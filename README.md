@@ -16,6 +16,20 @@ Owner: Delfine Stennis | Property Group of USA LLC
 
 ---
 
+## TRIPLE AI SIGNAL CONFIRMATION
+
+Every trade requires ALL 3 AIs to agree before executing.
+
+| AI | Role | API |
+|----|------|-----|
+| Claude (Anthropic) | Deep reasoning + risk analysis | console.anthropic.com |
+| GPT-4o (OpenAI) | Speed + market sentiment | platform.openai.com |
+| Grok (xAI) | Real-time X/Twitter + breaking news | console.x.ai |
+
+No single AI can trigger a trade alone. All 3 must confirm = execute.
+
+---
+
 ## ACCOUNTS
 
 | Broker | Account | Mode |
@@ -32,12 +46,14 @@ Owner: Delfine Stennis | Property Group of USA LLC
 - Account drops to $90K → reduce position size
 - Account drops to $80K → ALL trading stops automatically
 - STOP_TRADING=true kills everything instantly
+- All 3 AIs must agree before any trade fires
 
 ---
 
 ## GO LIVE CHECKLIST
 
 - [ ] 7 profitable paper days confirmed
+- [ ] All 3 AI keys active and responding
 - [ ] Change ALPACA_BASE_URL to api.alpaca.markets
 - [ ] Change ALPACA_LIVE_TRADE to true
 - [ ] Change TRADOVATE_MODE to live
@@ -45,4 +61,4 @@ Owner: Delfine Stennis | Property Group of USA LLC
 
 ---
 
-## ENVIRONMENT VARIABLES (set in Railway dashboard — never in code)
+## ENVIRONMENT VARIABLES (set in Railway — never in code)
