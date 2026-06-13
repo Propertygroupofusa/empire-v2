@@ -60,5 +60,24 @@ No single AI can trigger a trade alone. All 3 must confirm = execute.
 - [ ] Both Alpaca flags required — one alone does nothing
 
 ---
+---
 
+## SYNTHESIA AI VIDEO SYSTEM (AI Social Media)
+
+Auto-generate AI avatar videos for client content delivery.
+
+### API
+- Endpoint: https://api.synthesia.io/v2/videos
+- Webhook events: video.completed, video.failed
+- Signature verification: HMAC SHA256 via Synthesia-Signature header
+
+### Top Avatars for Business Content
+| Avatar | ID | Best For |
+|--------|-----|---------|
+| Olivia (Female v3) | e49ecfaf-1d39-4561-8355-29ebf8b71a4f | Professional/Finance |
+| Hudson (Male v3) | 11af1a93-e679-41a6-9b21-4cd41d73c940 | Real Estate |
+| Alisha (Female v3) | cf0eda7e-8f3c-43de-ae08-712e242ead61 | Marketing/Social |
+| Mason (Male v3) | 72da6c7c-36b6-4824-816b-380ac2058d86 | Sales/Outreach |
+
+### Add to Railway Variables
 ## ENVIRONMENT VARIABLES (set in Railway — never in code)
