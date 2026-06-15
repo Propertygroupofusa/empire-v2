@@ -1,7 +1,23 @@
-import os, sys, time, subprocess, threading, logging
+"""
+DEL'S TRADING EMPIRE — MAIN ORCHESTRATOR
+=========================================
+Single entry point. Starts all bots as subprocesses, runs health server,
+restarts crashed bots automatically.
+"""
+
+import os
+import sys
+import time
+import subprocess
+import threading
+import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
 log = logging.getLogger("empire")
 
 PORT = int(os.getenv("PORT", 10000))
@@ -9,8 +25,14 @@ STOP_TRADING = os.getenv("STOP_TRADING", "false").lower() == "true"
 LIVE_TRADE = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 LIVE_URL = "api.alpaca.markets" in os.getenv("ALPACA_BASE_URL", "")
 
-BOTS = ["prop_bot.py", "revenue_bot.py", "health_monitor.py"]
+BOTS = [
+    "prop_bot.py",
+    "revenue_bot.py",
+    "health_monitor.py",
+]
+
 processes = {}
+
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -25,10 +47,14 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(body)
-    def log_message(self, *_): pass
+
+    def log_message(self, *_):
+        pass
+
 
 def start_health_server():
     HTTPServer(("0.0.0.0", PORT), HealthHandler).serve_forever()
+
 
 def launch_bot(script):
     if not os.path.exists(script):
@@ -37,15 +63,18 @@ def launch_bot(script):
     log.info(f"Launching {script}")
     return subprocess.Popen([sys.executable, script], stdout=sys.stdout, stderr=sys.stderr)
 
+
 def watchdog():
     backoff = {}
     while True:
         time.sleep(30)
-        if STOP_TRADING: continue
+        if STOP_TRADING:
+            continue
         for script in BOTS:
             p = processes.get(script)
             if p and p.poll() is not None:
                 wait = backoff.get(script, 5)
+                log.warning(f"{script} crashed — restarting in {wait}s")
                 time.sleep(wait)
                 new_p = launch_bot(script)
                 if new_p:
@@ -53,6 +82,7 @@ def watchdog():
                     backoff[script] = min(wait * 2, 300)
             else:
                 backoff[script] = 5
+
 
 if __name__ == "__main__":
     log.info("=" * 50)
@@ -65,16 +95,23 @@ if __name__ == "__main__":
         start_health_server()
         sys.exit(0)
 
+    if LIVE_TRADE and not LIVE_URL:
+        log.error("ALPACA_LIVE_TRADE=true but ALPACA_BASE_URL is still paper. Fix it.")
+        sys.exit(1)
+
     threading.Thread(target=start_health_server, daemon=True).start()
 
     for script in BOTS:
         p = launch_bot(script)
-        if p: processes[script] = p
+        if p:
+            processes[script] = p
 
     threading.Thread(target=watchdog, daemon=True).start()
     log.info(f"Empire online. {len(processes)} bots running.")
 
     try:
-        while True: time.sleep(60)
+        while True:
+            time.sleep(60)
     except KeyboardInterrupt:
-        for p in processes.values(): p.terminate()
+        for p in processes.values():
+            p.terminate()
