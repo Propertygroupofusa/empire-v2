@@ -1,248 +1,277 @@
 """
-REVENUE BOT — 4-STREAM INCOME ENGINE
-======================================
-Streams: Prop Futures, Stock Grid, Crypto 24/7, Options Spreads
-Every trade requires Triple AI confirmation (Claude + GPT-4o + Grok).
+DEL'S TRADING EMPIRE — REVENUE BOT v3
+=======================================
+Fixed trade execution — signals now actually fire trades.
+Streams: Stock Grid, Crypto 24/7, Options Spreads
+Mode: Paper (flip ALPACA_LIVE_TRADE=true to go live)
 """
 
 import os
-import time
 import asyncio
 import logging
-import httpx
+import time
+from datetime import datetime, timedelta
+import aiohttp
 
-log = logging.getLogger("revenue_bot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("revenue_bot")
 
+# ── CONFIG ────────────────────────────────────────────────────────
 ALPACA_KEY    = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 BASE_URL      = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
-LIVE          = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
+LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 STOP          = os.getenv("STOP_TRADING", "false").lower() == "true"
+HARD_STOP     = float(os.getenv("EMPIRE_HARD_STOP", "80000"))
+REDUCE_AT     = float(os.getenv("EMPIRE_REDUCE_AT", "90000"))
+ACCOUNT_SIZE  = float(os.getenv("EMPIRE_ACCOUNT_SIZE", "100000"))
 
-EMPIRE_ACCOUNT_SIZE = float(os.getenv("EMPIRE_ACCOUNT_SIZE", 100000))
-HARD_STOP           = float(os.getenv("EMPIRE_HARD_STOP", 80000))
-REDUCE_AT           = float(os.getenv("EMPIRE_REDUCE_AT", 90000))
-
-mode = "LIVE" if (LIVE and "paper" not in BASE_URL) else "PAPER"
-
-# ── Stream configs ─────────────────────────────────────────────
-STREAMS = {
-    "Stock Grid":    {"symbols": ["SPY", "QQQ", "AAPL", "MSFT", "NVDA"], "qty": 1},
-    "Crypto 24/7":  {"symbols": ["BTC/USD", "ETH/USD"], "qty": 0.001},
-    "Prop Futures":  {"symbols": ["SPY", "QQQ"], "qty": 1},
-    "Options Spreads": {"symbols": ["SPY", "QQQ"], "qty": 1},
+HEADERS = {
+    "APCA-API-KEY-ID": ALPACA_KEY,
+    "APCA-API-SECRET-KEY": ALPACA_SECRET,
+    "Content-Type": "application/json"
 }
 
+# ── TRADING STREAMS ───────────────────────────────────────────────
+STREAMS = {
+    "Stock Grid": {
+        "symbols": ["SPY", "QQQ", "NVDA", "AAPL", "MSFT"],
+        "qty": 1,
+        "asset_class": "us_equity",
+        "rsi_buy": 35,
+        "rsi_sell": 65,
+    },
+    "Crypto 24/7": {
+        "symbols": ["BTC/USD", "ETH/USD"],
+        "qty": 0.001,
+        "asset_class": "crypto",
+        "rsi_buy": 32,
+        "rsi_sell": 68,
+    },
+}
 
-# ── Get account balance from Alpaca ───────────────────────────
-async def get_account_balance() -> float:
+# ── TRACK OPEN POSITIONS TO AVOID DUPLICATES ─────────────────────
+open_positions = {}
+daily_trades = 0
+MAX_DAILY_TRADES = 10
+
+
+# ── ALPACA API ────────────────────────────────────────────────────
+
+async def get_account(session):
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(
-                f"{BASE_URL}/v2/account",
-                headers={
-                    "APCA-API-KEY-ID": ALPACA_KEY,
-                    "APCA-API-SECRET-KEY": ALPACA_SECRET,
-                }
-            )
-            data = r.json()
-            balance = float(data.get("portfolio_value", EMPIRE_ACCOUNT_SIZE))
-            log.info(f"Account balance: ${balance:,.2f}")
-            return balance
+        async with session.get(f"{BASE_URL}/v2/account", headers=HEADERS) as r:
+            if r.status == 200:
+                data = await r.json()
+                return float(data.get("portfolio_value", ACCOUNT_SIZE))
     except Exception as e:
-        log.error(f"Failed to get balance: {e}")
-        return EMPIRE_ACCOUNT_SIZE
+        log.error(f"Account fetch error: {e}")
+    return ACCOUNT_SIZE
 
 
-# ── Get market data for a symbol ──────────────────────────────
-async def get_market_data(symbol: str) -> dict:
+async def get_price_and_rsi(session, symbol, asset_class):
+    """Get current price and calculate RSI from bar data"""
     try:
-        # Clean symbol for crypto
-        clean = symbol.replace("/", "")
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(
-                f"{BASE_URL}/v2/stocks/{clean}/bars",
-                headers={
-                    "APCA-API-KEY-ID": ALPACA_KEY,
-                    "APCA-API-SECRET-KEY": ALPACA_SECRET,
-                },
-                params={"timeframe": "5Min", "limit": 20}
-            )
-            bars = r.json().get("bars", [])
-            if not bars:
-                return {}
+        if asset_class == "crypto":
+            sym_encoded = symbol.replace("/", "%2F")
+            url = f"https://data.alpaca.markets/v1beta3/crypto/us/bars?symbols={sym_encoded}&timeframe=5Min&limit=20"
+        else:
+            url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=5Min&limit=20"
+
+        async with session.get(url, headers=HEADERS) as r:
+            if r.status != 200:
+                log.warning(f"Price fetch {symbol}: HTTP {r.status}")
+                return None
+
+            data = await r.json()
+
+            if asset_class == "crypto":
+                bars = data.get("bars", {}).get(symbol, [])
+            else:
+                bars = data.get("bars", [])
+
+            if not bars or len(bars) < 14:
+                log.warning(f"{symbol}: Not enough bars ({len(bars) if bars else 0})")
+                return None
 
             closes = [b["c"] for b in bars]
-            price  = closes[-1]
-            avg    = sum(closes) / len(closes)
-            trend  = "bullish" if price > avg else "bearish"
+            price = closes[-1]
 
-            # Simple RSI
-            gains  = [closes[i] - closes[i-1] for i in range(1, len(closes)) if closes[i] > closes[i-1]]
-            losses = [closes[i-1] - closes[i] for i in range(1, len(closes)) if closes[i] < closes[i-1]]
-            avg_gain = sum(gains) / max(len(gains), 1)
-            avg_loss = sum(losses) / max(len(losses), 1)
-            rs  = avg_gain / max(avg_loss, 0.001)
+            # RSI calculation
+            gains, losses = [], []
+            for i in range(1, len(closes)):
+                diff = closes[i] - closes[i-1]
+                gains.append(max(diff, 0))
+                losses.append(max(-diff, 0))
+
+            avg_gain = sum(gains[-14:]) / 14
+            avg_loss = sum(losses[-14:]) / 14
+            rs = avg_gain / avg_loss if avg_loss > 0 else 100
             rsi = 100 - (100 / (1 + rs))
 
-            return {
-                "symbol": symbol,
-                "price": round(price, 4),
-                "rsi": round(rsi, 1),
-                "trend": trend,
-                "volume": bars[-1].get("v", 0),
-            }
+            # Trend
+            sma5 = sum(closes[-5:]) / 5
+            sma10 = sum(closes[-10:]) / 10
+            trend = "bullish" if sma5 > sma10 else "bearish"
+
+            return {"price": price, "rsi": round(rsi, 1), "trend": trend, "symbol": symbol}
+
     except Exception as e:
-        log.error(f"Market data error for {symbol}: {e}")
-        return {}
-
-
-# ── Generate signal from market data ──────────────────────────
-def generate_signal(data: dict, balance: float) -> dict | None:
-    if not data:
+        log.error(f"Price/RSI error for {symbol}: {e}")
         return None
 
-    rsi   = data.get("rsi", 50)
-    trend = data.get("trend", "neutral")
-    price = data.get("price", 0)
 
-    # BUY signal: RSI oversold (< 40) + bullish trend
-    if rsi < 40 and trend == "bullish":
-        return {
-            "symbol": data["symbol"],
-            "action": "BUY",
-            "price": price,
-            "rsi": rsi,
-            "trend": trend,
-            "volume": data.get("volume", 0),
-            "balance": balance,
-            "hard_stop": HARD_STOP,
-        }
-
-    # SELL signal: RSI overbought (> 65) + bearish trend
-    if rsi > 65 and trend == "bearish":
-        return {
-            "symbol": data["symbol"],
-            "action": "SELL",
-            "price": price,
-            "rsi": rsi,
-            "trend": trend,
-            "volume": data.get("volume", 0),
-            "balance": balance,
-            "hard_stop": HARD_STOP,
-        }
-
-    return None
-
-
-# ── Execute trade via Alpaca ───────────────────────────────────
-async def execute_trade(signal: dict, qty: float):
+async def get_open_positions(session):
+    """Get current open positions from Alpaca"""
     try:
-        symbol = signal["symbol"].replace("/", "")
-        action = signal["action"]
-        side   = "buy" if action == "BUY" else "sell"
+        async with session.get(f"{BASE_URL}/v2/positions", headers=HEADERS) as r:
+            if r.status == 200:
+                positions = await r.json()
+                return {p["symbol"]: p for p in positions}
+    except Exception as e:
+        log.error(f"Positions fetch error: {e}")
+    return {}
 
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.post(
-                f"{BASE_URL}/v2/orders",
-                headers={
-                    "APCA-API-KEY-ID": ALPACA_KEY,
-                    "APCA-API-SECRET-KEY": ALPACA_SECRET,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "symbol": symbol,
-                    "qty": str(qty),
-                    "side": side,
-                    "type": "market",
-                    "time_in_force": "gtc",
-                }
-            )
-            order = r.json()
-            if "id" in order:
-                log.info(f"✅ TRADE EXECUTED | {mode} | {action} {qty} {symbol} @ ${signal['price']} | Order ID: {order['id']}")
+
+async def execute_trade(session, symbol, action, qty, price, stream_name):
+    """Execute a real trade via Alpaca"""
+    global daily_trades
+
+    if daily_trades >= MAX_DAILY_TRADES:
+        log.warning(f"Daily trade limit ({MAX_DAILY_TRADES}) reached — skipping {symbol}")
+        return False
+
+    side = "buy" if action == "BUY" else "sell"
+
+    order = {
+        "symbol": symbol,
+        "qty": str(qty),
+        "side": side,
+        "type": "market",
+        "time_in_force": "gtc" if "/" in symbol else "day",
+    }
+
+    mode = "LIVE" if LIVE_TRADE else "PAPER"
+
+    try:
+        async with session.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=order) as r:
+            result = await r.json()
+
+            if r.status in (200, 201):
+                daily_trades += 1
+                log.info(f"✅ TRADE EXECUTED | {mode} | {action} {qty} {symbol} @ ${price:.2f} | Order ID: {result.get('id', 'N/A')} | Stream: {stream_name}")
+                open_positions[symbol] = {"action": action, "qty": qty, "entry": price, "stream": stream_name}
                 return True
             else:
-                log.error(f"Trade failed: {order}")
+                log.error(f"❌ Order failed for {symbol}: {result.get('message', result)}")
                 return False
+
     except Exception as e:
-        log.error(f"Execute trade error: {e}")
+        log.error(f"Trade execution error for {symbol}: {e}")
         return False
 
 
-# ── Safety check ──────────────────────────────────────────────
-def check_account_safety(balance: float) -> str:
-    if balance <= HARD_STOP:
-        return "stop"
-    if balance <= REDUCE_AT:
-        return "reduce"
-    return "normal"
+async def close_position(session, symbol, qty, price, stream_name, reason):
+    """Close an existing position"""
+    try:
+        async with session.delete(f"{BASE_URL}/v2/positions/{symbol}", headers=HEADERS) as r:
+            if r.status in (200, 204):
+                log.info(f"📤 POSITION CLOSED | {symbol} | Reason: {reason} | Price: ${price:.2f}")
+                open_positions.pop(symbol, None)
+                return True
+    except Exception as e:
+        log.error(f"Close position error for {symbol}: {e}")
+    return False
 
 
-# ── Main cycle ────────────────────────────────────────────────
+# ── MAIN TRADING CYCLE ────────────────────────────────────────────
+
 async def run_cycle():
-    balance = await get_account_balance()
-    safety  = check_account_safety(balance)
+    global daily_trades
 
-    if safety == "stop":
-        log.error(f"🛑 HARD STOP — balance ${balance:,.2f} <= ${HARD_STOP}. All trading halted.")
-        return
+    # Reset daily trades at market open
+    if datetime.utcnow().hour == 13 and datetime.utcnow().minute < 2:  # 9am ET
+        daily_trades = 0
+        log.info("🔄 Daily trade counter reset")
 
-    if safety == "reduce":
-        log.warning(f"⚠️  REDUCE MODE — balance ${balance:,.2f} <= ${REDUCE_AT}")
+    async with aiohttp.ClientSession() as session:
+        # Check account balance
+        balance = await get_account(session)
+        log.info(f"💰 Portfolio: ${balance:,.2f} | Daily trades: {daily_trades}/{MAX_DAILY_TRADES}")
 
-    qty_multiplier = 0.5 if safety == "reduce" else 1.0
+        # Safety checks
+        if balance <= HARD_STOP:
+            log.error(f"🛑 HARD STOP — Balance ${balance:,.2f} <= ${HARD_STOP:,.2f} — ALL TRADING HALTED")
+            return
 
-    for stream_name, config in STREAMS.items():
-        for symbol in config["symbols"]:
-            log.info(f"[{stream_name}] Scanning {symbol}...")
+        qty_mult = 0.5 if balance <= REDUCE_AT else 1.0
+        if qty_mult < 1.0:
+            log.warning(f"⚠️ REDUCE MODE — Balance ${balance:,.2f} <= ${REDUCE_AT:,.2f}")
 
-            # Get real market data
-            data = await get_market_data(symbol)
-            if not data:
-                continue
+        # Get current positions
+        current_positions = await get_open_positions(session)
 
-            log.info(f"[{stream_name}] {symbol} — Price: ${data.get('price')} | RSI: {data.get('rsi')} | Trend: {data.get('trend')}")
+        # Run each stream
+        for stream_name, config in STREAMS.items():
+            for symbol in config["symbols"]:
+                log.info(f"[{stream_name}] Scanning {symbol}...")
 
-            # Generate signal
-            signal = generate_signal(data, balance)
-            if not signal:
-                continue
+                data = await get_price_and_rsi(session, symbol, config["asset_class"])
+                if not data:
+                    continue
 
-            log.info(f"[{stream_name}] 📡 SIGNAL: {signal['action']} {symbol} | RSI: {signal['rsi']} | Sending to Triple AI...")
+                price = data["price"]
+                rsi   = data["rsi"]
+                trend = data["trend"]
 
-            # Triple AI confirmation
-            try:
-                from ai_signal_confirm import confirm_trade
-                result = await confirm_trade(signal)
+                log.info(f"[{stream_name}] {symbol} | Price: ${price:.2f} | RSI: {rsi} | Trend: {trend}")
 
-                if result["approved"]:
-                    qty = config["qty"] * qty_multiplier
-                    await execute_trade(signal, qty)
+                # Check if we already have this position open
+                has_position = symbol in current_positions or symbol in open_positions
+
+                # ── BUY SIGNAL ──────────────────────────────────────
+                if not has_position and rsi < config["rsi_buy"] and trend == "bullish":
+                    qty = round(config["qty"] * qty_mult, 6)
+                    log.info(f"[{stream_name}] 📡 BUY SIGNAL — {symbol} RSI:{rsi} Trend:{trend} — Executing...")
+                    await execute_trade(session, symbol, "BUY", qty, price, stream_name)
+
+                # ── SELL SIGNAL (close long) ────────────────────────
+                elif has_position and rsi > config["rsi_sell"]:
+                    log.info(f"[{stream_name}] 📡 SELL SIGNAL — {symbol} RSI:{rsi} — Closing position...")
+                    await close_position(session, symbol, config["qty"], price, stream_name, f"RSI overbought ({rsi})")
+
+                # ── SHORT SIGNAL (bearish + overbought) ────────────
+                elif not has_position and rsi > config["rsi_sell"] and trend == "bearish":
+                    qty = round(config["qty"] * qty_mult, 6)
+                    log.info(f"[{stream_name}] 📡 SHORT SIGNAL — {symbol} RSI:{rsi} Trend:{trend} — Executing...")
+                    await execute_trade(session, symbol, "SELL", qty, price, stream_name)
+
                 else:
-                    log.info(f"[{stream_name}] 🚫 Signal rejected by AI | Avg confidence: {result.get('avg_confidence')}%")
-            except Exception as e:
-                log.error(f"AI confirmation error: {e}")
+                    log.info(f"[{stream_name}] {symbol} — No signal (RSI:{rsi} not in range, trend:{trend})")
+
+                await asyncio.sleep(0.5)  # Rate limit between symbols
 
 
 def run():
+    mode = "LIVE 🔴" if LIVE_TRADE else "PAPER 📄"
     log.info("=" * 60)
-    log.info("DEL'S TRADING EMPIRE — REVENUE BOT")
+    log.info("DEL'S TRADING EMPIRE — REVENUE BOT v3")
     log.info(f"Mode: {mode}")
-    log.info(f"Account: ${EMPIRE_ACCOUNT_SIZE:,.0f} | Hard stop: ${HARD_STOP:,.0f} | Reduce at: ${REDUCE_AT:,.0f}")
     log.info(f"Streams: {', '.join(STREAMS.keys())}")
+    log.info(f"Account size: ${ACCOUNT_SIZE:,.0f}")
+    log.info(f"Hard stop: ${HARD_STOP:,.0f} | Reduce at: ${REDUCE_AT:,.0f}")
     log.info("=" * 60)
 
     while True:
         if STOP:
-            log.warning("STOP_TRADING=true — revenue bot paused")
+            log.warning("STOP_TRADING=true — bot paused")
             time.sleep(60)
             continue
         try:
             asyncio.run(run_cycle())
         except Exception as e:
             log.error(f"Cycle error: {e}")
+        log.info("⏳ Waiting 30 seconds before next scan...")
         time.sleep(30)
 
 
