@@ -1,22 +1,21 @@
 """
-DEL'S TRADING EMPIRE — REVENUE BOT v3
+DEL'S TRADING EMPIRE — REVENUE BOT v4
 =======================================
-Fixed trade execution — signals now actually fire trades.
-Streams: Stock Grid, Crypto 24/7, Options Spreads
-Mode: Paper (flip ALPACA_LIVE_TRADE=true to go live)
+FIXED: Correct Alpaca data API format for stocks and crypto
+FIXED: Added feed=iex parameter
+FIXED: Correct response parsing (bars is a dict keyed by symbol)
 """
 
 import os
 import asyncio
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 import aiohttp
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("revenue_bot")
 
-# ── CONFIG ────────────────────────────────────────────────────────
 ALPACA_KEY    = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 BASE_URL      = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
@@ -32,7 +31,11 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-# ── TRADING STREAMS ───────────────────────────────────────────────
+DATA_HEADERS = {
+    "APCA-API-KEY-ID": ALPACA_KEY,
+    "APCA-API-SECRET-KEY": ALPACA_SECRET,
+}
+
 STREAMS = {
     "Stock Grid": {
         "symbols": ["SPY", "QQQ", "NVDA", "AAPL", "MSFT"],
@@ -50,173 +53,169 @@ STREAMS = {
     },
 }
 
-# ── TRACK OPEN POSITIONS TO AVOID DUPLICATES ─────────────────────
 open_positions = {}
 daily_trades = 0
 MAX_DAILY_TRADES = 10
 
 
-# ── ALPACA API ────────────────────────────────────────────────────
-
 async def get_account(session):
     try:
-        async with session.get(f"{BASE_URL}/v2/account", headers=HEADERS) as r:
+        async with session.get(
+            f"{BASE_URL}/v2/account", headers=HEADERS
+        ) as r:
+            data = await r.json()
             if r.status == 200:
-                data = await r.json()
-                return float(data.get("portfolio_value", ACCOUNT_SIZE))
+                bal = float(data.get("portfolio_value", ACCOUNT_SIZE))
+                log.info(f"💰 Account: ${bal:,.2f}")
+                return bal
+            log.error(f"Account error {r.status}: {data}")
     except Exception as e:
-        log.error(f"Account fetch error: {e}")
+        log.error(f"Account error: {e}")
     return ACCOUNT_SIZE
 
 
 async def get_price_and_rsi(session, symbol, asset_class):
-    """Get current price and calculate RSI from bar data"""
     try:
         if asset_class == "crypto":
             sym_encoded = symbol.replace("/", "%2F")
-            url = f"https://data.alpaca.markets/v1beta3/crypto/us/bars?symbols={sym_encoded}&timeframe=5Min&limit=20"
+            url = (
+                f"https://data.alpaca.markets/v1beta3/crypto/us/bars"
+                f"?symbols={sym_encoded}&timeframe=5Min&limit=20"
+            )
         else:
-            url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=5Min&limit=20"
+            # FIXED: use /v2/stocks/bars (plural) with symbols param + feed=iex
+            url = (
+                f"https://data.alpaca.markets/v2/stocks/bars"
+                f"?symbols={symbol}&timeframe=5Min&limit=20&feed=iex"
+            )
 
-        async with session.get(url, headers=HEADERS) as r:
+        async with session.get(url, headers=DATA_HEADERS) as r:
+            raw = await r.text()
             if r.status != 200:
-                log.warning(f"Price fetch {symbol}: HTTP {r.status}")
+                log.warning(f"[{symbol}] Data error {r.status}: {raw[:300]}")
                 return None
 
             data = await r.json()
 
-            if asset_class == "crypto":
-                bars = data.get("bars", {}).get(symbol, [])
+            # FIXED: response is always {"bars": {"SYMBOL": [...]}}
+            bars_dict = data.get("bars", {})
+            if isinstance(bars_dict, dict):
+                bars = bars_dict.get(symbol, [])
             else:
-                bars = data.get("bars", [])
+                bars = bars_dict  # fallback
 
             if not bars or len(bars) < 14:
-                log.warning(f"{symbol}: Not enough bars ({len(bars) if bars else 0})")
+                log.warning(f"[{symbol}] Only {len(bars) if bars else 0} bars returned — need 14")
                 return None
 
             closes = [b["c"] for b in bars]
-            price = closes[-1]
+            price  = closes[-1]
 
-            # RSI calculation
-            gains, losses = [], []
-            for i in range(1, len(closes)):
-                diff = closes[i] - closes[i-1]
-                gains.append(max(diff, 0))
-                losses.append(max(-diff, 0))
-
-            avg_gain = sum(gains[-14:]) / 14
-            avg_loss = sum(losses[-14:]) / 14
-            rs = avg_gain / avg_loss if avg_loss > 0 else 100
-            rsi = 100 - (100 / (1 + rs))
+            # RSI
+            gains  = [max(closes[i] - closes[i-1], 0) for i in range(1, len(closes))]
+            losses = [max(closes[i-1] - closes[i], 0) for i in range(1, len(closes))]
+            ag = sum(gains[-14:])  / 14
+            al = sum(losses[-14:]) / 14
+            rs  = ag / al if al > 0 else 100
+            rsi = round(100 - (100 / (1 + rs)), 1)
 
             # Trend
-            sma5 = sum(closes[-5:]) / 5
+            sma5  = sum(closes[-5:])  / 5
             sma10 = sum(closes[-10:]) / 10
             trend = "bullish" if sma5 > sma10 else "bearish"
 
-            return {"price": price, "rsi": round(rsi, 1), "trend": trend, "symbol": symbol}
+            log.info(f"[{symbol}] ✅ ${price:.2f} | RSI:{rsi} | {trend}")
+            return {"price": price, "rsi": rsi, "trend": trend}
 
     except Exception as e:
-        log.error(f"Price/RSI error for {symbol}: {e}")
+        log.error(f"[{symbol}] Exception: {e}")
         return None
 
 
 async def get_open_positions(session):
-    """Get current open positions from Alpaca"""
     try:
         async with session.get(f"{BASE_URL}/v2/positions", headers=HEADERS) as r:
             if r.status == 200:
                 positions = await r.json()
                 return {p["symbol"]: p for p in positions}
     except Exception as e:
-        log.error(f"Positions fetch error: {e}")
+        log.error(f"Positions error: {e}")
     return {}
 
 
 async def execute_trade(session, symbol, action, qty, price, stream_name):
-    """Execute a real trade via Alpaca"""
     global daily_trades
-
     if daily_trades >= MAX_DAILY_TRADES:
-        log.warning(f"Daily trade limit ({MAX_DAILY_TRADES}) reached — skipping {symbol}")
+        log.warning(f"Daily limit {MAX_DAILY_TRADES} reached")
         return False
 
-    side = "buy" if action == "BUY" else "sell"
-
-    order = {
-        "symbol": symbol,
-        "qty": str(qty),
-        "side": side,
-        "type": "market",
-        "time_in_force": "gtc" if "/" in symbol else "day",
-    }
-
-    mode = "LIVE" if LIVE_TRADE else "PAPER"
+    side  = "buy" if action == "BUY" else "sell"
+    tif   = "gtc" if "/" in symbol else "day"
+    order = {"symbol": symbol, "qty": str(qty), "side": side,
+             "type": "market", "time_in_force": tif}
+    mode  = "LIVE 🔴" if LIVE_TRADE else "PAPER 📄"
 
     try:
-        async with session.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=order) as r:
+        async with session.post(
+            f"{BASE_URL}/v2/orders", headers=HEADERS, json=order
+        ) as r:
             result = await r.json()
-
             if r.status in (200, 201):
                 daily_trades += 1
-                log.info(f"✅ TRADE EXECUTED | {mode} | {action} {qty} {symbol} @ ${price:.2f} | Order ID: {result.get('id', 'N/A')} | Stream: {stream_name}")
-                open_positions[symbol] = {"action": action, "qty": qty, "entry": price, "stream": stream_name}
+                log.info(
+                    f"✅ TRADE #{daily_trades} | {mode} | {action} {qty} "
+                    f"{symbol} @ ${price:.2f} | {stream_name}"
+                )
+                open_positions[symbol] = {
+                    "action": action, "qty": qty,
+                    "entry": price, "stream": stream_name
+                }
                 return True
-            else:
-                log.error(f"❌ Order failed for {symbol}: {result.get('message', result)}")
-                return False
-
+            log.error(f"❌ Order failed {symbol}: {result.get('message', result)}")
     except Exception as e:
-        log.error(f"Trade execution error for {symbol}: {e}")
-        return False
-
-
-async def close_position(session, symbol, qty, price, stream_name, reason):
-    """Close an existing position"""
-    try:
-        async with session.delete(f"{BASE_URL}/v2/positions/{symbol}", headers=HEADERS) as r:
-            if r.status in (200, 204):
-                log.info(f"📤 POSITION CLOSED | {symbol} | Reason: {reason} | Price: ${price:.2f}")
-                open_positions.pop(symbol, None)
-                return True
-    except Exception as e:
-        log.error(f"Close position error for {symbol}: {e}")
+        log.error(f"Trade error {symbol}: {e}")
     return False
 
 
-# ── MAIN TRADING CYCLE ────────────────────────────────────────────
+async def close_position(session, symbol, price, reason):
+    try:
+        async with session.delete(
+            f"{BASE_URL}/v2/positions/{symbol}", headers=HEADERS
+        ) as r:
+            if r.status in (200, 204):
+                log.info(f"📤 CLOSED {symbol} @ ${price:.2f} | {reason}")
+                open_positions.pop(symbol, None)
+                return True
+    except Exception as e:
+        log.error(f"Close error {symbol}: {e}")
+    return False
+
 
 async def run_cycle():
     global daily_trades
 
-    # Reset daily trades at market open
-    if datetime.utcnow().hour == 13 and datetime.utcnow().minute < 2:  # 9am ET
+    if datetime.utcnow().hour == 13 and datetime.utcnow().minute < 2:
         daily_trades = 0
-        log.info("🔄 Daily trade counter reset")
+        log.info("🔄 Daily counter reset")
 
     async with aiohttp.ClientSession() as session:
-        # Check account balance
         balance = await get_account(session)
-        log.info(f"💰 Portfolio: ${balance:,.2f} | Daily trades: {daily_trades}/{MAX_DAILY_TRADES}")
 
-        # Safety checks
         if balance <= HARD_STOP:
-            log.error(f"🛑 HARD STOP — Balance ${balance:,.2f} <= ${HARD_STOP:,.2f} — ALL TRADING HALTED")
+            log.error(f"🛑 HARD STOP ${balance:,.2f}")
             return
 
         qty_mult = 0.5 if balance <= REDUCE_AT else 1.0
-        if qty_mult < 1.0:
-            log.warning(f"⚠️ REDUCE MODE — Balance ${balance:,.2f} <= ${REDUCE_AT:,.2f}")
+        current  = await get_open_positions(session)
+        log.info(f"Open positions: {list(current.keys()) or 'None'}")
 
-        # Get current positions
-        current_positions = await get_open_positions(session)
-
-        # Run each stream
         for stream_name, config in STREAMS.items():
             for symbol in config["symbols"]:
                 log.info(f"[{stream_name}] Scanning {symbol}...")
 
-                data = await get_price_and_rsi(session, symbol, config["asset_class"])
+                data = await get_price_and_rsi(
+                    session, symbol, config["asset_class"]
+                )
                 if not data:
                     continue
 
@@ -224,54 +223,51 @@ async def run_cycle():
                 rsi   = data["rsi"]
                 trend = data["trend"]
 
-                log.info(f"[{stream_name}] {symbol} | Price: ${price:.2f} | RSI: {rsi} | Trend: {trend}")
+                has_pos = symbol in current or symbol in open_positions
 
-                # Check if we already have this position open
-                has_position = symbol in current_positions or symbol in open_positions
-
-                # ── BUY SIGNAL ──────────────────────────────────────
-                if not has_position and rsi < config["rsi_buy"] and trend == "bullish":
+                if not has_pos and rsi < config["rsi_buy"] and trend == "bullish":
                     qty = round(config["qty"] * qty_mult, 6)
-                    log.info(f"[{stream_name}] 📡 BUY SIGNAL — {symbol} RSI:{rsi} Trend:{trend} — Executing...")
+                    log.info(f"[{stream_name}] 📡 BUY {symbol} RSI:{rsi}")
                     await execute_trade(session, symbol, "BUY", qty, price, stream_name)
 
-                # ── SELL SIGNAL (close long) ────────────────────────
-                elif has_position and rsi > config["rsi_sell"]:
-                    log.info(f"[{stream_name}] 📡 SELL SIGNAL — {symbol} RSI:{rsi} — Closing position...")
-                    await close_position(session, symbol, config["qty"], price, stream_name, f"RSI overbought ({rsi})")
+                elif has_pos and rsi > config["rsi_sell"]:
+                    log.info(f"[{stream_name}] 📡 SELL {symbol} RSI:{rsi}")
+                    await close_position(session, symbol, price, f"RSI:{rsi}")
 
-                # ── SHORT SIGNAL (bearish + overbought) ────────────
-                elif not has_position and rsi > config["rsi_sell"] and trend == "bearish":
+                elif not has_pos and rsi > config["rsi_sell"] and trend == "bearish":
                     qty = round(config["qty"] * qty_mult, 6)
-                    log.info(f"[{stream_name}] 📡 SHORT SIGNAL — {symbol} RSI:{rsi} Trend:{trend} — Executing...")
+                    log.info(f"[{stream_name}] 📡 SHORT {symbol} RSI:{rsi}")
                     await execute_trade(session, symbol, "SELL", qty, price, stream_name)
 
                 else:
-                    log.info(f"[{stream_name}] {symbol} — No signal (RSI:{rsi} not in range, trend:{trend})")
+                    log.info(
+                        f"[{stream_name}] {symbol} — No signal | "
+                        f"RSI:{rsi} needs <{config['rsi_buy']} or >{config['rsi_sell']} | {trend}"
+                    )
 
-                await asyncio.sleep(0.5)  # Rate limit between symbols
+                await asyncio.sleep(0.5)
 
 
 def run():
-    mode = "LIVE 🔴" if LIVE_TRADE else "PAPER 📄"
     log.info("=" * 60)
-    log.info("DEL'S TRADING EMPIRE — REVENUE BOT v3")
-    log.info(f"Mode: {mode}")
-    log.info(f"Streams: {', '.join(STREAMS.keys())}")
-    log.info(f"Account size: ${ACCOUNT_SIZE:,.0f}")
-    log.info(f"Hard stop: ${HARD_STOP:,.0f} | Reduce at: ${REDUCE_AT:,.0f}")
+    log.info("DEL'S TRADING EMPIRE — REVENUE BOT v4")
+    log.info(f"Mode: {'LIVE 🔴' if LIVE_TRADE else 'PAPER 📄'}")
+    log.info(f"Key present: {bool(ALPACA_KEY)} | URL: {BASE_URL}")
     log.info("=" * 60)
 
+    cycle = 0
     while True:
         if STOP:
-            log.warning("STOP_TRADING=true — bot paused")
+            log.warning("STOP_TRADING=true — paused")
             time.sleep(60)
             continue
+        cycle += 1
+        log.info(f"--- CYCLE {cycle} ---")
         try:
             asyncio.run(run_cycle())
         except Exception as e:
-            log.error(f"Cycle error: {e}")
-        log.info("⏳ Waiting 30 seconds before next scan...")
+            log.error(f"Cycle {cycle} error: {e}")
+        log.info("⏳ Next scan in 30s...")
         time.sleep(30)
 
 
