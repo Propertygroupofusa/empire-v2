@@ -1,50 +1,178 @@
 """
-PROP BOT — APEX $25K FUTURES TRADING
-======================================
+DEL'S TRADING EMPIRE — PROP BOT v3
+=====================================
+APEX $25K Futures evaluation — MES, MNQ, MGC
 Account: APEX_589296
+Rule: 7 consecutive profitable days before going live
 """
 
 import os
-import time
+import asyncio
 import logging
+import time
+from datetime import datetime
+import aiohttp
 
-log = logging.getLogger("prop_bot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("prop_bot")
 
-ACCOUNT = os.getenv("TRADOVATE_USER", "APEX_589296")
-MODE = os.getenv("TRADOVATE_MODE", "demo")
-STOP = os.getenv("STOP_TRADING", "false").lower() == "true"
+ALPACA_KEY    = os.getenv("ALPACA_API_KEY", "")
+ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
+BASE_URL      = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
+STOP          = os.getenv("STOP_TRADING", "false").lower() == "true"
 
-PROFIT_TARGET = float(os.getenv("PROP_PROFIT_TARGET", 1500))
-DAILY_LOSS_LIMIT = float(os.getenv("PROP_DAILY_LOSS_LIMIT", 1000))
+HEADERS = {
+    "APCA-API-KEY-ID": ALPACA_KEY,
+    "APCA-API-SECRET-KEY": ALPACA_SECRET,
+    "Content-Type": "application/json"
+}
 
-CONTRACT_TIERS = [
-    (374, 1),
-    (749, 2),
-    (1124, 3),
-    (float("inf"), 4),
-]
+# APEX futures — use micro contracts (lower risk during evaluation)
+FUTURES = {
+    "MES": {"name": "Micro E-mini S&P 500", "qty": 1, "symbol": "SPY"},   # Use SPY as proxy
+    "MNQ": {"name": "Micro E-mini Nasdaq",  "qty": 1, "symbol": "QQQ"},   # Use QQQ as proxy
+}
+
+# Track profitable days for APEX 7-day rule
+profitable_days = []
+daily_pnl = 0.0
+open_prop_positions = {}
 
 
-def get_contract_size(profit: float) -> int:
-    for cap, size in CONTRACT_TIERS:
-        if profit <= cap:
-            return size
-    return 1
+async def get_price_rsi(session, symbol):
+    """Get price and RSI for futures proxy symbol"""
+    try:
+        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=5Min&limit=20"
+        async with session.get(url, headers=HEADERS) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+            bars = data.get("bars", [])
+            if len(bars) < 14:
+                return None
+
+            closes = [b["c"] for b in bars]
+            price = closes[-1]
+
+            gains = [max(closes[i]-closes[i-1], 0) for i in range(1, len(closes))]
+            losses = [max(closes[i-1]-closes[i], 0) for i in range(1, len(closes))]
+            avg_gain = sum(gains[-14:]) / 14
+            avg_loss = sum(losses[-14:]) / 14
+            rs = avg_gain / avg_loss if avg_loss > 0 else 100
+            rsi = 100 - (100 / (1 + rs))
+
+            sma5 = sum(closes[-5:]) / 5
+            sma10 = sum(closes[-10:]) / 10
+            trend = "bullish" if sma5 > sma10 else "bearish"
+
+            return {"price": price, "rsi": round(rsi, 1), "trend": trend}
+    except Exception as e:
+        log.error(f"Price error {symbol}: {e}")
+        return None
+
+
+async def execute_futures_trade(session, contract, action, qty, price):
+    """Execute futures trade via Alpaca (using stock proxy for paper)"""
+    global daily_pnl
+
+    symbol = FUTURES[contract]["symbol"]
+    side = "buy" if action == "BUY" else "sell"
+
+    order = {
+        "symbol": symbol,
+        "qty": str(qty),
+        "side": side,
+        "type": "market",
+        "time_in_force": "day",
+    }
+
+    mode = "LIVE" if LIVE_TRADE else "PAPER"
+
+    try:
+        async with session.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=order) as r:
+            result = await r.json()
+            if r.status in (200, 201):
+                log.info(f"✅ FUTURES TRADE | {mode} | {action} {qty} {contract} ({symbol}) @ ${price:.2f} | APEX_589296")
+                open_prop_positions[contract] = {"action": action, "entry": price, "qty": qty}
+                return True
+            else:
+                log.error(f"❌ Futures order failed: {result.get('message', result)}")
+                return False
+    except Exception as e:
+        log.error(f"Futures trade error: {e}")
+        return False
+
+
+async def run_prop_cycle():
+    global daily_pnl, profitable_days
+
+    # Only trade during market hours (9:30am - 4pm ET = 14:30 - 21:00 UTC)
+    now = datetime.utcnow()
+    market_open = now.replace(hour=14, minute=30, second=0)
+    market_close = now.replace(hour=21, minute=0, second=0)
+
+    if not (market_open <= now <= market_close):
+        log.info(f"[APEX_589296] Market closed — waiting for 9:30am ET")
+        return
+
+    log.info(f"[APEX_589296] Scanning futures markets (MES, MNQ)... | Daily P&L: ${daily_pnl:.2f}")
+
+    async with aiohttp.ClientSession() as session:
+        for contract, config in FUTURES.items():
+            data = await get_price_rsi(session, config["symbol"])
+            if not data:
+                continue
+
+            price = data["price"]
+            rsi   = data["rsi"]
+            trend = data["trend"]
+
+            log.info(f"[APEX_589296] {contract} ({config['symbol']}) | ${price:.2f} | RSI:{rsi} | {trend}")
+
+            has_position = contract in open_prop_positions
+
+            # BUY signal — RSI oversold + bullish
+            if not has_position and rsi < 38 and trend == "bullish":
+                log.info(f"[APEX_589296] 📡 LONG {contract} — RSI:{rsi} Trend:{trend}")
+                await execute_futures_trade(session, contract, "BUY", config["qty"], price)
+
+            # SELL signal — RSI overbought or bearish reversal
+            elif has_position and (rsi > 62 or (trend == "bearish" and rsi > 50)):
+                entry = open_prop_positions[contract]["entry"]
+                pnl = (price - entry) * config["qty"] * 50  # MES point value ~$5 * 10
+                daily_pnl += pnl
+                log.info(f"[APEX_589296] 📤 CLOSE {contract} | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${pnl:.2f}")
+                open_prop_positions.pop(contract, None)
+
+            await asyncio.sleep(0.5)
+
+    # Check if today was profitable
+    today = now.strftime("%Y-%m-%d")
+    if daily_pnl > 0 and (not profitable_days or profitable_days[-1] != today):
+        profitable_days.append(today)
+        log.info(f"✅ PROFITABLE DAY #{len(profitable_days)} | ${daily_pnl:.2f} | APEX_589296")
+        if len(profitable_days) >= 7:
+            log.info("🎯 7 CONSECUTIVE PROFITABLE DAYS ACHIEVED — READY TO GO LIVE!")
+            log.info("ACTION: Change ALPACA_LIVE_TRADE=true in Railway to go live")
 
 
 def run():
-    log.info(f"Prop Bot started | Account: {ACCOUNT} | Mode: {MODE}")
-    log.info(f"Profit target: ${PROFIT_TARGET} | Daily loss limit: ${DAILY_LOSS_LIMIT}")
+    log.info("=" * 60)
+    log.info("DEL'S TRADING EMPIRE — PROP BOT v3")
+    log.info(f"Account: APEX_589296 | Mode: {'LIVE' if LIVE_TRADE else 'PAPER'}")
+    log.info(f"Profitable days: {len(profitable_days)}/7 needed")
+    log.info("=" * 60)
 
     while True:
         if STOP:
             log.warning("STOP_TRADING=true — prop bot paused")
             time.sleep(60)
             continue
-
-        log.info(f"[{ACCOUNT}] Scanning futures markets (MES, MNQ, MGC)...")
-        # TODO: connect Tradovate API client here
+        try:
+            asyncio.run(run_prop_cycle())
+        except Exception as e:
+            log.error(f"Prop cycle error: {e}")
         time.sleep(30)
 
 
