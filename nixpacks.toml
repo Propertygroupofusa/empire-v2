@@ -1,0 +1,5 @@
+[phases.setup]
+aptPkgs = ["ffmpeg", "fonts-dejavu-core"]
+
+[start]
+cmd = "python content_bot.py"
