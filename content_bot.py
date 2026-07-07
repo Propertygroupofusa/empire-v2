@@ -119,7 +119,16 @@ def claude(prompt, max_tokens=2000):
               "max_tokens": max_tokens,
               "messages": [{"role": "user", "content": prompt}]},
         timeout=90)
-    r.raise_for_status()
+    if r.status_code != 200:
+        # Surface Anthropic's actual error message instead of a bare
+        # "400 Client Error" with no detail — this is what actually
+        # tells us what's wrong (bad model name, malformed request, etc).
+        try:
+            detail = r.json()
+        except Exception:
+            detail = r.text
+        log.error(f"Claude API error {r.status_code}: {detail}")
+        r.raise_for_status()
     return "".join(b.get("text", "") for b in r.json()["content"])
 
 def parse_json(raw):
