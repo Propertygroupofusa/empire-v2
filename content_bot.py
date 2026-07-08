@@ -26,10 +26,6 @@
     STATE_DIR               - default /data/bot_state
     TTS_VOICE               - default en-US-GuyNeural
     FORMAT_WEIGHTS          - e.g. "cartoon_story:2,caption_talk:2,card_slides:1"
-    ELEVENLABS_API_KEY      - optional paid TTS fallback used when edge-tts
-                              (unofficial, reverse-engineered from Microsoft's
-                              consumer service) breaks
-    ELEVENLABS_VOICE_ID     - default 21m00Tcm4TlvDq8ikWAM (Rachel)
 =============================================================
 """
 
@@ -50,8 +46,6 @@ ENABLED           = os.getenv("CONTENT_BOT_ENABLED", "true").lower() == "true"
 STATE_DIR         = os.getenv("STATE_DIR", "/data/bot_state")
 STATE_FILE        = os.path.join(STATE_DIR, "content_bot_state.json")
 VOICE             = os.getenv("TTS_VOICE", "en-US-GuyNeural")
-ELEVENLABS_API_KEY  = os.getenv("ELEVENLABS_API_KEY", "")
-ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 
 W_SHORT, H_SHORT = 1080, 1920      # 9:16
 W_LONG,  H_LONG  = 1920, 1080      # 16:9
@@ -181,43 +175,13 @@ Respond ONLY with JSON, no markdown fences:
 
 
 # ------------------------------------------------------------------
-# TTS (edge-tts, free neural voices - with retry + optional paid fallback)
+# TTS (edge-tts, free neural voices)
 # ------------------------------------------------------------------
-def tts(text, out_mp3, retries=3):
+def tts(text, out_mp3):
     import edge_tts
     async def run():
         await edge_tts.Communicate(text, VOICE, rate="+8%").save(out_mp3)
-
-    last_err = None
-    for attempt in range(retries):
-        try:
-            asyncio.run(run())
-            if os.path.getsize(out_mp3) > 0:
-                return out_mp3
-            last_err = RuntimeError("edge-tts produced an empty file")
-        except Exception as e:
-            last_err = e
-        log.warning(f"edge-tts attempt {attempt + 1}/{retries} failed: {last_err}")
-        time.sleep(2 * (attempt + 1))
-
-    if ELEVENLABS_API_KEY:
-        log.warning("edge-tts exhausted retries, falling back to ElevenLabs")
-        return _tts_elevenlabs(text, out_mp3)
-    raise RuntimeError(f"edge-tts failed after {retries} attempts: {last_err}")
-
-
-def _tts_elevenlabs(text, out_mp3):
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
-    r = requests.post(url, headers={
-        "xi-api-key": ELEVENLABS_API_KEY,
-        "Content-Type": "application/json",
-    }, json={
-        "text": text,
-        "model_id": "eleven_multilingual_v2",
-    }, timeout=120)
-    r.raise_for_status()
-    with open(out_mp3, "wb") as f:
-        f.write(r.content)
+    asyncio.run(run())
     return out_mp3
 
 def audio_duration(path):
