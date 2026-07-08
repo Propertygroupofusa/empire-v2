@@ -26,6 +26,8 @@
     STATE_DIR               - default /data/bot_state
     TTS_VOICE               - default en-US-GuyNeural
     FORMAT_WEIGHTS          - e.g. "cartoon_story:2,caption_talk:2,card_slides:1"
+    SHORT_HOURS_UTC         - comma-separated UTC hours to post Shorts at,
+                              default "14,18,23" (~9am/1pm/6pm CDT)
 =============================================================
 """
 
@@ -46,6 +48,7 @@ ENABLED           = os.getenv("CONTENT_BOT_ENABLED", "true").lower() == "true"
 STATE_DIR         = os.getenv("STATE_DIR", "/data/bot_state")
 STATE_FILE        = os.path.join(STATE_DIR, "content_bot_state.json")
 VOICE             = os.getenv("TTS_VOICE", "en-US-GuyNeural")
+SHORT_HOURS_UTC   = [int(h) for h in os.getenv("SHORT_HOURS_UTC", "14,18,23").split(",")]
 
 W_SHORT, H_SHORT = 1080, 1920      # 9:16
 W_LONG,  H_LONG  = 1920, 1080      # 16:9
@@ -97,8 +100,8 @@ def load_state():
         with open(STATE_FILE) as f:
             return json.load(f)
     except Exception:
-        return {"published": [], "last_short_date": "", "last_long_date": "",
-                "used_topics": []}
+        return {"published": [], "shorts_date": "", "shorts_done": [],
+                "last_long_date": "", "used_topics": []}
 
 def save_state(s):
     os.makedirs(STATE_DIR, exist_ok=True)
@@ -414,7 +417,7 @@ def pick_format():
     fmts, wts = zip(*valid)
     return random.choices(fmts, weights=wts, k=1)[0]
 
-def produce(kind):
+def produce(kind, slot=None):
     state = load_state()
     fmt = pick_format()
     pillar = random.choice(PILLARS)
@@ -434,18 +437,24 @@ def produce(kind):
                                 "title": pkg["title"],
                                 "date": dt.date.today().isoformat()})
     state["used_topics"] = (state["used_topics"] + [pkg["title"]])[-50:]
-    key = "last_short_date" if kind == "short" else "last_long_date"
-    state[key] = dt.date.today().isoformat()
+    if kind == "short":
+        state.setdefault("shorts_done", []).append(slot)
+    else:
+        state["last_long_date"] = dt.date.today().isoformat()
     save_state(state)
 
-def due_today():
+def due_now():
     state = load_state()
-    today = dt.date.today()
-    out = []
-    if state.get("last_short_date") != today.isoformat():
-        out.append("short")
-    if today.weekday() == 0 and state.get("last_long_date") != today.isoformat():
-        out.append("long")
+    now = dt.datetime.utcnow()
+    today_iso = now.date().isoformat()
+    if state.get("shorts_date") != today_iso:
+        state["shorts_date"] = today_iso
+        state["shorts_done"] = []
+        save_state(state)
+    done = set(state.get("shorts_done", []))
+    out = [("short", h) for h in SHORT_HOURS_UTC if now.hour >= h and h not in done]
+    if now.weekday() == 0 and state.get("last_long_date") != today_iso:
+        out.append(("long", None))
     return out
 
 def main():
@@ -461,15 +470,16 @@ def main():
     log.info("  \U0001F916 PGUSA CONTENT ENGINE v2 — multi-format autonomous mode")
     log.info(f"  Formats active: {list(parse_weights().keys())}"
              + ("" if GEMINI_API_KEY else " (cartoon disabled: no GEMINI_API_KEY)"))
-    log.info("  Schedule: 1 Short/day + long-form Mondays")
+    log.info(f"  Schedule: {len(SHORT_HOURS_UTC)} Shorts/day (UTC hours "
+             f"{SHORT_HOURS_UTC}) + long-form Mondays")
     log.info("=" * 60)
     while True:
         try:
             if not ENABLED:
                 time.sleep(3600)
                 continue
-            for kind in due_today():
-                produce(kind)
+            for kind, slot in due_now():
+                produce(kind, slot)
                 time.sleep(120)
         except Exception as e:
             log.error(f"\u274C Pipeline error: {e} — retry in 30 min")
