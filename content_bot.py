@@ -360,12 +360,17 @@ BUILDERS = {"cartoon_story": build_cartoon_story,
 # ------------------------------------------------------------------
 # YOUTUBE UPLOAD
 # ------------------------------------------------------------------
+def _raise_with_body(r):
+    if not r.ok:
+        log.error(f"  ✖ {r.status_code} from {r.url}: {r.text[:500]}")
+    r.raise_for_status()
+
 def yt_access_token():
     r = requests.post("https://oauth2.googleapis.com/token", data={
         "client_id": YT_CLIENT_ID, "client_secret": YT_CLIENT_SECRET,
         "refresh_token": YT_REFRESH_TOKEN, "grant_type": "refresh_token"},
         timeout=30)
-    r.raise_for_status()
+    _raise_with_body(r)
     return r.json()["access_token"]
 
 def yt_upload(filepath, title, description, tags, is_short):
@@ -384,13 +389,13 @@ def yt_upload(filepath, title, description, tags, is_short):
                  "Content-Type": "application/json; charset=UTF-8",
                  "X-Upload-Content-Type": "video/mp4"},
         json=meta, timeout=60)
-    init.raise_for_status()
+    _raise_with_body(init)
     with open(filepath, "rb") as f:
         up = requests.put(init.headers["Location"],
                           headers={"Authorization": f"Bearer {token}",
                                    "Content-Type": "video/mp4"},
                           data=f, timeout=1800)
-    up.raise_for_status()
+    _raise_with_body(up)
     vid = up.json()["id"]
     log.info(f"  \u2705 Uploaded: https://youtu.be/{vid}")
     return vid
