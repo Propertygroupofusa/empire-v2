@@ -1,0 +1,181 @@
+<!doctype html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta charset="utf-8">
+  <title>Create Campaign (mobile)</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; margin:12px; color:#111}
+    label{display:block;margin-top:10px;font-weight:600}
+    input[type=text], textarea {width:100%;padding:8px;border:1px solid #ccc;border-radius:6px;box-sizing:border-box}
+    button{margin-top:10px;padding:12px;border:none;border-radius:8px;background:#0366d6;color:#fff;font-weight:700;width:100%}
+    pre{background:#f6f8fa;padding:10px;border-radius:6px;overflow:auto;max-height:50vh}
+    .row{display:flex;gap:8px}
+    .small{flex:1}
+    .muted{color:#666;font-size:0.95rem}
+    .hint{font-size:0.88rem;color:#444;margin-top:6px}
+  </style>
+</head>
+<body>
+  <h2>Create Test Campaign</h2>
+
+  <label>API Create URL</label>
+  <input id="apiUrl" type="text" placeholder="https://api.example.com/campaigns" />
+
+  <label>Authorization (optional)</label>
+  <input id="auth" type="text" placeholder="Bearer xxxxx" />
+
+  <label>Request JSON body</label>
+  <textarea id="body" rows="9">
+{
+  "name": "persistence-test-2026-07-08",
+  "owner": "Propertygroupofusa",
+  "type": "integration_test",
+  "settings": {
+    "auto_start": true,
+    "quick": true,
+    "target": "test-runner"
+  },
+  "triggers": {
+    "immediate": true
+  },
+  "metadata": {
+    "source": "mobile-html"
+  }
+}
+  </textarea>
+
+  <button id="createBtn">Create Campaign (POST)</button>
+
+  <div class="hint muted">The response will be shown below. If the server returns a campaign id (fields like "campaign_id" or "id"), it will be detected automatically.</div>
+
+  <label>Response / Result</label>
+  <pre id="result">No request yet.</pre>
+
+  <div class="row" style="margin-top:8px">
+    <button id="copyId" class="small" style="background:#2da44e">Copy campaign_id</button>
+    <button id="openStatus" class="small" style="background:#6f42c1">Open status URL</button>
+  </div>
+
+  <label style="margin-top:10px">Status URL template</label>
+  <input id="statusTemplate" type="text" placeholder="https://app.example.com/campaigns/{id}/status" />
+  <div class="hint muted">Put {id} where the campaign id goes. Example: https://app.example.com/campaigns/{id}/status</div>
+
+  <button id="checkStatusBtn" style="background:#e55350">Fetch status (GET)</button>
+
+  <label>Latest status response</label>
+  <pre id="statusResult">No status checked yet.</pre>
+
+  <script>
+    const apiUrlEl = document.getElementById('apiUrl');
+    const authEl = document.getElementById('auth');
+    const bodyEl = document.getElementById('body');
+    const resultEl = document.getElementById('result');
+    const createBtn = document.getElementById('createBtn');
+    const copyBtn = document.getElementById('copyId');
+    const statusTemplateEl = document.getElementById('statusTemplate');
+    const checkStatusBtn = document.getElementById('checkStatusBtn');
+    const statusResultEl = document.getElementById('statusResult');
+    const openStatusBtn = document.getElementById('openStatus');
+
+    let lastResponseJson = null;
+    let lastCampaignId = '';
+
+    function detectId(obj) {
+      if (!obj) return '';
+      const candidates = ['campaign_id','id','campaignId','campaign','result_id','data'];
+      for (const k of candidates) {
+        if (k in obj) {
+          const value = obj[k];
+          if (typeof value === 'string' || typeof value === 'number') return String(value);
+          if (typeof value === 'object' && (value.id || value.campaign_id)) {
+            return String(value.id || value.campaign_id);
+          }
+        }
+      }
+      const stack = [obj];
+      while (stack.length) {
+        const cur = stack.pop();
+        if (cur && typeof cur === 'object') {
+          for (const [k,v] of Object.entries(cur)) {
+            if (/id$/i.test(k) && (typeof v === 'string' || typeof v === 'number')) return String(v);
+            if (typeof v === 'object') stack.push(v);
+          }
+        }
+      }
+      return '';
+    }
+
+    createBtn.addEventListener('click', async () => {
+      const url = apiUrlEl.value.trim();
+      if (!url) { alert('Enter the create API URL first'); return; }
+      let body;
+      try { body = JSON.parse(bodyEl.value); } catch(e) { alert('Invalid JSON body: ' + e.message); return; }
+
+      const headers = {'Content-Type':'application/json'};
+      const auth = authEl.value.trim();
+      if (auth) headers['Authorization'] = auth;
+
+      resultEl.textContent = 'Sending...';
+      try {
+        const res = await fetch(url, {method:'POST', headers, body: JSON.stringify(body)});
+        const text = await res.text();
+        let json;
+        try { json = JSON.parse(text); } catch(e) { json = null; }
+        lastResponseJson = json || text;
+        resultEl.textContent = (json) ? JSON.stringify(json, null, 2) : text;
+        lastCampaignId = detectId(json);
+        if (lastCampaignId) {
+          resultEl.textContent += "\n\nDetected campaign id: " + lastCampaignId;
+        } else {
+          resultEl.textContent += "\n\nNo campaign id detected in response.";
+        }
+      } catch (err) {
+        resultEl.textContent = 'Request failed: ' + (err.message || String(err));
+      }
+    });
+
+    copyBtn.addEventListener('click', async () => {
+      if (!lastCampaignId) {
+        alert('No campaign_id available. Create a campaign first.');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(lastCampaignId);
+        alert('campaign_id copied: ' + lastCampaignId);
+      } catch (e) {
+        prompt('Copy this campaign id manually:', lastCampaignId);
+      }
+    });
+
+    checkStatusBtn.addEventListener('click', async () => {
+      const tpl = statusTemplateEl.value.trim();
+      const id = lastCampaignId || prompt('No campaign_id detected. Paste campaign id:');
+      if (!tpl) { alert('Enter a status URL template first (with {id})'); return; }
+      if (!id) { alert('No campaign id provided'); return; }
+      const url = tpl.replace('{id}', encodeURIComponent(id));
+      statusResultEl.textContent = 'Fetching ' + url + ' ...';
+      try {
+        const res = await fetch(url, {method:'GET', headers: {'Accept':'application/json'}});
+        const text = await res.text();
+        try {
+          const json = JSON.parse(text);
+          statusResultEl.textContent = JSON.stringify(json, null, 2);
+        } catch(e) {
+          statusResultEl.textContent = text;
+        }
+      } catch (err) {
+        statusResultEl.textContent = 'Request failed: ' + (err.message || String(err));
+      }
+    });
+
+    openStatusBtn.addEventListener('click', () => {
+      const tpl = statusTemplateEl.value.trim();
+      const id = lastCampaignId || prompt('No campaign_id detected. Paste campaign id:');
+      if (!tpl || !id) { alert('Need status template and campaign id'); return; }
+      const url = tpl.replace('{id}', encodeURIComponent(id));
+      window.open(url, '_blank');
+    });
+  </script>
+</body>
+</html>
