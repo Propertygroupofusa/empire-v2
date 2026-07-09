@@ -28,6 +28,10 @@
     FORMAT_WEIGHTS          - e.g. "cartoon_story:2,caption_talk:2,card_slides:1"
     SHORT_HOURS_UTC         - comma-separated UTC hours to post Shorts at,
                               default "14,18,23" (~9am/1pm/6pm CDT)
+    RUN_ONE_NOW             - if "true", publish one Short immediately on
+                              startup (ad-hoc test), then resume the normal
+                              schedule. Unset it after — the restart policy
+                              would otherwise republish on every crash retry.
 =============================================================
 """
 
@@ -49,6 +53,7 @@ STATE_DIR         = os.getenv("STATE_DIR", "/data/bot_state")
 STATE_FILE        = os.path.join(STATE_DIR, "content_bot_state.json")
 VOICE             = os.getenv("TTS_VOICE", "en-US-GuyNeural")
 SHORT_HOURS_UTC   = [int(h) for h in os.getenv("SHORT_HOURS_UTC", "14,18,23").split(",")]
+RUN_ONE_NOW       = os.getenv("RUN_ONE_NOW", "false").lower() == "true"
 
 W_SHORT, H_SHORT = 1080, 1920      # 9:16
 W_LONG,  H_LONG  = 1920, 1080      # 16:9
@@ -182,9 +187,27 @@ Respond ONLY with JSON, no markdown fences:
 # ------------------------------------------------------------------
 def tts(text, out_mp3):
     import edge_tts
+    import aiohttp
+    from edge_tts.exceptions import EdgeTTSException
+
     async def run():
         await edge_tts.Communicate(text, VOICE, rate="+8%").save(out_mp3)
-    asyncio.run(run())
+
+    try:
+        asyncio.run(run())
+    except aiohttp.ClientResponseError as e:
+        # edge-tts retries once internally on a 403 (clock-skew correction);
+        # one escaping here means Microsoft's token scheme changed again.
+        log.error(f"  ✖ edge-tts HTTP {e.status} ({e.message}) from {e.request_info.url} "
+                  "— likely a Microsoft Sec-MS-GEC auth change, not a code bug")
+        raise
+    except EdgeTTSException as e:
+        log.error(f"  ✖ edge-tts error [{type(e).__name__}]: {e} "
+                  "— check github.com/rany2/edge-tts issues for a known break/fix")
+        raise
+    except Exception as e:
+        log.error(f"  ✖ edge-tts unexpected failure [{type(e).__name__}]: {e}")
+        raise
     return out_mp3
 
 def audio_duration(path):
@@ -473,6 +496,13 @@ def main():
     log.info(f"  Schedule: {len(SHORT_HOURS_UTC)} Shorts/day (UTC hours "
              f"{SHORT_HOURS_UTC}) + long-form Mondays")
     log.info("=" * 60)
+    if RUN_ONE_NOW:
+        log.info("  \U0001F6A8 RUN_ONE_NOW=true — publishing one Short immediately "
+                 "(remove this env var after so crash retries don't republish)")
+        try:
+            produce("short")
+        except Exception as e:
+            log.error(f"❌ RUN_ONE_NOW production failed [{type(e).__name__}]: {e}")
     while True:
         try:
             if not ENABLED:
