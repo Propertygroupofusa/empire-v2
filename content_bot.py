@@ -187,9 +187,27 @@ Respond ONLY with JSON, no markdown fences:
 # ------------------------------------------------------------------
 def tts(text, out_mp3):
     import edge_tts
+    import aiohttp
+    from edge_tts.exceptions import EdgeTTSException
+
     async def run():
         await edge_tts.Communicate(text, VOICE, rate="+8%").save(out_mp3)
-    asyncio.run(run())
+
+    try:
+        asyncio.run(run())
+    except aiohttp.ClientResponseError as e:
+        # edge-tts retries once internally on a 403 (clock-skew correction);
+        # one escaping here means Microsoft's token scheme changed again.
+        log.error(f"  ✖ edge-tts HTTP {e.status} ({e.message}) from {e.request_info.url} "
+                  "— likely a Microsoft Sec-MS-GEC auth change, not a code bug")
+        raise
+    except EdgeTTSException as e:
+        log.error(f"  ✖ edge-tts error [{type(e).__name__}]: {e} "
+                  "— check github.com/rany2/edge-tts issues for a known break/fix")
+        raise
+    except Exception as e:
+        log.error(f"  ✖ edge-tts unexpected failure [{type(e).__name__}]: {e}")
+        raise
     return out_mp3
 
 def audio_duration(path):
