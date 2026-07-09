@@ -466,6 +466,35 @@ def produce(kind, slot=None):
         state["last_long_date"] = dt.date.today().isoformat()
     save_state(state)
 
+def check_youtube_credentials():
+    """Redeem the refresh token once at boot so an OAuth mismatch is visible
+    immediately, instead of only surfacing after a full script/TTS/render
+    cycle burns API cost and lands on the upload step."""
+    try:
+        yt_access_token()
+        log.info("  ✅ YouTube OAuth check passed")
+    except requests.HTTPError as e:
+        try:
+            reason = e.response.json().get("error", "unknown")
+        except Exception:
+            reason = "unknown"
+        hints = {
+            "unauthorized_client": "refresh token doesn't belong to this client_id/secret "
+                "— redo the oauthplayground.google.com step with 'Use your own OAuth "
+                "credentials' checked, using this exact CLIENT_ID/CLIENT_SECRET",
+            "invalid_grant": "refresh token expired or was revoked — generate a new one "
+                "(also check the OAuth consent screen isn't stuck in 'Testing' status, "
+                "which auto-expires tokens after 7 days)",
+            "invalid_client": "CLIENT_ID/CLIENT_SECRET don't match a live OAuth client "
+                "— check console.cloud.google.com Credentials for this client",
+        }
+        log.error(f"  ⚠️ YouTube OAuth check FAILED at startup [{reason}]: "
+                  f"{hints.get(reason, 'see response body above')} "
+                  "— uploads will fail until this is fixed in Railway env vars.")
+    except Exception as e:
+        log.error(f"  ⚠️ YouTube OAuth check FAILED at startup "
+                  f"[{type(e).__name__}]: {e}")
+
 def due_now():
     state = load_state()
     now = dt.datetime.utcnow()
@@ -496,6 +525,7 @@ def main():
     log.info(f"  Schedule: {len(SHORT_HOURS_UTC)} Shorts/day (UTC hours "
              f"{SHORT_HOURS_UTC}) + long-form Mondays")
     log.info("=" * 60)
+    check_youtube_credentials()
     if RUN_ONE_NOW:
         log.info("  \U0001F6A8 RUN_ONE_NOW=true — publishing one Short immediately "
                  "(remove this env var after so crash retries don't republish)")
