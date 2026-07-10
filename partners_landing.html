@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>White-Label Video Generation - Add $50K/Month Revenue</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            color: #e2e8f0;
+        }
+
+        .navbar {
+            background: rgba(15, 23, 42, 0.95);
+            backdrop-filter: blur(10px);
+            padding: 20px 40px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+        }
+
+        .logo {
+            font-size: 24px;
+            font-weight: 700;
+            color: #a78bfa;
+        }
+
+        .nav-links a {
+            color: #cbd5e1;
+            text-decoration: none;
+            margin: 0 20px;
+        }
+
+        .nav-links a:hover {
+            color: #a78bfa;
+        }
+
+        .hero {
+            padding: 100px 40px;
+            text-align: center;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .hero h1 {
+            font-size: 3.5em;
+            font-weight: 800;
+            margin-bottom: 20px;
+            color: #fff;
+        }
+
+        .hero h1 .purple {
+            color: #a78bfa;
+        }
+
+        .hero p {
+            font-size: 1.2em;
+            color: #94a3b8;
+            margin-bottom: 40px;
+            max-width: 700px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .revenue-example {
+            background: rgba(167, 139, 250, 0.1);
+            border: 2px solid #a78bfa;
+            padding: 40px;
+            border-radius: 12px;
+            max-width: 600px;
+            margin: 40px auto;
+        }
+
+        .revenue-example h3 {
+            color: #a78bfa;
+            margin-bottom: 20px;
+        }
+
+        .revenue-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid rgba(167, 139, 250, 0.2);
+        }
+
+        .revenue-row.total {
+            border-bottom: none;
+            font-weight: 700;
+            color: #10b981;
+            font-size: 1.2em;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 2px solid rgba(167, 139, 250, 0.3);
+        }
+
+        .cta-button {
+            background: linear-gradient(135deg, #a78bfa, #8b5cf6);
+            color: white;
+            border: none;
+            padding: 18px 50px;
+            font-size: 1.1em;
+            font-weight: 600;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .cta-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 20px 40px rgba(167, 139, 250, 0.3);
+        }
+
+        .benefits {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+            padding: 80px 40px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .benefit {
+            background: rgba(51, 65, 85, 0.5);
+            padding: 40px;
+            border-radius: 12px;
+            border-left: 4px solid #a78bfa;
+        }
+
+        .benefit h3 {
+            color: #a78bfa;
+            margin-bottom: 15px;
+        }
+
+        .comparison {
+            padding: 80px 40px;
+            background: rgba(51, 65, 85, 0.3);
+        }
+
+        .comparison-title {
+            text-align: center;
+            font-size: 2.5em;
+            margin-bottom: 60px;
+        }
+
+        .comparison-table {
+            max-width: 1000px;
+            margin: 0 auto;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: rgba(51, 65, 85, 0.5);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        th {
+            background: rgba(167, 139, 250, 0.2);
+            padding: 20px;
+            text-align: left;
+            color: #a78bfa;
+            font-weight: 600;
+            border-bottom: 2px solid rgba(167, 139, 250, 0.3);
+        }
+
+        td {
+            padding: 20px;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+        }
+
+        td.check {
+            color: #10b981;
+            font-weight: bold;
+        }
+
+        td.cross {
+            color: #ef4444;
+        }
+
+        .tiers {
+            padding: 80px 40px;
+        }
+
+        .tiers-title {
+            text-align: center;
+            font-size: 2.5em;
+            margin-bottom: 60px;
+        }
+
+        .tiers-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 40px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .tier-card {
+            background: rgba(51, 65, 85, 0.8);
+            border: 2px solid rgba(167, 139, 250, 0.2);
+            padding: 50px;
+            border-radius: 12px;
+            text-align: center;
+            transition: all 0.3s;
+            position: relative;
+        }
+
+        .tier-card:hover {
+            border-color: rgba(167, 139, 250, 0.8);
+            transform: translateY(-10px);
+        }
+
+        .tier-card.featured {
+            border: 2px solid #a78bfa;
+            transform: scale(1.05);
+        }
+
+        .tier-card.featured::before {
+            content: "RECOMMENDED";
+            position: absolute;
+            top: -15px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: linear-gradient(135deg, #a78bfa, #8b5cf6);
+            color: white;
+            padding: 8px 20px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+
+        .tier-price {
+            font-size: 2.5em;
+            font-weight: 800;
+            color: #a78bfa;
+            margin: 20px 0;
+        }
+
+        .tier-features {
+            list-style: none;
+            margin: 30px 0;
+            text-align: left;
+        }
+
+        .tier-features li {
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+            color: #cbd5e1;
+        }
+
+        .tier-features li::before {
+            content: "✓ ";
+            color: #a78bfa;
+            font-weight: bold;
+            margin-right: 10px;
+        }
+
+        .tier-card button {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #a78bfa, #8b5cf6);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 20px;
+        }
+
+        .tier-card button:hover {
+            transform: scale(1.02);
+            box-shadow: 0 10px 30px rgba(167, 139, 250, 0.3);
+        }
+
+        .faq {
+            padding: 80px 40px;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        .faq-title {
+            text-align: center;
+            font-size: 2.5em;
+            margin-bottom: 60px;
+        }
+
+        .faq-item {
+            margin-bottom: 30px;
+            padding-bottom: 30px;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+        }
+
+        .faq-item h4 {
+            color: #a78bfa;
+            margin-bottom: 10px;
+            cursor: pointer;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            justify-content: center;
+            align-items: center;
+            z-index: 2000;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: #1e293b;
+            padding: 50px;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 500px;
+            border: 2px solid #a78bfa;
+        }
+
+        .modal-content h2 {
+            margin-bottom: 20px;
+            color: #a78bfa;
+        }
+
+        .modal-content input {
+            width: 100%;
+            padding: 12px;
+            margin-bottom: 15px;
+            background: rgba(51, 65, 85, 0.5);
+            border: 1px solid rgba(167, 139, 250, 0.2);
+            border-radius: 6px;
+            color: #e2e8f0;
+        }
+
+        .modal-content button {
+            width: 100%;
+            padding: 12px;
+            background: linear-gradient(135deg, #a78bfa, #8b5cf6);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .close {
+            float: right;
+            font-size: 28px;
+            cursor: pointer;
+            color: #94a3b8;
+        }
+
+        .footer {
+            padding: 40px;
+            text-align: center;
+            color: #64748b;
+            border-top: 1px solid rgba(148, 163, 184, 0.1);
+        }
+
+        @media (max-width: 768px) {
+            .hero h1 {
+                font-size: 2em;
+            }
+
+            .tier-card.featured {
+                transform: scale(1);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="navbar">
+        <div class="logo">🤝 Partner Program</div>
+        <div class="nav-links">
+            <a href="#benefits">Why Partner</a>
+            <a href="#tiers">Pricing</a>
+            <a href="#faq">FAQ</a>
+        </div>
+    </div>
+
+    <div class="hero">
+        <h1>Add <span class="purple">$50K+/Month</span> Revenue to Your Business</h1>
+        <p>Resell our white-label video generation platform. Your customers pay you, we take 20%. You keep 80%.</p>
+
+        <div class="revenue-example">
+            <h3>Realistic Example</h3>
+            <div class="revenue-row">
+                <span>20 customers at $99/month:</span>
+                <span>$1,980</span>
+            </div>
+            <div class="revenue-row">
+                <span>Your 80% (keep this):</span>
+                <span style="color: #10b981;">$1,584</span>
+            </div>
+            <div class="revenue-row">
+                <span>Our 20% (we take this):</span>
+                <span>$396</span>
+            </div>
+            <div class="revenue-row">
+                <span>Your license fee:</span>
+                <span>-$999</span>
+            </div>
+            <div class="revenue-row total">
+                <span>Your net profit:</span>
+                <span>$585/month</span>
+            </div>
+            <div style="font-size: 0.9em; color: #94a3b8; margin-top: 15px;">
+                (Get to 50 customers = $3,500/month profit)
+            </div>
+        </div>
+
+        <button class="cta-button" onclick="openModal()">Apply for Partnership</button>
+    </div>
+
+    <div class="benefits" id="benefits">
+        <div class="benefit">
+            <h3>💰 Revenue Share Model</h3>
+            <p>You set your own prices. We take 20%. You keep 80%. Simple.</p>
+        </div>
+        <div class="benefit">
+            <h3>🎨 White-Label Everything</h3>
+            <p>Your logo, your colors, your domain. Customers think it's your product.</p>
+        </div>
+        <div class="benefit">
+            <h3>📊 Zero Tech Work</h3>
+            <p>We handle the API, infrastructure, and video generation. You sell.</p>
+        </div>
+        <div class="benefit">
+            <h3>🚀 Proven Sales Pages</h3>
+            <p>We provide landing pages, email sequences, and marketing templates.</p>
+        </div>
+        <div class="benefit">
+            <h3>👥 Dedicated Support</h3>
+            <p>24/7 partner support. We help your customers succeed (so you succeed).</p>
+        </div>
+        <div class="benefit">
+            <h3>📈 Scale Infinitely</h3>
+            <p>Add 5 customers or 500. Platform scales with you.</p>
+        </div>
+    </div>
+
+    <div class="comparison">
+        <div class="comparison-title">Build vs Partner vs Buy</div>
+        <div class="comparison-table">
+            <table>
+                <tr>
+                    <th></th>
+                    <th>Build Yourself</th>
+                    <th>Buy White-Label</th>
+                    <th>Our Partner Program</th>
+                </tr>
+                <tr>
+                    <td><strong>Dev Time</strong></td>
+                    <td class="cross">3-6 months</td>
+                    <td class="check">0 months</td>
+                    <td class="check">0 months</td>
+                </tr>
+                <tr>
+                    <td><strong>Dev Cost</strong></td>
+                    <td class="cross">$50-150K</td>
+                    <td class="cross">$500-5K/month</td>
+                    <td class="check">$999/month (Agency)</td>
+                </tr>
+                <tr>
+                    <td><strong>Infrastructure</strong></td>
+                    <td class="cross">You maintain it</td>
+                    <td class="check">Included</td>
+                    <td class="check">Included</td>
+                </tr>
+                <tr>
+                    <td><strong>Customer Support</strong></td>
+                    <td class="cross">You handle</td>
+                    <td class="check">Included</td>
+                    <td class="check">We help</td>
+                </tr>
+                <tr>
+                    <td><strong>Revenue Model</strong></td>
+                    <td class="check">100% yours</td>
+                    <td class="cross">Lease only</td>
+                    <td class="check">80% yours + revenue share</td>
+                </tr>
+                <tr>
+                    <td><strong>Sales Materials</strong></td>
+                    <td class="cross">You create</td>
+                    <td class="cross">You create</td>
+                    <td class="check">We provide</td>
+                </tr>
+                <tr>
+                    <td><strong>Time to Revenue</strong></td>
+                    <td class="cross">6-12 months</td>
+                    <td>2-3 months</td>
+                    <td class="check">1 month</td>
+                </tr>
+            </table>
+        </div>
+    </div>
+
+    <div class="tiers" id="tiers">
+        <div class="tiers-title">Two Partnership Tiers</div>
+        <div class="tiers-grid">
+            <div class="tier-card">
+                <h3>Agency</h3>
+                <div class="tier-price">$999<span style="font-size: 0.4em;">/month</span></div>
+                <ul class="tier-features">
+                    <li>White-label platform</li>
+                    <li>Up to 5 sub-customers</li>
+                    <li>Custom branding</li>
+                    <li>Email support</li>
+                    <li>20% revenue share</li>
+                    <li>Marketing templates</li>
+                    <li>ROI: +$500/month at 15 customers</li>
+                </ul>
+                <button onclick="openModal('agency')">Apply</button>
+            </div>
+
+            <div class="tier-card featured">
+                <h3>Enterprise</h3>
+                <div class="tier-price">$4,999<span style="font-size: 0.4em;">/month</span></div>
+                <ul class="tier-features">
+                    <li>Full white-label platform</li>
+                    <li>Unlimited sub-customers</li>
+                    <li>Private API access</li>
+                    <li>Custom integrations</li>
+                    <li>24/7 priority support</li>
+                    <li>20% revenue share</li>
+                    <li>ROI: +$5,000/month at 50 customers</li>
+                </ul>
+                <button onclick="openModal('enterprise')">Apply</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="faq" id="faq">
+        <div class="faq-title">Common Questions</div>
+
+        <div class="faq-item">
+            <h4>Q: Do I need to know how to code?</h4>
+            <p>No. We handle all the technology. You focus on sales and customer success.</p>
+        </div>
+
+        <div class="faq-item">
+            <h4>Q: How many customers do I need to break even?</h4>
+            <p>Agency tier breaks even at ~15 customers at $99/month. Enterprise at ~40 customers. Most partners hit this within 90 days.</p>
+        </div>
+
+        <div class="faq-item">
+            <h4>Q: Can I integrate this with my existing platform?</h4>
+            <p>Yes. Enterprise tier includes API access for custom integrations. Agency can use our landing page + dashboard.</p>
+        </div>
+
+        <div class="faq-item">
+            <h4>Q: What's the revenue split exactly?</h4>
+            <p>You charge your customers. They pay you directly. You pay us 20% of what you collect. You keep 80%.</p>
+        </div>
+
+        <div class="faq-item">
+            <h4>Q: Do you handle customer support?</h4>
+            <p>We provide tier 2 support. You handle tier 1 (first contact). We're always there to back you up.</p>
+        </div>
+
+        <div class="faq-item">
+            <h4>Q: How long is the partnership term?</h4>
+            <p>Month-to-month. Cancel anytime. We'd rather earn your business every month than lock you in.</p>
+        </div>
+
+        <div class="faq-item">
+            <h4>Q: Can I white-label other services too?</h4>
+            <p>Yes. We also offer trading signals, done-for-you services, and course platform white-labeling.</p>
+        </div>
+    </div>
+
+    <div class="footer">
+        <p>&copy; 2026 Property Group USA. All rights reserved.</p>
+    </div>
+
+    <div id="modal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal()">&times;</span>
+            <h2>Apply for Partnership</h2>
+            <input type="text" id="company" placeholder="Company name">
+            <input type="email" id="email" placeholder="your@email.com">
+            <input type="text" id="website" placeholder="www.yoursite.com">
+            <input type="text" id="how_many_customers" placeholder="How many customers could you reach?">
+            <button onclick="submitForm()">Submit Application</button>
+        </div>
+    </div>
+
+    <script>
+        function openModal(tier) {
+            document.getElementById('modal').classList.add('active');
+        }
+
+        function closeModal() {
+            document.getElementById('modal').classList.remove('active');
+        }
+
+        async function submitForm() {
+            const company = document.getElementById('company').value;
+            const email = document.getElementById('email').value;
+            const website = document.getElementById('website').value;
+
+            if (!company || !email || !website) {
+                alert('Please fill in all fields');
+                return;
+            }
+
+            try {
+                const response = await fetch('http://localhost:8004/apply', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        company_name: company,
+                        contact_email: email,
+                        website: website,
+                        tier: 'agency'
+                    })
+                });
+
+                if (response.ok) {
+                    alert('Application submitted! We\'ll review and contact you within 48 hours.');
+                    closeModal();
+                } else {
+                    alert('Something went wrong. Please try again.');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Connection error.');
+            }
+        }
+
+        window.onclick = function(event) {
+            const modal = document.getElementById('modal');
+            if (event.target == modal) {
+                modal.classList.remove('active');
+            }
+        }
+    </script>
+</body>
+</html>

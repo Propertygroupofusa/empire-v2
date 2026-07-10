@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Done-For-You Video Management - We Handle Your Content</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+            color: #e2e8f0;
+            line-height: 1.6;
+        }
+
+        .navbar {
+            background: rgba(15, 23, 42, 0.95);
+            backdrop-filter: blur(10px);
+            padding: 20px 40px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+        }
+
+        .logo {
+            font-size: 24px;
+            font-weight: 700;
+            color: #10b981;
+        }
+
+        .nav-links a {
+            color: #cbd5e1;
+            text-decoration: none;
+            margin: 0 20px;
+        }
+
+        .nav-links a:hover {
+            color: #10b981;
+        }
+
+        .hero {
+            padding: 100px 40px;
+            text-align: center;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .hero h1 {
+            font-size: 3.5em;
+            font-weight: 800;
+            margin-bottom: 20px;
+            color: #fff;
+        }
+
+        .hero h1 .green {
+            color: #10b981;
+        }
+
+        .hero p {
+            font-size: 1.2em;
+            color: #94a3b8;
+            margin-bottom: 40px;
+            max-width: 700px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .problem {
+            background: rgba(239, 68, 68, 0.1);
+            border-left: 4px solid #ef4444;
+            padding: 30px;
+            margin: 40px 0;
+            border-radius: 8px;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .problem h3 {
+            color: #ef4444;
+            margin-bottom: 10px;
+        }
+
+        .solution {
+            background: rgba(16, 185, 129, 0.1);
+            border-left: 4px solid #10b981;
+            padding: 30px;
+            margin: 40px 0;
+            border-radius: 8px;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .solution h3 {
+            color: #10b981;
+            margin-bottom: 10px;
+        }
+
+        .cta-button {
+            background: linear-gradient(135deg, #10b981, #059669);
+            color: white;
+            border: none;
+            padding: 18px 50px;
+            font-size: 1.1em;
+            font-weight: 600;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .cta-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 20px 40px rgba(16, 185, 129, 0.3);
+        }
+
+        .benefits {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 30px;
+            padding: 80px 40px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .benefit {
+            background: rgba(51, 65, 85, 0.5);
+            padding: 40px;
+            border-radius: 12px;
+            border-left: 4px solid #10b981;
+        }
+
+        .benefit h3 {
+            color: #10b981;
+            margin-bottom: 15px;
+        }
+
+        .process {
+            padding: 80px 40px;
+            background: rgba(51, 65, 85, 0.3);
+        }
+
+        .process-title {
+            text-align: center;
+            font-size: 2.5em;
+            margin-bottom: 60px;
+        }
+
+        .process-steps {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 40px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .step {
+            text-align: center;
+            position: relative;
+        }
+
+        .step-number {
+            width: 60px;
+            height: 60px;
+            background: linear-gradient(135deg, #10b981, #059669);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            font-weight: 800;
+            margin: 0 auto 20px;
+        }
+
+        .step h3 {
+            color: #10b981;
+            margin-bottom: 10px;
+        }
+
+        .pricing-section {
+            padding: 80px 40px;
+        }
+
+        .pricing-title {
+            text-align: center;
+            font-size: 2.5em;
+            margin-bottom: 60px;
+        }
+
+        .pricing-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 40px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .pricing-card {
+            background: rgba(51, 65, 85, 0.8);
+            border: 2px solid rgba(16, 185, 129, 0.2);
+            padding: 50px;
+            border-radius: 12px;
+            text-align: center;
+            transition: all 0.3s;
+            position: relative;
+        }
+
+        .pricing-card:hover {
+            border-color: rgba(16, 185, 129, 0.8);
+            transform: translateY(-10px);
+        }
+
+        .pricing-card.featured {
+            border: 2px solid #10b981;
+            transform: scale(1.05);
+        }
+
+        .pricing-card.featured::before {
+            content: "BEST VALUE";
+            position: absolute;
+            top: -15px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: linear-gradient(135deg, #10b981, #059669);
+            color: white;
+            padding: 8px 20px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+
+        .price {
+            font-size: 3em;
+            font-weight: 800;
+            color: #10b981;
+            margin: 20px 0;
+        }
+
+        .price-period {
+            color: #94a3b8;
+            font-size: 1em;
+        }
+
+        .includes-list {
+            list-style: none;
+            margin: 30px 0;
+            text-align: left;
+        }
+
+        .includes-list li {
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+            color: #cbd5e1;
+        }
+
+        .includes-list li::before {
+            content: "✓ ";
+            color: #10b981;
+            font-weight: bold;
+            margin-right: 10px;
+        }
+
+        .pricing-card button {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #10b981, #059669);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 20px;
+            transition: all 0.2s;
+        }
+
+        .pricing-card button:hover {
+            transform: scale(1.02);
+            box-shadow: 0 10px 30px rgba(16, 185, 129, 0.3);
+        }
+
+        .guarantee {
+            background: rgba(16, 185, 129, 0.1);
+            border: 2px solid #10b981;
+            padding: 40px;
+            text-align: center;
+            border-radius: 12px;
+            margin: 60px auto;
+            max-width: 600px;
+        }
+
+        .guarantee h3 {
+            color: #10b981;
+            margin-bottom: 15px;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            justify-content: center;
+            align-items: center;
+            z-index: 2000;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: #1e293b;
+            padding: 50px;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 500px;
+            border: 2px solid #10b981;
+        }
+
+        .modal-content h2 {
+            margin-bottom: 20px;
+            color: #10b981;
+        }
+
+        .modal-content input, .modal-content textarea {
+            width: 100%;
+            padding: 12px;
+            margin-bottom: 15px;
+            background: rgba(51, 65, 85, 0.5);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+            border-radius: 6px;
+            color: #e2e8f0;
+        }
+
+        .modal-content button {
+            width: 100%;
+            padding: 12px;
+            background: linear-gradient(135deg, #10b981, #059669);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .close {
+            float: right;
+            font-size: 28px;
+            cursor: pointer;
+            color: #94a3b8;
+        }
+
+        .footer {
+            padding: 40px;
+            text-align: center;
+            color: #64748b;
+            border-top: 1px solid rgba(148, 163, 184, 0.1);
+        }
+    </style>
+</head>
+<body>
+    <div class="navbar">
+        <div class="logo">🎬 Done-For-You Videos</div>
+        <div class="nav-links">
+            <a href="#process">How It Works</a>
+            <a href="#pricing">Pricing</a>
+        </div>
+    </div>
+
+    <div class="hero">
+        <h1>You Focus on Sales.<br><span class="green">We Handle Your Video Content.</span></h1>
+        <p>Get professional YouTube Shorts, TikToks, and Reels delivered weekly. Full content strategy included.</p>
+
+        <div class="problem">
+            <h3>The Problem:</h3>
+            <p>💔 You want video content but don't have time to create it</p>
+            <p>💔 Hiring a videographer costs $5-10K/month</p>
+            <p>💔 Video templates look generic and underperform</p>
+        </div>
+
+        <div class="solution">
+            <h3>The Solution:</h3>
+            <p>✓ We generate professional videos tailored to your business</p>
+            <p>✓ $297-1,997/month (10-100 videos)</p>
+            <p>✓ Proven viral hooks + strategic distribution</p>
+        </div>
+
+        <button class="cta-button" onclick="openModal()">Schedule Free Strategy Call</button>
+    </div>
+
+    <div class="benefits">
+        <div class="benefit">
+            <h3>📅 Weekly Delivery</h3>
+            <p>Get fresh content every week, automatically optimized for YouTube, TikTok, Instagram, and Facebook.</p>
+        </div>
+        <div class="benefit">
+            <h3>🎯 Custom Strategy</h3>
+            <p>We learn your niche, audience, and goals. Every video is designed to convert.</p>
+        </div>
+        <div class="benefit">
+            <h3>📊 Performance Tracking</h3>
+            <p>See views, engagement, and ROI for every video. A/B test what works.</p>
+        </div>
+        <div class="benefit">
+            <h3>💰 Money-Back Guarantee</h3>
+            <p>If you're not seeing results after 30 days, we refund you. No questions asked.</p>
+        </div>
+        <div class="benefit">
+            <h3>🔄 Scale On Demand</h3>
+            <p>Start with 10/month, scale to 30 or 100 as you grow. Flexible upgrade anytime.</p>
+        </div>
+        <div class="benefit">
+            <h3>👥 Dedicated Manager</h3>
+            <p>Pro & Premium tiers include a dedicated account manager + priority support.</p>
+        </div>
+    </div>
+
+    <div class="process" id="process">
+        <div class="process-title">How We Work</div>
+        <div class="process-steps">
+            <div class="step">
+                <div class="step-number">1</div>
+                <h3>Strategy Call</h3>
+                <p>We learn your business, audience, and goals</p>
+            </div>
+            <div class="step">
+                <div class="step-number">2</div>
+                <h3>Content Plan</h3>
+                <p>We create a custom content roadmap for 30 days</p>
+            </div>
+            <div class="step">
+                <div class="step-number">3</div>
+                <h3>Production</h3>
+                <p>We generate videos weekly using AI + human review</p>
+            </div>
+            <div class="step">
+                <div class="step-number">4</div>
+                <h3>Optimization</h3>
+                <p>We track performance and optimize based on results</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="pricing-section" id="pricing">
+        <div class="pricing-title">Transparent Pricing</div>
+        <div class="pricing-grid">
+            <div class="pricing-card">
+                <h3>Basic</h3>
+                <div class="price">$297<span class="price-period">/month</span></div>
+                <ul class="includes-list">
+                    <li>10 videos/month</li>
+                    <li>Content strategy</li>
+                    <li>Weekly delivery</li>
+                    <li>Basic analytics</li>
+                    <li>Email support</li>
+                </ul>
+                <button onclick="openModal('basic')">Get Started</button>
+            </div>
+
+            <div class="pricing-card featured">
+                <h3>Pro</h3>
+                <div class="price">$897<span class="price-period">/month</span></div>
+                <ul class="includes-list">
+                    <li>30 videos/month</li>
+                    <li>Content strategy</li>
+                    <li>Weekly delivery</li>
+                    <li>Advanced analytics</li>
+                    <li>A/B testing</li>
+                    <li>Priority support</li>
+                </ul>
+                <button onclick="openModal('pro')">Subscribe Now</button>
+            </div>
+
+            <div class="pricing-card">
+                <h3>Premium</h3>
+                <div class="price">$1,997<span class="price-period">/month</span></div>
+                <ul class="includes-list">
+                    <li>100 videos/month</li>
+                    <li>Full management</li>
+                    <li>24-hour turnaround</li>
+                    <li>Advanced analytics</li>
+                    <li>Conversion optimization</li>
+                    <li>Dedicated manager</li>
+                </ul>
+                <button onclick="openModal('premium')">Contact Sales</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="guarantee">
+        <h3>✓ 30-Day Money-Back Guarantee</h3>
+        <p>If you don't see results in the first 30 days, we refund you completely. Zero risk, zero questions asked.</p>
+    </div>
+
+    <div class="footer">
+        <p>&copy; 2026 Property Group USA. All rights reserved.</p>
+    </div>
+
+    <div id="modal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal()">&times;</span>
+            <h2>Get Started Today</h2>
+            <input type="text" id="name" placeholder="Your name">
+            <input type="email" id="email" placeholder="your@email.com">
+            <input type="text" id="business" placeholder="Business/niche">
+            <textarea id="goals" placeholder="What are your goals?" rows="4"></textarea>
+            <button onclick="submitForm()">Schedule Call</button>
+        </div>
+    </div>
+
+    <script>
+        function openModal(tier) {
+            document.getElementById('modal').classList.add('active');
+        }
+
+        function closeModal() {
+            document.getElementById('modal').classList.remove('active');
+        }
+
+        async function submitForm() {
+            const name = document.getElementById('name').value;
+            const email = document.getElementById('email').value;
+            const business = document.getElementById('business').value;
+            const goals = document.getElementById('goals').value;
+
+            if (!name || !email || !business) {
+                alert('Please fill in all fields');
+                return;
+            }
+
+            try {
+                const response = await fetch('http://localhost:8003/onboard', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        email,
+                        business_name: business,
+                        niche: goals,
+                        tier: 'basic'
+                    })
+                });
+
+                if (response.ok) {
+                    alert('Great! Check your email for next steps.');
+                    closeModal();
+                } else {
+                    alert('Something went wrong. Please try again.');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Connection error.');
+            }
+        }
+
+        window.onclick = function(event) {
+            const modal = document.getElementById('modal');
+            if (event.target == modal) {
+                modal.classList.remove('active');
+            }
+        }
+    </script>
+</body>
+</html>
