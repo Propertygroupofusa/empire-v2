@@ -30,6 +30,7 @@ ENABLE_API = os.getenv("ENABLE_API", "true").lower() == "true"
 ENABLE_TIKTOK_BOT = os.getenv("TIKTOK_ENABLED", "true").lower() == "true"
 ENABLE_INSTAGRAM_BOT = os.getenv("INSTAGRAM_ENABLED", "true").lower() == "true"
 ENABLE_FACEBOOK_BOT = os.getenv("FACEBOOK_ENABLED", "true").lower() == "true"
+ENABLE_SIGNALS_API = os.getenv("ENABLE_SIGNALS_API", "true").lower() == "true"
 RESTART_DELAY = int(os.getenv("RESTART_DELAY", 5))
 
 # Track processes
@@ -74,6 +75,7 @@ def monitor_processes():
     log.info(f"CONTENT_BOT enabled: {ENABLE_CONTENT_BOT}")
     log.info(f"API enabled: {ENABLE_API}")
     log.info(f"Distribution: TikTok={ENABLE_TIKTOK_BOT}, Instagram={ENABLE_INSTAGRAM_BOT}, Facebook={ENABLE_FACEBOOK_BOT}")
+    log.info(f"Signals API enabled: {ENABLE_SIGNALS_API}")
     log.info("=" * 60)
 
     # Initial startup
@@ -94,6 +96,9 @@ def monitor_processes():
 
     if ENABLE_FACEBOOK_BOT:
         start_process("FACEBOOK_BOT", "python facebook_bot.py")
+
+    if ENABLE_SIGNALS_API:
+        start_process("SIGNALS_API", "python trading_signals_api.py")
 
     start_process("HEALTH_MONITOR", "python health_monitor.py")
 
@@ -120,6 +125,8 @@ def monitor_processes():
                     start_process(name, "python instagram_bot.py")
                 elif name == "FACEBOOK_BOT":
                     start_process(name, "python facebook_bot.py")
+                elif name == "SIGNALS_API":
+                    start_process(name, "python trading_signals_api.py")
                 elif name == "HEALTH_MONITOR":
                     start_process(name, "python health_monitor.py")
 
