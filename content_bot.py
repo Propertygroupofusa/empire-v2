@@ -61,12 +61,19 @@ W_LONG,  H_LONG  = 1920, 1080      # 16:9
 LINKS_BLOCK = (
     "\n\n---\n"
     "\U0001F680 Learn to build apps with AI (no coding degree needed): "
-    "https://propertygroupusa.gumroad.com/l/yaaap\n"
+    "https://propertygroupusa.gumroad.com/l/yaaap?utm_source=yt_shorts\n"
     "\U0001F4C4 Notary, tax prep & legal docs done for you: "
-    "https://propertygroupofusa.github.io/documents/services.html\n"
+    "https://propertygroupofusa.github.io/documents/services.html?utm_source=yt_shorts\n"
     "\U0001F4B0 Gig workers: get paid smarter — join the Payee Trust waitlist: "
-    "https://propertygroupofusa.github.io/documents/payeetrust-landing.html\n"
+    "https://propertygroupofusa.github.io/documents/payeetrust-landing.html?utm_source=yt_shorts\n"
 )
+
+# Funnel-specific email signup links (track which funnel viewers join)
+FUNNEL_EMAILS = {
+    "course": "https://propertygroupusa.gumroad.com/l/yaaap?utm_source=yt_shorts&email_capture=true",
+    "documents": "https://propertygroupofusa.github.io/documents/services.html?utm_source=yt_shorts&email_capture=true",
+    "payeetrust": "https://propertygroupofusa.github.io/documents/payeetrust-landing.html?utm_source=yt_shorts&email_capture=true",
+}
 
 PILLARS = [
     {"topic": "how to build an app using AI prompts (beginner reality check)",
@@ -114,18 +121,27 @@ def save_state(s):
         json.dump(s, f, indent=2)
 
 def track_video(title, funnel, url):
-    """Track published video for performance monitoring"""
+    """Track published video for performance monitoring + email capture"""
     s = load_state()
     if "video_log" not in s:
         s["video_log"] = []
-    s["video_log"].append({
+    if "funnel_stats" not in s:
+        s["funnel_stats"] = {"course": 0, "documents": 0, "payeetrust": 0}
+
+    video_entry = {
         "title": title,
         "funnel": funnel,
         "url": url,
+        "email_signup_link": FUNNEL_EMAILS.get(funnel, ""),
         "published_at": dt.datetime.utcnow().isoformat()
-    })
+    }
+    s["video_log"].append(video_entry)
+    s["funnel_stats"][funnel] = s["funnel_stats"].get(funnel, 0) + 1
     save_state(s)
-    log.info(f"📊 VIDEO TRACKED: {funnel} funnel — monitor performance at {url}")
+    log.info(f"📊 VIDEO TRACKED: {funnel} funnel")
+    log.info(f"   YouTube: {url}")
+    log.info(f"   Email signup: {FUNNEL_EMAILS.get(funnel, 'N/A')}")
+    log.info(f"   Total {funnel} videos: {s['funnel_stats'][funnel]}")
 
 
 # ------------------------------------------------------------------
