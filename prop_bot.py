@@ -10,6 +10,7 @@ import os
 import asyncio
 import logging
 import time
+import json
 from datetime import datetime
 import aiohttp
 
@@ -21,6 +22,8 @@ ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 BASE_URL      = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 STOP          = os.getenv("STOP_TRADING", "false").lower() == "true"
+STATE_DIR     = os.getenv("STATE_DIR", "/data/bot_state")
+STATE_FILE    = os.path.join(STATE_DIR, "prop_bot_state.json")
 
 HEADERS = {
     "APCA-API-KEY-ID": ALPACA_KEY,
@@ -38,6 +41,18 @@ FUTURES = {
 profitable_days = []
 daily_pnl = 0.0
 open_prop_positions = {}
+
+def load_state():
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {"profitable_days": [], "daily_pnl": 0.0}
+
+def save_state():
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(STATE_FILE, "w") as f:
+        json.dump({"profitable_days": profitable_days, "daily_pnl": daily_pnl}, f, indent=2)
 
 
 async def get_price_rsi(session, symbol):
@@ -116,7 +131,7 @@ async def run_prop_cycle():
         log.info(f"[APEX_589296] Market closed — waiting for 9:30am ET")
         return
 
-    log.info(f"[APEX_589296] Scanning futures markets (MES, MNQ)... | Daily P&L: ${daily_pnl:.2f}")
+    log.info(f"[APEX_589296] Scanning futures markets (MES, MNQ)... | Daily P&L: ${daily_pnl:.2f} | Profitable days: {len(profitable_days)}/7")
 
     async with aiohttp.ClientSession() as session:
         for contract, config in FUTURES.items():
@@ -151,6 +166,7 @@ async def run_prop_cycle():
     today = now.strftime("%Y-%m-%d")
     if daily_pnl > 0 and (not profitable_days or profitable_days[-1] != today):
         profitable_days.append(today)
+        save_state()
         log.info(f"✅ PROFITABLE DAY #{len(profitable_days)} | ${daily_pnl:.2f} | APEX_589296")
         if len(profitable_days) >= 7:
             log.info("🎯 7 CONSECUTIVE PROFITABLE DAYS ACHIEVED — READY TO GO LIVE!")
@@ -158,6 +174,13 @@ async def run_prop_cycle():
 
 
 def run():
+    global profitable_days, daily_pnl
+
+    # Load state from previous session
+    state = load_state()
+    profitable_days = state.get("profitable_days", [])
+    daily_pnl = state.get("daily_pnl", 0.0)
+
     log.info("=" * 60)
     log.info("DEL'S TRADING EMPIRE — PROP BOT v3")
     log.info(f"Account: APEX_589296 | Mode: {'LIVE' if LIVE_TRADE else 'PAPER'}")
