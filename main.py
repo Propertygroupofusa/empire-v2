@@ -31,6 +31,9 @@ ENABLE_TIKTOK_BOT = os.getenv("TIKTOK_ENABLED", "true").lower() == "true"
 ENABLE_INSTAGRAM_BOT = os.getenv("INSTAGRAM_ENABLED", "true").lower() == "true"
 ENABLE_FACEBOOK_BOT = os.getenv("FACEBOOK_ENABLED", "true").lower() == "true"
 ENABLE_SIGNALS_API = os.getenv("ENABLE_SIGNALS_API", "true").lower() == "true"
+ENABLE_GENERATION_API = os.getenv("ENABLE_GENERATION_API", "true").lower() == "true"
+ENABLE_DFY_SERVICE = os.getenv("ENABLE_DFY_SERVICE", "true").lower() == "true"
+ENABLE_WHITE_LABEL = os.getenv("ENABLE_WHITE_LABEL", "true").lower() == "true"
 RESTART_DELAY = int(os.getenv("RESTART_DELAY", 5))
 
 # Track processes
@@ -75,7 +78,7 @@ def monitor_processes():
     log.info(f"CONTENT_BOT enabled: {ENABLE_CONTENT_BOT}")
     log.info(f"API enabled: {ENABLE_API}")
     log.info(f"Distribution: TikTok={ENABLE_TIKTOK_BOT}, Instagram={ENABLE_INSTAGRAM_BOT}, Facebook={ENABLE_FACEBOOK_BOT}")
-    log.info(f"Signals API enabled: {ENABLE_SIGNALS_API}")
+    log.info(f"Monetization: Signals={ENABLE_SIGNALS_API}, API={ENABLE_GENERATION_API}, DFY={ENABLE_DFY_SERVICE}, WhiteLabel={ENABLE_WHITE_LABEL}")
     log.info("=" * 60)
 
     # Initial startup
@@ -99,6 +102,15 @@ def monitor_processes():
 
     if ENABLE_SIGNALS_API:
         start_process("SIGNALS_API", "python trading_signals_api.py")
+
+    if ENABLE_GENERATION_API:
+        start_process("GENERATION_API", "python content_generation_api.py")
+
+    if ENABLE_DFY_SERVICE:
+        start_process("DFY_SERVICE", "python done_for_you_service.py")
+
+    if ENABLE_WHITE_LABEL:
+        start_process("WHITE_LABEL_PLATFORM", "python white_label_platform.py")
 
     start_process("HEALTH_MONITOR", "python health_monitor.py")
 
@@ -127,6 +139,12 @@ def monitor_processes():
                     start_process(name, "python facebook_bot.py")
                 elif name == "SIGNALS_API":
                     start_process(name, "python trading_signals_api.py")
+                elif name == "GENERATION_API":
+                    start_process(name, "python content_generation_api.py")
+                elif name == "DFY_SERVICE":
+                    start_process(name, "python done_for_you_service.py")
+                elif name == "WHITE_LABEL_PLATFORM":
+                    start_process(name, "python white_label_platform.py")
                 elif name == "HEALTH_MONITOR":
                     start_process(name, "python health_monitor.py")
 
