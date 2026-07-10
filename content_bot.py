@@ -113,6 +113,20 @@ def save_state(s):
     with open(STATE_FILE, "w") as f:
         json.dump(s, f, indent=2)
 
+def track_video(title, funnel, url):
+    """Track published video for performance monitoring"""
+    s = load_state()
+    if "video_log" not in s:
+        s["video_log"] = []
+    s["video_log"].append({
+        "title": title,
+        "funnel": funnel,
+        "url": url,
+        "published_at": dt.datetime.utcnow().isoformat()
+    })
+    save_state(s)
+    log.info(f"📊 VIDEO TRACKED: {funnel} funnel — monitor performance at {url}")
+
 
 # ------------------------------------------------------------------
 # CLAUDE — script generation
@@ -164,20 +178,22 @@ def gen_script(fmt, kind, pillar, recent):
                        f'(one per story beat) for an illustrator. Urban anime style, '
                        f'original characters, no real people, no brand logos.')
         scenes_json = ', "scenes": ["...scene descriptions..."]'
-    prompt = f"""You write scripts for a YouTube channel helping everyday people make money with AI tools, gig work, and small business services.
+    prompt = f"""You write viral scripts for a YouTube channel helping everyday people make money with AI tools, gig work, and small business services.
 
-Write ONE {('YouTube Short' if kind == 'short' else 'YouTube video')} about: {pillar['topic']}
+Write ONE {('YouTube Short (needs VIRAL HOOK in first 0.5s!)' if kind == 'short' else 'YouTube video')} about: {pillar['topic']}
 Audience: {pillar['audience']}
 Style: {style}
 Length: {length}
+
+FOR SHORTS: Start with a SURPRISING statement or question that stops scrollers. Make them WANT to hear the full story.
 Hook in the first sentence. Spoken words only, no stage directions, no emoji.
-End with a call to action for this funnel: {pillar['funnel']} (course / payeetrust waitlist / document services — the link lives in the description).
+End with a strong call to action for this funnel: {pillar['funnel']} (course / payeetrust waitlist / document services — the link lives in the description).
 Must differ from these recent titles: {recent[-10:] if recent else 'none'}{scenes_rule}
 
 Respond ONLY with JSON, no markdown fences:
-{{"title": "clickable title under 90 chars",
-  "script": "full spoken script",
-  "description": "2-3 sentence SEO description",
+{{"title": "VIRAL clickable title under 90 chars (curiosity gap or benefit)",
+  "script": "full spoken script — hook FIRST, then story/tips, then CTA",
+  "description": "2-3 sentence SEO description with keywords",
   "tags": ["8-12","seo","tags"]{scenes_json}}}"""
     return parse_json(claude(prompt))
 

@@ -169,8 +169,15 @@ async def run_prop_cycle():
         save_state()
         log.info(f"✅ PROFITABLE DAY #{len(profitable_days)} | ${daily_pnl:.2f} | APEX_589296")
         if len(profitable_days) >= 7:
-            log.info("🎯 7 CONSECUTIVE PROFITABLE DAYS ACHIEVED — READY TO GO LIVE!")
-            log.info("ACTION: Change ALPACA_LIVE_TRADE=true in Railway to go live")
+            log.warning("=" * 80)
+            log.warning("🎯 🎯 🎯  7 CONSECUTIVE PROFITABLE DAYS ACHIEVED — READY TO GO LIVE!  🎯 🎯 🎯")
+            log.warning("=" * 80)
+            log.warning("🚨 MANUAL ACTION REQUIRED:")
+            log.warning("   1. Go to Railway → empire-v2 → Variables")
+            log.warning("   2. Set ALPACA_LIVE_TRADE=true")
+            log.warning("   3. Restart deployment")
+            log.warning("   Account APEX_589296 will switch to LIVE TRADING on next restart")
+            log.warning("=" * 80)
 
 
 def run():
