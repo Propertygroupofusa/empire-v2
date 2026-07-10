@@ -6,6 +6,7 @@ Starts and manages all bots, handles crashes + restarts
 - prop_bot (APEX $25K futures trading)
 - content_bot (AI video revenue system)
 - video_revenue_api (API server)
+- Distribution bots: tiktok_bot, instagram_bot, facebook_bot
 """
 
 import os
@@ -26,6 +27,9 @@ STOP_TRADING = os.getenv("STOP_TRADING", "false").lower() == "true"
 ENABLE_PROP_BOT = os.getenv("ENABLE_PROP_BOT", "true").lower() == "true"
 ENABLE_CONTENT_BOT = os.getenv("ENABLE_CONTENT_BOT", "true").lower() == "true"
 ENABLE_API = os.getenv("ENABLE_API", "true").lower() == "true"
+ENABLE_TIKTOK_BOT = os.getenv("TIKTOK_ENABLED", "true").lower() == "true"
+ENABLE_INSTAGRAM_BOT = os.getenv("INSTAGRAM_ENABLED", "true").lower() == "true"
+ENABLE_FACEBOOK_BOT = os.getenv("FACEBOOK_ENABLED", "true").lower() == "true"
 RESTART_DELAY = int(os.getenv("RESTART_DELAY", 5))
 
 # Track processes
@@ -69,6 +73,7 @@ def monitor_processes():
     log.info(f"PROP_BOT enabled: {ENABLE_PROP_BOT}")
     log.info(f"CONTENT_BOT enabled: {ENABLE_CONTENT_BOT}")
     log.info(f"API enabled: {ENABLE_API}")
+    log.info(f"Distribution: TikTok={ENABLE_TIKTOK_BOT}, Instagram={ENABLE_INSTAGRAM_BOT}, Facebook={ENABLE_FACEBOOK_BOT}")
     log.info("=" * 60)
 
     # Initial startup
@@ -80,6 +85,15 @@ def monitor_processes():
 
     if ENABLE_API:
         start_process("API", "uvicorn video_revenue_api:app --host 0.0.0.0 --port 8000")
+
+    if ENABLE_TIKTOK_BOT:
+        start_process("TIKTOK_BOT", "python tiktok_bot.py")
+
+    if ENABLE_INSTAGRAM_BOT:
+        start_process("INSTAGRAM_BOT", "python instagram_bot.py")
+
+    if ENABLE_FACEBOOK_BOT:
+        start_process("FACEBOOK_BOT", "python facebook_bot.py")
 
     start_process("HEALTH_MONITOR", "python health_monitor.py")
 
@@ -100,6 +114,12 @@ def monitor_processes():
                     start_process(name, "python content_bot.py")
                 elif name == "API":
                     start_process(name, "uvicorn video_revenue_api:app --host 0.0.0.0 --port 8000")
+                elif name == "TIKTOK_BOT":
+                    start_process(name, "python tiktok_bot.py")
+                elif name == "INSTAGRAM_BOT":
+                    start_process(name, "python instagram_bot.py")
+                elif name == "FACEBOOK_BOT":
+                    start_process(name, "python facebook_bot.py")
                 elif name == "HEALTH_MONITOR":
                     start_process(name, "python health_monitor.py")
 
