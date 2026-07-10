@@ -1,123 +1,128 @@
 """
-PROPERTY GROUP USA — DOCUMENTS PLATFORM BACKEND
-=================================================
-Full SaaS backend with worker management, client booking,
-job matching, payments, admin dashboard, and white label API.
+DEL'S TRADING EMPIRE v2 — ORCHESTRATOR
+========================================
+Starts and manages all bots, handles crashes + restarts
+- health_monitor (always on)
+- prop_bot (APEX $25K futures trading)
+- content_bot (AI video revenue system)
+- video_revenue_api (API server)
 """
 
-from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from contextlib import asynccontextmanager
-from sqlalchemy import text
 import os
-import uvicorn
+import time
 import logging
+import subprocess
+import signal
+import sys
 
-from database import init_db, engine
-from routers import workers, clients, jobs, bookings, payments, admin, whitelabel, auth, partners, labeling
-from payee_webhook import router as payee_router, payee_worker
-from paycom_features import router as payroll_router
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+log = logging.getLogger("orchestrator")
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("pgusa")
+# Configuration
+STOP_TRADING = os.getenv("STOP_TRADING", "false").lower() == "true"
+ENABLE_PROP_BOT = os.getenv("ENABLE_PROP_BOT", "true").lower() == "true"
+ENABLE_CONTENT_BOT = os.getenv("ENABLE_CONTENT_BOT", "true").lower() == "true"
+ENABLE_API = os.getenv("ENABLE_API", "true").lower() == "true"
+RESTART_DELAY = int(os.getenv("RESTART_DELAY", 5))
 
+# Track processes
+processes = {}
+shutdown_requested = False
 
-async def run_migrations():
-    """Add any missing columns to existing tables — safe to run every startup."""
-    cols = [
-        ("w9_submitted",          "BOOLEAN DEFAULT FALSE"),
-        ("w9_legal_name",         "VARCHAR"),
-        ("w9_tax_classification", "VARCHAR"),
-        ("w9_tin_last4",          "VARCHAR"),
-        ("w9_address",            "TEXT"),
-        ("credentials_submitted",     "BOOLEAN DEFAULT FALSE"),
-        ("credentials_verified",      "BOOLEAN DEFAULT FALSE"),
-        ("notary_commission_number",  "VARCHAR"),
-        ("notary_commission_state",   "VARCHAR"),
-        ("notary_commission_expires", "VARCHAR"),
-        ("ron_authorized",            "BOOLEAN DEFAULT FALSE"),
-        ("ron_authorization_state",   "VARCHAR"),
-    ]
-    async with engine.begin() as conn:
-        for col, col_type in cols:
+def signal_handler(sig, frame):
+    """Handle graceful shutdown"""
+    global shutdown_requested
+    log.warning("Shutdown signal received — stopping all bots...")
+    shutdown_requested = True
+    sys.exit(0)
+
+def start_process(name, command):
+    """Start a bot process and track it"""
+    if shutdown_requested:
+        return None
+
+    log.info(f"Starting {name}...")
+    try:
+        proc = subprocess.Popen(
+            command,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            bufsize=1
+        )
+        processes[name] = proc
+        log.info(f"✅ {name} started (PID: {proc.pid})")
+        return proc
+    except Exception as e:
+        log.error(f"❌ Failed to start {name}: {e}")
+        return None
+
+def monitor_processes():
+    """Monitor all running processes and restart if they crash"""
+    log.info("=" * 60)
+    log.info("ORCHESTRATOR STARTED")
+    log.info(f"STOP_TRADING: {STOP_TRADING}")
+    log.info(f"PROP_BOT enabled: {ENABLE_PROP_BOT}")
+    log.info(f"CONTENT_BOT enabled: {ENABLE_CONTENT_BOT}")
+    log.info(f"API enabled: {ENABLE_API}")
+    log.info("=" * 60)
+
+    # Initial startup
+    if ENABLE_PROP_BOT and not STOP_TRADING:
+        start_process("PROP_BOT", "python prop_bot.py")
+
+    if ENABLE_CONTENT_BOT:
+        start_process("CONTENT_BOT", "python content_bot.py")
+
+    if ENABLE_API:
+        start_process("API", "uvicorn video_revenue_api:app --host 0.0.0.0 --port 8000")
+
+    start_process("HEALTH_MONITOR", "python health_monitor.py")
+
+    # Continuous monitoring
+    while not shutdown_requested:
+        time.sleep(10)
+
+        for name, proc in list(processes.items()):
+            if proc and proc.poll() is not None:  # Process has exited
+                log.warning(f"⚠️  {name} crashed (exit code: {proc.returncode})")
+                log.info(f"Restarting {name} in {RESTART_DELAY}s...")
+                time.sleep(RESTART_DELAY)
+
+                # Determine restart command
+                if name == "PROP_BOT":
+                    start_process(name, "python prop_bot.py")
+                elif name == "CONTENT_BOT":
+                    start_process(name, "python content_bot.py")
+                elif name == "API":
+                    start_process(name, "uvicorn video_revenue_api:app --host 0.0.0.0 --port 8000")
+                elif name == "HEALTH_MONITOR":
+                    start_process(name, "python health_monitor.py")
+
+def cleanup():
+    """Kill all child processes on exit"""
+    log.info("Cleaning up processes...")
+    for name, proc in processes.items():
+        if proc:
             try:
-                await conn.execute(text(
-                    f"ALTER TABLE workers ADD COLUMN IF NOT EXISTS {col} {col_type}"
-                ))
-                log.info(f"Migration OK: {col}")
-            except Exception as e:
-                log.warning(f"Migration skip {col}: {e}")
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    log.info("PGUSA Platform starting...")
-    await init_db()
-    await run_migrations()
-    # Start Payee Trust async worker
-    import asyncio
-    asyncio.create_task(payee_worker())
-    log.info("Payee Trust webhook worker started")
-    log.info("Database initialized and migrations complete")
-    yield
-    log.info("PGUSA Platform shutting down")
-
-
-app = FastAPI(
-    title="Property Group USA Documents Platform API",
-    description="SaaS backend for notary, tax prep, and legal document services",
-    version="1.0.0",
-    lifespan=lifespan,
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ── Routers ──────────────────────────────────────────────────
-app.include_router(auth.router,        prefix="/auth",        tags=["Auth"])
-app.include_router(workers.router,     prefix="/workers",     tags=["Workers"])
-app.include_router(clients.router,     prefix="/clients",     tags=["Clients"])
-app.include_router(jobs.router,        prefix="/jobs",        tags=["Jobs"])
-app.include_router(bookings.router,    prefix="/bookings",    tags=["Bookings"])
-app.include_router(payments.router,    prefix="/payments",    tags=["Payments"])
-app.include_router(admin.router,       prefix="/admin",       tags=["Admin"])
-app.include_router(whitelabel.router,  prefix="/whitelabel",  tags=["White Label"])
-app.include_router(partners.router,    prefix="/partners",    tags=["Partners"])
-app.include_router(labeling.router,    prefix="/labeling",    tags=["AI Labeling"])
-app.include_router(payee_router,        prefix="/payee",       tags=["Payee Trust"])
-app.include_router(payroll_router,      prefix="/workers/payroll", tags=["Worker Payroll"])
-
-
-@app.get("/")
-async def root():
-    return {
-        "platform": "Property Group USA Documents Platform",
-        "version": "1.0.0",
-        "status": "online",
-        "endpoints": {
-            "docs": "/docs",
-            "workers": "/workers",
-            "clients": "/clients",
-            "jobs": "/jobs",
-            "bookings": "/bookings",
-            "admin": "/admin",
-            "whitelabel": "/whitelabel",
-            "partners": "/partners",
-        }
-    }
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "platform": "pgusa-documents"}
-
+                proc.terminate()
+                proc.wait(timeout=5)
+                log.info(f"✅ {name} terminated")
+            except:
+                proc.kill()
+                log.warning(f"⚠️  {name} force killed")
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    try:
+        monitor_processes()
+    except Exception as e:
+        log.error(f"Orchestrator error: {e}")
+    finally:
+        cleanup()
