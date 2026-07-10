@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  # Existing services
+  empire-api:
+    build: .
+    ports:
+      - "10000:10000"
+    environment:
+      - PORT=10000
+      - ALPACA_API_KEY=${ALPACA_API_KEY}
+      - ALPACA_SECRET_KEY=${ALPACA_SECRET_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - YOUTUBE_API_KEY=${YOUTUBE_API_KEY}
+      - SYNTHESIA_API_KEY=${SYNTHESIA_API_KEY}
+    volumes:
+      - ./video_exports:/app/video_exports
+    networks:
+      - empire-network
+
+  # Video Editor API
+  video-editor-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.video-editor
+    ports:
+      - "5001:5001"
+    environment:
+      - FLASK_ENV=production
+      - MAX_VIDEO_SIZE=500000000
+    volumes:
+      - ./video_uploads:/app/video_uploads
+      - ./video_temp:/app/video_temp
+      - ./video_exports:/app/video_exports
+    depends_on:
+      - empire-api
+    networks:
+      - empire-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/api/video/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Video Editor Frontend
+  video-editor-frontend:
+    build:
+      context: ./video-editor
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:5001
+    depends_on:
+      - video-editor-api
+    networks:
+      - empire-network
+    stdin_open: true
+    tty: true
+
+networks:
+  empire-network:
+    driver: bridge
+
+volumes:
+  video_uploads:
+  video_temp:
+  video_exports:

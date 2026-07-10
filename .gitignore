@@ -4,3 +4,13 @@ __pycache__/
 *.log
 *.json
 .DS_Store
+
+# Video editor directories (temp processing files)
+video_uploads/
+video_temp/
+video_exports/
+
+# Video editor frontend
+video-editor/node_modules/
+video-editor/build/
+video-editor/dist/

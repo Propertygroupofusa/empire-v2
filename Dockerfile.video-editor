@@ -1,0 +1,29 @@
+FROM python:3.11-slim
+
+# Install FFmpeg and other dependencies
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy requirements
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application
+COPY video_editor_api.py .
+
+# Create directories
+RUN mkdir -p video_uploads video_temp video_exports
+
+# Expose port
+EXPOSE 5001
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import requests; requests.get('http://localhost:5001/api/video/health')"
+
+# Run API
+CMD ["python", "video_editor_api.py"]
