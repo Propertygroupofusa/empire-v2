@@ -66,6 +66,30 @@ services:
       timeout: 10s
       retries: 3
 
+  # Video Generator (FREE AI video creation, no Synthesia needed)
+  video-generator:
+    build:
+      context: .
+      dockerfile: Dockerfile.video-editor
+    ports:
+      - "5003:5003"
+    environment:
+      - FLASK_ENV=production
+      - VIDEO_AUTO_EDITOR_URL=http://video-auto-editor:5002
+    command: python video_generator_bot.py
+    volumes:
+      - ./video_temp:/app/video_temp
+      - ./video_exports:/app/video_exports
+    depends_on:
+      - video-auto-editor
+    networks:
+      - empire-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5003/api/video-gen/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   # Video Editor Frontend
   video-editor-frontend:
     build:
