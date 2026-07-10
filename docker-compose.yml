@@ -42,6 +42,30 @@ services:
       timeout: 10s
       retries: 3
 
+  # Video Auto-Editor (Synthesia webhook + auto-edit/publish)
+  video-auto-editor:
+    build:
+      context: .
+      dockerfile: Dockerfile.video-editor
+    ports:
+      - "5002:5002"
+    environment:
+      - FLASK_ENV=production
+      - VIDEO_EDITOR_API_URL=http://video-editor-api:5001
+      - YOUTUBE_API_URL=http://empire-api:10000
+      - SYNTHESIA_WEBHOOK_SECRET=${SYNTHESIA_WEBHOOK_SECRET}
+    command: python video_auto_editor.py
+    depends_on:
+      - video-editor-api
+      - empire-api
+    networks:
+      - empire-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5002/api/auto-editor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   # Video Editor Frontend
   video-editor-frontend:
     build:
