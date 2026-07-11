@@ -24,6 +24,7 @@ from typing import Dict, Any
 
 from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import stripe
 import uvicorn
 
@@ -42,6 +43,14 @@ DEVELOPERS_FILE = os.path.join(STATE_DIR, "api_developers.json")
 GENERATION_API_PORT = int(os.getenv("GENERATION_API_PORT", 8002))
 
 app = FastAPI(title="Content Generation API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 TIER_LIMITS = {
     "starter": {"videos_per_month": 100, "price": "$99"},

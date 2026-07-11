@@ -20,6 +20,7 @@ from datetime import datetime
 import secrets
 
 from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi.middleware.cors import CORSMiddleware
 import stripe
 import uvicorn
 
@@ -33,6 +34,14 @@ CLIENTS_FILE = os.path.join(STATE_DIR, "dfy_clients.json")
 DFY_API_PORT = int(os.getenv("DFY_API_PORT", 8003))
 
 app = FastAPI(title="Done-For-You Video Service")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 DFY_TIERS = {
     "basic": {

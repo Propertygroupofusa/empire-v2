@@ -20,6 +20,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import stripe
 import uvicorn
 
@@ -38,6 +39,14 @@ SIGNALS_FILE = os.path.join(STATE_DIR, "prop_bot_state.json")
 PORT = int(os.getenv("SIGNALS_API_PORT", 8001))
 
 app = FastAPI(title="Trading Signals API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def load_subscribers():
     """Load subscription database"""

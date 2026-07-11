@@ -113,6 +113,9 @@ def monitor_processes():
     if ENABLE_WHITE_LABEL:
         start_process("WHITE_LABEL_PLATFORM", "python white_label_platform.py")
 
+    # Start API Gateway (reverse proxy for all services)
+    start_process("API_GATEWAY", "python api_gateway.py")
+
     start_process("HEALTH_MONITOR", "python health_monitor.py")
 
     # Continuous monitoring
@@ -146,6 +149,8 @@ def monitor_processes():
                     start_process(name, "python done_for_you_service.py")
                 elif name == "WHITE_LABEL_PLATFORM":
                     start_process(name, "python white_label_platform.py")
+                elif name == "API_GATEWAY":
+                    start_process(name, "python api_gateway.py")
                 elif name == "HEALTH_MONITOR":
                     start_process(name, "python health_monitor.py")
 

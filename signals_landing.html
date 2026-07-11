@@ -331,6 +331,9 @@
     </div>
 
     <script>
+        // Update this to your Railway service URL (e.g., https://empire-v2-production.up.railway.app)
+        const API_BASE_URL = 'https://empire-v2-production.up.railway.app';
+
         async function subscribe() {
             const email = document.getElementById('email').value;
             const name = document.getElementById('name').value;
@@ -341,7 +344,7 @@
             }
 
             try {
-                const response = await fetch('http://localhost:8001/subscribe', {
+                const response = await fetch(`${API_BASE_URL}/signals/subscribe`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ email, customer_name: name })

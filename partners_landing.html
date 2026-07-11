@@ -610,6 +610,9 @@
             document.getElementById('modal').classList.remove('active');
         }
 
+        // Update this to your Railway service URL (e.g., https://empire-v2-production.up.railway.app)
+        const API_BASE_URL = 'https://empire-v2-production.up.railway.app';
+
         async function submitForm() {
             const company = document.getElementById('company').value;
             const email = document.getElementById('email').value;
@@ -621,7 +624,7 @@
             }
 
             try {
-                const response = await fetch('http://localhost:8004/apply', {
+                const response = await fetch(`${API_BASE_URL}/partners/apply`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({

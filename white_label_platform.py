@@ -20,6 +20,7 @@ from datetime import datetime
 import secrets
 
 from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi.middleware.cors import CORSMiddleware
 import stripe
 import uvicorn
 
@@ -33,6 +34,14 @@ PARTNERS_FILE = os.path.join(STATE_DIR, "white_label_partners.json")
 WHITE_LABEL_API_PORT = int(os.getenv("WHITE_LABEL_API_PORT", 8004))
 
 app = FastAPI(title="White-Label Platform")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 PARTNER_TIERS = {
     "agency": {
