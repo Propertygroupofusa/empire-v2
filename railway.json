@@ -4,8 +4,45 @@
     "builder": "DOCKERFILE"
   },
   "deploy": {
-    "startCommand": "python content_bot.py",
+    "startCommand": "python main.py",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
+  },
+  "services": {
+    "main-app": {
+      "build": {
+        "dockerfile": "Dockerfile"
+      },
+      "startCommand": "python main.py",
+      "port": 10000
+    },
+    "video-generator": {
+      "build": {
+        "dockerfile": "Dockerfile.video-editor"
+      },
+      "startCommand": "python video_generator_bot.py",
+      "port": 5003
+    },
+    "video-editor-api": {
+      "build": {
+        "dockerfile": "Dockerfile.video-editor"
+      },
+      "startCommand": "python video_editor_api.py",
+      "port": 5001
+    },
+    "video-auto-editor": {
+      "build": {
+        "dockerfile": "Dockerfile.video-editor"
+      },
+      "startCommand": "python video_auto_editor.py",
+      "port": 5002
+    },
+    "video-editor-frontend": {
+      "build": {
+        "buildCommand": "cd video-editor && npm install && npm run build"
+      },
+      "startCommand": "cd video-editor && npm start",
+      "port": 3000
+    }
   }
 }
