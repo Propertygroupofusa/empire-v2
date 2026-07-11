@@ -234,7 +234,7 @@ def generate_video(
     developers = load_developers()
     dev_id = None
     for did, dev in developers["developers"].items():
-        if dev.get("api_key") == None:  # Find this developer
+        if dev.get("email") == developer["email"]:
             dev_id = did
             break
 
@@ -276,21 +276,9 @@ def get_job_status(job_id: str, developer=Depends(verify_api_key)):
 @app.get("/usage")
 def get_usage(developer=Depends(verify_api_key)):
     """Get current month's usage for developer"""
-    developers = load_developers()
-
     current_month = datetime.utcnow().strftime("%Y-%m")
-    dev_id = None
-    for did, dev in developers["developers"].items():
-        if dev.get("status") == "active":  # Find current developer
-            dev_id = did
-            break
-
-    if not dev_id:
-        raise HTTPException(status_code=404, detail="Developer not found")
-
-    dev = developers["developers"][dev_id]
-    usage = dev.get("usage", {}).get(current_month, 0)
-    tier = dev.get("tier", "starter")
+    usage = developer.get("usage", {}).get(current_month, 0)
+    tier = developer.get("tier", "starter")
     limit = TIER_LIMITS[tier]["videos_per_month"]
 
     return {
