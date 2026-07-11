@@ -15,9 +15,10 @@ import uvicorn
 import logging
 
 from database import init_db, engine
-from routers import workers, clients, jobs, bookings, payments, admin, whitelabel, auth, partners, labeling
+from routers import workers, clients, jobs, bookings, payments, admin, whitelabel, auth, partners, labeling, revenue_automation
 from payee_webhook import router as payee_router, payee_worker
 from paycom_features import router as payroll_router
+from daily_publisher import start_daily_publisher
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pgusa")
@@ -59,6 +60,9 @@ async def lifespan(app: FastAPI):
     import asyncio
     asyncio.create_task(payee_worker())
     log.info("Payee Trust webhook worker started")
+    # Start daily video publisher
+    if start_daily_publisher():
+        log.info("Daily video publisher started")
     log.info("Database initialized and migrations complete")
     yield
     log.info("PGUSA Platform shutting down")
@@ -92,6 +96,7 @@ app.include_router(partners.router,    prefix="/partners",    tags=["Partners"])
 app.include_router(labeling.router,    prefix="/labeling",    tags=["AI Labeling"])
 app.include_router(payee_router,        prefix="/payee",       tags=["Payee Trust"])
 app.include_router(payroll_router,      prefix="/workers/payroll", tags=["Worker Payroll"])
+app.include_router(revenue_automation.router, prefix="/revenue", tags=["Revenue Automation"])
 
 
 @app.get("/")
