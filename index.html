@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Del's Trading Empire - Monetization Platforms</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1000px;
+            width: 100%;
+        }
+
+        header {
+            text-align: center;
+            color: white;
+            margin-bottom: 50px;
+        }
+
+        h1 {
+            font-size: 48px;
+            margin-bottom: 10px;
+            font-weight: 700;
+        }
+
+        .subtitle {
+            font-size: 18px;
+            opacity: 0.9;
+        }
+
+        .platforms {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+            margin-bottom: 50px;
+        }
+
+        .platform-card {
+            background: white;
+            border-radius: 12px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            text-decoration: none;
+            color: inherit;
+            cursor: pointer;
+        }
+
+        .platform-card:hover {
+            transform: translateY(-10px);
+            box-shadow: 0 30px 80px rgba(0, 0, 0, 0.4);
+        }
+
+        .icon {
+            font-size: 48px;
+            margin-bottom: 20px;
+        }
+
+        .platform-card h2 {
+            font-size: 24px;
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        .price {
+            font-size: 28px;
+            font-weight: 700;
+            color: #667eea;
+            margin-bottom: 15px;
+        }
+
+        .description {
+            color: #666;
+            line-height: 1.6;
+            margin-bottom: 25px;
+            font-size: 14px;
+        }
+
+        .features {
+            list-style: none;
+            margin-bottom: 25px;
+        }
+
+        .features li {
+            color: #666;
+            margin-bottom: 8px;
+            font-size: 13px;
+            padding-left: 20px;
+            position: relative;
+        }
+
+        .features li:before {
+            content: "✓";
+            position: absolute;
+            left: 0;
+            color: #667eea;
+            font-weight: bold;
+        }
+
+        .btn {
+            display: inline-block;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 14px 30px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            transition: opacity 0.3s ease;
+            width: 100%;
+            text-align: center;
+        }
+
+        .btn:hover {
+            opacity: 0.9;
+        }
+
+        footer {
+            text-align: center;
+            color: white;
+            opacity: 0.8;
+            font-size: 14px;
+        }
+
+        @media (max-width: 768px) {
+            h1 {
+                font-size: 36px;
+            }
+
+            .platforms {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>⚡ Del's Trading Empire</h1>
+            <p class="subtitle">3 Ways to Make Money</p>
+        </header>
+
+        <div class="platforms">
+            <!-- Platform 1: Trading Signals -->
+            <a href="signals_landing.html" class="platform-card">
+                <div class="icon">📈</div>
+                <h2>Trading Signals API</h2>
+                <div class="price">$297/month</div>
+                <p class="description">Real-time trading signals for profitable day traders</p>
+                <ul class="features">
+                    <li>Live market signals</li>
+                    <li>API access</li>
+                    <li>Professional support</li>
+                </ul>
+                <button class="btn">Learn More →</button>
+            </a>
+
+            <!-- Platform 2: SaaS API -->
+            <a href="api_landing.html" class="platform-card">
+                <div class="icon">🎬</div>
+                <h2>SaaS Video API</h2>
+                <div class="price">$99-999/month</div>
+                <p class="description">Generate AI videos at scale via simple API</p>
+                <ul class="features">
+                    <li>Starter: 100 videos/mo</li>
+                    <li>Pro: 500 videos/mo</li>
+                    <li>Enterprise: Unlimited</li>
+                </ul>
+                <button class="btn">Get Started →</button>
+            </a>
+
+            <!-- Platform 3: White-Label -->
+            <a href="partners_landing.html" class="platform-card">
+                <div class="icon">🤝</div>
+                <h2>White-Label Platform</h2>
+                <div class="price">$999-4999/month</div>
+                <p class="description">Resell under your brand + 20% revenue share</p>
+                <ul class="features">
+                    <li>Full branding control</li>
+                    <li>Partner dashboard</li>
+                    <li>Revenue sharing</li>
+                </ul>
+                <button class="btn">Apply Now →</button>
+            </a>
+        </div>
+
+        <footer>
+            <p>© 2026 Property Group of USA. All rights reserved.</p>
+        </footer>
+    </div>
+</body>
+</html>
