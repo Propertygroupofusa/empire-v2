@@ -1,12 +1,13 @@
 """
-DEL'S TRADING EMPIRE v2 — ORCHESTRATOR
-========================================
+DEL'S TRADING EMPIRE v2 — ORCHESTRATOR (LIVE)
+==============================================
 Starts and manages all bots, handles crashes + restarts
 - health_monitor (always on)
 - prop_bot (APEX $25K futures trading)
 - content_bot (AI video revenue system)
 - video_revenue_api (API server)
 - Distribution bots: tiktok_bot, instagram_bot, facebook_bot
+- Stripe payment processing enabled
 """
 
 import os
