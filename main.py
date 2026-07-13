@@ -15,7 +15,6 @@ import uvicorn
 import logging
 
 from database import init_db, engine
-<<<<<<< HEAD
 from routers import workers, clients, jobs, bookings, payments, admin, whitelabel, auth, partners, labeling, outreach, trading_signals
 from payee_webhook import router as payee_router, payee_worker
 from paycom_features import router as payroll_router
