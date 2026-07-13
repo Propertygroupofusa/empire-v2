@@ -21,7 +21,7 @@ class Campaign(Base):
     scheduled_for = Column(DateTime, nullable=True, index=True)
     completed_at = Column(DateTime, nullable=True)
     is_active = Column(Boolean, default=True, index=True)
-    metadata = Column(JSON, nullable=True)
+    custom_metadata = Column(JSON, nullable=True)
 
     def to_dict(self):
         return {
@@ -37,7 +37,7 @@ class Campaign(Base):
             "scheduled_for": self.scheduled_for.isoformat() if self.scheduled_for else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "is_active": self.is_active,
-            "metadata": self.metadata,
+            "custom_metadata": self.custom_metadata,
         }
 
 
@@ -56,7 +56,7 @@ class CampaignContact(Base):
     opened_at = Column(DateTime, nullable=True)
     clicked_at = Column(DateTime, nullable=True)
     replied_at = Column(DateTime, nullable=True)
-    metadata = Column(JSON, nullable=True)
+    custom_metadata = Column(JSON, nullable=True)
 
     def to_dict(self):
         return {
@@ -71,7 +71,7 @@ class CampaignContact(Base):
             "opened_at": self.opened_at.isoformat() if self.opened_at else None,
             "clicked_at": self.clicked_at.isoformat() if self.clicked_at else None,
             "replied_at": self.replied_at.isoformat() if self.replied_at else None,
-            "metadata": self.metadata,
+            "custom_metadata": self.custom_metadata,
         }
 
 
@@ -86,7 +86,7 @@ class Worker(Base):
     status = Column(String, default="active")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    metadata = Column(JSON, nullable=True)
+    custom_metadata = Column(JSON, nullable=True)
 
     def to_dict(self):
         return {
@@ -97,7 +97,7 @@ class Worker(Base):
             "status": self.status,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-            "metadata": self.metadata,
+            "custom_metadata": self.custom_metadata,
         }
 
 
@@ -113,7 +113,7 @@ class Client(Base):
     status = Column(String, default="active")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    metadata = Column(JSON, nullable=True)
+    custom_metadata = Column(JSON, nullable=True)
 
     def to_dict(self):
         return {
@@ -125,5 +125,5 @@ class Client(Base):
             "status": self.status,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-            "metadata": self.metadata,
+            "custom_metadata": self.custom_metadata,
         }

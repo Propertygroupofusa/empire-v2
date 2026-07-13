@@ -19,7 +19,7 @@ class CampaignCreate(BaseModel):
     target_audience: Optional[dict] = None
     message_template: str
     scheduled_for: Optional[str] = None
-    metadata: Optional[dict] = None
+    custom_metadata: Optional[dict] = None
 
 
 class CampaignUpdate(BaseModel):
@@ -28,7 +28,7 @@ class CampaignUpdate(BaseModel):
     status: Optional[str] = None
     message_template: Optional[str] = None
     scheduled_for: Optional[str] = None
-    metadata: Optional[dict] = None
+    custom_metadata: Optional[dict] = None
 
 
 class CampaignResponse(BaseModel):
@@ -44,7 +44,7 @@ class CampaignResponse(BaseModel):
     scheduled_for: Optional[str]
     completed_at: Optional[str]
     is_active: bool
-    metadata: Optional[dict]
+    custom_metadata: Optional[dict] = None
 
     class Config:
         from_attributes = True
@@ -70,7 +70,7 @@ class CampaignContactResponse(BaseModel):
     opened_at: Optional[str]
     clicked_at: Optional[str]
     replied_at: Optional[str]
-    metadata: Optional[dict]
+    custom_metadata: Optional[dict] = None
 
     class Config:
         from_attributes = True
@@ -86,7 +86,7 @@ async def create_campaign(campaign: CampaignCreate, db: AsyncSession = Depends(g
         target_audience=campaign.target_audience,
         message_template=campaign.message_template,
         scheduled_for=datetime.fromisoformat(campaign.scheduled_for) if campaign.scheduled_for else None,
-        metadata=campaign.metadata,
+        custom_metadata=campaign.custom_metadata,
     )
     db.add(db_campaign)
     await db.commit()
