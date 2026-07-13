@@ -117,7 +117,7 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "platform": "pgusa-documents"}
+    return {"status": "ok", "platform": "pgusa-documents", "version": "v2.1-trading-signals"}
 
 
 if __name__ == "__main__":
