@@ -15,7 +15,7 @@ import uvicorn
 import logging
 
 from database import init_db, engine
-from routers import workers, clients, jobs, bookings, payments, admin, whitelabel, auth, partners, labeling, outreach
+from routers import workers, clients, jobs, bookings, payments, admin, whitelabel, auth, partners, labeling, outreach, trading_signals
 from payee_webhook import router as payee_router, payee_worker
 from paycom_features import router as payroll_router
 
@@ -93,6 +93,7 @@ app.include_router(labeling.router,    prefix="/labeling",    tags=["AI Labeling
 app.include_router(payee_router,        prefix="/payee",       tags=["Payee Trust"])
 app.include_router(payroll_router,      prefix="/workers/payroll", tags=["Worker Payroll"])
 app.include_router(outreach.router,     prefix="/outreach",    tags=["Outreach & Campaigns"])
+app.include_router(trading_signals.router, prefix="/trading", tags=["Trading Signals"])
 
 
 @app.get("/")

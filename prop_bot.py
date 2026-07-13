@@ -72,7 +72,35 @@ async def get_price_rsi(session, symbol):
         return None
 
 
-async def execute_futures_trade(session, contract, action, qty, price):
+async def broadcast_signal_to_subscribers(session, contract, action, price, rsi, trend, stop_loss=None, target=None):
+    """Broadcast signal to all trading signal subscribers via API."""
+    try:
+        api_url = os.getenv("API_BASE_URL", "http://localhost:8000")
+        signal_data = {
+            "contract": contract,
+            "action": action,
+            "entry_price": price,
+            "stop_loss": stop_loss or (price * 0.98),  # 2% stop loss if not specified
+            "target_price": target or (price * 1.03 if action == "BUY" else price * 0.97),  # 3% target
+            "rsi": rsi,
+            "trend": trend,
+            "confidence": 0.85,
+        }
+
+        async with session.post(f"{api_url}/trading/signals/broadcast", json=signal_data) as r:
+            if r.status == 200:
+                result = await r.json()
+                log.info(f"📡 Signal broadcast complete: {result.get('subscribers_notified', 0)} subscribers notified")
+                return True
+            else:
+                log.warning(f"Signal broadcast failed: {r.status}")
+                return False
+    except Exception as e:
+        log.warning(f"Could not broadcast signal: {e}")
+        return False
+
+
+async def execute_futures_trade(session, contract, action, qty, price, rsi, trend, stop_loss=None, target=None):
     """Execute futures trade via Alpaca (using stock proxy for paper)"""
     global daily_pnl
 
@@ -95,6 +123,10 @@ async def execute_futures_trade(session, contract, action, qty, price):
             if r.status in (200, 201):
                 log.info(f"✅ FUTURES TRADE | {mode} | {action} {qty} {contract} ({symbol}) @ ${price:.2f} | APEX_589296")
                 open_prop_positions[contract] = {"action": action, "entry": price, "qty": qty}
+
+                # Broadcast signal to subscribers
+                await broadcast_signal_to_subscribers(session, contract, action, price, rsi, trend, stop_loss, target)
+
                 return True
             else:
                 log.error(f"❌ Futures order failed: {result.get('message', result)}")
@@ -135,7 +167,9 @@ async def run_prop_cycle():
             # BUY signal — RSI oversold + bullish
             if not has_position and rsi < 38 and trend == "bullish":
                 log.info(f"[APEX_589296] 📡 LONG {contract} — RSI:{rsi} Trend:{trend}")
-                await execute_futures_trade(session, contract, "BUY", config["qty"], price)
+                stop_loss = price * 0.98  # 2% below entry
+                target = price * 1.03    # 3% above entry
+                await execute_futures_trade(session, contract, "BUY", config["qty"], price, rsi, trend, stop_loss, target)
 
             # SELL signal — RSI overbought or bearish reversal
             elif has_position and (rsi > 62 or (trend == "bearish" and rsi > 50)):
@@ -143,6 +177,11 @@ async def run_prop_cycle():
                 pnl = (price - entry) * config["qty"] * 50  # MES point value ~$5 * 10
                 daily_pnl += pnl
                 log.info(f"[APEX_589296] 📤 CLOSE {contract} | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${pnl:.2f}")
+
+                # Broadcast close signal to subscribers
+                target = price
+                await broadcast_signal_to_subscribers(session, contract, "SELL", price, rsi, trend, target=target)
+
                 open_prop_positions.pop(contract, None)
 
             await asyncio.sleep(0.5)
