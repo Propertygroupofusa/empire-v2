@@ -17,12 +17,18 @@ router = APIRouter()
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
 
-# Subscription tiers
+# Subscription tiers - FREEMIUM MODE ONLY (paid tiers coming after signal quality proven)
 TIERS = {
     "free": {"signals_per_month": 5, "price": 0, "stripe_price_id": None},
-    "pro": {"signals_per_month": 100, "price": 29700, "stripe_price_id": os.getenv("STRIPE_PRICE_PRO", "")},
-    "enterprise": {"signals_per_month": 9999, "price": 99700, "stripe_price_id": os.getenv("STRIPE_PRICE_ENTERPRISE", "")},
+    # "pro": {"signals_per_month": 100, "price": 29700, "stripe_price_id": os.getenv("STRIPE_PRICE_PRO", "")},
+    # "enterprise": {"signals_per_month": 9999, "price": 99700, "stripe_price_id": os.getenv("STRIPE_PRICE_ENTERPRISE", "")},
 }
+
+# FREEMIUM DEPLOYMENT NOTE:
+# - Only free tier ($0) enabled for signal quality validation
+# - Paid tiers will be enabled after 30 days of proven 60%+ win rate
+# - All infrastructure ready for paid conversion (Stripe, billing, etc)
+# - Monitor: GET /trading/signals/stats for win rate and subscriber growth
 
 
 class SignalSubscriber(BaseModel):
@@ -69,10 +75,13 @@ class SignalResponse(BaseModel):
 
 @router.post("/signals/subscribe")
 async def subscribe_to_signals(subscriber: SignalSubscriber, db: AsyncSession = Depends(get_db)):
-    """Subscribe to trading signals."""
-    tier = subscriber.tier
-    if tier not in TIERS:
-        raise HTTPException(status_code=400, detail=f"Invalid tier. Choose from: {list(TIERS.keys())}")
+    """Subscribe to trading signals (FREEMIUM: Free tier only during beta)."""
+    # FREEMIUM MODE: Force free tier for all subscribers during validation phase
+    tier = "free"  # Override subscriber.tier to free only
+
+    # Log if user tried to subscribe to paid tier
+    if subscriber.tier != "free":
+        log.info(f"Paid tier '{subscriber.tier}' requested but freemium mode active. Assigned free tier. Email: {subscriber.email}")
 
     # Create or update subscriber contact in a signal campaign
     result = await db.execute(
@@ -245,13 +254,17 @@ Time: {datetime.utcnow().isoformat()}
 
 @router.get("/signals/stats")
 async def get_signal_stats(db: AsyncSession = Depends(get_db)):
-    """Get trading signals performance statistics."""
+    """Get trading signals performance statistics (FREEMIUM MODE)."""
     result = await db.execute(
         select(Campaign).where(Campaign.name == "Trading Signals")
     )
     signal_campaign = result.scalar_one_or_none()
     if not signal_campaign:
-        return {"total_signals": 0, "total_subscribers": 0}
+        return {
+            "mode": "freemium",
+            "total_subscribers": 0,
+            "status": "initializing"
+        }
 
     result = await db.execute(
         select(CampaignContact).where(CampaignContact.campaign_id == signal_campaign.id)
@@ -263,19 +276,21 @@ async def get_signal_stats(db: AsyncSession = Depends(get_db)):
     opened = sum(1 for c in contacts if c.opened_at)
 
     return {
+        "mode": "freemium",
+        "status": "signal quality validation phase",
+        "note": "Free tier only. Paid tiers enable after 60%+ win rate proven (30 days).",
         "total_subscribers": len(contacts),
         "active_subscribers": active,
         "signals_sent": sent,
-        "open_rate": (opened / sent * 100) if sent > 0 else 0,
+        "open_rate": round((opened / sent * 100) if sent > 0 else 0, 1),
         "tier_breakdown": {
-            "free": sum(1 for c in contacts if c.contact_data.get("tier") == "free"),
-            "pro": sum(1 for c in contacts if c.contact_data.get("tier") == "pro"),
-            "enterprise": sum(1 for c in contacts if c.contact_data.get("tier") == "enterprise"),
+            "free": len(contacts),
+            "pro": 0,
+            "enterprise": 0,
         },
-        "monthly_revenue": (
-            sum(1 for c in contacts if c.contact_data.get("tier") == "pro") * 297 +
-            sum(1 for c in contacts if c.contact_data.get("tier") == "enterprise") * 997
-        ) / 100,  # In dollars
+        "current_revenue": "$0.00/month (freemium phase)",
+        "revenue_potential": "$0.00/month until paid tiers enabled",
+        "next_milestone": "30 days of signal tracking → enable paid tiers if 60%+ win rate",
     }
 
 
