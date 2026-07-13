@@ -94,6 +94,7 @@ app.include_router(payee_router,        prefix="/payee",       tags=["Payee Trus
 app.include_router(payroll_router,      prefix="/workers/payroll", tags=["Worker Payroll"])
 app.include_router(outreach.router,     prefix="/outreach",    tags=["Outreach & Campaigns"])
 app.include_router(trading_signals.router, prefix="/trading", tags=["Trading Signals"])
+app.include_router(trading_signals.router, prefix="/api", tags=["API Alias"])
 
 
 @app.get("/")
