@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete
 from datetime import datetime
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from database import get_db
 from models import Campaign, CampaignContact
@@ -31,7 +31,13 @@ class CampaignUpdate(BaseModel):
     custom_metadata: Optional[dict] = None
 
 
+class ContactStatusUpdate(BaseModel):
+    status: str
+
+
 class CampaignResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     name: str
     description: Optional[str]
@@ -39,15 +45,12 @@ class CampaignResponse(BaseModel):
     outreach_type: str
     target_audience: Optional[dict]
     message_template: str
-    created_at: str
-    updated_at: str
-    scheduled_for: Optional[str]
-    completed_at: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+    scheduled_for: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
     is_active: bool
     custom_metadata: Optional[dict] = None
-
-    class Config:
-        from_attributes = True
 
 
 class CampaignContactCreate(BaseModel):
@@ -59,21 +62,20 @@ class CampaignContactCreate(BaseModel):
 
 
 class CampaignContactResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     campaign_id: int
-    email: Optional[str]
-    phone: Optional[str]
-    name: Optional[str]
-    contact_data: Optional[dict]
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    name: Optional[str] = None
+    contact_data: Optional[dict] = None
     status: str
-    sent_at: Optional[str]
-    opened_at: Optional[str]
-    clicked_at: Optional[str]
-    replied_at: Optional[str]
+    sent_at: Optional[datetime] = None
+    opened_at: Optional[datetime] = None
+    clicked_at: Optional[datetime] = None
+    replied_at: Optional[datetime] = None
     custom_metadata: Optional[dict] = None
-
-    class Config:
-        from_attributes = True
 
 
 @router.post("/campaigns", response_model=CampaignResponse)
@@ -158,7 +160,7 @@ async def delete_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
 
-    await db.delete(campaign)
+    db.delete(campaign)
     await db.commit()
     return {"message": "Campaign deleted"}
 
@@ -214,7 +216,7 @@ async def list_campaign_contacts(
 async def update_contact_status(
     campaign_id: int,
     contact_id: int,
-    status: str,
+    update: ContactStatusUpdate,
     db: AsyncSession = Depends(get_db),
 ):
     """Update contact status (e.g., mark as sent, opened, replied)."""
@@ -227,14 +229,14 @@ async def update_contact_status(
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
 
-    contact.status = status
-    if status == "sent":
+    contact.status = update.status
+    if update.status == "sent":
         contact.sent_at = datetime.utcnow()
-    elif status == "opened":
+    elif update.status == "opened":
         contact.opened_at = datetime.utcnow()
-    elif status == "clicked":
+    elif update.status == "clicked":
         contact.clicked_at = datetime.utcnow()
-    elif status == "replied":
+    elif update.status == "replied":
         contact.replied_at = datetime.utcnow()
 
     await db.commit()
@@ -258,7 +260,7 @@ async def delete_contact(
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
 
-    await db.delete(contact)
+    db.delete(contact)
     await db.commit()
     return {"message": "Contact deleted"}
 
