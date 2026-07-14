@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from sqlalchemy import text
+from datetime import datetime
 import os
 import uvicorn
 import logging
@@ -116,6 +117,19 @@ async def create_monitor_tables():
             log.info("Migration OK: monitor_fixed_issues table")
         except Exception as e:
             log.warning(f"Migration skip monitor_fixed_issues: {e}")
+
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS monitor_performance (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    metric_data TEXT NOT NULL,
+                    checked_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            log.info("Migration OK: monitor_performance table")
+        except Exception as e:
+            log.warning(f"Migration skip monitor_performance: {e}")
 
 
 async def run_migrations():
@@ -312,6 +326,31 @@ async def get_fixed_issues(limit: int = 50):
     return {
         "total_fixed": len(monitor.fixed_issues),
         "fixed_issues": monitor.get_fixed_issues(limit)
+    }
+
+
+@app.get("/monitor/metrics")
+async def get_performance_metrics(limit: int = 50):
+    """Get performance metrics history"""
+    if monitor is None:
+        return {"error": "Monitor not available"}
+    return {
+        "total_metrics_logged": len(monitor.performance_metrics),
+        "metrics": monitor.get_performance_metrics(limit)
+    }
+
+
+@app.get("/monitor/comprehensive")
+async def get_comprehensive_status():
+    """Get complete comprehensive monitoring status and all data"""
+    if monitor is None:
+        return {"error": "Monitor not available"}
+    return {
+        "status": monitor.get_status(),
+        "error_history": monitor.get_error_history(100),
+        "fixed_issues": monitor.get_fixed_issues(100),
+        "performance_metrics": monitor.get_performance_metrics(50),
+        "timestamp": datetime.now().isoformat()
     }
 
 
