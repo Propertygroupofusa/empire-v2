@@ -32,6 +32,7 @@ routers_to_load = {
     'labeling': None,
     'revenue_automation': None,
     'social_dashboard': None,
+    'orders': None,
 }
 
 for router_name in routers_to_load:
@@ -54,6 +55,7 @@ partners = routers_to_load['partners']
 labeling = routers_to_load['labeling']
 revenue_automation = routers_to_load['revenue_automation']
 social_dashboard = routers_to_load['social_dashboard']
+orders = routers_to_load['orders']
 
 # Load remaining modules gracefully
 payee_router = None
@@ -307,6 +309,7 @@ routers_list = [
     (partners, "/partners", "Partners"),
     (labeling, "/labeling", "AI Labeling"),
     (revenue_automation, "/revenue", "Revenue Automation"),
+    (orders, "/orders", "Video Orders"),
 ]
 
 for router_module, prefix, tag in routers_list:
@@ -346,6 +349,15 @@ async def serve_dashboard():
     if not os.path.exists(dashboard_path):
         raise HTTPException(status_code=404, detail="Dashboard not found")
     return FileResponse(dashboard_path, media_type="text/html")
+
+
+@app.get("/quote")
+async def serve_quote_form():
+    """Serve the video quote request form"""
+    quote_path = os.path.join(os.path.dirname(__file__), "quote_request.html")
+    if not os.path.exists(quote_path):
+        raise HTTPException(status_code=404, detail="Quote form not found")
+    return FileResponse(quote_path, media_type="text/html")
 
 
 @app.get("/")
