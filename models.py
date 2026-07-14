@@ -127,3 +127,49 @@ class Client(Base):
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "custom_metadata": self.custom_metadata,
         }
+
+
+class StudyUser(Base):
+    """Study app user subscription."""
+    __tablename__ = "study_users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True)
+    tier = Column(String, default="free")  # free, paid
+    materials_generated_month = Column(Integer, default=0)
+    stripe_customer_id = Column(String, nullable=True)
+    stripe_subscription_id = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "email": self.email,
+            "tier": self.tier,
+            "materials_generated_month": self.materials_generated_month,
+        }
+
+
+class StudyMaterial(Base):
+    """Generated study materials from textbook images."""
+    __tablename__ = "study_materials"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True)  # email
+    material_type = Column(String)  # guide, quiz, flashcards
+    original_image_url = Column(String, nullable=True)
+    source_text = Column(Text)  # OCR'd text from image
+    generated_content = Column(JSON)  # The actual study material
+    title = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    page_count = Column(Integer, nullable=True)
+    topic = Column(String, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "material_type": self.material_type,
+            "title": self.title,
+            "created_at": self.created_at.isoformat(),
+            "generated_content": self.generated_content,
+        }

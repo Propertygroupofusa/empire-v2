@@ -7,7 +7,8 @@ job matching, payments, admin dashboard, and white label API.
 
 from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from sqlalchemy import text
 import os
@@ -15,7 +16,7 @@ import uvicorn
 import logging
 
 from database import init_db, engine
-from routers import workers, clients, jobs, bookings, payments, admin, whitelabel, auth, partners, labeling, outreach, trading_signals
+from routers import workers, clients, jobs, bookings, payments, admin, whitelabel, auth, partners, labeling, outreach, trading_signals, study
 from payee_webhook import router as payee_router, payee_worker
 from paycom_features import router as payroll_router
 
@@ -79,6 +80,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount static files for study assistant
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.exists(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
 # ── Routers ──────────────────────────────────────────────────
 app.include_router(auth.router,        prefix="/auth",        tags=["Auth"])
 app.include_router(workers.router,     prefix="/workers",     tags=["Workers"])
@@ -94,6 +100,7 @@ app.include_router(payee_router,        prefix="/payee",       tags=["Payee Trus
 app.include_router(payroll_router,      prefix="/workers/payroll", tags=["Worker Payroll"])
 app.include_router(outreach.router,     prefix="/outreach",    tags=["Outreach & Campaigns"])
 app.include_router(trading_signals.router, prefix="/trading", tags=["Trading Signals"])
+app.include_router(study.router, prefix="/study", tags=["Study Assistant"])
 
 
 @app.get("/")
@@ -118,6 +125,16 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok", "platform": "pgusa-documents", "version": "v2.1-trading-signals"}
+
+
+@app.get("/study-app")
+async def study_app():
+    """Serve the Study Assistant web app"""
+    static_dir = os.path.join(os.path.dirname(__file__), "static")
+    study_html = os.path.join(static_dir, "study.html")
+    if os.path.exists(study_html):
+        return FileResponse(study_html)
+    raise HTTPException(status_code=404, detail="Study app not found")
 
 
 if __name__ == "__main__":
