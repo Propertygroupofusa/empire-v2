@@ -54,16 +54,31 @@ async def run_migrations():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("PGUSA Platform starting...")
-    await init_db()
-    await run_migrations()
-    # Start Payee Trust async worker
-    import asyncio
-    asyncio.create_task(payee_worker())
-    log.info("Payee Trust webhook worker started")
-    # Start daily video publisher
-    if start_daily_publisher():
-        log.info("Daily video publisher started")
-    log.info("Database initialized and migrations complete")
+    try:
+        await init_db()
+        log.info("Database initialized")
+    except Exception as e:
+        log.warning(f"Database init failed: {e}")
+
+    try:
+        await run_migrations()
+    except Exception as e:
+        log.warning(f"Migrations failed: {e}")
+
+    try:
+        import asyncio
+        asyncio.create_task(payee_worker())
+        log.info("Payee Trust webhook worker started")
+    except Exception as e:
+        log.warning(f"Payee worker failed: {e}")
+
+    try:
+        if start_daily_publisher():
+            log.info("Daily video publisher started")
+    except Exception as e:
+        log.warning(f"Daily publisher failed: {e}")
+
+    log.info("Platform startup complete")
     yield
     log.info("PGUSA Platform shutting down")
 
