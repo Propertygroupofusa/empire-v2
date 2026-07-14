@@ -74,6 +74,13 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import daily_publisher: {e}")
 
+health_monitor_service = None
+try:
+    from health_monitor import start_health_monitor, monitor
+    health_monitor_service = start_health_monitor
+except Exception as e:
+    logging.warning(f"Failed to import health_monitor: {e}")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pgusa")
 
@@ -132,6 +139,14 @@ async def lifespan(app: FastAPI):
             log.info("Daily video publisher started")
     except Exception as e:
         log.warning(f"Daily publisher failed: {e}")
+
+    try:
+        if health_monitor_service is not None:
+            import asyncio
+            await health_monitor_service()
+            log.info("🔍 Health Monitor started - continuous error checking active")
+    except Exception as e:
+        log.warning(f"Health monitor failed: {e}")
 
     log.info("Platform startup complete")
     yield
@@ -229,6 +244,36 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok", "platform": "pgusa-documents"}
+
+
+@app.get("/monitor/status")
+async def get_monitor_status():
+    """Get current health monitor status"""
+    if monitor is None:
+        return {"error": "Monitor not available"}
+    return monitor.get_status()
+
+
+@app.get("/monitor/errors")
+async def get_monitor_errors(limit: int = 50):
+    """Get error history from monitor"""
+    if monitor is None:
+        return {"error": "Monitor not available"}
+    return {
+        "total_errors": len(monitor.error_history),
+        "errors": monitor.get_error_history(limit)
+    }
+
+
+@app.get("/monitor/fixed-issues")
+async def get_fixed_issues(limit: int = 50):
+    """Get list of auto-fixed issues"""
+    if monitor is None:
+        return {"error": "Monitor not available"}
+    return {
+        "total_fixed": len(monitor.fixed_issues),
+        "fixed_issues": monitor.get_fixed_issues(limit)
+    }
 
 
 if __name__ == "__main__":
