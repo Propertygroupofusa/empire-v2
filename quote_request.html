@@ -334,6 +334,51 @@
 
             <div class="form-row">
                 <div class="form-group">
+                    <label for="avatar">Avatar/Presenter *</label>
+                    <select id="avatar" name="avatar" required>
+                        <option value="">-- Select avatar --</option>
+                        <option value="anna">Anna (Female)</option>
+                        <option value="carlos">Carlos (Male)</option>
+                        <option value="emma">Emma (Female)</option>
+                        <option value="james">James (Male)</option>
+                        <option value="lisa">Lisa (Female)</option>
+                        <option value="marcus">Marcus (Male)</option>
+                        <option value="olivia">Olivia (Female)</option>
+                        <option value="ryan">Ryan (Male)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="language">Language & Accent *</label>
+                    <select id="language" name="language" required>
+                        <option value="">-- Select language --</option>
+                        <option value="english_us">English - US (American)</option>
+                        <option value="english_uk">English - UK (British)</option>
+                        <option value="english_au">English - AU (Australian)</option>
+                        <option value="spanish">Spanish (Spain)</option>
+                        <option value="spanish_mx">Spanish (Mexico)</option>
+                        <option value="french">French</option>
+                        <option value="german">German</option>
+                        <option value="italian">Italian</option>
+                        <option value="portuguese">Portuguese (Brazil)</option>
+                        <option value="portuguese_pt">Portuguese (Portugal)</option>
+                        <option value="dutch">Dutch</option>
+                        <option value="swedish">Swedish</option>
+                        <option value="norwegian">Norwegian</option>
+                        <option value="danish">Danish</option>
+                        <option value="polish">Polish</option>
+                        <option value="russian">Russian</option>
+                        <option value="japanese">Japanese</option>
+                        <option value="korean">Korean</option>
+                        <option value="chinese_simplified">Chinese (Simplified)</option>
+                        <option value="chinese_traditional">Chinese (Traditional)</option>
+                        <option value="arabic">Arabic</option>
+                        <option value="hindi">Hindi</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
                     <label for="deliveryDays">Delivery Timeline *</label>
                     <select id="deliveryDays" name="deliveryDays" required onchange="updatePricing()">
                         <option value="">-- Select timeline --</option>
@@ -502,6 +547,8 @@
                 video_type: formData.get('videoType'),
                 script_or_topic: formData.get('scriptOrTopic'),
                 target_audience: formData.get('targetAudience'),
+                avatar: formData.get('avatar'),
+                language: formData.get('language'),
                 delivery_days: parseInt(formData.get('deliveryDays')),
                 reference_url: formData.get('referenceUrl') || null,
             };

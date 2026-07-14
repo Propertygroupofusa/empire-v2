@@ -11,6 +11,8 @@ import json
 import logging
 import os
 import stripe
+import asyncio
+from heygan_integration import generate_video, get_video_url
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 stripe_publishable_key = os.getenv("STRIPE_PUBLISHABLE_KEY")
@@ -48,17 +50,19 @@ async def request_quote(
     video_type: str,
     script_or_topic: str,
     target_audience: str,
+    avatar: str,
+    language: str,
     delivery_days: int = 2,
     reference_url: Optional[str] = None,
     phone: Optional[str] = None,
     background_tasks: BackgroundTasks = None,
 ):
     """
-    Customer submits a video request.
+    Customer submits a video request with script, avatar, and language.
     Returns order ID and quote price for payment processing.
     """
 
-    if not customer_name or not customer_email or not video_type:
+    if not customer_name or not customer_email or not video_type or not avatar or not language:
         raise HTTPException(status_code=400, detail="Missing required fields")
 
     # Create order object
@@ -72,6 +76,8 @@ async def request_quote(
         "video_type": video_type,
         "script_or_topic": script_or_topic,
         "target_audience": target_audience,
+        "avatar": avatar,
+        "language": language,
         "delivery_days": delivery_days,
         "reference_url": reference_url,
         "requested_at": datetime.now().isoformat(),
@@ -82,6 +88,7 @@ async def request_quote(
         "stripe_session_id": None,
         "completed_at": None,
         "video_url": None,
+        "video_generation_status": "pending",
     }
 
     pending_orders.append(order)
@@ -216,7 +223,56 @@ async def stripe_webhook(request: Request):
             order["transaction_id"] = session["id"]
             log.info(f"Payment received for order {order_id} via Stripe")
 
+            # Trigger automatic video generation in background
+            asyncio.create_task(
+                generate_video_for_order(order_id, order)
+            )
+
     return {"status": "success"}
+
+
+async def generate_video_for_order(order_id: int, order: dict):
+    """Background task to generate video after payment"""
+    try:
+        log.info(f"Starting video generation for order {order_id}")
+        order["video_generation_status"] = "generating"
+
+        # Call HeyGen to generate video
+        video_id = await generate_video(
+            order_id=order_id,
+            script=order["script_or_topic"],
+            avatar=order["avatar"],
+            language=order["language"],
+            video_type=order["video_type"],
+        )
+
+        if not video_id:
+            order["video_generation_status"] = "failed"
+            log.error(f"Video generation failed for order {order_id}")
+            return
+
+        # Poll for video completion (max 10 minutes)
+        max_attempts = 60
+        attempt = 0
+        while attempt < max_attempts:
+            await asyncio.sleep(10)  # Check every 10 seconds
+            video_url = await get_video_url(video_id)
+
+            if video_url:
+                order["video_url"] = video_url
+                order["status"] = "video_ready"
+                order["video_generation_status"] = "completed"
+                log.info(f"Video completed for order {order_id}: {video_url}")
+                return
+
+            attempt += 1
+
+        order["video_generation_status"] = "timeout"
+        log.warning(f"Video generation timeout for order {order_id}")
+
+    except Exception as e:
+        order["video_generation_status"] = "error"
+        log.error(f"Video generation error for order {order_id}: {str(e)}")
 
 
 # ============================================================
