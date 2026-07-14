@@ -1,6 +1,7 @@
 """
 Automated Health Monitor & Self-Healing System
 Continuously checks for errors and automatically fixes them
+All data is persisted to database for permanent audit trail
 """
 
 import asyncio
@@ -8,6 +9,7 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Any
 import os
+from sqlalchemy import text
 
 log = logging.getLogger("health_monitor")
 
@@ -17,13 +19,51 @@ class HealthMonitor:
         self.last_check = None
         self.error_history: List[Dict] = []
         self.fixed_issues: List[Dict] = []
-        self.check_interval = 30  # Check every 30 seconds
+        self.check_interval = 30
 
     async def start(self):
         """Start continuous monitoring"""
         self.is_running = True
-        log.info("Health Monitor starting - will check every 30 seconds forever")
+        log.info("🔍 Health Monitor starting - checks every 30 seconds, data persisted to DB")
+        
+        # Load historical data from database
+        await self._load_history()
+        
         asyncio.create_task(self._monitor_loop())
+
+    async def _load_history(self):
+        """Load error history from database on startup"""
+        try:
+            from database import engine
+            async with engine.begin() as conn:
+                # Load recent errors
+                result = await conn.execute(
+                    text("SELECT * FROM monitor_errors ORDER BY detected_at DESC LIMIT 100")
+                )
+                rows = result.fetchall()
+                for row in rows:
+                    self.error_history.append({
+                        "type": row[1],
+                        "error": row[2],
+                        "severity": row[3],
+                        "timestamp": row[4]
+                    })
+                
+                # Load recent fixes
+                result = await conn.execute(
+                    text("SELECT * FROM monitor_fixed_issues ORDER BY fixed_at DESC LIMIT 100")
+                )
+                rows = result.fetchall()
+                for row in rows:
+                    self.fixed_issues.append({
+                        "issue": row[1],
+                        "fixed_at": row[2],
+                        "status": row[3]
+                    })
+                
+                log.info(f"📊 Loaded {len(self.error_history)} errors and {len(self.fixed_issues)} fixes from database")
+        except Exception as e:
+            log.warning(f"Could not load history: {e}")
 
     async def _monitor_loop(self):
         """Main monitoring loop that runs forever"""
@@ -84,21 +124,63 @@ class HealthMonitor:
                 "timestamp": datetime.now().isoformat()
             })
 
+        # Save errors to database and memory
         if errors_found:
             self.error_history.extend(errors_found)
+            await self._save_errors_to_db(errors_found)
             for error in errors_found:
                 log.warning(f"⚠ {error['type'].upper()}: {error['error']}")
         else:
-            log.info("✓ Health check passed - all systems OK")
+            log.info("✓ Health check passed")
 
         return errors_found
+
+    async def _save_errors_to_db(self, errors: List[Dict]):
+        """Persist errors to database"""
+        try:
+            from database import engine
+            async with engine.begin() as conn:
+                for error in errors:
+                    await conn.execute(
+                        text("""
+                            INSERT INTO monitor_errors (error_type, error_message, severity, detected_at)
+                            VALUES (:type, :msg, :sev, :timestamp)
+                        """),
+                        {
+                            "type": error.get("type"),
+                            "msg": error.get("error", "Unknown"),
+                            "sev": error.get("severity", "unknown"),
+                            "timestamp": datetime.now().isoformat()
+                        }
+                    )
+        except Exception as e:
+            log.error(f"Failed to save errors to DB: {e}")
+
+    async def _save_fix_to_db(self, issue_name: str):
+        """Persist fixed issue to database"""
+        try:
+            from database import engine
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text("""
+                        INSERT INTO monitor_fixed_issues (issue_name, fixed_at, status)
+                        VALUES (:issue, :timestamp, :status)
+                    """),
+                    {
+                        "issue": issue_name,
+                        "timestamp": datetime.now().isoformat(),
+                        "status": "success"
+                    }
+                )
+        except Exception as e:
+            log.error(f"Failed to save fix to DB: {e}")
 
     async def _check_database(self) -> Dict[str, Any]:
         """Check if database is accessible"""
         try:
             from database import engine
             async with engine.begin() as conn:
-                await conn.execute("SELECT 1")
+                await conn.execute(text("SELECT 1"))
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -114,6 +196,7 @@ class HealthMonitor:
                 "fixed_at": datetime.now().isoformat(),
                 "status": "success"
             })
+            await self._save_fix_to_db("database_reconnection")
             log.info("✓ Database reconnected successfully")
         except Exception as e:
             log.error(f"✗ Failed to fix database: {e}")
@@ -167,23 +250,22 @@ class HealthMonitor:
         return {
             "monitoring": self.is_running,
             "last_check": self.last_check.isoformat() if self.last_check else None,
-            "uptime": self._get_uptime(),
             "errors_detected": len(self.error_history),
             "issues_auto_fixed": len(self.fixed_issues),
             "recent_errors": self.error_history[-5:] if self.error_history else [],
             "recent_fixes": self.fixed_issues[-5:] if self.fixed_issues else [],
         }
 
-    def get_error_history(self, limit: int = 50) -> List[Dict]:
-        """Get error history"""
+    def get_error_history(self, limit: int = 100) -> List[Dict]:
+        """Get error history (all persisted in DB)"""
         return self.error_history[-limit:]
 
-    def get_fixed_issues(self, limit: int = 50) -> List[Dict]:
+    def get_fixed_issues(self, limit: int = 100) -> List[Dict]:
         """Get list of automatically fixed issues"""
         return self.fixed_issues[-limit:]
 
     def _get_uptime(self) -> str:
-        """Get uptime since monitor started"""
+        """Get time since last check"""
         if not self.last_check:
             return "Not started"
         return f"{(datetime.now() - self.last_check).seconds}s ago"

@@ -85,6 +85,39 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("pgusa")
 
 
+async def create_monitor_tables():
+    """Create health monitor tables if they don't exist"""
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS monitor_errors (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    error_type VARCHAR NOT NULL,
+                    error_message TEXT NOT NULL,
+                    severity VARCHAR,
+                    detected_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            log.info("Migration OK: monitor_errors table")
+        except Exception as e:
+            log.warning(f"Migration skip monitor_errors: {e}")
+
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS monitor_fixed_issues (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    issue_name VARCHAR NOT NULL,
+                    fixed_at TIMESTAMP,
+                    status VARCHAR,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            log.info("Migration OK: monitor_fixed_issues table")
+        except Exception as e:
+            log.warning(f"Migration skip monitor_fixed_issues: {e}")
+
+
 async def run_migrations():
     """Add any missing columns to existing tables — safe to run every startup."""
     cols = [
@@ -120,6 +153,12 @@ async def lifespan(app: FastAPI):
         log.info("Database initialized")
     except Exception as e:
         log.warning(f"Database init failed: {e}")
+
+    try:
+        await create_monitor_tables()
+        log.info("Monitor tables ready")
+    except Exception as e:
+        log.warning(f"Monitor tables failed: {e}")
 
     try:
         await run_migrations()
