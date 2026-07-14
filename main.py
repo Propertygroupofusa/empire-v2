@@ -355,16 +355,29 @@ async def serve_dashboard():
 async def serve_quote_form():
     """Serve the video quote request form"""
     try:
-        quote_path = os.path.join(os.path.dirname(__file__), "quote_request.html")
+        # Try multiple possible paths
+        possible_paths = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "quote_request.html"),
+            "/app/quote_request.html",
+            "quote_request.html",
+        ]
+
+        quote_path = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                quote_path = path
+                break
+
+        if not quote_path:
+            log.error(f"Quote form HTML file not found in any location: {possible_paths}")
+            raise HTTPException(status_code=404, detail="Quote form file not found")
+
         with open(quote_path, 'r') as f:
             html_content = f.read()
         return HTMLResponse(content=html_content, status_code=200)
-    except FileNotFoundError:
-        log.error(f"Quote form HTML file not found at {quote_path}")
-        raise HTTPException(status_code=404, detail="Quote form file not found")
     except Exception as e:
         log.error(f"Error serving quote form: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error serving quote form")
+        raise HTTPException(status_code=500, detail=f"Error serving quote form: {str(e)}")
 
 
 @app.get("/order-success")
