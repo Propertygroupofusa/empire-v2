@@ -7,7 +7,7 @@ job matching, payments, admin dashboard, and white label API.
 
 from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from sqlalchemy import text
@@ -354,10 +354,17 @@ async def serve_dashboard():
 @app.get("/quote")
 async def serve_quote_form():
     """Serve the video quote request form"""
-    quote_path = os.path.join(os.path.dirname(__file__), "quote_request.html")
-    if not os.path.exists(quote_path):
-        raise HTTPException(status_code=404, detail="Quote form not found")
-    return FileResponse(quote_path, media_type="text/html")
+    try:
+        quote_path = os.path.join(os.path.dirname(__file__), "quote_request.html")
+        with open(quote_path, 'r') as f:
+            html_content = f.read()
+        return HTMLResponse(content=html_content, status_code=200)
+    except FileNotFoundError:
+        log.error(f"Quote form HTML file not found at {quote_path}")
+        raise HTTPException(status_code=404, detail="Quote form file not found")
+    except Exception as e:
+        log.error(f"Error serving quote form: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error serving quote form")
 
 
 @app.get("/order-success")
