@@ -153,6 +153,20 @@ async function runTests() {
       checkBody: true,
     },
     {
+      name: "List Subscription Tiers",
+      method: "GET",
+      endpoint: "/subscriptions/tiers",
+      expectedStatus: 200,
+      expectedKeys: ["tiers", "total_tiers"],
+    },
+    {
+      name: "Get Pro Tier Details",
+      method: "GET",
+      endpoint: "/subscriptions/tiers/pro",
+      expectedStatus: 200,
+      expectedKeys: ["tier"],
+    },
+    {
       name: "Create Order (Request Quote)",
       method: "POST",
       endpoint: "/orders/orders/request-quote",

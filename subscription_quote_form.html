@@ -422,7 +422,7 @@
 
     <script src="https://js.stripe.com/v3/"></script>
     <script>
-        const STRIPE_PUBLISHABLE_KEY = 'pk_test_your_key_here'; // Will be fetched from API
+        let STRIPE_PUBLISHABLE_KEY = null;
 
         // Base prices for video types
         const videoTypePrices = {
@@ -467,7 +467,7 @@
         }
 
         // Select a subscription tier
-        function selectTier(tierId) {
+        async function selectTier(tierId) {
             const email = document.getElementById('customerEmail').value;
             const name = document.getElementById('customerName').value;
 
@@ -476,12 +476,32 @@
                 return;
             }
 
-            fetch('/subscriptions/tiers')
-                .then(r => r.json())
-                .then(data => {
-                    const tier = data.tiers.find(t => t.id === tierId);
-                    showMessage(`Welcome to ${tier.name}! 🎉 You have ${tier.videos_per_month} videos per month.`, 'success');
-                });
+            try {
+                // Create subscription checkout
+                const response = await fetch(
+                    `/subscriptions/checkout?customer_email=${encodeURIComponent(email)}&customer_name=${encodeURIComponent(name)}&tier_id=${tierId}`,
+                    { method: 'POST' }
+                );
+
+                const data = await response.json();
+
+                if (data.success) {
+                    if (tierId === 'free') {
+                        showMessage(`Welcome to ${data.tier}! 🎉 Your free trial is active.`, 'success');
+                        setTimeout(() => {
+                            window.location.href = '/quote';
+                        }, 2000);
+                    } else {
+                        showMessage('Redirecting to payment...', 'success');
+                        // Redirect to Stripe checkout
+                        window.location.href = data.redirect_url;
+                    }
+                } else {
+                    showMessage(data.detail || 'Failed to create subscription', 'error');
+                }
+            } catch (error) {
+                showMessage(`Error: ${error.message}`, 'error');
+            }
         }
 
         // Update price display

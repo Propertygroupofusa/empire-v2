@@ -3,7 +3,7 @@ Subscription Management Router
 Handles tier browsing, subscriptions, and usage tracking
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from subscription_tiers import (
     get_all_tiers,
     get_tier,
@@ -12,7 +12,14 @@ from subscription_tiers import (
     get_customer_billing_summary,
     SUBSCRIPTION_TIERS,
 )
+from stripe_subscriptions import (
+    create_subscription_checkout,
+    handle_subscription_event,
+    setup_stripe_products,
+)
+import stripe
 import logging
+import os
 
 log = logging.getLogger("subscriptions")
 router = APIRouter()
@@ -30,7 +37,7 @@ async def list_tiers():
     }
 
 
-@router.get("/subscriptions/tiers/{tier_id}")
+@router.get("/tiers/{tier_id}")
 async def get_tier_details(tier_id: str):
     """
     Get detailed information about a specific tier
@@ -49,7 +56,7 @@ async def get_tier_details(tier_id: str):
     }
 
 
-@router.post("/subscriptions/subscribe")
+@router.post("/subscribe")
 async def subscribe(
     customer_email: str,
     customer_name: str,
@@ -79,7 +86,7 @@ async def subscribe(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/subscriptions/status/{customer_email}")
+@router.get("/status/{customer_email}")
 async def get_subscription_status(customer_email: str):
     """
     Get current subscription status and usage for a customer
@@ -107,7 +114,7 @@ async def get_subscription_status(customer_email: str):
     }
 
 
-@router.get("/subscriptions/billing/{customer_email}")
+@router.get("/billing/{customer_email}")
 async def get_billing_info(customer_email: str):
     """
     Get billing summary and invoice information for a customer
@@ -116,7 +123,7 @@ async def get_billing_info(customer_email: str):
     return summary
 
 
-@router.post("/subscriptions/upgrade")
+@router.post("/upgrade")
 async def upgrade_subscription(
     customer_email: str,
     new_tier_id: str,
@@ -191,4 +198,118 @@ async def admin_get_customer_subscriptions(customer_email: str):
         "customer_email": customer_email,
         "subscription": subscription,
         "billing_summary": get_customer_billing_summary(customer_email),
+    }
+
+
+# ============================================================
+# STRIPE SUBSCRIPTION CHECKOUT
+# ============================================================
+
+
+@router.post("/checkout")
+async def create_subscription_checkout_session(
+    customer_email: str,
+    customer_name: str,
+    tier_id: str,
+):
+    """
+    Create a Stripe checkout session for subscription signup
+    Returns redirect URL to Stripe Checkout
+    """
+    if tier_id not in SUBSCRIPTION_TIERS:
+        raise HTTPException(status_code=400, detail=f"Invalid tier: {tier_id}")
+
+    if tier_id == "free":
+        # Free tier - no payment needed
+        subscribe_customer(customer_email, "free")
+        return {
+            "success": True,
+            "message": "Free trial activated",
+            "tier": SUBSCRIPTION_TIERS["free"]["name"],
+            "redirect_url": None,
+        }
+
+    # For paid tiers, create Stripe checkout
+    checkout = create_subscription_checkout(
+        customer_email=customer_email,
+        customer_name=customer_name,
+        tier_id=tier_id,
+    )
+
+    if not checkout:
+        raise HTTPException(status_code=500, detail="Failed to create checkout session")
+
+    if not checkout.get("url"):
+        raise HTTPException(status_code=500, detail="No checkout URL generated")
+
+    return {
+        "success": True,
+        "message": "Checkout session created",
+        "session_id": checkout["session_id"],
+        "redirect_url": checkout["url"],
+        "tier": SUBSCRIPTION_TIERS[tier_id]["name"],
+        "monthly_price": SUBSCRIPTION_TIERS[tier_id]["monthly_price"],
+    }
+
+
+# ============================================================
+# STRIPE WEBHOOK - Subscription Events
+# ============================================================
+
+
+@router.post("/webhook/stripe")
+async def subscription_stripe_webhook(request: Request):
+    """
+    Handle Stripe webhook events for subscriptions
+    Events: checkout.session.completed, customer.subscription.updated, invoice.payment_failed, etc.
+    """
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+    if not webhook_secret:
+        log.warning("STRIPE_WEBHOOK_SECRET not configured")
+        return {"status": "success"}
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    # Handle subscription events
+    success = handle_subscription_event(event)
+
+    if success:
+        log.info(f"Subscription webhook processed: {event['type']}")
+        return {"status": "success"}
+    else:
+        log.warning(f"Subscription webhook failed: {event['type']}")
+        return {"status": "error", "message": "Failed to process webhook"}
+
+
+# ============================================================
+# SUCCESS/CANCEL PAGES
+# ============================================================
+
+
+@router.get("/subscription-success")
+async def subscription_success(session_id: str = None):
+    """Subscription payment success page"""
+    return {
+        "status": "success",
+        "message": "Subscription activated! Your videos are ready to create.",
+        "session_id": session_id,
+        "next_step": "Visit /quote to start creating videos",
+    }
+
+
+@router.get("/subscription-cancel")
+async def subscription_cancel():
+    """Subscription payment cancelled page"""
+    return {
+        "status": "cancelled",
+        "message": "Subscription setup cancelled",
+        "next_step": "Feel free to try again or contact support",
     }

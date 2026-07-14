@@ -278,6 +278,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Retention manager failed: {e}")
 
+    try:
+        from stripe_subscriptions import setup_stripe_products
+        if setup_stripe_products():
+            log.info("💳 Stripe subscription products initialized")
+        else:
+            log.warning("Stripe products setup skipped - no API key configured")
+    except Exception as e:
+        log.warning(f"Stripe setup failed: {e}")
+
     log.info("Platform startup complete")
     yield
     log.info("PGUSA Platform shutting down")
