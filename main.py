@@ -201,10 +201,10 @@ if social_dashboard is not None:
 @app.get("/dashboard")
 async def serve_dashboard():
     """Serve the social media dashboard HTML"""
-    try:
-        return FileResponse("social_media_dashboard.html", media_type="text/html")
-    except FileNotFoundError:
+    dashboard_path = os.path.join(os.path.dirname(__file__), "social_media_dashboard.html")
+    if not os.path.exists(dashboard_path):
         raise HTTPException(status_code=404, detail="Dashboard not found")
+    return FileResponse(dashboard_path, media_type="text/html")
 
 
 @app.get("/")
