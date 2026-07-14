@@ -12,10 +12,19 @@ import logging
 import os
 import stripe
 import asyncio
-from heygan_integration import generate_video, get_video_url
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
+# Try to import HeyGen integration, but don't crash if it fails
+try:
+    from heygan_integration import generate_video, get_video_url
+    HEYGAN_AVAILABLE = True
+except Exception as e:
+    log.warning(f"HeyGen integration not available: {e}")
+    HEYGAN_AVAILABLE = False
+    generate_video = None
+    get_video_url = None
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 stripe_publishable_key = os.getenv("STRIPE_PUBLISHABLE_KEY")
@@ -280,10 +289,13 @@ async def stripe_webhook(request: Request):
             order["transaction_id"] = session["id"]
             log.info(f"Payment received for order {order_id} via Stripe")
 
-            # Trigger automatic video generation in background
-            asyncio.create_task(
-                generate_video_for_order(order_id, order)
-            )
+            # Trigger automatic video generation in background (if available)
+            if HEYGAN_AVAILABLE:
+                asyncio.create_task(
+                    generate_video_for_order(order_id, order)
+                )
+            else:
+                log.warning(f"HeyGen not available, skipping video generation for order {order_id}")
 
     return {"status": "success"}
 
