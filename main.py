@@ -15,10 +15,61 @@ import uvicorn
 import logging
 
 from database import init_db, engine
-from routers import workers, clients, jobs, bookings, payments, admin, whitelabel, auth, partners, labeling, revenue_automation
-from payee_webhook import router as payee_router, payee_worker
-from paycom_features import router as payroll_router
-from daily_publisher import start_daily_publisher
+
+# Load routers gracefully to prevent import errors from crashing startup
+routers_to_load = {
+    'workers': None,
+    'clients': None,
+    'jobs': None,
+    'bookings': None,
+    'payments': None,
+    'admin': None,
+    'whitelabel': None,
+    'auth': None,
+    'partners': None,
+    'labeling': None,
+    'revenue_automation': None,
+}
+
+for router_name in routers_to_load:
+    try:
+        routers_to_load[router_name] = __import__(f'routers.{router_name}', fromlist=[router_name])
+    except Exception as e:
+        logging.basicConfig(level=logging.INFO)
+        logging.warning(f"Failed to import router {router_name}: {e}")
+
+# Extract routers for app registration
+workers = routers_to_load['workers']
+clients = routers_to_load['clients']
+jobs = routers_to_load['jobs']
+bookings = routers_to_load['bookings']
+payments = routers_to_load['payments']
+admin = routers_to_load['admin']
+whitelabel = routers_to_load['whitelabel']
+auth = routers_to_load['auth']
+partners = routers_to_load['partners']
+labeling = routers_to_load['labeling']
+revenue_automation = routers_to_load['revenue_automation']
+
+# Load remaining modules gracefully
+payee_router = None
+payee_worker = None
+try:
+    from payee_webhook import router as payee_router, payee_worker
+except Exception as e:
+    logging.warning(f"Failed to import payee_webhook: {e}")
+
+payroll_router = None
+try:
+    from paycom_features import router as payroll_router
+except Exception as e:
+    logging.warning(f"Failed to import paycom_features: {e}")
+
+start_daily_publisher = None
+try:
+    from daily_publisher import start_daily_publisher
+except Exception as e:
+    logging.warning(f"Failed to import daily_publisher: {e}")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pgusa")
@@ -66,14 +117,15 @@ async def lifespan(app: FastAPI):
         log.warning(f"Migrations failed: {e}")
 
     try:
-        import asyncio
-        asyncio.create_task(payee_worker())
-        log.info("Payee Trust webhook worker started")
+        if payee_worker is not None:
+            import asyncio
+            asyncio.create_task(payee_worker())
+            log.info("Payee Trust webhook worker started")
     except Exception as e:
         log.warning(f"Payee worker failed: {e}")
 
     try:
-        if start_daily_publisher():
+        if start_daily_publisher is not None and start_daily_publisher():
             log.info("Daily video publisher started")
     except Exception as e:
         log.warning(f"Daily publisher failed: {e}")
@@ -99,19 +151,41 @@ app.add_middleware(
 )
 
 # ── Routers ──────────────────────────────────────────────────
-app.include_router(auth.router,        prefix="/auth",        tags=["Auth"])
-app.include_router(workers.router,     prefix="/workers",     tags=["Workers"])
-app.include_router(clients.router,     prefix="/clients",     tags=["Clients"])
-app.include_router(jobs.router,        prefix="/jobs",        tags=["Jobs"])
-app.include_router(bookings.router,    prefix="/bookings",    tags=["Bookings"])
-app.include_router(payments.router,    prefix="/payments",    tags=["Payments"])
-app.include_router(admin.router,       prefix="/admin",       tags=["Admin"])
-app.include_router(whitelabel.router,  prefix="/whitelabel",  tags=["White Label"])
-app.include_router(partners.router,    prefix="/partners",    tags=["Partners"])
-app.include_router(labeling.router,    prefix="/labeling",    tags=["AI Labeling"])
-app.include_router(payee_router,        prefix="/payee",       tags=["Payee Trust"])
-app.include_router(payroll_router,      prefix="/workers/payroll", tags=["Worker Payroll"])
-app.include_router(revenue_automation.router, prefix="/revenue", tags=["Revenue Automation"])
+routers_list = [
+    (auth, "/auth", "Auth"),
+    (workers, "/workers", "Workers"),
+    (clients, "/clients", "Clients"),
+    (jobs, "/jobs", "Jobs"),
+    (bookings, "/bookings", "Bookings"),
+    (payments, "/payments", "Payments"),
+    (admin, "/admin", "Admin"),
+    (whitelabel, "/whitelabel", "White Label"),
+    (partners, "/partners", "Partners"),
+    (labeling, "/labeling", "AI Labeling"),
+    (revenue_automation, "/revenue", "Revenue Automation"),
+]
+
+for router_module, prefix, tag in routers_list:
+    if router_module is not None:
+        try:
+            app.include_router(router_module.router, prefix=prefix, tags=[tag])
+            log.info(f"Router loaded: {prefix}")
+        except Exception as e:
+            log.warning(f"Failed to include router {prefix}: {e}")
+
+if payee_router is not None:
+    try:
+        app.include_router(payee_router, prefix="/payee", tags=["Payee Trust"])
+        log.info("Router loaded: /payee")
+    except Exception as e:
+        log.warning(f"Failed to include payee router: {e}")
+
+if payroll_router is not None:
+    try:
+        app.include_router(payroll_router, prefix="/workers/payroll", tags=["Worker Payroll"])
+        log.info("Router loaded: /workers/payroll")
+    except Exception as e:
+        log.warning(f"Failed to include payroll router: {e}")
 
 
 @app.get("/")

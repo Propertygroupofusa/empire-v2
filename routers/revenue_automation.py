@@ -4,19 +4,62 @@ Revenue Automation API - Unified endpoints for all revenue streams
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from typing import Optional
+import logging
 
-from daily_publisher import get_publisher, start_daily_publisher
-from youtube_monetization import get_tracker
-from client_video_service import get_service as get_video_service, PricingTier
-from lead_generator import (
-    get_generator as get_lead_generator,
-    LeadSource, LeadStatus
-)
-from course_builder import get_builder as get_course_builder, CourseLevel
-from revenue_dashboard import get_dashboard
-from social_media_autoposter import get_autoposter
+log = logging.getLogger("revenue_automation")
 
 router = APIRouter()
+
+# Import dependencies gracefully
+get_publisher = None
+start_daily_publisher = None
+try:
+    from daily_publisher import get_publisher, start_daily_publisher
+except Exception as e:
+    log.warning(f"Failed to import daily_publisher: {e}")
+
+get_tracker = None
+try:
+    from youtube_monetization import get_tracker
+except Exception as e:
+    log.warning(f"Failed to import youtube_monetization: {e}")
+
+get_video_service = None
+PricingTier = None
+try:
+    from client_video_service import get_service as get_video_service, PricingTier
+except Exception as e:
+    log.warning(f"Failed to import client_video_service: {e}")
+
+get_lead_generator = None
+LeadSource = None
+LeadStatus = None
+try:
+    from lead_generator import (
+        get_generator as get_lead_generator,
+        LeadSource, LeadStatus
+    )
+except Exception as e:
+    log.warning(f"Failed to import lead_generator: {e}")
+
+get_course_builder = None
+CourseLevel = None
+try:
+    from course_builder import get_builder as get_course_builder, CourseLevel
+except Exception as e:
+    log.warning(f"Failed to import course_builder: {e}")
+
+get_dashboard = None
+try:
+    from revenue_dashboard import get_dashboard
+except Exception as e:
+    log.warning(f"Failed to import revenue_dashboard: {e}")
+
+get_autoposter = None
+try:
+    from social_media_autoposter import get_autoposter
+except Exception as e:
+    log.warning(f"Failed to import social_media_autoposter: {e}")
 
 
 # ── DAILY PUBLISHING ENDPOINTS ────────────────────────────────────────
