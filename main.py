@@ -33,6 +33,7 @@ routers_to_load = {
     'revenue_automation': None,
     'social_dashboard': None,
     'orders': None,
+    'subscriptions': None,
 }
 
 for router_name in routers_to_load:
@@ -56,6 +57,7 @@ labeling = routers_to_load['labeling']
 revenue_automation = routers_to_load['revenue_automation']
 social_dashboard = routers_to_load['social_dashboard']
 orders = routers_to_load['orders']
+subscriptions = routers_to_load['subscriptions']
 
 # Load remaining modules gracefully
 payee_router = None
@@ -310,6 +312,7 @@ routers_list = [
     (labeling, "/labeling", "AI Labeling"),
     (revenue_automation, "/revenue", "Revenue Automation"),
     (orders, "/orders", "Video Orders"),
+    (subscriptions, "/subscriptions", "Subscriptions"),
 ]
 
 for router_module, prefix, tag in routers_list:
@@ -353,10 +356,14 @@ async def serve_dashboard():
 
 @app.get("/quote")
 async def serve_quote_form():
-    """Serve the video quote request form"""
+    """Serve the subscription-aware video quote form"""
     try:
-        # Try multiple possible paths
+        # Try multiple possible paths for new subscription form first
         possible_paths = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "subscription_quote_form.html"),
+            "/app/subscription_quote_form.html",
+            "subscription_quote_form.html",
+            # Fallback to old form if new one not found
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "quote_request.html"),
             "/app/quote_request.html",
             "quote_request.html",
