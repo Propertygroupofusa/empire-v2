@@ -14,6 +14,7 @@ from lead_generator import (
 )
 from course_builder import get_builder as get_course_builder, CourseLevel
 from revenue_dashboard import get_dashboard
+from social_media_autoposter import get_autoposter
 
 router = APIRouter()
 
@@ -388,3 +389,33 @@ async def get_growth_forecast():
     """Get 90-day growth forecast"""
     dashboard = get_dashboard()
     return dashboard.get_growth_forecast()
+
+
+# ── SOCIAL MEDIA AUTOPOSTER ENDPOINTS ─────────────────────────────────
+
+@router.get("/social/status")
+async def get_social_status():
+    """Get social media autoposter status"""
+    autoposter = get_autoposter()
+    return autoposter.get_status()
+
+
+@router.get("/social/platforms")
+async def get_enabled_platforms():
+    """Get list of enabled social platforms"""
+    autoposter = get_autoposter()
+    return {
+        "enabled_platforms": autoposter.get_enabled_platforms(),
+        "total": len(autoposter.get_enabled_platforms())
+    }
+
+
+@router.post("/social/autopost")
+async def autopost_video(
+    video_url: str,
+    title: str,
+    video_type: str = "trading"
+):
+    """Auto-post video to all enabled social media platforms"""
+    autoposter = get_autoposter()
+    return await autoposter.autoposts_video(video_url, title, video_type)
