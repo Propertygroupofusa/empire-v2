@@ -360,6 +360,17 @@ async def serve_quote_form():
     return FileResponse(quote_path, media_type="text/html")
 
 
+@app.get("/order-success")
+async def order_success(session_id: str = None):
+    """Stripe payment success page"""
+    return {
+        "status": "success",
+        "message": "Payment received! Your video creation is starting now.",
+        "session_id": session_id,
+        "next_step": "Check your email for updates",
+    }
+
+
 @app.get("/")
 async def root():
     return {

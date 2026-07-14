@@ -397,6 +397,7 @@
         </form>
     </div>
 
+    <script src="https://js.stripe.com/v3/"></script>
     <script>
         const baseVideoPrices = {
             'social': 500,
@@ -406,6 +407,18 @@
             'course': 900,
             'custom': 1000,
         };
+
+        let stripe = null;
+        let currentOrderId = null;
+        let currentQuotePrice = 0;
+
+        // Initialize Stripe when page loads
+        window.addEventListener('load', async function() {
+            const stripeKey = await fetch('/orders/stripe-key').then(r => r.json()).catch(() => null);
+            if (stripeKey && stripeKey.publishable_key) {
+                stripe = Stripe(stripeKey.publishable_key);
+            }
+        });
 
         function updatePricing() {
             const videoType = document.getElementById('videoType').value;
@@ -419,10 +432,51 @@
             }
 
             const totalPrice = basePrice + rushPrice;
+            currentQuotePrice = totalPrice;
 
             document.getElementById('basePrice').textContent = `$${basePrice}`;
             document.getElementById('rushPrice').textContent = `$${rushPrice}`;
             document.getElementById('totalPrice').textContent = `$${totalPrice}`;
+        }
+
+        async function proceedToPayment() {
+            if (!currentOrderId) {
+                alert('Error: Order not found. Please try again.');
+                return;
+            }
+
+            const submitBtn = document.querySelector('.btn-submit');
+            submitBtn.disabled = true;
+            document.getElementById('submitText').textContent = 'Processing payment...';
+
+            try {
+                const checkoutResponse = await fetch(`/orders/${currentOrderId}/create-checkout`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                });
+
+                if (!checkoutResponse.ok) {
+                    throw new Error('Failed to create checkout session');
+                }
+
+                const checkoutData = await checkoutResponse.json();
+
+                if (stripe && checkoutData.session_id) {
+                    const result = await stripe.redirectToCheckout({
+                        sessionId: checkoutData.session_id
+                    });
+
+                    if (result.error) {
+                        document.getElementById('errorMessage').textContent = result.error.message;
+                        document.getElementById('errorMessage').classList.add('show');
+                    }
+                }
+            } catch (error) {
+                document.getElementById('errorMessage').textContent = 'Payment processing error: ' + error.message;
+                document.getElementById('errorMessage').classList.add('show');
+                submitBtn.disabled = false;
+                document.getElementById('submitText').textContent = 'Get My Quote';
+            }
         }
 
         document.getElementById('quoteForm').addEventListener('submit', async function(e) {
@@ -462,27 +516,34 @@
                 });
 
                 if (response.ok) {
+                    const result = await response.json();
+                    currentOrderId = result.order_id;
+
+                    successMessage.textContent = '✓ Quote ready! Click "Accept & Pay Now" to proceed with payment.';
                     successMessage.classList.add('show');
                     errorMessage.classList.remove('show');
-                    this.reset();
-                    updatePricing();
 
-                    // Scroll to success
+                    // Show payment button instead of submit
+                    submitText.textContent = 'Accept & Pay Now';
+                    submitText.style.display = 'inline';
+                    submitBtn.onclick = proceedToPayment;
+
                     successMessage.scrollIntoView({ behavior: 'smooth' });
                 } else {
                     const error = await response.json();
                     errorMessage.textContent = error.detail || 'Error submitting form. Please try again.';
                     errorMessage.classList.add('show');
                     successMessage.classList.remove('show');
+                    submitBtn.disabled = false;
+                    submitText.style.display = 'inline';
                 }
             } catch (error) {
                 errorMessage.textContent = 'Network error. Please check your connection and try again.';
                 errorMessage.classList.add('show');
                 successMessage.classList.remove('show');
-            } finally {
-                // Hide loading
                 submitBtn.disabled = false;
                 submitText.style.display = 'inline';
+            } finally {
                 loadingSpinner.classList.remove('show');
             }
         });

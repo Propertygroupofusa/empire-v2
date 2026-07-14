@@ -3,12 +3,17 @@ Customer Order & Quote Management Router
 Handles video request submissions, quote generation, payments
 """
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
 from sqlalchemy import text
 from datetime import datetime
 from typing import Optional
 import json
 import logging
+import os
+import stripe
+
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+stripe_publishable_key = os.getenv("STRIPE_PUBLISHABLE_KEY")
 
 log = logging.getLogger("orders")
 router = APIRouter()
@@ -20,6 +25,18 @@ pending_orders = []
 completed_orders = []
 
 # ============================================================
+# GET /orders/stripe-key - Get Stripe publishable key
+# ============================================================
+
+@router.get("/orders/stripe-key")
+async def get_stripe_key():
+    """Get Stripe publishable key for frontend"""
+    return {
+        "publishable_key": stripe_publishable_key,
+    }
+
+
+# ============================================================
 # POST /orders/request-quote - Customer submits video request
 # ============================================================
 
@@ -28,17 +45,17 @@ async def request_quote(
     customer_name: str,
     customer_email: str,
     customer_company: str,
-    video_type: str,  # "youtube", "social", "testimonial", "product_demo", "course", "custom"
+    video_type: str,
     script_or_topic: str,
     target_audience: str,
-    delivery_days: int = 2,  # Default 2 days (48 hours)
+    delivery_days: int = 2,
     reference_url: Optional[str] = None,
     phone: Optional[str] = None,
     background_tasks: BackgroundTasks = None,
 ):
     """
     Customer submits a video request.
-    We generate a quote and send via email.
+    Returns order ID and quote price for payment processing.
     """
 
     if not customer_name or not customer_email or not video_type:
@@ -62,6 +79,7 @@ async def request_quote(
         "quote_price": None,
         "paid": False,
         "payment_link": None,
+        "stripe_session_id": None,
         "completed_at": None,
         "video_url": None,
     }
@@ -74,24 +92,12 @@ async def request_quote(
 
     log.info(f"New quote request from {customer_name} ({customer_email}): {video_type}, ${quote_price}")
 
-    # Send confirmation email to customer
-    if background_tasks:
-        background_tasks.add_task(
-            send_quote_email,
-            order_id=order["id"],
-            customer_name=customer_name,
-            customer_email=customer_email,
-            video_type=video_type,
-            quote_price=quote_price,
-            delivery_days=delivery_days,
-        )
-
     return {
         "success": True,
-        "message": f"Quote request received. We'll send a quote to {customer_email} shortly.",
+        "message": f"Quote created successfully",
         "order_id": order["id"],
-        "expected_quote_price": quote_price,
-        "next_step": "Check your email for quote and payment link",
+        "quote_price": quote_price,
+        "customer_email": customer_email,
     }
 
 
@@ -116,70 +122,101 @@ def calculate_quote_price(video_type: str, delivery_days: int) -> int:
     return base_price
 
 
-async def send_quote_email(
-    order_id: int,
-    customer_name: str,
-    customer_email: str,
-    video_type: str,
-    quote_price: int,
-    delivery_days: int,
-):
-    """Send quote email to customer (template for manual sending)"""
+# ============================================================
+# POST /orders/{order_id}/create-checkout - Create Stripe session
+# ============================================================
 
-    email_template = f"""
-Subject: Your Video Production Quote - ${quote_price}
+@router.post("/orders/{order_id}/create-checkout")
+async def create_checkout_session(order_id: int):
+    """Create Stripe checkout session for order"""
 
-Hi {customer_name},
+    order = next((o for o in pending_orders if o["id"] == order_id), None)
 
-Thanks for your video request!
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
 
-Here's your quote:
+    if order["paid"]:
+        raise HTTPException(status_code=400, detail="Order already paid")
 
-==================================================
-VIDEO PRODUCTION QUOTE
-==================================================
-Project: {video_type.upper()}
-Quote Price: ${quote_price} (one-time fee, no subscription)
-Delivery Timeline: {delivery_days} day(s)
-Quality: Professional HD with AI voiceover
-Revisions: Unlimited until satisfied
+    try:
+        checkout_session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[
+                {
+                    "price_data": {
+                        "currency": "usd",
+                        "product_data": {
+                            "name": f"Video Production: {order['video_type'].replace('_', ' ').title()}",
+                            "description": f"Video for {order['customer_company']}",
+                        },
+                        "unit_amount": order["quote_price"] * 100,
+                    },
+                    "quantity": 1,
+                }
+            ],
+            mode="payment",
+            success_url="https://empire-v2-production.up.railway.app/order-success?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url="https://empire-v2-production.up.railway.app/quote",
+            customer_email=order["customer_email"],
+            metadata={
+                "order_id": order_id,
+                "customer_email": order["customer_email"],
+                "customer_name": order["customer_name"],
+            }
+        )
 
-==================================================
-NEXT STEPS
-==================================================
+        order["stripe_session_id"] = checkout_session.id
+        log.info(f"Stripe checkout session created for order {order_id}")
 
-1. Review the quote above
-2. Pay via this link: [STRIPE PAYMENT LINK]
-3. We'll create your video within {delivery_days} day(s)
-4. You'll receive HD video file via email
-5. Unlimited revisions available
+        return {
+            "success": True,
+            "session_id": checkout_session.id,
+            "publishable_key": stripe_publishable_key,
+        }
 
-Ready to move forward? Reply to this email or use the payment link above.
-
-Questions? Reply with any details about your video needs.
-
-Thanks,
-Video Production Team
-https://empire-v2-production.up.railway.app
-
-===================================================
-"""
-
-    log.info(f"Quote email would be sent to {customer_email}:\n{email_template}")
-    # In production: integrate actual email sending here
+    except Exception as e:
+        log.error(f"Stripe checkout creation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Payment processing error")
 
 
 # ============================================================
-# GET /orders/pending - Admin view of pending orders
+# POST /orders/webhook/stripe - Stripe webhook handler
 # ============================================================
 
-@router.get("/orders/pending")
-async def get_pending_orders(limit: int = 50):
-    """Get all pending orders (for admin dashboard)"""
-    return {
-        "total_pending": len(pending_orders),
-        "orders": pending_orders[-limit:],
-    }
+@router.post("/orders/webhook/stripe")
+async def stripe_webhook(request: Request):
+    """Handle Stripe webhook events"""
+
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+    if not webhook_secret:
+        log.warning("STRIPE_WEBHOOK_SECRET not configured")
+        return {"status": "success"}
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, webhook_secret
+        )
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    # Handle checkout.session.completed event
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        order_id = int(session["metadata"]["order_id"])
+
+        order = next((o for o in pending_orders if o["id"] == order_id), None)
+        if order:
+            order["paid"] = True
+            order["status"] = "payment_received"
+            order["transaction_id"] = session["id"]
+            log.info(f"Payment received for order {order_id} via Stripe")
+
+    return {"status": "success"}
 
 
 # ============================================================
@@ -211,8 +248,7 @@ async def get_order_status(order_id: int):
 @router.post("/orders/{order_id}/payment-received")
 async def mark_payment_received(order_id: int, transaction_id: str = ""):
     """
-    Mark order as paid (called by Stripe webhook)
-    Admin calls this when payment is received
+    Mark order as paid
     """
     order = next((o for o in pending_orders if o["id"] == order_id), None)
 
@@ -245,7 +281,6 @@ async def mark_order_complete(
 ):
     """
     Admin marks order complete and provides video link
-    Sends delivery email to customer
     """
     order = next((o for o in pending_orders if o["id"] == order_id), None)
 
@@ -267,36 +302,12 @@ async def mark_order_complete(
 
     log.info(f"Order {order_id} marked complete. Video: {video_url}")
 
-    # Send delivery email (template)
-    delivery_email = f"""
-Subject: Your Video is Ready! - Download Here
-
-Hi {order['customer_name']},
-
-Your video is ready to download!
-
-Download Link: {video_download_link}
-
-Video Details:
-- Type: {order['video_type']}
-- Format: MP4 (HD 1080p)
-- Duration: Check file
-- Script: {order['script_or_topic'][:100]}...
-
-Questions or need revisions? Reply to this email.
-
-Thanks for choosing us!
-Video Production Team
-"""
-
-    log.info(f"Delivery email would be sent to {order['customer_email']}:\n{delivery_email}")
-
     return {
         "success": True,
         "order_id": order_id,
         "status": "delivered",
         "customer_email": order["customer_email"],
-        "message": f"Order marked complete. Delivery email sent to {order['customer_email']}",
+        "message": f"Order marked complete.",
     }
 
 
@@ -336,7 +347,7 @@ async def admin_dashboard():
         },
         "completed_orders": {
             "count": len(completed_orders),
-            "list": completed_orders[-20:],  # Last 20
+            "list": completed_orders[-20:],
             "total_revenue": sum(o["quote_price"] for o in completed_orders if o["paid"]),
         },
         "stats": {
