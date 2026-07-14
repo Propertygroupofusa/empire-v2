@@ -82,6 +82,13 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import health_monitor: {e}")
 
+retention_manager = None
+try:
+    from data_retention import retention_manager as rm
+    retention_manager = rm
+except Exception as e:
+    logging.warning(f"Failed to import data_retention: {e}")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pgusa")
 
@@ -130,6 +137,65 @@ async def create_monitor_tables():
             log.info("Migration OK: monitor_performance table")
         except Exception as e:
             log.warning(f"Migration skip monitor_performance: {e}")
+
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS monitor_errors_archive (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    error_type VARCHAR NOT NULL,
+                    error_message TEXT NOT NULL,
+                    severity VARCHAR,
+                    detected_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            log.info("Migration OK: monitor_errors_archive (PERMANENT STORAGE)")
+        except Exception as e:
+            log.warning(f"Migration skip monitor_errors_archive: {e}")
+
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS monitor_fixed_issues_archive (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    issue_name VARCHAR NOT NULL,
+                    fixed_at TIMESTAMP,
+                    status VARCHAR,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            log.info("Migration OK: monitor_fixed_issues_archive (PERMANENT STORAGE)")
+        except Exception as e:
+            log.warning(f"Migration skip monitor_fixed_issues_archive: {e}")
+
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS monitor_performance_archive (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    metric_data TEXT NOT NULL,
+                    checked_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            log.info("Migration OK: monitor_performance_archive (PERMANENT STORAGE)")
+        except Exception as e:
+            log.warning(f"Migration skip monitor_performance_archive: {e}")
+
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS data_retention_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    action VARCHAR NOT NULL,
+                    table_name VARCHAR,
+                    records_archived INTEGER,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            log.info("Migration OK: data_retention_log (PERMANENT STORAGE)")
+        except Exception as e:
+            log.warning(f"Migration skip data_retention_log: {e}")
 
 
 async def run_migrations():
@@ -200,6 +266,13 @@ async def lifespan(app: FastAPI):
             log.info("🔍 Health Monitor started - continuous error checking active")
     except Exception as e:
         log.warning(f"Health monitor failed: {e}")
+
+    try:
+        if retention_manager is not None:
+            await retention_manager.initialize_retention_tables(engine)
+            log.info("💾 Data Retention Manager initialized - ALL DATA KEPT FOREVER")
+    except Exception as e:
+        log.warning(f"Retention manager failed: {e}")
 
     log.info("Platform startup complete")
     yield
@@ -351,6 +424,43 @@ async def get_comprehensive_status():
         "fixed_issues": monitor.get_fixed_issues(100),
         "performance_metrics": monitor.get_performance_metrics(50),
         "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.get("/retention/data-count")
+async def get_total_data_stored():
+    """Get complete count of all data ever stored (current + archived)"""
+    if retention_manager is None:
+        return {"error": "Retention manager not available"}
+    return await retention_manager.get_total_data_stored(engine)
+
+
+@app.get("/retention/status")
+async def get_retention_status():
+    """Get data retention and archival status"""
+    if retention_manager is None:
+        return {"error": "Retention manager not available"}
+    return await retention_manager.get_retention_status(engine)
+
+
+@app.get("/retention/database-size")
+async def get_database_size():
+    """Get database size and storage usage"""
+    if retention_manager is None:
+        return {"error": "Retention manager not available"}
+    return await retention_manager.get_database_size(engine)
+
+
+@app.post("/retention/archive-old-data")
+async def trigger_archival(days_threshold: int = 90):
+    """Manually trigger data archival (moves old data to archive tables)"""
+    if retention_manager is None:
+        return {"error": "Retention manager not available"}
+    await retention_manager.archive_old_data(engine, days_threshold)
+    return {
+        "status": "archived",
+        "message": f"Data older than {days_threshold} days moved to permanent archive",
+        "note": "IMPORTANT: No data is deleted, only moved to archive tables"
     }
 
 
