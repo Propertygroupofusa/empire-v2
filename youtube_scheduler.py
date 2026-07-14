@@ -126,11 +126,13 @@ class YouTubeScheduler:
         conn.close()
 
     def schedule_weekly_generation(self):
-        """Schedule 3 videos per week (Mon, Wed, Fri at 9am)"""
+        """Schedule videos per week (Mon/Wed/Fri 9am, Sat 12pm & 10pm)"""
         schedule.every().monday.at("09:00").do(self.run_scheduled_generation)
         schedule.every().wednesday.at("09:00").do(self.run_scheduled_generation)
         schedule.every().friday.at("09:00").do(self.run_scheduled_generation)
-        self.log_schedule("SCHEDULED", "3 generations/week (Mon/Wed/Fri 9am)")
+        schedule.every().saturday.at("12:00").do(self.run_scheduled_generation)
+        schedule.every().saturday.at("22:00").do(self.run_scheduled_generation)
+        self.log_schedule("SCHEDULED", "5 generations/week (Mon/Wed/Fri 9am, Sat 12pm & 10pm)")
 
     def run_scheduled_generation(self):
         """Run the scheduled video generation"""
@@ -165,6 +167,8 @@ class YouTubeScheduler:
         log.info("  ⏰ Monday 9:00 AM - Generate 3 videos")
         log.info("  ⏰ Wednesday 9:00 AM - Generate 3 videos")
         log.info("  ⏰ Friday 9:00 AM - Generate 3 videos")
+        log.info("  ⏰ Saturday 12:00 PM - Generate 3 videos")
+        log.info("  ⏰ Saturday 10:00 PM - Generate 3 videos")
         log.info(f"  📊 Total video library: {self.total_topics} unique topics")
         log.info("\nScheduler is running. Press Ctrl+C to stop.\n")
 
@@ -280,7 +284,13 @@ if __name__ == "__main__":
 
     else:
         print("\nYouTube Scheduler - Usage:")
-        print("  python youtube_scheduler.py start              # Run scheduler (3 videos/week)")
+        print("  python youtube_scheduler.py start              # Run scheduler (5 generations/week)")
         print("  python youtube_scheduler.py generate-now       # Generate videos now")
         print("  python youtube_scheduler.py status             # Show statistics")
         print("  python youtube_scheduler.py revenue            # Estimate revenue")
+        print("\n📅 Schedule:")
+        print("  • Monday 9:00 AM")
+        print("  • Wednesday 9:00 AM")
+        print("  • Friday 9:00 AM")
+        print("  • Saturday 12:00 PM")
+        print("  • Saturday 10:00 PM")
