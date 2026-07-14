@@ -7,7 +7,8 @@ job matching, payments, admin dashboard, and white label API.
 
 from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from sqlalchemy import text
 import os
@@ -29,6 +30,7 @@ routers_to_load = {
     'partners': None,
     'labeling': None,
     'revenue_automation': None,
+    'social_dashboard': None,
 }
 
 for router_name in routers_to_load:
@@ -50,6 +52,7 @@ auth = routers_to_load['auth']
 partners = routers_to_load['partners']
 labeling = routers_to_load['labeling']
 revenue_automation = routers_to_load['revenue_automation']
+social_dashboard = routers_to_load['social_dashboard']
 
 # Load remaining modules gracefully
 payee_router = None
@@ -186,6 +189,22 @@ if payroll_router is not None:
         log.info("Router loaded: /workers/payroll")
     except Exception as e:
         log.warning(f"Failed to include payroll router: {e}")
+
+if social_dashboard is not None:
+    try:
+        app.include_router(social_dashboard.router, prefix="/social", tags=["Social Media Dashboard"])
+        log.info("Router loaded: /social")
+    except Exception as e:
+        log.warning(f"Failed to include social dashboard router: {e}")
+
+
+@app.get("/dashboard")
+async def serve_dashboard():
+    """Serve the social media dashboard HTML"""
+    try:
+        return FileResponse("social_media_dashboard.html", media_type="text/html")
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Dashboard not found")
 
 
 @app.get("/")
