@@ -96,6 +96,13 @@ except Exception as e:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pgusa")
 
+# Ensure all subscription modules load correctly
+try:
+    from stripe_subscriptions import setup_stripe_products
+    from subscription_tiers import SUBSCRIPTION_TIERS
+except Exception as e:
+    log.warning(f"Subscription modules pre-check: {e}")
+
 
 async def create_monitor_tables():
     """Create health monitor tables if they don't exist"""
