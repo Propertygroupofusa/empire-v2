@@ -34,6 +34,7 @@ routers_to_load = {
     'social_dashboard': None,
     'orders': None,
     'subscriptions': None,
+    'ai_assistant': None,
 }
 
 for router_name in routers_to_load:
@@ -58,6 +59,7 @@ revenue_automation = routers_to_load['revenue_automation']
 social_dashboard = routers_to_load['social_dashboard']
 orders = routers_to_load['orders']
 subscriptions = routers_to_load['subscriptions']
+ai_assistant = routers_to_load['ai_assistant']
 
 # Load remaining modules gracefully
 payee_router = None
@@ -346,6 +348,7 @@ routers_list = [
     (revenue_automation, "/revenue", "Revenue Automation"),
     (orders, "/orders", "Video Orders"),
     (subscriptions, "/subscriptions", "Subscriptions"),
+    (ai_assistant, "/assistant", "AI Assistant"),
 ]
 
 for router_module, prefix, tag in routers_list:

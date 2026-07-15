@@ -582,5 +582,138 @@
         loadPricingTiers();
         updatePrice();
     </script>
+
+    <!-- AI Chat Widget -->
+    <script>
+        // Load chat widget dynamically
+        const chatWidgetScript = `
+<!-- AI Assistant Chat Widget -->
+<div id="ai-chat-widget" style="
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    width: 380px;
+    height: 500px;
+    border-radius: 12px;
+    background: white;
+    box-shadow: 0 5px 40px rgba(0,0,0,0.16);
+    display: none;
+    flex-direction: column;
+    z-index: 9999;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+">
+    <div style="
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 16px;
+        border-radius: 12px 12px 0 0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    ">
+        <div>
+            <h3 style="margin: 0; font-size: 16px; font-weight: 600;">Video Assistant</h3>
+            <p style="margin: 4px 0 0 0; font-size: 12px; opacity: 0.9;">Ask me anything!</p>
+        </div>
+        <button id="ai-close-btn" style="background: none; border: none; color: white; font-size: 20px; cursor: pointer; padding: 0;">×</button>
+    </div>
+    <div id="ai-messages" style="flex: 1; overflow-y: auto; padding: 16px; background: #f7f7f7;">
+        <div style="background: white; padding: 12px; border-radius: 8px; margin-bottom: 8px; border-left: 3px solid #667eea;">
+            <p style="margin: 0; font-size: 14px; color: #333;">👋 Hi! I'm your video production assistant. Ask me about avatars, languages, pricing, delivery times, or anything else!</p>
+        </div>
+    </div>
+    <div style="padding: 12px; border-top: 1px solid #eee; display: flex; gap: 8px;">
+        <input id="ai-input" type="text" placeholder="Ask a question..." style="flex: 1; border: 1px solid #ddd; border-radius: 6px; padding: 10px; font-size: 14px; font-family: inherit;">
+        <button id="ai-send-btn" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 6px; padding: 10px 16px; cursor: pointer; font-weight: 600;">Send</button>
+    </div>
+</div>
+<button id="ai-toggle-btn" style="position: fixed; bottom: 20px; right: 20px; width: 56px; height: 56px; border-radius: 50%; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; font-size: 24px; cursor: pointer; box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4); display: flex; align-items: center; justify-content: center; z-index: 9998;">?</button>
+        `;
+
+        // Chat widget functionality
+        document.addEventListener('DOMContentLoaded', function() {
+            const chatWidget = document.getElementById('ai-chat-widget');
+            const toggleBtn = document.getElementById('ai-toggle-btn');
+            const closeBtn = document.getElementById('ai-close-btn');
+            const sendBtn = document.getElementById('ai-send-btn');
+            const input = document.getElementById('ai-input');
+            const messagesContainer = document.getElementById('ai-messages');
+
+            if (!chatWidget || !toggleBtn) return;
+
+            let chatHistory = [];
+
+            toggleBtn.addEventListener('click', () => {
+                chatWidget.style.display = chatWidget.style.display === 'none' ? 'flex' : 'none';
+                toggleBtn.style.display = chatWidget.style.display === 'none' ? 'flex' : 'none';
+                if (chatWidget.style.display === 'flex') input.focus();
+            });
+
+            closeBtn.addEventListener('click', () => {
+                chatWidget.style.display = 'none';
+                toggleBtn.style.display = 'flex';
+            });
+
+            async function sendMessage() {
+                const question = input.value.trim();
+                if (!question) return;
+
+                const messageEl = document.createElement('div');
+                messageEl.style.cssText = 'background: #667eea; color: white; padding: 12px; border-radius: 8px; margin-bottom: 8px; font-size: 14px; line-height: 1.4; margin-left: auto; width: fit-content; max-width: 80%;';
+                messageEl.textContent = question;
+                messagesContainer.appendChild(messageEl);
+                input.value = '';
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+
+                chatHistory.push({ role: 'user', content: question });
+
+                const loadingEl = document.createElement('div');
+                loadingEl.id = 'loading-' + Date.now();
+                loadingEl.style.cssText = 'background: white; color: #333; padding: 12px; border-radius: 8px; margin-bottom: 8px; border-left: 3px solid #667eea; font-size: 14px;';
+                loadingEl.textContent = '...';
+                messagesContainer.appendChild(loadingEl);
+
+                try {
+                    const response = await fetch('/assistant/ask', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ question, chat_history: chatHistory })
+                    });
+
+                    loadingEl.remove();
+
+                    if (!response.ok) {
+                        const error = await response.json();
+                        const errorEl = document.createElement('div');
+                        errorEl.style.cssText = 'background: #ffe6e6; color: #c33; padding: 12px; border-radius: 8px; margin-bottom: 8px; font-size: 14px;';
+                        errorEl.textContent = `Error: ${error.detail || 'Failed to get response'}`;
+                        messagesContainer.appendChild(errorEl);
+                    } else {
+                        const data = await response.json();
+                        const answerEl = document.createElement('div');
+                        answerEl.style.cssText = 'background: white; color: #333; padding: 12px; border-radius: 8px; margin-bottom: 8px; border-left: 3px solid #667eea; font-size: 14px; line-height: 1.4;';
+                        answerEl.textContent = data.answer;
+                        messagesContainer.appendChild(answerEl);
+                        chatHistory.push({ role: 'assistant', content: data.answer });
+                    }
+                    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                } catch (error) {
+                    loadingEl.remove();
+                    const errorEl = document.createElement('div');
+                    errorEl.style.cssText = 'background: #ffe6e6; color: #c33; padding: 12px; border-radius: 8px; margin-bottom: 8px; font-size: 14px;';
+                    errorEl.textContent = `Error: ${error.message}`;
+                    messagesContainer.appendChild(errorEl);
+                }
+            }
+
+            sendBtn.addEventListener('click', sendMessage);
+            input.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendMessage();
+                }
+            });
+        });
+    </script>
 </body>
 </html>
