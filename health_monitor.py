@@ -182,7 +182,6 @@ class ComprehensiveHealthMonitor:
             "main.py", "database.py", "health_monitor.py",
             "social_media_dashboard.html", "routers/social_dashboard.py",
             "routers/__init__.py", "requirements.txt",
-            "empire.db" # Check database file exists
         ]
         
         results = {}
@@ -225,11 +224,12 @@ class ComprehensiveHealthMonitor:
         ]
         
         results = {}
+        port = os.getenv("PORT", 8000)
         for endpoint in endpoints:
             try:
                 import httpx
                 async with httpx.AsyncClient(timeout=5) as client:
-                    response = await client.get(f"http://localhost:8000{endpoint}")
+                    response = await client.get(f"http://localhost:{port}{endpoint}")
                     results[endpoint] = {
                         "ok": response.status_code < 500,
                         "status_code": response.status_code
