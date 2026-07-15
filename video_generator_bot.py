@@ -17,6 +17,8 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import logging
 import edge_tts
+import aiohttp
+from edge_tts.exceptions import EdgeTTSException
 from PIL import Image, ImageDraw, ImageFont
 import requests
 import threading
@@ -103,22 +105,31 @@ class VideoTemplate(Enum):
 
 async def generate_audio(text, voice='female', output_path=None):
     """Generate audio from text using edge-tts"""
+    if not output_path:
+        output_path = TEMP_FOLDER / f'audio_{uuid.uuid4()}.mp3'
+
+    logger.info(f"Generating audio with voice: {voice}")
+
     try:
-        if not output_path:
-            output_path = TEMP_FOLDER / f'audio_{uuid.uuid4()}.mp3'
-
-        logger.info(f"Generating audio with voice: {voice}")
-
-        # Use edge-tts to generate speech
         communicate = edge_tts.Communicate(text, VOICES.get(voice, VOICES['female']))
         await communicate.save(str(output_path))
-
-        logger.info(f"Audio saved: {output_path}")
-        return output_path
-
-    except Exception as e:
-        logger.error(f"Audio generation failed: {str(e)}")
+    except aiohttp.ClientResponseError as e:
+        # edge-tts retries once internally on a 403 (clock-skew correction);
+        # one escaping here means Microsoft's token scheme changed again.
+        logger.error(f"Audio generation failed: HTTP {e.status} ({e.message}) from "
+                     f"{e.request_info.url} — likely a Microsoft Sec-MS-GEC auth change, "
+                     "not a code bug")
         raise
+    except EdgeTTSException as e:
+        logger.error(f"Audio generation failed [{type(e).__name__}]: {e} "
+                     "— check github.com/rany2/edge-tts issues for a known break/fix")
+        raise
+    except Exception as e:
+        logger.error(f"Audio generation failed [{type(e).__name__}]: {e}")
+        raise
+
+    logger.info(f"Audio saved: {output_path}")
+    return output_path
 
 
 def get_audio_duration(audio_path):

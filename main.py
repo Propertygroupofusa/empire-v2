@@ -73,6 +73,12 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import paycom_features: {e}")
 
+video_revenue_router = None
+try:
+    from video_revenue_api import router as video_revenue_router
+except Exception as e:
+    logging.warning(f"Failed to import video_revenue_api: {e}")
+
 start_daily_publisher = None
 try:
     from daily_publisher import start_daily_publisher
@@ -367,6 +373,16 @@ if social_dashboard is not None:
         log.info("Router loaded: /social")
     except Exception as e:
         log.warning(f"Failed to include social dashboard router: {e}")
+
+if video_revenue_router is not None:
+    try:
+        # No prefix: video_auto_editor.py calls these paths
+        # (e.g. /publish/youtube/social-content) directly against this
+        # service's own port (YOUTUBE_API_URL defaults to localhost:10000).
+        app.include_router(video_revenue_router, tags=["Video Revenue"])
+        log.info("Router loaded: video revenue (no prefix)")
+    except Exception as e:
+        log.warning(f"Failed to include video revenue router: {e}")
 
 
 @app.get("/dashboard")

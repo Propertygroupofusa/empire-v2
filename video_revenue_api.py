@@ -7,19 +7,17 @@ Includes Synthesia generation + YouTube auto-publish.
 
 import os
 import logging
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException
 
 from synthesia_video_bot import (
     create_video, get_video, verify_webhook,
     property_listing_script, payee_trust_onboarding_script,
     social_content_script, cold_call_followup_script,
 )
-from youtube_upload_bot import (
-    synthesia_to_youtube, property_listing_metadata, social_content_metadata,
-)
+from youtube_upload_bot import synthesia_to_youtube
 
 log = logging.getLogger("video_api")
-app = FastAPI(title="AI Video Revenue API")
+router = APIRouter()
 
 PRICING = {
     "property_listing": 75,
@@ -29,12 +27,7 @@ PRICING = {
 }
 
 
-@app.get("/health")
-async def health():
-    return {"status": "ok", "service": "video-revenue-api"}
-
-
-@app.post("/generate/property-listing")
+@router.post("/generate/property-listing")
 async def generate_property_listing(payload: dict):
     """payload: { address, price, beds, baths, features, client_email } | $75/video"""
     script = property_listing_script(
@@ -53,7 +46,7 @@ async def generate_property_listing(payload: dict):
     return {"video": result, "price": PRICING["property_listing"]}
 
 
-@app.post("/generate/social-content")
+@router.post("/generate/social-content")
 async def generate_social_content(payload: dict):
     """payload: { business_name, topic, cta, client_email } | $50/video"""
     script = social_content_script(
@@ -70,7 +63,7 @@ async def generate_social_content(payload: dict):
     return {"video": result, "price": PRICING["social_content"]}
 
 
-@app.post("/generate/cold-call-followup")
+@router.post("/generate/cold-call-followup")
 async def generate_followup(payload: dict):
     """payload: { lead_name, property_address, lead_email } | $25/video"""
     script = cold_call_followup_script(
@@ -86,7 +79,7 @@ async def generate_followup(payload: dict):
     return {"video": result, "price": PRICING["cold_call_followup"]}
 
 
-@app.post("/generate/payee-trust-onboarding")
+@router.post("/generate/payee-trust-onboarding")
 async def generate_onboarding(payload: dict):
     """payload: { user_name, user_email } | internal use"""
     script = payee_trust_onboarding_script(user_name=payload.get("user_name", "there"))
@@ -99,12 +92,12 @@ async def generate_onboarding(payload: dict):
     return {"video": result}
 
 
-@app.get("/video/{video_id}")
+@router.get("/video/{video_id}")
 async def video_status(video_id: str):
     return await get_video(video_id)
 
 
-@app.post("/webhook/synthesia")
+@router.post("/webhook/synthesia")
 async def synthesia_webhook(request: Request):
     timestamp = request.headers.get("Synthesia-Timestamp", "")
     signature = request.headers.get("Synthesia-Signature", "")
@@ -126,42 +119,36 @@ async def synthesia_webhook(request: Request):
     return {"received": True}
 
 
-@app.post("/publish/youtube/property-listing")
+@router.post("/publish/youtube/property-listing")
 async def publish_property_youtube(payload: dict):
-    """payload: { synthesia_download_url, address, price, beds, baths } | publishes public"""
-    meta = property_listing_metadata(
-        address=payload["address"],
-        price=payload["price"],
-        beds=payload["beds"],
-        baths=payload["baths"],
-    )
+    """payload: { video_url, title, description, tags } | publishes public"""
     result = await synthesia_to_youtube(
-        synthesia_download_url=payload["synthesia_download_url"],
-        title=meta["title"],
-        description=meta["description"],
-        tags=meta["tags"],
+        synthesia_download_url=payload["video_url"],
+        title=payload.get("title", "Property Listing"),
+        description=payload.get("description", ""),
+        tags=payload.get("tags"),
         privacy="public",
     )
     return result
 
 
-@app.post("/publish/youtube/social-content")
+@router.post("/publish/youtube/social-content")
 async def publish_social_youtube(payload: dict):
-    """payload: { synthesia_download_url, business_name, topic } | publishes unlisted"""
-    meta = social_content_metadata(
-        business_name=payload["business_name"],
-        topic=payload["topic"],
-    )
+    """payload: { video_url, title, description, tags, privacy } | defaults unlisted"""
     result = await synthesia_to_youtube(
-        synthesia_download_url=payload["synthesia_download_url"],
-        title=meta["title"],
-        description=meta["description"],
-        tags=meta["tags"],
-        privacy="unlisted",
+        synthesia_download_url=payload["video_url"],
+        title=payload.get("title", "Social Content"),
+        description=payload.get("description", ""),
+        tags=payload.get("tags"),
+        privacy=payload.get("privacy", "unlisted"),
     )
     return result
 
 
 if __name__ == "__main__":
     import uvicorn
+    from fastapi import FastAPI
+
+    app = FastAPI(title="AI Video Revenue API")
+    app.include_router(router)
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))

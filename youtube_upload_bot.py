@@ -28,6 +28,12 @@ async def get_access_token() -> str:
                 "grant_type": "refresh_token",
             },
         )
+        if not r.is_success:
+            # Without this, a bad refresh token/client surfaces as a bare
+            # KeyError: 'access_token' with no indication it was an OAuth
+            # failure at all. Log Google's actual error before raising.
+            log.error(f"YouTube OAuth token refresh failed {r.status_code}: {r.text[:500]}")
+        r.raise_for_status()
         return r.json()["access_token"]
 
 
