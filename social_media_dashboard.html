@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EMPIRE v2 - Social Media Hub</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        header h1 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+
+        header p {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: 1fr 2fr 1fr;
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .platform-card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            cursor: pointer;
+            transition: transform 0.3s, box-shadow 0.3s;
+            border-left: 4px solid #667eea;
+        }
+
+        .platform-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 12px rgba(0,0,0,0.15);
+        }
+
+        .platform-card.youtube { border-left-color: #ff0000; }
+        .platform-card.instagram { border-left-color: #E4405F; }
+        .platform-card.facebook { border-left-color: #1877F2; }
+        .platform-card.tiktok { border-left-color: #000000; }
+        .platform-card.linkedin { border-left-color: #0A66C2; }
+        .platform-card.twitter { border-left-color: #1DA1F2; }
+        .platform-card.whatsapp { border-left-color: #25D366; }
+
+        .platform-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .platform-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 15px;
+            font-size: 20px;
+            color: white;
+        }
+
+        .platform-card.youtube .platform-icon { background: #ff0000; }
+        .platform-card.instagram .platform-icon { background: #E4405F; }
+        .platform-card.facebook .platform-icon { background: #1877F2; }
+        .platform-card.tiktok .platform-icon { background: #000000; }
+        .platform-card.linkedin .platform-icon { background: #0A66C2; }
+        .platform-card.twitter .platform-icon { background: #1DA1F2; }
+        .platform-card.whatsapp .platform-icon { background: #25D366; }
+
+        .platform-info h3 {
+            font-size: 18px;
+            margin-bottom: 5px;
+        }
+
+        .platform-status {
+            font-size: 12px;
+            color: #999;
+        }
+
+        .status-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+
+        .status-dot.active { background: #10B981; }
+        .status-dot.inactive { background: #EF4444; }
+
+        .platform-stats {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 15px;
+            font-size: 12px;
+        }
+
+        .stat {
+            padding: 10px;
+            background: #f5f5f5;
+            border-radius: 5px;
+            text-align: center;
+        }
+
+        .stat-number {
+            font-size: 18px;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .stat-label {
+            color: #999;
+            font-size: 11px;
+        }
+
+        .compose-section {
+            background: white;
+            border-radius: 10px;
+            padding: 30px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        .compose-section h2 {
+            margin-bottom: 20px;
+            color: #333;
+        }
+
+        textarea {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-family: inherit;
+            font-size: 14px;
+            resize: vertical;
+            min-height: 120px;
+            margin-bottom: 15px;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .platforms-select {
+            margin-bottom: 20px;
+        }
+
+        .platforms-select h4 {
+            margin-bottom: 15px;
+            font-size: 14px;
+            color: #333;
+        }
+
+        .checkbox-group {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+        }
+
+        .checkbox-item {
+            display: flex;
+            align-items: center;
+        }
+
+        .checkbox-item input[type="checkbox"] {
+            margin-right: 10px;
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+
+        .checkbox-item label {
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        .schedule-section {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        input[type="date"],
+        input[type="time"] {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+
+        input[type="date"]:focus,
+        input[type="time"]:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+        }
+
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(102, 126, 234, 0.3);
+        }
+
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+        }
+
+        .btn-secondary:hover {
+            background: #e0e0e0;
+        }
+
+        .stats-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        .stat-card h3 {
+            font-size: 12px;
+            color: #999;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+        }
+
+        .stat-card .big-number {
+            font-size: 36px;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .message {
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            display: none;
+        }
+
+        .message.success {
+            background: #D1FAE5;
+            color: #065F46;
+            display: block;
+        }
+
+        .message.error {
+            background: #FEE2E2;
+            color: #7F1D1D;
+            display: block;
+        }
+
+        @media (max-width: 768px) {
+            .dashboard-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .schedule-section {
+                grid-template-columns: 1fr;
+            }
+
+            .checkbox-group {
+                grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📱 Social Media Hub</h1>
+            <p>Manage all your social platforms from one dashboard</p>
+        </header>
+
+        <div class="stats-row">
+            <div class="stat-card">
+                <h3>Total Followers</h3>
+                <div class="big-number" id="totalFollowers">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>This Month Posts</h3>
+                <div class="big-number" id="monthlyPosts">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>Total Engagement</h3>
+                <div class="big-number" id="totalEngagement">0</div>
+            </div>
+        </div>
+
+        <div class="compose-section">
+            <h2>✏️ Compose Post</h2>
+
+            <div id="message" class="message"></div>
+
+            <div class="platforms-select">
+                <h4>Select Platforms to Post:</h4>
+                <div class="checkbox-group">
+                    <div class="checkbox-item">
+                        <input type="checkbox" id="youtube" value="YouTube">
+                        <label for="youtube">🎬 YouTube</label>
+                    </div>
+                    <div class="checkbox-item">
+                        <input type="checkbox" id="instagram" value="Instagram">
+                        <label for="instagram">📷 Instagram</label>
+                    </div>
+                    <div class="checkbox-item">
+                        <input type="checkbox" id="facebook" value="Facebook">
+                        <label for="facebook">👥 Facebook</label>
+                    </div>
+                    <div class="checkbox-item">
+                        <input type="checkbox" id="tiktok" value="TikTok">
+                        <label for="tiktok">🎵 TikTok</label>
+                    </div>
+                    <div class="checkbox-item">
+                        <input type="checkbox" id="linkedin" value="LinkedIn">
+                        <label for="linkedin">💼 LinkedIn</label>
+                    </div>
+                    <div class="checkbox-item">
+                        <input type="checkbox" id="twitter" value="Twitter">
+                        <label for="twitter">𝕏 Twitter</label>
+                    </div>
+                    <div class="checkbox-item">
+                        <input type="checkbox" id="whatsapp" value="WhatsApp">
+                        <label for="whatsapp">💬 WhatsApp</label>
+                    </div>
+                </div>
+            </div>
+
+            <textarea id="postContent" placeholder="What's on your mind? Write your post here..."></textarea>
+
+            <div class="schedule-section">
+                <div>
+                    <label for="postDate" style="display: block; margin-bottom: 8px; font-weight: 600;">Date</label>
+                    <input type="date" id="postDate">
+                </div>
+                <div>
+                    <label for="postTime" style="display: block; margin-bottom: 8px; font-weight: 600;">Time</label>
+                    <input type="time" id="postTime">
+                </div>
+            </div>
+
+            <div class="button-group">
+                <button class="btn-secondary" onclick="clearForm()">Clear</button>
+                <button class="btn-primary" onclick="schedulePost()">Schedule Post</button>
+                <button class="btn-primary" onclick="postNow()" style="background: linear-gradient(135deg, #10B981 0%, #059669 100%);">Post Now</button>
+            </div>
+        </div>
+
+        <div style="margin-top: 30px;">
+            <h2 style="color: white; margin-bottom: 20px;">📊 Your Platforms</h2>
+            <div class="dashboard-grid">
+                <!-- YouTube -->
+                <div class="platform-card youtube">
+                    <div class="platform-header">
+                        <div class="platform-icon">🎬</div>
+                        <div class="platform-info">
+                            <h3>YouTube</h3>
+                            <div class="platform-status">
+                                <span class="status-dot active"></span>
+                                Connected
+                            </div>
+                        </div>
+                    </div>
+                    <div class="platform-stats">
+                        <div class="stat">
+                            <div class="stat-number">1.2K</div>
+                            <div class="stat-label">Subscribers</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-number">45K</div>
+                            <div class="stat-label">Views</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Instagram -->
+                <div class="platform-card instagram">
+                    <div class="platform-header">
+                        <div class="platform-icon">📷</div>
+                        <div class="platform-info">
+                            <h3>Instagram</h3>
+                            <div class="platform-status">
+                                <span class="status-dot inactive"></span>
+                                Add Token
+                            </div>
+                        </div>
+                    </div>
+                    <div class="platform-stats">
+                        <div class="stat">
+                            <div class="stat-number">0</div>
+                            <div class="stat-label">Followers</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-number">0</div>
+                            <div class="stat-label">Posts</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Facebook -->
+                <div class="platform-card facebook">
+                    <div class="platform-header">
+                        <div class="platform-icon">👥</div>
+                        <div class="platform-info">
+                            <h3>Facebook</h3>
+                            <div class="platform-status">
+                                <span class="status-dot inactive"></span>
+                                Add Token
+                            </div>
+                        </div>
+                    </div>
+                    <div class="platform-stats">
+                        <div class="stat">
+                            <div class="stat-number">0</div>
+                            <div class="stat-label">Followers</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-number">0</div>
+                            <div class="stat-label">Posts</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TikTok -->
+                <div class="platform-card tiktok">
+                    <div class="platform-header">
+                        <div class="platform-icon">🎵</div>
+                        <div class="platform-info">
+                            <h3>TikTok</h3>
+                            <div class="platform-status">
+                                <span class="status-dot inactive"></span>
+                                Add Token
+                            </div>
+                        </div>
+                    </div>
+                    <div class="platform-stats">
+                        <div class="stat">
+                            <div class="stat-number">0</div>
+                            <div class="stat-label">Followers</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-number">0</div>
+                            <div class="stat-label">Posts</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- LinkedIn -->
+                <div class="platform-card linkedin">
+                    <div class="platform-header">
+                        <div class="platform-icon">💼</div>
+                        <div class="platform-info">
+                            <h3>LinkedIn</h3>
+                            <div class="platform-status">
+                                <span class="status-dot inactive"></span>
+                                Add Token
+                            </div>
+                        </div>
+                    </div>
+                    <div class="platform-stats">
+                        <div class="stat">
+                            <div class="stat-number">0</div>
+                            <div class="stat-label">Followers</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-number">0</div>
+                            <div class="stat-label">Posts</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Twitter -->
+                <div class="platform-card twitter">
+                    <div class="platform-header">
+                        <div class="platform-icon">𝕏</div>
+                        <div class="platform-info">
+                            <h3>Twitter/X</h3>
+                            <div class="platform-status">
+                                <span class="status-dot inactive"></span>
+                                Add Token
+                            </div>
+                        </div>
+                    </div>
+                    <div class="platform-stats">
+                        <div class="stat">
+                            <div class="stat-number">0</div>
+                            <div class="stat-label">Followers</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-number">0</div>
+                            <div class="stat-label">Posts</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- WhatsApp -->
+                <div class="platform-card whatsapp">
+                    <div class="platform-header">
+                        <div class="platform-icon">💬</div>
+                        <div class="platform-info">
+                            <h3>WhatsApp</h3>
+                            <div class="platform-status">
+                                <span class="status-dot inactive"></span>
+                                Business API
+                            </div>
+                        </div>
+                    </div>
+                    <div class="platform-stats">
+                        <div class="stat">
+                            <div class="stat-number">0</div>
+                            <div class="stat-label">Contacts</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-number">0</div>
+                            <div class="stat-label">Messages</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Get today's date as default
+        document.getElementById('postDate').valueAsDate = new Date();
+        document.getElementById('postTime').value = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' }).slice(0, 5);
+
+        function showMessage(message, type) {
+            const messageDiv = document.getElementById('message');
+            messageDiv.textContent = message;
+            messageDiv.className = `message ${type}`;
+            setTimeout(() => {
+                messageDiv.className = 'message';
+            }, 3000);
+        }
+
+        function getSelectedPlatforms() {
+            const platforms = [];
+            const checkboxes = document.querySelectorAll('input[type="checkbox"]:checked');
+            checkboxes.forEach(cb => {
+                platforms.push(cb.value);
+            });
+            return platforms;
+        }
+
+        function postNow() {
+            const content = document.getElementById('postContent').value;
+            const platforms = getSelectedPlatforms();
+
+            if (!content.trim()) {
+                showMessage('Please write something to post', 'error');
+                return;
+            }
+
+            if (platforms.length === 0) {
+                showMessage('Please select at least one platform', 'error');
+                return;
+            }
+
+            showMessage(`✅ Posted to ${platforms.join(', ')}!`, 'success');
+            clearForm();
+        }
+
+        function schedulePost() {
+            const content = document.getElementById('postContent').value;
+            const date = document.getElementById('postDate').value;
+            const time = document.getElementById('postTime').value;
+            const platforms = getSelectedPlatforms();
+
+            if (!content.trim()) {
+                showMessage('Please write something to post', 'error');
+                return;
+            }
+
+            if (platforms.length === 0) {
+                showMessage('Please select at least one platform', 'error');
+                return;
+            }
+
+            if (!date || !time) {
+                showMessage('Please select date and time', 'error');
+                return;
+            }
+
+            showMessage(`✅ Post scheduled for ${date} at ${time} on ${platforms.join(', ')}`, 'success');
+            clearForm();
+        }
+
+        function clearForm() {
+            document.getElementById('postContent').value = '';
+            document.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
+            document.getElementById('postDate').valueAsDate = new Date();
+            document.getElementById('postTime').value = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' }).slice(0, 5);
+        }
+    </script>
+</body>
+</html>

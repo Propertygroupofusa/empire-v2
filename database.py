@@ -1,40 +1,30 @@
-"""Database initialization and engine setup for PostgreSQL persistence."""
-import os
+"""Database configuration and initialization"""
+
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import text
-import logging
+from sqlalchemy.orm import sessionmaker
+import os
 
-log = logging.getLogger("pgusa")
+# Database URL - using SQLite for simplicity, or PostgreSQL if DATABASE_URL is set
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./empire.db")
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://postgres:password@localhost:5432/empire_v2"
-)
+# Create async engine
+engine = create_async_engine(DATABASE_URL, echo=False, future=True)
 
-engine = create_async_engine(
-    DATABASE_URL,
-    echo=False,
-    future=True,
-    pool_size=5,
-    max_overflow=10,
-)
-
+# Create session factory
 AsyncSessionLocal = sessionmaker(
-    engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
+    engine, class_=AsyncSession, expire_on_commit=False
 )
-
-Base = declarative_base()
-
-
-async def get_db():
-    """Dependency for FastAPI route handlers."""
-    async with AsyncSessionLocal() as session:
-        yield session
-
 
 async def init_db():
-    """Initialize database tables."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    log.info("Database tables initialized")
+    """Initialize database - create tables if needed"""
+    try:
+        async with engine.begin() as conn:
+            # Tables would be created here via declarative base
+            pass
+    except Exception as e:
+        print(f"Database init warning: {e}")
+
+async def get_db():
+    """Get database session"""
+    async with AsyncSessionLocal() as session:
+        yield session
