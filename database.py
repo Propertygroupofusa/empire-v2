@@ -4,8 +4,15 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 import os
 
-# Database URL - using SQLite for simplicity, or PostgreSQL if DATABASE_URL is set
+# Database URL - using SQLite for simplicity, or PostgreSQL if DATABASE_URL is set.
+# Railway's Postgres plugin injects a plain postgresql:// URL, which defaults to
+# the sync psycopg2 driver — create_async_engine requires an async driver, so
+# rewrite the scheme to use asyncpg regardless of what's provided.
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./empire.db")
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+elif DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
 
 # Create async engine
 engine = create_async_engine(DATABASE_URL, echo=False, future=True)
