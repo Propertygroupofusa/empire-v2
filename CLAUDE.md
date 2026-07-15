@@ -26,78 +26,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Monitoring:** Health monitor + data retention manager
 
 ### Main Entry Point
-**main.py** (17,648 bytes)
-- FastAPI app initialization with CORS
-- Lifespan context manager for startup/shutdown
-- Router registration (auth, workers, clients, jobs, bookings, payments, admin, orders, revenue, social)
-- Critical endpoints:
-  - `GET /quote` — serves quote_request.html form (reads file, returns HTMLResponse)
-  - `GET /health` — deployment health check
-  - `GET /order-success` — Stripe success redirect
-  - `GET /monitor/*` — monitoring endpoints
-  - `GET /retention/*` — data retention status
+**main.py** — FastAPI app entry point with CORS, lifespan manager, and router registration (auth, workers, clients, jobs, bookings, payments, admin, orders, revenue, social).
 
 **Key Pattern:** Routers imported with try-except to prevent crashes if modules missing. Missing routers log warnings but don't stop startup.
 
 ### Order/Video Generation Flow
-**routers/orders.py** (23,525 bytes) — main business logic
+**routers/orders.py** — main business logic for quote creation, checkout, webhook handling, and video generation.
 
-1. **POST /orders/request-quote** — Customer submits video request
-   - Accepts: customer info, video type, script, avatar, language, delivery timeline
-   - Avatar: 8 options (Anna, Carlos, Emma, James, Lisa, Marcus, Olivia, Ryan)
-   - Language: 22 options (English US/UK/AU, Spanish, French, German, Italian, Portuguese, Dutch, Swedish, Norwegian, Danish, Polish, Russian, Japanese, Korean, Chinese Simplified/Traditional, Arabic, Hindi)
-   - Returns: order_id + quote_price
-   - Stores in `pending_orders` list with all fields
-
-2. **POST /orders/{order_id}/create-checkout** — Stripe session creation
-   - Uses stored order data to create Stripe checkout session
-   - Returns: session_id for redirectToCheckout()
-
-3. **POST /orders/webhook/stripe** — Payment confirmation webhook
-   - Validates webhook signature
-   - Marks order as paid
-   - Triggers `generate_video_for_order()` background task (if HeyGen available)
-
-4. **Async generate_video_for_order()** — Background video generation
-   - Calls HeyGen API with: script, avatar (mapped to HeyGen ID), language (mapped to voice settings)
-   - Polls HeyGen API every 10 seconds for up to 10 minutes
-   - On completion: stores video_url, sends email to customer
-   - On timeout/error: sets status accordingly
-
-5. **GET /orders/customer/{order_id}** — Customer portal
-   - Displays order status, video download link (if ready)
-
-6. **GET /orders/admin-dashboard** — Admin video tracking
-   - Shows all orders with generation status
+Key endpoints: `POST /orders/request-quote` (customer submits video request, accepts 8 avatars and 22 languages), `POST /orders/{order_id}/create-checkout` (Stripe session creation), `POST /orders/webhook/stripe` (payment confirmation, triggers background video generation), `GET /orders/customer/{order_id}` (customer portal), `GET /orders/admin-dashboard` (admin video tracking).
 
 ### Frontend Form
-**quote_request.html** (21,646 bytes)
-- Beautiful purple gradient UI
-- Two-stage flow: Get Quote → Accept & Pay Now
-- Form fields: name, email, company, phone, video type, script, target audience, avatar, language, delivery timeline
-- Dynamic pricing calculator
-- Stripe.js integration (calls POST /orders/request-quote, then creates checkout session)
-- All form data serialized to JSON and sent to backend
+**quote_request.html** — Quote form with two-stage flow (Get Quote → Pay), dynamic pricing calculator, and Stripe.js integration. Collects customer info, video type, script, target audience, avatar, language, and delivery timeline.
 
 ### Supporting Systems
 
-**heygan_integration.py** (5,083 bytes)
-- `async generate_video()` — calls HeyGen API v1/videos/generate
-- `async get_video_url()` — polls HeyGen API for completion
-- Avatar/language mapping tables (convert user-friendly names to HeyGen format)
+**heygan_integration.py** — HeyGen API client with avatar/language mapping and video polling.
 
-**health_monitor.py** (17,248 bytes)
-- Monitors all systems continuously
-- Tracks errors, fixed issues, performance metrics
-- Stores in permanent archive tables
+**health_monitor.py** — Continuous system monitoring with error tracking and performance metrics.
 
-**data_retention.py** (12,265 bytes)
-- Archives old data to permanent storage
-- Keeps all data forever (non-deletion retention policy)
+**data_retention.py** — Data archival (permanent retention policy, no deletions).
 
-**database.py** (941 bytes)
-- SQLAlchemy engine + session factory
-- SQLite connection string from env var
+**database.py** — SQLAlchemy async engine and session factory for SQLite persistence.
 
 ---
 
