@@ -3,6 +3,7 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 import os
+import traceback
 
 # Database URL - using SQLite for simplicity, or PostgreSQL if DATABASE_URL is set.
 # Railway's Postgres plugin injects a plain postgresql:// URL, which defaults to
@@ -32,7 +33,11 @@ async def init_db():
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
     except Exception as e:
-        print(f"Database init warning: {e}")
+        # str(e) has been coming back empty in production for whatever's
+        # failing here, making this warning useless — log the exception
+        # type and full traceback instead of guessing blind.
+        print(f"Database init warning [{type(e).__name__}]: {e}")
+        traceback.print_exc()
 
 async def get_db():
     """Get database session"""
