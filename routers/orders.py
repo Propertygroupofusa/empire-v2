@@ -3,9 +3,10 @@ Customer Order & Quote Management Router
 Handles video request submissions, quote generation, payments
 """
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Request, Depends
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import text, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 from typing import Optional
 import json
@@ -16,6 +17,7 @@ import asyncio
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from database import get_db, Order
 
 
 # Pydantic models for request bodies
@@ -62,10 +64,94 @@ log = logging.getLogger("orders")
 router = APIRouter()
 
 # ============================================================
-# IN-MEMORY STORAGE (FOR NOW - move to DB in production)
+# IN-MEMORY STORAGE (legacy - gradual migration to DB)
 # ============================================================
 pending_orders = []
 completed_orders = []
+
+
+async def save_order_to_db(session: AsyncSession, order_data: dict) -> Optional[int]:
+    """Save order to database"""
+    try:
+        order = Order(
+            order_id=order_data.get("id"),
+            customer_email=order_data.get("customer_email"),
+            customer_name=order_data.get("customer_name"),
+            customer_company=order_data.get("customer_company"),
+            customer_phone=order_data.get("customer_phone"),
+            video_type=order_data.get("video_type"),
+            script=order_data.get("script_or_topic"),
+            target_audience=order_data.get("target_audience"),
+            avatar=order_data.get("avatar"),
+            language=order_data.get("language"),
+            delivery_days=order_data.get("delivery_days", 2),
+            quote_price=order_data.get("quote_price", 0),
+            status=order_data.get("status", "quote_requested"),
+            paid=order_data.get("paid", False),
+            stripe_session_id=order_data.get("stripe_session_id"),
+            video_generation_status=order_data.get("video_generation_status", "pending"),
+            video_url=order_data.get("video_url"),
+        )
+        session.add(order)
+        await session.commit()
+        log.info(f"Order {order_data.get('id')} saved to database")
+        return order.id
+    except Exception as e:
+        log.error(f"Failed to save order to database: {e}")
+        return None
+
+
+async def get_order_from_db(session: AsyncSession, order_id: int) -> Optional[dict]:
+    """Retrieve order from database"""
+    try:
+        result = await session.execute(
+            select(Order).where(Order.order_id == str(order_id))
+        )
+        order = result.scalars().first()
+        if order:
+            return {
+                "id": order.order_id,
+                "customer_email": order.customer_email,
+                "customer_name": order.customer_name,
+                "customer_company": order.customer_company,
+                "customer_phone": order.customer_phone,
+                "video_type": order.video_type,
+                "script_or_topic": order.script,
+                "target_audience": order.target_audience,
+                "avatar": order.avatar,
+                "language": order.language,
+                "delivery_days": order.delivery_days,
+                "quote_price": order.quote_price,
+                "status": order.status,
+                "paid": order.paid,
+                "stripe_session_id": order.stripe_session_id,
+                "video_generation_status": order.video_generation_status,
+                "video_url": order.video_url,
+                "created_at": order.created_at.isoformat(),
+            }
+    except Exception as e:
+        log.warning(f"Failed to retrieve order from database: {e}")
+    return None
+
+
+async def update_order_in_db(session: AsyncSession, order_id: int, updates: dict) -> bool:
+    """Update order in database"""
+    try:
+        result = await session.execute(
+            select(Order).where(Order.order_id == str(order_id))
+        )
+        order = result.scalars().first()
+        if order:
+            for key, value in updates.items():
+                if hasattr(order, key):
+                    setattr(order, key, value)
+            order.updated_at = datetime.utcnow()
+            await session.commit()
+            log.info(f"Order {order_id} updated in database")
+            return True
+    except Exception as e:
+        log.error(f"Failed to update order in database: {e}")
+    return False
 
 # ============================================================
 # GET /orders/stripe-key - Get Stripe publishable key
@@ -84,7 +170,7 @@ async def get_stripe_key():
 # ============================================================
 
 @router.post("/request-quote")
-async def request_quote(data: RequestQuoteData, background_tasks: BackgroundTasks):
+async def request_quote(data: RequestQuoteData, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
     """
     Customer submits a video request with script, avatar, and language.
     Automatically uses subscription quota if available, otherwise creates quote for payment.
@@ -166,6 +252,9 @@ async def request_quote(data: RequestQuoteData, background_tasks: BackgroundTask
         order["pricing_type"] = "one_off"
 
     pending_orders.append(order)
+
+    # Save order to database for persistence
+    await save_order_to_db(db, order)
 
     log.info(
         f"Video order from {data.customer_name} ({data.customer_email}): "
@@ -510,20 +599,25 @@ async def admin_dashboard():
 # ============================================================
 
 @router.get("/{order_id}")
-async def get_order_status(order_id: int):
-    """Get status of specific order"""
-    order = next((o for o in pending_orders if o["id"] == order_id), None)
+async def get_order_status(order_id: int, db: AsyncSession = Depends(get_db)):
+    """Get status of specific order (from database or in-memory)"""
+    # Try database first
+    order = await get_order_from_db(db, order_id)
+
     if not order:
-        order = next((o for o in completed_orders if o["id"] == order_id), None)
+        # Fallback to in-memory
+        order = next((o for o in pending_orders if o["id"] == order_id), None)
+        if not order:
+            order = next((o for o in completed_orders if o["id"] == order_id), None)
 
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
     return {
         "order": order,
-        "status": order["status"],
-        "paid": order["paid"],
-        "completed": order["status"] == "delivered",
+        "status": order.get("status"),
+        "paid": order.get("paid"),
+        "completed": order.get("status") == "delivered",
     }
 
 
