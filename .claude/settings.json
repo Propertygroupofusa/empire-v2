@@ -1,0 +1,47 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__github__pull_request_read",
+      "mcp__github__list_pull_requests",
+      "Bash(git status *)",
+      "Bash(git log *)",
+      "Bash(git diff *)",
+      "Bash(git show *)",
+      "Bash(git branch *)",
+      "Bash(gh pr view *)",
+      "Bash(gh pr list *)",
+      "Bash(gh pr diff *)",
+      "Bash(gh issue view *)",
+      "Bash(gh run list *)",
+      "Bash(grep *)",
+      "Bash(rg *)",
+      "Bash(find *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(wc *)",
+      "Bash(pwd)",
+      "Read"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // .tool_response.filePath' | { read -r f; if [[ \"$f\" == *.py ]]; then python3 -m black --quiet \"$f\" 2>/dev/null || true; elif [[ \"$f\" == *.js ]] || [[ \"$f\" == *.jsx ]]; then npx prettier --write \"$f\" 2>/dev/null || true; fi; }",
+            "statusMessage": "Formatting...",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "DEBUG": "false",
+    "PYTHONUNBUFFERED": "1"
+  }
+}
