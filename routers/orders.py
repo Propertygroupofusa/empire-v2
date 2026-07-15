@@ -42,6 +42,19 @@ except Exception as e:
     generate_video = None
     get_video_url = None
 
+# Import subscription management
+try:
+    from subscription_tiers import (
+        get_subscription,
+        can_create_video,
+        use_video_quota,
+        get_pricing_for_customer,
+    )
+    SUBSCRIPTIONS_AVAILABLE = True
+except Exception as e:
+    log.warning(f"Subscription integration not available: {e}")
+    SUBSCRIPTIONS_AVAILABLE = False
+
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 stripe_publishable_key = os.getenv("STRIPE_PUBLISHABLE_KEY")
 
@@ -74,11 +87,36 @@ async def get_stripe_key():
 async def request_quote(data: RequestQuoteData, background_tasks: BackgroundTasks = None):
     """
     Customer submits a video request with script, avatar, and language.
-    Returns order ID and quote price for payment processing.
+    Automatically uses subscription quota if available, otherwise creates quote for payment.
     """
 
     if not data.customer_name or not data.customer_email or not data.video_type or not data.avatar or not data.language:
         raise HTTPException(status_code=400, detail="Missing required fields")
+
+    # Check subscription status and quota
+    subscription_status = None
+    pricing_info = None
+    quota_deducted = False
+
+    if SUBSCRIPTIONS_AVAILABLE:
+        # Check if customer can create video (has quota)
+        can_create, reason = can_create_video(data.customer_email)
+        if not can_create:
+            raise HTTPException(status_code=429, detail=f"Video quota exceeded: {reason}")
+
+        # Get subscription and pricing info
+        subscription_status = get_subscription(data.customer_email)
+        pricing_info = get_pricing_for_customer(
+            data.customer_email,
+            data.video_type,
+            data.delivery_days
+        )
+
+        # If subscription exists and video is included, mark quota as used
+        if subscription_status and subscription_status.get("active"):
+            quota_deducted = use_video_quota(data.customer_email)
+            if not quota_deducted:
+                raise HTTPException(status_code=429, detail="Could not deduct from quota - quota exceeded")
 
     # Create order object
     order = {
@@ -104,22 +142,53 @@ async def request_quote(data: RequestQuoteData, background_tasks: BackgroundTask
         "completed_at": None,
         "video_url": None,
         "video_generation_status": "pending",
+        "subscription_type": None,
+        "pricing_type": None,
     }
+
+    # Calculate pricing
+    if pricing_info:
+        order["quote_price"] = pricing_info.get("total", 0)
+        order["pricing_type"] = pricing_info.get("type", "one_off")
+        order["subscription_type"] = subscription_status.get("tier_id") if subscription_status else None
+
+        # Mark as paid if included in subscription
+        if pricing_info.get("type") == "subscription":
+            order["status"] = "payment_received"
+            order["paid"] = True
+            # Auto-trigger video generation for subscription videos
+            if background_tasks:
+                background_tasks.add_task(generate_video_for_order, order["id"], order)
+    else:
+        # Fall back to regular quote price calculation
+        quote_price = calculate_quote_price(data.video_type, data.delivery_days)
+        order["quote_price"] = quote_price
+        order["pricing_type"] = "one_off"
 
     pending_orders.append(order)
 
-    # Calculate quote price based on video type and delivery speed
-    quote_price = calculate_quote_price(video_type, delivery_days)
-    order["quote_price"] = quote_price
-
-    log.info(f"New quote request from {customer_name} ({customer_email}): {video_type}, ${quote_price}")
+    log.info(
+        f"Video order from {data.customer_name} ({data.customer_email}): "
+        f"{data.video_type}, pricing={order['pricing_type']}, price=${order['quote_price']}, "
+        f"subscription={order['subscription_type'] or 'none'}"
+    )
 
     return {
         "success": True,
-        "message": f"Quote created successfully",
+        "message": f"Video order created successfully",
         "order_id": order["id"],
-        "quote_price": quote_price,
-        "customer_email": customer_email,
+        "quote_price": order["quote_price"],
+        "customer_email": data.customer_email,
+        "pricing_type": order["pricing_type"],
+        "subscription_tier": order["subscription_type"],
+        "status": order["status"],
+        "details": {
+            "included_in_subscription": pricing_info.get("type") == "subscription" if pricing_info else False,
+            "videos_remaining": (
+                subscription_status.get("videos_remaining", 0)
+                if subscription_status else None
+            ),
+        }
     }
 
 
