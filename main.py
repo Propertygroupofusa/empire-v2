@@ -96,6 +96,9 @@ except Exception as e:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pgusa")
 
+# Deployment marker - forces fresh Railway build
+_deployment_version = "2026-07-15-stripe-subscriptions"
+
 # Ensure all subscription modules load correctly
 try:
     from stripe_subscriptions import setup_stripe_products
