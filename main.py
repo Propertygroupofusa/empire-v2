@@ -276,7 +276,8 @@ async def lifespan(app: FastAPI):
     try:
         if health_monitor_service is not None:
             import asyncio
-            await health_monitor_service()
+            # Start health monitor as a background task to avoid blocking startup
+            asyncio.create_task(health_monitor_service())
             log.info("🔍 Health Monitor started - continuous error checking active")
     except Exception as e:
         log.warning(f"Health monitor failed: {e}")
