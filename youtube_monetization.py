@@ -105,8 +105,8 @@ class YouTubeMonetizationTracker:
             # Request analytics metrics
             response = self.youtube_analytics_service.reports().query(
                 ids='channel==MINE',
-                start_date=str(start_date),
-                end_date=str(end_date),
+                startDate=str(start_date),
+                endDate=str(end_date),
                 metrics='views,estimatedMinutesWatched,estimatedRevenue,monetizedPlaybacks,impressions',
                 dimensions='day'
             ).execute()
