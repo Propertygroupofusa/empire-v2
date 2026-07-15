@@ -4,6 +4,7 @@ Handles tier browsing, subscriptions, and usage tracking
 """
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 from subscription_tiers import (
     get_all_tiers,
     get_tier,
@@ -20,6 +21,13 @@ from stripe_subscriptions import (
 import stripe
 import logging
 import os
+
+
+# Pydantic models for request bodies
+class CheckoutRequest(BaseModel):
+    tier_id: str
+    customer_email: str
+    customer_name: str
 
 log = logging.getLogger("subscriptions")
 router = APIRouter()
@@ -207,15 +215,14 @@ async def admin_get_customer_subscriptions(customer_email: str):
 
 
 @router.post("/checkout")
-async def create_subscription_checkout_session(
-    customer_email: str,
-    customer_name: str,
-    tier_id: str,
-):
+async def create_subscription_checkout_session(request: CheckoutRequest):
     """
     Create a Stripe checkout session for subscription signup
     Returns redirect URL to Stripe Checkout
     """
+    customer_email = request.customer_email
+    customer_name = request.customer_name
+    tier_id = request.tier_id
     if tier_id not in SUBSCRIPTION_TIERS:
         raise HTTPException(status_code=400, detail=f"Invalid tier: {tier_id}")
 

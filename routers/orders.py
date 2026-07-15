@@ -4,6 +4,7 @@ Handles video request submissions, quote generation, payments
 """
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
+from pydantic import BaseModel
 from sqlalchemy import text
 from datetime import datetime
 from typing import Optional
@@ -15,6 +16,21 @@ import asyncio
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
+
+# Pydantic models for request bodies
+class RequestQuoteData(BaseModel):
+    customer_name: str
+    customer_email: str
+    customer_company: str = ""
+    video_type: str
+    script_or_topic: str
+    target_audience: str = ""
+    avatar: str
+    language: str
+    delivery_days: int = 2
+    reference_url: Optional[str] = None
+    phone: Optional[str] = None
 
 # Try to import HeyGen integration, but don't crash if it fails
 try:
@@ -42,7 +58,7 @@ completed_orders = []
 # GET /orders/stripe-key - Get Stripe publishable key
 # ============================================================
 
-@router.get("/orders/stripe-key")
+@router.get("/stripe-key")
 async def get_stripe_key():
     """Get Stripe publishable key for frontend"""
     return {
@@ -51,47 +67,34 @@ async def get_stripe_key():
 
 
 # ============================================================
-# POST /orders/request-quote - Customer submits video request
+# POST /request-quote - Customer submits video request
 # ============================================================
 
-@router.post("/orders/request-quote")
-async def request_quote(
-    customer_name: str,
-    customer_email: str,
-    customer_company: str,
-    video_type: str,
-    script_or_topic: str,
-    target_audience: str,
-    avatar: str,
-    language: str,
-    delivery_days: int = 2,
-    reference_url: Optional[str] = None,
-    phone: Optional[str] = None,
-    background_tasks: BackgroundTasks = None,
-):
+@router.post("/request-quote")
+async def request_quote(data: RequestQuoteData, background_tasks: BackgroundTasks = None):
     """
     Customer submits a video request with script, avatar, and language.
     Returns order ID and quote price for payment processing.
     """
 
-    if not customer_name or not customer_email or not video_type or not avatar or not language:
+    if not data.customer_name or not data.customer_email or not data.video_type or not data.avatar or not data.language:
         raise HTTPException(status_code=400, detail="Missing required fields")
 
     # Create order object
     order = {
         "id": len(pending_orders) + 1,
         "status": "quote_requested",
-        "customer_name": customer_name,
-        "customer_email": customer_email,
-        "customer_company": customer_company,
-        "phone": phone,
-        "video_type": video_type,
-        "script_or_topic": script_or_topic,
-        "target_audience": target_audience,
-        "avatar": avatar,
-        "language": language,
-        "delivery_days": delivery_days,
-        "reference_url": reference_url,
+        "customer_name": data.customer_name,
+        "customer_email": data.customer_email,
+        "customer_company": data.customer_company,
+        "phone": data.phone,
+        "video_type": data.video_type,
+        "script_or_topic": data.script_or_topic,
+        "target_audience": data.target_audience,
+        "avatar": data.avatar,
+        "language": data.language,
+        "delivery_days": data.delivery_days,
+        "reference_url": data.reference_url,
         "requested_at": datetime.now().isoformat(),
         "quote_sent_at": None,
         "quote_price": None,
@@ -199,7 +202,7 @@ def calculate_quote_price(video_type: str, delivery_days: int) -> int:
 # POST /orders/{order_id}/create-checkout - Create Stripe session
 # ============================================================
 
-@router.post("/orders/{order_id}/create-checkout")
+@router.post("/{order_id}/create-checkout")
 async def create_checkout_session(order_id: int):
     """Create Stripe checkout session for order"""
 
@@ -256,7 +259,7 @@ async def create_checkout_session(order_id: int):
 # POST /orders/webhook/stripe - Stripe webhook handler
 # ============================================================
 
-@router.post("/orders/webhook/stripe")
+@router.post("/webhook/stripe")
 async def stripe_webhook(request: Request):
     """Handle Stripe webhook events"""
 
@@ -353,219 +356,10 @@ async def generate_video_for_order(order_id: int, order: dict):
 
 
 # ============================================================
-# GET /orders/{order_id} - Get specific order status
+# LITERAL ROUTES (must come before /{order_id})
 # ============================================================
 
-@router.get("/orders/{order_id}")
-async def get_order_status(order_id: int):
-    """Get status of specific order"""
-    order = next((o for o in pending_orders if o["id"] == order_id), None)
-    if not order:
-        order = next((o for o in completed_orders if o["id"] == order_id), None)
-
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    return {
-        "order": order,
-        "status": order["status"],
-        "paid": order["paid"],
-        "completed": order["status"] == "delivered",
-    }
-
-
-# ============================================================
-# POST /orders/{order_id}/payment-received - Mark order as paid
-# ============================================================
-
-@router.post("/orders/{order_id}/payment-received")
-async def mark_payment_received(order_id: int, transaction_id: str = ""):
-    """
-    Mark order as paid
-    """
-    order = next((o for o in pending_orders if o["id"] == order_id), None)
-
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    order["paid"] = True
-    order["status"] = "payment_received"
-    order["transaction_id"] = transaction_id
-
-    log.info(f"Payment received for order {order_id}: ${order['quote_price']}")
-
-    return {
-        "success": True,
-        "order_id": order_id,
-        "status": "payment_received",
-        "message": f"Payment confirmed. Video creation starting now.",
-    }
-
-
-# ============================================================
-# POST /orders/{order_id}/generate-video - Manually trigger video generation
-# ============================================================
-
-@router.post("/orders/{order_id}/generate-video")
-async def manual_generate_video(order_id: int):
-    """Admin endpoint to manually trigger video generation"""
-    order = next((o for o in pending_orders if o["id"] == order_id), None)
-
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    if not order["paid"]:
-        raise HTTPException(status_code=400, detail="Order must be paid before generating video")
-
-    if order.get("video_url"):
-        return {
-            "status": "already_complete",
-            "message": "Video already generated",
-            "video_url": order["video_url"],
-        }
-
-    # Trigger video generation
-    asyncio.create_task(generate_video_for_order(order_id, order))
-
-    return {
-        "status": "generation_started",
-        "order_id": order_id,
-        "message": "Video generation started. Check status in a few moments.",
-    }
-
-
-# ============================================================
-# POST /orders/{order_id}/mark-complete - Mark video as complete
-# ============================================================
-
-@router.post("/orders/{order_id}/mark-complete")
-async def mark_order_complete(
-    order_id: int,
-    video_url: str,
-    video_download_link: str,
-):
-    """
-    Admin marks order complete and provides video link
-    """
-    order = next((o for o in pending_orders if o["id"] == order_id), None)
-
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    if not order["paid"]:
-        raise HTTPException(status_code=400, detail="Order not paid yet")
-
-    # Mark as complete
-    order["status"] = "delivered"
-    order["completed_at"] = datetime.now().isoformat()
-    order["video_url"] = video_url
-    order["video_download_link"] = video_download_link
-
-    # Move to completed
-    pending_orders.remove(order)
-    completed_orders.append(order)
-
-    log.info(f"Order {order_id} marked complete. Video: {video_url}")
-
-    return {
-        "success": True,
-        "order_id": order_id,
-        "status": "delivered",
-        "customer_email": order["customer_email"],
-        "message": f"Order marked complete.",
-    }
-
-
-# ============================================================
-# GET /orders/customer/{order_id} - Customer portal
-# ============================================================
-
-@router.get("/orders/customer/{order_id}")
-async def customer_portal(order_id: int):
-    """Customer portal to track order and download video"""
-    order = next((o for o in pending_orders if o["id"] == order_id), None)
-    if not order:
-        order = next((o for o in completed_orders if o["id"] == order_id), None)
-
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    # Build response with customer-friendly status
-    status_messages = {
-        "quote_requested": "Quote submitted - awaiting payment",
-        "payment_received": "Payment received - video is being created",
-        "video_ready": "✓ Video is ready to download!",
-        "delivered": "✓ Order complete",
-    }
-
-    video_generation_messages = {
-        "pending": "Waiting to start...",
-        "generating": "Creating your video with AI...",
-        "completed": "Done!",
-        "failed": "Generation failed",
-        "timeout": "Generation took too long",
-        "error": "An error occurred",
-    }
-
-    return {
-        "order_id": order["id"],
-        "customer_name": order["customer_name"],
-        "customer_email": order["customer_email"],
-        "status": order["status"],
-        "status_message": status_messages.get(order["status"], order["status"]),
-        "video_type": order["video_type"],
-        "avatar": order.get("avatar", "N/A"),
-        "language": order.get("language", "N/A"),
-        "quote_price": order["quote_price"],
-        "paid": order["paid"],
-        "requested_at": order["requested_at"],
-        "video_generation_status": order.get("video_generation_status", "pending"),
-        "video_generation_message": video_generation_messages.get(
-            order.get("video_generation_status", "pending")
-        ),
-        "video_url": order.get("video_url"),
-        "completed_at": order.get("completed_at"),
-        "can_download": order.get("video_url") is not None,
-    }
-
-
-# ============================================================
-# GET /orders/customer/{email}/all - Get all orders for customer
-# ============================================================
-
-@router.get("/orders/customer-email/{email}/all")
-async def customer_orders_by_email(email: str):
-    """Get all orders for a customer by email"""
-    customer_orders = [
-        o for o in (pending_orders + completed_orders)
-        if o["customer_email"].lower() == email.lower()
-    ]
-
-    if not customer_orders:
-        raise HTTPException(status_code=404, detail="No orders found for this email")
-
-    return {
-        "email": email,
-        "total_orders": len(customer_orders),
-        "orders": [
-            {
-                "order_id": o["id"],
-                "status": o["status"],
-                "quote_price": o["quote_price"],
-                "paid": o["paid"],
-                "video_ready": o.get("video_url") is not None,
-                "requested_at": o["requested_at"],
-            }
-            for o in customer_orders
-        ]
-    }
-
-
-# ============================================================
-# GET /orders/stats - Quick stats for dashboard
-# ============================================================
-
-@router.get("/orders/stats")
+@router.get("/stats")
 async def get_order_stats():
     """Get order statistics"""
     total_revenue = sum(o["quote_price"] for o in completed_orders if o["paid"])
@@ -582,11 +376,7 @@ async def get_order_stats():
     }
 
 
-# ============================================================
-# GET /orders/admin-dashboard - Full admin view
-# ============================================================
-
-@router.get("/orders/admin-dashboard")
+@router.get("/admin-dashboard")
 async def admin_dashboard():
     """Complete admin dashboard view"""
 
@@ -644,3 +434,218 @@ async def admin_dashboard():
             "avg_order_value": sum(o["quote_price"] for o in completed_orders if o["paid"]) // len([o for o in completed_orders if o["paid"]]) if any(o["paid"] for o in completed_orders) else 0,
         },
     }
+
+
+# ============================================================
+# GET /{order_id} - Get specific order status
+# ============================================================
+
+@router.get("/{order_id}")
+async def get_order_status(order_id: int):
+    """Get status of specific order"""
+    order = next((o for o in pending_orders if o["id"] == order_id), None)
+    if not order:
+        order = next((o for o in completed_orders if o["id"] == order_id), None)
+
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    return {
+        "order": order,
+        "status": order["status"],
+        "paid": order["paid"],
+        "completed": order["status"] == "delivered",
+    }
+
+
+# ============================================================
+# POST /orders/{order_id}/payment-received - Mark order as paid
+# ============================================================
+
+@router.post("/{order_id}/payment-received")
+async def mark_payment_received(order_id: int, transaction_id: str = ""):
+    """
+    Mark order as paid
+    """
+    order = next((o for o in pending_orders if o["id"] == order_id), None)
+
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    order["paid"] = True
+    order["status"] = "payment_received"
+    order["transaction_id"] = transaction_id
+
+    log.info(f"Payment received for order {order_id}: ${order['quote_price']}")
+
+    return {
+        "success": True,
+        "order_id": order_id,
+        "status": "payment_received",
+        "message": f"Payment confirmed. Video creation starting now.",
+    }
+
+
+# ============================================================
+# POST /orders/{order_id}/generate-video - Manually trigger video generation
+# ============================================================
+
+@router.post("/{order_id}/generate-video")
+async def manual_generate_video(order_id: int):
+    """Admin endpoint to manually trigger video generation"""
+    order = next((o for o in pending_orders if o["id"] == order_id), None)
+
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if not order["paid"]:
+        raise HTTPException(status_code=400, detail="Order must be paid before generating video")
+
+    if order.get("video_url"):
+        return {
+            "status": "already_complete",
+            "message": "Video already generated",
+            "video_url": order["video_url"],
+        }
+
+    # Trigger video generation
+    asyncio.create_task(generate_video_for_order(order_id, order))
+
+    return {
+        "status": "generation_started",
+        "order_id": order_id,
+        "message": "Video generation started. Check status in a few moments.",
+    }
+
+
+# ============================================================
+# POST /orders/{order_id}/mark-complete - Mark video as complete
+# ============================================================
+
+@router.post("/{order_id}/mark-complete")
+async def mark_order_complete(
+    order_id: int,
+    video_url: str,
+    video_download_link: str,
+):
+    """
+    Admin marks order complete and provides video link
+    """
+    order = next((o for o in pending_orders if o["id"] == order_id), None)
+
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if not order["paid"]:
+        raise HTTPException(status_code=400, detail="Order not paid yet")
+
+    # Mark as complete
+    order["status"] = "delivered"
+    order["completed_at"] = datetime.now().isoformat()
+    order["video_url"] = video_url
+    order["video_download_link"] = video_download_link
+
+    # Move to completed
+    pending_orders.remove(order)
+    completed_orders.append(order)
+
+    log.info(f"Order {order_id} marked complete. Video: {video_url}")
+
+    return {
+        "success": True,
+        "order_id": order_id,
+        "status": "delivered",
+        "customer_email": order["customer_email"],
+        "message": f"Order marked complete.",
+    }
+
+
+# ============================================================
+# GET /orders/customer/{order_id} - Customer portal
+# ============================================================
+
+@router.get("/customer/{order_id}")
+async def customer_portal(order_id: int):
+    """Customer portal to track order and download video"""
+    order = next((o for o in pending_orders if o["id"] == order_id), None)
+    if not order:
+        order = next((o for o in completed_orders if o["id"] == order_id), None)
+
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # Build response with customer-friendly status
+    status_messages = {
+        "quote_requested": "Quote submitted - awaiting payment",
+        "payment_received": "Payment received - video is being created",
+        "video_ready": "✓ Video is ready to download!",
+        "delivered": "✓ Order complete",
+    }
+
+    video_generation_messages = {
+        "pending": "Waiting to start...",
+        "generating": "Creating your video with AI...",
+        "completed": "Done!",
+        "failed": "Generation failed",
+        "timeout": "Generation took too long",
+        "error": "An error occurred",
+    }
+
+    return {
+        "order_id": order["id"],
+        "customer_name": order["customer_name"],
+        "customer_email": order["customer_email"],
+        "status": order["status"],
+        "status_message": status_messages.get(order["status"], order["status"]),
+        "video_type": order["video_type"],
+        "avatar": order.get("avatar", "N/A"),
+        "language": order.get("language", "N/A"),
+        "quote_price": order["quote_price"],
+        "paid": order["paid"],
+        "requested_at": order["requested_at"],
+        "video_generation_status": order.get("video_generation_status", "pending"),
+        "video_generation_message": video_generation_messages.get(
+            order.get("video_generation_status", "pending")
+        ),
+        "video_url": order.get("video_url"),
+        "completed_at": order.get("completed_at"),
+        "can_download": order.get("video_url") is not None,
+    }
+
+
+# ============================================================
+# GET /orders/customer/{email}/all - Get all orders for customer
+# ============================================================
+
+@router.get("/customer-email/{email}/all")
+async def customer_orders_by_email(email: str):
+    """Get all orders for a customer by email"""
+    customer_orders = [
+        o for o in (pending_orders + completed_orders)
+        if o["customer_email"].lower() == email.lower()
+    ]
+
+    if not customer_orders:
+        raise HTTPException(status_code=404, detail="No orders found for this email")
+
+    return {
+        "email": email,
+        "total_orders": len(customer_orders),
+        "orders": [
+            {
+                "order_id": o["id"],
+                "status": o["status"],
+                "quote_price": o["quote_price"],
+                "paid": o["paid"],
+                "video_ready": o.get("video_url") is not None,
+                "requested_at": o["requested_at"],
+            }
+            for o in customer_orders
+        ]
+    }
+
+
+# ============================================================
+# GET /orders/stats - Quick stats for dashboard
+# ============================================================
+
