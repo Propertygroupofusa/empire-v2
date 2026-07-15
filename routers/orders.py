@@ -113,7 +113,7 @@ async def request_quote(data: RequestQuoteData, background_tasks: BackgroundTask
         )
 
         # If subscription exists and video is included, mark quota as used
-        if subscription_status and subscription_status.get("active"):
+        if subscription_status and subscription_status.get("active", False):
             quota_deducted = use_video_quota(data.customer_email)
             if not quota_deducted:
                 raise HTTPException(status_code=429, detail="Could not deduct from quota - quota exceeded")

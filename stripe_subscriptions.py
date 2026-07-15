@@ -230,7 +230,7 @@ def handle_checkout_completed(event: dict) -> bool:
         if customer_email in customer_subscriptions:
             customer_subscriptions[customer_email]["stripe_subscription_id"] = subscription_id
             customer_subscriptions[customer_email]["stripe_customer_id"] = session["customer"]
-            customer_subscriptions[customer_email]["status"] = "active"
+            customer_subscriptions[customer_email]["active"] = True
             customer_subscriptions[customer_email]["payment_status"] = "active"
 
         return True

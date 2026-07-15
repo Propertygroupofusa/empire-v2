@@ -108,8 +108,8 @@ def get_subscription(customer_email: str) -> Optional[dict]:
     if not sub:
         return None
 
-    # Check if subscription period has ended
-    if sub["active"] and datetime.utcnow() > sub["current_period_end"]:
+    # Check if subscription period has ended (only if active)
+    if sub.get("active", False) and datetime.utcnow() > sub["current_period_end"]:
         # Reset monthly counter and extend period
         sub["current_period_start"] = datetime.utcnow()
         sub["current_period_end"] = datetime.utcnow() + timedelta(days=30)
@@ -131,7 +131,7 @@ def can_create_video(customer_email: str) -> tuple[bool, str]:
         return True, "one_off"
 
     # Check if subscription is active
-    if not sub.get("active"):
+    if not sub.get("active", False):
         return True, "one_off (subscription inactive)"
 
     # Check quota
@@ -148,7 +148,7 @@ def use_video_quota(customer_email: str) -> bool:
     """Deduct one video from customer quota (return False if over quota or inactive)"""
     sub = get_subscription(customer_email)
 
-    if not sub or not sub.get("active"):
+    if not sub or not sub.get("active", False):
         # One-off customer or inactive subscription, no quota check needed
         return True
 
@@ -180,7 +180,7 @@ def get_pricing_for_customer(customer_email: str, video_type: str, delivery_days
     # Check if customer has subscription
     sub = get_subscription(customer_email)
 
-    if not sub or not sub.get("active"):
+    if not sub or not sub.get("active", False):
         # One-off pricing: base + rush fee (if no subscription or subscription inactive)
         rush_fee = 0
         if delivery_days == 1:  # Rush 4h
@@ -236,7 +236,7 @@ def get_customer_billing_summary(customer_email: str) -> dict:
 
     return {
         "customer_email": customer_email,
-        "status": "active" if sub["active"] else "inactive",
+        "status": "active" if sub.get("active", False) else "inactive",
         "tier": tier["name"],
         "monthly_price": tier["monthly_price"],
         "videos_per_month": tier["videos_per_month"],

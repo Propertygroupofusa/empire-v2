@@ -118,7 +118,7 @@ async def get_subscription_status(customer_email: str):
         "videos_remaining": subscription["videos_remaining"],
         "current_period_start": subscription["current_period_start"].isoformat(),
         "current_period_end": subscription["current_period_end"].isoformat(),
-        "active": subscription["active"],
+        "active": subscription.get("active", True),
     }
 
 
