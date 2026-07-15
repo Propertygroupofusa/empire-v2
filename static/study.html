@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Study Assistant</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #333;
+            font-size: 32px;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 15px;
+            line-height: 1.5;
+        }
+
+        .upload-section {
+            border: 2px dashed #667eea;
+            border-radius: 8px;
+            padding: 40px 30px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-bottom: 30px;
+        }
+
+        .upload-section:hover {
+            border-color: #764ba2;
+            background: #f9f9f9;
+        }
+
+        .upload-section input {
+            display: none;
+        }
+
+        .upload-icon {
+            font-size: 48px;
+            margin-bottom: 15px;
+            display: block;
+        }
+
+        .upload-text {
+            color: #667eea;
+            font-weight: 600;
+            margin-bottom: 5px;
+            font-size: 16px;
+        }
+
+        .upload-subtext {
+            color: #999;
+            font-size: 13px;
+        }
+
+        .material-type {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+
+        .material-btn {
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 14px;
+            font-weight: 500;
+            background: white;
+        }
+
+        .material-btn:hover {
+            border-color: #667eea;
+            background: #f0f4ff;
+        }
+
+        .material-btn.active {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+
+        .btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 16px;
+            width: 100%;
+            transition: all 0.3s;
+        }
+
+        .btn:hover:not(:disabled) {
+            background: #764ba2;
+        }
+
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px 20px;
+            display: none;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .result {
+            margin-top: 40px;
+            padding: 20px;
+            background: #f9f9f9;
+            border-radius: 8px;
+            display: none;
+        }
+
+        .result.show {
+            display: block;
+        }
+
+        .result h2 {
+            margin-bottom: 15px;
+            color: #333;
+            font-size: 24px;
+        }
+
+        .result-content {
+            max-height: 600px;
+            overflow-y: auto;
+            background: white;
+            padding: 20px;
+            border-radius: 6px;
+            font-size: 14px;
+            line-height: 1.7;
+            color: #333;
+        }
+
+        .result-content h3 {
+            margin-top: 20px;
+            margin-bottom: 12px;
+            color: #667eea;
+            font-size: 16px;
+        }
+
+        .result-content h3:first-child {
+            margin-top: 0;
+        }
+
+        .result-content p {
+            margin-bottom: 10px;
+        }
+
+        .result-content ul {
+            margin-left: 20px;
+            margin-bottom: 10px;
+        }
+
+        .result-content li {
+            margin-bottom: 6px;
+        }
+
+        .error {
+            background: #fee;
+            color: #c00;
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            display: none;
+            border-left: 4px solid #c00;
+        }
+
+        .error.show {
+            display: block;
+        }
+
+        .freemium-note {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 15px;
+            margin-bottom: 30px;
+            border-radius: 4px;
+            font-size: 13px;
+            color: #856404;
+        }
+
+        .freemium-note strong {
+            display: block;
+            margin-bottom: 8px;
+        }
+
+        .freemium-note button {
+            background: none;
+            border: none;
+            color: #667eea;
+            cursor: pointer;
+            text-decoration: underline;
+            font-weight: 600;
+            font-size: 13px;
+        }
+
+        .freemium-note button:hover {
+            color: #764ba2;
+        }
+
+        .stats {
+            background: #f0f4ff;
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            font-size: 13px;
+            color: #667eea;
+        }
+
+        .quiz-question {
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #f9f9f9;
+            border-radius: 6px;
+            border-left: 3px solid #667eea;
+        }
+
+        .quiz-question strong {
+            display: block;
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        .quiz-option {
+            margin: 6px 0;
+            padding: 6px 0;
+            color: #555;
+        }
+
+        .quiz-answer {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #ddd;
+        }
+
+        .quiz-answer strong {
+            color: #667eea;
+            font-size: 12px;
+        }
+
+        .flashcard {
+            margin-bottom: 12px;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.3s;
+            background: white;
+        }
+
+        .flashcard:hover {
+            border-color: #667eea;
+            background: #f0f4ff;
+            box-shadow: 0 2px 8px rgba(102, 126, 234, 0.1);
+        }
+
+        .flashcard-front {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 8px;
+        }
+
+        .flashcard-back {
+            color: #667eea;
+            font-size: 13px;
+            padding-top: 8px;
+            border-top: 1px solid #eee;
+        }
+
+        .download-btn {
+            background: #28a745;
+            margin-top: 15px;
+        }
+
+        .download-btn:hover:not(:disabled) {
+            background: #218838;
+        }
+
+        @media (max-width: 600px) {
+            .container {
+                padding: 20px;
+            }
+
+            h1 {
+                font-size: 24px;
+            }
+
+            .material-type {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📚 AI Study Assistant</h1>
+        <p class="subtitle">Convert textbook pages into study guides, quizzes, and flashcards instantly. Powered by Claude AI.</p>
+
+        <div class="error" id="error"></div>
+
+        <div class="freemium-note" id="freemiumNote">
+            <strong id="tierDisplay">Free Plan: 5 materials/month</strong>
+            <span id="usageText">Loading usage...</span>
+            <button onclick="upgradeToPaid()">Upgrade to Unlimited →</button>
+        </div>
+
+        <div class="stats" id="stats" style="display: none;">
+            <span id="statsText">Loading stats...</span>
+        </div>
+
+        <div class="upload-section" onclick="document.getElementById('fileInput').click()">
+            <span class="upload-icon">📷</span>
+            <div class="upload-text">Upload a textbook page</div>
+            <div class="upload-subtext">JPG, PNG (max 5MB)</div>
+            <input type="file" id="fileInput" accept="image/jpeg,image/png" onchange="handleFileSelect(event)">
+        </div>
+
+        <div class="material-type">
+            <button class="material-btn active" onclick="selectMaterial(event, 'guide')">
+                📖 Study Guide
+            </button>
+            <button class="material-btn" onclick="selectMaterial(event, 'quiz')">
+                ❓ Quiz
+            </button>
+            <button class="material-btn" onclick="selectMaterial(event, 'flashcards')">
+                🎴 Flashcards
+            </button>
+        </div>
+
+        <button class="btn" id="generateBtn" onclick="generateMaterial()" disabled>
+            Generate Study Material
+        </button>
+
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p style="color: #667eea; font-size: 15px;">Analyzing your textbook page...</p>
+        </div>
+
+        <div class="result" id="result">
+            <h2 id="resultTitle">Study Material</h2>
+            <div class="result-content" id="resultContent"></div>
+            <button class="btn download-btn" onclick="downloadResult()">⬇️ Download as PDF</button>
+        </div>
+
+        <div id="myMaterials" style="margin-top: 40px; padding-top: 40px; border-top: 1px solid #eee;">
+            <h2 style="margin-bottom: 20px; color: #333;">My Materials</h2>
+            <div id="materialsGrid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 15px;">
+                <p style="color: #999; font-size: 13px;">Loading your materials...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let selectedFile = null;
+        let selectedMaterial = "guide";
+        let currentUser = null;
+        const API_BASE = "/study";
+
+        // Initialize
+        async function init() {
+            const email = prompt("Enter your email to get started:", "student@example.com") || "student@example.com";
+            currentUser = email;
+            localStorage.setItem("study_email", email);
+
+            // Load user stats
+            await loadUserStats();
+            // Load previous materials
+            await loadMyMaterials();
+        }
+
+        async function loadUserStats() {
+            try {
+                const response = await fetch(`${API_BASE}/user-stats`, {
+                    headers: { "Authorization": `Bearer ${currentUser}` }
+                });
+
+                if (!response.ok) throw new Error("Failed to load stats");
+
+                const data = await response.json();
+                const limit = data.tier === "paid" ? "Unlimited" : `${data.monthly_limit}/month`;
+                const remaining = data.tier === "paid" ? "∞" : data.remaining;
+
+                document.getElementById("tierDisplay").textContent =
+                    `${data.tier === "paid" ? "💎 Paid Plan" : "Free Plan"}: ${limit}`;
+                document.getElementById("usageText").textContent =
+                    `${data.materials_generated_this_month} of ${data.monthly_limit} materials used this month`;
+                document.getElementById("statsText").textContent =
+                    `You have ${remaining} materials remaining`;
+            } catch (e) {
+                console.error("Stats load error:", e);
+            }
+        }
+
+        async function loadMyMaterials() {
+            try {
+                const response = await fetch(`${API_BASE}/my-materials`, {
+                    headers: { "Authorization": `Bearer ${currentUser}` }
+                });
+
+                if (!response.ok) throw new Error("Failed to load materials");
+
+                const data = await response.json();
+                const grid = document.getElementById("materialsGrid");
+
+                if (data.materials.length === 0) {
+                    grid.innerHTML = '<p style="color: #999; font-size: 13px;">No materials yet. Create one above!</p>';
+                    return;
+                }
+
+                grid.innerHTML = data.materials.map(m => `
+                    <div style="border: 1px solid #ddd; border-radius: 6px; padding: 15px; cursor: pointer; transition: all 0.3s;" onmouseover="this.style.borderColor='#667eea'; this.style.boxShadow='0 2px 8px rgba(102,126,234,0.1)'" onmouseout="this.style.borderColor='#ddd'; this.style.boxShadow='none'">
+                        <div style="font-size: 20px; margin-bottom: 8px;">
+                            ${m.material_type === 'guide' ? '📖' : m.material_type === 'quiz' ? '❓' : '🎴'}
+                        </div>
+                        <div style="font-weight: 600; color: #333; margin-bottom: 5px; font-size: 13px;">${m.title.substring(0, 40)}...</div>
+                        <div style="font-size: 12px; color: #999;">${new Date(m.created_at).toLocaleDateString()}</div>
+                    </div>
+                `).join('');
+            } catch (e) {
+                console.error("Materials load error:", e);
+            }
+        }
+
+        function handleFileSelect(event) {
+            selectedFile = event.target.files[0];
+            if (selectedFile) {
+                document.querySelector(".upload-text").textContent = selectedFile.name;
+                document.getElementById("generateBtn").disabled = false;
+            }
+        }
+
+        function selectMaterial(event, type) {
+            selectedMaterial = type;
+            document.querySelectorAll(".material-btn").forEach(btn => btn.classList.remove("active"));
+            event.target.classList.add("active");
+        }
+
+        async function generateMaterial() {
+            if (!selectedFile) {
+                showError("Please select a file first");
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append("file", selectedFile);
+            formData.append("material_type", selectedMaterial);
+
+            document.getElementById("loading").style.display = "block";
+            document.getElementById("result").classList.remove("show");
+            document.getElementById("error").classList.remove("show");
+
+            try {
+                const response = await fetch(`${API_BASE}/upload-and-generate`, {
+                    method: "POST",
+                    headers: {
+                        "Authorization": `Bearer ${currentUser}`
+                    },
+                    body: formData
+                });
+
+                document.getElementById("loading").style.display = "none";
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    showError(error.detail || "Generation failed");
+                    return;
+                }
+
+                const data = await response.json();
+                displayResult(data);
+                await loadUserStats();
+                await loadMyMaterials();
+            } catch (e) {
+                document.getElementById("loading").style.display = "none";
+                showError("Network error: " + e.message);
+            }
+        }
+
+        function displayResult(data) {
+            document.getElementById("resultTitle").textContent = data.title || "Study Material";
+
+            let html = "";
+            const content = data.content;
+
+            if (selectedMaterial === "guide") {
+                html = `
+                    <h3>${content.title || "Study Guide"}</h3>
+                    <p><strong>Summary:</strong></p>
+                    <p>${(content.summary || "").replace(/\n/g, "<br>")}</p>
+                    ${content.key_concepts && content.key_concepts.length > 0 ? `
+                        <h3>Key Concepts</h3>
+                        <ul>${content.key_concepts.map(c => `<li>${c}</li>`).join("")}</ul>
+                    ` : ""}
+                    ${content.key_points && content.key_points.length > 0 ? `
+                        <h3>Key Points</h3>
+                        ${content.key_points.map(kp => `
+                            <div style="margin-bottom: 12px;">
+                                <strong style="color: #667eea;">${kp.heading}:</strong> ${kp.explanation}
+                            </div>
+                        `).join("")}
+                    ` : ""}
+                    ${content.review_questions && content.review_questions.length > 0 ? `
+                        <h3>Review Questions</h3>
+                        <ul>${content.review_questions.map(q => `<li>${q}</li>`).join("")}</ul>
+                    ` : ""}
+                `;
+            } else if (selectedMaterial === "quiz") {
+                html = `
+                    <h3>${content.title || "Quiz"}</h3>
+                    ${(content.questions || []).map((q, i) => `
+                        <div class="quiz-question">
+                            <strong>Q${i + 1}: ${q.question}</strong>
+                            ${q.options.map(opt => `<div class="quiz-option">${opt}</div>`).join("")}
+                            <div class="quiz-answer">
+                                <strong>Answer: ${q.correct_answer}</strong>
+                                <p style="margin-top: 6px; color: #666; font-size: 13px;"><em>${q.explanation}</em></p>
+                            </div>
+                        </div>
+                    `).join("")}
+                `;
+            } else if (selectedMaterial === "flashcards") {
+                html = `
+                    <h3>${content.title || "Flashcards"}</h3>
+                    ${(content.cards || []).map((card, i) => `
+                        <div class="flashcard" onclick="toggleFlashcard(this)">
+                            <div class="flashcard-front">Card ${i + 1}: ${card.front}</div>
+                            <div class="flashcard-back" style="display: none;">${card.back}</div>
+                        </div>
+                    `).join("")}
+                    <p style="margin-top: 15px; color: #999; font-size: 12px;">Click any card to reveal the answer</p>
+                `;
+            }
+
+            document.getElementById("resultContent").innerHTML = html;
+            document.getElementById("result").classList.add("show");
+            document.getElementById("result").scrollIntoView({ behavior: "smooth" });
+        }
+
+        function toggleFlashcard(el) {
+            const front = el.querySelector(".flashcard-front");
+            const back = el.querySelector(".flashcard-back");
+            if (back.style.display === "none") {
+                front.style.display = "none";
+                back.style.display = "block";
+            } else {
+                front.style.display = "block";
+                back.style.display = "none";
+            }
+        }
+
+        function showError(message) {
+            const error = document.getElementById("error");
+            error.textContent = message;
+            error.classList.add("show");
+            error.scrollIntoView({ behavior: "smooth" });
+        }
+
+        function upgradeToPaid() {
+            alert("Upgrade feature coming soon! Contact support or upgrade manually.");
+        }
+
+        function downloadResult() {
+            alert("PDF download coming soon! You can copy the content for now.");
+        }
+
+        // Start app
+        init();
+    </script>
+</body>
+</html>

@@ -317,6 +317,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount static files for study assistant
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.exists(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
 # ── Routers ──────────────────────────────────────────────────
 routers_list = [
     (auth, "/auth", "Auth"),
@@ -438,7 +443,17 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "platform": "pgusa-documents"}
+    return {"status": "ok", "platform": "pgusa-documents", "version": "v2.1-trading-signals"}
+
+
+@app.get("/study-app")
+async def study_app():
+    """Serve the Study Assistant web app"""
+    static_dir = os.path.join(os.path.dirname(__file__), "static")
+    study_html = os.path.join(static_dir, "study.html")
+    if os.path.exists(study_html):
+        return FileResponse(study_html)
+    raise HTTPException(status_code=404, detail="Study app not found")
 
 
 @app.get("/monitor/status")
