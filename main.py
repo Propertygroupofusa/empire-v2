@@ -242,9 +242,10 @@ async def run_migrations():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("PGUSA Platform starting...")
+    log.info("Beginning database initialization...")
     try:
         await init_db()
-        log.info("Database initialized")
+        log.info("✅ Database initialized successfully")
     except Exception as e:
         log.warning(f"Database init failed: {e}")
 
