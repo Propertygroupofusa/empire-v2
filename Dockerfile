@@ -1,18 +1,16 @@
 FROM python:3.11-slim
 
-# Install system dependencies and force clean pip cache
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core \
-    && rm -rf /var/lib/apt/lists/* \
-    && rm -rf /root/.cache/pip/*
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY requirements.txt .
-# Install python-multipart with fresh pip, then install all requirements
-RUN pip install --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir --no-deps python-multipart==0.0.6 && \
-    pip install --no-cache-dir -r requirements.txt
+
+# Install all dependencies with fresh pip (bypass any caching issues)
+RUN python -m pip install --upgrade pip && \
+    python -m pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
