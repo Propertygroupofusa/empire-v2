@@ -15,8 +15,16 @@ if DATABASE_URL.startswith("postgresql://"):
 elif DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
 
-# Create async engine
-engine = create_async_engine(DATABASE_URL, echo=False, future=True)
+# Create async engine. pool_pre_ping avoids handing out connections Postgres
+# already dropped (common on managed DBs that kill idle connections), and
+# pool_recycle keeps us from reusing connections the server would've closed
+# anyway. connect_args timeout bounds how long a hung SSL handshake blocks
+# instead of stalling the health-monitor's reconnect loop indefinitely.
+_engine_kwargs = {"echo": False, "future": True, "pool_pre_ping": True, "pool_recycle": 300}
+if DATABASE_URL.startswith("postgresql+asyncpg://"):
+    _engine_kwargs["connect_args"] = {"timeout": 10}
+
+engine = create_async_engine(DATABASE_URL, **_engine_kwargs)
 
 # Create session factory
 AsyncSessionLocal = sessionmaker(
