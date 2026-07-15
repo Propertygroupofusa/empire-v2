@@ -16,6 +16,10 @@ log = logging.getLogger("pgusa")
 router = APIRouter()
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
+if stripe.api_key:
+    log.info("✅ Stripe API key configured")
+else:
+    log.warning("⚠️ Stripe API key not configured - paid tiers disabled")
 
 # Subscription tiers - FREEMIUM MODE ONLY (paid tiers coming after signal quality proven)
 TIERS = {
@@ -318,6 +322,12 @@ async def unsubscribe(email: str, db: AsyncSession = Depends(get_db)):
     await db.commit()
 
     return {"message": f"Unsubscribed {email} from trading signals"}
+
+
+@router.post("/subscribe")
+async def subscribe_signals_alias(subscriber: SignalSubscriber, db: AsyncSession = Depends(get_db)):
+    """Alias endpoint for /subscribe (routes to /signals/subscribe for frontend compatibility)."""
+    return await subscribe_to_signals(subscriber, db)
 
 
 @router.get("/signals/health")
