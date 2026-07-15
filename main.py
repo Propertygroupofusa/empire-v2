@@ -34,6 +34,8 @@ routers_to_load = {
     'social_dashboard': None,
     'orders': None,
     'subscriptions': None,
+    'trading_signals': None,
+    'outreach': None,
 }
 
 for router_name in routers_to_load:
@@ -58,6 +60,8 @@ revenue_automation = routers_to_load['revenue_automation']
 social_dashboard = routers_to_load['social_dashboard']
 orders = routers_to_load['orders']
 subscriptions = routers_to_load['subscriptions']
+trading_signals = routers_to_load['trading_signals']
+outreach = routers_to_load['outreach']
 
 # Load remaining modules gracefully
 payee_router = None
@@ -343,6 +347,8 @@ routers_list = [
     (revenue_automation, "/revenue", "Revenue Automation"),
     (orders, "/orders", "Video Orders"),
     (subscriptions, "/subscriptions", "Subscriptions"),
+    (trading_signals, "/trading", "Trading Signals"),
+    (outreach, "/outreach", "Outreach & Campaigns"),
 ]
 
 for router_module, prefix, tag in routers_list:
@@ -383,6 +389,14 @@ if video_revenue_router is not None:
         log.info("Router loaded: video revenue (no prefix)")
     except Exception as e:
         log.warning(f"Failed to include video revenue router: {e}")
+
+if trading_signals is not None:
+    try:
+        # Frontend calls /api/subscribe; keep /trading as the canonical prefix too.
+        app.include_router(trading_signals.router, prefix="/api", tags=["API Alias"])
+        log.info("Router loaded: /api (trading signals alias)")
+    except Exception as e:
+        log.warning(f"Failed to include trading signals /api alias: {e}")
 
 
 @app.get("/dashboard")

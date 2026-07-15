@@ -1,7 +1,7 @@
 """Database configuration and initialization"""
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, declarative_base
 import os
 
 # Database URL - using SQLite for simplicity, or PostgreSQL if DATABASE_URL is set
@@ -15,12 +15,15 @@ AsyncSessionLocal = sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False
 )
 
+# Declarative base for all models (models.py imports this)
+Base = declarative_base()
+
 async def init_db():
     """Initialize database - create tables if needed"""
     try:
+        import models  # noqa: F401  (registers model classes on Base.metadata)
         async with engine.begin() as conn:
-            # Tables would be created here via declarative base
-            pass
+            await conn.run_sync(Base.metadata.create_all)
     except Exception as e:
         print(f"Database init warning: {e}")
 
