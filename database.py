@@ -45,7 +45,6 @@ class Order(Base):
     video_url = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    metadata = Column(JSON, default={})
 
 
 class CustomerSubscription(Base):
