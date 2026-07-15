@@ -130,6 +130,10 @@ def can_create_video(customer_email: str) -> tuple[bool, str]:
     if not sub:
         return True, "one_off"
 
+    # Check if subscription is active
+    if not sub.get("active"):
+        return True, "one_off (subscription inactive)"
+
     # Check quota
     tier = get_tier(sub["tier_id"])
     remaining = tier["videos_per_month"] - sub["videos_used_this_month"]
@@ -141,11 +145,11 @@ def can_create_video(customer_email: str) -> tuple[bool, str]:
 
 
 def use_video_quota(customer_email: str) -> bool:
-    """Deduct one video from customer quota (return False if over quota)"""
+    """Deduct one video from customer quota (return False if over quota or inactive)"""
     sub = get_subscription(customer_email)
 
-    if not sub:
-        # One-off customer, no quota check needed
+    if not sub or not sub.get("active"):
+        # One-off customer or inactive subscription, no quota check needed
         return True
 
     tier = get_tier(sub["tier_id"])
@@ -176,8 +180,8 @@ def get_pricing_for_customer(customer_email: str, video_type: str, delivery_days
     # Check if customer has subscription
     sub = get_subscription(customer_email)
 
-    if not sub:
-        # One-off pricing: base + rush fee
+    if not sub or not sub.get("active"):
+        # One-off pricing: base + rush fee (if no subscription or subscription inactive)
         rush_fee = 0
         if delivery_days == 1:  # Rush 4h
             rush_fee = 30000  # $300
@@ -192,7 +196,7 @@ def get_pricing_for_customer(customer_email: str, video_type: str, delivery_days
             "description": f"One-time video purchase",
         }
 
-    # Subscription pricing
+    # Subscription pricing (only if subscription is active)
     tier = get_tier(sub["tier_id"])
 
     if tier["monthly_price"] == 0:

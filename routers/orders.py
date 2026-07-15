@@ -84,7 +84,7 @@ async def get_stripe_key():
 # ============================================================
 
 @router.post("/request-quote")
-async def request_quote(data: RequestQuoteData, background_tasks: BackgroundTasks = None):
+async def request_quote(data: RequestQuoteData, background_tasks: BackgroundTasks):
     """
     Customer submits a video request with script, avatar, and language.
     Automatically uses subscription quota if available, otherwise creates quote for payment.
@@ -157,8 +157,8 @@ async def request_quote(data: RequestQuoteData, background_tasks: BackgroundTask
             order["status"] = "payment_received"
             order["paid"] = True
             # Auto-trigger video generation for subscription videos
-            if background_tasks:
-                background_tasks.add_task(generate_video_for_order, order["id"], order)
+            background_tasks.add_task(generate_video_for_order, order["id"], order)
+            order["video_generation_status"] = "generating"
     else:
         # Fall back to regular quote price calculation
         quote_price = calculate_quote_price(data.video_type, data.delivery_days)
