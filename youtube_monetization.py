@@ -41,10 +41,6 @@ class YouTubeMonetizationTracker:
     def _init_services(self):
         """Initialize YouTube API services"""
         try:
-            # Create YouTube service
-            self.youtube_service = build('youtube', 'v3', developerKey=self.youtube_api_key)
-
-            # Create YouTube Analytics service with refresh token
             if self.youtube_refresh_token:
                 credentials = Credentials(
                     token=None,
@@ -53,10 +49,23 @@ class YouTubeMonetizationTracker:
                     client_id=self.youtube_client_id,
                     client_secret=self.youtube_client_secret
                 )
+                # channels().list(mine=True) and search().list(forMine=True)
+                # (used by get_channel_metrics/get_top_videos) need an
+                # authenticated user, not just an API key — a developerKey-only
+                # client can't resolve "mine" and falls back to probing for
+                # Application Default Credentials, which aren't configured
+                # here, then stalls until it times out. Build with the same
+                # OAuth credentials used for Analytics instead.
+                self.youtube_service = build('youtube', 'v3', credentials=credentials)
                 self.youtube_analytics_service = build(
                     'youtubeAnalytics', 'v2', credentials=credentials
                 )
                 log.info("YouTube Analytics service initialized")
+            else:
+                # No refresh token: fall back to API-key-only access, which
+                # only supports public (non-"mine") lookups.
+                self.youtube_service = build('youtube', 'v3', developerKey=self.youtube_api_key)
+                log.warning("No YOUTUBE_REFRESH_TOKEN — 'mine' queries (channel/top videos) will fail")
         except Exception as e:
             log.warning(f"YouTube service initialization: {e}")
 
