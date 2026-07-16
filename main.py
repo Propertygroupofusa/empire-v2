@@ -411,6 +411,15 @@ async def serve_dashboard():
     return FileResponse(dashboard_path, media_type="text/html")
 
 
+@app.get("/signals")
+async def serve_signals_signup():
+    """Serve the trading signals signup page"""
+    signals_path = os.path.join(os.path.dirname(__file__), "signals_signup.html")
+    if not os.path.exists(signals_path):
+        raise HTTPException(status_code=404, detail="Signals signup page not found")
+    return FileResponse(signals_path, media_type="text/html")
+
+
 @app.get("/quote")
 async def serve_quote_form():
     """Serve the subscription-aware video quote form"""
