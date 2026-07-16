@@ -7,6 +7,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, Optional
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from daily_publisher import get_publisher
 from youtube_monetization import get_tracker
 from client_video_service import get_service as get_video_service
@@ -27,19 +29,19 @@ class RevenueDashboard:
         self.lead_generator = get_lead_generator()
         self.course_builder = get_course_builder()
 
-    def get_all_metrics(self) -> Dict:
+    async def get_all_metrics(self, db: AsyncSession) -> Dict:
         """Get comprehensive metrics across all revenue streams"""
         return {
             "timestamp": datetime.utcnow().isoformat(),
-            "revenue_summary": self.get_revenue_summary(),
+            "revenue_summary": await self.get_revenue_summary(db),
             "youtube_metrics": self.get_youtube_metrics(),
-            "client_services": self.get_client_services_metrics(),
+            "client_services": await self.get_client_services_metrics(db),
             "courses": self.get_course_metrics(),
             "leads": self.get_lead_metrics(),
             "publishing": self.get_publishing_metrics()
         }
 
-    def get_revenue_summary(self) -> Dict:
+    async def get_revenue_summary(self, db: AsyncSession) -> Dict:
         """Get unified revenue summary"""
         try:
             # YouTube revenue
@@ -47,7 +49,7 @@ class RevenueDashboard:
             youtube_revenue = analytics.get("totals", {}).get("revenue", 0)
 
             # Client video service revenue
-            video_orders = self.video_service.get_orders(status="delivered")
+            video_orders = await self.video_service.get_orders(db, status="delivered")
             client_revenue = sum(
                 self.video_service.PRICING[order["tier"]]["amount"] / 100
                 for order in video_orders
@@ -96,13 +98,13 @@ class RevenueDashboard:
             log.error(f"Error getting YouTube metrics: {e}")
             return {"error": str(e)}
 
-    def get_client_services_metrics(self) -> Dict:
+    async def get_client_services_metrics(self, db: AsyncSession) -> Dict:
         """Get client video service metrics"""
         try:
-            stats = self.video_service.get_statistics()
+            stats = await self.video_service.get_statistics(db)
             pricing = self.video_service.get_pricing()
 
-            orders = self.video_service.get_orders()
+            orders = await self.video_service.get_orders(db)
             by_tier = {
                 tier: sum(1 for o in orders if o["tier"] == tier)
                 for tier in pricing["tiers"].keys()
@@ -174,10 +176,10 @@ class RevenueDashboard:
             log.error(f"Error getting publishing metrics: {e}")
             return {"error": str(e)}
 
-    def get_roi_analysis(self) -> Dict:
+    async def get_roi_analysis(self, db: AsyncSession) -> Dict:
         """Analyze return on investment"""
         try:
-            revenue_summary = self.get_revenue_summary()
+            revenue_summary = await self.get_revenue_summary(db)
             youtube_data = self.get_youtube_metrics()
 
             if "error" in revenue_summary or "error" in youtube_data:
@@ -239,13 +241,13 @@ class RevenueDashboard:
             log.error(f"Error forecasting growth: {e}")
             return {"error": str(e)}
 
-    def get_executive_summary(self) -> Dict:
+    async def get_executive_summary(self, db: AsyncSession) -> Dict:
         """Get quick executive summary"""
         try:
-            revenue = self.get_revenue_summary()
+            revenue = await self.get_revenue_summary(db)
             leads = self.lead_generator.get_lead_generation_metrics()
             youtube = self.get_youtube_metrics()
-            roi = self.get_roi_analysis()
+            roi = await self.get_roi_analysis(db)
 
             if any("error" in data for data in [revenue, leads, youtube, roi]):
                 return {"error": "Unable to generate summary"}
