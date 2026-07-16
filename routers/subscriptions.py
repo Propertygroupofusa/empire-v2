@@ -3,12 +3,14 @@ Subscription Management Router
 Handles tier browsing, subscriptions, and usage tracking
 """
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
 from subscription_tiers import (
     get_all_tiers,
     get_tier,
     subscribe_customer,
     get_subscription,
+    get_all_subscriptions,
     get_customer_billing_summary,
     SUBSCRIPTION_TIERS,
 )
@@ -17,6 +19,7 @@ from stripe_subscriptions import (
     handle_subscription_event,
     setup_stripe_products,
 )
+from database import get_db
 import stripe
 import logging
 import os
@@ -61,6 +64,7 @@ async def subscribe(
     customer_email: str,
     customer_name: str,
     tier_id: str,
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Activate the free tier directly. Paid tiers must go through
@@ -78,7 +82,7 @@ async def subscribe(
         )
 
     try:
-        subscription = subscribe_customer(customer_email, tier_id)
+        subscription = await subscribe_customer(db, customer_email, tier_id)
         tier = get_tier(tier_id)
 
         return {
@@ -96,11 +100,11 @@ async def subscribe(
 
 
 @router.get("/status/{customer_email}")
-async def get_subscription_status(customer_email: str):
+async def get_subscription_status(customer_email: str, db: AsyncSession = Depends(get_db)):
     """
     Get current subscription status and usage for a customer
     """
-    subscription = get_subscription(customer_email)
+    subscription = await get_subscription(db, customer_email)
 
     if not subscription:
         return {
@@ -124,11 +128,11 @@ async def get_subscription_status(customer_email: str):
 
 
 @router.get("/billing/{customer_email}")
-async def get_billing_info(customer_email: str):
+async def get_billing_info(customer_email: str, db: AsyncSession = Depends(get_db)):
     """
     Get billing summary and invoice information for a customer
     """
-    summary = get_customer_billing_summary(customer_email)
+    summary = await get_customer_billing_summary(db, customer_email)
     return summary
 
 
@@ -136,6 +140,7 @@ async def get_billing_info(customer_email: str):
 async def upgrade_subscription(
     customer_email: str,
     new_tier_id: str,
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Move a customer to a different tier. Only free is allowed here since
@@ -151,11 +156,11 @@ async def upgrade_subscription(
             detail="Upgrading to a paid tier requires checkout - use POST /subscriptions/checkout instead",
         )
 
-    old_subscription = get_subscription(customer_email)
+    old_subscription = await get_subscription(db, customer_email)
     old_tier = old_subscription["tier_name"] if old_subscription else "None"
 
     # Subscribe to new tier (overwrites old subscription)
-    subscribe_customer(customer_email, new_tier_id)
+    await subscribe_customer(db, customer_email, new_tier_id)
     new_tier = get_tier(new_tier_id)
 
     return {
@@ -169,18 +174,16 @@ async def upgrade_subscription(
 
 
 @router.get("/admin/subscriptions")
-async def admin_list_subscriptions():
+async def admin_list_subscriptions(db: AsyncSession = Depends(get_db)):
     """
     [ADMIN] List all active subscriptions with usage
     """
-    from subscription_tiers import customer_subscriptions
-
     subscriptions = []
-    for email, sub in customer_subscriptions.items():
+    for sub in await get_all_subscriptions(db):
         tier = get_tier(sub["tier_id"])
         subscriptions.append(
             {
-                "customer_email": email,
+                "customer_email": sub["customer_email"],
                 "tier": tier["name"],
                 "monthly_price": tier["monthly_price"],
                 "videos_per_month": tier["videos_per_month"],
@@ -199,11 +202,11 @@ async def admin_list_subscriptions():
 
 
 @router.get("/admin/subscriptions/{customer_email}")
-async def admin_get_customer_subscriptions(customer_email: str):
+async def admin_get_customer_subscriptions(customer_email: str, db: AsyncSession = Depends(get_db)):
     """
     [ADMIN] Get detailed subscription info for a customer
     """
-    subscription = get_subscription(customer_email)
+    subscription = await get_subscription(db, customer_email)
 
     if not subscription:
         return {
@@ -214,7 +217,7 @@ async def admin_get_customer_subscriptions(customer_email: str):
     return {
         "customer_email": customer_email,
         "subscription": subscription,
-        "billing_summary": get_customer_billing_summary(customer_email),
+        "billing_summary": await get_customer_billing_summary(db, customer_email),
     }
 
 
@@ -228,6 +231,7 @@ async def create_subscription_checkout_session(
     customer_email: str,
     customer_name: str,
     tier_id: str,
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Create a Stripe checkout session for subscription signup
@@ -238,7 +242,7 @@ async def create_subscription_checkout_session(
 
     if tier_id == "free":
         # Free tier - no payment needed
-        subscribe_customer(customer_email, "free")
+        await subscribe_customer(db, customer_email, "free")
         return {
             "success": True,
             "message": "Free trial activated",
@@ -275,7 +279,7 @@ async def create_subscription_checkout_session(
 
 
 @router.post("/webhook/stripe")
-async def subscription_stripe_webhook(request: Request):
+async def subscription_stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     """
     Handle Stripe webhook events for subscriptions
     Events: checkout.session.completed, customer.subscription.updated, invoice.payment_failed, etc.
@@ -299,7 +303,7 @@ async def subscription_stripe_webhook(request: Request):
         raise HTTPException(status_code=400, detail="Invalid signature")
 
     # Handle subscription events
-    success = handle_subscription_event(event)
+    success = await handle_subscription_event(db, event)
 
     if success:
         log.info(f"Subscription webhook processed: {event['type']}")

@@ -189,7 +189,7 @@ def create_subscription_checkout(
         return None
 
 
-def handle_subscription_event(event: dict) -> bool:
+async def handle_subscription_event(db, event: dict) -> bool:
     """
     Handle Stripe subscription webhook events
     Returns True if event was handled successfully
@@ -197,29 +197,29 @@ def handle_subscription_event(event: dict) -> bool:
     event_type = event.get("type")
 
     if event_type == "checkout.session.completed":
-        return handle_checkout_completed(event)
+        return await handle_checkout_completed(db, event)
     elif event_type == "customer.subscription.updated":
-        return handle_subscription_updated(event)
+        return await handle_subscription_updated(db, event)
     elif event_type == "customer.subscription.deleted":
-        return handle_subscription_deleted(event)
+        return await handle_subscription_deleted(db, event)
     elif event_type == "invoice.payment_failed":
-        return handle_payment_failed(event)
+        return await handle_payment_failed(db, event)
     elif event_type == "invoice.payment_succeeded":
-        return handle_payment_succeeded(event)
+        return await handle_payment_succeeded(db, event)
 
     return True  # Ignore unhandled event types
 
 
-def handle_checkout_completed(event: dict) -> bool:
+async def handle_checkout_completed(db, event: dict) -> bool:
     """Handle checkout.session.completed - subscription activated.
 
     This is the only place a paid tier's subscription record gets created:
     routers/subscriptions.py's /checkout endpoint never calls
     subscribe_customer() for paid tiers (it just starts the Stripe
-    session), so a customer_subscriptions entry only used to get patched
-    here IF one already existed - which for a real paid signup it never
-    did. That meant a customer could pay Stripe successfully and still
-    have get_subscription() return None forever. Create the record here
+    session), so a subscription row only used to get patched here IF one
+    already existed - which for a real paid signup it never did. That
+    meant a customer could pay Stripe successfully and still have
+    get_subscription() return None forever. Create the record here
     instead of conditionally patching one.
     """
     try:
@@ -233,13 +233,10 @@ def handle_checkout_completed(event: dict) -> bool:
             return False
 
         # Import here to avoid circular imports
-        from subscription_tiers import subscribe_customer, customer_subscriptions
+        from subscription_tiers import subscribe_customer, update_stripe_ids
 
-        subscribe_customer(customer_email, tier_id)
-        customer_subscriptions[customer_email]["stripe_subscription_id"] = subscription_id
-        customer_subscriptions[customer_email]["stripe_customer_id"] = session["customer"]
-        customer_subscriptions[customer_email]["status"] = "active"
-        customer_subscriptions[customer_email]["payment_status"] = "active"
+        await subscribe_customer(db, customer_email, tier_id)
+        await update_stripe_ids(db, customer_email, subscription_id, session["customer"])
 
         log.info(f"Subscription activated: {customer_email} -> {tier_id} (sub: {subscription_id})")
         return True
@@ -249,7 +246,7 @@ def handle_checkout_completed(event: dict) -> bool:
         return False
 
 
-def handle_subscription_updated(event: dict) -> bool:
+async def handle_subscription_updated(db, event: dict) -> bool:
     """Handle customer.subscription.updated"""
     try:
         subscription = event["data"]["object"]
@@ -268,7 +265,7 @@ def handle_subscription_updated(event: dict) -> bool:
         return False
 
 
-def handle_subscription_deleted(event: dict) -> bool:
+async def handle_subscription_deleted(db, event: dict) -> bool:
     """Handle customer.subscription.deleted - subscription cancelled"""
     try:
         subscription = event["data"]["object"]
@@ -284,7 +281,7 @@ def handle_subscription_deleted(event: dict) -> bool:
         return False
 
 
-def handle_payment_failed(event: dict) -> bool:
+async def handle_payment_failed(db, event: dict) -> bool:
     """Handle invoice.payment_failed - payment failed"""
     try:
         invoice = event["data"]["object"]
@@ -301,7 +298,7 @@ def handle_payment_failed(event: dict) -> bool:
         return False
 
 
-def handle_payment_succeeded(event: dict) -> bool:
+async def handle_payment_succeeded(db, event: dict) -> bool:
     """Handle invoice.payment_succeeded - payment processed"""
     try:
         invoice = event["data"]["object"]

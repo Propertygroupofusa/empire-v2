@@ -3,12 +3,12 @@ Customer Order & Quote Management Router
 Handles video request submissions, quote generation, payments
 """
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Request, Depends
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 from typing import Optional
-import json
 import logging
 import os
 import stripe
@@ -16,6 +16,9 @@ import asyncio
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
+from database import get_db, AsyncSessionLocal
+from models import VideoQuoteOrder
 
 log = logging.getLogger("orders")
 
@@ -33,12 +36,6 @@ stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 stripe_publishable_key = os.getenv("STRIPE_PUBLISHABLE_KEY")
 
 router = APIRouter()
-
-# ============================================================
-# IN-MEMORY STORAGE (FOR NOW - move to DB in production)
-# ============================================================
-pending_orders = []
-completed_orders = []
 
 # ============================================================
 # GET /orders/stripe-key - Get Stripe publishable key
@@ -71,66 +68,43 @@ class QuoteRequest(BaseModel):
 # ============================================================
 
 @router.post("/orders/request-quote")
-async def request_quote(quote: QuoteRequest, background_tasks: BackgroundTasks = None):
+async def request_quote(quote: QuoteRequest, db: AsyncSession = Depends(get_db)):
     """
     Customer submits a video request with script, avatar, and language.
     Returns order ID and quote price for payment processing.
     """
-    customer_name = quote.customer_name
-    customer_email = quote.customer_email
-    customer_company = quote.customer_company
-    video_type = quote.video_type
-    script_or_topic = quote.script_or_topic
-    target_audience = quote.target_audience
-    avatar = quote.avatar
-    language = quote.language
-    delivery_days = quote.delivery_days
-    reference_url = quote.reference_url
-    phone = quote.phone
-
-    if not customer_name or not customer_email or not video_type or not avatar or not language:
+    if not quote.customer_name or not quote.customer_email or not quote.video_type or not quote.avatar or not quote.language:
         raise HTTPException(status_code=400, detail="Missing required fields")
 
-    # Create order object
-    order = {
-        "id": len(pending_orders) + 1,
-        "status": "quote_requested",
-        "customer_name": customer_name,
-        "customer_email": customer_email,
-        "customer_company": customer_company,
-        "phone": phone,
-        "video_type": video_type,
-        "script_or_topic": script_or_topic,
-        "target_audience": target_audience,
-        "avatar": avatar,
-        "language": language,
-        "delivery_days": delivery_days,
-        "reference_url": reference_url,
-        "requested_at": datetime.now().isoformat(),
-        "quote_sent_at": None,
-        "quote_price": None,
-        "paid": False,
-        "payment_link": None,
-        "stripe_session_id": None,
-        "completed_at": None,
-        "video_url": None,
-        "video_generation_status": "pending",
-    }
+    quote_price = calculate_quote_price(quote.video_type, quote.delivery_days)
 
-    pending_orders.append(order)
+    order = VideoQuoteOrder(
+        status="quote_requested",
+        customer_name=quote.customer_name,
+        customer_email=quote.customer_email,
+        customer_company=quote.customer_company,
+        phone=quote.phone,
+        video_type=quote.video_type,
+        script_or_topic=quote.script_or_topic,
+        target_audience=quote.target_audience,
+        avatar=quote.avatar,
+        language=quote.language,
+        delivery_days=quote.delivery_days,
+        reference_url=quote.reference_url,
+        quote_price=quote_price,
+    )
+    db.add(order)
+    await db.commit()
+    await db.refresh(order)
 
-    # Calculate quote price based on video type and delivery speed
-    quote_price = calculate_quote_price(video_type, delivery_days)
-    order["quote_price"] = quote_price
-
-    log.info(f"New quote request from {customer_name} ({customer_email}): {video_type}, ${quote_price}")
+    log.info(f"New quote request from {quote.customer_name} ({quote.customer_email}): {quote.video_type}, ${quote_price}")
 
     return {
         "success": True,
-        "message": f"Quote created successfully",
-        "order_id": order["id"],
+        "message": "Quote created successfully",
+        "order_id": order.id,
         "quote_price": quote_price,
-        "customer_email": customer_email,
+        "customer_email": quote.customer_email,
     }
 
 
@@ -214,15 +188,15 @@ def calculate_quote_price(video_type: str, delivery_days: int) -> int:
 # ============================================================
 
 @router.post("/orders/{order_id}/create-checkout")
-async def create_checkout_session(order_id: int):
+async def create_checkout_session(order_id: int, db: AsyncSession = Depends(get_db)):
     """Create Stripe checkout session for order"""
 
-    order = next((o for o in pending_orders if o["id"] == order_id), None)
+    order = await db.get(VideoQuoteOrder, order_id)
 
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    if order["paid"]:
+    if order.paid:
         raise HTTPException(status_code=400, detail="Order already paid")
 
     try:
@@ -233,10 +207,10 @@ async def create_checkout_session(order_id: int):
                     "price_data": {
                         "currency": "usd",
                         "product_data": {
-                            "name": f"Video Production: {order['video_type'].replace('_', ' ').title()}",
-                            "description": f"Video for {order['customer_company']}",
+                            "name": f"Video Production: {order.video_type.replace('_', ' ').title()}",
+                            "description": f"Video for {order.customer_company}",
                         },
-                        "unit_amount": order["quote_price"] * 100,
+                        "unit_amount": order.quote_price * 100,
                     },
                     "quantity": 1,
                 }
@@ -244,15 +218,16 @@ async def create_checkout_session(order_id: int):
             mode="payment",
             success_url="https://empire-v2-production.up.railway.app/order-success?session_id={CHECKOUT_SESSION_ID}",
             cancel_url="https://empire-v2-production.up.railway.app/quote",
-            customer_email=order["customer_email"],
+            customer_email=order.customer_email,
             metadata={
                 "order_id": order_id,
-                "customer_email": order["customer_email"],
-                "customer_name": order["customer_name"],
+                "customer_email": order.customer_email,
+                "customer_name": order.customer_name,
             }
         )
 
-        order["stripe_session_id"] = checkout_session.id
+        order.stripe_session_id = checkout_session.id
+        await db.commit()
         log.info(f"Stripe checkout session created for order {order_id}")
 
         return {
@@ -271,7 +246,7 @@ async def create_checkout_session(order_id: int):
 # ============================================================
 
 @router.post("/orders/webhook/stripe")
-async def stripe_webhook(request: Request):
+async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     """Handle Stripe webhook events"""
 
     payload = await request.body()
@@ -299,74 +274,188 @@ async def stripe_webhook(request: Request):
         session = event["data"]["object"]
         order_id = int(session["metadata"]["order_id"])
 
-        order = next((o for o in pending_orders if o["id"] == order_id), None)
+        order = await db.get(VideoQuoteOrder, order_id)
         if order:
-            order["paid"] = True
-            order["status"] = "payment_received"
-            order["transaction_id"] = session["id"]
+            order.paid = True
+            order.status = "payment_received"
+            order.transaction_id = session["id"]
+            await db.commit()
             log.info(f"Payment received for order {order_id} via Stripe")
 
             # Trigger automatic video generation in background (if available)
             if HEYGAN_AVAILABLE:
-                asyncio.create_task(
-                    generate_video_for_order(order_id, order)
-                )
+                asyncio.create_task(generate_video_for_order(order_id))
             else:
                 log.warning(f"HeyGen not available, skipping video generation for order {order_id}")
 
     return {"status": "success"}
 
 
-async def generate_video_for_order(order_id: int, order: dict):
-    """Background task to generate video after payment"""
-    try:
-        log.info(f"Starting video generation for order {order_id}")
-        order["video_generation_status"] = "generating"
+async def generate_video_for_order(order_id: int):
+    """Background task to generate video after payment.
 
-        # Call HeyGen to generate video
-        video_id = await generate_video(
-            order_id=order_id,
-            script=order["script_or_topic"],
-            avatar=order["avatar"],
-            language=order["language"],
-            video_type=order["video_type"],
-        )
-
-        if not video_id:
-            order["video_generation_status"] = "failed"
-            log.error(f"Video generation failed for order {order_id}")
+    Runs as a detached asyncio task outside any request, so it opens its
+    own DB session rather than reusing a request-scoped one that would
+    already be closed.
+    """
+    async with AsyncSessionLocal() as db:
+        order = await db.get(VideoQuoteOrder, order_id)
+        if not order:
+            log.error(f"generate_video_for_order: order {order_id} not found")
             return
 
-        # Poll for video completion (max 10 minutes)
-        max_attempts = 60
-        attempt = 0
-        while attempt < max_attempts:
-            await asyncio.sleep(10)  # Check every 10 seconds
-            video_url = await get_video_url(video_id)
+        try:
+            log.info(f"Starting video generation for order {order_id}")
+            order.video_generation_status = "generating"
+            await db.commit()
 
-            if video_url:
-                order["video_url"] = video_url
-                order["status"] = "video_ready"
-                order["video_generation_status"] = "completed"
-                log.info(f"Video completed for order {order_id}: {video_url}")
+            # Call HeyGen to generate video
+            video_id = await generate_video(
+                order_id=order_id,
+                script=order.script_or_topic,
+                avatar=order.avatar,
+                language=order.language,
+                video_type=order.video_type,
+            )
 
-                # Send email to customer
-                await send_video_ready_email(
-                    customer_email=order["customer_email"],
-                    customer_name=order["customer_name"],
-                    order_id=order_id,
-                    video_url=video_url,
-                )
+            if not video_id:
+                order.video_generation_status = "failed"
+                await db.commit()
+                log.error(f"Video generation failed for order {order_id}")
                 return
 
-            attempt += 1
+            # Poll for video completion (max 10 minutes)
+            max_attempts = 60
+            attempt = 0
+            while attempt < max_attempts:
+                await asyncio.sleep(10)  # Check every 10 seconds
+                video_url = await get_video_url(video_id)
 
-        order["video_generation_status"] = "timeout"
-        log.warning(f"Video generation timeout for order {order_id}")
+                if video_url:
+                    order.video_url = video_url
+                    order.status = "video_ready"
+                    order.video_generation_status = "completed"
+                    await db.commit()
+                    log.info(f"Video completed for order {order_id}: {video_url}")
 
-    except Exception as e:
-        order["video_generation_status"] = "error"
-        log.error(f"Video generation error for order {order_id}: {str(e)}")
+                    # Send email to customer
+                    await send_video_ready_email(
+                        customer_email=order.customer_email,
+                        customer_name=order.customer_name,
+                        order_id=order_id,
+                        video_url=video_url,
+                    )
+                    return
+
+                attempt += 1
+
+            order.video_generation_status = "timeout"
+            await db.commit()
+            log.warning(f"Video generation timeout for order {order_id}")
+
+        except Exception as e:
+            order.video_generation_status = "error"
+            await db.commit()
+            log.error(f"Video generation error for order {order_id}: {str(e)}")
+
+
+# ============================================================
+# GET /orders/stats - Quick stats for dashboard
+# ============================================================
+# NOTE: these two literal-path routes must stay registered before
+# GET /orders/{order_id} below - FastAPI matches routes in registration
+# order, and {order_id}: int would otherwise try (and fail) to parse
+# "stats"/"admin-dashboard" as an integer, 422ing before ever reaching
+# the routes actually meant to handle those paths.
+
+@router.get("/orders/stats")
+async def get_order_stats(db: AsyncSession = Depends(get_db)):
+    """Get order statistics"""
+    result = await db.execute(select(VideoQuoteOrder))
+    all_orders = result.scalars().all()
+    pending_orders = [o for o in all_orders if o.status != "delivered"]
+    completed_orders = [o for o in all_orders if o.status == "delivered"]
+
+    total_revenue = sum(o.quote_price for o in completed_orders if o.paid)
+    pending_revenue = sum(o.quote_price for o in pending_orders if o.status != "quote_requested")
+
+    return {
+        "total_quote_requests": len(pending_orders),
+        "total_paid_orders": len([o for o in completed_orders if o.paid]),
+        "total_delivered": len(completed_orders),
+        "revenue_completed": total_revenue,
+        "revenue_pending": pending_revenue,
+        "total_potential_revenue": total_revenue + pending_revenue,
+        "average_order_value": total_revenue // len(completed_orders) if completed_orders else 0,
+    }
+
+
+# ============================================================
+# GET /orders/admin-dashboard - Full admin view
+# ============================================================
+
+@router.get("/orders/admin-dashboard")
+async def admin_dashboard(db: AsyncSession = Depends(get_db)):
+    """Complete admin dashboard view"""
+    result = await db.execute(select(VideoQuoteOrder))
+    all_orders = result.scalars().all()
+    pending_orders = [o for o in all_orders if o.status != "delivered"]
+    completed_orders = [o for o in all_orders if o.status == "delivered"]
+
+    # Count orders by video generation status
+    generating = sum(1 for o in pending_orders if o.video_generation_status == "generating")
+    video_ready = sum(1 for o in pending_orders if o.video_generation_status == "completed")
+    failed = sum(1 for o in pending_orders if o.video_generation_status in ["failed", "error", "timeout"])
+
+    return {
+        "pending_orders": {
+            "count": len(pending_orders),
+            "list": [
+                {
+                    "id": o.id,
+                    "customer_name": o.customer_name,
+                    "customer_email": o.customer_email,
+                    "video_type": o.video_type,
+                    "quote_price": o.quote_price,
+                    "paid": o.paid,
+                    "status": o.status,
+                    "video_generation_status": o.video_generation_status,
+                    "video_url": o.video_url,
+                    "requested_at": o.requested_at.isoformat() if o.requested_at else None,
+                }
+                for o in pending_orders
+            ],
+            "revenue_at_stake": sum(o.quote_price for o in pending_orders if o.paid),
+        },
+        "completed_orders": {
+            "count": len(completed_orders),
+            "list": [
+                {
+                    "id": o.id,
+                    "customer_name": o.customer_name,
+                    "customer_email": o.customer_email,
+                    "video_type": o.video_type,
+                    "quote_price": o.quote_price,
+                    "paid": o.paid,
+                    "video_url": o.video_url,
+                    "completed_at": o.completed_at.isoformat() if o.completed_at else None,
+                }
+                for o in completed_orders[-20:]
+            ],
+            "total_revenue": sum(o.quote_price for o in completed_orders if o.paid),
+        },
+        "video_generation_status": {
+            "generating": generating,
+            "ready": video_ready,
+            "failed": failed,
+        },
+        "stats": {
+            "total_requests": len(pending_orders) + len(completed_orders),
+            "conversion_rate": len(completed_orders) / (len(pending_orders) + len(completed_orders)) if (len(pending_orders) + len(completed_orders)) > 0 else 0,
+            "total_revenue": sum(o.quote_price for o in completed_orders if o.paid),
+            "avg_order_value": sum(o.quote_price for o in completed_orders if o.paid) // len([o for o in completed_orders if o.paid]) if any(o.paid for o in completed_orders) else 0,
+        },
+    }
 
 
 # ============================================================
@@ -374,20 +463,18 @@ async def generate_video_for_order(order_id: int, order: dict):
 # ============================================================
 
 @router.get("/orders/{order_id}")
-async def get_order_status(order_id: int):
+async def get_order_status(order_id: int, db: AsyncSession = Depends(get_db)):
     """Get status of specific order"""
-    order = next((o for o in pending_orders if o["id"] == order_id), None)
-    if not order:
-        order = next((o for o in completed_orders if o["id"] == order_id), None)
+    order = await db.get(VideoQuoteOrder, order_id)
 
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
     return {
-        "order": order,
-        "status": order["status"],
-        "paid": order["paid"],
-        "completed": order["status"] == "delivered",
+        "order": order.to_dict(),
+        "status": order.status,
+        "paid": order.paid,
+        "completed": order.status == "delivered",
     }
 
 
@@ -396,26 +483,27 @@ async def get_order_status(order_id: int):
 # ============================================================
 
 @router.post("/orders/{order_id}/payment-received")
-async def mark_payment_received(order_id: int, transaction_id: str = ""):
+async def mark_payment_received(order_id: int, transaction_id: str = "", db: AsyncSession = Depends(get_db)):
     """
     Mark order as paid
     """
-    order = next((o for o in pending_orders if o["id"] == order_id), None)
+    order = await db.get(VideoQuoteOrder, order_id)
 
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    order["paid"] = True
-    order["status"] = "payment_received"
-    order["transaction_id"] = transaction_id
+    order.paid = True
+    order.status = "payment_received"
+    order.transaction_id = transaction_id
+    await db.commit()
 
-    log.info(f"Payment received for order {order_id}: ${order['quote_price']}")
+    log.info(f"Payment received for order {order_id}: ${order.quote_price}")
 
     return {
         "success": True,
         "order_id": order_id,
         "status": "payment_received",
-        "message": f"Payment confirmed. Video creation starting now.",
+        "message": "Payment confirmed. Video creation starting now.",
     }
 
 
@@ -424,25 +512,25 @@ async def mark_payment_received(order_id: int, transaction_id: str = ""):
 # ============================================================
 
 @router.post("/orders/{order_id}/generate-video")
-async def manual_generate_video(order_id: int):
+async def manual_generate_video(order_id: int, db: AsyncSession = Depends(get_db)):
     """Admin endpoint to manually trigger video generation"""
-    order = next((o for o in pending_orders if o["id"] == order_id), None)
+    order = await db.get(VideoQuoteOrder, order_id)
 
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    if not order["paid"]:
+    if not order.paid:
         raise HTTPException(status_code=400, detail="Order must be paid before generating video")
 
-    if order.get("video_url"):
+    if order.video_url:
         return {
             "status": "already_complete",
             "message": "Video already generated",
-            "video_url": order["video_url"],
+            "video_url": order.video_url,
         }
 
     # Trigger video generation
-    asyncio.create_task(generate_video_for_order(order_id, order))
+    asyncio.create_task(generate_video_for_order(order_id))
 
     return {
         "status": "generation_started",
@@ -460,27 +548,24 @@ async def mark_order_complete(
     order_id: int,
     video_url: str,
     video_download_link: str,
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Admin marks order complete and provides video link
     """
-    order = next((o for o in pending_orders if o["id"] == order_id), None)
+    order = await db.get(VideoQuoteOrder, order_id)
 
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    if not order["paid"]:
+    if not order.paid:
         raise HTTPException(status_code=400, detail="Order not paid yet")
 
-    # Mark as complete
-    order["status"] = "delivered"
-    order["completed_at"] = datetime.now().isoformat()
-    order["video_url"] = video_url
-    order["video_download_link"] = video_download_link
-
-    # Move to completed
-    pending_orders.remove(order)
-    completed_orders.append(order)
+    order.status = "delivered"
+    order.completed_at = datetime.utcnow()
+    order.video_url = video_url
+    order.video_download_link = video_download_link
+    await db.commit()
 
     log.info(f"Order {order_id} marked complete. Video: {video_url}")
 
@@ -488,8 +573,8 @@ async def mark_order_complete(
         "success": True,
         "order_id": order_id,
         "status": "delivered",
-        "customer_email": order["customer_email"],
-        "message": f"Order marked complete.",
+        "customer_email": order.customer_email,
+        "message": "Order marked complete.",
     }
 
 
@@ -498,11 +583,9 @@ async def mark_order_complete(
 # ============================================================
 
 @router.get("/orders/customer/{order_id}")
-async def customer_portal(order_id: int):
+async def customer_portal(order_id: int, db: AsyncSession = Depends(get_db)):
     """Customer portal to track order and download video"""
-    order = next((o for o in pending_orders if o["id"] == order_id), None)
-    if not order:
-        order = next((o for o in completed_orders if o["id"] == order_id), None)
+    order = await db.get(VideoQuoteOrder, order_id)
 
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -525,24 +608,22 @@ async def customer_portal(order_id: int):
     }
 
     return {
-        "order_id": order["id"],
-        "customer_name": order["customer_name"],
-        "customer_email": order["customer_email"],
-        "status": order["status"],
-        "status_message": status_messages.get(order["status"], order["status"]),
-        "video_type": order["video_type"],
-        "avatar": order.get("avatar", "N/A"),
-        "language": order.get("language", "N/A"),
-        "quote_price": order["quote_price"],
-        "paid": order["paid"],
-        "requested_at": order["requested_at"],
-        "video_generation_status": order.get("video_generation_status", "pending"),
-        "video_generation_message": video_generation_messages.get(
-            order.get("video_generation_status", "pending")
-        ),
-        "video_url": order.get("video_url"),
-        "completed_at": order.get("completed_at"),
-        "can_download": order.get("video_url") is not None,
+        "order_id": order.id,
+        "customer_name": order.customer_name,
+        "customer_email": order.customer_email,
+        "status": order.status,
+        "status_message": status_messages.get(order.status, order.status),
+        "video_type": order.video_type,
+        "avatar": order.avatar or "N/A",
+        "language": order.language or "N/A",
+        "quote_price": order.quote_price,
+        "paid": order.paid,
+        "requested_at": order.requested_at.isoformat() if order.requested_at else None,
+        "video_generation_status": order.video_generation_status,
+        "video_generation_message": video_generation_messages.get(order.video_generation_status),
+        "video_url": order.video_url,
+        "completed_at": order.completed_at.isoformat() if order.completed_at else None,
+        "can_download": order.video_url is not None,
     }
 
 
@@ -551,12 +632,12 @@ async def customer_portal(order_id: int):
 # ============================================================
 
 @router.get("/orders/customer-email/{email}/all")
-async def customer_orders_by_email(email: str):
+async def customer_orders_by_email(email: str, db: AsyncSession = Depends(get_db)):
     """Get all orders for a customer by email"""
-    customer_orders = [
-        o for o in (pending_orders + completed_orders)
-        if o["customer_email"].lower() == email.lower()
-    ]
+    result = await db.execute(
+        select(VideoQuoteOrder).where(func.lower(VideoQuoteOrder.customer_email) == email.lower())
+    )
+    customer_orders = result.scalars().all()
 
     if not customer_orders:
         raise HTTPException(status_code=404, detail="No orders found for this email")
@@ -566,98 +647,13 @@ async def customer_orders_by_email(email: str):
         "total_orders": len(customer_orders),
         "orders": [
             {
-                "order_id": o["id"],
-                "status": o["status"],
-                "quote_price": o["quote_price"],
-                "paid": o["paid"],
-                "video_ready": o.get("video_url") is not None,
-                "requested_at": o["requested_at"],
+                "order_id": o.id,
+                "status": o.status,
+                "quote_price": o.quote_price,
+                "paid": o.paid,
+                "video_ready": o.video_url is not None,
+                "requested_at": o.requested_at.isoformat() if o.requested_at else None,
             }
             for o in customer_orders
         ]
-    }
-
-
-# ============================================================
-# GET /orders/stats - Quick stats for dashboard
-# ============================================================
-
-@router.get("/orders/stats")
-async def get_order_stats():
-    """Get order statistics"""
-    total_revenue = sum(o["quote_price"] for o in completed_orders if o["paid"])
-    pending_revenue = sum(o["quote_price"] for o in pending_orders if o["status"] != "quote_requested")
-
-    return {
-        "total_quote_requests": len(pending_orders),
-        "total_paid_orders": len([o for o in completed_orders if o["paid"]]),
-        "total_delivered": len(completed_orders),
-        "revenue_completed": total_revenue,
-        "revenue_pending": pending_revenue,
-        "total_potential_revenue": total_revenue + pending_revenue,
-        "average_order_value": total_revenue // len(completed_orders) if completed_orders else 0,
-    }
-
-
-# ============================================================
-# GET /orders/admin-dashboard - Full admin view
-# ============================================================
-
-@router.get("/orders/admin-dashboard")
-async def admin_dashboard():
-    """Complete admin dashboard view"""
-
-    # Count orders by video generation status
-    generating = sum(1 for o in pending_orders if o.get("video_generation_status") == "generating")
-    video_ready = sum(1 for o in pending_orders if o.get("video_generation_status") == "completed")
-    failed = sum(1 for o in pending_orders if o.get("video_generation_status") in ["failed", "error", "timeout"])
-
-    return {
-        "pending_orders": {
-            "count": len(pending_orders),
-            "list": [
-                {
-                    "id": o["id"],
-                    "customer_name": o["customer_name"],
-                    "customer_email": o["customer_email"],
-                    "video_type": o["video_type"],
-                    "quote_price": o["quote_price"],
-                    "paid": o["paid"],
-                    "status": o["status"],
-                    "video_generation_status": o.get("video_generation_status", "pending"),
-                    "video_url": o.get("video_url"),
-                    "requested_at": o["requested_at"],
-                }
-                for o in pending_orders
-            ],
-            "revenue_at_stake": sum(o["quote_price"] for o in pending_orders if o["paid"]),
-        },
-        "completed_orders": {
-            "count": len(completed_orders),
-            "list": [
-                {
-                    "id": o["id"],
-                    "customer_name": o["customer_name"],
-                    "customer_email": o["customer_email"],
-                    "video_type": o["video_type"],
-                    "quote_price": o["quote_price"],
-                    "paid": o["paid"],
-                    "video_url": o.get("video_url"),
-                    "completed_at": o.get("completed_at"),
-                }
-                for o in completed_orders[-20:]
-            ],
-            "total_revenue": sum(o["quote_price"] for o in completed_orders if o["paid"]),
-        },
-        "video_generation_status": {
-            "generating": generating,
-            "ready": video_ready,
-            "failed": failed,
-        },
-        "stats": {
-            "total_requests": len(pending_orders) + len(completed_orders),
-            "conversion_rate": len(completed_orders) / (len(pending_orders) + len(completed_orders)) if (len(pending_orders) + len(completed_orders)) > 0 else 0,
-            "total_revenue": sum(o["quote_price"] for o in completed_orders if o["paid"]),
-            "avg_order_value": sum(o["quote_price"] for o in completed_orders if o["paid"]) // len([o for o in completed_orders if o["paid"]]) if any(o["paid"] for o in completed_orders) else 0,
-        },
     }

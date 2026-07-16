@@ -7,6 +7,11 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional, List
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from models import CustomerSubscription
+
 log = logging.getLogger("subscriptions")
 
 # ============================================================
@@ -60,12 +65,6 @@ SUBSCRIPTION_TIERS = {
     },
 }
 
-# ============================================================
-# IN-MEMORY SUBSCRIPTION STORAGE
-# ============================================================
-
-customer_subscriptions = {}  # {customer_email: {"tier": "pro", "start_date": datetime, ...}}
-
 
 # ============================================================
 # SUBSCRIPTION FUNCTIONS
@@ -81,50 +80,108 @@ def get_all_tiers() -> List[dict]:
     return list(SUBSCRIPTION_TIERS.values())
 
 
-def subscribe_customer(customer_email: str, tier_id: str) -> dict:
-    """Subscribe a customer to a tier"""
+def _sub_to_dict(sub: CustomerSubscription) -> dict:
+    return {
+        "customer_email": sub.customer_email,
+        "tier_id": sub.tier_id,
+        "tier_name": SUBSCRIPTION_TIERS[sub.tier_id]["name"],
+        "start_date": sub.start_date,
+        "current_period_start": sub.current_period_start,
+        "current_period_end": sub.current_period_end,
+        "videos_used_this_month": sub.videos_used_this_month,
+        "active": sub.active,
+        "stripe_subscription_id": sub.stripe_subscription_id,
+        "stripe_customer_id": sub.stripe_customer_id,
+        "status": sub.status,
+        "payment_status": sub.payment_status,
+    }
+
+
+async def _get_sub_row(db: AsyncSession, customer_email: str) -> Optional[CustomerSubscription]:
+    result = await db.execute(
+        select(CustomerSubscription).where(CustomerSubscription.customer_email == customer_email)
+    )
+    return result.scalar_one_or_none()
+
+
+async def subscribe_customer(db: AsyncSession, customer_email: str, tier_id: str) -> dict:
+    """Subscribe a customer to a tier (create or overwrite their record)"""
     if tier_id not in SUBSCRIPTION_TIERS:
         raise ValueError(f"Invalid tier: {tier_id}")
 
     now = datetime.utcnow()
-    customer_subscriptions[customer_email] = {
-        "tier_id": tier_id,
-        "tier_name": SUBSCRIPTION_TIERS[tier_id]["name"],
-        "start_date": now,
-        "current_period_start": now,
-        "current_period_end": now + timedelta(days=30),
-        "videos_used_this_month": 0,
-        "active": True,
-    }
+    sub = await _get_sub_row(db, customer_email)
+
+    if sub:
+        sub.tier_id = tier_id
+        sub.start_date = now
+        sub.current_period_start = now
+        sub.current_period_end = now + timedelta(days=30)
+        sub.videos_used_this_month = 0
+        sub.active = True
+    else:
+        sub = CustomerSubscription(
+            customer_email=customer_email,
+            tier_id=tier_id,
+            start_date=now,
+            current_period_start=now,
+            current_period_end=now + timedelta(days=30),
+            videos_used_this_month=0,
+            active=True,
+        )
+        db.add(sub)
+
+    await db.commit()
+    await db.refresh(sub)
 
     log.info(f"Customer {customer_email} subscribed to {tier_id} tier")
-    return customer_subscriptions[customer_email]
+    return _sub_to_dict(sub)
 
 
-def get_subscription(customer_email: str) -> Optional[dict]:
+async def update_stripe_ids(db: AsyncSession, customer_email: str, stripe_subscription_id: str, stripe_customer_id: str) -> None:
+    """Attach Stripe IDs and mark active/paid - called once a checkout webhook confirms payment"""
+    sub = await _get_sub_row(db, customer_email)
+    if not sub:
+        log.warning(f"update_stripe_ids: no subscription record for {customer_email}")
+        return
+
+    sub.stripe_subscription_id = stripe_subscription_id
+    sub.stripe_customer_id = stripe_customer_id
+    sub.status = "active"
+    sub.payment_status = "active"
+    await db.commit()
+
+
+async def get_subscription(db: AsyncSession, customer_email: str) -> Optional[dict]:
     """Get customer subscription status"""
-    sub = customer_subscriptions.get(customer_email)
-
+    sub = await _get_sub_row(db, customer_email)
     if not sub:
         return None
 
     # Check if subscription period has ended
-    if sub["active"] and datetime.utcnow() > sub["current_period_end"]:
+    if sub.active and datetime.utcnow() > sub.current_period_end:
         # Reset monthly counter and extend period
-        sub["current_period_start"] = datetime.utcnow()
-        sub["current_period_end"] = datetime.utcnow() + timedelta(days=30)
-        sub["videos_used_this_month"] = 0
+        sub.current_period_start = datetime.utcnow()
+        sub.current_period_end = datetime.utcnow() + timedelta(days=30)
+        sub.videos_used_this_month = 0
+        await db.commit()
 
-    tier = get_tier(sub["tier_id"])
-    sub["tier_details"] = tier
-    sub["videos_remaining"] = tier["videos_per_month"] - sub["videos_used_this_month"]
+    tier = get_tier(sub.tier_id)
+    d = _sub_to_dict(sub)
+    d["tier_details"] = tier
+    d["videos_remaining"] = tier["videos_per_month"] - sub.videos_used_this_month
+    return d
 
-    return sub
+
+async def get_all_subscriptions(db: AsyncSession) -> List[dict]:
+    """[ADMIN] Get every customer's subscription record"""
+    result = await db.execute(select(CustomerSubscription))
+    return [_sub_to_dict(sub) for sub in result.scalars().all()]
 
 
-def can_create_video(customer_email: str) -> tuple[bool, str]:
+async def can_create_video(db: AsyncSession, customer_email: str) -> tuple:
     """Check if customer can create a video (within quota)"""
-    sub = get_subscription(customer_email)
+    sub = await get_subscription(db, customer_email)
 
     # If no subscription, allow one-off purchase
     if not sub:
@@ -137,27 +194,29 @@ def can_create_video(customer_email: str) -> tuple[bool, str]:
     if remaining > 0:
         return True, f"subscription ({remaining} remaining)"
     else:
-        return False, f"monthly quota exceeded"
+        return False, "monthly quota exceeded"
 
 
-def use_video_quota(customer_email: str) -> bool:
+async def use_video_quota(db: AsyncSession, customer_email: str) -> bool:
     """Deduct one video from customer quota (return False if over quota)"""
-    sub = get_subscription(customer_email)
+    sub_dict = await get_subscription(db, customer_email)
 
-    if not sub:
+    if not sub_dict:
         # One-off customer, no quota check needed
         return True
 
-    tier = get_tier(sub["tier_id"])
-    if sub["videos_used_this_month"] < tier["videos_per_month"]:
-        sub["videos_used_this_month"] += 1
-        log.info(f"Video quota used for {customer_email}: {sub['videos_used_this_month']}/{tier['videos_per_month']}")
+    sub = await _get_sub_row(db, customer_email)
+    tier = get_tier(sub.tier_id)
+    if sub.videos_used_this_month < tier["videos_per_month"]:
+        sub.videos_used_this_month += 1
+        await db.commit()
+        log.info(f"Video quota used for {customer_email}: {sub.videos_used_this_month}/{tier['videos_per_month']}")
         return True
 
     return False
 
 
-def get_pricing_for_customer(customer_email: str, video_type: str, delivery_days: int) -> dict:
+async def get_pricing_for_customer(db: AsyncSession, customer_email: str, video_type: str, delivery_days: int) -> dict:
     """
     Calculate video pricing based on customer tier
     Returns pricing breakdown
@@ -174,7 +233,7 @@ def get_pricing_for_customer(customer_email: str, video_type: str, delivery_days
     base_price = base_prices.get(video_type, 50000)
 
     # Check if customer has subscription
-    sub = get_subscription(customer_email)
+    sub = await get_subscription(db, customer_email)
 
     if not sub:
         # One-off pricing: base + rush fee
@@ -189,7 +248,7 @@ def get_pricing_for_customer(customer_email: str, video_type: str, delivery_days
             "base_price": base_price,
             "rush_fee": rush_fee,
             "total": base_price + rush_fee,
-            "description": f"One-time video purchase",
+            "description": "One-time video purchase",
         }
 
     # Subscription pricing
@@ -217,9 +276,9 @@ def get_pricing_for_customer(customer_email: str, video_type: str, delivery_days
         }
 
 
-def get_customer_billing_summary(customer_email: str) -> dict:
+async def get_customer_billing_summary(db: AsyncSession, customer_email: str) -> dict:
     """Get billing summary for a customer"""
-    sub = get_subscription(customer_email)
+    sub = await get_subscription(db, customer_email)
 
     if not sub:
         return {

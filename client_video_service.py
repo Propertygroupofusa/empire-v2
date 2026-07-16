@@ -6,12 +6,15 @@ $500, $750, $1000 pricing tiers with automated fulfillment
 import os
 import uuid
 import logging
-from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 from enum import Enum
 
 import stripe
 import aiohttp
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from models import ClientVideoOrder
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("client_video_service")
@@ -51,64 +54,37 @@ PRICING = {
 }
 
 
-class VideoOrder:
-    """Represents a video order"""
-
-    def __init__(self, order_id: str, client_email: str, tier: PricingTier, script: str):
-        self.order_id = order_id
-        self.client_email = client_email
-        self.tier = tier
-        self.script = script
-        self.status = "pending"  # pending, processing, ready, delivered
-        self.created_at = datetime.utcnow()
-        self.video_job_id = None
-        self.download_link = None
-        self.revisions_used = 0
-        self.payment_id = None
-
-    def to_dict(self) -> Dict:
-        return {
-            "order_id": self.order_id,
-            "client_email": self.client_email,
-            "tier": self.tier,
-            "script": self.script,
-            "status": self.status,
-            "created_at": self.created_at.isoformat(),
-            "video_job_id": self.video_job_id,
-            "download_link": self.download_link,
-            "revisions_used": self.revisions_used,
-            "max_revisions": PRICING[self.tier]["revisions"],
-            "payment_id": self.payment_id
-        }
-
-
 class ClientVideoService:
     """Manage client video orders and fulfillment"""
 
     def __init__(self):
-        self.orders: Dict[str, VideoOrder] = {}
         self.video_generator_url = os.getenv("VIDEO_GENERATOR_URL", "http://localhost:5003")
         self.stripe_enabled = bool(os.getenv("STRIPE_SECRET_KEY"))
 
-    async def create_order(self, client_email: str, tier: PricingTier, script: str) -> Dict:
+    async def create_order(self, db: AsyncSession, client_email: str, tier: PricingTier, script: str) -> Dict:
         """Create a new video order. Video generation is NOT queued here —
         it only starts once Stripe confirms payment via webhook
         (see confirm_payment_and_fulfill), otherwise anyone could call this
         endpoint and get a paid video for free."""
         try:
-            order_id = f"ORD-{uuid.uuid4().hex[:8].upper()}"
-            order = VideoOrder(order_id, client_email, tier, script)
-            self.orders[order_id] = order
-
             if not self.stripe_enabled:
                 return {"success": False, "error": "Payments are not configured for this service"}
 
+            order_id = f"ORD-{uuid.uuid4().hex[:8].upper()}"
+
             checkout = await self._create_checkout_session(client_email, order_id, tier)
             if not checkout.get("success"):
-                del self.orders[order_id]
                 return checkout
 
-            order.status = "awaiting_payment"
+            order = ClientVideoOrder(
+                order_id=order_id,
+                client_email=client_email,
+                tier=tier.value,
+                script=script,
+                status="awaiting_payment",
+            )
+            db.add(order)
+            await db.commit()
 
             log.info(f"Order created: {order_id} ({tier}) for {client_email}, awaiting payment")
 
@@ -151,14 +127,18 @@ class ClientVideoService:
             log.error(f"Stripe checkout session creation failed: {e}")
             return {"success": False, "error": f"Payment setup failed: {str(e)}"}
 
-    async def confirm_payment_and_fulfill(self, order_id: str, session_id: str) -> Dict:
+    async def _get_order(self, db: AsyncSession, order_id: str) -> Optional[ClientVideoOrder]:
+        result = await db.execute(select(ClientVideoOrder).where(ClientVideoOrder.order_id == order_id))
+        return result.scalar_one_or_none()
+
+    async def confirm_payment_and_fulfill(self, db: AsyncSession, order_id: str, session_id: str) -> Dict:
         """Called by the Stripe webhook once checkout.session.completed fires.
         This is the only path that triggers video generation."""
-        if order_id not in self.orders:
+        order = await self._get_order(db, order_id)
+        if not order:
             log.warning(f"Stripe webhook confirmed unknown order_id: {order_id}")
             return {"success": False, "error": "Order not found"}
 
-        order = self.orders[order_id]
         if order.payment_id:
             log.info(f"Order {order_id} already fulfilled, ignoring duplicate webhook")
             return {"success": True, "order_id": order_id, "status": order.status}
@@ -168,24 +148,24 @@ class ClientVideoService:
         result = await self._queue_video_generation(order)
         if not result.get("success"):
             order.status = "payment_received_generation_failed"
+            await db.commit()
             log.error(f"Video generation failed after payment for order {order_id}: {result.get('error')}")
             return result
 
         order.video_job_id = result.get("job_id")
         order.status = "processing"
+        await db.commit()
         log.info(f"Payment confirmed for order {order_id}, video generation queued")
         return {"success": True, "order_id": order_id, "status": "processing"}
 
-    async def _queue_video_generation(self, order: VideoOrder) -> Dict:
+    async def _queue_video_generation(self, order: ClientVideoOrder) -> Dict:
         """Send video to generator"""
         try:
-            pricing = PRICING[order.tier]
-
             async with aiohttp.ClientSession() as session:
                 payload = {
                     "text": order.script,
                     "videoType": "client_custom",
-                    "quality": "1080p" if order.tier in [PricingTier.PROFESSIONAL, PricingTier.PREMIUM] else "720p",
+                    "quality": "1080p" if order.tier in [PricingTier.PROFESSIONAL.value, PricingTier.PREMIUM.value] else "720p",
                     "metadata": {
                         "order_id": order.order_id,
                         "client_email": order.client_email,
@@ -207,12 +187,11 @@ class ClientVideoService:
             log.error(f"Failed to queue video: {e}")
             return {"success": False, "error": str(e)}
 
-    async def check_order_status(self, order_id: str) -> Dict:
+    async def check_order_status(self, db: AsyncSession, order_id: str) -> Dict:
         """Check status of an order"""
-        if order_id not in self.orders:
+        order = await self._get_order(db, order_id)
+        if not order:
             return {"error": "Order not found"}
-
-        order = self.orders[order_id]
 
         # Check video generation status
         if order.video_job_id:
@@ -230,28 +209,30 @@ class ClientVideoService:
                                 order.download_link = job_status.get("download_url")
                             elif job_status.get("status") == "processing":
                                 order.status = "processing"
+                            await db.commit()
             except Exception as e:
                 log.warning(f"Failed to check job status: {e}")
 
+        pricing = PRICING[PricingTier(order.tier)]
         return {
-            "order_id": order_id,
+            "order_id": order.order_id,
             "status": order.status,
             "tier": order.tier,
-            "created_at": order.created_at.isoformat(),
+            "created_at": order.created_at.isoformat() if order.created_at else None,
             "video_job_id": order.video_job_id,
             "download_link": order.download_link,
             "revisions_used": order.revisions_used,
-            "max_revisions": PRICING[order.tier]["revisions"],
+            "max_revisions": pricing["revisions"],
             "message": f"Your video is {order.status}"
         }
 
-    async def request_revision(self, order_id: str, revision_script: str) -> Dict:
+    async def request_revision(self, db: AsyncSession, order_id: str, revision_script: str) -> Dict:
         """Request revision to video"""
-        if order_id not in self.orders:
+        order = await self._get_order(db, order_id)
+        if not order:
             return {"error": "Order not found"}
 
-        order = self.orders[order_id]
-        pricing = PRICING[order.tier]
+        pricing = PRICING[PricingTier(order.tier)]
 
         if order.revisions_used >= pricing["revisions"]:
             return {
@@ -266,6 +247,7 @@ class ClientVideoService:
             order.video_job_id = result.get("job_id")
             order.status = "processing"
             order.revisions_used += 1
+            await db.commit()
 
             return {
                 "success": True,
@@ -277,17 +259,21 @@ class ClientVideoService:
         else:
             return {"success": False, "error": result.get("error")}
 
-    def get_orders(self, client_email: Optional[str] = None, status: Optional[str] = None) -> List[Dict]:
+    async def get_orders(self, db: AsyncSession, client_email: Optional[str] = None, status: Optional[str] = None) -> List[Dict]:
         """Get orders, optionally filtered"""
-        orders = list(self.orders.values())
-
+        query = select(ClientVideoOrder)
         if client_email:
-            orders = [o for o in orders if o.client_email == client_email]
-
+            query = query.where(ClientVideoOrder.client_email == client_email)
         if status:
-            orders = [o for o in orders if o.status == status]
+            query = query.where(ClientVideoOrder.status == status)
 
-        return [o.to_dict() for o in orders]
+        result = await db.execute(query)
+        orders = result.scalars().all()
+
+        return [
+            o.to_dict(max_revisions=PRICING[PricingTier(o.tier)]["revisions"])
+            for o in orders
+        ]
 
     def get_pricing(self) -> Dict:
         """Get pricing information"""
@@ -305,15 +291,18 @@ class ClientVideoService:
             "currency": "USD"
         }
 
-    def get_statistics(self) -> Dict:
+    async def get_statistics(self, db: AsyncSession) -> Dict:
         """Get service statistics"""
-        total_orders = len(self.orders)
-        completed = sum(1 for o in self.orders.values() if o.status == "delivered")
-        processing = sum(1 for o in self.orders.values() if o.status == "processing")
+        result = await db.execute(select(ClientVideoOrder))
+        orders = result.scalars().all()
+
+        total_orders = len(orders)
+        completed = sum(1 for o in orders if o.status == "delivered")
+        processing = sum(1 for o in orders if o.status == "processing")
 
         total_revenue = sum(
-            PRICING[o.tier]["amount"] / 100
-            for o in self.orders.values()
+            PRICING[PricingTier(o.tier)]["amount"] / 100
+            for o in orders
             if o.status == "delivered"
         )
 
