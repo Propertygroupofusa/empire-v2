@@ -416,7 +416,7 @@ async def enroll_student(
 ):
     """Enroll a student in a course"""
     builder = get_course_builder()
-    return await builder.enroll_student(student_id, student_email, course_id)
+    return builder.enroll_student(student_id, student_email, course_id)
 
 
 @router.get("/courses/{course_id}/progress/{student_id}")
@@ -437,7 +437,7 @@ async def mark_lesson_complete(
 ):
     """Mark a lesson as completed"""
     builder = get_course_builder()
-    return await builder.mark_lesson_complete(student_id, course_id, lesson_id)
+    return builder.mark_lesson_complete(student_id, course_id, lesson_id)
 
 
 @router.get("/courses/{course_id}/stats")
