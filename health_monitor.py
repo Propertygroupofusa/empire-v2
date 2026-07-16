@@ -352,7 +352,7 @@ class ComprehensiveHealthMonitor:
                             "type": error.get("type"),
                             "msg": error.get("error", "Unknown"),
                             "sev": error.get("severity", "unknown"),
-                            "timestamp": datetime.now().isoformat()
+                            "timestamp": datetime.now()
                         }
                     )
         except Exception as e:
@@ -370,7 +370,7 @@ class ComprehensiveHealthMonitor:
                     """),
                     {
                         "issue": issue_name,
-                        "timestamp": datetime.now().isoformat(),
+                        "timestamp": datetime.now(),
                         "status": "success"
                     }
                 )
@@ -390,7 +390,7 @@ class ComprehensiveHealthMonitor:
                     """),
                     {
                         "data": json.dumps(metrics),
-                        "timestamp": datetime.now().isoformat()
+                        "timestamp": datetime.now()
                     }
                 )
         except Exception as e:
@@ -402,7 +402,7 @@ class ComprehensiveHealthMonitor:
             "type": error_type,
             "error": error_msg,
             "severity": severity,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now()
         }
 
     def get_status(self) -> Dict[str, Any]:
