@@ -488,10 +488,13 @@ async def study_stripe_webhook(request: Request, db: AsyncSession = Depends(get_
     """Stripe webhook: only place a user's tier actually flips to "paid"."""
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
-    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+    # Falls back to the shared STRIPE_WEBHOOK_SECRET so this keeps working if
+    # only one Stripe webhook endpoint is registered; set the dedicated var
+    # once a separate endpoint (with its own signing secret) exists for /study.
+    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET_STUDY") or os.getenv("STRIPE_WEBHOOK_SECRET")
 
     if not webhook_secret:
-        log.warning("STRIPE_WEBHOOK_SECRET not configured, cannot verify webhook")
+        log.warning("STRIPE_WEBHOOK_SECRET_STUDY (or STRIPE_WEBHOOK_SECRET) not configured, cannot verify webhook")
         raise HTTPException(status_code=500, detail="Webhook not configured")
 
     try:
