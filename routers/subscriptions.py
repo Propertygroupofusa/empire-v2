@@ -63,10 +63,19 @@ async def subscribe(
     tier_id: str,
 ):
     """
-    Subscribe a customer to a tier
+    Activate the free tier directly. Paid tiers must go through
+    POST /subscriptions/checkout so payment is actually collected -
+    this endpoint used to grant any tier (including $3,500/mo Enterprise)
+    with no payment at all.
     """
     if tier_id not in SUBSCRIPTION_TIERS:
         raise HTTPException(status_code=400, detail=f"Invalid tier: {tier_id}")
+
+    if tier_id != "free":
+        raise HTTPException(
+            status_code=400,
+            detail="Paid tiers require checkout - use POST /subscriptions/checkout instead",
+        )
 
     try:
         subscription = subscribe_customer(customer_email, tier_id)
@@ -129,10 +138,18 @@ async def upgrade_subscription(
     new_tier_id: str,
 ):
     """
-    Upgrade customer to a different tier (effective immediately)
+    Move a customer to a different tier. Only free is allowed here since
+    upgrading to a paid tier needs an actual Stripe charge - use
+    POST /subscriptions/checkout for paid tiers instead.
     """
     if new_tier_id not in SUBSCRIPTION_TIERS:
         raise HTTPException(status_code=400, detail=f"Invalid tier: {new_tier_id}")
+
+    if new_tier_id != "free":
+        raise HTTPException(
+            status_code=400,
+            detail="Upgrading to a paid tier requires checkout - use POST /subscriptions/checkout instead",
+        )
 
     old_subscription = get_subscription(customer_email)
     old_tier = old_subscription["tier_name"] if old_subscription else "None"
