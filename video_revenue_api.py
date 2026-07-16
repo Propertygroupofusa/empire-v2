@@ -7,7 +7,9 @@ Includes Synthesia generation + YouTube auto-publish.
 
 import os
 import logging
+from typing import List, Optional
 from fastapi import APIRouter, Request, HTTPException
+from pydantic import BaseModel
 
 from synthesia_video_bot import (
     create_video, get_video, verify_webhook,
@@ -27,67 +29,94 @@ PRICING = {
 }
 
 
+class PropertyListingRequest(BaseModel):
+    address: str
+    price: str
+    beds: str
+    baths: str
+    features: str
+    client_email: Optional[str] = ""
+
+
+class SocialContentRequest(BaseModel):
+    business_name: str
+    topic: str
+    cta: str
+    client_email: Optional[str] = ""
+
+
+class ColdCallFollowupRequest(BaseModel):
+    lead_name: str
+    property_address: str
+    lead_email: Optional[str] = ""
+
+
+class OnboardingRequest(BaseModel):
+    user_name: Optional[str] = "there"
+    user_email: Optional[str] = ""
+
+
 @router.post("/generate/property-listing")
-async def generate_property_listing(payload: dict):
-    """payload: { address, price, beds, baths, features, client_email } | $75/video"""
+async def generate_property_listing(payload: PropertyListingRequest):
+    """$75/video"""
     script = property_listing_script(
-        address=payload["address"],
-        price=payload["price"],
-        beds=payload["beds"],
-        baths=payload["baths"],
-        features=payload["features"],
+        address=payload.address,
+        price=payload.price,
+        beds=payload.beds,
+        baths=payload.baths,
+        features=payload.features,
     )
     result = await create_video(
         script=script,
         use_case="real_estate",
-        title=f"Listing: {payload['address']}",
-        callback_id=payload.get("client_email", ""),
+        title=f"Listing: {payload.address}",
+        callback_id=payload.client_email,
     )
     return {"video": result, "price": PRICING["property_listing"]}
 
 
 @router.post("/generate/social-content")
-async def generate_social_content(payload: dict):
-    """payload: { business_name, topic, cta, client_email } | $50/video"""
+async def generate_social_content(payload: SocialContentRequest):
+    """$50/video"""
     script = social_content_script(
-        business_name=payload["business_name"],
-        topic=payload["topic"],
-        cta=payload["cta"],
+        business_name=payload.business_name,
+        topic=payload.topic,
+        cta=payload.cta,
     )
     result = await create_video(
         script=script,
         use_case="marketing",
-        title=f"Social: {payload['business_name']} - {payload['topic']}",
-        callback_id=payload.get("client_email", ""),
+        title=f"Social: {payload.business_name} - {payload.topic}",
+        callback_id=payload.client_email,
     )
     return {"video": result, "price": PRICING["social_content"]}
 
 
 @router.post("/generate/cold-call-followup")
-async def generate_followup(payload: dict):
-    """payload: { lead_name, property_address, lead_email } | $25/video"""
+async def generate_followup(payload: ColdCallFollowupRequest):
+    """$25/video"""
     script = cold_call_followup_script(
-        lead_name=payload["lead_name"],
-        property_address=payload["property_address"],
+        lead_name=payload.lead_name,
+        property_address=payload.property_address,
     )
     result = await create_video(
         script=script,
         use_case="sales",
-        title=f"Follow-up: {payload['lead_name']}",
-        callback_id=payload.get("lead_email", ""),
+        title=f"Follow-up: {payload.lead_name}",
+        callback_id=payload.lead_email,
     )
     return {"video": result, "price": PRICING["cold_call_followup"]}
 
 
 @router.post("/generate/payee-trust-onboarding")
-async def generate_onboarding(payload: dict):
-    """payload: { user_name, user_email } | internal use"""
-    script = payee_trust_onboarding_script(user_name=payload.get("user_name", "there"))
+async def generate_onboarding(payload: OnboardingRequest):
+    """internal use"""
+    script = payee_trust_onboarding_script(user_name=payload.user_name)
     result = await create_video(
         script=script,
         use_case="finance",
-        title=f"Onboarding: {payload.get('user_name', 'New User')}",
-        callback_id=payload.get("user_email", ""),
+        title=f"Onboarding: {payload.user_name}",
+        callback_id=payload.user_email,
     )
     return {"video": result}
 
@@ -119,28 +148,43 @@ async def synthesia_webhook(request: Request):
     return {"received": True}
 
 
+class PublishPropertyRequest(BaseModel):
+    video_url: str
+    title: Optional[str] = "Property Listing"
+    description: Optional[str] = ""
+    tags: Optional[List[str]] = None
+
+
+class PublishSocialRequest(BaseModel):
+    video_url: str
+    title: Optional[str] = "Social Content"
+    description: Optional[str] = ""
+    tags: Optional[List[str]] = None
+    privacy: Optional[str] = "unlisted"
+
+
 @router.post("/publish/youtube/property-listing")
-async def publish_property_youtube(payload: dict):
-    """payload: { video_url, title, description, tags } | publishes public"""
+async def publish_property_youtube(payload: PublishPropertyRequest):
+    """publishes public"""
     result = await synthesia_to_youtube(
-        synthesia_download_url=payload["video_url"],
-        title=payload.get("title", "Property Listing"),
-        description=payload.get("description", ""),
-        tags=payload.get("tags"),
+        synthesia_download_url=payload.video_url,
+        title=payload.title,
+        description=payload.description,
+        tags=payload.tags,
         privacy="public",
     )
     return result
 
 
 @router.post("/publish/youtube/social-content")
-async def publish_social_youtube(payload: dict):
-    """payload: { video_url, title, description, tags, privacy } | defaults unlisted"""
+async def publish_social_youtube(payload: PublishSocialRequest):
+    """defaults unlisted"""
     result = await synthesia_to_youtube(
-        synthesia_download_url=payload["video_url"],
-        title=payload.get("title", "Social Content"),
-        description=payload.get("description", ""),
-        tags=payload.get("tags"),
-        privacy=payload.get("privacy", "unlisted"),
+        synthesia_download_url=payload.video_url,
+        title=payload.title,
+        description=payload.description,
+        tags=payload.tags,
+        privacy=payload.privacy,
     )
     return result
 

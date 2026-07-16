@@ -156,25 +156,29 @@ class DailyPublisher:
             self._async_job,
             CronTrigger(hour=8, minute=0),  # 8 AM
             id="morning_video",
-            name="Morning market analysis"
+            name="Morning market analysis",
+            replace_existing=True
         )
         self.scheduler.add_job(
             self._async_job,
             CronTrigger(hour=12, minute=0),  # Noon
             id="midday_video",
-            name="Midday market update"
+            name="Midday market update",
+            replace_existing=True
         )
         self.scheduler.add_job(
             self._async_job,
             CronTrigger(hour=16, minute=30),  # 4:30 PM
             id="close_video",
-            name="Market close recap"
+            name="Market close recap",
+            replace_existing=True
         )
         self.scheduler.add_job(
             self._async_job,
             CronTrigger(hour=18, minute=0),  # 6 PM
             id="evening_video",
-            name="Evening market analysis"
+            name="Evening market analysis",
+            replace_existing=True
         )
 
         if not self.scheduler.running:
