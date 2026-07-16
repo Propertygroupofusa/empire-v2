@@ -4,6 +4,7 @@ Handles video request submissions, quote generation, payments
 """
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
+from pydantic import BaseModel
 from sqlalchemy import text
 from datetime import datetime
 from typing import Optional
@@ -51,29 +52,41 @@ async def get_stripe_key():
     }
 
 
+class QuoteRequest(BaseModel):
+    customer_name: str
+    customer_email: str
+    customer_company: str
+    video_type: str
+    script_or_topic: str
+    target_audience: str
+    avatar: str
+    language: str
+    delivery_days: int = 2
+    reference_url: Optional[str] = None
+    phone: Optional[str] = None
+
+
 # ============================================================
 # POST /orders/request-quote - Customer submits video request
 # ============================================================
 
 @router.post("/orders/request-quote")
-async def request_quote(
-    customer_name: str,
-    customer_email: str,
-    customer_company: str,
-    video_type: str,
-    script_or_topic: str,
-    target_audience: str,
-    avatar: str,
-    language: str,
-    delivery_days: int = 2,
-    reference_url: Optional[str] = None,
-    phone: Optional[str] = None,
-    background_tasks: BackgroundTasks = None,
-):
+async def request_quote(quote: QuoteRequest, background_tasks: BackgroundTasks = None):
     """
     Customer submits a video request with script, avatar, and language.
     Returns order ID and quote price for payment processing.
     """
+    customer_name = quote.customer_name
+    customer_email = quote.customer_email
+    customer_company = quote.customer_company
+    video_type = quote.video_type
+    script_or_topic = quote.script_or_topic
+    target_audience = quote.target_audience
+    avatar = quote.avatar
+    language = quote.language
+    delivery_days = quote.delivery_days
+    reference_url = quote.reference_url
+    phone = quote.phone
 
     if not customer_name or not customer_email or not video_type or not avatar or not language:
         raise HTTPException(status_code=400, detail="Missing required fields")

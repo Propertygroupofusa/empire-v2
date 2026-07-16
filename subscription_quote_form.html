@@ -424,6 +424,17 @@
     <script>
         let STRIPE_PUBLISHABLE_KEY = null;
 
+        // Fetch Stripe publishable key on load - needed before any checkout redirect
+        window.addEventListener('load', async function() {
+            try {
+                const r = await fetch('/orders/stripe-key');
+                const data = await r.json();
+                STRIPE_PUBLISHABLE_KEY = data.publishable_key;
+            } catch (error) {
+                console.error('Failed to load Stripe key:', error);
+            }
+        });
+
         // Base prices for video types
         const videoTypePrices = {
             explainer: 50000,
@@ -538,32 +549,60 @@
                 }
             }
 
-            const params = new URLSearchParams({
+            const payload = {
                 customer_name: document.getElementById('customerName').value,
                 customer_email: document.getElementById('customerEmail').value,
                 customer_company: document.getElementById('company').value,
-                phone: document.getElementById('phone').value,
+                phone: document.getElementById('phone').value || null,
                 video_type: document.getElementById('videoType').value,
                 script_or_topic: document.getElementById('script').value,
                 target_audience: document.getElementById('audience').value,
                 avatar: document.getElementById('avatar').value,
                 language: document.getElementById('language').value,
                 delivery_days: parseInt(document.getElementById('delivery').value),
-            });
+            };
 
             try {
-                const response = await fetch(`/orders/orders/request-quote?${params}`);
+                const response = await fetch('/orders/request-quote', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
                 const data = await response.json();
 
-                if (data.success) {
-                    showMessage(`Quote created! Order #${data.order_id} - ${data.quote_price / 100 === 0 ? 'Included in subscription' : '$' + (data.quote_price / 100)}`, 'success');
-
-                    // Redirect to Stripe checkout
-                    setTimeout(() => {
-                        window.location.href = `/orders/orders/${data.order_id}/create-checkout`;
-                    }, 1500);
+                if (response.ok) {
+                    showMessage(`Quote created! Order #${data.order_id} - $${data.quote_price}`, 'success');
+                    setTimeout(() => proceedToCheckout(data.order_id), 1500);
                 } else {
                     showMessage(data.detail || 'Failed to create quote', 'error');
+                }
+            } catch (error) {
+                showMessage(`Error: ${error.message}`, 'error');
+            }
+        }
+
+        // Create the Stripe checkout session and redirect - create-checkout is a
+        // POST endpoint returning JSON, so it can't be reached via a plain
+        // navigation link; Stripe.js handles the actual redirect.
+        async function proceedToCheckout(orderId) {
+            try {
+                const response = await fetch(`/orders/${orderId}/create-checkout`, { method: 'POST' });
+                const data = await response.json();
+
+                if (!response.ok || !data.session_id) {
+                    showMessage(data.detail || 'Failed to start checkout', 'error');
+                    return;
+                }
+
+                if (!STRIPE_PUBLISHABLE_KEY) {
+                    showMessage('Payment system unavailable, please try again shortly', 'error');
+                    return;
+                }
+
+                const stripe = Stripe(STRIPE_PUBLISHABLE_KEY);
+                const result = await stripe.redirectToCheckout({ sessionId: data.session_id });
+                if (result.error) {
+                    showMessage(result.error.message, 'error');
                 }
             } catch (error) {
                 showMessage(`Error: ${error.message}`, 'error');
