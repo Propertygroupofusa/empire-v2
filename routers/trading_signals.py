@@ -14,6 +14,7 @@ import logging
 
 from database import get_db
 from models import Campaign, CampaignContact
+from admin_auth import require_admin_key
 
 log = logging.getLogger("pgusa")
 router = APIRouter()
@@ -145,7 +146,7 @@ async def subscribe_to_signals(subscriber: SignalSubscriber, db: AsyncSession = 
     }
 
 
-@router.get("/signals/subscribers")
+@router.get("/signals/subscribers", dependencies=[Depends(require_admin_key)])
 async def list_subscribers(
     tier: Optional[str] = None,
     skip: int = Query(0, ge=0),

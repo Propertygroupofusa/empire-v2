@@ -16,8 +16,10 @@ import asyncio
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from urllib.parse import quote
 
 from database import get_db, AsyncSessionLocal
+from admin_auth import require_admin_key
 from models import VideoQuoteOrder
 
 log = logging.getLogger("orders")
@@ -134,7 +136,7 @@ async def send_video_ready_email(customer_email: str, customer_name: str, order_
                     </div>
 
                     <p>This video is also available in your customer portal at:</p>
-                    <p><a href="https://empire-v2-production.up.railway.app/customer/{order_id}">{order_id}</a></p>
+                    <p><a href="https://empire-v2-production.up.railway.app/orders/customer/{order_id}?email={quote(customer_email)}">Order #{order_id}</a></p>
 
                     <p>Questions? Reply to this email and we'll help you right away.</p>
 
@@ -276,6 +278,14 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
 
         order = await db.get(VideoQuoteOrder, order_id)
         if order:
+            # Stripe can and does redeliver the same webhook event more than
+            # once - without this check a redelivery would re-trigger a
+            # second video-generation job and a second "video ready" email
+            # for an order that was already paid.
+            if order.paid:
+                log.info(f"Order {order_id} already marked paid, ignoring duplicate webhook")
+                return {"status": "success"}
+
             order.paid = True
             order.status = "payment_received"
             order.transaction_id = session["id"]
@@ -368,7 +378,7 @@ async def generate_video_for_order(order_id: int):
 # "stats"/"admin-dashboard" as an integer, 422ing before ever reaching
 # the routes actually meant to handle those paths.
 
-@router.get("/orders/stats")
+@router.get("/orders/stats", dependencies=[Depends(require_admin_key)])
 async def get_order_stats(db: AsyncSession = Depends(get_db)):
     """Get order statistics"""
     result = await db.execute(select(VideoQuoteOrder))
@@ -394,7 +404,7 @@ async def get_order_stats(db: AsyncSession = Depends(get_db)):
 # GET /orders/admin-dashboard - Full admin view
 # ============================================================
 
-@router.get("/orders/admin-dashboard")
+@router.get("/orders/admin-dashboard", dependencies=[Depends(require_admin_key)])
 async def admin_dashboard(db: AsyncSession = Depends(get_db)):
     """Complete admin dashboard view"""
     result = await db.execute(select(VideoQuoteOrder))
@@ -462,7 +472,7 @@ async def admin_dashboard(db: AsyncSession = Depends(get_db)):
 # GET /orders/{order_id} - Get specific order status
 # ============================================================
 
-@router.get("/orders/{order_id}")
+@router.get("/orders/{order_id}", dependencies=[Depends(require_admin_key)])
 async def get_order_status(order_id: int, db: AsyncSession = Depends(get_db)):
     """Get status of specific order"""
     order = await db.get(VideoQuoteOrder, order_id)
@@ -482,10 +492,11 @@ async def get_order_status(order_id: int, db: AsyncSession = Depends(get_db)):
 # POST /orders/{order_id}/payment-received - Mark order as paid
 # ============================================================
 
-@router.post("/orders/{order_id}/payment-received")
+@router.post("/orders/{order_id}/payment-received", dependencies=[Depends(require_admin_key)])
 async def mark_payment_received(order_id: int, transaction_id: str = "", db: AsyncSession = Depends(get_db)):
     """
-    Mark order as paid
+    Mark order as paid. Admin-only: this bypasses Stripe entirely, so
+    without protection anyone could call it to get a paid video for free.
     """
     order = await db.get(VideoQuoteOrder, order_id)
 
@@ -511,7 +522,7 @@ async def mark_payment_received(order_id: int, transaction_id: str = "", db: Asy
 # POST /orders/{order_id}/generate-video - Manually trigger video generation
 # ============================================================
 
-@router.post("/orders/{order_id}/generate-video")
+@router.post("/orders/{order_id}/generate-video", dependencies=[Depends(require_admin_key)])
 async def manual_generate_video(order_id: int, db: AsyncSession = Depends(get_db)):
     """Admin endpoint to manually trigger video generation"""
     order = await db.get(VideoQuoteOrder, order_id)
@@ -543,7 +554,7 @@ async def manual_generate_video(order_id: int, db: AsyncSession = Depends(get_db
 # POST /orders/{order_id}/mark-complete - Mark video as complete
 # ============================================================
 
-@router.post("/orders/{order_id}/mark-complete")
+@router.post("/orders/{order_id}/mark-complete", dependencies=[Depends(require_admin_key)])
 async def mark_order_complete(
     order_id: int,
     video_url: str,
@@ -583,11 +594,18 @@ async def mark_order_complete(
 # ============================================================
 
 @router.get("/orders/customer/{order_id}")
-async def customer_portal(order_id: int, db: AsyncSession = Depends(get_db)):
-    """Customer portal to track order and download video"""
+async def customer_portal(order_id: int, email: str, db: AsyncSession = Depends(get_db)):
+    """Customer portal to track order and download video.
+
+    order_id is a small sequential integer with no other protection, so it's
+    trivially enumerable (order 1, 2, 3...) - require the email the order was
+    placed under as a second factor. Return the same 404 whether the order
+    doesn't exist or the email doesn't match, so this can't be used to probe
+    which order IDs are in use.
+    """
     order = await db.get(VideoQuoteOrder, order_id)
 
-    if not order:
+    if not order or order.customer_email.lower() != email.lower():
         raise HTTPException(status_code=404, detail="Order not found")
 
     # Build response with customer-friendly status

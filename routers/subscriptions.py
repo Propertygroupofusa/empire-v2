@@ -20,6 +20,7 @@ from stripe_subscriptions import (
     setup_stripe_products,
 )
 from database import get_db
+from admin_auth import require_admin_key
 import stripe
 import logging
 import os
@@ -173,7 +174,7 @@ async def upgrade_subscription(
     }
 
 
-@router.get("/admin/subscriptions")
+@router.get("/admin/subscriptions", dependencies=[Depends(require_admin_key)])
 async def admin_list_subscriptions(db: AsyncSession = Depends(get_db)):
     """
     [ADMIN] List all active subscriptions with usage
@@ -201,7 +202,7 @@ async def admin_list_subscriptions(db: AsyncSession = Depends(get_db)):
     }
 
 
-@router.get("/admin/subscriptions/{customer_email}")
+@router.get("/admin/subscriptions/{customer_email}", dependencies=[Depends(require_admin_key)])
 async def admin_get_customer_subscriptions(customer_email: str, db: AsyncSession = Depends(get_db)):
     """
     [ADMIN] Get detailed subscription info for a customer

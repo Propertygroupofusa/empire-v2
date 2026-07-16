@@ -2,7 +2,7 @@
 Revenue Automation API - Unified endpoints for all revenue streams
 """
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Request, Depends
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Request, Depends, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 import logging
@@ -10,6 +10,7 @@ import os
 import stripe
 
 from database import get_db
+from admin_auth import require_admin_key
 
 log = logging.getLogger("revenue_automation")
 
@@ -167,13 +168,22 @@ async def request_revision(order_id: str, revised_script: str, db: AsyncSession 
 
 
 @router.get("/video-service/orders")
-async def get_orders(client_email: Optional[str] = None, status: Optional[str] = None, db: AsyncSession = Depends(get_db)):
-    """Get orders, optionally filtered"""
+async def get_orders(
+    client_email: Optional[str] = None,
+    status: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    x_admin_key: Optional[str] = Header(None),
+):
+    """Get orders. With client_email, this is a customer looking up their
+    own orders. Without it, it dumps every customer's orders, which needs
+    the admin key - there's no other check on this endpoint at all."""
+    if not client_email:
+        await require_admin_key(x_admin_key)
     service = get_video_service()
     return await service.get_orders(db, client_email=client_email, status=status)
 
 
-@router.get("/video-service/stats")
+@router.get("/video-service/stats", dependencies=[Depends(require_admin_key)])
 async def get_service_stats(db: AsyncSession = Depends(get_db)):
     """Get video service statistics"""
     service = get_video_service()
