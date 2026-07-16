@@ -2,11 +2,14 @@
 Revenue Automation API - Unified endpoints for all revenue streams
 """
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Request, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 import logging
 import os
 import stripe
+
+from database import get_db
 
 log = logging.getLogger("revenue_automation")
 
@@ -141,43 +144,44 @@ async def get_video_pricing():
 async def create_video_order(
     client_email: str,
     script: str,
-    tier: PricingTier = PricingTier.STANDARD
+    tier: PricingTier = PricingTier.STANDARD,
+    db: AsyncSession = Depends(get_db),
 ):
     """Create a custom video order"""
     service = get_video_service()
-    return await service.create_order(client_email, tier, script)
+    return await service.create_order(db, client_email, tier, script)
 
 
 @router.get("/video-service/order/{order_id}")
-async def get_order_status(order_id: str):
+async def get_order_status(order_id: str, db: AsyncSession = Depends(get_db)):
     """Check order status"""
     service = get_video_service()
-    return await service.check_order_status(order_id)
+    return await service.check_order_status(db, order_id)
 
 
 @router.post("/video-service/order/{order_id}/revision")
-async def request_revision(order_id: str, revised_script: str):
+async def request_revision(order_id: str, revised_script: str, db: AsyncSession = Depends(get_db)):
     """Request revision to an order"""
     service = get_video_service()
-    return await service.request_revision(order_id, revised_script)
+    return await service.request_revision(db, order_id, revised_script)
 
 
 @router.get("/video-service/orders")
-async def get_orders(client_email: Optional[str] = None, status: Optional[str] = None):
+async def get_orders(client_email: Optional[str] = None, status: Optional[str] = None, db: AsyncSession = Depends(get_db)):
     """Get orders, optionally filtered"""
     service = get_video_service()
-    return service.get_orders(client_email=client_email, status=status)
+    return await service.get_orders(db, client_email=client_email, status=status)
 
 
 @router.get("/video-service/stats")
-async def get_service_stats():
+async def get_service_stats(db: AsyncSession = Depends(get_db)):
     """Get video service statistics"""
     service = get_video_service()
-    return service.get_statistics()
+    return await service.get_statistics(db)
 
 
 @router.post("/video-service/webhook/stripe")
-async def video_service_stripe_webhook(request: Request):
+async def video_service_stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     """Stripe webhook for client_video_service Checkout Sessions.
     Video generation only starts here, once payment is actually confirmed."""
     payload = await request.body()
@@ -203,7 +207,7 @@ async def video_service_stripe_webhook(request: Request):
         order_id = session.get("metadata", {}).get("order_id")
         if order_id:
             service = get_video_service()
-            await service.confirm_payment_and_fulfill(order_id, session["id"])
+            await service.confirm_payment_and_fulfill(db, order_id, session["id"])
 
     return {"status": "success"}
 

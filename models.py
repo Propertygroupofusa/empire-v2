@@ -149,6 +149,125 @@ class StudyUser(Base):
         }
 
 
+class VideoQuoteOrder(Base):
+    """Customer video quote/order from the /orders/request-quote flow."""
+    __tablename__ = "video_quote_orders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    status = Column(String, default="quote_requested")
+    customer_name = Column(String)
+    customer_email = Column(String, index=True)
+    customer_company = Column(String, nullable=True)
+    phone = Column(String, nullable=True)
+    video_type = Column(String)
+    script_or_topic = Column(Text)
+    target_audience = Column(String, nullable=True)
+    avatar = Column(String)
+    language = Column(String)
+    delivery_days = Column(Integer, default=2)
+    reference_url = Column(String, nullable=True)
+    requested_at = Column(DateTime, default=datetime.utcnow)
+    quote_price = Column(Integer, nullable=True)
+    paid = Column(Boolean, default=False)
+    stripe_session_id = Column(String, nullable=True)
+    transaction_id = Column(String, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    video_url = Column(String, nullable=True)
+    video_download_link = Column(String, nullable=True)
+    video_generation_status = Column(String, default="pending")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "status": self.status,
+            "customer_name": self.customer_name,
+            "customer_email": self.customer_email,
+            "customer_company": self.customer_company,
+            "phone": self.phone,
+            "video_type": self.video_type,
+            "script_or_topic": self.script_or_topic,
+            "target_audience": self.target_audience,
+            "avatar": self.avatar,
+            "language": self.language,
+            "delivery_days": self.delivery_days,
+            "reference_url": self.reference_url,
+            "requested_at": self.requested_at.isoformat() if self.requested_at else None,
+            "quote_price": self.quote_price,
+            "paid": self.paid,
+            "stripe_session_id": self.stripe_session_id,
+            "transaction_id": self.transaction_id,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "video_url": self.video_url,
+            "video_download_link": self.video_download_link,
+            "video_generation_status": self.video_generation_status,
+        }
+
+
+class ClientVideoOrder(Base):
+    """Tiered ($500/$750/$1000) video order from client_video_service.py."""
+    __tablename__ = "client_video_orders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    order_id = Column(String, unique=True, index=True)
+    client_email = Column(String, index=True)
+    tier = Column(String)
+    script = Column(Text)
+    status = Column(String, default="pending")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    video_job_id = Column(String, nullable=True)
+    download_link = Column(String, nullable=True)
+    revisions_used = Column(Integer, default=0)
+    payment_id = Column(String, nullable=True)
+
+    def to_dict(self, max_revisions: int = 0):
+        return {
+            "order_id": self.order_id,
+            "client_email": self.client_email,
+            "tier": self.tier,
+            "script": self.script,
+            "status": self.status,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "video_job_id": self.video_job_id,
+            "download_link": self.download_link,
+            "revisions_used": self.revisions_used,
+            "max_revisions": max_revisions,
+            "payment_id": self.payment_id,
+        }
+
+
+class CustomerSubscription(Base):
+    """Video-subscription-tier record from subscription_tiers.py."""
+    __tablename__ = "customer_subscriptions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    customer_email = Column(String, unique=True, index=True)
+    tier_id = Column(String)
+    start_date = Column(DateTime, default=datetime.utcnow)
+    current_period_start = Column(DateTime, default=datetime.utcnow)
+    current_period_end = Column(DateTime)
+    videos_used_this_month = Column(Integer, default=0)
+    active = Column(Boolean, default=True)
+    stripe_subscription_id = Column(String, nullable=True)
+    stripe_customer_id = Column(String, nullable=True)
+    status = Column(String, nullable=True)
+    payment_status = Column(String, nullable=True)
+
+    def to_dict(self):
+        return {
+            "customer_email": self.customer_email,
+            "tier_id": self.tier_id,
+            "start_date": self.start_date.isoformat() if self.start_date else None,
+            "current_period_start": self.current_period_start.isoformat() if self.current_period_start else None,
+            "current_period_end": self.current_period_end.isoformat() if self.current_period_end else None,
+            "videos_used_this_month": self.videos_used_this_month,
+            "active": self.active,
+            "stripe_subscription_id": self.stripe_subscription_id,
+            "stripe_customer_id": self.stripe_customer_id,
+            "status": self.status,
+            "payment_status": self.payment_status,
+        }
+
+
 class StudyMaterial(Base):
     """Generated study materials from textbook images."""
     __tablename__ = "study_materials"
