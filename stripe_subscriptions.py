@@ -211,7 +211,17 @@ def handle_subscription_event(event: dict) -> bool:
 
 
 def handle_checkout_completed(event: dict) -> bool:
-    """Handle checkout.session.completed - subscription activated"""
+    """Handle checkout.session.completed - subscription activated.
+
+    This is the only place a paid tier's subscription record gets created:
+    routers/subscriptions.py's /checkout endpoint never calls
+    subscribe_customer() for paid tiers (it just starts the Stripe
+    session), so a customer_subscriptions entry only used to get patched
+    here IF one already existed - which for a real paid signup it never
+    did. That meant a customer could pay Stripe successfully and still
+    have get_subscription() return None forever. Create the record here
+    instead of conditionally patching one.
+    """
     try:
         session = event["data"]["object"]
         customer_email = session["metadata"].get("customer_email")
@@ -222,17 +232,16 @@ def handle_checkout_completed(event: dict) -> bool:
             log.warning(f"Incomplete checkout data: {session}")
             return False
 
-        log.info(f"Subscription activated: {customer_email} -> {tier_id} (sub: {subscription_id})")
-
         # Import here to avoid circular imports
-        from subscription_tiers import customer_subscriptions
+        from subscription_tiers import subscribe_customer, customer_subscriptions
 
-        if customer_email in customer_subscriptions:
-            customer_subscriptions[customer_email]["stripe_subscription_id"] = subscription_id
-            customer_subscriptions[customer_email]["stripe_customer_id"] = session["customer"]
-            customer_subscriptions[customer_email]["status"] = "active"
-            customer_subscriptions[customer_email]["payment_status"] = "active"
+        subscribe_customer(customer_email, tier_id)
+        customer_subscriptions[customer_email]["stripe_subscription_id"] = subscription_id
+        customer_subscriptions[customer_email]["stripe_customer_id"] = session["customer"]
+        customer_subscriptions[customer_email]["status"] = "active"
+        customer_subscriptions[customer_email]["payment_status"] = "active"
 
+        log.info(f"Subscription activated: {customer_email} -> {tier_id} (sub: {subscription_id})")
         return True
 
     except Exception as e:
