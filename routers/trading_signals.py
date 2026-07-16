@@ -5,6 +5,9 @@ from sqlalchemy import select
 from datetime import datetime
 from typing import List, Optional
 from pydantic import BaseModel
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import smtplib
 import stripe
 import os
 import logging
@@ -189,6 +192,32 @@ async def list_subscribers(
     }
 
 
+def _send_signal_email(to_email: str, message: str, signal: "TradingSignal") -> bool:
+    """Send a trading signal alert email to a subscriber. Best-effort: logs
+    and returns False rather than raising, so one bad address or missing
+    credentials doesn't stop the rest of the broadcast."""
+    sender_email = os.getenv("GMAIL_EMAIL")
+    sender_password = os.getenv("GMAIL_PASSWORD")
+    if not sender_email or not sender_password:
+        log.warning("GMAIL credentials not configured, skipping signal email")
+        return False
+
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = sender_email
+        msg["To"] = to_email
+        msg["Subject"] = f"Trading Signal: {signal.action} {signal.contract}"
+        msg.attach(MIMEText(message, "plain"))
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(sender_email, sender_password)
+            server.sendmail(sender_email, to_email, msg.as_string())
+        return True
+    except Exception as e:
+        log.error(f"Failed to send signal email to {to_email}: {e}")
+        return False
+
+
 @router.post("/signals/broadcast")
 async def broadcast_signal(signal: TradingSignal, db: AsyncSession = Depends(get_db)):
     """Broadcast a new trading signal to all subscribers.
@@ -211,7 +240,11 @@ async def broadcast_signal(signal: TradingSignal, db: AsyncSession = Depends(get
     )
     subscribers = result.scalars().all()
 
+    stop_loss_str = f"${signal.stop_loss:.2f}" if signal.stop_loss else "N/A"
+    target_str = f"${signal.target_price:.2f}" if signal.target_price else "N/A"
+
     sent_count = 0
+    emailed_count = 0
     for subscriber in subscribers:
         tier = subscriber.contact_data.get("tier", "free")
 
@@ -220,8 +253,8 @@ async def broadcast_signal(signal: TradingSignal, db: AsyncSession = Depends(get
 🚀 NEW TRADING SIGNAL — {signal.action} {signal.contract}
 
 Entry Price: ${signal.entry_price:.2f}
-Stop Loss: ${signal.stop_loss:.2f if signal.stop_loss else 'N/A'}
-Target: ${signal.target_price:.2f if signal.target_price else 'N/A'}
+Stop Loss: {stop_loss_str}
+Target: {target_str}
 
 Technical Setup:
 • RSI: {signal.rsi:.1f}
@@ -232,25 +265,30 @@ Tier: {tier.upper()}
 Time: {datetime.utcnow().isoformat()}
         """.strip()
 
-        # Update contact with sent status
-        subscriber.status = "sent"
+        # Record delivery without touching status: "active" here means
+        # "subscribed", not "already sent one signal" - status is also what
+        # list_subscribers/broadcast filter on, so overwriting it here used
+        # to make every subscriber invisible to all future broadcasts after
+        # their first signal.
         subscriber.sent_at = datetime.utcnow()
-        subscriber.metadata = {"last_signal": signal.contract, "last_action": signal.action}
+        subscriber.custom_metadata = {"last_signal": signal.contract, "last_action": signal.action}
 
         sent_count += 1
 
-        # TODO: Actually send email/SMS here
-        # For now, just log
+        if subscriber.email and _send_signal_email(subscriber.email, message, signal):
+            emailed_count += 1
+
         log.info(f"Signal sent to {subscriber.email}: {signal.action} {signal.contract}")
 
     await db.commit()
 
-    log.info(f"✅ Trading signal broadcast: {signal.action} {signal.contract} → {sent_count} subscribers")
+    log.info(f"✅ Trading signal broadcast: {signal.action} {signal.contract} → {sent_count} subscribers ({emailed_count} emailed)")
 
     return {
         "signal": signal.contract,
         "action": signal.action,
         "subscribers_notified": sent_count,
+        "emails_sent": emailed_count,
         "entry_price": signal.entry_price,
         "timestamp": datetime.utcnow().isoformat(),
     }
