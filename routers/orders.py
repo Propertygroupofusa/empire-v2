@@ -16,6 +16,8 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
+log = logging.getLogger("orders")
+
 # Try to import HeyGen integration, but don't crash if it fails
 try:
     from heygan_integration import generate_video, get_video_url
@@ -29,7 +31,6 @@ except Exception as e:
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 stripe_publishable_key = os.getenv("STRIPE_PUBLISHABLE_KEY")
 
-log = logging.getLogger("orders")
 router = APIRouter()
 
 # ============================================================

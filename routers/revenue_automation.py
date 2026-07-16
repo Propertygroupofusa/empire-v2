@@ -2,11 +2,15 @@
 Revenue Automation API - Unified endpoints for all revenue streams
 """
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
 from typing import Optional
 import logging
+import os
+import stripe
 
 log = logging.getLogger("revenue_automation")
+
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
 router = APIRouter()
 
@@ -170,6 +174,35 @@ async def get_service_stats():
     """Get video service statistics"""
     service = get_video_service()
     return service.get_statistics()
+
+
+@router.post("/video-service/webhook/stripe")
+async def video_service_stripe_webhook(request: Request):
+    """Stripe webhook for client_video_service Checkout Sessions.
+    Video generation only starts here, once payment is actually confirmed."""
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+    if not webhook_secret:
+        log.warning("STRIPE_WEBHOOK_SECRET not configured, cannot verify webhook")
+        raise HTTPException(status_code=500, detail="Webhook not configured")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        order_id = session.get("metadata", {}).get("order_id")
+        if order_id:
+            service = get_video_service()
+            await service.confirm_payment_and_fulfill(order_id, session["id"])
+
+    return {"status": "success"}
 
 
 # ── LEAD GENERATION ENDPOINTS ─────────────────────────────────────────
