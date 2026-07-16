@@ -91,73 +91,90 @@ class ClientVideoService:
         self.stripe_enabled = bool(os.getenv("STRIPE_SECRET_KEY"))
 
     async def create_order(self, client_email: str, tier: PricingTier, script: str) -> Dict:
-        """Create a new video order"""
+        """Create a new video order. Video generation is NOT queued here —
+        it only starts once Stripe confirms payment via webhook
+        (see confirm_payment_and_fulfill), otherwise anyone could call this
+        endpoint and get a paid video for free."""
         try:
             order_id = f"ORD-{uuid.uuid4().hex[:8].upper()}"
             order = VideoOrder(order_id, client_email, tier, script)
-
-            # Process payment
-            if self.stripe_enabled:
-                payment = await self._process_payment(
-                    client_email,
-                    order_id,
-                    tier
-                )
-                if not payment.get("success"):
-                    return payment
-
-                order.payment_id = payment.get("payment_id")
-
-            # Queue video generation
-            result = await self._queue_video_generation(order)
-            if not result.get("success"):
-                return result
-
-            order.video_job_id = result.get("job_id")
-            order.status = "processing"
-
-            # Store order
             self.orders[order_id] = order
 
-            log.info(f"Order created: {order_id} ({tier}) for {client_email}")
+            if not self.stripe_enabled:
+                return {"success": False, "error": "Payments are not configured for this service"}
+
+            checkout = await self._create_checkout_session(client_email, order_id, tier)
+            if not checkout.get("success"):
+                del self.orders[order_id]
+                return checkout
+
+            order.status = "awaiting_payment"
+
+            log.info(f"Order created: {order_id} ({tier}) for {client_email}, awaiting payment")
 
             return {
                 "success": True,
                 "order_id": order_id,
-                "status": "processing",
-                "delivery_time": PRICING[tier]["delivery_time"],
-                "message": f"Your {tier} video has been queued for generation"
+                "status": "awaiting_payment",
+                "checkout_url": checkout.get("checkout_url"),
+                "message": f"Complete payment to start your {tier.value} video"
             }
         except Exception as e:
             log.error(f"Failed to create order: {e}")
             return {"success": False, "error": str(e)}
 
-    async def _process_payment(self, client_email: str, order_id: str, tier: PricingTier) -> Dict:
-        """Process payment via Stripe"""
+    async def _create_checkout_session(self, client_email: str, order_id: str, tier: PricingTier) -> Dict:
+        """Create a Stripe-hosted Checkout Session for the order"""
         try:
             pricing = PRICING[tier]
+            base_url = os.getenv("PUBLIC_BASE_URL", "https://empire-v2-production.up.railway.app")
 
-            # Create payment intent
-            intent = stripe.PaymentIntent.create(
-                amount=pricing["amount"],
-                currency="usd",
-                metadata={
-                    "order_id": order_id,
-                    "tier": tier,
-                    "client_email": client_email
-                },
-                description=f"Custom video service - {tier} tier"
+            session = stripe.checkout.Session.create(
+                payment_method_types=["card"],
+                line_items=[{
+                    "price_data": {
+                        "currency": "usd",
+                        "product_data": {"name": f"Custom video service - {tier} tier"},
+                        "unit_amount": pricing["amount"],
+                    },
+                    "quantity": 1,
+                }],
+                mode="payment",
+                customer_email=client_email,
+                success_url=f"{base_url}/revenue/video-service/order/{order_id}",
+                cancel_url=f"{base_url}/revenue/video-service/pricing",
+                metadata={"order_id": order_id, "tier": tier, "client_email": client_email},
             )
 
-            return {
-                "success": True,
-                "payment_id": intent.id,
-                "client_secret": intent.client_secret,
-                "message": "Payment processing initiated"
-            }
+            return {"success": True, "checkout_url": session.url, "session_id": session.id}
         except stripe.error.StripeError as e:
-            log.error(f"Stripe payment failed: {e}")
-            return {"success": False, "error": f"Payment failed: {str(e)}"}
+            log.error(f"Stripe checkout session creation failed: {e}")
+            return {"success": False, "error": f"Payment setup failed: {str(e)}"}
+
+    async def confirm_payment_and_fulfill(self, order_id: str, session_id: str) -> Dict:
+        """Called by the Stripe webhook once checkout.session.completed fires.
+        This is the only path that triggers video generation."""
+        if order_id not in self.orders:
+            log.warning(f"Stripe webhook confirmed unknown order_id: {order_id}")
+            return {"success": False, "error": "Order not found"}
+
+        order = self.orders[order_id]
+        if order.payment_id:
+            log.info(f"Order {order_id} already fulfilled, ignoring duplicate webhook")
+            return {"success": True, "order_id": order_id, "status": order.status}
+
+        order.payment_id = session_id
+
+        result = await self._queue_video_generation(order)
+        if not result.get("success"):
+            order.status = "payment_received_generation_failed"
+            log.error(f"Video generation failed after payment for order {order_id}: {result.get('error')}")
+            return result
+
+        order.video_job_id = result.get("job_id")
+        order.status = "processing"
+        log.info(f"Payment confirmed for order {order_id}, video generation queued")
+        return {"success": True, "order_id": order_id, "status": "processing"}
 
     async def _queue_video_generation(self, order: VideoOrder) -> Dict:
         """Send video to generator"""
