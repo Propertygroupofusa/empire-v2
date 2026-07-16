@@ -1,5 +1,5 @@
 """AI Study Material Generation Router"""
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Header
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Header, Request
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, func
@@ -9,6 +9,7 @@ import base64
 import json
 import logging
 import httpx
+import stripe
 from io import BytesIO
 from typing import Optional
 
@@ -22,9 +23,13 @@ router = APIRouter()
 CLAUDE_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 client = anthropic.Anthropic(api_key=CLAUDE_KEY)
 
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+stripe_publishable_key = os.getenv("STRIPE_PUBLISHABLE_KEY")
+
 # Free tier limits
 FREE_LIMIT = 5  # materials per month
 PAID_LIMIT = 999
+PAID_TIER_PRICE_CENTS = 999  # $9.99/month, per STUDY_MVP_SUMMARY.md
 
 
 async def verify_user(authorization: Optional[str] = Header(None), db: AsyncSession = Depends(get_db)):
@@ -68,7 +73,7 @@ async def check_limit(user: dict, db: AsyncSession):
     if count >= FREE_LIMIT:
         raise HTTPException(
             status_code=429,
-            detail=f"Free tier limit ({FREE_LIMIT}/month) exceeded. Upgrade to unlimited at /study/upgrade"
+            detail=f"Free tier limit ({FREE_LIMIT}/month) exceeded. Upgrade to unlimited at /study/checkout"
         )
     return True
 
@@ -427,41 +432,91 @@ async def get_material(
     return material.to_dict()
 
 
-@router.post("/upgrade")
-async def upgrade_to_paid(
+@router.get("/stripe-key")
+async def get_study_stripe_key():
+    """Get Stripe publishable key for the study app frontend"""
+    return {"publishable_key": stripe_publishable_key}
+
+
+@router.post("/checkout")
+async def create_study_checkout(
     authorization: Optional[str] = Header(None),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """
-    Upgrade user to paid tier.
-
-    In production, this would be called by Stripe webhook after payment.
-    For MVP, can be called directly to test paid features.
-
-    Args:
-        authorization: Bearer token with email
-
-    Returns:
-        Updated user tier information
+    Create a Stripe Checkout Session to upgrade to the paid tier
+    ($9.99/month per STUDY_MVP_SUMMARY.md). The user's tier is only
+    flipped to "paid" by the webhook once Stripe confirms payment -
+    see study_stripe_webhook below.
     """
     user = await verify_user(authorization, db)
 
-    result = await db.execute(
-        select(StudyUser).where(StudyUser.email == user["email"])
-    )
-    db_user = result.scalar_one()
-    db_user.tier = "paid"
-    await db.commit()
-    await db.refresh(db_user)
+    if user["tier"] == "paid":
+        raise HTTPException(status_code=400, detail="Already on the paid tier")
 
-    log.info(f"Upgraded user to paid tier: {user['email']}")
+    if not stripe.api_key:
+        raise HTTPException(status_code=500, detail="Payments are not configured for this service")
 
-    return {
-        "status": "upgraded",
-        "email": user["email"],
-        "tier": "paid",
-        "materials_limit": "unlimited"
-    }
+    base_url = os.getenv("PUBLIC_BASE_URL", "https://empire-v2-production.up.railway.app")
+
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{
+                "price_data": {
+                    "currency": "usd",
+                    "product_data": {"name": "Study Assistant - Unlimited Plan"},
+                    "unit_amount": PAID_TIER_PRICE_CENTS,
+                    "recurring": {"interval": "month"},
+                },
+                "quantity": 1,
+            }],
+            mode="subscription",
+            customer_email=user["email"],
+            success_url=f"{base_url}/study-app?upgraded=true",
+            cancel_url=f"{base_url}/study-app",
+            metadata={"study_user_email": user["email"]},
+        )
+        return {"checkout_url": session.url, "session_id": session.id}
+    except stripe.error.StripeError as e:
+        log.error(f"Study checkout session creation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Payment setup failed: {str(e)}")
+
+
+@router.post("/webhook/stripe")
+async def study_stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
+    """Stripe webhook: only place a user's tier actually flips to "paid"."""
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+    if not webhook_secret:
+        log.warning("STRIPE_WEBHOOK_SECRET not configured, cannot verify webhook")
+        raise HTTPException(status_code=500, detail="Webhook not configured")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        email = session.get("metadata", {}).get("study_user_email")
+        if email:
+            result = await db.execute(select(StudyUser).where(StudyUser.email == email))
+            db_user = result.scalar_one_or_none()
+            if db_user:
+                db_user.tier = "paid"
+                db_user.stripe_customer_id = session.get("customer")
+                db_user.stripe_subscription_id = session.get("subscription")
+                await db.commit()
+                log.info(f"Upgraded user to paid tier via Stripe: {email}")
+            else:
+                log.warning(f"Stripe webhook confirmed payment for unknown study user: {email}")
+
+    return {"status": "success"}
 
 
 @router.get("/user-stats")
