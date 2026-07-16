@@ -276,10 +276,13 @@ async def stripe_webhook(request: Request):
 
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
-    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+    # Falls back to the shared STRIPE_WEBHOOK_SECRET so this keeps working if
+    # only one Stripe webhook endpoint is registered; set the dedicated var
+    # once a separate endpoint (with its own signing secret) exists for /orders.
+    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET_ORDERS") or os.getenv("STRIPE_WEBHOOK_SECRET")
 
     if not webhook_secret:
-        log.warning("STRIPE_WEBHOOK_SECRET not configured")
+        log.warning("STRIPE_WEBHOOK_SECRET_ORDERS (or STRIPE_WEBHOOK_SECRET) not configured")
         return {"status": "success"}
 
     try:
