@@ -449,35 +449,35 @@ async def get_course_stats(course_id: str):
 
 # ── REVENUE DASHBOARD ENDPOINTS ───────────────────────────────────────
 
-@router.get("/dashboard/all-metrics")
-async def get_all_metrics():
+@router.get("/dashboard/all-metrics", dependencies=[Depends(require_admin_key)])
+async def get_all_metrics(db: AsyncSession = Depends(get_db)):
     """Get all metrics across all revenue streams"""
     dashboard = get_dashboard()
-    return dashboard.get_all_metrics()
+    return await dashboard.get_all_metrics(db)
 
 
-@router.get("/dashboard/revenue-summary")
-async def get_revenue_summary():
+@router.get("/dashboard/revenue-summary", dependencies=[Depends(require_admin_key)])
+async def get_revenue_summary(db: AsyncSession = Depends(get_db)):
     """Get unified revenue summary"""
     dashboard = get_dashboard()
-    return dashboard.get_revenue_summary()
+    return await dashboard.get_revenue_summary(db)
 
 
-@router.get("/dashboard/executive-summary")
-async def get_executive_summary():
+@router.get("/dashboard/executive-summary", dependencies=[Depends(require_admin_key)])
+async def get_executive_summary(db: AsyncSession = Depends(get_db)):
     """Get executive summary with key metrics"""
     dashboard = get_dashboard()
-    return dashboard.get_executive_summary()
+    return await dashboard.get_executive_summary(db)
 
 
-@router.get("/dashboard/roi-analysis")
-async def get_roi_analysis():
+@router.get("/dashboard/roi-analysis", dependencies=[Depends(require_admin_key)])
+async def get_roi_analysis(db: AsyncSession = Depends(get_db)):
     """Get ROI analysis"""
     dashboard = get_dashboard()
-    return dashboard.get_roi_analysis()
+    return await dashboard.get_roi_analysis(db)
 
 
-@router.get("/dashboard/growth-forecast")
+@router.get("/dashboard/growth-forecast", dependencies=[Depends(require_admin_key)])
 async def get_growth_forecast():
     """Get 90-day growth forecast"""
     dashboard = get_dashboard()
