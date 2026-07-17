@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import ClientVideoOrder
+from payments_pause import payments_paused, PAUSE_MESSAGE
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("client_video_service")
@@ -101,6 +102,10 @@ class ClientVideoService:
 
     async def _create_checkout_session(self, client_email: str, order_id: str, tier: PricingTier) -> Dict:
         """Create a Stripe-hosted Checkout Session for the order"""
+        if payments_paused():
+            log.warning(f"Payments paused (PAYMENTS_PAUSED=true) - refusing checkout for order {order_id}")
+            return {"success": False, "error": PAUSE_MESSAGE}
+
         try:
             pricing = PRICING[tier]
             base_url = os.getenv("PUBLIC_BASE_URL", "https://empire-v2-production.up.railway.app")

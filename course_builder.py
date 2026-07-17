@@ -12,6 +12,8 @@ from enum import Enum
 
 import stripe
 
+from payments_pause import payments_paused, PAUSE_MESSAGE
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("course_builder")
 
@@ -209,6 +211,9 @@ class CourseBuilder:
                 return {"error": "Course not found"}
 
             course = self.courses[course_id]
+
+            if course.price > 0 and self.stripe_enabled and payments_paused():
+                return {"success": False, "error": PAUSE_MESSAGE}
 
             # Process payment
             if course.price > 0 and self.stripe_enabled:

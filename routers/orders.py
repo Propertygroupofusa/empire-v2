@@ -21,6 +21,7 @@ from urllib.parse import quote
 from database import get_db, AsyncSessionLocal
 from admin_auth import require_admin_key
 from models import VideoQuoteOrder
+from payments_pause import payments_paused, PAUSE_MESSAGE
 
 log = logging.getLogger("orders")
 
@@ -200,6 +201,9 @@ async def create_checkout_session(order_id: int, db: AsyncSession = Depends(get_
 
     if order.paid:
         raise HTTPException(status_code=400, detail="Order already paid")
+
+    if payments_paused():
+        raise HTTPException(status_code=503, detail=PAUSE_MESSAGE)
 
     try:
         checkout_session = stripe.checkout.Session.create(
