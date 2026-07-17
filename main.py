@@ -105,6 +105,13 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import data_retention: {e}")
 
+prop_bot_module = None
+try:
+    import prop_bot
+    prop_bot_module = prop_bot
+except Exception as e:
+    logging.warning(f"Failed to import prop_bot: {e}")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pgusa")
 
@@ -302,6 +309,16 @@ async def lifespan(app: FastAPI):
             log.info("💾 Data Retention Manager initialized - ALL DATA KEPT FOREVER")
     except Exception as e:
         log.warning(f"Retention manager failed: {e}")
+
+    try:
+        if prop_bot_module is not None:
+            import threading
+            mode = "LIVE" if os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true" else "PAPER"
+            stopped = os.getenv("STOP_TRADING", "false").lower() == "true"
+            threading.Thread(target=prop_bot_module.run, daemon=True).start()
+            log.info(f"📈 Prop bot started (background thread) | Mode: {mode} | STOP_TRADING: {stopped}")
+    except Exception as e:
+        log.warning(f"Prop bot failed to start: {e}")
 
     try:
         from stripe_subscriptions import setup_stripe_products
