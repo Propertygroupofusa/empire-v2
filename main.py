@@ -617,6 +617,137 @@ async def trigger_archival(days_threshold: int = 90):
     }
 
 
+# ============================================================================
+# BOT MONITORING ENDPOINTS — Real-time visibility into trading bot operations
+# ============================================================================
+
+def _read_log_file(filepath: str, lines: int = 50) -> list:
+    """Read last N lines from a log file, return as list"""
+    import os
+    if not os.path.exists(filepath):
+        return []
+    try:
+        with open(filepath, 'r') as f:
+            all_lines = f.readlines()
+            return all_lines[-lines:] if all_lines else []
+    except Exception as e:
+        return [f"Error reading log: {e}"]
+
+
+def _read_json_file(filepath: str) -> dict:
+    """Read JSON file, return parsed content or empty dict"""
+    import json
+    import os
+    if not os.path.exists(filepath):
+        return {"status": "no_data", "message": f"File not found: {filepath}"}
+    try:
+        with open(filepath, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/admin/bot-logs/crypto")
+async def get_crypto_bot_logs(lines: int = 100):
+    """Get last N lines from crypto trading bot log (bot2_crypto.log)"""
+    log_lines = _read_log_file("bot2_crypto.log", lines)
+    return {
+        "service": "crypto-trading-bot",
+        "log_file": "bot2_crypto.log",
+        "lines_requested": lines,
+        "lines_returned": len(log_lines),
+        "logs": [line.rstrip('\n') for line in log_lines],
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.get("/admin/bot-logs/pl-tracker")
+async def get_pl_tracker_logs(lines: int = 100):
+    """Get last N lines from P&L tracker log (logs/bot_pl_tracker.log)"""
+    log_lines = _read_log_file("logs/bot_pl_tracker.log", lines)
+    return {
+        "service": "pl-tracker",
+        "log_file": "logs/bot_pl_tracker.log",
+        "lines_requested": lines,
+        "lines_returned": len(log_lines),
+        "logs": [line.rstrip('\n') for line in log_lines],
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.get("/admin/bot-state")
+async def get_bot_state():
+    """Get current bot state (day count, win/loss ratio, peak portfolio, etc)"""
+    state = _read_json_file("bot2_state.json")
+    return {
+        "service": "crypto-trading-bot",
+        "state_file": "bot2_state.json",
+        "data": state,
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.get("/admin/bot-pl-history")
+async def get_bot_pl_history(limit: int = 500):
+    """Get P&L history snapshots (bot_pl_history.json) - last N snapshots"""
+    history = _read_json_file("bot_pl_history.json")
+
+    # If we have snapshots, return only the last N
+    if isinstance(history, dict) and "snapshots" in history:
+        snapshots = history.get("snapshots", [])
+        return {
+            "service": "pl-tracker",
+            "history_file": "bot_pl_history.json",
+            "total_snapshots": len(snapshots),
+            "snapshots_returned": min(limit, len(snapshots)),
+            "snapshots": snapshots[-limit:] if len(snapshots) > limit else snapshots,
+            "milestones_hit": history.get("milestones_hit", []),
+            "timestamp": datetime.now().isoformat()
+        }
+
+    return {
+        "service": "pl-tracker",
+        "history_file": "bot_pl_history.json",
+        "total_snapshots": 0,
+        "error": "No history data yet",
+        "data": history,
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.get("/admin/bot-status")
+async def get_bot_status():
+    """Get comprehensive bot status - logs, state, and P&L in one call"""
+    crypto_logs = _read_log_file("bot2_crypto.log", 30)
+    pl_logs = _read_log_file("logs/bot_pl_tracker.log", 20)
+    state = _read_json_file("bot2_state.json")
+    history = _read_json_file("bot_pl_history.json")
+
+    # Get latest snapshot if available
+    latest_snapshot = None
+    if isinstance(history, dict) and "snapshots" in history:
+        snapshots = history.get("snapshots", [])
+        if snapshots:
+            latest_snapshot = snapshots[-1]
+
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "services": {
+            "crypto-trading-bot": {
+                "log_file": "bot2_crypto.log",
+                "recent_logs": [line.rstrip('\n') for line in crypto_logs],
+                "state": state
+            },
+            "pl-tracker": {
+                "log_file": "logs/bot_pl_tracker.log",
+                "recent_logs": [line.rstrip('\n') for line in pl_logs],
+                "latest_snapshot": latest_snapshot,
+                "milestones_hit": history.get("milestones_hit", []) if isinstance(history, dict) else []
+            }
+        }
+    }
+
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
