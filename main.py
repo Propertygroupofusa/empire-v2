@@ -333,7 +333,7 @@ async def lifespan(app: FastAPI):
         def start_crypto_bot():
             try:
                 subprocess.Popen(['python', 'bot_2_crypto_scalper.py'],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 log.info("🤖 Crypto scalper bot #2 started (background subprocess)")
             except Exception as e:
                 log.warning(f"Crypto bot subprocess failed: {e}")
