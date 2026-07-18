@@ -253,12 +253,19 @@ async def run_migrations():
     async with engine.begin() as conn:
         for col, col_type in cols:
             try:
-                await conn.execute(text(
-                    f"ALTER TABLE workers ADD COLUMN IF NOT EXISTS {col} {col_type}"
+                # Check if column exists first (SQLite doesn't support IF NOT EXISTS for ALTER TABLE)
+                check_result = await conn.execute(text(
+                    f"PRAGMA table_info(workers)"
                 ))
-                log.info(f"Migration OK: {col}")
+                existing_columns = [row[1] for row in await check_result.fetchall()]
+
+                if col not in existing_columns:
+                    await conn.execute(text(
+                        f"ALTER TABLE workers ADD COLUMN {col} {col_type}"
+                    ))
+                    log.info(f"Migration OK: {col}")
             except Exception as e:
-                log.warning(f"Migration skip {col}: {e}")
+                log.debug(f"Migration skip {col}: {e}")
 
 
 @asynccontextmanager
