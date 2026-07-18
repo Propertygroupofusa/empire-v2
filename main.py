@@ -328,6 +328,21 @@ async def lifespan(app: FastAPI):
         log.warning(f"Prop bot failed to start: {e}")
 
     try:
+        import subprocess
+        import threading
+        def start_crypto_bot():
+            try:
+                subprocess.Popen(['python', 'bot_2_crypto_scalper.py'],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                log.info("🤖 Crypto scalper bot #2 started (background subprocess)")
+            except Exception as e:
+                log.warning(f"Crypto bot subprocess failed: {e}")
+
+        threading.Thread(target=start_crypto_bot, daemon=True).start()
+    except Exception as e:
+        log.warning(f"Crypto bot startup failed: {e}")
+
+    try:
         from stripe_subscriptions import setup_stripe_products
         if setup_stripe_products():
             log.info("💳 Stripe subscription products initialized")
