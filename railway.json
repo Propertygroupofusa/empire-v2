@@ -43,6 +43,22 @@
       },
       "startCommand": "cd video-editor && npm start",
       "port": 3000
+    },
+    "crypto-trading-bot": {
+      "build": {
+        "dockerfile": "Dockerfile"
+      },
+      "startCommand": "python bot_2_crypto_scalper.py",
+      "restartPolicyType": "ON_FAILURE",
+      "restartPolicyMaxRetries": 10
+    },
+    "pl-tracker": {
+      "build": {
+        "dockerfile": "Dockerfile"
+      },
+      "startCommand": "python bot_pl_tracker.py",
+      "restartPolicyType": "ON_FAILURE",
+      "restartPolicyMaxRetries": 10
     }
   }
 }
