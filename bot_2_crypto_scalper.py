@@ -461,10 +461,10 @@ def start():
 
     acct = get_account()
     if not acct:
-        log.error("❌ Cannot connect to Alpaca")
-        return
-
-    pf = float(acct.get("portfolio_value", CONFIG["starting_capital"]))
+        log.warning("⚠️  Cannot connect to Alpaca — using default capital, will retry")
+        pf = CONFIG["starting_capital"]
+    else:
+        pf = float(acct.get("portfolio_value", CONFIG["starting_capital"]))
     state.start_pf = pf
     state.day_start_pf = pf
 
