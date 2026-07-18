@@ -11,7 +11,8 @@ Leverage: None — spot only
 Runs: 24/7 — crypto never sleeps
 
 COMPOUNDING: Every profit reinvested automatically
-$500 → $1k → $5k → $10k → $100k
+No hard stop — keeps compounding indefinitely
+$980 → $1k → $5k → $10k → $100k → $500k → $1M+
 """
 import os
 import json
@@ -52,7 +53,7 @@ DATA_URL = "https://data.alpaca.markets"
 # ── CONFIG ──────────────────────────────────────────────────
 CONFIG = {
     "starting_capital": 980.0,  # Live account capital
-    "target_portfolio": 100_000.0,
+    "target_portfolio": 10_000_000.0,  # No hard stop — keep compounding to $10M+
     "daily_target_pct": 2.0,
     "max_daily_loss_pct": 3.0,
     "stop_loss_pct": 0.8,
@@ -83,7 +84,10 @@ MILESTONES = [
     {"balance": 10_000, "alloc": 25, "max_pos": 4, "label": "🔥 5 Figures!"},
     {"balance": 25_000, "alloc": 25, "max_pos": 4, "label": "⚡ Quarter!"},
     {"balance": 50_000, "alloc": 25, "max_pos": 4, "label": "🚀 Halfway!"},
-    {"balance": 100_000, "alloc": 25, "max_pos": 4, "label": "🏆 TARGET!"},
+    {"balance": 100_000, "alloc": 25, "max_pos": 4, "label": "🏆 $100k!"},
+    {"balance": 250_000, "alloc": 25, "max_pos": 4, "label": "💎 Quarter Million!"},
+    {"balance": 500_000, "alloc": 25, "max_pos": 4, "label": "🌟 Half Million!"},
+    {"balance": 1_000_000, "alloc": 25, "max_pos": 4, "label": "👑 MILLIONAIRE!"},
 ]
 
 
@@ -368,10 +372,6 @@ def run_cycle():
     log.info(
         f"  Per-trade: ${pf*ms['alloc']/100:,.2f} | W:{state.wins} L:{state.losses} ({state.win_rate():.0f}% WR)"
     )
-
-    if pf >= CONFIG["target_portfolio"]:
-        log.info("🏆 $100,000 TARGET REACHED!")
-        return schedule.CancelJob
 
     if datetime.now().hour == 0 and datetime.now().minute < 16:
         state.new_day(pf)
