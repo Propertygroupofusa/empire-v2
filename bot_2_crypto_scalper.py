@@ -155,7 +155,7 @@ def get_crypto_prices(symbol, limit=50):
 
 
 def get_account():
-    return api_call("GET", "/v2/account")
+    return api_call("GET", "/v2/account", live=state.is_live)
 
 
 def place_buy(symbol, notional, live=False):
@@ -463,6 +463,10 @@ def start():
     pf = CONFIG["starting_capital"]
     state.start_pf = pf
     state.day_start_pf = pf
+
+    # Read ALPACA_LIVE_TRADE from environment to set trading mode
+    live_trade_env = os.getenv("ALPACA_LIVE_TRADE", "false").lower()
+    state.is_live = live_trade_env in ("true", "1", "yes")
 
     log.info(f"  Balance: ${pf:,.2f} (using default capital)")
     log.info(f"  Mode: {'🔴 LIVE' if state.is_live else '📄 PAPER'}")
