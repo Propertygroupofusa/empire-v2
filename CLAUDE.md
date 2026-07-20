@@ -6,22 +6,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Empire v2** is a multi-system SaaS platform combining:
 1. **Video Production Service** — Stripe-powered quote form → HeyGen video generation → customer delivery
-2. **Trading Automation** (secondary) — Futures/crypto trading with AI signal confirmation
-3. **Content/Revenue Systems** — Email campaigns, YouTube publishing, data retention
+2. **Delivery Platform** (active development) — DoorDash-like food delivery with real-time GPS tracking
+3. **Trading Automation** (secondary) — Futures/crypto trading with AI signal confirmation
+4. **Content/Revenue Systems** — Email campaigns, YouTube publishing, data retention
 
-**Current Focus:** Video production platform (quote form → Stripe payment → HeyGen generation).
+**Current Focus:** Building customer + driver delivery app with live GPS tracking via WebSocket.
 
 **Deployment:** Railway (https://empire-v2-production.up.railway.app)
+**Branch:** `claude/custom-delivery-app-di39ur`
 
 ---
 
 ## Architecture
 
 ### Core Stack
-- **Framework:** FastAPI (async, graceful error handling)
-- **Database:** SQLite via SQLAlchemy (in-memory order storage for video orders)
+- **Framework:** FastAPI (async, graceful error handling, WebSocket support)
+- **Database:** SQLite via SQLAlchemy (video orders + delivery data)
 - **Payments:** Stripe (checkout sessions, webhooks)
 - **Video Generation:** HeyGen API (avatar + voice synthesis)
+- **Real-time:** WebSocket for live GPS tracking + order status updates
 - **Email:** Gmail SMTP (configured via env vars)
 - **Monitoring:** Health monitor + data retention manager
 
@@ -38,6 +41,43 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - `GET /retention/*` — data retention status
 
 **Key Pattern:** Routers imported with try-except to prevent crashes if modules missing. Missing routers log warnings but don't stop startup.
+
+### Delivery Platform Architecture
+**routers/delivery.py** — main delivery app logic (to be created)
+
+**Data Model:**
+- **Restaurants:** name, address, menu_items, cuisine_type, ratings, delivery_fee
+- **Menu Items:** restaurant_id, name, price, description, category
+- **Orders:** customer_info, restaurant_id, items, status, delivery_address, driver_id, tracking
+- **Drivers:** name, phone, current_location, status (available|on_delivery), vehicle_info, ratings
+- **Real-time Tracking:** order_id, driver_location (lat/lon), estimated_arrival, customer_watching
+
+**Flow:**
+1. **Customer Browse** — `GET /delivery/restaurants` → list restaurants with filters (cuisine, rating, delivery_time)
+2. **View Menu** — `GET /delivery/restaurants/{id}/menu` → get menu items with prices
+3. **Create Order** — `POST /delivery/orders` → add items to cart, select address/payment
+4. **Payment** — Uses Stripe (same as video orders), stores order as "pending"
+5. **Auto-Assign Driver** — Background task finds nearest available driver, assigns order
+6. **Real-time Tracking** — WebSocket connection `ws://localhost:8000/delivery/ws/track/{order_id}` 
+   - Driver location updates sent every 5 seconds
+   - Customer receives: driver_lat, driver_lon, estimated_arrival, driver_name, phone
+7. **Delivery Complete** — Driver marks complete, customer rates driver/order
+
+**WebSocket Layer (routers/delivery.py):**
+```python
+@app.websocket("/delivery/ws/track/{order_id}")
+async def websocket_endpoint(websocket: WebSocket, order_id: str):
+    # Accept connection from customer
+    await websocket.accept()
+    # Loop: poll driver location from DB, send to customer every 5sec
+    # On delivery complete or order cancelled: close connection
+```
+
+**Driver Assignment:**
+- Pseudo-code: `find_nearest_driver(order_location, radius=5km, status='available')`
+- Updates driver status → "on_delivery"
+- Stores driver_id in order record
+- Driver app polls for new orders or uses WebSocket
 
 ### Order/Video Generation Flow
 **routers/orders.py** (23,525 bytes) — main business logic
@@ -135,15 +175,34 @@ python main.py
 4. Click "Accept & Pay Now"
 5. Stripe checkout redirect (uses test/live keys based on env)
 
+### Testing Delivery App Locally
+
+**WebSocket Test (curl not ideal, use wscat or JavaScript):**
+```bash
+# Install wscat: npm install -g wscat
+wscat -c ws://localhost:8000/delivery/ws/track/order-123
+
+# Or test in browser console:
+const ws = new WebSocket('ws://localhost:8000/delivery/ws/track/order-123');
+ws.onmessage = (e) => console.log(JSON.parse(e.data));
+```
+
+**API Test Flow:**
+1. `GET /delivery/restaurants` → browse restaurants
+2. `GET /delivery/restaurants/{id}/menu` → view menu
+3. `POST /delivery/orders` → create order with items + delivery address
+4. WebSocket connect: `ws://localhost:8000/delivery/ws/track/{order_id}`
+5. Check order status: `GET /delivery/orders/{order_id}`
+
 ### Deployment to Railway
 
-**Branch:** `claude/video-editing-platform-ib585z`
+**Branch:** `claude/custom-delivery-app-di39ur`
 
 **Deploy steps:**
-1. Push code: `git push -u origin claude/video-editing-platform-ib585z`
-2. Go to Railway dashboard → empire-v2 deployment → click Redeploy
+1. Push code: `git push -u origin claude/custom-delivery-app-di39ur`
+2. Railway auto-detects push and redeploys
 3. Wait 2-3 minutes for "Active" status
-4. Test: `https://empire-v2-production.up.railway.app/quote`
+4. Test: `https://empire-v2-production.up.railway.app/delivery/restaurants`
 
 **Key deployment files:**
 - **Dockerfile** — Python 3.11-slim, copies all files, runs `python main.py`
@@ -161,12 +220,10 @@ possible_paths = [
 
 ### Git Workflow
 
-- **Branch name:** `claude/video-editing-platform-ib585z` (do NOT push to main without explicit permission)
+- **Branch name:** `claude/custom-delivery-app-di39ur` (do NOT push to main without explicit permission)
 - **Commits:** Create new commits (don't amend) with clear messages
-- **Recent commits:**
-  - `774f1e8` — Fix quote form endpoint paths on Railway
-  - `5617390` — Return HTMLResponse instead of FileResponse
-  - Previous — HeyGen integration, Stripe webhook, customer portal
+- **Deployment:** Push to this branch → Railway auto-redeploys in ~2-3 minutes
+- **Key pattern:** All development on delivery features goes to this branch only
 
 ---
 
@@ -216,6 +273,87 @@ possible_paths = [
 - **Env vars:** GMAIL_EMAIL, GMAIL_PASSWORD (App password, not regular password)
 - Requires Gmail "App passwords" feature (may not be available on Google Workspace accounts)
 
+### Delivery App Database Schema
+
+**Tables to create:**
+
+```sql
+-- Restaurants
+CREATE TABLE restaurants (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  address TEXT NOT NULL,
+  latitude REAL,
+  longitude REAL,
+  cuisine_type TEXT,
+  rating REAL,
+  delivery_fee INTEGER (cents),
+  created_at TIMESTAMP
+);
+
+-- Menu Items
+CREATE TABLE menu_items (
+  id INTEGER PRIMARY KEY,
+  restaurant_id INTEGER,
+  name TEXT NOT NULL,
+  price INTEGER (cents),
+  description TEXT,
+  category TEXT,
+  available BOOLEAN
+);
+
+-- Delivery Orders
+CREATE TABLE delivery_orders (
+  id INTEGER PRIMARY KEY,
+  customer_id TEXT,
+  customer_name TEXT,
+  customer_phone TEXT,
+  customer_email TEXT,
+  restaurant_id INTEGER,
+  delivery_address TEXT,
+  delivery_lat REAL,
+  delivery_lon REAL,
+  status TEXT (pending|assigned|on_way|delivered|cancelled),
+  driver_id INTEGER,
+  total_price INTEGER (cents),
+  created_at TIMESTAMP,
+  delivered_at TIMESTAMP
+);
+
+-- Order Items (line items)
+CREATE TABLE order_items (
+  id INTEGER PRIMARY KEY,
+  order_id INTEGER,
+  menu_item_id INTEGER,
+  quantity INTEGER,
+  price INTEGER (cents at time of order)
+);
+
+-- Drivers
+CREATE TABLE drivers (
+  id INTEGER PRIMARY KEY,
+  name TEXT,
+  phone TEXT,
+  vehicle_type TEXT,
+  status TEXT (available|on_delivery|offline),
+  current_lat REAL,
+  current_lon REAL,
+  last_updated TIMESTAMP,
+  total_deliveries INTEGER,
+  rating REAL
+);
+
+-- Driver Locations (history for tracking)
+CREATE TABLE driver_locations (
+  id INTEGER PRIMARY KEY,
+  driver_id INTEGER,
+  order_id INTEGER,
+  latitude REAL,
+  longitude REAL,
+  timestamp TIMESTAMP
+);
+```
+
 ---
 
 ## Verification Before Deployment
@@ -262,13 +400,48 @@ Before pushing changes to Railway, verify:
 
 ---
 
+## Common Delivery App Tasks
+
+**Seed test restaurants:**
+- Create `scripts/seed_restaurants.py` that inserts 5-10 restaurants with lat/lon into database
+- Include menu items per restaurant (3-5 items each)
+- Run before demo: `python scripts/seed_restaurants.py`
+
+**Add a new restaurant:**
+- `POST /delivery/restaurants` with: name, address, latitude, longitude, cuisine_type
+- Create menu items: `POST /delivery/restaurants/{id}/menu_items` for each item
+
+**Create a test driver:**
+- `POST /delivery/drivers` with: name, phone, vehicle_type, status="available"
+- Initialize location: `POST /delivery/drivers/{id}/location` with lat/lon
+
+**Test real-time tracking:**
+1. Create an order: `POST /delivery/orders` → capture order_id
+2. Open WebSocket: `ws://localhost:8000/delivery/ws/track/{order_id}`
+3. Simulate driver movement: `POST /delivery/drivers/{driver_id}/location` with updated lat/lon
+4. Verify WebSocket receives: `{driver_lat, driver_lon, estimated_arrival, status}`
+
+**Debug WebSocket connections:**
+- Check FastAPI logs: `tail -f app.log` shows connection open/close
+- Verify message delivery: Add console.log in browser DevTools
+- Test timeout: Keep connection open 30+ minutes, verify doesn't drop
+
+---
+
 ## Known Limitations & TODOs
 
-- **Order persistence:** Restart loses all pending orders (use DB for production)
-- **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
-- **Scale:** In-memory lists won't scale; add PostgreSQL connection for real usage
-- **Video editing:** HeyGen only generates new videos; can't modify existing videos per user request
-- **Admin auth:** No authentication on admin endpoints yet (add before production)
+**Video Production:**
+- Order persistence: Restart loses pending orders (use DB for production)
+- Email: Gmail not configured (skip for now, test with HeyGen generation only)
+- Admin auth: No authentication on admin endpoints yet (add before production)
+
+**Delivery App (In Progress):**
+- Restaurant seeding: Hardcode 5-10 test restaurants initially
+- Driver assignment: Implement auto-assign to nearest driver logic
+- WebSocket scaling: Use Redis for pub/sub if scaling to many concurrent orders
+- Real-time verification: Test GPS updates at scale (100+ concurrent deliveries)
+- Customer/Driver auth: Add JWT auth before production launch
+- Payment confirmation: Hook order creation to Stripe payment completion
 
 ---
 
