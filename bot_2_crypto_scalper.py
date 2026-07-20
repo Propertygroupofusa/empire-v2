@@ -344,7 +344,7 @@ class State:
 
     def win_rate(self):
         total = self.wins + self.losses
-        return (self.wins / total * 100) if total > 0 else 0
+        return (self.wins / total * 100) if total > 0 else None
 
 
 state = State()
@@ -369,8 +369,10 @@ def run_cycle():
     log.info(f"\n{'='*55}")
     log.info(f"⏱ BOT #2 CRYPTO | {mode} | ${pf:,.2f}")
     log.info(f"  {ms['label']} | Days to $100k: ~{days}")
+    wr = state.win_rate()
+    wr_str = f"{wr:.0f}% WR" if wr is not None else "N/A WR"
     log.info(
-        f"  Per-trade: ${pf*ms['alloc']/100:,.2f} | W:{state.wins} L:{state.losses} ({state.win_rate():.0f}% WR)"
+        f"  Per-trade: ${pf*ms['alloc']/100:,.2f} | W:{state.wins} L:{state.losses} ({wr_str})"
     )
 
     if datetime.now().hour == 0 and datetime.now().minute < 16:
