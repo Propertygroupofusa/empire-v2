@@ -40,10 +40,10 @@ stripe_publishable_key = os.getenv("STRIPE_PUBLISHABLE_KEY")
 router = APIRouter()
 
 # ============================================================
-# GET /orders/stripe-key - Get Stripe publishable key
+# GET /stripe-key - Get Stripe publishable key
 # ============================================================
 
-@router.get("/orders/stripe-key")
+@router.get("/stripe-key")
 async def get_stripe_key():
     """Get Stripe publishable key for frontend"""
     return {
@@ -66,10 +66,10 @@ class QuoteRequest(BaseModel):
 
 
 # ============================================================
-# POST /orders/request-quote - Customer submits video request
+# POST /request-quote - Customer submits video request
 # ============================================================
 
-@router.post("/orders/request-quote")
+@router.post("/request-quote")
 async def request_quote(quote: QuoteRequest, db: AsyncSession = Depends(get_db)):
     """
     Customer submits a video request with script, avatar, and language.
@@ -189,7 +189,7 @@ def calculate_quote_price(video_type: str, delivery_days: int) -> int:
 # POST /orders/{order_id}/create-checkout - Create Stripe session
 # ============================================================
 
-@router.post("/orders/{order_id}/create-checkout")
+@router.post("/{order_id}/create-checkout")
 async def create_checkout_session(order_id: int, db: AsyncSession = Depends(get_db)):
     """Create Stripe checkout session for order"""
 
@@ -247,7 +247,7 @@ async def create_checkout_session(order_id: int, db: AsyncSession = Depends(get_
 # POST /orders/webhook/stripe - Stripe webhook handler
 # ============================================================
 
-@router.post("/orders/webhook/stripe")
+@router.post("/webhook/stripe")
 async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     """Handle Stripe webhook events"""
 
@@ -378,7 +378,7 @@ async def generate_video_for_order(order_id: int):
 # "stats"/"admin-dashboard" as an integer, 422ing before ever reaching
 # the routes actually meant to handle those paths.
 
-@router.get("/orders/stats", dependencies=[Depends(require_admin_key)])
+@router.get("/stats", dependencies=[Depends(require_admin_key)])
 async def get_order_stats(db: AsyncSession = Depends(get_db)):
     """Get order statistics"""
     result = await db.execute(select(VideoQuoteOrder))
@@ -404,7 +404,7 @@ async def get_order_stats(db: AsyncSession = Depends(get_db)):
 # GET /orders/admin-dashboard - Full admin view
 # ============================================================
 
-@router.get("/orders/admin-dashboard", dependencies=[Depends(require_admin_key)])
+@router.get("/admin-dashboard", dependencies=[Depends(require_admin_key)])
 async def admin_dashboard(db: AsyncSession = Depends(get_db)):
     """Complete admin dashboard view"""
     result = await db.execute(select(VideoQuoteOrder))
@@ -472,7 +472,7 @@ async def admin_dashboard(db: AsyncSession = Depends(get_db)):
 # GET /orders/{order_id} - Get specific order status
 # ============================================================
 
-@router.get("/orders/{order_id}", dependencies=[Depends(require_admin_key)])
+@router.get("/{order_id}", dependencies=[Depends(require_admin_key)])
 async def get_order_status(order_id: int, db: AsyncSession = Depends(get_db)):
     """Get status of specific order"""
     order = await db.get(VideoQuoteOrder, order_id)
@@ -492,7 +492,7 @@ async def get_order_status(order_id: int, db: AsyncSession = Depends(get_db)):
 # POST /orders/{order_id}/payment-received - Mark order as paid
 # ============================================================
 
-@router.post("/orders/{order_id}/payment-received", dependencies=[Depends(require_admin_key)])
+@router.post("/{order_id}/payment-received", dependencies=[Depends(require_admin_key)])
 async def mark_payment_received(order_id: int, transaction_id: str = "", db: AsyncSession = Depends(get_db)):
     """
     Mark order as paid. Admin-only: this bypasses Stripe entirely, so
@@ -522,7 +522,7 @@ async def mark_payment_received(order_id: int, transaction_id: str = "", db: Asy
 # POST /orders/{order_id}/generate-video - Manually trigger video generation
 # ============================================================
 
-@router.post("/orders/{order_id}/generate-video", dependencies=[Depends(require_admin_key)])
+@router.post("/{order_id}/generate-video", dependencies=[Depends(require_admin_key)])
 async def manual_generate_video(order_id: int, db: AsyncSession = Depends(get_db)):
     """Admin endpoint to manually trigger video generation"""
     order = await db.get(VideoQuoteOrder, order_id)
@@ -554,7 +554,7 @@ async def manual_generate_video(order_id: int, db: AsyncSession = Depends(get_db
 # POST /orders/{order_id}/mark-complete - Mark video as complete
 # ============================================================
 
-@router.post("/orders/{order_id}/mark-complete", dependencies=[Depends(require_admin_key)])
+@router.post("/{order_id}/mark-complete", dependencies=[Depends(require_admin_key)])
 async def mark_order_complete(
     order_id: int,
     video_url: str,
@@ -593,7 +593,7 @@ async def mark_order_complete(
 # GET /orders/customer/{order_id} - Customer portal
 # ============================================================
 
-@router.get("/orders/customer/{order_id}")
+@router.get("/customer/{order_id}")
 async def customer_portal(order_id: int, email: str, db: AsyncSession = Depends(get_db)):
     """Customer portal to track order and download video.
 
@@ -649,7 +649,7 @@ async def customer_portal(order_id: int, email: str, db: AsyncSession = Depends(
 # GET /orders/customer/{email}/all - Get all orders for customer
 # ============================================================
 
-@router.get("/orders/customer-email/{email}/all")
+@router.get("/customer-email/{email}/all")
 async def customer_orders_by_email(email: str, db: AsyncSession = Depends(get_db)):
     """Get all orders for a customer by email"""
     result = await db.execute(
