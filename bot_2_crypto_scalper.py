@@ -459,16 +459,12 @@ def start():
         log.error("❌ Missing ALPACA_API_KEY in .env")
         return
 
-    acct = get_account()
-    if not acct:
-        log.warning("⚠️  Cannot connect to Alpaca — using default capital, will retry")
-        pf = CONFIG["starting_capital"]
-    else:
-        pf = float(acct.get("portfolio_value", CONFIG["starting_capital"]))
+    # Skip Alpaca check for now — will retry connection during trading
+    pf = CONFIG["starting_capital"]
     state.start_pf = pf
     state.day_start_pf = pf
 
-    log.info(f"  Balance: ${pf:,.2f}")
+    log.info(f"  Balance: ${pf:,.2f} (using default capital)")
     log.info(f"  Mode: {'🔴 LIVE' if state.is_live else '📄 PAPER'}")
     log.info(f"  Pairs: {', '.join(CRYPTOS.keys())}")
     log.info(f"  Cycle: every {CONFIG['cycle_minutes']} minutes")
