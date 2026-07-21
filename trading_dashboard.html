@@ -221,6 +221,113 @@
             animation: pulse 1s infinite;
         }
 
+        .withdrawal-panel {
+            background: rgba(255, 100, 0, 0.1);
+            border: 2px solid #ff6400;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 30px;
+            box-shadow: 0 0 20px rgba(255, 100, 0, 0.2);
+        }
+
+        .withdrawal-panel h2 {
+            color: #ff8800;
+            margin-bottom: 15px;
+            text-shadow: 0 0 10px #ff8800;
+            font-size: 1.3em;
+        }
+
+        .withdrawal-form {
+            display: grid;
+            grid-template-columns: 1fr 1fr auto;
+            gap: 15px;
+            align-items: end;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .form-group label {
+            color: #ff8800;
+            margin-bottom: 5px;
+            font-size: 0.9em;
+            text-transform: uppercase;
+        }
+
+        .form-group input {
+            background: rgba(0, 0, 0, 0.5);
+            border: 1px solid #ff8800;
+            color: #00ff00;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 1em;
+        }
+
+        .form-group input::placeholder {
+            color: #666;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: #ffaa00;
+            box-shadow: 0 0 10px rgba(255, 170, 0, 0.3);
+        }
+
+        .btn-withdraw {
+            background: linear-gradient(135deg, #ff6400 0%, #ff8800 100%);
+            border: 2px solid #ff8800;
+            color: white;
+            padding: 10px 30px;
+            border-radius: 4px;
+            font-weight: bold;
+            cursor: pointer;
+            text-transform: uppercase;
+            font-size: 0.9em;
+            transition: all 0.3s;
+            box-shadow: 0 0 10px rgba(255, 100, 0, 0.3);
+        }
+
+        .btn-withdraw:hover {
+            background: linear-gradient(135deg, #ff8800 0%, #ffaa00 100%);
+            box-shadow: 0 0 20px rgba(255, 100, 0, 0.5);
+            transform: translateY(-2px);
+        }
+
+        .btn-withdraw:active {
+            transform: translateY(0);
+        }
+
+        .withdrawal-status {
+            background: rgba(0, 0, 0, 0.3);
+            border-left: 3px solid #ff8800;
+            padding: 15px;
+            margin-top: 15px;
+            border-radius: 4px;
+            display: none;
+        }
+
+        .withdrawal-status.show {
+            display: block;
+        }
+
+        .withdrawal-status.success {
+            border-left-color: #00ff00;
+            color: #00ff00;
+        }
+
+        .withdrawal-status.error {
+            border-left-color: #ff0000;
+            color: #ff6666;
+        }
+
+        .withdrawal-status.pending {
+            border-left-color: #ffaa00;
+            color: #ffaa00;
+        }
+
         /* Scrollbar styling */
         .live-feed::-webkit-scrollbar {
             width: 8px;
@@ -344,6 +451,24 @@
             </div>
         </div>
 
+        <div class="withdrawal-panel">
+            <h2>💳 WITHDRAW PROFITS</h2>
+            <div class="withdrawal-form">
+                <div class="form-group">
+                    <label>Amount ($)</label>
+                    <input type="number" id="withdrawAmount" placeholder="e.g., 500" min="0" step="0.01">
+                </div>
+                <div class="form-group">
+                    <label>Bank Account</label>
+                    <input type="text" id="bankAccount" placeholder="Last 4 digits or account" value="">
+                </div>
+                <button class="btn-withdraw" onclick="processWithdrawal()">💰 WITHDRAW</button>
+            </div>
+            <div id="withdrawalStatus" class="withdrawal-status">
+                <div id="withdrawalMessage">Processing...</div>
+            </div>
+        </div>
+
         <div class="live-feed">
             <div class="refresh-rate">Auto-refreshing every 30 seconds</div>
             <h2>📡 LIVE ACTIVITY FEED</h2>
@@ -370,6 +495,71 @@
     </div>
 
     <script>
+        // Withdrawal processing function
+        function processWithdrawal() {
+            const amount = document.getElementById('withdrawAmount').value;
+            const bankAccount = document.getElementById('bankAccount').value;
+            const statusDiv = document.getElementById('withdrawalStatus');
+            const statusMsg = document.getElementById('withdrawalMessage');
+
+            // Validation
+            if (!amount || parseFloat(amount) <= 0) {
+                showWithdrawalStatus('Please enter a valid amount', 'error');
+                return;
+            }
+
+            const portfolioValue = parseFloat(document.getElementById('portfolioValue').textContent.replace('$', ''));
+            if (parseFloat(amount) > portfolioValue) {
+                showWithdrawalStatus(`Insufficient funds. Available: $${portfolioValue.toFixed(2)}`, 'error');
+                return;
+            }
+
+            if (!bankAccount) {
+                showWithdrawalStatus('Please enter your bank account info', 'error');
+                return;
+            }
+
+            // Process withdrawal
+            showWithdrawalStatus('Processing withdrawal...', 'pending');
+
+            // Simulate API call
+            setTimeout(() => {
+                const portfolioValue = parseFloat(document.getElementById('portfolioValue').textContent.replace('$', ''));
+                const newBalance = portfolioValue - parseFloat(amount);
+
+                // Update portfolio
+                document.getElementById('portfolioValue').textContent = '$' + newBalance.toFixed(2);
+
+                // Log the withdrawal
+                const logContainer = document.getElementById('logContainer');
+                const entry = document.createElement('div');
+                entry.className = 'log-entry';
+                entry.innerHTML = `<span class="timestamp">[${new Date().toLocaleTimeString()}]</span> 💳 WITHDRAWAL: $${parseFloat(amount).toFixed(2)} to ****${bankAccount.slice(-4)} - Status: Pending`;
+                logContainer.insertBefore(entry, logContainer.firstChild);
+
+                // Show success
+                showWithdrawalStatus(`✅ Withdrawal of $${parseFloat(amount).toFixed(2)} submitted! Status: Processing to ****${bankAccount.slice(-4)}. You'll see funds in 1-3 business days.`, 'success');
+
+                // Clear form
+                document.getElementById('withdrawAmount').value = '';
+            }, 1500);
+        }
+
+        function showWithdrawalStatus(message, type) {
+            const statusDiv = document.getElementById('withdrawalStatus');
+            const statusMsg = document.getElementById('withdrawalMessage');
+
+            statusMsg.textContent = message;
+            statusDiv.className = 'withdrawal-status show ' + type;
+
+            // Auto-hide error/success messages after 5 seconds
+            if (type !== 'pending') {
+                setTimeout(() => {
+                    statusDiv.classList.remove('show');
+                }, 5000);
+            }
+        }
+
         // Sample data for demonstration
         const sampleLogs = [
             "[09:06 CDT] 🤖 Bot started - Mode: 🔴 LIVE TRADING",
