@@ -477,6 +477,18 @@
                 <div class="stat-value" id="sessionPL" class="positive">+$0.00</div>
                 <p id="sessionPLPct" class="positive">+0.00% ROI</p>
             </div>
+
+            <div class="stat-card">
+                <h3>Total Withdrawn (All-Time)</h3>
+                <div class="stat-value" id="totalWithdrawn">$0.00</div>
+                <p id="withdrawalCountLabel" style="color: #00cc00;">0 withdrawals</p>
+            </div>
+
+            <div class="stat-card">
+                <h3>Total Currently With Bot</h3>
+                <div class="stat-value" id="totalHeld">$980.00</div>
+                <p style="color: #00cc00;">Base capital + unwithdrawn profit</p>
+            </div>
         </div>
 
         <div class="grid-2">
@@ -604,8 +616,29 @@
         let totalTradesExecuted = 0;
         let totalProfitTaken = 0;
 
+        // This dashboard has no real backend yet - persist the lifetime
+        // withdrawal total in localStorage so it survives a page reload
+        // instead of resetting to zero every time.
+        let totalWithdrawn = parseFloat(localStorage.getItem('bmb_totalWithdrawn') || '0');
+
+        function saveWithdrawalState() {
+            localStorage.setItem('bmb_totalWithdrawn', totalWithdrawn.toFixed(2));
+        }
+
+        function updateTotalWithdrawnDisplay() {
+            document.getElementById('totalWithdrawn').textContent = '$' + totalWithdrawn.toFixed(2);
+            document.getElementById('withdrawalCountLabel').textContent =
+                withdrawalHistory.length + (withdrawalHistory.length === 1 ? ' withdrawal' : ' withdrawals');
+        }
+
+        function updateTotalHeldDisplay() {
+            const portfolioValue = parseFloat(document.getElementById('portfolioValue').textContent.replace('$', ''));
+            document.getElementById('totalHeld').textContent = '$' + portfolioValue.toFixed(2);
+        }
+
         // Update profit amount every second
         setInterval(updateProfitDisplay, 1000);
+        setInterval(updateTotalHeldDisplay, 1000);
 
         // Update trade count based on profit
         setInterval(updateTradeStats, 2000);
@@ -647,6 +680,12 @@
                 destination: 'Stripe Account'
             };
             withdrawalHistory.unshift(transaction);
+
+            // Track the running lifetime total right away, not just once the
+            // simulated transfer "completes" - this is what you asked to see.
+            totalWithdrawn += profit;
+            saveWithdrawalState();
+            updateTotalWithdrawnDisplay();
 
             // Add to display
             addTransactionToDisplay(transaction);
@@ -843,6 +882,11 @@
         // Update every 30 seconds
         setInterval(updateDashboard, 30000);
         updateDashboard();
+
+        // Restore total-withdrawn from a prior visit and show what's
+        // currently sitting in the account right away, don't wait a second.
+        updateTotalWithdrawnDisplay();
+        updateTotalHeldDisplay();
 
         // Add sample logs periodically
         let logIndex = 0;
