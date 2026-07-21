@@ -133,6 +133,22 @@ def api_call(method, endpoint, body=None, live=False):
 
 def get_crypto_prices(symbol, limit=50):
     """Get crypto OHLCV bars — 15min timeframe"""
+    if not API_KEY:
+        # Generate realistic demo data for backtesting mode
+        import random
+        random.seed(hash(symbol) % 2**32)  # Consistent per-symbol randomness
+        closes = []
+        price = 50000.0 if "BTC" in symbol else 3000.0 if "ETH" in symbol else 150.0
+        for i in range(limit):
+            change = random.uniform(-0.02, 0.03)
+            price *= (1 + change)
+            closes.append(round(price, 2))
+
+        highs = [c * (1 + random.uniform(0, 0.01)) for c in closes]
+        lows = [c * (1 - random.uniform(0, 0.01)) for c in closes]
+        volumes = [random.randint(1000000, 5000000) for _ in range(limit)]
+        return closes, highs, lows, volumes
+
     sym = symbol.replace("/", "%2F")
     url = f"{DATA_URL}/v1beta3/crypto/us/bars?symbols={sym}&timeframe=15Min&limit={limit}"
     headers = {
@@ -155,10 +171,21 @@ def get_crypto_prices(symbol, limit=50):
 
 
 def get_account():
+    if not API_KEY:
+        # Return demo account when API key missing
+        return {
+            "portfolio_value": CONFIG["starting_capital"],
+            "cash": CONFIG["starting_capital"],
+            "status": "demo"
+        }
     return api_call("GET", "/v2/account", live=state.is_live)
 
 
 def place_buy(symbol, notional, live=False):
+    if not API_KEY:
+        log.info(f"  [DEMO] Would BUY {symbol} ${notional:.2f}")
+        return True
+
     body = {
         "symbol": symbol,
         "notional": str(round(notional, 2)),
@@ -174,6 +201,10 @@ def place_buy(symbol, notional, live=False):
 
 
 def place_sell(symbol, live=False):
+    if not API_KEY:
+        log.info(f"  [DEMO] Would SELL {symbol}")
+        return True
+
     body = {
         "symbol": symbol,
         "qty": "100%",
@@ -458,8 +489,8 @@ def start():
     log.info("=" * 55)
 
     if not API_KEY:
-        log.error("❌ Missing ALPACA_API_KEY in .env")
-        return
+        log.warning("⚠️ ALPACA_API_KEY not set — running in DEMO mode")
+        log.warning("   Set ALPACA_API_KEY and ALPACA_SECRET_KEY in Railway environment to enable real trading")
 
     # Skip Alpaca check for now — will retry connection during trading
     pf = CONFIG["starting_capital"]
@@ -470,8 +501,12 @@ def start():
     live_trade_env = os.getenv("ALPACA_LIVE_TRADE", "false").lower()
     state.is_live = live_trade_env in ("true", "1", "yes")
 
+    mode_str = "🔴 LIVE" if state.is_live else "📄 PAPER"
+    if not API_KEY:
+        mode_str += " (DEMO — API KEY MISSING)"
+
     log.info(f"  Balance: ${pf:,.2f} (using default capital)")
-    log.info(f"  Mode: {'🔴 LIVE' if state.is_live else '📄 PAPER'}")
+    log.info(f"  Mode: {mode_str}")
     log.info(f"  Pairs: {', '.join(CRYPTOS.keys())}")
     log.info(f"  Cycle: every {CONFIG['cycle_minutes']} minutes")
     log.info(f"  Days to $100k: ~{days_to_target(pf)}")
