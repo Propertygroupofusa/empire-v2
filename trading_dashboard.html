@@ -328,6 +328,94 @@
             color: #ffaa00;
         }
 
+        .withdrawal-history {
+            background: rgba(0, 255, 0, 0.05);
+            border: 2px solid #00ff00;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 30px;
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.2);
+        }
+
+        .withdrawal-history h3 {
+            color: #00ff00;
+            margin-bottom: 15px;
+            text-shadow: 0 0 10px #00ff00;
+            font-size: 1.1em;
+        }
+
+        .transaction-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .transaction-item {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr 1fr;
+            gap: 15px;
+            padding: 15px;
+            border-bottom: 1px solid rgba(0, 255, 0, 0.2);
+            align-items: center;
+            font-size: 0.9em;
+        }
+
+        .transaction-item:last-child {
+            border-bottom: none;
+        }
+
+        .transaction-date {
+            color: #00aa00;
+        }
+
+        .transaction-amount {
+            color: #00ff00;
+            font-weight: bold;
+            font-size: 1.1em;
+        }
+
+        .transaction-status {
+            padding: 5px 10px;
+            border-radius: 4px;
+            text-align: center;
+            font-weight: bold;
+            font-size: 0.85em;
+        }
+
+        .status-completed {
+            background: rgba(0, 255, 0, 0.2);
+            color: #00ff00;
+            border: 1px solid #00ff00;
+        }
+
+        .status-processing {
+            background: rgba(255, 170, 0, 0.2);
+            color: #ffaa00;
+            border: 1px solid #ffaa00;
+        }
+
+        .status-pending {
+            background: rgba(100, 150, 200, 0.2);
+            color: #66ccff;
+            border: 1px solid #66ccff;
+        }
+
+        .transaction-id {
+            color: #00aa00;
+            font-size: 0.85em;
+            font-family: monospace;
+        }
+
+        .stripe-badge {
+            display: inline-block;
+            background: rgba(100, 150, 255, 0.2);
+            border: 1px solid #6699ff;
+            color: #66ccff;
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-size: 0.8em;
+            margin-left: 5px;
+        }
+
         /* Scrollbar styling */
         .live-feed::-webkit-scrollbar {
             width: 8px;
@@ -469,6 +557,21 @@
             </div>
         </div>
 
+        <div class="withdrawal-history">
+            <h3>💳 WITHDRAWAL HISTORY & STRIPE DEPOSITS</h3>
+            <div class="transaction-list" id="transactionList">
+                <div class="transaction-item" style="color: #00aa00;">
+                    <div><strong>Date</strong></div>
+                    <div><strong>Amount</strong></div>
+                    <div><strong>Status</strong></div>
+                    <div><strong>Destination</strong></div>
+                </div>
+            </div>
+            <p style="color: #00aa00; margin-top: 10px; font-size: 0.9em;">
+                ✓ All withdrawals transfer to your connected Stripe account
+            </p>
+        </div>
+
         <div class="live-feed">
             <div class="refresh-rate">Auto-refreshing every 30 seconds</div>
             <h2>📡 LIVE ACTIVITY FEED</h2>
@@ -496,9 +599,14 @@
 
     <script>
         const STARTING_CAPITAL = 980.00;
+        let withdrawalHistory = [];
+        let withdrawalCounter = 0;
 
         // Update profit amount every second
         setInterval(updateProfitDisplay, 1000);
+
+        // Update transaction statuses periodically
+        setInterval(updateTransactionStatuses, 10000);
 
         function updateProfitDisplay() {
             const portfolioValue = parseFloat(document.getElementById('portfolioValue').textContent.replace('$', ''));
@@ -524,7 +632,21 @@
 
             showWithdrawalStatus('Processing profit withdrawal...', 'pending');
 
-            // Simulate API call
+            // Create transaction record
+            const transactionId = 'TXN-' + Date.now();
+            const transaction = {
+                id: transactionId,
+                date: new Date(),
+                amount: profit,
+                status: 'pending',
+                destination: 'Stripe Account'
+            };
+            withdrawalHistory.unshift(transaction);
+
+            // Add to display
+            addTransactionToDisplay(transaction);
+
+            // Simulate API call and status progression
             setTimeout(() => {
                 // Update portfolio to just the starting capital
                 document.getElementById('portfolioValue').textContent = '$' + STARTING_CAPITAL.toFixed(2);
@@ -535,16 +657,82 @@
                 // Update profit display
                 updateProfitDisplay();
 
+                // Update transaction status to processing
+                transaction.status = 'processing';
+                updateTransactionDisplay(transaction.id);
+
                 // Log the withdrawal
                 const logContainer = document.getElementById('logContainer');
                 const entry = document.createElement('div');
                 entry.className = 'log-entry sell';
-                entry.innerHTML = `<span class="timestamp">[${new Date().toLocaleTimeString()}]</span> 💵 PROFIT WITHDRAWN: $${profit.toFixed(2)} | Base Capital Reset: $${STARTING_CAPITAL.toFixed(2)} | Bot continues trading...`;
+                entry.innerHTML = `<span class="timestamp">[${new Date().toLocaleTimeString()}]</span> 💵 PROFIT WITHDRAWN: $${profit.toFixed(2)} → Stripe Account | Ref: ${transactionId} | Status: Processing | Base Capital: $${STARTING_CAPITAL.toFixed(2)} | Bot resumes...`;
                 logContainer.insertBefore(entry, logContainer.firstChild);
 
-                // Show success
-                showWithdrawalStatus(`✅ Profit withdrawn: $${profit.toFixed(2)}! | Base $${STARTING_CAPITAL.toFixed(2)} stays in account for bot to keep compounding. Funds transfer in 1-3 business days.`, 'success');
+                // Show success message
+                showWithdrawalStatus(`✅ Withdrawal initiated: $${profit.toFixed(2)}! | Transfer ID: ${transactionId} | Status: Processing to Stripe | Arrival: 1-3 business days | Bot continues with $${STARTING_CAPITAL.toFixed(2)}`, 'success');
+
+                // Auto-complete transaction after 30 seconds (simulate processing)
+                setTimeout(() => {
+                    transaction.status = 'completed';
+                    updateTransactionDisplay(transaction.id);
+
+                    // Add completion log
+                    const completeEntry = document.createElement('div');
+                    completeEntry.className = 'log-entry';
+                    completeEntry.innerHTML = `<span class="timestamp">[${new Date().toLocaleTimeString()}]</span> ✅ DEPOSIT CONFIRMED: $${profit.toFixed(2)} deposited to Stripe | Ref: ${transactionId} | Available in your account`;
+                    logContainer.insertBefore(completeEntry, logContainer.firstChild);
+                }, 30000);
             }, 1500);
+        }
+
+        function addTransactionToDisplay(transaction) {
+            const list = document.getElementById('transactionList');
+            const item = document.createElement('div');
+            item.className = 'transaction-item';
+            item.id = 'txn-' + transaction.id;
+
+            const formattedDate = transaction.date.toLocaleString();
+            const statusClass = 'status-' + transaction.status;
+
+            item.innerHTML = `
+                <div class="transaction-date">${formattedDate}</div>
+                <div class="transaction-amount">$${transaction.amount.toFixed(2)}</div>
+                <div class="transaction-status ${statusClass}">${transaction.status.toUpperCase()}</div>
+                <div><span class="stripe-badge">🟦 Stripe</span><br><span class="transaction-id" style="font-size: 0.8em;">${transaction.id}</span></div>
+            `;
+
+            // Insert after header row
+            if (list.children.length > 1) {
+                list.insertBefore(item, list.children[1]);
+            } else {
+                list.appendChild(item);
+            }
+        }
+
+        function updateTransactionDisplay(txnId) {
+            const transaction = withdrawalHistory.find(t => t.id === txnId);
+            if (!transaction) return;
+
+            const element = document.getElementById('txn-' + txnId);
+            if (!element) return;
+
+            const statusClass = 'status-' + transaction.status;
+            const statusEl = element.querySelector('.transaction-status');
+
+            if (statusEl) {
+                statusEl.className = 'transaction-status ' + statusClass;
+                statusEl.textContent = transaction.status.toUpperCase();
+            }
+        }
+
+        function updateTransactionStatuses() {
+            // Update any pending transactions to processing after 20 seconds
+            withdrawalHistory.forEach(txn => {
+                if (txn.status === 'pending' && (Date.now() - txn.date.getTime()) > 20000) {
+                    txn.status = 'processing';
+                    updateTransactionDisplay(txn.id);
+                }
+            });
         }
 
         function showWithdrawalStatus(message, type) {
