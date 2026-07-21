@@ -268,6 +268,51 @@ class CustomerSubscription(Base):
         }
 
 
+class TradingBotState(Base):
+    """Per-bot tracked state for the trading dashboard - Alpaca itself has no
+    concept of 'base capital' vs 'profit', so we track our own baseline here.
+    Profit shown on the dashboard is real equity minus this stored value."""
+    __tablename__ = "trading_bot_state"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot_name = Column(String, unique=True, index=True)  # e.g. "bare_metal_builders"
+    base_capital = Column(Float)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "bot_name": self.bot_name,
+            "base_capital": self.base_capital,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class WithdrawalRequest(Base):
+    """A real record of a requested profit withdrawal. No transfer API is
+    called - Alpaca's standard trading API doesn't expose one for a
+    self-directed account. The actual bank transfer is done manually in
+    Alpaca's own app; this just tracks that it was requested and lets it be
+    marked completed once you've done that."""
+    __tablename__ = "withdrawal_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot_name = Column(String, index=True)
+    amount = Column(Float)
+    status = Column(String, default="requested")  # requested, completed
+    requested_at = Column(DateTime, default=datetime.utcnow, index=True)
+    completed_at = Column(DateTime, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "bot_name": self.bot_name,
+            "amount": self.amount,
+            "status": self.status,
+            "requested_at": self.requested_at.isoformat() if self.requested_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+        }
+
+
 class StudyMaterial(Base):
     """Generated study materials from textbook images."""
     __tablename__ = "study_materials"

@@ -613,213 +613,189 @@
     </div>
 
     <script>
-        // Base capital grows over time via auto-compounding, so it's a
-        // persisted variable now rather than a fixed constant.
-        let STARTING_CAPITAL = parseFloat(localStorage.getItem('bmb_baseCapital') || '980.00');
-        let withdrawalHistory = [];
-        let withdrawalCounter = 0;
-        let totalTradesExecuted = 0;
-        let totalProfitTaken = 0;
+        // Real data only, pulled from your actual Alpaca account through
+        // /api/trading-dashboard/* (see routers/trading_dashboard.py). No
+        // Math.random() mock generator, no fake sample logs. Withdrawals are
+        // logged as real requests but don't call a transfer API - Alpaca's
+        // standard trading API doesn't expose one for a self-directed
+        // account; the real transfer has to happen in Alpaca's own app,
+        // then get marked completed here.
 
-        // This dashboard has no real backend yet - persist the lifetime
-        // withdrawal total in localStorage so it survives a page reload
-        // instead of resetting to zero every time.
-        let totalWithdrawn = parseFloat(localStorage.getItem('bmb_totalWithdrawn') || '0');
+        // Absolute URL (not relative) so this works identically whether the
+        // page is served from the real deployment or viewed as a static
+        // artifact preview on a different origin - CORS is open (allow_origins
+        // = ["*"]) so the cross-origin fetch works fine either way.
+        const API_BASE = 'https://empire-v2-production.up.railway.app/api/trading-dashboard';
+        let adminKey = localStorage.getItem('bmb_admin_key') || '';
 
-        function saveWithdrawalState() {
-            localStorage.setItem('bmb_totalWithdrawn', totalWithdrawn.toFixed(2));
+        function ensureAdminKey() {
+            if (!adminKey) {
+                adminKey = prompt('Enter admin key to load real account data:') || '';
+                if (adminKey) localStorage.setItem('bmb_admin_key', adminKey);
+            }
+            return adminKey;
         }
 
-        function updateTotalWithdrawnDisplay() {
-            document.getElementById('totalWithdrawn').textContent = '$' + totalWithdrawn.toFixed(2);
+        async function apiFetch(path, options = {}) {
+            ensureAdminKey();
+            const headers = Object.assign(
+                { 'X-Admin-Key': adminKey, 'Content-Type': 'application/json' },
+                options.headers || {}
+            );
+            const res = await fetch(API_BASE + path, Object.assign({}, options, { headers }));
+
+            if (res.status === 401) {
+                // Wrong/missing key - clear it so the next call re-prompts.
+                localStorage.removeItem('bmb_admin_key');
+                adminKey = '';
+                throw new Error('Unauthorized - check your admin key');
+            }
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || ('Request failed: ' + res.status));
+            }
+            return res.json();
+        }
+
+        function logEvent(message, cls) {
+            const logContainer = document.getElementById('logContainer');
+            const entry = document.createElement('div');
+            entry.className = 'log-entry' + (cls ? ' ' + cls : '');
+            entry.innerHTML = `<span class="timestamp">[${new Date().toLocaleTimeString()}]</span> ${message}`;
+            logContainer.insertBefore(entry, logContainer.firstChild);
+        }
+
+        async function refreshStatus() {
+            let status;
+            try {
+                status = await apiFetch('/status');
+            } catch (e) {
+                logEvent('❌ Failed to load account status: ' + e.message, 'error');
+                return;
+            }
+
+            document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+
+            document.getElementById('portfolioValue').textContent = '$' + status.equity.toFixed(2);
+            document.getElementById('cashValue').textContent = '$' + status.cash.toFixed(2);
+            document.getElementById('buyingPower').textContent = 'Buying Power: $' + status.buying_power.toFixed(2);
+
+            const pl = status.session_pl;
+            const plPct = status.session_pl_pct;
+            document.getElementById('portfolioChange').textContent =
+                (pl >= 0 ? '+' : '') + pl.toFixed(2) + ' (' + plPct.toFixed(2) + '%)';
+            document.getElementById('portfolioChange').className = pl >= 0 ? 'positive' : 'negative';
+            document.getElementById('sessionPL').textContent = (pl >= 0 ? '+' : '') + '$' + pl.toFixed(2);
+            document.getElementById('sessionPL').className = 'stat-value ' + (pl >= 0 ? 'positive' : 'negative');
+            document.getElementById('sessionPLPct').className = pl >= 0 ? 'positive' : 'negative';
+            document.getElementById('sessionPLPct').textContent = (pl >= 0 ? '+' : '') + plPct.toFixed(2) + '% ROI';
+
+            document.getElementById('activePositions').textContent = status.active_positions;
+            document.getElementById('positionStatus').textContent =
+                status.active_positions > 0 ? `${status.active_positions} open` : 'Monitoring 6 pairs...';
+            document.getElementById('tradeCount').textContent = status.todays_trade_count;
+            // Win/loss per trade isn't tracked server-side yet - showing a
+            // made-up win rate would be worse than admitting we don't have it.
+            document.getElementById('tradeWinRate').textContent = 'Win Rate: N/A (not tracked yet)';
+
+            document.getElementById('botStatus').textContent = status.live_trading
+                ? (status.stop_trading ? '⏸ LIVE (paused)' : '🔴 LIVE TRADING')
+                : '📄 PAPER TRADING';
+            document.getElementById('nextCycle').textContent = 'Refreshes every 30s';
+
+            document.getElementById('profitAmount').textContent = '$' + status.profit_available.toFixed(2);
+            document.getElementById('profitAmount').style.color = status.profit_available >= 0 ? '#00ff00' : '#ff6666';
+
+            document.getElementById('baseCapitalDisplay').textContent = '$' + status.base_capital.toFixed(2);
+            document.getElementById('baseCapitalHeading').textContent = status.base_capital.toFixed(0);
+
+            document.getElementById('totalHeld').textContent = '$' + status.equity.toFixed(2);
+            document.getElementById('totalWithdrawn').textContent = '$' + status.total_withdrawn.toFixed(2);
+
+            if (status.auto_compounded_this_check > 0) {
+                logEvent(
+                    `🔄 AUTO-COMPOUND: $${status.auto_compounded_this_check.toFixed(2)} profit moved to base capital | New base: $${status.base_capital.toFixed(2)}`,
+                    'buy'
+                );
+            }
+        }
+
+        async function refreshWithdrawals() {
+            let data;
+            try {
+                data = await apiFetch('/withdrawals');
+            } catch (e) {
+                return;
+            }
+
+            const list = document.getElementById('transactionList');
+            while (list.children.length > 1) list.removeChild(list.lastChild);
+
             document.getElementById('withdrawalCountLabel').textContent =
-                withdrawalHistory.length + (withdrawalHistory.length === 1 ? ' withdrawal' : ' withdrawals');
+                data.withdrawals.length + (data.withdrawals.length === 1 ? ' withdrawal' : ' withdrawals');
+
+            data.withdrawals.forEach(w => {
+                const item = document.createElement('div');
+                item.className = 'transaction-item';
+                const statusClass = 'status-' + w.status;
+                const dateStr = new Date(w.requested_at).toLocaleString();
+                const actionHtml = w.status === 'requested'
+                    ? `<button class="btn-withdraw" style="padding: 4px 10px; font-size: 0.75em;" onclick="completeWithdrawal(${w.id})">Mark Completed</button>`
+                    : `<span style="color:#00cc00; font-size:0.8em;">✓ Done${w.completed_at ? ' ' + new Date(w.completed_at).toLocaleDateString() : ''}</span>`;
+
+                item.innerHTML = `
+                    <div class="transaction-date">${dateStr}</div>
+                    <div class="transaction-amount">$${w.amount.toFixed(2)}</div>
+                    <div class="transaction-status ${statusClass}">${w.status.toUpperCase()}</div>
+                    <div>${actionHtml}</div>
+                `;
+                list.appendChild(item);
+            });
         }
 
-        function updateTotalHeldDisplay() {
-            const portfolioValue = parseFloat(document.getElementById('portfolioValue').textContent.replace('$', ''));
-            document.getElementById('totalHeld').textContent = '$' + portfolioValue.toFixed(2);
-        }
-
-        function saveBaseCapital() {
-            localStorage.setItem('bmb_baseCapital', STARTING_CAPITAL.toFixed(2));
-        }
-
-        function updateBaseCapitalDisplay() {
-            document.getElementById('baseCapitalDisplay').textContent = '$' + STARTING_CAPITAL.toFixed(2);
-            document.getElementById('baseCapitalHeading').textContent = STARTING_CAPITAL.toFixed(0);
-        }
-
-        // Auto-compound: every $100 of profit gets folded into base capital
-        // automatically instead of sitting there waiting to be withdrawn.
-        // Runs a $100-at-a-time loop in case profit jumps past $100 in a
-        // single update tick.
-        function checkAutoCompound() {
-            const portfolioValue = parseFloat(document.getElementById('portfolioValue').textContent.replace('$', ''));
-            let profit = portfolioValue - STARTING_CAPITAL;
-            let compounded = 0;
-
-            while (profit >= 100) {
-                STARTING_CAPITAL += 100;
-                profit -= 100;
-                compounded += 100;
+        async function withdrawProfit() {
+            let status;
+            try {
+                status = await apiFetch('/status');
+            } catch (e) {
+                showWithdrawalStatus('❌ ' + e.message, 'error');
+                return;
             }
 
-            if (compounded > 0) {
-                saveBaseCapital();
-                updateBaseCapitalDisplay();
-
-                const logContainer = document.getElementById('logContainer');
-                const entry = document.createElement('div');
-                entry.className = 'log-entry buy';
-                entry.innerHTML = `<span class="timestamp">[${new Date().toLocaleTimeString()}]</span> 🔄 AUTO-COMPOUND: $${compounded.toFixed(2)} profit moved to base capital | New base: $${STARTING_CAPITAL.toFixed(2)}`;
-                logContainer.insertBefore(entry, logContainer.firstChild);
-
-                updateProfitDisplay();
-            }
-        }
-
-        // Update profit amount every second
-        setInterval(updateProfitDisplay, 1000);
-        setInterval(updateTotalHeldDisplay, 1000);
-
-        // Update trade count based on profit
-        setInterval(updateTradeStats, 2000);
-
-        // Update transaction statuses periodically
-        setInterval(updateTransactionStatuses, 10000);
-
-        function updateProfitDisplay() {
-            const portfolioValue = parseFloat(document.getElementById('portfolioValue').textContent.replace('$', ''));
-            const profit = portfolioValue - STARTING_CAPITAL;
-            const profitDisplay = document.getElementById('profitAmount');
-
-            if (profitDisplay) {
-                profitDisplay.textContent = '$' + profit.toFixed(2);
-                profitDisplay.style.color = profit >= 0 ? '#00ff00' : '#ff6666';
-            }
-        }
-
-        // One-click profit withdrawal
-        function withdrawProfit() {
-            const portfolioValue = parseFloat(document.getElementById('portfolioValue').textContent.replace('$', ''));
-            const profit = portfolioValue - STARTING_CAPITAL;
-
-            // Validation
+            const profit = status.profit_available;
             if (profit <= 0) {
                 showWithdrawalStatus('❌ No profit to withdraw yet', 'error');
                 return;
             }
 
-            showWithdrawalStatus('Processing profit withdrawal...', 'pending');
-
-            // Create transaction record
-            const transactionId = 'TXN-' + Date.now();
-            const transaction = {
-                id: transactionId,
-                date: new Date(),
-                amount: profit,
-                status: 'pending',
-                destination: 'Stripe Account'
-            };
-            withdrawalHistory.unshift(transaction);
-
-            // Track the running lifetime total right away, not just once the
-            // simulated transfer "completes" - this is what you asked to see.
-            totalWithdrawn += profit;
-            saveWithdrawalState();
-            updateTotalWithdrawnDisplay();
-
-            // Add to display
-            addTransactionToDisplay(transaction);
-
-            // Simulate API call and status progression
-            setTimeout(() => {
-                // Update portfolio to just the starting capital
-                document.getElementById('portfolioValue').textContent = '$' + STARTING_CAPITAL.toFixed(2);
-                document.getElementById('portfolioChange').textContent = '+$0.00 (0.00%)';
-                document.getElementById('sessionPL').textContent = '+$0.00';
-                document.getElementById('sessionPLPct').textContent = '+0.00% ROI';
-
-                // Update profit display
-                updateProfitDisplay();
-
-                // Update transaction status to processing
-                transaction.status = 'processing';
-                updateTransactionDisplay(transaction.id);
-
-                // Log the withdrawal
-                const logContainer = document.getElementById('logContainer');
-                const entry = document.createElement('div');
-                entry.className = 'log-entry sell';
-                entry.innerHTML = `<span class="timestamp">[${new Date().toLocaleTimeString()}]</span> 💵 PROFIT WITHDRAWN: $${profit.toFixed(2)} → Stripe Account | Ref: ${transactionId} | Status: Processing | Base Capital: $${STARTING_CAPITAL.toFixed(2)} | Bot resumes...`;
-                logContainer.insertBefore(entry, logContainer.firstChild);
-
-                // Show success message
-                showWithdrawalStatus(`✅ Withdrawal initiated: $${profit.toFixed(2)}! | Transfer ID: ${transactionId} | Status: Processing to Stripe | Arrival: 1-3 business days | Bot continues with $${STARTING_CAPITAL.toFixed(2)}`, 'success');
-
-                // Auto-complete transaction after 30 seconds (simulate processing)
-                setTimeout(() => {
-                    transaction.status = 'completed';
-                    updateTransactionDisplay(transaction.id);
-
-                    // Add completion log
-                    const completeEntry = document.createElement('div');
-                    completeEntry.className = 'log-entry';
-                    completeEntry.innerHTML = `<span class="timestamp">[${new Date().toLocaleTimeString()}]</span> ✅ DEPOSIT CONFIRMED: $${profit.toFixed(2)} deposited to Stripe | Ref: ${transactionId} | Available in your account`;
-                    logContainer.insertBefore(completeEntry, logContainer.firstChild);
-                }, 30000);
-            }, 1500);
-        }
-
-        function addTransactionToDisplay(transaction) {
-            const list = document.getElementById('transactionList');
-            const item = document.createElement('div');
-            item.className = 'transaction-item';
-            item.id = 'txn-' + transaction.id;
-
-            const formattedDate = transaction.date.toLocaleString();
-            const statusClass = 'status-' + transaction.status;
-
-            item.innerHTML = `
-                <div class="transaction-date">${formattedDate}</div>
-                <div class="transaction-amount">$${transaction.amount.toFixed(2)}</div>
-                <div class="transaction-status ${statusClass}">${transaction.status.toUpperCase()}</div>
-                <div><span class="stripe-badge">🟦 Stripe</span><br><span class="transaction-id" style="font-size: 0.8em;">${transaction.id}</span></div>
-            `;
-
-            // Insert after header row
-            if (list.children.length > 1) {
-                list.insertBefore(item, list.children[1]);
-            } else {
-                list.appendChild(item);
+            showWithdrawalStatus('Logging withdrawal request...', 'pending');
+            try {
+                const withdrawal = await apiFetch('/withdraw-request', {
+                    method: 'POST',
+                    body: JSON.stringify({ amount: profit }),
+                });
+                logEvent(
+                    `💵 WITHDRAWAL REQUESTED: $${withdrawal.amount.toFixed(2)} | Ref: #${withdrawal.id} | Complete the real transfer manually in Alpaca's app, then mark it Completed below`,
+                    'sell'
+                );
+                showWithdrawalStatus(
+                    `✅ Withdrawal request #${withdrawal.id} logged for $${profit.toFixed(2)}. This does NOT move real money — go complete the actual transfer in Alpaca's app, then mark it "Completed" in the table below.`,
+                    'success'
+                );
+                await refreshWithdrawals();
+            } catch (e) {
+                showWithdrawalStatus('❌ ' + e.message, 'error');
             }
         }
 
-        function updateTransactionDisplay(txnId) {
-            const transaction = withdrawalHistory.find(t => t.id === txnId);
-            if (!transaction) return;
-
-            const element = document.getElementById('txn-' + txnId);
-            if (!element) return;
-
-            const statusClass = 'status-' + transaction.status;
-            const statusEl = element.querySelector('.transaction-status');
-
-            if (statusEl) {
-                statusEl.className = 'transaction-status ' + statusClass;
-                statusEl.textContent = transaction.status.toUpperCase();
+        async function completeWithdrawal(id) {
+            try {
+                const w = await apiFetch(`/withdraw-request/${id}/complete`, { method: 'POST' });
+                logEvent(`✅ WITHDRAWAL MARKED COMPLETE: $${w.amount.toFixed(2)} | Ref: #${w.id}`);
+                await refreshWithdrawals();
+            } catch (e) {
+                logEvent('❌ Failed to mark withdrawal complete: ' + e.message, 'error');
             }
-        }
-
-        function updateTransactionStatuses() {
-            // Update any pending transactions to processing after 20 seconds
-            withdrawalHistory.forEach(txn => {
-                if (txn.status === 'pending' && (Date.now() - txn.date.getTime()) > 20000) {
-                    txn.status = 'processing';
-                    updateTransactionDisplay(txn.id);
-                }
-            });
         }
 
         function showWithdrawalStatus(message, type) {
@@ -829,137 +805,18 @@
             statusMsg.innerHTML = message;
             statusDiv.className = 'withdrawal-status show ' + type;
 
-            // Auto-hide error/success messages after 6 seconds
             if (type !== 'pending') {
                 setTimeout(() => {
                     statusDiv.classList.remove('show');
-                }, 6000);
+                }, 8000);
             }
         }
 
-        function updateTradeStats() {
-            const portfolioValue = parseFloat(document.getElementById('portfolioValue').textContent.replace('$', ''));
-            const profit = portfolioValue - STARTING_CAPITAL;
-
-            // Calculate estimated trades executed based on profit
-            // If we have profit, at least 1 trade has closed successfully
-            let estimatedTrades = 0;
-            let estimatedPositions = 0;
-
-            if (profit > 0) {
-                // Each profitable trade averages ~$47.50 gain based on sample logs
-                // Position size is 20-25%, so roughly 1 trade per 4-5% portfolio gain
-                estimatedTrades = Math.max(1, Math.round((profit / 980) * 100 / 5));
-
-                // Estimate active positions from withdrawal history
-                // After each withdrawal, we reset. If we withdrew, likely 1 position or less
-                if (withdrawalHistory.length > 0) {
-                    estimatedPositions = Math.max(0, Math.ceil((profit / 100) * 0.5));
-                } else {
-                    estimatedPositions = Math.max(0, Math.ceil((profit / 100) * 1));
-                }
-            }
-
-            // Update UI
-            const tradeCountEl = document.getElementById('tradeCount');
-            const activePositionsEl = document.getElementById('activePositions');
-
-            if (tradeCountEl) {
-                tradeCountEl.textContent = estimatedTrades;
-            }
-
-            if (activePositionsEl) {
-                activePositionsEl.textContent = estimatedPositions;
-            }
-
-            // Update win rate (100% if we have profit)
-            const winRateEl = document.getElementById('tradeWinRate');
-            if (winRateEl && profit > 0) {
-                winRateEl.textContent = 'Win Rate: 100%';
-            }
-
-            // Store for reference
-            totalTradesExecuted = estimatedTrades;
-        }
-
-        // Sample data for demonstration
-        const sampleLogs = [
-            "[09:06 CDT] 🤖 Bot started - Mode: 🔴 LIVE TRADING",
-            "[09:06 CDT] Monitoring: BTC, ETH, SOL, AVAX, DOGE, LINK",
-            "[09:07 CDT] Account Balance: $980.00",
-            "[09:15 CDT] 📈 BTC/USD RSI: 42 - BUY SIGNAL DETECTED",
-            "[09:15 CDT] 🟢 ENTERED: BTC/USD @ $43,250 | Position: $196.00 (20%)",
-            "[09:20 CDT] 📊 ETH/USD RSI: 35 - Monitoring...",
-            "[09:30 CDT] 💰 BTC/USD P&L: +$47.50 | Take Profit: $470.40",
-            "[09:35 CDT] 🔴 EXIT: BTC/USD @ $43,351 | Closed at +2.4% | P&L: +$47.50",
-            "[09:35 CDT] ✅ Trade Complete | Wins: 1 | Loss: 0 | Win Rate: 100%",
-            "[09:35 CDT] 💵 Account Value: $1,027.50 | Session P&L: +$47.50 (+4.85%)",
-            "[09:35 CDT] 🔄 Auto-compounding next position...",
-        ];
-
-        function updateDashboard() {
-            const now = new Date();
-            document.getElementById('lastUpdate').textContent = now.toLocaleTimeString();
-
-            // Simulate real-time data, scaled off the CURRENT base capital -
-            // not a hardcoded 980 - so profit keeps accumulating sensibly
-            // after auto-compounding has grown the base.
-            const portfolioValue = STARTING_CAPITAL + Math.random() * 130;
-            const sessionPL = portfolioValue - STARTING_CAPITAL;
-            const sessionPct = (sessionPL / STARTING_CAPITAL) * 100;
-
-            document.getElementById('portfolioValue').textContent = '$' + portfolioValue.toFixed(2);
-            document.getElementById('portfolioChange').textContent =
-                (sessionPL >= 0 ? '+' : '') + sessionPL.toFixed(2) + ' (' + sessionPct.toFixed(2) + '%)';
-            document.getElementById('portfolioChange').className =
-                sessionPL >= 0 ? 'positive' : 'negative';
-
-            document.getElementById('sessionPL').textContent =
-                (sessionPL >= 0 ? '+' : '') + '$' + sessionPL.toFixed(2);
-            document.getElementById('sessionPL').className =
-                'stat-value ' + (sessionPL >= 0 ? 'positive' : 'negative');
-            document.getElementById('sessionPLPct').className =
-                (sessionPL >= 0 ? 'positive' : 'negative');
-            document.getElementById('sessionPLPct').textContent =
-                (sessionPL >= 0 ? '+' : '') + sessionPct.toFixed(2) + '% ROI';
-
-            checkAutoCompound();
-        }
-
-        // Update every 30 seconds
-        setInterval(updateDashboard, 30000);
-        updateDashboard();
-
-        // Restore total-withdrawn/base-capital from a prior visit and show
-        // what's currently sitting in the account right away, don't wait.
-        updateTotalWithdrawnDisplay();
-        updateTotalHeldDisplay();
-        updateBaseCapitalDisplay();
-
-        // Add sample logs periodically
-        let logIndex = 0;
-        setInterval(() => {
-            const container = document.getElementById('logContainer');
-            if (logIndex < sampleLogs.length) {
-                const entry = document.createElement('div');
-                entry.className = 'log-entry';
-                
-                if (sampleLogs[logIndex].includes('ENTERED')) {
-                    entry.className += ' buy';
-                } else if (sampleLogs[logIndex].includes('EXIT')) {
-                    entry.className += ' sell';
-                } else if (sampleLogs[logIndex].includes('ERROR')) {
-                    entry.className += ' error';
-                } else if (sampleLogs[logIndex].includes('RSI') || sampleLogs[logIndex].includes('SIGNAL')) {
-                    entry.className += ' signal';
-                }
-                
-                entry.textContent = sampleLogs[logIndex];
-                container.appendChild(entry);
-                container.scrollTop = container.scrollHeight;
-                logIndex++;
-            }
-        }, 5000);
+        logEvent('🤖 Dashboard connected — loading real Alpaca account data...', 'signal');
+        refreshStatus();
+        refreshWithdrawals();
+        setInterval(refreshStatus, 30000);
+        setInterval(refreshWithdrawals, 30000);
     </script>
 </body>
 </html>
