@@ -552,7 +552,10 @@
         </div>
 
         <div class="withdrawal-panel">
-            <h2>💰 WITHDRAW PROFIT (Keep $980 for Bot)</h2>
+            <h2>💰 WITHDRAW PROFIT (Keep $<span id="baseCapitalHeading">980</span> for Bot)</h2>
+            <p style="color: #00cc00; font-size: 0.85em; margin-top: -10px; margin-bottom: 15px;">
+                🔄 Auto-compound: every $100 of profit is automatically added to base capital
+            </p>
             <div style="display: grid; grid-template-columns: 1fr auto auto; gap: 15px; align-items: center;">
                 <div style="text-align: left;">
                     <p style="color: #ffaa00; font-size: 1.1em; margin-bottom: 5px;">Profit Available:</p>
@@ -560,7 +563,7 @@
                 </div>
                 <div style="text-align: center; padding: 15px; background: rgba(0,0,0,0.3); border-radius: 4px;">
                     <p style="color: #00aa00; font-size: 0.9em;">Base Capital</p>
-                    <p style="color: #00ff00; font-size: 1.5em; font-weight: bold;">$980.00</p>
+                    <p style="color: #00ff00; font-size: 1.5em; font-weight: bold;" id="baseCapitalDisplay">$980.00</p>
                 </div>
                 <button class="btn-withdraw" onclick="withdrawProfit()" style="height: 60px; font-size: 1.1em; padding: 0 30px;">💵 WITHDRAW<br>PROFIT</button>
             </div>
@@ -610,7 +613,9 @@
     </div>
 
     <script>
-        const STARTING_CAPITAL = 980.00;
+        // Base capital grows over time via auto-compounding, so it's a
+        // persisted variable now rather than a fixed constant.
+        let STARTING_CAPITAL = parseFloat(localStorage.getItem('bmb_baseCapital') || '980.00');
         let withdrawalHistory = [];
         let withdrawalCounter = 0;
         let totalTradesExecuted = 0;
@@ -634,6 +639,44 @@
         function updateTotalHeldDisplay() {
             const portfolioValue = parseFloat(document.getElementById('portfolioValue').textContent.replace('$', ''));
             document.getElementById('totalHeld').textContent = '$' + portfolioValue.toFixed(2);
+        }
+
+        function saveBaseCapital() {
+            localStorage.setItem('bmb_baseCapital', STARTING_CAPITAL.toFixed(2));
+        }
+
+        function updateBaseCapitalDisplay() {
+            document.getElementById('baseCapitalDisplay').textContent = '$' + STARTING_CAPITAL.toFixed(2);
+            document.getElementById('baseCapitalHeading').textContent = STARTING_CAPITAL.toFixed(0);
+        }
+
+        // Auto-compound: every $100 of profit gets folded into base capital
+        // automatically instead of sitting there waiting to be withdrawn.
+        // Runs a $100-at-a-time loop in case profit jumps past $100 in a
+        // single update tick.
+        function checkAutoCompound() {
+            const portfolioValue = parseFloat(document.getElementById('portfolioValue').textContent.replace('$', ''));
+            let profit = portfolioValue - STARTING_CAPITAL;
+            let compounded = 0;
+
+            while (profit >= 100) {
+                STARTING_CAPITAL += 100;
+                profit -= 100;
+                compounded += 100;
+            }
+
+            if (compounded > 0) {
+                saveBaseCapital();
+                updateBaseCapitalDisplay();
+
+                const logContainer = document.getElementById('logContainer');
+                const entry = document.createElement('div');
+                entry.className = 'log-entry buy';
+                entry.innerHTML = `<span class="timestamp">[${new Date().toLocaleTimeString()}]</span> 🔄 AUTO-COMPOUND: $${compounded.toFixed(2)} profit moved to base capital | New base: $${STARTING_CAPITAL.toFixed(2)}`;
+                logContainer.insertBefore(entry, logContainer.firstChild);
+
+                updateProfitDisplay();
+            }
         }
 
         // Update profit amount every second
@@ -858,35 +901,40 @@
             const now = new Date();
             document.getElementById('lastUpdate').textContent = now.toLocaleTimeString();
 
-            // Simulate real-time data
-            const portfolioValue = 980 + Math.random() * 100;
-            const sessionPL = portfolioValue - 980;
-            const sessionPct = (sessionPL / 980) * 100;
+            // Simulate real-time data, scaled off the CURRENT base capital -
+            // not a hardcoded 980 - so profit keeps accumulating sensibly
+            // after auto-compounding has grown the base.
+            const portfolioValue = STARTING_CAPITAL + Math.random() * 130;
+            const sessionPL = portfolioValue - STARTING_CAPITAL;
+            const sessionPct = (sessionPL / STARTING_CAPITAL) * 100;
 
             document.getElementById('portfolioValue').textContent = '$' + portfolioValue.toFixed(2);
-            document.getElementById('portfolioChange').textContent = 
+            document.getElementById('portfolioChange').textContent =
                 (sessionPL >= 0 ? '+' : '') + sessionPL.toFixed(2) + ' (' + sessionPct.toFixed(2) + '%)';
-            document.getElementById('portfolioChange').className = 
+            document.getElementById('portfolioChange').className =
                 sessionPL >= 0 ? 'positive' : 'negative';
 
-            document.getElementById('sessionPL').textContent = 
+            document.getElementById('sessionPL').textContent =
                 (sessionPL >= 0 ? '+' : '') + '$' + sessionPL.toFixed(2);
-            document.getElementById('sessionPL').className = 
+            document.getElementById('sessionPL').className =
                 'stat-value ' + (sessionPL >= 0 ? 'positive' : 'negative');
-            document.getElementById('sessionPLPct').className = 
+            document.getElementById('sessionPLPct').className =
                 (sessionPL >= 0 ? 'positive' : 'negative');
-            document.getElementById('sessionPLPct').textContent = 
+            document.getElementById('sessionPLPct').textContent =
                 (sessionPL >= 0 ? '+' : '') + sessionPct.toFixed(2) + '% ROI';
+
+            checkAutoCompound();
         }
 
         // Update every 30 seconds
         setInterval(updateDashboard, 30000);
         updateDashboard();
 
-        // Restore total-withdrawn from a prior visit and show what's
-        // currently sitting in the account right away, don't wait a second.
+        // Restore total-withdrawn/base-capital from a prior visit and show
+        // what's currently sitting in the account right away, don't wait.
         updateTotalWithdrawnDisplay();
         updateTotalHeldDisplay();
+        updateBaseCapitalDisplay();
 
         // Add sample logs periodically
         let logIndex = 0;
