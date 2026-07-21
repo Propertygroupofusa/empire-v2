@@ -9,8 +9,9 @@ market data - Tradovate's own market-data API needs a separate
 mdAccessToken + websocket setup that isn't wired up here.
 
 SAFETY:
-- Inert by default: if TRADOVATE_USERNAME/PASSWORD/CID/SECRET aren't
-  set, this module logs a warning and does nothing.
+- Inert by default: if TRADOVATE_USER (or TRADOVATE_USERNAME)/
+  TRADOVATE_PASS (or TRADOVATE_PASSWORD)/CID/SECRET aren't set, this
+  module logs a warning and does nothing.
 - STOP_TRADING=true halts new orders (shared kill switch with
   prop_bot.py - flipping it pauses BOTH bots at once).
 - TRADOVATE_MODE defaults to "demo". Set to "live" only after
@@ -32,8 +33,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("tradovate_bot")
 
 # ── CREDENTIALS ───────────────────────────────────────────────────
-TV_USER    = os.getenv("TRADOVATE_USERNAME", "")
-TV_PASS    = os.getenv("TRADOVATE_PASSWORD", "")
+TV_USER    = os.getenv("TRADOVATE_USER", "") or os.getenv("TRADOVATE_USERNAME", "")
+TV_PASS    = os.getenv("TRADOVATE_PASS", "") or os.getenv("TRADOVATE_PASSWORD", "")
 TV_APP_ID  = os.getenv("TRADOVATE_APP_ID", "Trading Bot Suite")
 TV_APP_VER = os.getenv("TRADOVATE_APP_VERSION", "1.0")
 TV_CID     = os.getenv("TRADOVATE_CID", "")
@@ -345,7 +346,7 @@ async def run_cycle():
 
 def run():
     if not (TV_USER and TV_PASS and TV_CID and TV_SECRET):
-        log.warning("Tradovate credentials not configured (TRADOVATE_USERNAME/PASSWORD/CID/SECRET) - tradovate_bot will not start")
+        log.warning("Tradovate credentials not configured (TRADOVATE_USER/PASS/CID/SECRET) - tradovate_bot will not start")
         return
 
     log.info("=" * 60)
