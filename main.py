@@ -112,6 +112,13 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import prop_bot: {e}")
 
+tradovate_bot_module = None
+try:
+    import tradovate_bot
+    tradovate_bot_module = tradovate_bot
+except Exception as e:
+    logging.warning(f"Failed to import tradovate_bot: {e}")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pgusa")
 
@@ -326,6 +333,14 @@ async def lifespan(app: FastAPI):
             log.info(f"📈 Prop bot started (background thread) | Mode: {mode} | STOP_TRADING: {stopped}")
     except Exception as e:
         log.warning(f"Prop bot failed to start: {e}")
+
+    try:
+        if tradovate_bot_module is not None:
+            import threading
+            threading.Thread(target=tradovate_bot_module.run, daemon=True).start()
+            log.info("📊 Tradovate bot thread started (stays inert until TRADOVATE_* credentials are set)")
+    except Exception as e:
+        log.warning(f"Tradovate bot failed to start: {e}")
 
     try:
         import subprocess
