@@ -16,6 +16,7 @@ from typing import Optional
 import anthropic
 from database import get_db
 from models import StudyMaterial, StudyUser
+from payments_pause import payments_paused, PAUSE_MESSAGE
 
 log = logging.getLogger("study")
 router = APIRouter()
@@ -456,6 +457,9 @@ async def create_study_checkout(
 
     if not stripe.api_key:
         raise HTTPException(status_code=500, detail="Payments are not configured for this service")
+
+    if payments_paused():
+        raise HTTPException(status_code=503, detail=PAUSE_MESSAGE)
 
     base_url = os.getenv("PUBLIC_BASE_URL", "https://empire-v2-production.up.railway.app")
 

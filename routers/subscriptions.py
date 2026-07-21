@@ -21,6 +21,7 @@ from stripe_subscriptions import (
 )
 from database import get_db
 from admin_auth import require_admin_key
+from payments_pause import payments_paused, PAUSE_MESSAGE
 import stripe
 import logging
 import os
@@ -250,6 +251,9 @@ async def create_subscription_checkout_session(
             "tier": SUBSCRIPTION_TIERS["free"]["name"],
             "redirect_url": None,
         }
+
+    if payments_paused():
+        raise HTTPException(status_code=503, detail=PAUSE_MESSAGE)
 
     # For paid tiers, create Stripe checkout
     checkout = create_subscription_checkout(

@@ -15,6 +15,7 @@ from datetime import datetime
 import os
 import uvicorn
 import logging
+import httpx
 
 from database import init_db, engine
 
@@ -37,6 +38,7 @@ routers_to_load = {
     'trading_signals': None,
     'outreach': None,
     'study': None,
+    'trading_dashboard': None,
 }
 
 for router_name in routers_to_load:
@@ -64,6 +66,7 @@ subscriptions = routers_to_load['subscriptions']
 trading_signals = routers_to_load['trading_signals']
 outreach = routers_to_load['outreach']
 study = routers_to_load['study']
+trading_dashboard = routers_to_load['trading_dashboard']
 
 # Load remaining modules gracefully
 payee_router = None
@@ -111,6 +114,13 @@ try:
     prop_bot_module = prop_bot
 except Exception as e:
     logging.warning(f"Failed to import prop_bot: {e}")
+
+tradovate_bot_module = None
+try:
+    import tradovate_bot
+    tradovate_bot_module = tradovate_bot
+except Exception as e:
+    logging.warning(f"Failed to import tradovate_bot: {e}")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pgusa")
@@ -328,6 +338,14 @@ async def lifespan(app: FastAPI):
         log.warning(f"Prop bot failed to start: {e}")
 
     try:
+        if tradovate_bot_module is not None:
+            import threading
+            threading.Thread(target=tradovate_bot_module.run, daemon=True).start()
+            log.info("📊 Tradovate bot thread started (stays inert until TRADOVATE_* credentials are set)")
+    except Exception as e:
+        log.warning(f"Tradovate bot failed to start: {e}")
+
+    try:
         import subprocess
         import threading
         def start_crypto_bot():
@@ -394,6 +412,7 @@ routers_list = [
     (trading_signals, "/trading", "Trading Signals"),
     (outreach, "/outreach", "Outreach & Campaigns"),
     (study, "/study", "Study Assistant"),
+    (trading_dashboard, "/api/trading-dashboard", "Trading Dashboard"),
 ]
 
 for router_module, prefix, tag in routers_list:
@@ -460,6 +479,32 @@ async def serve_signals_signup():
     if not os.path.exists(signals_path):
         raise HTTPException(status_code=404, detail="Signals signup page not found")
     return FileResponse(signals_path, media_type="text/html")
+
+
+@app.api_route("/api/bot/{path:path}", methods=["GET", "POST"])
+async def proxy_bot_api(path: str, limit: int = None):
+    """Proxy requests to bot_api service for crypto bot dashboard"""
+    try:
+        bot_api_url = os.getenv("BOT_API_URL", "http://bot-api:8001")
+        full_url = f"{bot_api_url}/api/bot/{path}"
+        if limit:
+            full_url += f"?limit={limit}"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(full_url)
+            return response.json()
+    except Exception as e:
+        log.warning(f"Bot API proxy error: {e}")
+        return {}
+
+
+@app.get("/trading-dashboard")
+async def serve_trading_dashboard():
+    """Serve the Bare Metal Builders live trading dashboard (admin-only data,
+    gated by X-Admin-Key on the /api/trading-dashboard/* endpoints it calls)"""
+    dashboard_path = os.path.join(os.path.dirname(__file__), "trading_dashboard.html")
+    if not os.path.exists(dashboard_path):
+        raise HTTPException(status_code=404, detail="Trading dashboard not found")
+    return FileResponse(dashboard_path, media_type="text/html")
 
 
 @app.get("/quote")

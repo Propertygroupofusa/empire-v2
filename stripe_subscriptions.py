@@ -9,6 +9,8 @@ import os
 from typing import Optional
 from datetime import datetime
 
+from payments_pause import payments_paused
+
 log = logging.getLogger("stripe_subscriptions")
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
@@ -140,6 +142,10 @@ def create_subscription_checkout(
 
     if not stripe.api_key:
         log.error("STRIPE_SECRET_KEY not configured")
+        return None
+
+    if payments_paused():
+        log.warning("Payments paused (PAYMENTS_PAUSED=true) - refusing to create subscription checkout")
         return None
 
     price_id = get_price_id(tier_id)

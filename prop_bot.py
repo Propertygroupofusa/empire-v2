@@ -22,6 +22,13 @@ BASE_URL      = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 STOP          = os.getenv("STOP_TRADING", "false").lower() == "true"
 
+# RSI entry/exit thresholds. Loosened from the original 38/62 so the bot
+# doesn't need as extreme an oversold/overbought reading to act - trades
+# more often, at the cost of acting on weaker, less-confirmed signals.
+# Configurable via env so further tuning doesn't require a code change.
+RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "45"))
+RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "55"))
+
 HEADERS = {
     "APCA-API-KEY-ID": ALPACA_KEY,
     "APCA-API-SECRET-KEY": ALPACA_SECRET,
@@ -32,6 +39,9 @@ HEADERS = {
 FUTURES = {
     "MES": {"name": "Micro E-mini S&P 500", "qty": 1, "symbol": "SPY"},   # Use SPY as proxy
     "MNQ": {"name": "Micro E-mini Nasdaq",  "qty": 1, "symbol": "QQQ"},   # Use QQQ as proxy
+    "MYM": {"name": "Micro E-mini Dow",     "qty": 1, "symbol": "DIA"},   # Use DIA as proxy
+    "M2K": {"name": "Micro E-mini Russell", "qty": 1, "symbol": "IWM"},   # Use IWM as proxy
+    "MGC": {"name": "Micro Gold",           "qty": 1, "symbol": "GLD"},   # Use GLD as proxy
 }
 
 # Track profitable days for APEX 7-day rule
@@ -148,7 +158,7 @@ async def run_prop_cycle():
         log.info(f"[APEX_589296] Market closed — waiting for 9:30am ET")
         return
 
-    log.info(f"[APEX_589296] Scanning futures markets (MES, MNQ)... | Daily P&L: ${daily_pnl:.2f}")
+    log.info(f"[APEX_589296] Scanning futures markets ({', '.join(FUTURES)})... | Daily P&L: ${daily_pnl:.2f}")
 
     async with aiohttp.ClientSession() as session:
         for contract, config in FUTURES.items():
@@ -164,15 +174,19 @@ async def run_prop_cycle():
 
             has_position = contract in open_prop_positions
 
-            # BUY signal — RSI oversold + bullish
-            if not has_position and rsi < 38 and trend == "bullish":
+            # BUY signal — RSI oversold. Trend confirmation is no longer a hard
+            # gate: requiring both oversold AND bullish trend at once across only
+            # a couple of symbols made entries too rare. This is a straight RSI
+            # mean-reversion entry now, with trend kept only as a logged signal
+            # strength indicator, not a filter.
+            if not has_position and rsi < RSI_BUY_BELOW:
                 log.info(f"[APEX_589296] 📡 LONG {contract} — RSI:{rsi} Trend:{trend}")
                 stop_loss = price * 0.98  # 2% below entry
                 target = price * 1.03    # 3% above entry
                 await execute_futures_trade(session, contract, "BUY", config["qty"], price, rsi, trend, stop_loss, target)
 
             # SELL signal — RSI overbought or bearish reversal
-            elif has_position and (rsi > 62 or (trend == "bearish" and rsi > 50)):
+            elif has_position and (rsi > RSI_SELL_ABOVE or (trend == "bearish" and rsi > 50)):
                 entry = open_prop_positions[contract]["entry"]
                 pnl = (price - entry) * config["qty"] * 50  # MES point value ~$5 * 10
                 daily_pnl += pnl
@@ -200,6 +214,7 @@ def run():
     log.info("=" * 60)
     log.info("DEL'S TRADING EMPIRE — PROP BOT v3")
     log.info(f"Account: APEX_589296 | Mode: {'LIVE' if LIVE_TRADE else 'PAPER'}")
+    log.info(f"RSI thresholds: buy < {RSI_BUY_BELOW} | sell > {RSI_SELL_ABOVE}")
     log.info(f"Profitable days: {len(profitable_days)}/7 needed")
     log.info("=" * 60)
 
