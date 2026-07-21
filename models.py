@@ -175,6 +175,11 @@ class VideoQuoteOrder(Base):
     video_url = Column(String, nullable=True)
     video_download_link = Column(String, nullable=True)
     video_generation_status = Column(String, default="pending")
+    refunded = Column(Boolean, default=False)
+    refund_amount = Column(Integer, nullable=True)
+    refund_status = Column(String, nullable=True)
+    refund_transaction_id = Column(String, nullable=True)
+    refunded_at = Column(DateTime, nullable=True)
 
     def to_dict(self):
         return {
