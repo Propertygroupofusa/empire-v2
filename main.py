@@ -15,6 +15,7 @@ from datetime import datetime
 import os
 import uvicorn
 import logging
+import httpx
 
 from database import init_db, engine
 
@@ -478,6 +479,22 @@ async def serve_signals_signup():
     if not os.path.exists(signals_path):
         raise HTTPException(status_code=404, detail="Signals signup page not found")
     return FileResponse(signals_path, media_type="text/html")
+
+
+@app.api_route("/api/bot/{path:path}", methods=["GET", "POST"])
+async def proxy_bot_api(path: str, limit: int = None):
+    """Proxy requests to bot_api service for crypto bot dashboard"""
+    try:
+        bot_api_url = os.getenv("BOT_API_URL", "http://bot-api:8001")
+        full_url = f"{bot_api_url}/api/bot/{path}"
+        if limit:
+            full_url += f"?limit={limit}"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(full_url)
+            return response.json()
+    except Exception as e:
+        log.warning(f"Bot API proxy error: {e}")
+        return {}
 
 
 @app.get("/trading-dashboard")

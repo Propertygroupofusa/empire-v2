@@ -59,6 +59,15 @@
       "startCommand": "python bot_pl_tracker.py",
       "restartPolicyType": "ON_FAILURE",
       "restartPolicyMaxRetries": 10
+    },
+    "bot-api": {
+      "build": {
+        "dockerfile": "Dockerfile"
+      },
+      "startCommand": "python bot_api.py",
+      "port": 8001,
+      "restartPolicyType": "ON_FAILURE",
+      "restartPolicyMaxRetries": 10
     }
   }
 }
