@@ -39,6 +39,9 @@ HEADERS = {
 FUTURES = {
     "MES": {"name": "Micro E-mini S&P 500", "qty": 1, "symbol": "SPY"},   # Use SPY as proxy
     "MNQ": {"name": "Micro E-mini Nasdaq",  "qty": 1, "symbol": "QQQ"},   # Use QQQ as proxy
+    "MYM": {"name": "Micro E-mini Dow",     "qty": 1, "symbol": "DIA"},   # Use DIA as proxy
+    "M2K": {"name": "Micro E-mini Russell", "qty": 1, "symbol": "IWM"},   # Use IWM as proxy
+    "MGC": {"name": "Micro Gold",           "qty": 1, "symbol": "GLD"},   # Use GLD as proxy
 }
 
 # Track profitable days for APEX 7-day rule
@@ -155,7 +158,7 @@ async def run_prop_cycle():
         log.info(f"[APEX_589296] Market closed — waiting for 9:30am ET")
         return
 
-    log.info(f"[APEX_589296] Scanning futures markets (MES, MNQ)... | Daily P&L: ${daily_pnl:.2f}")
+    log.info(f"[APEX_589296] Scanning futures markets ({', '.join(FUTURES)})... | Daily P&L: ${daily_pnl:.2f}")
 
     async with aiohttp.ClientSession() as session:
         for contract, config in FUTURES.items():
@@ -171,8 +174,12 @@ async def run_prop_cycle():
 
             has_position = contract in open_prop_positions
 
-            # BUY signal — RSI oversold + bullish
-            if not has_position and rsi < RSI_BUY_BELOW and trend == "bullish":
+            # BUY signal — RSI oversold. Trend confirmation is no longer a hard
+            # gate: requiring both oversold AND bullish trend at once across only
+            # a couple of symbols made entries too rare. This is a straight RSI
+            # mean-reversion entry now, with trend kept only as a logged signal
+            # strength indicator, not a filter.
+            if not has_position and rsi < RSI_BUY_BELOW:
                 log.info(f"[APEX_589296] 📡 LONG {contract} — RSI:{rsi} Trend:{trend}")
                 stop_loss = price * 0.98  # 2% below entry
                 target = price * 1.03    # 3% above entry
