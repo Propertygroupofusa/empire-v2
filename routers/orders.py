@@ -79,7 +79,14 @@ class QuoteRequest(BaseModel):
 # POST /request-quote - Customer submits video request
 # ============================================================
 
-@router.post("/request-quote")
+async def get_optional_current_user() -> Optional[User]:
+    """Get current user if authenticated, otherwise None"""
+    if AUTH_AVAILABLE and get_current_user:
+        return None  # Simplified: always None for now
+    return None
+
+
+@router.post("/request-quote", response_model=None)
 async def request_quote(
     quote: Optional[QuoteRequest] = None,
     customer_name: Optional[str] = None,
@@ -94,12 +101,10 @@ async def request_quote(
     delivery_days: int = 2,
     reference_url: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
-    user: Optional[User] = None,  # Optional: user if authenticated
 ):
     """
     Customer submits a video request with script, avatar, and language.
     Accepts either JSON body or query parameters.
-    If authenticated, uses logged-in user's email and name.
     Returns order ID and quote price for payment processing.
     """
     # Support both JSON body and query parameters
@@ -116,43 +121,38 @@ async def request_quote(
         delivery_days = quote.delivery_days or delivery_days
         reference_url = quote.reference_url or reference_url
 
-    # If user is authenticated, use their data
-    if user:
-        customer_email = user.email
-        customer_name = customer_name or user.name or "Customer"
-
     if not customer_name or not customer_email or not video_type or not avatar or not language:
         raise HTTPException(status_code=400, detail="Missing required fields")
 
-    quote_price = calculate_quote_price(quote.video_type, quote.delivery_days)
+    quote_price = calculate_quote_price(video_type, delivery_days)
 
     order = VideoQuoteOrder(
         status="quote_requested",
-        customer_name=quote.customer_name,
-        customer_email=quote.customer_email,
-        customer_company=quote.customer_company,
-        phone=quote.phone,
-        video_type=quote.video_type,
-        script_or_topic=quote.script_or_topic,
-        target_audience=quote.target_audience,
-        avatar=quote.avatar,
-        language=quote.language,
-        delivery_days=quote.delivery_days,
-        reference_url=quote.reference_url,
+        customer_name=customer_name,
+        customer_email=customer_email,
+        customer_company=customer_company,
+        phone=phone,
+        video_type=video_type,
+        script_or_topic=script_or_topic,
+        target_audience=target_audience,
+        avatar=avatar,
+        language=language,
+        delivery_days=delivery_days,
+        reference_url=reference_url,
         quote_price=quote_price,
     )
     db.add(order)
     await db.commit()
     await db.refresh(order)
 
-    log.info(f"New quote request from {quote.customer_name} ({quote.customer_email}): {quote.video_type}, ${quote_price}")
+    log.info(f"New quote request from {customer_name} ({customer_email}): {video_type}, ${quote_price}")
 
     return {
         "success": True,
         "message": "Quote created successfully",
         "order_id": order.id,
         "quote_price": quote_price,
-        "customer_email": quote.customer_email,
+        "customer_email": customer_email,
     }
 
 
