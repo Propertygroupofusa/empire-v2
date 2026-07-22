@@ -15,7 +15,7 @@ from auth_utils import (
 )
 
 log = logging.getLogger("auth")
-router = APIRouter(prefix="/auth", tags=["authentication"])
+router = APIRouter(tags=["authentication"])
 
 
 # ============================================================
