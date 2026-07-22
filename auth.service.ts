@@ -168,19 +168,29 @@ export class AuthService {
    * Get current user profile (protected)
    */
   async getProfile(): Promise<User> {
+    if (!this.authState.accessToken) {
+      throw new Error('Not authenticated - no access token available');
+    }
+
     const response = await this.fetchWithAuth(`${this.apiUrl}/auth/me`);
 
     if (!response.ok) {
       throw new Error(await this.parseError(response));
     }
 
-    return (await response.json()) as User;
+    const user = (await response.json()) as User;
+    this.authState.user = user;
+    return user;
   }
 
   /**
    * Update user profile (protected)
    */
   async updateProfile(request: UpdateProfileRequest): Promise<User> {
+    if (!this.authState.user) {
+      throw new Error('No authenticated user to update');
+    }
+
     const response = await this.fetchWithAuth(`${this.apiUrl}/auth/me`, {
       method: 'PUT',
       body: JSON.stringify(request),
@@ -191,10 +201,8 @@ export class AuthService {
     }
 
     const updatedUser = (await response.json()) as User;
-    if (this.authState.user) {
-      this.authState.user = updatedUser;
-      localStorage.setItem('user', JSON.stringify(updatedUser));
-    }
+    this.authState.user = updatedUser;
+    localStorage.setItem('user', JSON.stringify(updatedUser));
     return updatedUser;
   }
 
@@ -203,6 +211,12 @@ export class AuthService {
    */
   async logout(): Promise<void> {
     try {
+      if (!this.authState.accessToken) {
+        console.warn('No access token to logout with');
+        this.clearAuthState();
+        return;
+      }
+
       const response = await this.fetchWithAuth(`${this.apiUrl}/auth/logout`, {
         method: 'POST',
       });
@@ -212,9 +226,9 @@ export class AuthService {
       }
     } catch (error) {
       console.error('Logout error:', error);
+    } finally {
+      this.clearAuthState();
     }
-
-    this.clearAuthState();
   }
 
   /**
