@@ -20,8 +20,17 @@ from urllib.parse import quote
 
 from database import get_db, AsyncSessionLocal
 from admin_auth import require_admin_key
-from models import VideoQuoteOrder
+from models import VideoQuoteOrder, User
 from payments_pause import payments_paused, PAUSE_MESSAGE
+
+# Try to import auth utilities
+try:
+    from routers.auth import get_current_user
+    AUTH_AVAILABLE = True
+except Exception as e:
+    AUTH_AVAILABLE = False
+    get_current_user = None
+    log.warning(f"Auth utilities not available: {e}")
 
 log = logging.getLogger("orders")
 
@@ -84,11 +93,13 @@ async def request_quote(
     language: Optional[str] = None,
     delivery_days: int = 2,
     reference_url: Optional[str] = None,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    user: Optional[User] = None,  # Optional: user if authenticated
 ):
     """
     Customer submits a video request with script, avatar, and language.
     Accepts either JSON body or query parameters.
+    If authenticated, uses logged-in user's email and name.
     Returns order ID and quote price for payment processing.
     """
     # Support both JSON body and query parameters
@@ -104,6 +115,11 @@ async def request_quote(
         language = quote.language or language
         delivery_days = quote.delivery_days or delivery_days
         reference_url = quote.reference_url or reference_url
+
+    # If user is authenticated, use their data
+    if user:
+        customer_email = user.email
+        customer_name = customer_name or user.name or "Customer"
 
     if not customer_name or not customer_email or not video_type or not avatar or not language:
         raise HTTPException(status_code=400, detail="Missing required fields")
