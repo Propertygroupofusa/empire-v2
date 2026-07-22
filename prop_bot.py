@@ -22,12 +22,12 @@ BASE_URL      = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 STOP          = os.getenv("STOP_TRADING", "false").lower() == "true"
 
-# RSI entry/exit thresholds. Loosened from the original 38/62 so the bot
-# doesn't need as extreme an oversold/overbought reading to act - trades
-# more often, at the cost of acting on weaker, less-confirmed signals.
-# Configurable via env so further tuning doesn't require a code change.
-RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "45"))
-RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "55"))
+# RSI entry/exit thresholds - AGGRESSIVE MODE for maximum trade frequency + win rate
+# Buy at RSI 38 (strong oversold) for high-probability reversals
+# Sell at RSI 48 (early exit) to lock profits before full reversal, avoiding drawdowns
+# Configurable via env for tuning without code changes
+RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "38"))
+RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "48"))
 
 HEADERS = {
     "APCA-API-KEY-ID": ALPACA_KEY,
@@ -185,18 +185,24 @@ async def run_prop_cycle():
                 target = price * 1.03    # 3% above entry
                 await execute_futures_trade(session, contract, "BUY", config["qty"], price, rsi, trend, stop_loss, target)
 
-            # SELL signal — RSI overbought or bearish reversal
-            elif has_position and (rsi > RSI_SELL_ABOVE or (trend == "bearish" and rsi > 50)):
+            # SELL signal — RSI overbought, bearish reversal, OR profit target hit
+            elif has_position:
                 entry = open_prop_positions[contract]["entry"]
-                pnl = (price - entry) * config["qty"] * 50  # MES point value ~$5 * 10
-                daily_pnl += pnl
-                log.info(f"[APEX_589296] 📤 CLOSE {contract} | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${pnl:.2f}")
+                profit_pct = ((price - entry) / entry) * 100
+                profit_target_hit = profit_pct >= 1.5  # Exit at +1.5% profit (lock in wins early)
+                rsi_exit = rsi > RSI_SELL_ABOVE or (trend == "bearish" and rsi > 50)
 
-                # Broadcast close signal to subscribers
-                target = price
-                await broadcast_signal_to_subscribers(session, contract, "SELL", price, rsi, trend, target=target)
+                if profit_target_hit or rsi_exit:
+                    pnl = (price - entry) * config["qty"] * 50  # MES point value ~$5 * 10
+                    daily_pnl += pnl
+                    exit_reason = "PROFIT TARGET" if profit_target_hit else "RSI"
+                    log.info(f"[APEX_589296] 📤 CLOSE {contract} ({exit_reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${pnl:.2f} ({profit_pct:.2f}%)")
 
-                open_prop_positions.pop(contract, None)
+                    # Broadcast close signal to subscribers
+                    target = price
+                    await broadcast_signal_to_subscribers(session, contract, "SELL", price, rsi, trend, target=target)
+
+                    open_prop_positions.pop(contract, None)
 
             await asyncio.sleep(0.5)
 
