@@ -319,6 +319,7 @@ def get_signal(closes, highs, lows, volumes, in_pos, entry_px, peak_px, symbol):
 class State:
     def __init__(self):
         self.positions = {}
+        self.trades = []  # Track closed trades
         self.trades_today = 0
         self.wins = 0
         self.losses = 0
@@ -326,6 +327,7 @@ class State:
         self.start_pf = CONFIG["starting_capital"]
         self.day_start_pf = CONFIG["starting_capital"]
         self.peak_pf = CONFIG["starting_capital"]
+        self.current_pf = CONFIG["starting_capital"]  # Current portfolio value
         self.is_live = False
         self.load()
 
@@ -338,9 +340,22 @@ class State:
             self.is_live = d.get("is_live", False)
             self.start_pf = d.get("start_pf", CONFIG["starting_capital"])
             self.peak_pf = d.get("peak_pf", CONFIG["starting_capital"])
-            log.info(f"📂 Loaded: Day {self.day} W:{self.wins} L:{self.losses}")
+            self.current_pf = d.get("current_pf", CONFIG["starting_capital"])
+            log.info(f"📂 Loaded: Day {self.day} W:{self.wins} L:{self.losses} P&L: ${self.current_pf - self.start_pf:+.2f}")
         except:
             pass
+
+        # Load positions
+        try:
+            self.positions = json.load(open("bot2_positions.json"))
+        except:
+            self.positions = {}
+
+        # Load trades
+        try:
+            self.trades = json.load(open("bot2_trades.json"))
+        except:
+            self.trades = []
 
     def save(self):
         json.dump(
@@ -351,10 +366,17 @@ class State:
                 "is_live": self.is_live,
                 "start_pf": self.start_pf,
                 "peak_pf": self.peak_pf,
+                "current_pf": self.current_pf,
             },
             open("bot2_state.json", "w"),
             indent=2,
         )
+
+        # Save positions
+        json.dump(self.positions, open("bot2_positions.json", "w"), indent=2)
+
+        # Save trades
+        json.dump(self.trades, open("bot2_trades.json", "w"), indent=2)
 
     def new_day(self, pf):
         self.day += 1
@@ -448,6 +470,16 @@ def run_cycle():
                 else:
                     state.losses += 1
                 state.trades_today += 1
+
+                # Record closed trade
+                state.trades.append({
+                    "symbol": symbol,
+                    "entry_price": round(entry_px, 4),
+                    "exit_price": round(px, 4),
+                    "pnl": round(pnl, 2),
+                    "exit_time": datetime.now(timezone.utc).isoformat(),
+                })
+
                 del state.positions[symbol]
                 emoji = "✅" if pnl > 0 else "❌"
                 log.info(f"  {emoji} {symbol} P&L: {pnl:+.2f}%")
@@ -483,6 +515,8 @@ def run_cycle():
             log.info(f"  💹 ENTERED {symbol} @ ${px:,.4f} | Compounding: ${val:,.2f}")
         time.sleep(0.5)
 
+    # Update portfolio value for dashboard
+    state.current_pf = pf
     state.save()
     log.info(f"✓ Cycle complete | Positions: {len(state.positions)} | Trades today: {state.trades_today}\n")
 
