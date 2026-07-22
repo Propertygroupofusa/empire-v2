@@ -332,8 +332,12 @@ class State:
         self.load()
 
     def load(self):
+        state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot2_state.json")
+        positions_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot2_positions.json")
+        trades_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot2_trades.json")
+
         try:
-            d = json.load(open("bot2_state.json"))
+            d = json.load(open(state_file))
             self.day = d.get("day", 1)
             self.wins = d.get("wins", 0)
             self.losses = d.get("losses", 0)
@@ -347,17 +351,21 @@ class State:
 
         # Load positions
         try:
-            self.positions = json.load(open("bot2_positions.json"))
+            self.positions = json.load(open(positions_file))
         except:
             self.positions = {}
 
         # Load trades
         try:
-            self.trades = json.load(open("bot2_trades.json"))
+            self.trades = json.load(open(trades_file))
         except:
             self.trades = []
 
     def save(self):
+        state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot2_state.json")
+        positions_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot2_positions.json")
+        trades_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot2_trades.json")
+
         json.dump(
             {
                 "day": self.day,
@@ -368,15 +376,15 @@ class State:
                 "peak_pf": self.peak_pf,
                 "current_pf": self.current_pf,
             },
-            open("bot2_state.json", "w"),
+            open(state_file, "w"),
             indent=2,
         )
 
         # Save positions
-        json.dump(self.positions, open("bot2_positions.json", "w"), indent=2)
+        json.dump(self.positions, open(positions_file, "w"), indent=2)
 
         # Save trades
-        json.dump(self.trades, open("bot2_trades.json", "w"), indent=2)
+        json.dump(self.trades, open(trades_file, "w"), indent=2)
 
     def new_day(self, pf):
         self.day += 1

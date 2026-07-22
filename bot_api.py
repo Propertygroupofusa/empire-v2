@@ -16,9 +16,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-STATE_FILE = "bot2_state.json"
-POSITIONS_FILE = "bot2_positions.json"
-TRADES_FILE = "bot2_trades.json"
+# Use absolute paths for Railway compatibility
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+STATE_FILE = os.path.join(SCRIPT_DIR, "bot2_state.json")
+POSITIONS_FILE = os.path.join(SCRIPT_DIR, "bot2_positions.json")
+TRADES_FILE = os.path.join(SCRIPT_DIR, "bot2_trades.json")
 
 
 def load_state():
