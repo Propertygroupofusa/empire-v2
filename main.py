@@ -482,16 +482,30 @@ async def serve_signals_signup():
 
 
 @app.api_route("/api/bot/{path:path}", methods=["GET", "POST"])
-async def proxy_bot_api(path: str, limit: int = None):
+async def proxy_bot_api(path: str, request: Request, limit: int = None):
     """Proxy requests to bot_api service for crypto bot dashboard"""
     try:
-        bot_api_url = os.getenv("BOT_API_URL", "http://bot-api:8001")
+        bot_api_url = os.getenv("BOT_API_URL", "http://localhost:8001")
         full_url = f"{bot_api_url}/api/bot/{path}"
-        if limit:
+
+        # Preserve query parameters
+        if request.url.query:
+            full_url += f"?{request.url.query}"
+        elif limit:
             full_url += f"?limit={limit}"
+
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(full_url)
-            return response.json()
+            if request.method == "POST":
+                body = await request.body()
+                response = await client.post(full_url, content=body)
+            else:
+                response = await client.get(full_url)
+
+            if response.status_code == 200:
+                return response.json()
+            else:
+                log.warning(f"Bot API returned {response.status_code}: {response.text}")
+                return {}
     except Exception as e:
         log.warning(f"Bot API proxy error: {e}")
         return {}

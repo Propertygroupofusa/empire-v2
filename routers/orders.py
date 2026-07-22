@@ -71,12 +71,41 @@ class QuoteRequest(BaseModel):
 # ============================================================
 
 @router.post("/request-quote")
-async def request_quote(quote: QuoteRequest, db: AsyncSession = Depends(get_db)):
+async def request_quote(
+    quote: Optional[QuoteRequest] = None,
+    customer_name: Optional[str] = None,
+    customer_email: Optional[str] = None,
+    customer_company: Optional[str] = None,
+    phone: Optional[str] = None,
+    video_type: Optional[str] = None,
+    script_or_topic: Optional[str] = None,
+    target_audience: Optional[str] = None,
+    avatar: Optional[str] = None,
+    language: Optional[str] = None,
+    delivery_days: int = 2,
+    reference_url: Optional[str] = None,
+    db: AsyncSession = Depends(get_db)
+):
     """
     Customer submits a video request with script, avatar, and language.
+    Accepts either JSON body or query parameters.
     Returns order ID and quote price for payment processing.
     """
-    if not quote.customer_name or not quote.customer_email or not quote.video_type or not quote.avatar or not quote.language:
+    # Support both JSON body and query parameters
+    if quote:
+        customer_name = quote.customer_name or customer_name
+        customer_email = quote.customer_email or customer_email
+        customer_company = quote.customer_company or customer_company
+        phone = quote.phone or phone
+        video_type = quote.video_type or video_type
+        script_or_topic = quote.script_or_topic or script_or_topic
+        target_audience = quote.target_audience or target_audience
+        avatar = quote.avatar or avatar
+        language = quote.language or language
+        delivery_days = quote.delivery_days or delivery_days
+        reference_url = quote.reference_url or reference_url
+
+    if not customer_name or not customer_email or not video_type or not avatar or not language:
         raise HTTPException(status_code=400, detail="Missing required fields")
 
     quote_price = calculate_quote_price(quote.video_type, quote.delivery_days)
