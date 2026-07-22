@@ -400,6 +400,7 @@ def run_cycle():
     log.info(f"\n{'='*55}")
     log.info(f"⏱ BOT #2 CRYPTO | {mode} | ${pf:,.2f}")
     log.info(f"  {ms['label']} | Days to $100k: ~{days}")
+    log.info(f"  API Keys available: API={bool(API_KEY)} | Secret={bool(SECRET_KEY)}")
     wr = state.win_rate()
     wr_str = f"{wr:.0f}% WR" if wr is not None else "N/A WR"
     log.info(
@@ -458,12 +459,17 @@ def run_cycle():
 
     # Buy best opportunities
     scored.sort()  # lowest RSI first = most oversold
+    if scored:
+        log.info(f"  📊 BUY SIGNALS: {len(scored)} coins ready | Best RSI: {scored[0][0]:.0f}")
     for _, symbol, px in scored:
         if not state.can_trade():
+            log.info(f"  🛑 Cannot trade - trading halted (daily loss limit hit?)")
             break
         if len(state.positions) >= ms["max_pos"]:
+            log.info(f"  🛑 Max positions reached ({len(state.positions)}/{ms['max_pos']})")
             break
         if symbol in state.positions:
+            log.info(f"  ⏭ {symbol} already in position")
             continue
 
         alloc = ms["alloc"]
@@ -478,6 +484,7 @@ def run_cycle():
         time.sleep(0.5)
 
     state.save()
+    log.info(f"✓ Cycle complete | Positions: {len(state.positions)} | Trades today: {state.trades_today}\n")
 
 
 # ── STARTUP ──────────────────────────────────────────────────
