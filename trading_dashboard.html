@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🤖 Live Crypto Trading Dashboard - Bare Metal Builders</title>
+    <title>🤖 Live Trading Dashboard - Bare Metal Builders</title>
     <style>
         * {
             margin: 0;
@@ -434,7 +434,7 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>🤖 LIVE CRYPTO TRADING DASHBOARD</h1>
+            <h1>🤖 LIVE TRADING DASHBOARD</h1>
             <p>Bare Metal Builders - Automated Trading Bot</p>
         </div>
 
@@ -454,7 +454,7 @@
             <div class="stat-card">
                 <h3>Active Positions</h3>
                 <div class="stat-value" id="activePositions">0</div>
-                <p id="positionStatus" style="color: #ffaa00;">Monitoring 6 pairs...</p>
+                <p id="positionStatus" style="color: #ffaa00;">Monitoring 5 symbols...</p>
             </div>
 
             <div class="stat-card">
@@ -493,30 +493,26 @@
 
         <div class="grid-2">
             <div class="panel">
-                <h3>📊 Monitored Pairs</h3>
+                <h3>📊 Monitored Contracts</h3>
                 <div id="pairsMonitored">
                     <div class="pair">
-                        <span class="pair-name">BTC/USD</span>
+                        <span class="pair-name">MES (SPY proxy)</span>
                         <span class="pair-status">Monitoring...</span>
                     </div>
                     <div class="pair">
-                        <span class="pair-name">ETH/USD</span>
+                        <span class="pair-name">MNQ (QQQ proxy)</span>
                         <span class="pair-status">Monitoring...</span>
                     </div>
                     <div class="pair">
-                        <span class="pair-name">SOL/USD</span>
+                        <span class="pair-name">MYM (DIA proxy)</span>
                         <span class="pair-status">Monitoring...</span>
                     </div>
                     <div class="pair">
-                        <span class="pair-name">AVAX/USD</span>
+                        <span class="pair-name">M2K (IWM proxy)</span>
                         <span class="pair-status">Monitoring...</span>
                     </div>
                     <div class="pair">
-                        <span class="pair-name">DOGE/USD</span>
-                        <span class="pair-status">Monitoring...</span>
-                    </div>
-                    <div class="pair">
-                        <span class="pair-name">LINK/USD</span>
+                        <span class="pair-name">MGC (GLD proxy)</span>
                         <span class="pair-status">Monitoring...</span>
                     </div>
                 </div>
@@ -525,28 +521,28 @@
             <div class="panel">
                 <h3>⚙️ Bot Configuration</h3>
                 <div class="pair">
-                    <span>Starting Capital</span>
-                    <span>$980.00</span>
-                </div>
-                <div class="pair">
-                    <span>Trade Cycle</span>
-                    <span>15 minutes</span>
+                    <span>Scan Cycle</span>
+                    <span>~30 sec (5-min bars)</span>
                 </div>
                 <div class="pair">
                     <span>Position Size</span>
-                    <span>20-25% per trade</span>
+                    <span>1 share per signal</span>
                 </div>
                 <div class="pair">
                     <span>Max Positions</span>
-                    <span>4 concurrent</span>
+                    <span>Up to 5 (1 per symbol)</span>
                 </div>
                 <div class="pair">
-                    <span>Risk/Reward</span>
-                    <span>3:1 ratio</span>
+                    <span>Entry Signal</span>
+                    <span>RSI oversold (no trend filter)</span>
+                </div>
+                <div class="pair">
+                    <span>Exit Signal</span>
+                    <span>RSI overbought or +1.5% profit</span>
                 </div>
                 <div class="pair">
                     <span>Stop Loss</span>
-                    <span>0.8%</span>
+                    <span>Informational only - no bracket order placed</span>
                 </div>
             </div>
         </div>
@@ -591,23 +587,11 @@
             <div class="refresh-rate">Auto-refreshing every 30 seconds</div>
             <h2>📡 LIVE ACTIVITY FEED</h2>
             <div id="logContainer">
-                <div class="log-entry signal">
-                    <span class="timestamp">[09:06 CDT]</span> Bot initialized - Mode: 🔴 LIVE TRADING
-                </div>
-                <div class="log-entry">
-                    <span class="timestamp">[09:06 CDT]</span> Monitoring BTC, ETH, SOL, AVAX, DOGE, LINK
-                </div>
-                <div class="log-entry">
-                    <span class="timestamp">[09:06 CDT]</span> Account: $980.00 | Buying Power: $980.00
-                </div>
-                <div class="log-entry">
-                    <span class="timestamp">[09:07 CDT]</span> Waiting for RSI signals on any pair...
-                </div>
             </div>
         </div>
 
         <div class="footer">
-            <p>🎥 Bare Metal Builders Trading Bot | Live Dashboard</p>
+            <p>🤖 Bare Metal Builders Trading Bot | Live Dashboard</p>
             <p>Updates every 30 seconds | Last update: <span id="lastUpdate">just now</span></p>
         </div>
     </div>
@@ -692,7 +676,7 @@
 
             document.getElementById('activePositions').textContent = status.active_positions;
             document.getElementById('positionStatus').textContent =
-                status.active_positions > 0 ? `${status.active_positions} open` : 'Monitoring 6 pairs...';
+                status.active_positions > 0 ? `${status.active_positions} open` : 'Monitoring 5 symbols...';
             document.getElementById('tradeCount').textContent = status.todays_trade_count;
             // Win/loss per trade isn't tracked server-side yet - showing a
             // made-up win rate would be worse than admitting we don't have it.
