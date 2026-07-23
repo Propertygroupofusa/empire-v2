@@ -167,6 +167,44 @@ async def get_account_equity(session):
         return None
 
 
+async def get_account_cash(session):
+    """Real Alpaca cash balance, used to size new positions in dollars
+    rather than a fixed share count (see size_position). Falls back to
+    None on any failure - callers fall back to the fixed 1-share size."""
+    try:
+        async with session.get(f"{BASE_URL}/v2/account", headers=HEADERS) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+            return float(data.get("cash", 0))
+    except Exception as e:
+        log.warning(f"Could not fetch account cash for position sizing: {e}")
+        return None
+
+
+# Floor on a single position's dollar size. Below this, a position is too
+# small to bother with (order fees/slippage would dominate) - skip the
+# entry rather than place a near-zero fractional order.
+MIN_POSITION_NOTIONAL = float(os.getenv("PROP_MIN_POSITION_NOTIONAL", "10"))
+
+
+def size_position(cash_remaining, slots_remaining, price):
+    """Dollar-based (fractional-share) position sizing. A fixed 1-share
+    order fails outright on higher-priced ETFs (SPY, QQQ, DIA) once cash
+    is tight, while cheaper ones (SLV, USO) fill fine - silently capping
+    how many of the open slots can ever actually fill regardless of how
+    many real signals come in. Splitting whatever cash is left evenly
+    across the remaining open slots means a small account can still use
+    all its slots, no matter which symbol's proxy ETF happens to signal.
+    Returns None if there isn't enough cash left for even one minimum-size
+    position."""
+    if slots_remaining <= 0 or cash_remaining < MIN_POSITION_NOTIONAL:
+        return None
+    amount = min(max(cash_remaining / slots_remaining, MIN_POSITION_NOTIONAL), cash_remaining)
+    qty = round(amount / price, 6)
+    return qty if qty > 0 else None
+
+
 async def broadcast_signal_to_subscribers(session, contract, action, price, rsi, trend, stop_loss=None, target=None):
     """Broadcast signal to all trading signal subscribers via API."""
     try:
@@ -282,31 +320,57 @@ async def run_prop_cycle():
         open_prop_positions.pop(contract, None)
         return True
 
-    async def open_position(session, contract, config, side, price, rsi, trend):
+    async def open_position(session, contract, config, side, price, rsi, trend, qty):
         action = "BUY" if side == "long" else "SELL"
         if side == "long":
             stop_loss, target = price * 0.98, price * 1.03
         else:
             stop_loss, target = price * 1.02, price * 0.97
 
-        filled = await execute_futures_trade(session, contract, action, config["qty"], price, rsi, trend, stop_loss, target)
+        filled = await execute_futures_trade(session, contract, action, qty, price, rsi, trend, stop_loss, target)
         if not filled:
             return False
 
-        open_prop_positions[contract] = {"side": side, "entry": price, "qty": config["qty"]}
+        open_prop_positions[contract] = {"side": side, "entry": price, "qty": qty}
         send_trade_alert(
             f"🤖 Bare Metal Builders — {side.upper()} {contract} opened",
             f"{'LIVE' if LIVE_TRADE else 'PAPER'} {side} opened on APEX_589296:\n\n"
-            f"{action} {config['qty']} {contract} ({config['symbol']}) @ ${price:.2f}\n"
+            f"{action} {qty} {contract} ({config['symbol']}) @ ${price:.2f}\n"
             f"RSI: {rsi} | Trend: {trend}\n\n"
             f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
         )
         return True
 
+    async def try_open(contract, config, side, price, rsi, trend, slots_remaining):
+        """Wraps open_position with dollar-based sizing against whatever
+        cash is actually left this cycle (tracked in cash_remaining, closed
+        over from run_prop_cycle) - falls back to the fixed 1-share size
+        if the real cash balance couldn't be fetched this cycle."""
+        nonlocal cash_remaining
+        if cash_remaining is not None:
+            qty = size_position(cash_remaining, slots_remaining, price)
+            if qty is None:
+                log.info(f"[APEX_589296] Skipping {contract} {side} entry — not enough cash left (${cash_remaining:.2f})")
+                return False
+        else:
+            qty = config["qty"]
+
+        opened = await open_position(session, contract, config, side, price, rsi, trend, qty)
+        if opened and cash_remaining is not None:
+            cash_remaining -= qty * price
+        return opened
+
     async with aiohttp.ClientSession() as session:
         equity = await get_account_equity(session)
         profit_increment = get_profit_increment(equity)
         log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | Profit-target increment: ${profit_increment:.2f}")
+
+        # Tracked and spent-down across this cycle's entries so dollar-based
+        # sizing (see try_open/size_position) reflects money already
+        # committed to earlier orders this same cycle, without an extra
+        # API call per entry.
+        cash_remaining = await get_account_cash(session)
+        log.info(f"[APEX_589296] Cash available: {'$%.2f' % cash_remaining if cash_remaining is not None else 'unknown'}")
 
         scans = {}
         for contract, config in FUTURES.items():
@@ -377,7 +441,7 @@ async def run_prop_cycle():
         for _, contract, config, side, price, rsi, trend in candidates:
             if len(open_prop_positions) < MAX_POSITIONS:
                 log.info(f"[APEX_589296] 📡 {side.upper()} {contract} — RSI:{rsi} Trend:{trend}")
-                await open_position(session, contract, config, side, price, rsi, trend)
+                await try_open(contract, config, side, price, rsi, trend, MAX_POSITIONS - len(open_prop_positions))
             else:
                 # At the cap - find the weakest held position (lowest
                 # unrealized P&L). Only rotate out of it if it's a genuine
@@ -401,6 +465,11 @@ async def run_prop_cycle():
 
                 if weakest_contract is not None and weakest_pct is not None and weakest_pct < 0:
                     held_data = scans[weakest_contract]
+                    # Capture the dollar value being freed up before closing
+                    # (close_position pops it from open_prop_positions), so
+                    # try_open's sizing reflects the cash rotation frees, not
+                    # just what was already sitting uninvested.
+                    freed_value = open_prop_positions[weakest_contract]["qty"] * held_data["price"]
                     log.info(
                         f"[APEX_589296] 🔄 ROTATING: {weakest_contract} ({weakest_pct:.2f}%, weakest of {MAX_POSITIONS}) "
                         f"→ {contract} (RSI:{rsi} {side})"
@@ -410,7 +479,9 @@ async def run_prop_cycle():
                         held_data["price"], held_data["rsi"], held_data["trend"], "ROTATED OUT",
                     )
                     if closed:
-                        await open_position(session, contract, config, side, price, rsi, trend)
+                        if cash_remaining is not None:
+                            cash_remaining += freed_value
+                        await try_open(contract, config, side, price, rsi, trend, MAX_POSITIONS - len(open_prop_positions))
                 else:
                     log.info(
                         f"[APEX_589296] At max positions ({MAX_POSITIONS}) - {contract} {side} signal held, "
