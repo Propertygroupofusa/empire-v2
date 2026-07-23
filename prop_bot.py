@@ -182,6 +182,28 @@ async def get_account_cash(session):
         return None
 
 
+async def get_account_shorting_enabled(session):
+    """Real Alpaca account.shorting_enabled flag. Discovered in production
+    that every single short attempt was failing with "account is not
+    allowed to short" - a real Alpaca account-level restriction (commonly
+    tied to margin/equity requirements, not something a code fix can
+    override) rather than a bug in the order-placement code. Checking this
+    upfront means new short entries are skipped cleanly (with one clear
+    log line) instead of repeatedly attempting - and failing - orders
+    every cycle. Falls back to True (attempt as before) on fetch failure,
+    so a transient API hiccup doesn't silently disable a feature that may
+    actually be working."""
+    try:
+        async with session.get(f"{BASE_URL}/v2/account", headers=HEADERS) as r:
+            if r.status != 200:
+                return True
+            data = await r.json()
+            return bool(data.get("shorting_enabled", True))
+    except Exception as e:
+        log.warning(f"Could not fetch account shorting_enabled status: {e}")
+        return True
+
+
 # Floor on a single position's dollar size. Below this, a position is too
 # small to bother with (order fees/slippage would dominate) - skip the
 # entry rather than place a near-zero fractional order.
@@ -372,6 +394,16 @@ async def run_prop_cycle():
         cash_remaining = await get_account_cash(session)
         log.info(f"[APEX_589296] Cash available: {'$%.2f' % cash_remaining if cash_remaining is not None else 'unknown'}")
 
+        # Discovered in production: every short entry was failing with a
+        # real Alpaca error ("account is not allowed to short") - checked
+        # once per cycle so new shorts are skipped cleanly instead of
+        # repeatedly attempting (and failing) orders. Existing short
+        # positions can still be covered either way (that's a BUY order,
+        # not a new short) - this only gates opening NEW shorts.
+        shorting_enabled = await get_account_shorting_enabled(session)
+        if not shorting_enabled:
+            log.info("[APEX_589296] ⚠️ Shorting not enabled on this account - skipping new SHORT entries this cycle (longs unaffected)")
+
         scans = {}
         for contract, config in FUTURES.items():
             data = await get_price_rsi(session, config["symbol"])
@@ -427,7 +459,11 @@ async def run_prop_cycle():
                 candidates.append((RSI_BUY_BELOW - rsi, contract, config, "long", price, rsi, trend))
                 status = "BUY_ZONE"
             elif rsi > RSI_SELL_ABOVE:
-                candidates.append((rsi - RSI_SELL_ABOVE, contract, config, "short", price, rsi, trend))
+                # Signal is real either way - only gate acting on it. Still
+                # shown as SHORT_ZONE on the dashboard so it accurately
+                # reflects RSI conditions even while shorting is disabled.
+                if shorting_enabled:
+                    candidates.append((rsi - RSI_SELL_ABOVE, contract, config, "short", price, rsi, trend))
                 status = "SHORT_ZONE"
             else:
                 status = "NEUTRAL"
