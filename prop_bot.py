@@ -51,6 +51,15 @@ profitable_days = []
 daily_pnl = 0.0
 open_prop_positions = {}
 
+# Latest per-symbol scan snapshot, read by routers/trading_dashboard.py's
+# GET /signals so the dashboard can show live price/RSI/trend instead of
+# that only being visible in Railway logs. Written once per symbol per
+# cycle in run_prop_cycle - this is a live-view read model, not the source
+# of truth for trading decisions (open_prop_positions is).
+latest_signals = {}
+last_cycle_at = None
+last_market_open = None
+
 # Email alert on real fills/exits - reuses the same GMAIL_EMAIL/GMAIL_PASSWORD
 # SMTP creds routers/orders.py already uses for order emails, no new
 # credentials to configure. No-ops quietly (just a log line) if they aren't
@@ -182,16 +191,21 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
 
 
 async def run_prop_cycle():
-    global daily_pnl, profitable_days
+    global daily_pnl, profitable_days, last_cycle_at, last_market_open
 
     # Only trade during market hours (9:30am - 4pm ET = 14:30 - 21:00 UTC)
     now = datetime.utcnow()
     market_open = now.replace(hour=14, minute=30, second=0)
     market_close = now.replace(hour=21, minute=0, second=0)
 
+    last_cycle_at = now.isoformat()
+
     if not (market_open <= now <= market_close):
+        last_market_open = False
         log.info(f"[APEX_589296] Market closed — waiting for 9:30am ET")
         return
+
+    last_market_open = True
 
     log.info(f"[APEX_589296] Scanning futures markets ({', '.join(FUTURES)})... | Daily P&L: ${daily_pnl:.2f}")
 
@@ -208,6 +222,25 @@ async def run_prop_cycle():
             log.info(f"[APEX_589296] {contract} ({config['symbol']}) | ${price:.2f} | RSI:{rsi} | {trend}")
 
             has_position = contract in open_prop_positions
+
+            if has_position:
+                status = "HOLDING"
+            elif rsi < RSI_BUY_BELOW:
+                status = "BUY_ZONE"
+            elif rsi > RSI_SELL_ABOVE:
+                status = "SELL_ZONE"
+            else:
+                status = "NEUTRAL"
+
+            latest_signals[contract] = {
+                "symbol": config["symbol"],
+                "price": price,
+                "rsi": rsi,
+                "trend": trend,
+                "status": status,
+                "has_position": has_position,
+                "checked_at": now.isoformat(),
+            }
 
             # BUY signal — RSI oversold. Trend confirmation is no longer a hard
             # gate: requiring both oversold AND bullish trend at once across only
