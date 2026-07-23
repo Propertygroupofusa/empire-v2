@@ -9,7 +9,9 @@ Rule: 7 consecutive profitable days before going live
 import os
 import asyncio
 import logging
+import smtplib
 import time
+from email.mime.text import MIMEText
 from datetime import datetime
 import aiohttp
 
@@ -48,6 +50,31 @@ FUTURES = {
 profitable_days = []
 daily_pnl = 0.0
 open_prop_positions = {}
+
+# Email alert on real fills/exits - reuses the same GMAIL_EMAIL/GMAIL_PASSWORD
+# SMTP creds routers/orders.py already uses for order emails, no new
+# credentials to configure. No-ops quietly (just a log line) if they aren't
+# set, same as that existing code path.
+TRADE_ALERT_EMAIL = os.getenv("TRADE_ALERT_EMAIL", "delfarrell591@gmail.com")
+
+
+def send_trade_alert(subject: str, body: str):
+    sender_email = os.getenv("GMAIL_EMAIL", "")
+    sender_password = os.getenv("GMAIL_PASSWORD", "")
+    if not sender_email or not sender_password:
+        log.info(f"(trade alert email skipped - GMAIL_EMAIL/GMAIL_PASSWORD not set) {subject}")
+        return
+    try:
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = sender_email
+        msg["To"] = TRADE_ALERT_EMAIL
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(sender_email, sender_password)
+            server.sendmail(sender_email, TRADE_ALERT_EMAIL, msg.as_string())
+        log.info(f"📧 Trade alert emailed to {TRADE_ALERT_EMAIL}")
+    except Exception as e:
+        log.warning(f"Trade alert email failed: {e}")
 
 
 async def get_price_rsi(session, symbol):
@@ -134,6 +161,14 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
                 log.info(f"✅ FUTURES TRADE | {mode} | {action} {qty} {contract} ({symbol}) @ ${price:.2f} | APEX_589296")
                 open_prop_positions[contract] = {"action": action, "entry": price, "qty": qty}
 
+                send_trade_alert(
+                    f"🤖 Bare Metal Builders — {action} {contract} filled",
+                    f"{mode} trade executed on APEX_589296:\n\n"
+                    f"{action} {qty} {contract} ({symbol}) @ ${price:.2f}\n"
+                    f"RSI: {rsi} | Trend: {trend}\n\n"
+                    f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
+                )
+
                 # Broadcast signal to subscribers
                 await broadcast_signal_to_subscribers(session, contract, action, price, rsi, trend, stop_loss, target)
 
@@ -197,6 +232,14 @@ async def run_prop_cycle():
                     daily_pnl += pnl
                     exit_reason = "PROFIT TARGET" if profit_target_hit else "RSI"
                     log.info(f"[APEX_589296] 📤 CLOSE {contract} ({exit_reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${pnl:.2f} ({profit_pct:.2f}%)")
+
+                    send_trade_alert(
+                        f"🤖 Bare Metal Builders — {contract} closed ({exit_reason})",
+                        f"Position closed on APEX_589296:\n\n"
+                        f"{contract} | Entry: ${entry:.2f} | Exit: ${price:.2f}\n"
+                        f"P&L: ${pnl:.2f} ({profit_pct:.2f}%) | Reason: {exit_reason}\n\n"
+                        f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
+                    )
 
                     # Broadcast close signal to subscribers
                     target = price
