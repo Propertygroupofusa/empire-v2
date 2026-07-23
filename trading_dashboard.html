@@ -542,7 +542,7 @@
                 </div>
                 <div class="pair">
                     <span>Position Size</span>
-                    <span>1 share per signal</span>
+                    <span>Splits available cash across open slots (fractional shares)</span>
                 </div>
                 <div class="pair">
                     <span>Max Positions</span>
@@ -565,6 +565,14 @@
                     <span>Informational only - no bracket order placed</span>
                 </div>
             </div>
+        </div>
+
+        <div class="panel">
+            <h3>📈 Path to $1,000/day</h3>
+            <p style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">
+                Compounding math off your real account equity — not a guarantee. Real returns vary day to day and can be negative.
+            </p>
+            <div id="projectionTable">Loading...</div>
         </div>
 
         <div class="withdrawal-panel">
@@ -678,6 +686,62 @@
             logContainer.insertBefore(entry, logContainer.firstChild);
         }
 
+        // Rough compounding-math projection, computed client-side off the
+        // real equity /status already fetches (no extra Alpaca call). Shows
+        // what it'd actually take to reach $1,000/day at a few realistic
+        // (not magical) constant daily-return rates - the honest answer is
+        // that's an account-size problem, not a risk-per-trade one: at
+        // 2%/day, $1,000/day needs $50k in the account, not a bigger bet
+        // size on the current ~$1k account.
+        const PROJECTION_DAILY_RATES = [0.01, 0.015, 0.02]; // 1%, 1.5%, 2%/trading-day
+        const TRADING_DAYS_PER_MONTH = 21;
+        const DAILY_INCOME_TARGET = 1000;
+
+        function renderProjection(equity) {
+            const container = document.getElementById('projectionTable');
+            if (!container) return;
+
+            let rows = '';
+            for (const rate of PROJECTION_DAILY_RATES) {
+                const targetEquity = DAILY_INCOME_TARGET / rate;
+                const daysToTarget = (equity > 0 && targetEquity > equity)
+                    ? Math.log(targetEquity / equity) / Math.log(1 + rate)
+                    : 0;
+                const monthsToTarget = daysToTarget / TRADING_DAYS_PER_MONTH;
+                const oneYearEquity = equity * Math.pow(1 + rate, 12 * TRADING_DAYS_PER_MONTH);
+                const oneYearDailyIncome = oneYearEquity * rate;
+
+                rows += `<tr>
+                    <td style="padding: 6px;">${(rate * 100).toFixed(1)}%/day</td>
+                    <td style="padding: 6px;">$${targetEquity.toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
+                    <td style="padding: 6px;">~${monthsToTarget.toFixed(1)} months</td>
+                    <td style="padding: 6px;">$${oneYearEquity.toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
+                    <td style="padding: 6px;">$${oneYearDailyIncome.toFixed(2)}/day</td>
+                </tr>`;
+            }
+
+            container.innerHTML = `
+                <table style="width: 100%; border-collapse: collapse; font-size: 0.9em;">
+                    <thead>
+                        <tr style="color: #00ffaa; text-align: left; border-bottom: 1px solid #00aa00;">
+                            <th style="padding: 6px;">Assumed Rate</th>
+                            <th style="padding: 6px;">Equity Needed for $1,000/day</th>
+                            <th style="padding: 6px;">Time to Get There</th>
+                            <th style="padding: 6px;">Projected Equity in 1yr</th>
+                            <th style="padding: 6px;">Projected Income/day in 1yr</th>
+                        </tr>
+                    </thead>
+                    <tbody style="color: #ccffcc;">${rows}</tbody>
+                </table>
+                <p style="color: #ffaa00; font-size: 0.8em; margin-top: 10px;">
+                    Current equity: $${equity.toFixed(2)}. These assume a *constant* daily return compounding every
+                    trading day (~21/month) — real returns vary day to day and can be negative on any given day.
+                    $1,000/day isn't reachable by increasing risk on the current account size; it requires growing
+                    the account itself.
+                </p>
+            `;
+        }
+
         async function refreshStatus() {
             let status;
             try {
@@ -691,6 +755,7 @@
 
             document.getElementById('portfolioValue').textContent = '$' + status.equity.toFixed(2);
             document.getElementById('cashValue').textContent = '$' + status.cash.toFixed(2);
+            renderProjection(status.equity);
             document.getElementById('buyingPower').textContent = 'Buying Power: $' + status.buying_power.toFixed(2);
 
             const pl = status.session_pl;
