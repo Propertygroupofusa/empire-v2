@@ -76,7 +76,11 @@ class CampaignContact(Base):
 
 
 class Worker(Base):
-    """Worker/contractor profile."""
+    """Worker/contractor profile. Fields below (w9_*, credentials_*,
+    notary_*, ron_*) mirror the raw ALTER TABLE columns main.py's
+    run_migrations() adds to the real "workers" table - declared here too
+    so the ORM can actually read/write them (previously these existed only
+    as orphaned raw DB columns nothing in the code touched)."""
     __tablename__ = "workers"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -88,6 +92,25 @@ class Worker(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     custom_metadata = Column(JSON, nullable=True)
 
+    w9_submitted = Column(Boolean, default=False)
+    w9_legal_name = Column(String, nullable=True)
+    w9_tax_classification = Column(String, nullable=True)
+    w9_tin_last4 = Column(String, nullable=True)
+    w9_address = Column(Text, nullable=True)
+
+    credentials_submitted = Column(Boolean, default=False)
+    credentials_verified = Column(Boolean, default=False)
+
+    # Notary-specific credentials. A worker can be a notary, a tax
+    # preparer, or a legal-doc processor (this platform's other
+    # advertised verticals) - these fields are simply unused/null for
+    # non-notary workers rather than needing a separate table per role.
+    notary_commission_number = Column(String, nullable=True)
+    notary_commission_state = Column(String, nullable=True)
+    notary_commission_expires = Column(String, nullable=True)  # ISO date string
+    ron_authorized = Column(Boolean, default=False)  # Remote Online Notarization
+    ron_authorization_state = Column(String, nullable=True)
+
     def to_dict(self):
         return {
             "id": self.id,
@@ -98,6 +121,17 @@ class Worker(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "custom_metadata": self.custom_metadata,
+            "w9_submitted": self.w9_submitted,
+            "w9_legal_name": self.w9_legal_name,
+            "w9_tax_classification": self.w9_tax_classification,
+            "w9_tin_last4": self.w9_tin_last4,
+            "credentials_submitted": self.credentials_submitted,
+            "credentials_verified": self.credentials_verified,
+            "notary_commission_number": self.notary_commission_number,
+            "notary_commission_state": self.notary_commission_state,
+            "notary_commission_expires": self.notary_commission_expires,
+            "ron_authorized": self.ron_authorized,
+            "ron_authorization_state": self.ron_authorization_state,
         }
 
 
@@ -126,6 +160,73 @@ class Client(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "custom_metadata": self.custom_metadata,
+        }
+
+
+class Job(Base):
+    """A service request from a client (starts with job_type='notarization'
+    but the shape is generic enough for this platform's other advertised
+    verticals - tax prep, legal docs - without needing a separate table
+    per service type)."""
+    __tablename__ = "jobs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_type = Column(String, index=True)  # "notarization", ...
+    client_id = Column(Integer, ForeignKey("clients.id"), index=True)
+    worker_id = Column(Integer, ForeignKey("workers.id"), nullable=True, index=True)
+    state = Column(String, index=True)  # US state jurisdiction the job must be handled in
+    description = Column(Text, nullable=True)
+    status = Column(String, default="requested", index=True)  # requested, matched, scheduled, completed, cancelled
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    matched_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    custom_metadata = Column(JSON, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "job_type": self.job_type,
+            "client_id": self.client_id,
+            "worker_id": self.worker_id,
+            "state": self.state,
+            "description": self.description,
+            "status": self.status,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "matched_at": self.matched_at.isoformat() if self.matched_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "custom_metadata": self.custom_metadata,
+        }
+
+
+class Booking(Base):
+    """A scheduled appointment for a matched job (e.g. a RON session)."""
+    __tablename__ = "bookings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey("jobs.id"), index=True)
+    worker_id = Column(Integer, ForeignKey("workers.id"), index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), index=True)
+    scheduled_start = Column(DateTime)
+    scheduled_end = Column(DateTime, nullable=True)
+    status = Column(String, default="scheduled", index=True)  # scheduled, completed, cancelled, no_show
+    meeting_link = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "job_id": self.job_id,
+            "worker_id": self.worker_id,
+            "client_id": self.client_id,
+            "scheduled_start": self.scheduled_start.isoformat() if self.scheduled_start else None,
+            "scheduled_end": self.scheduled_end.isoformat() if self.scheduled_end else None,
+            "status": self.status,
+            "meeting_link": self.meeting_link,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
 

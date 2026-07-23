@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
-from sqlalchemy import text
+from sqlalchemy import text, inspect
 from datetime import datetime
 import os
 import uvicorn
@@ -128,6 +128,13 @@ try:
     crypto_scalp_grid_bot_module = crypto_scalp_grid_bot
 except Exception as e:
     logging.warning(f"Failed to import crypto_scalp_grid_bot: {e}")
+
+notary_bot_module = None
+try:
+    import notary_bot
+    notary_bot_module = notary_bot
+except Exception as e:
+    logging.warning(f"Failed to import notary_bot: {e}")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pgusa")
@@ -252,7 +259,13 @@ async def create_monitor_tables():
 
 
 async def run_migrations():
-    """Add any missing columns to existing tables — safe to run every startup."""
+    """Add any missing columns to existing tables — safe to run every startup.
+
+    Uses SQLAlchemy's dialect-agnostic inspector rather than raw SQLite
+    PRAGMA syntax - the previous version's PRAGMA table_info(workers)
+    query is SQLite-only and silently fails on Postgres (caught by the
+    broad except below, easy to miss in logs), meaning these columns may
+    never have actually been added on a Postgres production database."""
     cols = [
         ("w9_submitted",          "BOOLEAN DEFAULT FALSE"),
         ("w9_legal_name",         "VARCHAR"),
@@ -268,19 +281,20 @@ async def run_migrations():
         ("ron_authorization_state",   "VARCHAR"),
     ]
     async with engine.begin() as conn:
-        for col, col_type in cols:
-            try:
-                # Check if column exists first (SQLite doesn't support IF NOT EXISTS for ALTER TABLE)
-                check_result = await conn.execute(text(
-                    f"PRAGMA table_info(workers)"
-                ))
-                existing_columns = [row[1] for row in await check_result.fetchall()]
+        try:
+            existing_columns = await conn.run_sync(
+                lambda sync_conn: [c["name"] for c in inspect(sync_conn).get_columns("workers")]
+            )
+        except Exception as e:
+            log.warning(f"Migration: could not inspect workers table columns: {e}")
+            return
 
-                if col not in existing_columns:
-                    await conn.execute(text(
-                        f"ALTER TABLE workers ADD COLUMN {col} {col_type}"
-                    ))
-                    log.info(f"Migration OK: {col}")
+        for col, col_type in cols:
+            if col in existing_columns:
+                continue
+            try:
+                await conn.execute(text(f"ALTER TABLE workers ADD COLUMN {col} {col_type}"))
+                log.info(f"Migration OK: {col}")
             except Exception as e:
                 log.debug(f"Migration skip {col}: {e}")
 
@@ -360,6 +374,14 @@ async def lifespan(app: FastAPI):
             log.info(f"🪙 Crypto Scalp-Grid bot started (background thread) | Mode: {mode} | Pairs: BTC, ETH, XRP")
     except Exception as e:
         log.warning(f"Crypto scalp-grid bot failed to start: {e}")
+
+    try:
+        if notary_bot_module is not None:
+            import threading
+            threading.Thread(target=notary_bot_module.run, daemon=True).start()
+            log.info("🖋️ Notary matching bot started (background thread)")
+    except Exception as e:
+        log.warning(f"Notary bot failed to start: {e}")
 
     try:
         import subprocess
