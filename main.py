@@ -279,6 +279,7 @@ async def run_migrations():
         ("notary_commission_expires", "VARCHAR"),
         ("ron_authorized",            "BOOLEAN DEFAULT FALSE"),
         ("ron_authorization_state",   "VARCHAR"),
+        ("password_hash",             "VARCHAR"),
     ]
     async with engine.begin() as conn:
         try:
