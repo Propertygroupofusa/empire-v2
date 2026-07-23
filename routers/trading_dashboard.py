@@ -37,48 +37,85 @@ except Exception as e:
     log.warning(f"prop_bot not importable, /signals will report unavailable: {e}")
     prop_bot_module = None
 
-BOT_NAME = "bare_metal_builders"
-
 ALPACA_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 ALPACA_HEADERS = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
 
-AUTO_COMPOUND_INCREMENT = 100.0
+# Pre-8-bot names, kept only to migrate whatever they were already
+# tracking into the new bot_N buckets the first time this runs.
+LEGACY_BOT_NAME = "bare_metal_builders"
+LEGACY_MIRROR_PREFIX = "mirror_"
 
-# Every time the main bot's own compounding bucket reaches this much, peel
-# off a "mirror" - a separate tracked capital bucket that locks in at
-# exactly this amount and stops growing, freeing the main bucket to start
-# accumulating toward the next one. This is a bookkeeping split, not a
-# real separate brokerage account: every mirror's dollars are still part
-# of the same real Alpaca equity and the same real trades prop_bot.py
-# places - "mirror" here means "a separate line item on the dashboard",
-# not a separate pool of buying power.
-AUTO_MIRROR_INCREMENT = float(os.getenv("PROP_MIRROR_INCREMENT", "2000"))
-MIRROR_PREFIX = "mirror_"
+# The account owner chose real per-bot withdrawal, not just a display
+# split: NUM_BOTS named buckets, each individually withdrawable, all
+# compounding together since every dollar is still the same real Alpaca
+# equity and the same real trades prop_bot.py places. A bot_N row's
+# base_capital means "this bucket's current tracked value" (its whole
+# balance is withdrawable), not a fixed floor like the old single-bucket
+# design - whatever's left after a withdrawal keeps compounding.
+NUM_BOTS = int(os.getenv("PROP_NUM_BOTS", "8"))
+BOT_PREFIX = "bot_"
 
 
-async def _get_mirrors(db: AsyncSession) -> list[TradingBotState]:
+async def _get_or_init_bots(db: AsyncSession, current_equity: float) -> list:
+    """Fetches the NUM_BOTS tracked buckets, creating them on first call.
+    One-time migration: folds in whatever the old single-bucket/mirror
+    design was already tracking (if anything) and splits it evenly across
+    NUM_BOTS; otherwise splits the real current equity evenly instead."""
     result = await db.execute(
-        select(TradingBotState)
-        .where(TradingBotState.bot_name.like(f"{MIRROR_PREFIX}%"))
-        .order_by(TradingBotState.bot_name)
+        select(TradingBotState).where(TradingBotState.bot_name.like(f"{BOT_PREFIX}%")).order_by(TradingBotState.bot_name)
     )
-    return list(result.scalars().all())
+    bots = list(result.scalars().all())
+    if bots:
+        return bots
+
+    legacy_result = await db.execute(
+        select(TradingBotState).where(
+            (TradingBotState.bot_name == LEGACY_BOT_NAME) | (TradingBotState.bot_name.like(f"{LEGACY_MIRROR_PREFIX}%"))
+        )
+    )
+    legacy_rows = list(legacy_result.scalars().all())
+    starting_total = sum(r.base_capital for r in legacy_rows) if legacy_rows else current_equity
+
+    share = starting_total / NUM_BOTS
+    bots = []
+    for i in range(1, NUM_BOTS + 1):
+        bot = TradingBotState(bot_name=f"{BOT_PREFIX}{i}", base_capital=share)
+        db.add(bot)
+        bots.append(bot)
+    for r in legacy_rows:
+        await db.delete(r)
+
+    await db.commit()
+    for bot in bots:
+        await db.refresh(bot)
+    log.info(f"Initialized {NUM_BOTS} bots at ${share:.2f} each (migrated ${starting_total:.2f} from legacy tracking)")
+    return bots
 
 
-async def _get_or_create_state(db: AsyncSession, current_equity: float) -> TradingBotState:
-    result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == BOT_NAME))
-    state = result.scalar_one_or_none()
-    if not state:
-        # First time this runs - whatever's in the account right now becomes
-        # the baseline. Profit is only what accrues above this point on.
-        state = TradingBotState(bot_name=BOT_NAME, base_capital=current_equity)
-        db.add(state)
-        await db.commit()
-        await db.refresh(state)
-        log.info(f"Initialized base capital for {BOT_NAME}: ${current_equity:.2f}")
-    return state
+def _rebalance_bots(bots: list, equity: float) -> float:
+    """Distributes whatever changed in real equity since the bots' tracked
+    total was last synced, proportionally to each bot's current share -
+    every bucket compounds (or draws down) together with real trading
+    results, none singled out. Returns the raw change applied (positive or
+    negative, 0.0 if nothing to apply) - mutates the bot objects in place,
+    caller still needs to commit."""
+    total_tracked = sum(b.base_capital for b in bots)
+    change = equity - total_tracked
+
+    if abs(change) < 0.005:
+        return 0.0
+
+    if total_tracked <= 0:
+        # Every bucket has been fully drawn down - nowhere to proportion
+        # the change against, so it goes to the first bucket.
+        bots[0].base_capital += change
+        return change
+
+    for bot in bots:
+        bot.base_capital += change * (bot.base_capital / total_tracked)
+    return change
 
 
 async def _fetch_dividend_activities(session: aiohttp.ClientSession) -> list:
@@ -123,9 +160,10 @@ async def _fetch_todays_filled_orders(session: aiohttp.ClientSession) -> list:
 @router.get("/status", dependencies=[Depends(require_admin_key)])
 async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
     """Real account snapshot: equity, cash, positions, today's trades, and
-    profit/base-capital as tracked by us. Auto-compounds $100 increments of
-    profit into base capital on every call (this endpoint is polled every
-    30s by the dashboard, so that's effectively continuous)."""
+    each of the NUM_BOTS tracked buckets' current share. Every poll,
+    whatever changed in real equity since the last check gets distributed
+    proportionally across all bots (see _rebalance_bots) so they all
+    compound together in real time."""
     if not (ALPACA_KEY and ALPACA_SECRET):
         raise HTTPException(status_code=500, detail="Alpaca credentials not configured")
 
@@ -141,39 +179,17 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
     session_pl = equity - last_equity
     session_pl_pct = (session_pl / last_equity * 100) if last_equity else 0.0
 
-    state = await _get_or_create_state(db, equity)
-    mirrors = await _get_mirrors(db)
-    total_committed = state.base_capital + sum(m.base_capital for m in mirrors)
-
-    compounded = 0.0
-    profit = equity - total_committed
-    while profit >= AUTO_COMPOUND_INCREMENT:
-        state.base_capital += AUTO_COMPOUND_INCREMENT
-        profit -= AUTO_COMPOUND_INCREMENT
-        compounded += AUTO_COMPOUND_INCREMENT
-    if compounded > 0:
-        log.info(f"Auto-compounded ${compounded:.2f} into base capital | new base: ${state.base_capital:.2f}")
-
-    # Peel off a new mirror for every full $2,000 the main bucket has
-    # accumulated. Each mirror locks in at a fixed AUTO_MIRROR_INCREMENT
-    # and stops growing - the main bucket keeps whatever's left over and
-    # keeps compounding toward the next one.
-    mirrors_created = []
-    while state.base_capital >= AUTO_MIRROR_INCREMENT:
-        state.base_capital -= AUTO_MIRROR_INCREMENT
-        mirror_name = f"{MIRROR_PREFIX}{len(mirrors) + len(mirrors_created) + 1}"
-        new_mirror = TradingBotState(bot_name=mirror_name, base_capital=AUTO_MIRROR_INCREMENT)
-        db.add(new_mirror)
-        mirrors_created.append(mirror_name)
-        log.info(f"🪞 Mirror created: {mirror_name} locked in at ${AUTO_MIRROR_INCREMENT:.2f} | main bucket remainder: ${state.base_capital:.2f}")
-
-    if compounded > 0 or mirrors_created:
+    bots = await _get_or_init_bots(db, equity)
+    rebalanced = _rebalance_bots(bots, equity)
+    if rebalanced != 0.0:
         await db.commit()
-        await db.refresh(state)
-        mirrors = await _get_mirrors(db)
-        total_committed = state.base_capital + sum(m.base_capital for m in mirrors)
+        for bot in bots:
+            await db.refresh(bot)
+        log.info(f"Rebalanced ${rebalanced:+.2f} across {len(bots)} bots proportionally to their current share")
 
-    result = await db.execute(select(WithdrawalRequest).where(WithdrawalRequest.bot_name == BOT_NAME))
+    total_committed = sum(b.base_capital for b in bots)
+
+    result = await db.execute(select(WithdrawalRequest))
     all_withdrawals = result.scalars().all()
     total_withdrawn = sum(w.amount for w in all_withdrawals if w.status == "completed")
 
@@ -185,29 +201,28 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
         "session_pl_pct": session_pl_pct,
         "active_positions": len(positions),
         "todays_trade_count": len(todays_orders),
-        "base_capital": state.base_capital,
-        "total_committed_capital": total_committed,
-        "mirrors": [{"name": m.bot_name, "base_capital": m.base_capital} for m in mirrors],
-        "mirror_increment": AUTO_MIRROR_INCREMENT,
-        "mirrors_created_this_check": mirrors_created,
-        "profit_available": max(profit, 0.0),
+        "bots": [{"name": b.bot_name, "capital": round(b.base_capital, 2)} for b in bots],
+        "total_committed_capital": round(total_committed, 2),
+        "rebalanced_this_check": round(rebalanced, 2),
         "total_withdrawn": total_withdrawn,
-        "auto_compounded_this_check": compounded,
         "live_trading": os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true",
         "stop_trading": os.getenv("STOP_TRADING", "false").lower() == "true",
     }
 
 
 class WithdrawRequestBody(BaseModel):
+    bot_name: str
     amount: float
 
 
 @router.post("/withdraw-request", dependencies=[Depends(require_admin_key)])
 async def create_withdrawal_request(payload: WithdrawRequestBody, db: AsyncSession = Depends(get_db)):
-    """Logs a real withdrawal request. Does not move any money - the actual
-    ACH transfer has to be done manually in Alpaca's app (see module
-    docstring). Validates the amount against currently available profit so
-    you can't request more than what's actually sitting there."""
+    """Logs a real withdrawal request against one specific bot's tracked
+    capital. Does not move any money - the actual ACH transfer has to be
+    done manually in Alpaca's app (see module docstring). Each bot's
+    entire tracked balance is individually withdrawable (no separate
+    floor/profit split per bucket) - validates against that bot's own
+    current share, not the account total."""
     if payload.amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be positive")
 
@@ -215,53 +230,56 @@ async def create_withdrawal_request(payload: WithdrawRequestBody, db: AsyncSessi
         account = await _fetch_alpaca_account(session)
     equity = float(account["equity"])
 
-    result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == BOT_NAME))
-    state = result.scalar_one_or_none()
-    if not state:
-        raise HTTPException(status_code=400, detail="No base capital tracked yet - call /status first")
-    mirrors = await _get_mirrors(db)
-    total_committed = state.base_capital + sum(m.base_capital for m in mirrors)
+    bots = await _get_or_init_bots(db, equity)
+    bot = next((b for b in bots if b.bot_name == payload.bot_name), None)
+    if not bot:
+        valid_names = ", ".join(b.bot_name for b in bots)
+        raise HTTPException(status_code=400, detail=f"Unknown bot '{payload.bot_name}' - must be one of: {valid_names}")
 
-    available_profit = equity - total_committed
-    if payload.amount > available_profit:
+    if payload.amount > bot.base_capital:
         raise HTTPException(
             status_code=400,
-            detail=f"Requested ${payload.amount:.2f} exceeds available profit (${available_profit:.2f})",
+            detail=f"Requested ${payload.amount:.2f} exceeds {bot.bot_name}'s tracked capital (${bot.base_capital:.2f})",
         )
 
-    withdrawal = WithdrawalRequest(bot_name=BOT_NAME, amount=payload.amount, status="requested")
+    withdrawal = WithdrawalRequest(bot_name=bot.bot_name, amount=payload.amount, status="requested")
     db.add(withdrawal)
     await db.commit()
     await db.refresh(withdrawal)
-    log.info(f"Withdrawal requested: ${payload.amount:.2f} (id={withdrawal.id})")
+    log.info(f"Withdrawal requested from {bot.bot_name}: ${payload.amount:.2f} (id={withdrawal.id})")
     return withdrawal.to_dict()
 
 
 @router.post("/withdraw-request/{withdrawal_id}/complete", dependencies=[Depends(require_admin_key)])
 async def complete_withdrawal_request(withdrawal_id: int, db: AsyncSession = Depends(get_db)):
     """Mark a withdrawal request completed once you've actually done the
-    real transfer manually in Alpaca's app."""
+    real transfer manually in Alpaca's app - this is also when the
+    specific bot's tracked capital actually gets reduced by the withdrawn
+    amount, so the next /status rebalance correctly treats the transfer as
+    money that left (attributed to that one bot), not as trading loss
+    smeared proportionally across every bot."""
     withdrawal = await db.get(WithdrawalRequest, withdrawal_id)
     if not withdrawal:
         raise HTTPException(status_code=404, detail="Withdrawal request not found")
     if withdrawal.status == "completed":
         return withdrawal.to_dict()
 
+    result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == withdrawal.bot_name))
+    bot = result.scalar_one_or_none()
+    if bot:
+        bot.base_capital = max(bot.base_capital - withdrawal.amount, 0.0)
+
     withdrawal.status = "completed"
     withdrawal.completed_at = datetime.utcnow()
     await db.commit()
     await db.refresh(withdrawal)
-    log.info(f"Withdrawal marked completed: ${withdrawal.amount:.2f} (id={withdrawal.id})")
+    log.info(f"Withdrawal marked completed: ${withdrawal.amount:.2f} from {withdrawal.bot_name} (id={withdrawal.id})")
     return withdrawal.to_dict()
 
 
 @router.get("/withdrawals", dependencies=[Depends(require_admin_key)])
 async def list_withdrawals(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(WithdrawalRequest)
-        .where(WithdrawalRequest.bot_name == BOT_NAME)
-        .order_by(WithdrawalRequest.requested_at.desc())
-    )
+    result = await db.execute(select(WithdrawalRequest).order_by(WithdrawalRequest.requested_at.desc()))
     withdrawals = result.scalars().all()
     return {"withdrawals": [w.to_dict() for w in withdrawals]}
 

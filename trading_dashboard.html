@@ -588,29 +588,31 @@
         </div>
 
         <div class="panel">
-            <h3>🪞 Mirror Bots</h3>
+            <h3>🤖 8 Bots</h3>
             <p style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">
-                Every $<span id="mirrorIncrementLabel">2,000</span> the bot compounds gets locked in as a separate tracked bucket -
-                same real account and real trades underneath, just split out on this dashboard as it grows.
+                One real Alpaca account and one real set of trades underneath, tracked here as 8 separate buckets.
+                Every real gain or loss is split proportionally across all 8, so they all compound together - and
+                each one is individually withdrawable below without freezing the rest.
             </p>
-            <div id="mirrorsList">Loading...</div>
+            <div id="botsList">Loading...</div>
         </div>
 
         <div class="withdrawal-panel">
-            <h2>💰 WITHDRAW PROFIT (Keep $<span id="baseCapitalHeading">980</span> for Bot)</h2>
+            <h2>💰 WITHDRAW FROM A BOT</h2>
             <p style="color: #00cc00; font-size: 0.85em; margin-top: -10px; margin-bottom: 15px;">
-                🔄 Auto-compound: every $100 of profit is automatically added to base capital
+                Each bot's entire tracked balance is individually withdrawable - whatever's left behind keeps compounding.
             </p>
-            <div style="display: grid; grid-template-columns: 1fr auto auto; gap: 15px; align-items: center;">
+            <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 15px; align-items: center;">
                 <div style="text-align: left;">
-                    <p style="color: #ffaa00; font-size: 1.1em; margin-bottom: 5px;">Profit Available:</p>
-                    <p style="color: #00ff00; font-size: 1.8em; font-weight: bold;" id="profitAmount">$0.00</p>
+                    <p style="color: #ffaa00; font-size: 1.1em; margin-bottom: 5px;">Bot:</p>
+                    <select id="withdrawBotSelect" onchange="updateWithdrawBotBalance(lastStatus)" style="font-size: 1.1em; padding: 8px; background: rgba(0,0,0,0.3); color: #00ff00; border: 1px solid #00aa00; border-radius: 4px;">
+                    </select>
                 </div>
-                <div style="text-align: center; padding: 15px; background: rgba(0,0,0,0.3); border-radius: 4px;">
-                    <p style="color: #00aa00; font-size: 0.9em;">Base Capital</p>
-                    <p style="color: #00ff00; font-size: 1.5em; font-weight: bold;" id="baseCapitalDisplay">$980.00</p>
+                <div style="text-align: left;">
+                    <p style="color: #ffaa00; font-size: 1.1em; margin-bottom: 5px;">Amount (available: $<span id="withdrawBotBalance">0.00</span>):</p>
+                    <input type="number" id="withdrawAmountInput" min="0" step="0.01" style="font-size: 1.3em; padding: 8px; width: 100%; background: rgba(0,0,0,0.3); color: #00ff00; border: 1px solid #00aa00; border-radius: 4px;">
                 </div>
-                <button class="btn-withdraw" onclick="withdrawProfit()" style="height: 60px; font-size: 1.1em; padding: 0 30px;">💵 WITHDRAW<br>PROFIT</button>
+                <button class="btn-withdraw" onclick="withdrawFromBot()" style="height: 60px; font-size: 1.1em; padding: 0 30px;">💵 WITHDRAW</button>
             </div>
             <div id="withdrawalStatus" class="withdrawal-status">
                 <div id="withdrawalMessage">Processing...</div>
@@ -669,6 +671,7 @@
         let lastTradeCount = null;
         let lastActivePositions = null;
         let lastSignalStatus = {};
+        let lastStatus = null;
 
         function ensureAdminKey() {
             if (!adminKey) {
@@ -816,58 +819,48 @@
                 : '📄 PAPER TRADING';
             document.getElementById('nextCycle').textContent = 'Refreshes every 30s';
 
-            document.getElementById('profitAmount').textContent = '$' + status.profit_available.toFixed(2);
-            document.getElementById('profitAmount').style.color = status.profit_available >= 0 ? '#00ff00' : '#ff6666';
-
-            document.getElementById('baseCapitalDisplay').textContent = '$' + status.total_committed_capital.toFixed(2);
-            document.getElementById('baseCapitalHeading').textContent = status.total_committed_capital.toFixed(0);
-
             document.getElementById('totalHeld').textContent = '$' + status.equity.toFixed(2);
             document.getElementById('totalWithdrawn').textContent = '$' + status.total_withdrawn.toFixed(2);
 
-            renderMirrors(status);
+            renderBots(status);
 
-            if (status.auto_compounded_this_check > 0) {
+            if (Math.abs(status.rebalanced_this_check) > 0.01) {
                 logEvent(
-                    `🔄 AUTO-COMPOUND: $${status.auto_compounded_this_check.toFixed(2)} profit moved to base capital | New base: $${status.base_capital.toFixed(2)}`,
-                    'buy'
-                );
-            }
-            for (const mirrorName of (status.mirrors_created_this_check || [])) {
-                logEvent(
-                    `🪞 ${mirrorName.replace('_', ' #')} created — $${status.mirror_increment.toFixed(2)} locked in, growing separately on the dashboard`,
-                    'buy'
+                    `${status.rebalanced_this_check > 0 ? '🔄' : '📉'} $${status.rebalanced_this_check.toFixed(2)} ${status.rebalanced_this_check > 0 ? 'gained' : 'lost'} — split proportionally across all ${status.bots.length} bots`,
+                    status.rebalanced_this_check > 0 ? 'buy' : 'sell'
                 );
             }
         }
 
-        function renderMirrors(status) {
-            document.getElementById('mirrorIncrementLabel').textContent = status.mirror_increment.toLocaleString();
-            const container = document.getElementById('mirrorsList');
-            const mirrors = status.mirrors || [];
+        let lastBotSelectValue = null;
 
-            if (mirrors.length === 0) {
-                const remaining = status.mirror_increment - status.base_capital;
-                container.innerHTML = `<p style="color: #ccffcc;">No mirrors yet — main bucket is $${status.base_capital.toFixed(2)} of $${status.mirror_increment.toFixed(2)}
-                    (about $${Math.max(remaining, 0).toFixed(2)} of compounded profit to go before the first mirror splits off).</p>`;
-                return;
-            }
+        function renderBots(status) {
+            lastStatus = status;
+            const container = document.getElementById('botsList');
+            const bots = status.bots || [];
 
-            let rows = mirrors.map(m => `
+            container.innerHTML = bots.map(b => `
                 <div class="pair">
-                    <span class="pair-name">${m.name.replace('_', ' #')}</span>
-                    <span class="pair-status status-holding-long">$${m.base_capital.toFixed(2)} (locked in)</span>
+                    <span class="pair-name">${b.name.replace('_', ' #')}</span>
+                    <span class="pair-status status-holding-long">$${b.capital.toFixed(2)}</span>
                 </div>
             `).join('');
 
-            rows += `
-                <div class="pair">
-                    <span class="pair-name">Main bucket (growing toward next mirror)</span>
-                    <span class="pair-status status-buy-zone">$${status.base_capital.toFixed(2)} / $${status.mirror_increment.toFixed(2)}</span>
-                </div>
-            `;
+            const select = document.getElementById('withdrawBotSelect');
+            const previousValue = select.value || lastBotSelectValue;
+            select.innerHTML = bots.map(b => `<option value="${b.name}">${b.name.replace('_', ' #')} — $${b.capital.toFixed(2)}</option>`).join('');
+            if (previousValue && bots.some(b => b.name === previousValue)) {
+                select.value = previousValue;
+            }
+            lastBotSelectValue = select.value;
+            updateWithdrawBotBalance(status);
+        }
 
-            container.innerHTML = rows;
+        function updateWithdrawBotBalance(status) {
+            if (!status) return;
+            const select = document.getElementById('withdrawBotSelect');
+            const bot = (status.bots || []).find(b => b.name === select.value);
+            document.getElementById('withdrawBotBalance').textContent = bot ? bot.capital.toFixed(2) : '0.00';
         }
 
         async function refreshDividends() {
@@ -932,18 +925,16 @@
             });
         }
 
-        async function withdrawProfit() {
-            let status;
-            try {
-                status = await apiFetch('/status');
-            } catch (e) {
-                showWithdrawalStatus('❌ ' + e.message, 'error');
+        async function withdrawFromBot() {
+            const botName = document.getElementById('withdrawBotSelect').value;
+            const amount = parseFloat(document.getElementById('withdrawAmountInput').value);
+
+            if (!botName) {
+                showWithdrawalStatus('❌ No bot selected', 'error');
                 return;
             }
-
-            const profit = status.profit_available;
-            if (profit <= 0) {
-                showWithdrawalStatus('❌ No profit to withdraw yet', 'error');
+            if (!amount || amount <= 0) {
+                showWithdrawalStatus('❌ Enter an amount to withdraw', 'error');
                 return;
             }
 
@@ -951,17 +942,19 @@
             try {
                 const withdrawal = await apiFetch('/withdraw-request', {
                     method: 'POST',
-                    body: JSON.stringify({ amount: profit }),
+                    body: JSON.stringify({ bot_name: botName, amount: amount }),
                 });
                 logEvent(
-                    `💵 WITHDRAWAL REQUESTED: $${withdrawal.amount.toFixed(2)} | Ref: #${withdrawal.id} | Complete the real transfer manually in Alpaca's app, then mark it Completed below`,
+                    `💵 WITHDRAWAL REQUESTED: $${withdrawal.amount.toFixed(2)} from ${botName.replace('_', ' #')} | Ref: #${withdrawal.id} | Complete the real transfer manually in Alpaca's app, then mark it Completed below`,
                     'sell'
                 );
                 showWithdrawalStatus(
-                    `✅ Withdrawal request #${withdrawal.id} logged for $${profit.toFixed(2)}. This does NOT move real money — go complete the actual transfer in Alpaca's app, then mark it "Completed" in the table below.`,
+                    `✅ Withdrawal request #${withdrawal.id} logged for $${amount.toFixed(2)} from ${botName.replace('_', ' #')}. This does NOT move real money — go complete the actual transfer in Alpaca's app, then mark it "Completed" in the table below.`,
                     'success'
                 );
+                document.getElementById('withdrawAmountInput').value = '';
                 await refreshWithdrawals();
+                await refreshStatus();
             } catch (e) {
                 showWithdrawalStatus('❌ ' + e.message, 'error');
             }
