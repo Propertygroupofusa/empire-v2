@@ -46,6 +46,26 @@ ALPACA_HEADERS = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_S
 
 AUTO_COMPOUND_INCREMENT = 100.0
 
+# Every time the main bot's own compounding bucket reaches this much, peel
+# off a "mirror" - a separate tracked capital bucket that locks in at
+# exactly this amount and stops growing, freeing the main bucket to start
+# accumulating toward the next one. This is a bookkeeping split, not a
+# real separate brokerage account: every mirror's dollars are still part
+# of the same real Alpaca equity and the same real trades prop_bot.py
+# places - "mirror" here means "a separate line item on the dashboard",
+# not a separate pool of buying power.
+AUTO_MIRROR_INCREMENT = float(os.getenv("PROP_MIRROR_INCREMENT", "2000"))
+MIRROR_PREFIX = "mirror_"
+
+
+async def _get_mirrors(db: AsyncSession) -> list[TradingBotState]:
+    result = await db.execute(
+        select(TradingBotState)
+        .where(TradingBotState.bot_name.like(f"{MIRROR_PREFIX}%"))
+        .order_by(TradingBotState.bot_name)
+    )
+    return list(result.scalars().all())
+
 
 async def _get_or_create_state(db: AsyncSession, current_equity: float) -> TradingBotState:
     result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == BOT_NAME))
@@ -108,17 +128,36 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
     session_pl_pct = (session_pl / last_equity * 100) if last_equity else 0.0
 
     state = await _get_or_create_state(db, equity)
+    mirrors = await _get_mirrors(db)
+    total_committed = state.base_capital + sum(m.base_capital for m in mirrors)
 
     compounded = 0.0
-    profit = equity - state.base_capital
+    profit = equity - total_committed
     while profit >= AUTO_COMPOUND_INCREMENT:
         state.base_capital += AUTO_COMPOUND_INCREMENT
         profit -= AUTO_COMPOUND_INCREMENT
         compounded += AUTO_COMPOUND_INCREMENT
     if compounded > 0:
+        log.info(f"Auto-compounded ${compounded:.2f} into base capital | new base: ${state.base_capital:.2f}")
+
+    # Peel off a new mirror for every full $2,000 the main bucket has
+    # accumulated. Each mirror locks in at a fixed AUTO_MIRROR_INCREMENT
+    # and stops growing - the main bucket keeps whatever's left over and
+    # keeps compounding toward the next one.
+    mirrors_created = []
+    while state.base_capital >= AUTO_MIRROR_INCREMENT:
+        state.base_capital -= AUTO_MIRROR_INCREMENT
+        mirror_name = f"{MIRROR_PREFIX}{len(mirrors) + len(mirrors_created) + 1}"
+        new_mirror = TradingBotState(bot_name=mirror_name, base_capital=AUTO_MIRROR_INCREMENT)
+        db.add(new_mirror)
+        mirrors_created.append(mirror_name)
+        log.info(f"🪞 Mirror created: {mirror_name} locked in at ${AUTO_MIRROR_INCREMENT:.2f} | main bucket remainder: ${state.base_capital:.2f}")
+
+    if compounded > 0 or mirrors_created:
         await db.commit()
         await db.refresh(state)
-        log.info(f"Auto-compounded ${compounded:.2f} into base capital | new base: ${state.base_capital:.2f}")
+        mirrors = await _get_mirrors(db)
+        total_committed = state.base_capital + sum(m.base_capital for m in mirrors)
 
     result = await db.execute(select(WithdrawalRequest).where(WithdrawalRequest.bot_name == BOT_NAME))
     all_withdrawals = result.scalars().all()
@@ -133,6 +172,10 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
         "active_positions": len(positions),
         "todays_trade_count": len(todays_orders),
         "base_capital": state.base_capital,
+        "total_committed_capital": total_committed,
+        "mirrors": [{"name": m.bot_name, "base_capital": m.base_capital} for m in mirrors],
+        "mirror_increment": AUTO_MIRROR_INCREMENT,
+        "mirrors_created_this_check": mirrors_created,
         "profit_available": max(profit, 0.0),
         "total_withdrawn": total_withdrawn,
         "auto_compounded_this_check": compounded,
@@ -162,8 +205,10 @@ async def create_withdrawal_request(payload: WithdrawRequestBody, db: AsyncSessi
     state = result.scalar_one_or_none()
     if not state:
         raise HTTPException(status_code=400, detail="No base capital tracked yet - call /status first")
+    mirrors = await _get_mirrors(db)
+    total_committed = state.base_capital + sum(m.base_capital for m in mirrors)
 
-    available_profit = equity - state.base_capital
+    available_profit = equity - total_committed
     if payload.amount > available_profit:
         raise HTTPException(
             status_code=400,

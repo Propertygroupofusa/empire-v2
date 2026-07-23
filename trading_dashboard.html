@@ -575,6 +575,15 @@
             <div id="projectionTable">Loading...</div>
         </div>
 
+        <div class="panel">
+            <h3>🪞 Mirror Bots</h3>
+            <p style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">
+                Every $<span id="mirrorIncrementLabel">2,000</span> the bot compounds gets locked in as a separate tracked bucket -
+                same real account and real trades underneath, just split out on this dashboard as it grows.
+            </p>
+            <div id="mirrorsList">Loading...</div>
+        </div>
+
         <div class="withdrawal-panel">
             <h2>💰 WITHDRAW PROFIT (Keep $<span id="baseCapitalHeading">980</span> for Bot)</h2>
             <p style="color: #00cc00; font-size: 0.85em; margin-top: -10px; margin-bottom: 15px;">
@@ -798,11 +807,13 @@
             document.getElementById('profitAmount').textContent = '$' + status.profit_available.toFixed(2);
             document.getElementById('profitAmount').style.color = status.profit_available >= 0 ? '#00ff00' : '#ff6666';
 
-            document.getElementById('baseCapitalDisplay').textContent = '$' + status.base_capital.toFixed(2);
-            document.getElementById('baseCapitalHeading').textContent = status.base_capital.toFixed(0);
+            document.getElementById('baseCapitalDisplay').textContent = '$' + status.total_committed_capital.toFixed(2);
+            document.getElementById('baseCapitalHeading').textContent = status.total_committed_capital.toFixed(0);
 
             document.getElementById('totalHeld').textContent = '$' + status.equity.toFixed(2);
             document.getElementById('totalWithdrawn').textContent = '$' + status.total_withdrawn.toFixed(2);
+
+            renderMirrors(status);
 
             if (status.auto_compounded_this_check > 0) {
                 logEvent(
@@ -810,6 +821,41 @@
                     'buy'
                 );
             }
+            for (const mirrorName of (status.mirrors_created_this_check || [])) {
+                logEvent(
+                    `🪞 ${mirrorName.replace('_', ' #')} created — $${status.mirror_increment.toFixed(2)} locked in, growing separately on the dashboard`,
+                    'buy'
+                );
+            }
+        }
+
+        function renderMirrors(status) {
+            document.getElementById('mirrorIncrementLabel').textContent = status.mirror_increment.toLocaleString();
+            const container = document.getElementById('mirrorsList');
+            const mirrors = status.mirrors || [];
+
+            if (mirrors.length === 0) {
+                const remaining = status.mirror_increment - status.base_capital;
+                container.innerHTML = `<p style="color: #ccffcc;">No mirrors yet — main bucket is $${status.base_capital.toFixed(2)} of $${status.mirror_increment.toFixed(2)}
+                    (about $${Math.max(remaining, 0).toFixed(2)} of compounded profit to go before the first mirror splits off).</p>`;
+                return;
+            }
+
+            let rows = mirrors.map(m => `
+                <div class="pair">
+                    <span class="pair-name">${m.name.replace('_', ' #')}</span>
+                    <span class="pair-status status-holding-long">$${m.base_capital.toFixed(2)} (locked in)</span>
+                </div>
+            `).join('');
+
+            rows += `
+                <div class="pair">
+                    <span class="pair-name">Main bucket (growing toward next mirror)</span>
+                    <span class="pair-status status-buy-zone">$${status.base_capital.toFixed(2)} / $${status.mirror_increment.toFixed(2)}</span>
+                </div>
+            `;
+
+            container.innerHTML = rows;
         }
 
         async function refreshWithdrawals() {
