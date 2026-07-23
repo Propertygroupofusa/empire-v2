@@ -576,6 +576,18 @@
         </div>
 
         <div class="panel">
+            <h3>💵 Dividend Tracker</h3>
+            <p style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">
+                Real dividend cash actually received (Alpaca account activity history) - not projected or estimated.
+                Dividend cash lands in the same balance shown above and is already covered by the withdrawal panel
+                below, so there's nothing separate to withdraw here. Upcoming payment dates/yields aren't shown -
+                that needs a data entitlement this account may not have, and this panel won't guess.
+            </p>
+            <div id="dividendSummary">Loading...</div>
+            <div id="dividendList"></div>
+        </div>
+
+        <div class="panel">
             <h3>🪞 Mirror Bots</h3>
             <p style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">
                 Every $<span id="mirrorIncrementLabel">2,000</span> the bot compounds gets locked in as a separate tracked bucket -
@@ -858,6 +870,35 @@
             container.innerHTML = rows;
         }
 
+        async function refreshDividends() {
+            let data;
+            try {
+                data = await apiFetch('/dividends');
+            } catch (e) {
+                document.getElementById('dividendSummary').textContent = '❌ ' + e.message;
+                return;
+            }
+
+            document.getElementById('dividendSummary').innerHTML =
+                `<p style="color: #00ff00; font-size: 1.3em; font-weight: bold; margin-bottom: 10px;">` +
+                `Total dividends received: $${data.total_dividends_received.toFixed(2)}</p>`;
+
+            const listEl = document.getElementById('dividendList');
+            if (data.dividend_payers.length === 0) {
+                listEl.innerHTML = `<p style="color: #ccffcc;">No dividend payments recorded yet in this account's activity history.</p>`;
+                return;
+            }
+
+            listEl.innerHTML = data.dividend_payers.map(d => `
+                <div class="pair">
+                    <span class="pair-name">${d.symbol}</span>
+                    <span class="pair-status status-holding-long">
+                        $${d.total_received.toFixed(2)} received (${d.payment_count} payment${d.payment_count === 1 ? '' : 's'}, last ${d.last_payment_date || 'unknown'})
+                    </span>
+                </div>
+            `).join('');
+        }
+
         async function refreshWithdrawals() {
             let data;
             try {
@@ -1016,9 +1057,11 @@
         refreshStatus();
         refreshWithdrawals();
         refreshSignals();
+        refreshDividends();
         setInterval(refreshStatus, 30000);
         setInterval(refreshWithdrawals, 30000);
         setInterval(refreshSignals, 30000);
+        setInterval(refreshDividends, 300000); // dividends don't change fast - every 5 min is plenty
     </script>
 </body>
 </html>
