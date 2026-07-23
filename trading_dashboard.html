@@ -568,6 +568,15 @@
         </div>
 
         <div class="panel">
+            <h3>⚖️ Margin & Shorting Status</h3>
+            <p style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">
+                Real account data from Alpaca, not a code setting - shorting requires a real margin account, which
+                federal Reg T rules gate behind a minimum equity requirement, regardless of any toggle in Alpaca's UI.
+            </p>
+            <div id="marginStatus">Loading...</div>
+        </div>
+
+        <div class="panel">
             <h3>📈 Path to $1,000/day</h3>
             <p style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">
                 Compounding math off your real account equity — not a guarantee. Real returns vary day to day and can be negative.
@@ -672,6 +681,7 @@
         let lastActivePositions = null;
         let lastSignalStatus = {};
         let lastStatus = null;
+        let lastShortingEnabled = null;
 
         function ensureAdminKey() {
             if (!adminKey) {
@@ -823,6 +833,7 @@
             document.getElementById('totalWithdrawn').textContent = '$' + status.total_withdrawn.toFixed(2);
 
             renderBots(status);
+            renderMarginStatus(status);
 
             if (Math.abs(status.rebalanced_this_check) > 0.01) {
                 logEvent(
@@ -861,6 +872,57 @@
             const select = document.getElementById('withdrawBotSelect');
             const bot = (status.bots || []).find(b => b.name === select.value);
             document.getElementById('withdrawBotBalance').textContent = bot ? bot.capital.toFixed(2) : '0.00';
+        }
+
+        function renderMarginStatus(status) {
+            const container = document.getElementById('marginStatus');
+            const multiplier = status.margin_multiplier;
+            const shortingEnabled = status.shorting_enabled;
+            const minEquity = status.margin_min_equity;
+            const equity = status.equity;
+
+            const multiplierLabel = multiplier === null || multiplier === undefined
+                ? 'unknown'
+                : (String(multiplier) === '1' ? '1x (cash account - no margin)' : `${multiplier}x margin`);
+
+            const shortingLabel = shortingEnabled === null || shortingEnabled === undefined
+                ? 'unknown'
+                : (shortingEnabled ? '✅ Enabled - the bot can open real shorts' : '❌ Not enabled - new SHORT entries are skipped');
+
+            let progressHtml = '';
+            if (shortingEnabled === false && minEquity) {
+                const remaining = Math.max(minEquity - equity, 0);
+                const pct = Math.min((equity / minEquity) * 100, 100);
+                progressHtml = `
+                    <p style="color: #ffaa00; font-size: 0.85em; margin-top: 10px;">
+                        Real Reg T minimum to open a margin account: $${minEquity.toFixed(2)}. Current equity: $${equity.toFixed(2)}
+                        (about $${remaining.toFixed(2)} to go, ${pct.toFixed(1)}% of the way there). This is a federal requirement,
+                        not a setting either side can change - shorting should start working automatically once equity crosses this line.
+                    </p>
+                `;
+            }
+
+            container.innerHTML = `
+                <div class="pair">
+                    <span class="pair-name">Margin Multiplier</span>
+                    <span class="pair-status ${String(multiplier) === '1' ? 'status-neutral' : 'status-holding-long'}">${multiplierLabel}</span>
+                </div>
+                <div class="pair">
+                    <span class="pair-name">Shorting</span>
+                    <span class="pair-status ${shortingEnabled ? 'status-holding-long' : 'status-short-zone'}">${shortingLabel}</span>
+                </div>
+                ${progressHtml}
+            `;
+
+            if (lastShortingEnabled !== null && lastShortingEnabled !== shortingEnabled && shortingEnabled !== null && shortingEnabled !== undefined) {
+                logEvent(
+                    shortingEnabled
+                        ? '🎉 Margin/shorting is now ENABLED on the account - the bot will start opening real shorts on the next signal'
+                        : '⚠️ Shorting is no longer enabled on the account - new SHORT entries will be skipped',
+                    shortingEnabled ? 'buy' : 'sell'
+                );
+            }
+            lastShortingEnabled = shortingEnabled;
         }
 
         async function refreshDividends() {

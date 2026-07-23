@@ -57,6 +57,14 @@ LEGACY_MIRROR_PREFIX = "mirror_"
 NUM_BOTS = int(os.getenv("PROP_NUM_BOTS", "8"))
 BOT_PREFIX = "bot_"
 
+# Reg T's real minimum equity to open a margin account (and therefore be
+# eligible for shorting) - a federal requirement, not an Alpaca setting or
+# anything this app can change. Confirmed directly against the real
+# account: multiplier stayed at 1 (cash-account behavior) even after
+# selecting a margin multiplier preference in Alpaca's UI, because the
+# account sits below this threshold.
+MARGIN_MIN_EQUITY = 2000.0
+
 
 async def _get_or_init_bots(db: AsyncSession, current_equity: float) -> list:
     """Fetches the NUM_BOTS tracked buckets, creating them on first call.
@@ -179,6 +187,17 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
     session_pl = equity - last_equity
     session_pl_pct = (session_pl / last_equity * 100) if last_equity else 0.0
 
+    # Real account.multiplier/shorting_enabled fields - confirmed via a
+    # direct account check that this account sits at multiplier=1
+    # (cash-account behavior) despite "Shorting Enabled" being toggled on
+    # in Alpaca's UI, because margin hasn't actually been granted yet.
+    # MARGIN_MIN_EQUITY is Reg T's real ~$2,000 minimum to open a margin
+    # account - not a setting either side of this app can change; shown
+    # purely so the dashboard reflects why shorting is blocked instead of
+    # that only being visible by manually querying the account.
+    margin_multiplier = account.get("multiplier")
+    shorting_enabled = account.get("shorting_enabled")
+
     bots = await _get_or_init_bots(db, equity)
     rebalanced = _rebalance_bots(bots, equity)
     if rebalanced != 0.0:
@@ -205,6 +224,9 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
         "total_committed_capital": round(total_committed, 2),
         "rebalanced_this_check": round(rebalanced, 2),
         "total_withdrawn": total_withdrawn,
+        "margin_multiplier": margin_multiplier,
+        "shorting_enabled": shorting_enabled,
+        "margin_min_equity": MARGIN_MIN_EQUITY,
         "live_trading": os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true",
         "stop_trading": os.getenv("STOP_TRADING", "false").lower() == "true",
     }
