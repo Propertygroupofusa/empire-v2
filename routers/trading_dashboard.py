@@ -81,6 +81,20 @@ async def _get_or_create_state(db: AsyncSession, current_equity: float) -> Tradi
     return state
 
 
+async def _fetch_dividend_activities(session: aiohttp.ClientSession) -> list:
+    """Real dividend cash actually paid into the account, from Alpaca's
+    account-activities history (activity_type=DIV) - not a projection or
+    estimate. Alpaca's standard trading API doesn't expose forward-looking
+    ex-dividend/payment-date schedules (that needs a separate
+    corporate-actions data entitlement this account may not have), so this
+    only ever reflects dividends already received."""
+    params = {"activity_types": "DIV", "direction": "desc", "page_size": "100"}
+    async with session.get(f"{ALPACA_BASE_URL}/v2/account/activities", headers=ALPACA_HEADERS, params=params) as r:
+        if r.status != 200:
+            return []
+        return await r.json()
+
+
 async def _fetch_alpaca_account(session: aiohttp.ClientSession) -> dict:
     async with session.get(f"{ALPACA_BASE_URL}/v2/account", headers=ALPACA_HEADERS) as r:
         if r.status != 200:
@@ -281,4 +295,45 @@ async def get_live_signals():
         "rsi_buy_below": prop_bot_module.RSI_BUY_BELOW,
         "rsi_sell_above": prop_bot_module.RSI_SELL_ABOVE,
         "signals": prop_bot_module.latest_signals,
+    }
+
+
+@router.get("/dividends", dependencies=[Depends(require_admin_key)])
+async def get_dividend_tracker():
+    """Real dividend income received into the account, grouped by symbol -
+    pulled straight from Alpaca's account-activities history (activity
+    type DIV), not estimated or projected. Dividend cash lands in the same
+    real cash balance /status already tracks, so it's already covered by
+    the existing withdraw-profit flow - there's no separate "dividend
+    withdrawal" to build. Forward-looking payment schedules (next
+    ex-dividend date, yield) aren't shown here - Alpaca's standard trading
+    API doesn't expose that; it needs a separate corporate-actions data
+    entitlement this account may not have, and this endpoint won't guess."""
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        raise HTTPException(status_code=500, detail="Alpaca credentials not configured")
+
+    async with aiohttp.ClientSession() as session:
+        activities = await _fetch_dividend_activities(session)
+        positions = await _fetch_alpaca_positions(session)
+
+    by_symbol = {}
+    total_received = 0.0
+    for a in activities:
+        symbol = a.get("symbol") or "UNKNOWN"
+        amount = float(a.get("net_amount") or a.get("amount") or 0)
+        entry = by_symbol.setdefault(symbol, {"symbol": symbol, "total_received": 0.0, "payment_count": 0, "last_payment_date": None})
+        entry["total_received"] += amount
+        entry["payment_count"] += 1
+        payment_date = a.get("date")
+        if payment_date and (entry["last_payment_date"] is None or payment_date > entry["last_payment_date"]):
+            entry["last_payment_date"] = payment_date
+        total_received += amount
+
+    return {
+        "total_dividends_received": round(total_received, 2),
+        "dividend_payers": sorted(
+            ({**d, "total_received": round(d["total_received"], 2)} for d in by_symbol.values()),
+            key=lambda d: -d["total_received"],
+        ),
+        "currently_held_symbols": sorted({p["symbol"] for p in positions}),
     }
