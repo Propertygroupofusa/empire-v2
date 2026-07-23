@@ -461,7 +461,7 @@
             <div class="stat-card">
                 <h3>Active Positions</h3>
                 <div class="stat-value" id="activePositions">0</div>
-                <p id="positionStatus" style="color: #ffaa00;">Monitoring 5 symbols...</p>
+                <p id="positionStatus" style="color: #ffaa00;">Monitoring 7 symbols...</p>
             </div>
 
             <div class="stat-card">
@@ -523,6 +523,14 @@
                         <span class="pair-name">MGC (GLD proxy)</span>
                         <span class="pair-status" id="sig-MGC">Monitoring...</span>
                     </div>
+                    <div class="pair">
+                        <span class="pair-name">MCL (USO proxy)</span>
+                        <span class="pair-status" id="sig-MCL">Monitoring...</span>
+                    </div>
+                    <div class="pair">
+                        <span class="pair-name">SIL (SLV proxy)</span>
+                        <span class="pair-status" id="sig-SIL">Monitoring...</span>
+                    </div>
                 </div>
             </div>
 
@@ -538,7 +546,7 @@
                 </div>
                 <div class="pair">
                     <span>Max Positions</span>
-                    <span>Up to 5 (1 per symbol)</span>
+                    <span>6 of 7 symbols - weakest losing position rotates out for a fresh signal</span>
                 </div>
                 <div class="pair">
                     <span>Long Entry</span>
@@ -550,7 +558,7 @@
                 </div>
                 <div class="pair">
                     <span>Exit (either)</span>
-                    <span>RSI reverts or +1.5% profit</span>
+                    <span>RSI reverts or profit target (scales $0.25→$0.60 with account equity)</span>
                 </div>
                 <div class="pair">
                     <span>Stop Loss</span>
@@ -697,7 +705,7 @@
 
             document.getElementById('activePositions').textContent = status.active_positions;
             document.getElementById('positionStatus').textContent =
-                status.active_positions > 0 ? `${status.active_positions} open` : 'Monitoring 5 symbols...';
+                status.active_positions > 0 ? `${status.active_positions} open` : 'Monitoring 7 symbols...';
             document.getElementById('tradeCount').textContent = status.todays_trade_count;
 
             if (lastTradeCount !== null && status.todays_trade_count > lastTradeCount) {
@@ -853,7 +861,7 @@
             const STALE_MS = 5 * 60 * 1000; // a symbol that hasn't updated in 5min is worth flagging
             const now = Date.now();
 
-            for (const contract of ['MES', 'MNQ', 'MYM', 'M2K', 'MGC']) {
+            for (const contract of ['MES', 'MNQ', 'MYM', 'M2K', 'MGC', 'MCL', 'SIL']) {
                 const el = document.getElementById('sig-' + contract);
                 const sig = data.signals ? data.signals[contract] : null;
                 if (!sig) {

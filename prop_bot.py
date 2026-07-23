@@ -49,7 +49,36 @@ FUTURES = {
     "MYM": {"name": "Micro E-mini Dow",     "qty": 1, "symbol": "DIA"},   # Use DIA as proxy
     "M2K": {"name": "Micro E-mini Russell", "qty": 1, "symbol": "IWM"},   # Use IWM as proxy
     "MGC": {"name": "Micro Gold",           "qty": 1, "symbol": "GLD"},   # Use GLD as proxy
+    "MCL": {"name": "Micro Crude Oil",      "qty": 1, "symbol": "USO"},   # Use USO as proxy
+    "SIL": {"name": "Micro Silver",         "qty": 1, "symbol": "SLV"},   # Use SLV as proxy
 }
+
+# Max concurrent open positions. With 7 symbols scanned and a 6-position
+# cap, a 7th entry signal while already full triggers rotation (see
+# run_prop_cycle) instead of just being ignored.
+MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", "6"))
+
+# Profit-target price move, in dollars, scaled by real account equity -
+# the bigger the account gets, the larger a favorable price move needs to
+# be before the bot locks in profit early (rather than a flat percentage).
+# Explicit request: start at $0.25, step up to $0.30/$0.45/$0.60 as equity
+# grows into the thousands. Checked against real Alpaca equity each cycle.
+PROFIT_INCREMENT_MILESTONES = [
+    (0,     0.25),
+    (1000,  0.30),
+    (5000,  0.45),
+    (10000, 0.60),
+]
+
+
+def get_profit_increment(equity):
+    if equity is None:
+        return PROFIT_INCREMENT_MILESTONES[0][1]
+    increment = PROFIT_INCREMENT_MILESTONES[0][1]
+    for threshold, inc in PROFIT_INCREMENT_MILESTONES:
+        if equity >= threshold:
+            increment = inc
+    return increment
 
 # Track profitable days for APEX 7-day rule
 profitable_days = []
@@ -120,6 +149,21 @@ async def get_price_rsi(session, symbol):
             return {"price": price, "rsi": round(rsi, 1), "trend": trend}
     except Exception as e:
         log.error(f"Price error {symbol}: {e}")
+        return None
+
+
+async def get_account_equity(session):
+    """Real Alpaca account equity, used to scale the profit-target
+    increment (see PROFIT_INCREMENT_MILESTONES). Falls back to None (base
+    tier) on any failure - a scaling hiccup shouldn't block trading."""
+    try:
+        async with session.get(f"{BASE_URL}/v2/account", headers=HEADERS) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+            return float(data.get("equity", 0))
+    except Exception as e:
+        log.warning(f"Could not fetch account equity for profit-target scaling: {e}")
         return None
 
 
@@ -211,117 +255,171 @@ async def run_prop_cycle():
 
     log.info(f"[APEX_589296] Scanning futures markets ({', '.join(FUTURES)})... | Daily P&L: ${daily_pnl:.2f}")
 
+    async def close_position(session, contract, config, position, price, rsi, trend, reason_label):
+        """Shared close/cover path for both a normal exit and a rotation
+        exit - same order placement, P&L accounting, and alert either way."""
+        side = position["side"]
+        entry = position["entry"]
+        qty = position["qty"]
+        close_action = "SELL" if side == "long" else "BUY"
+        profit_pct = ((price - entry) / entry * 100) if side == "long" else ((entry - price) / entry * 100)
+        pnl = (profit_pct / 100) * entry * qty * 50  # MES point value ~$5 * 10
+
+        filled = await execute_futures_trade(session, contract, close_action, qty, price, rsi, trend, target=price)
+        if not filled:
+            return False
+
+        global daily_pnl
+        daily_pnl += pnl
+        log.info(f"[APEX_589296] 📤 CLOSE {side.upper()} {contract} ({reason_label}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${pnl:.2f} ({profit_pct:.2f}%)")
+        send_trade_alert(
+            f"🤖 Bare Metal Builders — {contract} {side} closed ({reason_label})",
+            f"{side.capitalize()} position closed on APEX_589296:\n\n"
+            f"{contract} | Entry: ${entry:.2f} | Exit: ${price:.2f}\n"
+            f"P&L: ${pnl:.2f} ({profit_pct:.2f}%) | Reason: {reason_label}\n\n"
+            f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
+        )
+        open_prop_positions.pop(contract, None)
+        return True
+
+    async def open_position(session, contract, config, side, price, rsi, trend):
+        action = "BUY" if side == "long" else "SELL"
+        if side == "long":
+            stop_loss, target = price * 0.98, price * 1.03
+        else:
+            stop_loss, target = price * 1.02, price * 0.97
+
+        filled = await execute_futures_trade(session, contract, action, config["qty"], price, rsi, trend, stop_loss, target)
+        if not filled:
+            return False
+
+        open_prop_positions[contract] = {"side": side, "entry": price, "qty": config["qty"]}
+        send_trade_alert(
+            f"🤖 Bare Metal Builders — {side.upper()} {contract} opened",
+            f"{'LIVE' if LIVE_TRADE else 'PAPER'} {side} opened on APEX_589296:\n\n"
+            f"{action} {config['qty']} {contract} ({config['symbol']}) @ ${price:.2f}\n"
+            f"RSI: {rsi} | Trend: {trend}\n\n"
+            f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
+        )
+        return True
+
     async with aiohttp.ClientSession() as session:
+        equity = await get_account_equity(session)
+        profit_increment = get_profit_increment(equity)
+        log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | Profit-target increment: ${profit_increment:.2f}")
+
+        scans = {}
         for contract, config in FUTURES.items():
             data = await get_price_rsi(session, config["symbol"])
+            if data:
+                scans[contract] = data
+                log.info(f"[APEX_589296] {contract} ({config['symbol']}) | ${data['price']:.2f} | RSI:{data['rsi']} | {data['trend']}")
+            await asyncio.sleep(0.3)
+
+        # ── Pass 1: manage exits for symbols already held ────────────────
+        # A long profits as price rises and exits on overbought RSI; a
+        # short profits as price falls and exits on oversold RSI. Profit
+        # target is now a real-dollar price move (see
+        # PROFIT_INCREMENT_MILESTONES), not a flat percentage, and scales
+        # up as the real account grows.
+        for contract, position in list(open_prop_positions.items()):
+            data = scans.get(contract)
+            config = FUTURES[contract]
             if not data:
                 continue
+            price, rsi, trend = data["price"], data["rsi"], data["trend"]
+            latest_signals[contract] = {
+                "symbol": config["symbol"], "price": price, "rsi": rsi, "trend": trend,
+                "status": "HOLDING_LONG" if position["side"] == "long" else "HOLDING_SHORT",
+                "has_position": True, "checked_at": now.isoformat(),
+            }
 
-            price = data["price"]
-            rsi   = data["rsi"]
-            trend = data["trend"]
+            side = position["side"]
+            entry = position["entry"]
+            if side == "long":
+                price_move = price - entry
+                rsi_exit = rsi > RSI_SELL_ABOVE or (trend == "bearish" and rsi > 50)
+            else:
+                price_move = entry - price
+                rsi_exit = rsi < RSI_BUY_BELOW or (trend == "bullish" and rsi < 50)
 
-            log.info(f"[APEX_589296] {contract} ({config['symbol']}) | ${price:.2f} | RSI:{rsi} | {trend}")
+            if price_move >= profit_increment or rsi_exit:
+                reason = "PROFIT TARGET" if price_move >= profit_increment else "RSI"
+                await close_position(session, contract, config, position, price, rsi, trend, reason)
 
-            position = open_prop_positions.get(contract)
-            has_position = position is not None
+            await asyncio.sleep(0.3)
 
-            if has_position:
-                status = "HOLDING_LONG" if position["side"] == "long" else "HOLDING_SHORT"
-            elif rsi < RSI_BUY_BELOW:
+        # ── Pass 2: new entries, with rotation if already at the cap ─────
+        candidates = []
+        for contract, config in FUTURES.items():
+            if contract in open_prop_positions:
+                continue
+            data = scans.get(contract)
+            if not data:
+                continue
+            price, rsi, trend = data["price"], data["rsi"], data["trend"]
+
+            if rsi < RSI_BUY_BELOW:
+                candidates.append((RSI_BUY_BELOW - rsi, contract, config, "long", price, rsi, trend))
                 status = "BUY_ZONE"
             elif rsi > RSI_SELL_ABOVE:
+                candidates.append((rsi - RSI_SELL_ABOVE, contract, config, "short", price, rsi, trend))
                 status = "SHORT_ZONE"
             else:
                 status = "NEUTRAL"
-
             latest_signals[contract] = {
-                "symbol": config["symbol"],
-                "price": price,
-                "rsi": rsi,
-                "trend": trend,
-                "status": status,
-                "has_position": has_position,
-                "checked_at": now.isoformat(),
+                "symbol": config["symbol"], "price": price, "rsi": rsi, "trend": trend,
+                "status": status, "has_position": False, "checked_at": now.isoformat(),
             }
 
-            if not has_position:
-                # Flat - look for a new entry in either direction, so the
-                # bot can make money whether the market is heading up or
-                # down, not just up. RSI oversold opens a LONG (expect a
-                # bounce); RSI overbought opens a SHORT (expect a pullback -
-                # this account has shorting enabled). Trend is logged only,
-                # not a hard filter (see note above on why that gate was
-                # dropped).
-                if rsi < RSI_BUY_BELOW:
-                    log.info(f"[APEX_589296] 📡 LONG {contract} — RSI:{rsi} Trend:{trend}")
-                    stop_loss = price * 0.98  # 2% below entry
-                    target = price * 1.03    # 3% above entry
-                    filled = await execute_futures_trade(session, contract, "BUY", config["qty"], price, rsi, trend, stop_loss, target)
-                    if filled:
-                        open_prop_positions[contract] = {"side": "long", "entry": price, "qty": config["qty"]}
-                        send_trade_alert(
-                            f"🤖 Bare Metal Builders — LONG {contract} opened",
-                            f"{'LIVE' if LIVE_TRADE else 'PAPER'} long opened on APEX_589296:\n\n"
-                            f"BUY {config['qty']} {contract} ({config['symbol']}) @ ${price:.2f}\n"
-                            f"RSI: {rsi} | Trend: {trend}\n\n"
-                            f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
-                        )
-                elif rsi > RSI_SELL_ABOVE:
-                    log.info(f"[APEX_589296] 📡 SHORT {contract} — RSI:{rsi} Trend:{trend}")
-                    stop_loss = price * 1.02  # 2% above entry - a short loses if price rises
-                    target = price * 0.97    # 3% below entry
-                    filled = await execute_futures_trade(session, contract, "SELL", config["qty"], price, rsi, trend, stop_loss, target)
-                    if filled:
-                        open_prop_positions[contract] = {"side": "short", "entry": price, "qty": config["qty"]}
-                        send_trade_alert(
-                            f"🤖 Bare Metal Builders — SHORT {contract} opened",
-                            f"{'LIVE' if LIVE_TRADE else 'PAPER'} short opened on APEX_589296:\n\n"
-                            f"SELL {config['qty']} {contract} ({config['symbol']}) @ ${price:.2f}\n"
-                            f"RSI: {rsi} | Trend: {trend}\n\n"
-                            f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
-                        )
+        candidates.sort(key=lambda c: -c[0])  # strongest (furthest past threshold) first
 
+        for _, contract, config, side, price, rsi, trend in candidates:
+            if len(open_prop_positions) < MAX_POSITIONS:
+                log.info(f"[APEX_589296] 📡 {side.upper()} {contract} — RSI:{rsi} Trend:{trend}")
+                await open_position(session, contract, config, side, price, rsi, trend)
             else:
-                # In a position - exit logic differs by direction: a long
-                # profits as price rises and exits on overbought RSI; a
-                # short profits as price falls and exits on oversold RSI.
-                # Profit-target check is symmetric (1.5% either direction).
-                side = position["side"]
-                entry = position["entry"]
-                qty = position["qty"]
+                # At the cap - find the weakest held position (lowest
+                # unrealized P&L). Only rotate out of it if it's a genuine
+                # loss (strictly negative) - never sell a winning position,
+                # and never a merely-flat one either, since a position that
+                # was *just* opened this same cycle reads as exactly 0% and
+                # would otherwise get rotated out seconds after opening
+                # whenever several signals fire in the same cycle.
+                weakest_contract, weakest_pct = None, None
+                for held_contract, held_pos in open_prop_positions.items():
+                    held_data = scans.get(held_contract)
+                    if not held_data:
+                        continue
+                    held_price = held_data["price"]
+                    held_pct = (
+                        (held_price - held_pos["entry"]) / held_pos["entry"] * 100 if held_pos["side"] == "long"
+                        else (held_pos["entry"] - held_price) / held_pos["entry"] * 100
+                    )
+                    if weakest_pct is None or held_pct < weakest_pct:
+                        weakest_pct, weakest_contract = held_pct, held_contract
 
-                if side == "long":
-                    profit_pct = ((price - entry) / entry) * 100
-                    rsi_exit = rsi > RSI_SELL_ABOVE or (trend == "bearish" and rsi > 50)
-                    close_action = "SELL"
+                if weakest_contract is not None and weakest_pct is not None and weakest_pct < 0:
+                    held_data = scans[weakest_contract]
+                    log.info(
+                        f"[APEX_589296] 🔄 ROTATING: {weakest_contract} ({weakest_pct:.2f}%, weakest of {MAX_POSITIONS}) "
+                        f"→ {contract} (RSI:{rsi} {side})"
+                    )
+                    closed = await close_position(
+                        session, weakest_contract, FUTURES[weakest_contract], open_prop_positions[weakest_contract],
+                        held_data["price"], held_data["rsi"], held_data["trend"], "ROTATED OUT",
+                    )
+                    if closed:
+                        await open_position(session, contract, config, side, price, rsi, trend)
                 else:
-                    profit_pct = ((entry - price) / entry) * 100
-                    rsi_exit = rsi < RSI_BUY_BELOW or (trend == "bullish" and rsi < 50)
-                    close_action = "BUY"
+                    log.info(
+                        f"[APEX_589296] At max positions ({MAX_POSITIONS}) - {contract} {side} signal held, "
+                        f"weakest position ({weakest_contract} {weakest_pct:+.2f}%) isn't a loss, not rotating"
+                        if weakest_contract else
+                        f"[APEX_589296] At max positions ({MAX_POSITIONS}) - {contract} {side} signal held, no rotation candidate"
+                    )
 
-                profit_target_hit = profit_pct >= 1.5  # Exit at +1.5% profit (lock in wins early)
-
-                if profit_target_hit or rsi_exit:
-                    pnl = (profit_pct / 100) * entry * qty * 50  # MES point value ~$5 * 10
-                    exit_reason = "PROFIT TARGET" if profit_target_hit else "RSI"
-
-                    filled = await execute_futures_trade(session, contract, close_action, qty, price, rsi, trend, target=price)
-                    if filled:
-                        daily_pnl += pnl
-                        log.info(f"[APEX_589296] 📤 CLOSE {side.upper()} {contract} ({exit_reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${pnl:.2f} ({profit_pct:.2f}%)")
-
-                        send_trade_alert(
-                            f"🤖 Bare Metal Builders — {contract} {side} closed ({exit_reason})",
-                            f"{side.capitalize()} position closed on APEX_589296:\n\n"
-                            f"{contract} | Entry: ${entry:.2f} | Exit: ${price:.2f}\n"
-                            f"P&L: ${pnl:.2f} ({profit_pct:.2f}%) | Reason: {exit_reason}\n\n"
-                            f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
-                        )
-
-                        open_prop_positions.pop(contract, None)
-
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
 
     # Check if today was profitable
     today = now.strftime("%Y-%m-%d")
