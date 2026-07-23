@@ -149,9 +149,14 @@ async def broadcast_signal_to_subscribers(session, contract, action, price, rsi,
 
 
 async def execute_futures_trade(session, contract, action, qty, price, rsi, trend, stop_loss=None, target=None):
-    """Execute futures trade via Alpaca (using stock proxy for paper)"""
-    global daily_pnl
-
+    """Place a real order via Alpaca. `action` is the literal order side
+    ("BUY" or "SELL") - what that *means* (open a long, open a short, close
+    a long, cover a short) depends on the caller's position state, tracked
+    in run_prop_cycle, not here. This function just places the order,
+    broadcasts the signal, and reports success/failure - it doesn't touch
+    open_prop_positions or send fill emails, since a single fill can mean
+    different things (new entry vs. exit) that the caller knows and this
+    function doesn't."""
     symbol = FUTURES[contract]["symbol"]
     side = "buy" if action == "BUY" else "sell"
 
@@ -170,19 +175,7 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
             result = await r.json()
             if r.status in (200, 201):
                 log.info(f"✅ FUTURES TRADE | {mode} | {action} {qty} {contract} ({symbol}) @ ${price:.2f} | APEX_589296")
-                open_prop_positions[contract] = {"action": action, "entry": price, "qty": qty}
-
-                send_trade_alert(
-                    f"🤖 Bare Metal Builders — {action} {contract} filled",
-                    f"{mode} trade executed on APEX_589296:\n\n"
-                    f"{action} {qty} {contract} ({symbol}) @ ${price:.2f}\n"
-                    f"RSI: {rsi} | Trend: {trend}\n\n"
-                    f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
-                )
-
-                # Broadcast signal to subscribers
                 await broadcast_signal_to_subscribers(session, contract, action, price, rsi, trend, stop_loss, target)
-
                 return True
             else:
                 log.error(f"❌ Futures order failed: {result.get('message', result)}")
@@ -223,14 +216,15 @@ async def run_prop_cycle():
 
             log.info(f"[APEX_589296] {contract} ({config['symbol']}) | ${price:.2f} | RSI:{rsi} | {trend}")
 
-            has_position = contract in open_prop_positions
+            position = open_prop_positions.get(contract)
+            has_position = position is not None
 
             if has_position:
-                status = "HOLDING"
+                status = "HOLDING_LONG" if position["side"] == "long" else "HOLDING_SHORT"
             elif rsi < RSI_BUY_BELOW:
                 status = "BUY_ZONE"
             elif rsi > RSI_SELL_ABOVE:
-                status = "SELL_ZONE"
+                status = "SHORT_ZONE"
             else:
                 status = "NEUTRAL"
 
@@ -244,43 +238,81 @@ async def run_prop_cycle():
                 "checked_at": now.isoformat(),
             }
 
-            # BUY signal — RSI oversold. Trend confirmation is no longer a hard
-            # gate: requiring both oversold AND bullish trend at once across only
-            # a couple of symbols made entries too rare. This is a straight RSI
-            # mean-reversion entry now, with trend kept only as a logged signal
-            # strength indicator, not a filter.
-            if not has_position and rsi < RSI_BUY_BELOW:
-                log.info(f"[APEX_589296] 📡 LONG {contract} — RSI:{rsi} Trend:{trend}")
-                stop_loss = price * 0.98  # 2% below entry
-                target = price * 1.03    # 3% above entry
-                await execute_futures_trade(session, contract, "BUY", config["qty"], price, rsi, trend, stop_loss, target)
+            if not has_position:
+                # Flat - look for a new entry in either direction, so the
+                # bot can make money whether the market is heading up or
+                # down, not just up. RSI oversold opens a LONG (expect a
+                # bounce); RSI overbought opens a SHORT (expect a pullback -
+                # this account has shorting enabled). Trend is logged only,
+                # not a hard filter (see note above on why that gate was
+                # dropped).
+                if rsi < RSI_BUY_BELOW:
+                    log.info(f"[APEX_589296] 📡 LONG {contract} — RSI:{rsi} Trend:{trend}")
+                    stop_loss = price * 0.98  # 2% below entry
+                    target = price * 1.03    # 3% above entry
+                    filled = await execute_futures_trade(session, contract, "BUY", config["qty"], price, rsi, trend, stop_loss, target)
+                    if filled:
+                        open_prop_positions[contract] = {"side": "long", "entry": price, "qty": config["qty"]}
+                        send_trade_alert(
+                            f"🤖 Bare Metal Builders — LONG {contract} opened",
+                            f"{'LIVE' if LIVE_TRADE else 'PAPER'} long opened on APEX_589296:\n\n"
+                            f"BUY {config['qty']} {contract} ({config['symbol']}) @ ${price:.2f}\n"
+                            f"RSI: {rsi} | Trend: {trend}\n\n"
+                            f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
+                        )
+                elif rsi > RSI_SELL_ABOVE:
+                    log.info(f"[APEX_589296] 📡 SHORT {contract} — RSI:{rsi} Trend:{trend}")
+                    stop_loss = price * 1.02  # 2% above entry - a short loses if price rises
+                    target = price * 0.97    # 3% below entry
+                    filled = await execute_futures_trade(session, contract, "SELL", config["qty"], price, rsi, trend, stop_loss, target)
+                    if filled:
+                        open_prop_positions[contract] = {"side": "short", "entry": price, "qty": config["qty"]}
+                        send_trade_alert(
+                            f"🤖 Bare Metal Builders — SHORT {contract} opened",
+                            f"{'LIVE' if LIVE_TRADE else 'PAPER'} short opened on APEX_589296:\n\n"
+                            f"SELL {config['qty']} {contract} ({config['symbol']}) @ ${price:.2f}\n"
+                            f"RSI: {rsi} | Trend: {trend}\n\n"
+                            f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
+                        )
 
-            # SELL signal — RSI overbought, bearish reversal, OR profit target hit
-            elif has_position:
-                entry = open_prop_positions[contract]["entry"]
-                profit_pct = ((price - entry) / entry) * 100
+            else:
+                # In a position - exit logic differs by direction: a long
+                # profits as price rises and exits on overbought RSI; a
+                # short profits as price falls and exits on oversold RSI.
+                # Profit-target check is symmetric (1.5% either direction).
+                side = position["side"]
+                entry = position["entry"]
+                qty = position["qty"]
+
+                if side == "long":
+                    profit_pct = ((price - entry) / entry) * 100
+                    rsi_exit = rsi > RSI_SELL_ABOVE or (trend == "bearish" and rsi > 50)
+                    close_action = "SELL"
+                else:
+                    profit_pct = ((entry - price) / entry) * 100
+                    rsi_exit = rsi < RSI_BUY_BELOW or (trend == "bullish" and rsi < 50)
+                    close_action = "BUY"
+
                 profit_target_hit = profit_pct >= 1.5  # Exit at +1.5% profit (lock in wins early)
-                rsi_exit = rsi > RSI_SELL_ABOVE or (trend == "bearish" and rsi > 50)
 
                 if profit_target_hit or rsi_exit:
-                    pnl = (price - entry) * config["qty"] * 50  # MES point value ~$5 * 10
-                    daily_pnl += pnl
+                    pnl = (profit_pct / 100) * entry * qty * 50  # MES point value ~$5 * 10
                     exit_reason = "PROFIT TARGET" if profit_target_hit else "RSI"
-                    log.info(f"[APEX_589296] 📤 CLOSE {contract} ({exit_reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${pnl:.2f} ({profit_pct:.2f}%)")
 
-                    send_trade_alert(
-                        f"🤖 Bare Metal Builders — {contract} closed ({exit_reason})",
-                        f"Position closed on APEX_589296:\n\n"
-                        f"{contract} | Entry: ${entry:.2f} | Exit: ${price:.2f}\n"
-                        f"P&L: ${pnl:.2f} ({profit_pct:.2f}%) | Reason: {exit_reason}\n\n"
-                        f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
-                    )
+                    filled = await execute_futures_trade(session, contract, close_action, qty, price, rsi, trend, target=price)
+                    if filled:
+                        daily_pnl += pnl
+                        log.info(f"[APEX_589296] 📤 CLOSE {side.upper()} {contract} ({exit_reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${pnl:.2f} ({profit_pct:.2f}%)")
 
-                    # Broadcast close signal to subscribers
-                    target = price
-                    await broadcast_signal_to_subscribers(session, contract, "SELL", price, rsi, trend, target=target)
+                        send_trade_alert(
+                            f"🤖 Bare Metal Builders — {contract} {side} closed ({exit_reason})",
+                            f"{side.capitalize()} position closed on APEX_589296:\n\n"
+                            f"{contract} | Entry: ${entry:.2f} | Exit: ${price:.2f}\n"
+                            f"P&L: ${pnl:.2f} ({profit_pct:.2f}%) | Reason: {exit_reason}\n\n"
+                            f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
+                        )
 
-                    open_prop_positions.pop(contract, None)
+                        open_prop_positions.pop(contract, None)
 
             await asyncio.sleep(0.5)
 
@@ -298,7 +330,7 @@ def run():
     log.info("=" * 60)
     log.info("DEL'S TRADING EMPIRE — PROP BOT v3")
     log.info(f"Account: APEX_589296 | Mode: {'LIVE' if LIVE_TRADE else 'PAPER'}")
-    log.info(f"RSI thresholds: buy < {RSI_BUY_BELOW} | sell > {RSI_SELL_ABOVE}")
+    log.info(f"RSI thresholds: long entry < {RSI_BUY_BELOW} | short entry > {RSI_SELL_ABOVE} (trades both directions)")
     log.info(f"Profitable days: {len(profitable_days)}/7 needed")
     log.info("=" * 60)
 
