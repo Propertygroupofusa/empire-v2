@@ -175,6 +175,12 @@
             color: #00cc00;
         }
 
+        .pair-status.status-buy-zone { color: #00ff00; font-weight: bold; }
+        .pair-status.status-sell-zone { color: #ff4444; font-weight: bold; }
+        .pair-status.status-holding { color: #ffaa00; font-weight: bold; }
+        .pair-status.status-neutral { color: #888; }
+        .pair-status.status-stale { color: #666; font-style: italic; }
+
         .status-indicator {
             display: inline-block;
             width: 10px;
@@ -493,27 +499,28 @@
 
         <div class="grid-2">
             <div class="panel">
-                <h3>📊 Monitored Contracts</h3>
+                <h3>📊 Live Signals</h3>
+                <p id="signalsMeta" style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">Loading...</p>
                 <div id="pairsMonitored">
                     <div class="pair">
                         <span class="pair-name">MES (SPY proxy)</span>
-                        <span class="pair-status">Monitoring...</span>
+                        <span class="pair-status" id="sig-MES">Monitoring...</span>
                     </div>
                     <div class="pair">
                         <span class="pair-name">MNQ (QQQ proxy)</span>
-                        <span class="pair-status">Monitoring...</span>
+                        <span class="pair-status" id="sig-MNQ">Monitoring...</span>
                     </div>
                     <div class="pair">
                         <span class="pair-name">MYM (DIA proxy)</span>
-                        <span class="pair-status">Monitoring...</span>
+                        <span class="pair-status" id="sig-MYM">Monitoring...</span>
                     </div>
                     <div class="pair">
                         <span class="pair-name">M2K (IWM proxy)</span>
-                        <span class="pair-status">Monitoring...</span>
+                        <span class="pair-status" id="sig-M2K">Monitoring...</span>
                     </div>
                     <div class="pair">
                         <span class="pair-name">MGC (GLD proxy)</span>
-                        <span class="pair-status">Monitoring...</span>
+                        <span class="pair-status" id="sig-MGC">Monitoring...</span>
                     </div>
                 </div>
             </div>
@@ -796,11 +803,59 @@
             }
         }
 
+        async function refreshSignals() {
+            let data;
+            try {
+                data = await apiFetch('/signals');
+            } catch (e) {
+                document.getElementById('signalsMeta').textContent = '❌ ' + e.message;
+                return;
+            }
+
+            const metaEl = document.getElementById('signalsMeta');
+            if (!data.last_cycle_at) {
+                metaEl.textContent = 'Bot has not completed a scan cycle yet.';
+            } else if (data.market_open === false) {
+                metaEl.textContent = 'Market closed as of last check (' + new Date(data.last_cycle_at).toLocaleTimeString() + ') - no scanning until 9:30am ET.';
+            } else {
+                metaEl.textContent = 'Last scan: ' + new Date(data.last_cycle_at).toLocaleTimeString() +
+                    ' | Buy below RSI ' + data.rsi_buy_below + ' | Sell above RSI ' + data.rsi_sell_above;
+            }
+
+            const STALE_MS = 5 * 60 * 1000; // a symbol that hasn't updated in 5min is worth flagging
+            const now = Date.now();
+
+            for (const contract of ['MES', 'MNQ', 'MYM', 'M2K', 'MGC']) {
+                const el = document.getElementById('sig-' + contract);
+                const sig = data.signals ? data.signals[contract] : null;
+                if (!sig) {
+                    el.textContent = data.market_open === false ? 'Market closed' : 'Waiting for first scan...';
+                    el.className = 'pair-status';
+                    continue;
+                }
+
+                const age = now - new Date(sig.checked_at).getTime();
+                const stale = age > STALE_MS;
+
+                const statusLabel = {
+                    BUY_ZONE: '📈 BUY ZONE',
+                    SELL_ZONE: '📉 SELL ZONE',
+                    HOLDING: '💼 HOLDING',
+                    NEUTRAL: 'neutral',
+                }[sig.status] || sig.status;
+
+                el.textContent = `$${sig.price.toFixed(2)} | RSI ${sig.rsi} | ${sig.trend} | ${statusLabel}` + (stale ? ' (stale)' : '');
+                el.className = 'pair-status ' + (stale ? 'status-stale' : 'status-' + sig.status.toLowerCase().replace('_', '-'));
+            }
+        }
+
         logEvent('🤖 Dashboard connected — loading real Alpaca account data...', 'signal');
         refreshStatus();
         refreshWithdrawals();
+        refreshSignals();
         setInterval(refreshStatus, 30000);
         setInterval(refreshWithdrawals, 30000);
+        setInterval(refreshSignals, 30000);
     </script>
 </body>
 </html>

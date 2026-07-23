@@ -31,6 +31,12 @@ from models import TradingBotState, WithdrawalRequest
 log = logging.getLogger("trading_dashboard")
 router = APIRouter()
 
+try:
+    import prop_bot as prop_bot_module
+except Exception as e:
+    log.warning(f"prop_bot not importable, /signals will report unavailable: {e}")
+    prop_bot_module = None
+
 BOT_NAME = "bare_metal_builders"
 
 ALPACA_KEY = os.getenv("ALPACA_API_KEY", "")
@@ -212,3 +218,22 @@ async def get_crypto_bot_status():
     except Exception as e:
         log.error(f"Crypto status error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/signals", dependencies=[Depends(require_admin_key)])
+async def get_live_signals():
+    """Live per-symbol price/RSI/trend from prop_bot.py's most recent scan
+    cycle - the same numbers that were previously only visible in Railway
+    logs. Read-only view into the bot's in-memory state (same process,
+    same thread's module-level dict) - this endpoint doesn't call Alpaca
+    itself, so it's cheap enough to poll every 30s alongside /status."""
+    if prop_bot_module is None:
+        raise HTTPException(status_code=503, detail="prop_bot not available")
+
+    return {
+        "last_cycle_at": prop_bot_module.last_cycle_at,
+        "market_open": prop_bot_module.last_market_open,
+        "rsi_buy_below": prop_bot_module.RSI_BUY_BELOW,
+        "rsi_sell_above": prop_bot_module.RSI_SELL_ABOVE,
+        "signals": prop_bot_module.latest_signals,
+    }
