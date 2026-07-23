@@ -24,12 +24,14 @@ BASE_URL      = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 STOP          = os.getenv("STOP_TRADING", "false").lower() == "true"
 
-# RSI entry/exit thresholds - AGGRESSIVE MODE for maximum trade frequency + win rate
-# Buy at RSI 38 (strong oversold) for high-probability reversals
-# Sell at RSI 48 (early exit) to lock profits before full reversal, avoiding drawdowns
-# Configurable via env for tuning without code changes
-RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "38"))
-RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "48"))
+# RSI entry/exit thresholds. Widened again at the account owner's explicit
+# request - real trades were too rare at 38/48 (RSI mostly sat in the
+# 39-57 range with nothing crossing 38). Wider band means more real trades
+# fire, at the cost of acting on weaker/less-confirmed signals - that
+# tradeoff was made knowingly, not a bug. Configurable via env for tuning
+# without a code change.
+RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "45"))
+RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "50"))
 
 HEADERS = {
     "APCA-API-KEY-ID": ALPACA_KEY,

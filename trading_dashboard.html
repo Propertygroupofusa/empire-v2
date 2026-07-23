@@ -619,6 +619,15 @@
         const API_BASE = 'https://empire-v2-production.up.railway.app/api/trading-dashboard';
         let adminKey = localStorage.getItem('bmb_admin_key') || '';
 
+        // Tracks previous poll's values so we can log real transitions (not
+        // just a flat snapshot) to the activity feed - trade count going up,
+        // a position opening/closing, a symbol crossing into a buy/sell
+        // zone. All of this is derived from real API responses; nothing
+        // here is generated or randomized.
+        let lastTradeCount = null;
+        let lastActivePositions = null;
+        let lastSignalStatus = {};
+
         function ensureAdminKey() {
             if (!adminKey) {
                 adminKey = prompt('Enter admin key to load real account data:') || '';
@@ -685,6 +694,20 @@
             document.getElementById('positionStatus').textContent =
                 status.active_positions > 0 ? `${status.active_positions} open` : 'Monitoring 5 symbols...';
             document.getElementById('tradeCount').textContent = status.todays_trade_count;
+
+            if (lastTradeCount !== null && status.todays_trade_count > lastTradeCount) {
+                logEvent(`✅ NEW TRADE FILLED — today's trade count: ${lastTradeCount} → ${status.todays_trade_count}`, 'buy');
+            }
+            if (lastActivePositions !== null && status.active_positions !== lastActivePositions) {
+                logEvent(
+                    status.active_positions > lastActivePositions
+                        ? `📈 Position opened — active positions: ${status.active_positions}`
+                        : `📤 Position closed — active positions: ${status.active_positions}`,
+                    status.active_positions > lastActivePositions ? 'buy' : 'sell'
+                );
+            }
+            lastTradeCount = status.todays_trade_count;
+            lastActivePositions = status.active_positions;
             // Win/loss per trade isn't tracked server-side yet - showing a
             // made-up win rate would be worse than admitting we don't have it.
             document.getElementById('tradeWinRate').textContent = 'Win Rate: N/A (not tracked yet)';
@@ -846,6 +869,21 @@
 
                 el.textContent = `$${sig.price.toFixed(2)} | RSI ${sig.rsi} | ${sig.trend} | ${statusLabel}` + (stale ? ' (stale)' : '');
                 el.className = 'pair-status ' + (stale ? 'status-stale' : 'status-' + sig.status.toLowerCase().replace('_', '-'));
+
+                // Log real zone transitions to the activity feed - only on
+                // change, not every 30s, so this reflects actual signal
+                // movement instead of spamming a static reading.
+                const prevStatus = lastSignalStatus[contract];
+                if (prevStatus !== undefined && prevStatus !== sig.status) {
+                    if (sig.status === 'BUY_ZONE') {
+                        logEvent(`📈 ${contract} (${sig.symbol}) entered BUY ZONE — RSI ${sig.rsi}, $${sig.price.toFixed(2)}`, 'buy');
+                    } else if (sig.status === 'SELL_ZONE') {
+                        logEvent(`📉 ${contract} (${sig.symbol}) entered SELL ZONE — RSI ${sig.rsi}, $${sig.price.toFixed(2)}`, 'sell');
+                    } else if (prevStatus === 'BUY_ZONE' || prevStatus === 'SELL_ZONE') {
+                        logEvent(`↔️ ${contract} (${sig.symbol}) back to neutral — RSI ${sig.rsi}`, 'signal');
+                    }
+                }
+                lastSignalStatus[contract] = sig.status;
             }
         }
 
