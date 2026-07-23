@@ -176,8 +176,9 @@
         }
 
         .pair-status.status-buy-zone { color: #00ff00; font-weight: bold; }
-        .pair-status.status-sell-zone { color: #ff4444; font-weight: bold; }
-        .pair-status.status-holding { color: #ffaa00; font-weight: bold; }
+        .pair-status.status-short-zone { color: #ff4444; font-weight: bold; }
+        .pair-status.status-holding-long { color: #00ccff; font-weight: bold; }
+        .pair-status.status-holding-short { color: #ff8800; font-weight: bold; }
         .pair-status.status-neutral { color: #888; }
         .pair-status.status-stale { color: #666; font-style: italic; }
 
@@ -540,12 +541,16 @@
                     <span>Up to 5 (1 per symbol)</span>
                 </div>
                 <div class="pair">
-                    <span>Entry Signal</span>
+                    <span>Long Entry</span>
                     <span>RSI oversold (no trend filter)</span>
                 </div>
                 <div class="pair">
-                    <span>Exit Signal</span>
-                    <span>RSI overbought or +1.5% profit</span>
+                    <span>Short Entry</span>
+                    <span>RSI overbought (no trend filter)</span>
+                </div>
+                <div class="pair">
+                    <span>Exit (either)</span>
+                    <span>RSI reverts or +1.5% profit</span>
                 </div>
                 <div class="pair">
                     <span>Stop Loss</span>
@@ -862,8 +867,9 @@
 
                 const statusLabel = {
                     BUY_ZONE: '📈 BUY ZONE',
-                    SELL_ZONE: '📉 SELL ZONE',
-                    HOLDING: '💼 HOLDING',
+                    SHORT_ZONE: '📉 SHORT ZONE',
+                    HOLDING_LONG: '💼 LONG',
+                    HOLDING_SHORT: '💼 SHORT',
                     NEUTRAL: 'neutral',
                 }[sig.status] || sig.status;
 
@@ -877,9 +883,9 @@
                 if (prevStatus !== undefined && prevStatus !== sig.status) {
                     if (sig.status === 'BUY_ZONE') {
                         logEvent(`📈 ${contract} (${sig.symbol}) entered BUY ZONE — RSI ${sig.rsi}, $${sig.price.toFixed(2)}`, 'buy');
-                    } else if (sig.status === 'SELL_ZONE') {
-                        logEvent(`📉 ${contract} (${sig.symbol}) entered SELL ZONE — RSI ${sig.rsi}, $${sig.price.toFixed(2)}`, 'sell');
-                    } else if (prevStatus === 'BUY_ZONE' || prevStatus === 'SELL_ZONE') {
+                    } else if (sig.status === 'SHORT_ZONE') {
+                        logEvent(`📉 ${contract} (${sig.symbol}) entered SHORT ZONE — RSI ${sig.rsi}, $${sig.price.toFixed(2)}`, 'sell');
+                    } else if (prevStatus === 'BUY_ZONE' || prevStatus === 'SHORT_ZONE') {
                         logEvent(`↔️ ${contract} (${sig.symbol}) back to neutral — RSI ${sig.rsi}`, 'signal');
                     }
                 }
