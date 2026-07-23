@@ -19,8 +19,12 @@ const BASE_URL = `http://localhost:${PORT}`;
 
 let serverProcess = null;
 
-// Helper to make HTTP requests
-async function makeRequest(method, endpoint, query = null) {
+// Helper to make HTTP requests. `query` becomes URL search params (GET
+// filters, or the second-factor `email` on the customer-portal route);
+// `jsonBody` is sent as a real JSON request body for endpoints declared
+// with a Pydantic model (FastAPI 422s if you send those as query params
+// instead - this bit both of us before).
+async function makeRequest(method, endpoint, query = null, jsonBody = null) {
   return new Promise((resolve, reject) => {
     const url = new URL(`${BASE_URL}${endpoint}`);
     if (query) {
@@ -29,9 +33,11 @@ async function makeRequest(method, endpoint, query = null) {
       });
     }
 
+    const bodyStr = jsonBody ? JSON.stringify(jsonBody) : null;
     const options = {
       method,
       timeout: 5000,
+      headers: bodyStr ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(bodyStr) } : {},
     };
 
     const req = http.request(url, options, (res) => {
@@ -57,7 +63,7 @@ async function makeRequest(method, endpoint, query = null) {
     });
 
     req.on("error", reject);
-    req.end();
+    req.end(bodyStr || undefined);
   });
 }
 
@@ -158,6 +164,7 @@ async function runTests() {
       endpoint: "/subscriptions/tiers",
       expectedStatus: 200,
       expectedKeys: ["tiers", "total_tiers"],
+      onSuccess: (body) => `${body.total_tiers} tiers`,
     },
     {
       name: "Get Pro Tier Details",
@@ -165,12 +172,24 @@ async function runTests() {
       endpoint: "/subscriptions/tiers/pro",
       expectedStatus: 200,
       expectedKeys: ["tier"],
+      onSuccess: () => "tier detail loaded",
     },
     {
       name: "Create Order (Request Quote)",
       method: "POST",
-      endpoint: "/orders/orders/request-quote",
-      query: {
+      // NOTE: single "/orders" prefix, not "/orders/orders" - that double
+      // prefix was true when this route was declared as
+      // @router.post("/orders/request-quote") under the "/orders" mount;
+      // it's since been changed to a relative @router.post("/request-quote"),
+      // so the old double-prefix quirk from an earlier version of this
+      // skill no longer applies. Verify with the actual registered path if
+      // this 404s again: `python3 -c "from main import app; ..."` and grep
+      // app.routes for "request-quote".
+      endpoint: "/orders/request-quote",
+      // JSON body, not query params - the route takes a Pydantic
+      // QuoteRequest model (routers/orders.py) since the DB-backed
+      // storage migration; query params here 422 with a validation error.
+      jsonBody: {
         customer_name: "Test User",
         customer_email: "test@example.com",
         customer_company: "Test Company",
@@ -182,6 +201,7 @@ async function runTests() {
       },
       expectedStatus: 200,
       expectedKeys: ["success", "order_id", "quote_price"],
+      onSuccess: (body) => `Order #${body.order_id} created (${body.quote_price} cents)`,
     },
   ];
 
@@ -191,7 +211,7 @@ async function runTests() {
 
   for (const test of tests) {
     try {
-      const res = await makeRequest(test.method, test.endpoint, test.query);
+      const res = await makeRequest(test.method, test.endpoint, test.query, test.jsonBody);
 
       if (res.status !== test.expectedStatus) {
         console.log(
@@ -212,8 +232,9 @@ async function runTests() {
       } else if (test.expectedKeys) {
         const missing = test.expectedKeys.filter((k) => !(k in res.body));
         if (missing.length === 0) {
-          orderId = res.body.order_id;
-          console.log(`✓ ${test.name}: Order #${orderId} created (${res.body.quote_price} cents)`);
+          if (res.body.order_id !== undefined) orderId = res.body.order_id;
+          const detail = test.onSuccess ? test.onSuccess(res.body) : "OK";
+          console.log(`✓ ${test.name}: ${detail}`);
           passedTests++;
         } else {
           console.log(
@@ -231,15 +252,24 @@ async function runTests() {
     }
   }
 
-  // Test order status if order was created
+  // Test order status if order was created. This is the customer-facing
+  // portal route (routers/orders.py, GET /orders/customer/{order_id}) -
+  // it requires the same email the order was placed under as a second
+  // factor against ID enumeration, instead of an admin key. The plain
+  // GET /orders/{order_id} route is admin-key-gated (see admin_auth) and
+  // isn't the one a real customer (or this smoke test) would hit.
   if (orderId !== null) {
     try {
-      const res = await makeRequest("GET", `/orders/orders/${orderId}`);
-      if (res.status === 200 && res.body?.order?.id === orderId) {
+      const res = await makeRequest(
+        "GET",
+        `/orders/customer/${orderId}`,
+        { email: "test@example.com" }
+      );
+      if (res.status === 200 && res.body?.order_id === orderId) {
         console.log(`✓ Get Order Status: Order #${orderId} retrieved`);
         passedTests++;
       } else {
-        console.log(`✗ Get Order Status: Failed to retrieve order`);
+        console.log(`✗ Get Order Status: Expected 200 w/ matching order_id, got ${res.status} ${JSON.stringify(res.body)}`);
         failedTests++;
       }
     } catch (error) {
@@ -295,7 +325,8 @@ async function main() {
       case "create-order":
         const order = await makeRequest(
           "POST",
-          "/orders/orders/request-quote",
+          "/orders/request-quote",
+          null,
           {
             customer_name: "Test User",
             customer_email: "test@example.com",
