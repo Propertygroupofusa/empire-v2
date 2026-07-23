@@ -13,7 +13,10 @@ import smtplib
 import time
 from email.mime.text import MIMEText
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import aiohttp
+
+ET = ZoneInfo("America/New_York")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("prop_bot")
@@ -188,14 +191,18 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
 async def run_prop_cycle():
     global daily_pnl, profitable_days, last_cycle_at, last_market_open
 
-    # Only trade during market hours (9:30am - 4pm ET = 14:30 - 21:00 UTC)
-    now = datetime.utcnow()
-    market_open = now.replace(hour=14, minute=30, second=0)
-    market_close = now.replace(hour=21, minute=0, second=0)
+    # Only trade during market hours (9:30am-4pm ET). Checked against real
+    # ET wall-clock time (DST-aware) rather than a hardcoded UTC range -
+    # a fixed 14:30-21:00 UTC window is wrong by an hour for about 8
+    # months of the year whenever ET is in daylight time.
+    now = datetime.now(ET)
+    is_weekday = now.weekday() < 5
+    market_open_t = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close_t = now.replace(hour=16, minute=0, second=0, microsecond=0)
 
     last_cycle_at = now.isoformat()
 
-    if not (market_open <= now <= market_close):
+    if not (is_weekday and market_open_t <= now <= market_close_t):
         last_market_open = False
         log.info(f"[APEX_589296] Market closed — waiting for 9:30am ET")
         return
