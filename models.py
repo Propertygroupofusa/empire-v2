@@ -92,6 +92,12 @@ class Worker(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     custom_metadata = Column(JSON, nullable=True)
 
+    # bcrypt hash for self-service worker login (see worker_auth.py) -
+    # nullable since workers registered before this existed have none yet
+    # (they'd need to go through a password-set flow to gain login access).
+    # Deliberately never included in to_dict().
+    password_hash = Column(String, nullable=True)
+
     w9_submitted = Column(Boolean, default=False)
     w9_legal_name = Column(String, nullable=True)
     w9_tax_classification = Column(String, nullable=True)

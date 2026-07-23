@@ -24,7 +24,7 @@ import smtplib
 from datetime import datetime
 from email.mime.text import MIMEText
 
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 
@@ -72,7 +72,10 @@ def send_match_alert(subject: str, body: str, to_email: str):
 async def match_pending_jobs():
     """One matching pass: for every requested notarization job, find an
     eligible verified notary (active, credentials verified, and either
-    commissioned or RON-authorized in the job's state) and assign them.
+    commissioned or RON-authorized in the job's state) and assign
+    whichever eligible notary currently has the fewest active (matched or
+    scheduled, not yet completed) jobs - so work spreads evenly across
+    eligible notaries instead of always piling onto the same one.
     Returns the number of jobs matched this pass."""
     matched_count = 0
     async with _SessionLocal() as db:
@@ -88,6 +91,15 @@ async def match_pending_jobs():
         )
         verified_notaries = [w for w in result.scalars().all() if w.notary_commission_number or w.ron_authorized]
 
+        # Current workload per notary, so the very first assignment this
+        # pass already accounts for jobs matched in earlier passes.
+        active_counts_result = await db.execute(
+            select(Job.worker_id, func.count(Job.id))
+            .where(Job.status.in_(["matched", "scheduled"]))
+            .group_by(Job.worker_id)
+        )
+        active_counts = {worker_id: count for worker_id, count in active_counts_result.all()}
+
         for job in pending_jobs:
             eligible = [
                 w for w in verified_notaries
@@ -96,15 +108,18 @@ async def match_pending_jobs():
             if not eligible:
                 continue
 
-            # First eligible match - no ranking/load-balancing yet; this
-            # is the simplest correct behavior for getting the flow
-            # working end-to-end, not a permanent design decision.
+            # Least-loaded eligible notary first. Ties broken by id for
+            # deterministic, testable behavior.
+            eligible.sort(key=lambda w: (active_counts.get(w.id, 0), w.id))
             notary = eligible[0]
             job.worker_id = notary.id
             job.status = "matched"
             job.matched_at = datetime.utcnow()
             matched_count += 1
-            log.info(f"✅ Matched job {job.id} ({job.state}) to notary {notary.email} (id={notary.id})")
+            # Reflected immediately so a second job this same pass doesn't
+            # pile onto the notary just assigned above.
+            active_counts[notary.id] = active_counts.get(notary.id, 0) + 1
+            log.info(f"✅ Matched job {job.id} ({job.state}) to notary {notary.email} (id={notary.id}, now {active_counts[notary.id]} active)")
 
             client = await db.get(Client, job.client_id)
             if client:
