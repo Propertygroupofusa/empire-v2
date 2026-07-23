@@ -199,3 +199,16 @@ async def list_withdrawals(db: AsyncSession = Depends(get_db)):
     )
     withdrawals = result.scalars().all()
     return {"withdrawals": [w.to_dict() for w in withdrawals]}
+
+
+@router.get("/crypto-status", dependencies=[Depends(require_admin_key)])
+async def get_crypto_bot_status():
+    """24/7 Crypto Scalp-Grid bot status (BTC, ETH, XRP)"""
+    try:
+        from crypto_scalp_grid_bot import get_status
+        return get_status()
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Crypto bot not available")
+    except Exception as e:
+        log.error(f"Crypto status error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
