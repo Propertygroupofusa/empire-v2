@@ -58,27 +58,36 @@ FUTURES = {
 # run_prop_cycle) instead of just being ignored.
 MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", "6"))
 
-# Profit-target price move, in dollars, scaled by real account equity -
-# the bigger the account gets, the larger a favorable price move needs to
-# be before the bot locks in profit early (rather than a flat percentage).
-# Explicit request: start at $0.25, step up to $0.30/$0.45/$0.60 as equity
-# grows into the thousands. Checked against real Alpaca equity each cycle.
-PROFIT_INCREMENT_MILESTONES = [
-    (0,     0.25),
-    (1000,  0.30),
-    (5000,  0.45),
-    (10000, 0.60),
+# Profit target, in REAL DOLLARS of profit on the position (not a raw
+# price move on the underlying) - scaled by real account equity. Explicit
+# request: take profit daily even if it's just 50 cents to a dollar,
+# then immediately look for another promising signal, rather than
+# holding out for a bigger move. Checked against real Alpaca equity each
+# cycle.
+#
+# This replaces an earlier version that checked a raw per-share price
+# move (e.g. "SPY moved $0.25") instead of the position's actual dollar
+# P&L. That was fine when positions were a fixed 1 share, but once
+# size_position() started sizing positions in fractional dollars (see
+# try_open), a $0.25 underlying move on a $10-$150 fractional position
+# could mean only a few cents of real profit - nowhere near the 50c-$1
+# actually wanted here.
+PROFIT_TARGET_DOLLARS_MILESTONES = [
+    (0,     0.50),
+    (1000,  0.60),
+    (5000,  0.80),
+    (10000, 1.00),
 ]
 
 
-def get_profit_increment(equity):
+def get_profit_target_dollars(equity):
     if equity is None:
-        return PROFIT_INCREMENT_MILESTONES[0][1]
-    increment = PROFIT_INCREMENT_MILESTONES[0][1]
-    for threshold, inc in PROFIT_INCREMENT_MILESTONES:
+        return PROFIT_TARGET_DOLLARS_MILESTONES[0][1]
+    target = PROFIT_TARGET_DOLLARS_MILESTONES[0][1]
+    for threshold, t in PROFIT_TARGET_DOLLARS_MILESTONES:
         if equity >= threshold:
-            increment = inc
-    return increment
+            target = t
+    return target
 
 # Track profitable days for APEX 7-day rule
 profitable_days = []
@@ -323,7 +332,13 @@ async def run_prop_cycle():
         qty = position["qty"]
         close_action = "SELL" if side == "long" else "BUY"
         profit_pct = ((price - entry) / entry * 100) if side == "long" else ((entry - price) / entry * 100)
-        pnl = (profit_pct / 100) * entry * qty * 50  # MES point value ~$5 * 10
+        # Real dollar P&L on the actual fractional-share qty held - not a
+        # futures-contract point value multiplier (that "*50" was left
+        # over from before size_position() made qty a real fractional
+        # share count instead of a fixed 1-contract quantity, and was
+        # inflating every logged/emailed P&L figure ~50x above the real
+        # fill amount).
+        pnl = (price - entry) * qty if side == "long" else (entry - price) * qty
 
         filled = await execute_futures_trade(session, contract, close_action, qty, price, rsi, trend, target=price)
         if not filled:
@@ -384,8 +399,8 @@ async def run_prop_cycle():
 
     async with aiohttp.ClientSession() as session:
         equity = await get_account_equity(session)
-        profit_increment = get_profit_increment(equity)
-        log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | Profit-target increment: ${profit_increment:.2f}")
+        profit_target = get_profit_target_dollars(equity)
+        log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | Profit target: ${profit_target:.2f}/position")
 
         # Tracked and spent-down across this cycle's entries so dollar-based
         # sizing (see try_open/size_position) reflects money already
@@ -415,9 +430,10 @@ async def run_prop_cycle():
         # ── Pass 1: manage exits for symbols already held ────────────────
         # A long profits as price rises and exits on overbought RSI; a
         # short profits as price falls and exits on oversold RSI. Profit
-        # target is now a real-dollar price move (see
-        # PROFIT_INCREMENT_MILESTONES), not a flat percentage, and scales
-        # up as the real account grows.
+        # target is checked against the position's actual real dollar
+        # P&L (see PROFIT_TARGET_DOLLARS_MILESTONES) - take the 50c-$1,
+        # don't hold out for a bigger move - and scales up slightly as
+        # the real account grows.
         for contract, position in list(open_prop_positions.items()):
             data = scans.get(contract)
             config = FUTURES[contract]
@@ -432,15 +448,16 @@ async def run_prop_cycle():
 
             side = position["side"]
             entry = position["entry"]
+            qty = position["qty"]
             if side == "long":
-                price_move = price - entry
+                unrealized_pnl = (price - entry) * qty
                 rsi_exit = rsi > RSI_SELL_ABOVE or (trend == "bearish" and rsi > 50)
             else:
-                price_move = entry - price
+                unrealized_pnl = (entry - price) * qty
                 rsi_exit = rsi < RSI_BUY_BELOW or (trend == "bullish" and rsi < 50)
 
-            if price_move >= profit_increment or rsi_exit:
-                reason = "PROFIT TARGET" if price_move >= profit_increment else "RSI"
+            if unrealized_pnl >= profit_target or rsi_exit:
+                reason = "PROFIT TARGET" if unrealized_pnl >= profit_target else "RSI"
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
 
             await asyncio.sleep(0.3)
