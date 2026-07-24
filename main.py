@@ -268,49 +268,58 @@ async def create_monitor_tables():
 
 
 async def run_migrations():
-    """Add any columns models.py's Worker declares that the real "workers"
-    table is actually missing - safe to run every startup (skips whatever
-    already exists).
+    """Add any columns models.py declares that the real tables are
+    actually missing - safe to run every startup (skips whatever already
+    exists).
 
-    Discovered live in production: the real table was missing even
-    "name" - one of the ORIGINAL base columns, not something added this
-    session. The table must have been created some other way before the
-    ORM model existed (this app has a separate /workers/payroll feature
-    that predates the notary work), and nothing ever surfaced the drift
-    because routers/workers.py was a no-op empty stub until today - this
-    is the first code that ever actually queries this table for real.
+    Discovered live in production: the real "workers" table was missing
+    even "name" - one of the ORIGINAL base columns, not something added
+    this session (PR #72). Root cause: these tables were created some
+    other way before their ORM models existed (e.g. workers predates the
+    notary work via an unrelated /workers/payroll feature), and nothing
+    ever surfaced the drift because routers/workers.py, routers/jobs.py,
+    etc. were no-op empty stubs until the notary marketplace work - the
+    first code that ever actually queried these tables for real.
 
-    Model-driven (iterates Worker.__table__.columns) rather than a
+    Confirmed the SAME issue hits "jobs" too (column jobs.job_type does
+    not exist, breaking notary_bot.py's matching cycle every 60s in
+    production) - so this now covers every model introduced alongside
+    Worker in that same PR (#70), not just Worker, since any of them
+    could have the same kind of pre-existing-table drift.
+
+    Model-driven (iterates each model's __table__.columns) rather than a
     manually maintained list of column names/types, specifically so this
     doesn't only patch the columns anyone remembered to add here - it
     catches ANY drift between the ORM model and the real table, present
     or future. Also dialect-agnostic (SQLAlchemy's inspector, not raw
     SQLite PRAGMA), so it actually works on Postgres - production."""
-    from models import Worker
+    from models import Worker, Client, Job, Booking
 
     async with engine.begin() as conn:
-        try:
-            existing_columns = await conn.run_sync(
-                lambda sync_conn: [c["name"] for c in inspect(sync_conn).get_columns("workers")]
-            )
-        except Exception as e:
-            log.warning(f"Migration: could not inspect workers table columns: {e}")
-            return
-
-        for column in Worker.__table__.columns:
-            if column.name in existing_columns:
-                continue
+        for model in (Worker, Client, Job, Booking):
+            table_name = model.__tablename__
             try:
-                ddl_type = column.type.compile(dialect=conn.dialect)
-                # Always added nullable regardless of the model's own
-                # nullable=False, even for required-looking columns like
-                # name/email - a NOT NULL ALTER TABLE ADD COLUMN without a
-                # default fails outright on Postgres if the table already
-                # has rows, which is exactly the scenario this exists for.
-                await conn.execute(text(f'ALTER TABLE workers ADD COLUMN "{column.name}" {ddl_type}'))
-                log.info(f"Migration OK: {column.name}")
+                existing_columns = await conn.run_sync(
+                    lambda sync_conn, t=table_name: [c["name"] for c in inspect(sync_conn).get_columns(t)]
+                )
             except Exception as e:
-                log.debug(f"Migration skip {column.name}: {e}")
+                log.warning(f"Migration: could not inspect {table_name} table columns: {e}")
+                continue
+
+            for column in model.__table__.columns:
+                if column.name in existing_columns:
+                    continue
+                try:
+                    ddl_type = column.type.compile(dialect=conn.dialect)
+                    # Always added nullable regardless of the model's own
+                    # nullable=False, even for required-looking columns like
+                    # name/email - a NOT NULL ALTER TABLE ADD COLUMN without a
+                    # default fails outright on Postgres if the table already
+                    # has rows, which is exactly the scenario this exists for.
+                    await conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN "{column.name}" {ddl_type}'))
+                    log.info(f"Migration OK: {table_name}.{column.name}")
+                except Exception as e:
+                    log.debug(f"Migration skip {table_name}.{column.name}: {e}")
 
 
 @asynccontextmanager
