@@ -39,6 +39,7 @@ routers_to_load = {
     'outreach': None,
     'study': None,
     'trading_dashboard': None,
+    'support': None,
 }
 
 for router_name in routers_to_load:
@@ -67,6 +68,7 @@ trading_signals = routers_to_load['trading_signals']
 outreach = routers_to_load['outreach']
 study = routers_to_load['study']
 trading_dashboard = routers_to_load['trading_dashboard']
+support = routers_to_load['support']
 
 # Load remaining modules gracefully
 payee_router = None
@@ -456,6 +458,7 @@ routers_list = [
     (outreach, "/outreach", "Outreach & Campaigns"),
     (study, "/study", "Study Assistant"),
     (trading_dashboard, "/api/trading-dashboard", "Trading Dashboard"),
+    (support, "/support", "AI Customer Support"),
 ]
 
 for router_module, prefix, tag in routers_list:
