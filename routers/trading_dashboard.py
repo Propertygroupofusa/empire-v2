@@ -306,6 +306,28 @@ async def list_withdrawals(db: AsyncSession = Depends(get_db)):
     return {"withdrawals": [w.to_dict() for w in withdrawals]}
 
 
+@router.get("/trades", dependencies=[Depends(require_admin_key)])
+async def get_todays_trades():
+    """Detail behind /status's todays_trade_count - the actual filled
+    orders (symbol, side, qty, fill price, time), not just a count. Same
+    real Alpaca order history, just not collapsed to a number."""
+    async with aiohttp.ClientSession() as session:
+        orders = await _fetch_todays_filled_orders(session)
+
+    return {
+        "trades": [
+            {
+                "symbol": o.get("symbol"),
+                "side": o.get("side"),
+                "qty": o.get("filled_qty"),
+                "price": o.get("filled_avg_price"),
+                "filled_at": o.get("filled_at"),
+            }
+            for o in orders
+        ]
+    }
+
+
 @router.get("/crypto-status", dependencies=[Depends(require_admin_key)])
 async def get_crypto_bot_status():
     """24/7 Crypto Scalp-Grid bot status (BTC, ETH, XRP)"""
