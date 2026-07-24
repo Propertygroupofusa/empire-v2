@@ -53,10 +53,17 @@ FUTURES = {
     "SIL": {"name": "Micro Silver",         "qty": 1, "symbol": "SLV"},   # Use SLV as proxy
 }
 
-# Max concurrent open positions. With 7 symbols scanned and a 6-position
-# cap, a 7th entry signal while already full triggers rotation (see
-# run_prop_cycle) instead of just being ignored.
-MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", "6"))
+# Max concurrent open positions. Explicit request: don't cap this below
+# what the account can actually afford - open as many of the tracked
+# symbols as there's real cash and a signal for, not an arbitrary count.
+# Defaults to every symbol currently tracked (len(FUTURES)) rather than a
+# fixed number below that, so it never artificially blocks a signal on a
+# symbol that isn't already held - real cash (see size_position/
+# MIN_POSITION_NOTIONAL) is the actual limiting factor. The rotation
+# logic in run_prop_cycle (swap out a losing position for a fresh signal)
+# still exists as a safety net, but can't trigger at this default since
+# there's no 8th symbol to need a slot from.
+MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", str(len(FUTURES))))
 
 # Profit target, in REAL DOLLARS of profit on the position (not a raw
 # price move on the underlying) - scaled by real account equity. Explicit
