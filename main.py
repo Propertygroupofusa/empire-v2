@@ -259,28 +259,26 @@ async def create_monitor_tables():
 
 
 async def run_migrations():
-    """Add any missing columns to existing tables — safe to run every startup.
+    """Add any columns models.py's Worker declares that the real "workers"
+    table is actually missing - safe to run every startup (skips whatever
+    already exists).
 
-    Uses SQLAlchemy's dialect-agnostic inspector rather than raw SQLite
-    PRAGMA syntax - the previous version's PRAGMA table_info(workers)
-    query is SQLite-only and silently fails on Postgres (caught by the
-    broad except below, easy to miss in logs), meaning these columns may
-    never have actually been added on a Postgres production database."""
-    cols = [
-        ("w9_submitted",          "BOOLEAN DEFAULT FALSE"),
-        ("w9_legal_name",         "VARCHAR"),
-        ("w9_tax_classification", "VARCHAR"),
-        ("w9_tin_last4",          "VARCHAR"),
-        ("w9_address",            "TEXT"),
-        ("credentials_submitted",     "BOOLEAN DEFAULT FALSE"),
-        ("credentials_verified",      "BOOLEAN DEFAULT FALSE"),
-        ("notary_commission_number",  "VARCHAR"),
-        ("notary_commission_state",   "VARCHAR"),
-        ("notary_commission_expires", "VARCHAR"),
-        ("ron_authorized",            "BOOLEAN DEFAULT FALSE"),
-        ("ron_authorization_state",   "VARCHAR"),
-        ("password_hash",             "VARCHAR"),
-    ]
+    Discovered live in production: the real table was missing even
+    "name" - one of the ORIGINAL base columns, not something added this
+    session. The table must have been created some other way before the
+    ORM model existed (this app has a separate /workers/payroll feature
+    that predates the notary work), and nothing ever surfaced the drift
+    because routers/workers.py was a no-op empty stub until today - this
+    is the first code that ever actually queries this table for real.
+
+    Model-driven (iterates Worker.__table__.columns) rather than a
+    manually maintained list of column names/types, specifically so this
+    doesn't only patch the columns anyone remembered to add here - it
+    catches ANY drift between the ORM model and the real table, present
+    or future. Also dialect-agnostic (SQLAlchemy's inspector, not raw
+    SQLite PRAGMA), so it actually works on Postgres - production."""
+    from models import Worker
+
     async with engine.begin() as conn:
         try:
             existing_columns = await conn.run_sync(
@@ -290,14 +288,20 @@ async def run_migrations():
             log.warning(f"Migration: could not inspect workers table columns: {e}")
             return
 
-        for col, col_type in cols:
-            if col in existing_columns:
+        for column in Worker.__table__.columns:
+            if column.name in existing_columns:
                 continue
             try:
-                await conn.execute(text(f"ALTER TABLE workers ADD COLUMN {col} {col_type}"))
-                log.info(f"Migration OK: {col}")
+                ddl_type = column.type.compile(dialect=conn.dialect)
+                # Always added nullable regardless of the model's own
+                # nullable=False, even for required-looking columns like
+                # name/email - a NOT NULL ALTER TABLE ADD COLUMN without a
+                # default fails outright on Postgres if the table already
+                # has rows, which is exactly the scenario this exists for.
+                await conn.execute(text(f'ALTER TABLE workers ADD COLUMN "{column.name}" {ddl_type}'))
+                log.info(f"Migration OK: {column.name}")
             except Exception as e:
-                log.debug(f"Migration skip {col}: {e}")
+                log.debug(f"Migration skip {column.name}: {e}")
 
 
 @asynccontextmanager
