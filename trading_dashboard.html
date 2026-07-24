@@ -577,6 +577,14 @@
         </div>
 
         <div class="panel">
+            <h3>📋 Today's Trades</h3>
+            <p style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">
+                Real filled orders from your Alpaca account today - what actually bought/sold, not just a count.
+            </p>
+            <div id="tradesList">Loading...</div>
+        </div>
+
+        <div class="panel">
             <h3>📈 Path to $1,000/day</h3>
             <p style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">
                 Compounding math off your real account equity — not a guarantee. Real returns vary day to day and can be negative.
@@ -954,6 +962,34 @@
             `).join('');
         }
 
+        async function refreshTrades() {
+            let data;
+            try {
+                data = await apiFetch('/trades');
+            } catch (e) {
+                document.getElementById('tradesList').textContent = '❌ ' + e.message;
+                return;
+            }
+
+            const container = document.getElementById('tradesList');
+            if (data.trades.length === 0) {
+                container.innerHTML = `<p style="color: #ccffcc;">No trades filled yet today.</p>`;
+                return;
+            }
+
+            container.innerHTML = data.trades.map(t => {
+                const time = t.filled_at ? new Date(t.filled_at).toLocaleTimeString() : 'unknown';
+                const sideClass = t.side === 'buy' ? 'status-holding-long' : 'status-holding-short';
+                const price = t.price ? '$' + parseFloat(t.price).toFixed(2) : 'unknown';
+                return `
+                <div class="pair">
+                    <span class="pair-name">${time} — ${t.symbol}</span>
+                    <span class="pair-status ${sideClass}">${t.side.toUpperCase()} ${t.qty} @ ${price}</span>
+                </div>
+            `;
+            }).join('');
+        }
+
         async function refreshWithdrawals() {
             let data;
             try {
@@ -1112,10 +1148,12 @@
         refreshStatus();
         refreshWithdrawals();
         refreshSignals();
+        refreshTrades();
         refreshDividends();
         setInterval(refreshStatus, 30000);
         setInterval(refreshWithdrawals, 30000);
         setInterval(refreshSignals, 30000);
+        setInterval(refreshTrades, 30000);
         setInterval(refreshDividends, 300000); // dividends don't change fast - every 5 min is plenty
     </script>
 </body>
