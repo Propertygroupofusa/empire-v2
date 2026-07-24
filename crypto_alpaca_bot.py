@@ -55,7 +55,11 @@ CRYPTO_PAIRS = ["BTC/USD", "ETH/USD"]
 RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "45"))
 RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "50"))
 
-MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "2"))
+# Same principle as prop_bot.py's MAX_POSITIONS: defaults to every pair
+# currently tracked (len(CRYPTO_PAIRS)) rather than a fixed count below
+# that, so real cash (MAX_ALLOCATION/MIN_POSITION_NOTIONAL) is the actual
+# limit, not an arbitrary position cap.
+MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", str(len(CRYPTO_PAIRS))))
 MAX_ALLOCATION = float(os.getenv("CRYPTO_MAX_ALLOCATION", "100"))
 MIN_POSITION_NOTIONAL = float(os.getenv("CRYPTO_MIN_POSITION_NOTIONAL", "5"))
 
