@@ -138,6 +138,13 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import notary_bot: {e}")
 
+crypto_alpaca_bot_module = None
+try:
+    import crypto_alpaca_bot
+    crypto_alpaca_bot_module = crypto_alpaca_bot
+except Exception as e:
+    logging.warning(f"Failed to import crypto_alpaca_bot: {e}")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pgusa")
 
@@ -389,6 +396,14 @@ async def lifespan(app: FastAPI):
             log.info("🖋️ Notary matching bot started (background thread)")
     except Exception as e:
         log.warning(f"Notary bot failed to start: {e}")
+
+    try:
+        if crypto_alpaca_bot_module is not None:
+            import threading
+            threading.Thread(target=crypto_alpaca_bot_module.run, daemon=True).start()
+            log.info("₿ Crypto (Alpaca) bot started (background thread) | Pairs: BTC/USD, ETH/USD | Runs 24/7")
+    except Exception as e:
+        log.warning(f"Crypto (Alpaca) bot failed to start: {e}")
 
     try:
         import subprocess

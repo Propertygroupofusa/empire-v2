@@ -37,6 +37,12 @@ except Exception as e:
     log.warning(f"prop_bot not importable, /signals will report unavailable: {e}")
     prop_bot_module = None
 
+try:
+    import crypto_alpaca_bot as crypto_alpaca_bot_module
+except Exception as e:
+    log.warning(f"crypto_alpaca_bot not importable, /crypto-alpaca-status will report unavailable: {e}")
+    crypto_alpaca_bot_module = None
+
 ALPACA_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
@@ -357,6 +363,26 @@ async def get_live_signals():
         "rsi_buy_below": prop_bot_module.RSI_BUY_BELOW,
         "rsi_sell_above": prop_bot_module.RSI_SELL_ABOVE,
         "signals": prop_bot_module.latest_signals,
+    }
+
+
+@router.get("/crypto-alpaca-status", dependencies=[Depends(require_admin_key)])
+async def get_crypto_alpaca_status():
+    """Same read-only in-memory view as /signals, but for
+    crypto_alpaca_bot.py - the 24/7 BTC/ETH bot trading through this
+    same Alpaca account (separate from crypto-status, which reports on
+    the unrelated Binance-based crypto_scalp_grid_bot.py)."""
+    if crypto_alpaca_bot_module is None:
+        raise HTTPException(status_code=503, detail="crypto_alpaca_bot not available")
+
+    return {
+        "last_cycle_at": crypto_alpaca_bot_module.last_cycle_at,
+        "daily_pnl": round(crypto_alpaca_bot_module.daily_pnl, 2),
+        "open_positions": crypto_alpaca_bot_module.open_crypto_positions,
+        "max_allocation": crypto_alpaca_bot_module.MAX_ALLOCATION,
+        "rsi_buy_below": crypto_alpaca_bot_module.RSI_BUY_BELOW,
+        "rsi_sell_above": crypto_alpaca_bot_module.RSI_SELL_ABOVE,
+        "signals": crypto_alpaca_bot_module.latest_signals,
     }
 
 
