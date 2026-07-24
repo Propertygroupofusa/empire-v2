@@ -444,3 +444,100 @@ class StudyMaterial(Base):
             "created_at": self.created_at.isoformat(),
             "generated_content": self.generated_content,
         }
+
+
+class SupportAccount(Base):
+    """A tenant of the AI customer-service product - one per paying
+    business using it to handle their own customers' email support.
+    api_key is the shared secret their inbound-parse webhook URL is
+    scoped by (SendGrid doesn't sign inbound-parse requests the way
+    Stripe signs webhooks, so this is the auth for that endpoint)."""
+    __tablename__ = "support_accounts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True)
+    business_name = Column(String)
+    api_key = Column(String, unique=True, index=True)
+    inbound_email = Column(String, nullable=True)  # the address customers email in to
+    status = Column(String, default="active")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "email": self.email,
+            "business_name": self.business_name,
+            "inbound_email": self.inbound_email,
+            "status": self.status,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class KnowledgeBaseEntry(Base):
+    """One Q&A/fact entry in a support account's knowledge base, used to
+    ground the AI agent's replies instead of letting it improvise."""
+    __tablename__ = "knowledge_base_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("support_accounts.id"), index=True)
+    topic = Column(String)
+    content = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "account_id": self.account_id,
+            "topic": self.topic,
+            "content": self.content,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class SupportConversation(Base):
+    """One customer's email thread with a support account. status covers
+    what a separate 'ticket' table would otherwise track - there's no
+    need for two objects when a conversation's lifecycle IS the ticket's
+    lifecycle here."""
+    __tablename__ = "support_conversations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("support_accounts.id"), index=True)
+    customer_email = Column(String, index=True)
+    subject = Column(String, nullable=True)
+    status = Column(String, default="open", index=True)  # open, escalated, resolved
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "account_id": self.account_id,
+            "customer_email": self.customer_email,
+            "subject": self.subject,
+            "status": self.status,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class SupportMessage(Base):
+    """One message within a SupportConversation, from either side."""
+    __tablename__ = "support_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(Integer, ForeignKey("support_conversations.id"), index=True)
+    sender = Column(String)  # "customer" or "ai"
+    body = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "conversation_id": self.conversation_id,
+            "sender": self.sender,
+            "body": self.body,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }

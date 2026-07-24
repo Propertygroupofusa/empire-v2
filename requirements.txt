@@ -29,3 +29,4 @@ google-api-python-client==2.98.0
 schedule==1.2.0
 python-multipart==0.0.6
 python-binance==1.0.37
+sendgrid==6.11.0
