@@ -577,6 +577,18 @@
         </div>
 
         <div class="panel">
+            <h3>₿ Crypto Bot (24/7)</h3>
+            <p style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">
+                Trades BTC/USD and ETH/USD through this SAME Alpaca account and cash balance - not a separate
+                exchange. Runs around the clock since crypto has no market close, unlike the stock/ETF bot above.
+                Long-only (Alpaca crypto is spot, no shorting) and capped to a limited slice of the account's cash
+                so it doesn't compete with the stock bot's own entries.
+            </p>
+            <p id="cryptoAlpacaMeta" style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">Loading...</p>
+            <div id="cryptoAlpacaList">Loading...</div>
+        </div>
+
+        <div class="panel">
             <h3>📋 Today's Trades</h3>
             <p style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">
                 Real filled orders from your Alpaca account today - what actually bought/sold, not just a count.
@@ -962,6 +974,37 @@
             `).join('');
         }
 
+        async function refreshCryptoAlpacaStatus() {
+            let data;
+            try {
+                data = await apiFetch('/crypto-alpaca-status');
+            } catch (e) {
+                document.getElementById('cryptoAlpacaMeta').textContent = '❌ ' + e.message;
+                return;
+            }
+
+            const metaEl = document.getElementById('cryptoAlpacaMeta');
+            metaEl.textContent = data.last_cycle_at
+                ? `Last scan: ${new Date(data.last_cycle_at).toLocaleTimeString()} | Buy below RSI ${data.rsi_buy_below} | Sell above RSI ${data.rsi_sell_above} | Today's crypto P&L: $${data.daily_pnl.toFixed(2)} | Max allocation: $${data.max_allocation.toFixed(2)}`
+                : 'Bot has not completed a scan cycle yet.';
+
+            const listEl = document.getElementById('cryptoAlpacaList');
+            const pairs = ['BTC/USD', 'ETH/USD'];
+            listEl.innerHTML = pairs.map(pair => {
+                const sig = data.signals ? data.signals[pair] : null;
+                if (!sig) {
+                    return `<div class="pair"><span class="pair-name">${pair}</span><span class="pair-status">Waiting for first scan...</span></div>`;
+                }
+                const statusLabel = {
+                    BUY_ZONE: '📈 BUY ZONE',
+                    HOLDING_LONG: '💼 LONG',
+                    NEUTRAL: 'neutral',
+                }[sig.status] || sig.status;
+                const statusClass = 'status-' + (sig.status || 'neutral').toLowerCase().replace('_', '-');
+                return `<div class="pair"><span class="pair-name">${pair}</span><span class="pair-status ${statusClass}">$${sig.price.toFixed(2)} | RSI ${sig.rsi} | ${statusLabel}</span></div>`;
+            }).join('');
+        }
+
         async function refreshTrades() {
             let data;
             try {
@@ -1148,11 +1191,13 @@
         refreshStatus();
         refreshWithdrawals();
         refreshSignals();
+        refreshCryptoAlpacaStatus();
         refreshTrades();
         refreshDividends();
         setInterval(refreshStatus, 30000);
         setInterval(refreshWithdrawals, 30000);
         setInterval(refreshSignals, 30000);
+        setInterval(refreshCryptoAlpacaStatus, 30000);
         setInterval(refreshTrades, 30000);
         setInterval(refreshDividends, 300000); // dividends don't change fast - every 5 min is plenty
     </script>
