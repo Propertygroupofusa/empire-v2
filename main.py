@@ -426,20 +426,11 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Crypto (Alpaca) bot failed to start: {e}")
 
-    try:
-        import subprocess
-        import threading
-        def start_crypto_bot():
-            try:
-                subprocess.Popen(['python', 'bot_2_crypto_scalper.py'],
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                log.info("🤖 Crypto scalper bot #2 started (background subprocess)")
-            except Exception as e:
-                log.warning(f"Crypto bot subprocess failed: {e}")
-
-        threading.Thread(target=start_crypto_bot, daemon=True).start()
-    except Exception as e:
-        log.warning(f"Crypto bot startup failed: {e}")
+    # bot_2_crypto_scalper.py is NOT launched here. railway.json already
+    # runs it as its own dedicated "crypto-trading-bot" service - spawning
+    # it again as a subprocess of the main app meant two independent
+    # processes placing trades against the same live Alpaca account, each
+    # unaware of the other's positions.
 
     try:
         from stripe_subscriptions import setup_stripe_products
