@@ -1,6 +1,10 @@
 """
 Daily Video Publisher - Automated YouTube publishing system
 Generates and publishes videos on schedule to build audience
+
+NOTE: Scheduler DISABLED until video_generator_bot.py is deployed
+as a separate Railway service. Set DAILY_PUBLISHER_ENABLED=true
+in Railway variables to re-enable when ready.
 """
 
 import os
@@ -50,12 +54,11 @@ class ContentGenerator:
         }
 
         try:
-            # Use Anthropic to generate content
             from anthropic import Anthropic
             client = Anthropic()
 
             response = client.messages.create(
-                model="claude-opus-4-8",
+                model="claude-haiku-4-5-20251001",
                 max_tokens=500,
                 messages=[
                     {
@@ -87,10 +90,10 @@ class DailyPublisher:
         self.video_generator_url = os.getenv("VIDEO_GENERATOR_URL", "http://localhost:5003")
         self.youtube_auto_publish = os.getenv("YOUTUBE_AUTO_PUBLISH", "true").lower() == "true"
         self.publishing_schedule = {
-            "morning": "08:00",      # Market open
-            "midday": "12:00",       # Lunch analysis
-            "close": "16:30",        # Market close
-            "evening": "18:00",      # Evening recap
+            "morning": "08:00",
+            "midday": "12:00",
+            "close": "16:30",
+            "evening": "18:00",
         }
         self.templates = [
             VideoTemplate.TRADING_ANALYSIS,
@@ -107,14 +110,11 @@ class DailyPublisher:
     async def generate_daily_video(self) -> dict:
         """Generate a video for daily publishing"""
         try:
-            # Select template (rotate through different types)
             template = self.templates[self.template_index % len(self.templates)]
             self.template_index += 1
 
-            # Generate content
             content = await self.content_generator.generate_daily_content(template)
 
-            # Send to video generator
             async with aiohttp.ClientSession() as session:
                 payload = {
                     "text": content["script"],
@@ -125,7 +125,7 @@ class DailyPublisher:
                         "description": content["description"],
                         "tags": content["tags"],
                         "privacy": "public",
-                        "category": "22"  # Finance category
+                        "category": "22"
                     }
                 }
 
@@ -154,28 +154,28 @@ class DailyPublisher:
         """Set up scheduled publishing"""
         self.scheduler.add_job(
             self._async_job,
-            CronTrigger(hour=8, minute=0),  # 8 AM
+            CronTrigger(hour=8, minute=0),
             id="morning_video",
             name="Morning market analysis",
             replace_existing=True
         )
         self.scheduler.add_job(
             self._async_job,
-            CronTrigger(hour=12, minute=0),  # Noon
+            CronTrigger(hour=12, minute=0),
             id="midday_video",
             name="Midday market update",
             replace_existing=True
         )
         self.scheduler.add_job(
             self._async_job,
-            CronTrigger(hour=16, minute=30),  # 4:30 PM
+            CronTrigger(hour=16, minute=30),
             id="close_video",
             name="Market close recap",
             replace_existing=True
         )
         self.scheduler.add_job(
             self._async_job,
-            CronTrigger(hour=18, minute=0),  # 6 PM
+            CronTrigger(hour=18, minute=0),
             id="evening_video",
             name="Evening market analysis",
             replace_existing=True
@@ -220,12 +220,19 @@ publisher = DailyPublisher()
 
 
 def start_daily_publisher():
-    """Start the daily publishing service"""
-    if os.getenv("DAILY_PUBLISHER_ENABLED", "true").lower() == "true":
+    """
+    Start the daily publishing service.
+    DISABLED by default until video_generator_bot.py is deployed
+    as a separate Railway service.
+    To enable: set DAILY_PUBLISHER_ENABLED=true in Railway variables.
+    """
+    if os.getenv("DAILY_PUBLISHER_ENABLED", "false").lower() == "true":
         publisher.schedule_daily_publishing()
         log.info("Daily publisher started")
         return True
-    return False
+    else:
+        log.info("Daily publisher DISABLED — set DAILY_PUBLISHER_ENABLED=true to enable")
+        return False
 
 
 def get_publisher():

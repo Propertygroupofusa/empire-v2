@@ -3,16 +3,28 @@
 ---
 
 name: run-empire-v2
-description: Launch and test the FastAPI video production platform locally
+description: Build, launch, and smoke-test the Empire v2 FastAPI platform (video orders, subscriptions, trading dashboard) locally - run the app, verify a change, screenshot the quote form
 type: project-skill
 
 ---
 
 ## Overview
 
-Empire v2 is a FastAPI backend serving a video production SaaS platform: quote form → Stripe payment → HeyGen video generation → customer delivery.
+Empire v2 is a FastAPI backend serving several products off one app: a video
+production SaaS (quote form → Stripe payment → HeyGen video generation →
+customer delivery), a worker/client services marketplace, subscriptions, and
+a real-money trading dashboard backed by background bot threads.
 
-The driver is a Node.js script (`.claude/skills/run-empire-v2/driver.mjs`) that launches the Python server on port 8000, verifies it's ready, and runs smoke tests on key endpoints (health check, quote form, order creation, order status).
+The driver is a Node.js script (`.claude/skills/run-empire-v2/driver.mjs`)
+that launches the Python server on port 8000, verifies it's ready, and runs
+smoke tests on key endpoints (health check, quote form, subscription tiers,
+order creation, order status).
+
+**This skill covers the HTTP surface** (routes, orders, subscriptions). For
+the background trading bots (`prop_bot.py`, `tradovate_bot.py`) - which are
+daemon threads calling a real broker API on a timer, not HTTP endpoints -
+see the separate `.claude/skills/verify/SKILL.md`, which drives them with a
+stubbed network boundary instead.
 
 ## Prerequisites
 
@@ -54,41 +66,47 @@ This will:
 3. Run smoke tests:
    - Health check (`GET /health`)
    - Quote form loads (`GET /quote` returns HTML)
-   - Create an order via API (`POST /orders/orders/request-quote`)
-   - Retrieve order status (`GET /orders/orders/{id}`)
+   - List subscription tiers (`GET /subscriptions/tiers`)
+   - Get one tier's detail (`GET /subscriptions/tiers/pro`)
+   - Create an order via API (`POST /orders/request-quote`, JSON body)
+   - Retrieve order status (`GET /orders/customer/{id}?email=...`)
 4. Print results (pass/fail count)
 5. Stop the server and exit
 
-**Output:**
+**Output** (this is a real run, verified this session):
 ```
 Starting FastAPI server on port 8000...
-✓ Router loaded: /auth
-✓ Router loaded: /orders
-... more routers ...
+INFO:pgusa:Migration OK: monitor_errors table
+INFO:health_monitor:📊 Loaded: 14 errors, 0 fixes, 2 metrics
 ✓ Server ready
 
 📊 Running smoke tests...
 
 ✓ Health Check
 ✓ Quote Form HTML: HTML form loaded
+✓ List Subscription Tiers: 4 tiers
+✓ Get Pro Tier Details: tier detail loaded
 ✓ Create Order (Request Quote): Order #1 created (750 cents)
 ✓ Get Order Status: Order #1 retrieved
 
-📈 Results: 4 passed, 0 failed
+📈 Results: 6 passed, 0 failed
 ```
 
 ### Driver Commands
 
-The driver supports several commands:
+| Command | What it does | Needs a server already running? |
+|---------|------------|------|
+| `node driver.mjs start` | Launch server, stay running (Ctrl+C to stop) | starts its own |
+| `node driver.mjs test` | Launch, run smoke tests, stop | starts its own |
+| `node driver.mjs health` | Show health endpoint response | **yes** |
+| `node driver.mjs quote-form` | Check if quote form HTML loads | **yes** |
+| `node driver.mjs create-order` | Create a test order and show response | **yes** |
+| `node driver.mjs stop` | Kill any running server process | n/a |
 
-| Command | What it does |
-|---------|------------|
-| `node driver.mjs start` | Launch server, stay running (Ctrl+C to stop) |
-| `node driver.mjs test` | Launch, run smoke tests, stop |
-| `node driver.mjs health` | Show health endpoint response |
-| `node driver.mjs quote-form` | Check if quote form HTML loads |
-| `node driver.mjs create-order` | Create a test order and show response |
-| `node driver.mjs stop` | Kill any running server process |
+`health`, `quote-form`, and `create-order` hit an already-listening server -
+they don't start one themselves. Run `start` in one shell (or background it)
+first, or just use `test`, which is self-contained (start → test → stop) and
+is the right default for a quick check.
 
 ## Run (Human Path)
 
@@ -101,7 +119,16 @@ python main.py
 # Terminal 2: Test in another shell
 curl http://localhost:8000/health
 curl http://localhost:8000/quote
-curl -X POST "http://localhost:8000/orders/orders/request-quote?customer_name=John&customer_email=test@example.com&customer_company=TestCo&video_type=explainer&script_or_topic=test&target_audience=business&avatar=anna&language=english_us"
+
+# request-quote takes a JSON body (Pydantic model), not query params -
+# sending it as query params 422s.
+curl -X POST http://localhost:8000/orders/request-quote \
+  -H "Content-Type: application/json" \
+  -d '{"customer_name":"John","customer_email":"test@example.com","customer_company":"TestCo","video_type":"explainer","script_or_topic":"test","target_audience":"business","avatar":"anna","language":"english_us"}'
+
+# Order status is customer-facing and needs the matching email as a second
+# factor (see Gotchas) - not the order ID alone.
+curl "http://localhost:8000/orders/customer/1?email=test@example.com"
 
 # Browser: Open http://localhost:8000/quote to see the form
 # (Ctrl+C in Terminal 1 to stop)
@@ -121,12 +148,16 @@ For local testing, these are optional; video generation and email are skipped if
 ## Test
 
 ```bash
-# Run the driver smoke tests (recommended)
+# Run the driver smoke tests (recommended) - real HTTP requests against a
+# real running server and a real (SQLite) DB write
 node .claude/skills/run-empire-v2/driver.mjs test
-
-# Or run the Python test suite if it exists
-pytest tests/ -v  # (if tests/ directory exists)
 ```
+
+There's no `tests/` directory or pytest suite. There are two standalone
+scripts at the repo root (`test_outreach_persistence.py`,
+`test_video_generation.py`) runnable directly with `python3 <file>`, but
+they're one-off integration checks for specific features, not a general
+suite - the driver above is the actual smoke test for "does the app work."
 
 ## Gotchas
 
@@ -143,13 +174,35 @@ pytest tests/ -v  # (if tests/ directory exists)
 
 This handles most Railway variations. If the form still fails after deployment, check the Railway container's working directory in logs.
 
-### Order endpoints use double `/orders` prefix locally
+### `request-quote` takes a JSON body, not query params
 
-**Issue:** The routes in `routers/orders.py` define full paths like `/orders/request-quote`, and the router is registered at `/orders` prefix in `main.py`, resulting in `/orders/orders/request-quote`.
+**Issue:** `POST /orders/request-quote` 422s if you send the fields as URL
+query params.
 
-**Why it's like this:** This is intentional — the router registration can be changed if routes are moved to relative paths (e.g., `/request-quote`), but current code works as-is.
+**Why:** `routers/orders.py` declares it as `async def request_quote(quote:
+QuoteRequest, ...)` - a Pydantic model, so FastAPI expects a JSON request
+body. This used to take query params and used to be double-prefixed
+(`/orders/orders/request-quote`) before the DB-backed storage migration;
+both of those are gone now. If you hit either old shape, you'll get a 404
+(wrong path) or 422 (wrong param style) - this skill was itself out of date
+about this until this session's verification pass caught it.
 
-**Workaround:** Use `/orders/orders/*` for testing locally. This quirk is harmless.
+**Fix:** POST a JSON body to `/orders/request-quote` (single prefix). See
+the curl example above or `driver.mjs`'s `jsonBody` test case.
+
+### Order status lookup needs the customer's email, not just the ID
+
+**Issue:** `GET /orders/{order_id}` 401s (admin-key gated).
+
+**Why:** Order IDs are small sequential ints with no other protection, so a
+plain `GET /orders/{id}` is trivially enumerable - that route now requires
+an admin key (`admin_auth.require_admin_key`). The real customer-facing
+route is `GET /orders/customer/{order_id}?email=...`, which requires the
+email the order was placed under as a second factor instead.
+
+**Fix:** For a customer-facing check, hit `/orders/customer/{id}` with the
+matching `email` query param. For an admin check, hit `/orders/{id}` with
+an `X-Admin-Key` header.
 
 ### HeyGen integration is optional
 
@@ -159,29 +212,55 @@ This handles most Railway variations. If the form still fails after deployment, 
 
 **Fix:** Set `HEYGAN_API_KEY` in environment to enable video generation. Without it, orders stay in `video_generation_status: "pending"` forever.
 
-### In-memory order storage (development only)
+### Orders persist across restarts now (SQLite by default)
 
-**Issue:** When the server restarts, all pending orders are lost.
+Orders, subscriptions, trading bot state, and withdrawal requests are all
+DB-backed (`models.py` / `database.py`), not in-memory lists - an earlier
+version of this doc said otherwise. Locally this defaults to a SQLite file
+at `./empire.db` in the repo root (no `DATABASE_URL` needed); set
+`DATABASE_URL` to a real Postgres URL to match production. Delete
+`empire.db` to reset local state between runs (e.g. if `create-order` keeps
+incrementing order IDs and you want a clean slate).
 
-**Why:** Orders are stored in Python lists (`pending_orders`, `completed_orders`) that live only as long as the process.
+### `python-binance` version pin can silently break the whole build
 
-**Fix for production:** Migrate to persistent database (PostgreSQL/SQLite on disk). For local development, this is fine.
+**Issue:** `pip install -r requirements.txt` fails entirely (not just the
+optional crypto bot) with `No matching distribution found for
+python-binance==X.Y.Z` if that pin doesn't exist on PyPI.
+
+**Why:** `crypto_scalp_grid_bot.py`'s import is guarded in `main.py` (won't
+crash the app if missing), but `requirements.txt` itself isn't - a bad pin
+there fails the *entire* `pip install`, which fails the Railway build for
+every feature, not just the crypto bot. This actually happened - a pin of
+`python-binance==1.20.1` (a version that was never published; latest real
+release is `1.0.37`) broke production builds until fixed.
+
+**Fix:** `pip index versions python-binance` to check what's real before
+pinning. If `pip install -r requirements.txt` fails on an unrelated-looking
+package, check whether it's guarded in `main.py` but still hard-pinned in
+`requirements.txt` - the guard doesn't help if the file itself won't install.
 
 ## Troubleshooting
 
 | Error | Fix |
 |-------|-----|
 | `ModuleNotFoundError: No module named 'fastapi'` | Run `pip install -r requirements.txt` |
+| `No matching distribution found for python-binance==...` | Bad version pin in `requirements.txt` - check `pip index versions python-binance` and fix the pin (see Gotchas). Blocks *all* deps from installing, not just the crypto bot. |
 | `Address already in use: ('0.0.0.0', 8000)` | Another process is using port 8000. Run `pkill -f "python main.py"` or change PORT in driver. |
-| `ConnectionRefused` on smoke tests | Server didn't start. Check `python main.py` output for errors (missing imports, etc). |
+| `ConnectionRefused` on smoke tests, or on `health`/`quote-form`/`create-order` | Server isn't running. `health`/`quote-form`/`create-order` don't start one themselves - run `start` first (or use `test`, which is self-contained). |
 | Stripe endpoint returns null publishable key | `STRIPE_PUBLISHABLE_KEY` env var not set. Set it or skip payment tests locally. |
 | Quote form shows `Not Found` | The `quote_request.html` file may have been moved. Check `ls -la quote_request.html`. |
-| `/orders/*` endpoints return 404 | Use `/orders/orders/*` (the double prefix is correct due to router registration). |
+| `POST /orders/request-quote` → 404 | Single `/orders` prefix, not `/orders/orders` - that double prefix was removed when the route body changed to a Pydantic model. |
+| `POST /orders/request-quote` → 422 | Send a JSON body (`Content-Type: application/json`), not query params. |
+| `GET /orders/{id}` → 401 | That route is admin-key gated now. Use `GET /orders/customer/{id}?email=...` for the customer-facing lookup. |
 
 ## Code Navigation
 
-- **main.py** — FastAPI app, lifespan, router registration, core endpoints (`/health`, `/quote`, `/order-success`)
-- **routers/orders.py** — Order lifecycle: quote → Stripe checkout → payment webhook → video generation
+- **main.py** — FastAPI app, guarded router imports (`routers_to_load` dict, each wrapped in try/except so one missing optional module doesn't crash the app), `routers_list` registration loop, background bot threads started at startup, core endpoints (`/health`, `/quote`, `/order-success`, `/trading-dashboard`)
+- **routers/orders.py** — Order lifecycle: quote (JSON body, DB-backed) → Stripe checkout → payment webhook → video generation → customer portal (email-gated) / admin lookup (key-gated)
+- **routers/trading_dashboard.py** — Real Alpaca account data + withdrawal-request log backing `trading_dashboard.html`; see the `verify` skill to drive this without hitting the real broker API
+- **prop_bot.py** / **tradovate_bot.py** — Background trading bots (daemon threads, not HTTP routes) - see `.claude/skills/verify/SKILL.md`
+- **models.py** / **database.py** — SQLAlchemy models and async engine; SQLite locally by default, Postgres via `DATABASE_URL`
 - **heygan_integration.py** — HeyGen API wrapper (avatar/language mapping, video polling)
 - **quote_request.html** — Frontend form with two-stage flow and Stripe.js integration
 - **.claude/CLAUDE.md** — Full architecture and deployment guide

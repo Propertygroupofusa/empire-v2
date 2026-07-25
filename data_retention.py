@@ -21,12 +21,16 @@ class DataRetentionManager:
 
     async def initialize_retention_tables(self, engine):
         """Create archive tables for permanent storage"""
+        # AUTOINCREMENT is SQLite-only syntax; Postgres needs SERIAL. Same
+        # dialect check main.py's create_monitor_tables() already uses for
+        # the tables these archive.
+        pk = "SERIAL PRIMARY KEY" if engine.dialect.name == "postgresql" else "INTEGER PRIMARY KEY AUTOINCREMENT"
         async with engine.begin() as conn:
             # Archive tables - keep forever
             try:
-                await conn.execute(text("""
+                await conn.execute(text(f"""
                     CREATE TABLE IF NOT EXISTS monitor_errors_archive (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        id {pk},
                         error_type VARCHAR NOT NULL,
                         error_message TEXT NOT NULL,
                         severity VARCHAR,
@@ -40,9 +44,9 @@ class DataRetentionManager:
                 log.warning(f"Archive table skip: {e}")
 
             try:
-                await conn.execute(text("""
+                await conn.execute(text(f"""
                     CREATE TABLE IF NOT EXISTS monitor_fixed_issues_archive (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        id {pk},
                         issue_name VARCHAR NOT NULL,
                         fixed_at TIMESTAMP,
                         status VARCHAR,
@@ -55,9 +59,9 @@ class DataRetentionManager:
                 log.warning(f"Archive table skip: {e}")
 
             try:
-                await conn.execute(text("""
+                await conn.execute(text(f"""
                     CREATE TABLE IF NOT EXISTS monitor_performance_archive (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        id {pk},
                         metric_data TEXT NOT NULL,
                         checked_at TIMESTAMP,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -70,9 +74,9 @@ class DataRetentionManager:
 
             # Data retention log table
             try:
-                await conn.execute(text("""
+                await conn.execute(text(f"""
                     CREATE TABLE IF NOT EXISTS data_retention_log (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        id {pk},
                         action VARCHAR NOT NULL,
                         table_name VARCHAR,
                         records_archived INTEGER,
