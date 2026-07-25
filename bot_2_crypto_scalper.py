@@ -295,6 +295,7 @@ class State:
         self.start_pf = CONFIG["starting_capital"]
         self.day_start_pf = CONFIG["starting_capital"]
         self.peak_pf = CONFIG["starting_capital"]
+        self.current_pf = CONFIG["starting_capital"]
         self.is_live = False
         self.load()
 
@@ -307,6 +308,7 @@ class State:
             self.is_live = d.get("is_live", False)
             self.start_pf = d.get("start_pf", CONFIG["starting_capital"])
             self.peak_pf = d.get("peak_pf", CONFIG["starting_capital"])
+            self.current_pf = d.get("current_pf", self.peak_pf)
             log.info(f"📂 Loaded: Day {self.day} W:{self.wins} L:{self.losses}")
         except:
             pass
@@ -320,6 +322,7 @@ class State:
                 "is_live": self.is_live,
                 "start_pf": self.start_pf,
                 "peak_pf": self.peak_pf,
+                "current_pf": self.current_pf,
             },
             open("bot2_state.json", "w"),
             indent=2,
@@ -358,6 +361,7 @@ def run_cycle():
         return
 
     pf = float(acct.get("portfolio_value", CONFIG["starting_capital"]))
+    state.current_pf = pf
     ms = get_milestone(pf)
     days = days_to_target(pf, CONFIG["daily_target_pct"])
     mode = "🔴 LIVE" if state.is_live else "📄 PAPER"
