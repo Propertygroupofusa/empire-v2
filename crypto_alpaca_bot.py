@@ -127,35 +127,91 @@ async def get_account_equity_and_cash(session):
         return None, None
 
 
-async def get_price_rsi(session, symbol):
+def _compute_rsi(closes: list) -> float:
+    gains = [max(closes[i] - closes[i - 1], 0) for i in range(1, len(closes))]
+    losses = [max(closes[i - 1] - closes[i], 0) for i in range(1, len(closes))]
+    avg_gain = sum(gains[-14:]) / 14
+    avg_loss = sum(losses[-14:]) / 14
+    rs = avg_gain / avg_loss if avg_loss > 0 else 100
+    return round(100 - (100 / (1 + rs)), 1)
+
+
+async def _fetch_alpaca_closes(session, symbol):
     """Alpaca's crypto bars endpoint returns bars keyed by symbol (not a
     flat list like the stocks bars endpoint), since one request can ask
     for multiple symbols at once."""
-    try:
-        url = f"{DATA_URL}/v1beta3/crypto/us/bars"
-        params = {"symbols": symbol, "timeframe": "5Min", "limit": "20"}
-        async with session.get(url, headers=HEADERS, params=params) as r:
-            if r.status != 200:
-                return None
-            data = await r.json()
-            bars = (data.get("bars") or {}).get(symbol, [])
-            if len(bars) < 14:
-                return None
+    url = f"{DATA_URL}/v1beta3/crypto/us/bars"
+    params = {"symbols": symbol, "timeframe": "5Min", "limit": "20"}
+    async with session.get(url, headers=HEADERS, params=params) as r:
+        if r.status != 200:
+            return None
+        data = await r.json()
+        bars = (data.get("bars") or {}).get(symbol, [])
+        if len(bars) < 14:
+            return None
+        return [b["c"] for b in bars]
 
-            closes = [b["c"] for b in bars]
-            price = closes[-1]
 
-            gains = [max(closes[i] - closes[i - 1], 0) for i in range(1, len(closes))]
-            losses = [max(closes[i - 1] - closes[i], 0) for i in range(1, len(closes))]
-            avg_gain = sum(gains[-14:]) / 14
-            avg_loss = sum(losses[-14:]) / 14
-            rs = avg_gain / avg_loss if avg_loss > 0 else 100
-            rsi = 100 - (100 / (1 + rs))
+async def _fetch_coinbase_closes(session, symbol):
+    """Free, no-auth public endpoint - BTC/USD -> BTC-USD. Price data
+    only, never used for order placement (that stays on Alpaca, the
+    real brokerage account)."""
+    pair = symbol.replace("/", "-")
+    url = f"https://api.exchange.coinbase.com/products/{pair}/candles?granularity=300"
+    async with session.get(url, headers={"Accept": "application/json"}) as r:
+        if r.status != 200:
+            return None
+        data = await r.json()
+        if not data or len(data) < 14:
+            return None
+        # Coinbase returns newest-first; each row is [time, low, high, open, close, volume]
+        rows = list(reversed(data))[-20:]
+        return [float(row[4]) for row in rows]
 
-            return {"price": price, "rsi": round(rsi, 1)}
-    except Exception as e:
-        log.error(f"Crypto price error {symbol}: {e}")
-        return None
+
+async def _fetch_binance_closes(session, symbol):
+    """Free, no-auth public endpoint - BTC/USD -> BTCUSDT. Price data
+    only, same reasoning as Coinbase above."""
+    pair = symbol.replace("/", "").replace("USD", "USDT")
+    url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval=5m&limit=20"
+    async with session.get(url, headers={"Accept": "application/json"}) as r:
+        if r.status != 200:
+            return None
+        data = await r.json()
+        if not data or len(data) < 14:
+            return None
+        # Each row: [open_time, open, high, low, close, volume, ...]
+        return [float(row[4]) for row in data]
+
+
+_PRICE_SOURCES = (
+    ("alpaca", _fetch_alpaca_closes),
+    ("coinbase", _fetch_coinbase_closes),
+    ("binance", _fetch_binance_closes),
+)
+
+
+async def get_price_rsi(session, symbol):
+    """Price+RSI with a fallback chain (Alpaca -> Coinbase -> Binance)
+    for resilience - crypto trades 24/7, so a single data-source outage
+    (rate limit, brief downtime) shouldn't silently stall trading on a
+    pair until Alpaca recovers. Alpaca is tried first since that's also
+    where real orders are placed; Coinbase/Binance are only ever used
+    for price data, never for order placement."""
+    for source_name, fetch_fn in _PRICE_SOURCES:
+        try:
+            closes = await fetch_fn(session, symbol)
+        except Exception as e:
+            log.debug(f"{source_name} price fetch failed for {symbol}: {e}")
+            closes = None
+
+        if closes and len(closes) >= 14:
+            if source_name != "alpaca":
+                log.info(f"[CRYPTO] {symbol} price/RSI from fallback source: {source_name}")
+            return {"price": closes[-1], "rsi": _compute_rsi(closes)}
+
+    log.error(f"Crypto price error {symbol}: all sources (alpaca, coinbase, binance) failed")
+    return None
 
 
 def size_position(cash_pool_remaining, slots_remaining, price):
