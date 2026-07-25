@@ -38,7 +38,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 
-from models import Job, SupportConversation
+from models import Job, SupportConversation, DailyBrief
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("daily_brief")
@@ -180,6 +180,14 @@ async def generate_and_send_brief():
 
     summary = _generate_summary(trading, notary, support)
 
+    # Persisted before sending, not after - so the history record exists
+    # even if the email step fails (missing GMAIL_EMAIL/PASSWORD, SMTP
+    # hiccup, etc.). The email is a delivery channel; the DB row is the
+    # actual record.
+    async with _SessionLocal() as db:
+        db.add(DailyBrief(summary=summary, trading_snapshot=trading, notary_snapshot=notary, support_snapshot=support))
+        await db.commit()
+
     today = datetime.now(ET).strftime("%A, %B %d")
     body = (
         f"{summary}\n\n"
@@ -191,7 +199,7 @@ async def generate_and_send_brief():
         f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
     )
     _send_brief_email(f"☀️ Del Ventures Brief — {today}", body)
-    log.info("Daily brief generated and sent")
+    log.info("Daily brief generated, persisted, and sent")
 
 
 _scheduler = BackgroundScheduler()

@@ -541,3 +541,30 @@ class SupportMessage(Base):
             "body": self.body,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class DailyBrief(Base):
+    """One day's Daily Ventures Brief (see daily_brief.py) - persisted so
+    the briefing history becomes searchable later ("show me every day
+    revenue exceeded $X"), not just a one-off email that's gone once it
+    leaves the inbox. Raw snapshots are stored alongside the generated
+    summary so future querying isn't limited to whatever Claude happened
+    to mention in the prose that day."""
+    __tablename__ = "daily_briefs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    summary = Column(Text)
+    trading_snapshot = Column(JSON, nullable=True)
+    notary_snapshot = Column(JSON, nullable=True)
+    support_snapshot = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "summary": self.summary,
+            "trading_snapshot": self.trading_snapshot,
+            "notary_snapshot": self.notary_snapshot,
+            "support_snapshot": self.support_snapshot,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
