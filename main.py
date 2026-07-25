@@ -96,6 +96,12 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import daily_publisher: {e}")
 
+start_daily_brief = None
+try:
+    from daily_brief import start_daily_brief
+except Exception as e:
+    logging.warning(f"Failed to import daily_brief: {e}")
+
 health_monitor_service = None
 try:
     from health_monitor import start_health_monitor, monitor
@@ -355,6 +361,12 @@ async def lifespan(app: FastAPI):
             log.info("Daily video publisher started")
     except Exception as e:
         log.warning(f"Daily publisher failed: {e}")
+
+    try:
+        if start_daily_brief is not None and start_daily_brief():
+            log.info("☀️ Daily Ventures Brief scheduled")
+    except Exception as e:
+        log.warning(f"Daily brief failed to start: {e}")
 
     try:
         if health_monitor_service is not None:
