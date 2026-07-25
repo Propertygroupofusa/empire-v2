@@ -19,7 +19,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Core Stack
 - **Framework:** FastAPI (async, graceful error handling)
-- **Database:** SQLite via SQLAlchemy (in-memory order storage for video orders)
+- **Database:** SQLite/PostgreSQL via async SQLAlchemy (persistent order storage)
 - **Payments:** Stripe (checkout sessions, webhooks)
 - **Video Generation:** HeyGen API (avatar + voice synthesis)
 - **Email:** Gmail SMTP (configured via env vars)
@@ -47,7 +47,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    - Avatar: 8 options (Anna, Carlos, Emma, James, Lisa, Marcus, Olivia, Ryan)
    - Language: 22 options (English US/UK/AU, Spanish, French, German, Italian, Portuguese, Dutch, Swedish, Norwegian, Danish, Polish, Russian, Japanese, Korean, Chinese Simplified/Traditional, Arabic, Hindi)
    - Returns: order_id + quote_price
-   - Stores in `pending_orders` list with all fields
+   - Persists order to database via SQLAlchemy ORM
 
 2. **POST /orders/{order_id}/create-checkout** — Stripe session creation
    - Uses stored order data to create Stripe checkout session
@@ -95,9 +95,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Archives old data to permanent storage
 - Keeps all data forever (non-deletion retention policy)
 
-**database.py** (941 bytes)
-- SQLAlchemy engine + session factory
-- SQLite connection string from env var
+**database.py**
+- Async SQLAlchemy engine with connection pooling
+- Supports SQLite (local) and PostgreSQL (production) with asyncpg driver
+- `AsyncSessionLocal()` factory for background tasks
+- `Depends(get_db)` dependency for request handlers
 
 ---
 
@@ -161,21 +163,20 @@ possible_paths = [
 
 ### Git Workflow
 
-- **Branch name:** `claude/video-editing-platform-ib585z` (do NOT push to main without explicit permission)
+- **Development branch:** `claude/usa-empire-v2-setup-01hmw8` (all changes pushed here)
+- **Production branch:** `main` (do NOT push without explicit permission)
 - **Commits:** Create new commits (don't amend) with clear messages
-- **Recent commits:**
-  - `774f1e8` — Fix quote form endpoint paths on Railway
-  - `5617390` — Return HTMLResponse instead of FileResponse
-  - Previous — HeyGen integration, Stripe webhook, customer portal
+- **Deployment:** Push to main branch, Railway auto-deploys to https://empire-v2-production.up.railway.app
 
 ---
 
 ## Critical Implementation Details
 
 ### Order Storage
-- **In-memory lists:** `pending_orders`, `completed_orders` (FastAPI variables, lost on restart)
-- **Future:** Migrate to database persistence in orders table
-- Order object schema:
+- **Database:** All orders persisted in `video_quote_orders` table via async SQLAlchemy ORM
+- **Connection:** Uses `Depends(get_db)` for request-scoped sessions, `AsyncSessionLocal()` for background tasks
+- **Databases supported:** SQLite (local development, default: empire.db), PostgreSQL with asyncpg (Railway production)
+- Order object schema (VideoQuoteOrder model):
   ```python
   {
     "id": int,
@@ -264,11 +265,10 @@ Before pushing changes to Railway, verify:
 
 ## Known Limitations & TODOs
 
-- **Order persistence:** Restart loses all pending orders (use DB for production)
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
-- **Scale:** In-memory lists won't scale; add PostgreSQL connection for real usage
 - **Video editing:** HeyGen only generates new videos; can't modify existing videos per user request
 - **Admin auth:** No authentication on admin endpoints yet (add before production)
+- **Database:** PostgreSQL recommended for production (Railway plugin auto-configures with asyncpg driver)
 
 ---
 
