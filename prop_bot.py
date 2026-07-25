@@ -168,6 +168,46 @@ async def get_price_rsi(session, symbol):
         return None
 
 
+async def get_higher_tf_trend(session, symbol):
+    """1-hour timeframe trend, used ONLY as a confirmation filter on new
+    entries (see run_prop_cycle's Pass 2) - never on exits, so an
+    already-open position is never held or closed differently because
+    of this. A 5-minute RSI dip against a strong 1-hour downtrend is a
+    much weaker signal than the same dip with the 1-hour trend flat or
+    favorable - this is the "don't fight the higher timeframe" idea,
+    simplified from a full multi-timeframe confluence system down to a
+    single confirming check, since a 3-tier confidence-scoring system
+    (as reviewed elsewhere) is more machinery than a 7-symbol watchlist
+    needs. Returns "UP"/"DOWN"/"SIDEWAYS"/"UNKNOWN" - UNKNOWN on any
+    fetch failure so a data hiccup never blocks a trade outright, only
+    a genuinely confirmed opposing trend does."""
+    try:
+        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=1Hour&limit=50&feed=iex"
+        async with session.get(url, headers=HEADERS) as r:
+            if r.status != 200:
+                return "UNKNOWN"
+            data = await r.json()
+            bars = data.get("bars", [])
+            if len(bars) < 50:
+                return "UNKNOWN"
+
+            closes = [b["c"] for b in bars]
+            sma20 = sum(closes[-20:]) / 20
+            sma50 = sum(closes[-50:]) / 50
+            if sma50 == 0:
+                return "UNKNOWN"
+
+            diff_pct = (sma20 - sma50) / sma50
+            if diff_pct > 0.015:
+                return "UP"
+            if diff_pct < -0.015:
+                return "DOWN"
+            return "SIDEWAYS"
+    except Exception as e:
+        log.warning(f"Could not fetch 1H trend for {symbol}: {e}")
+        return "UNKNOWN"
+
+
 async def get_account_equity(session):
     """Real Alpaca account equity, used to scale the profit-target
     increment (see PROFIT_INCREMENT_MILESTONES). Falls back to None (base
@@ -499,6 +539,14 @@ async def run_prop_cycle():
         candidates.sort(key=lambda c: -c[0])  # strongest (furthest past threshold) first
 
         for _, contract, config, side, price, rsi, trend in candidates:
+            # Multi-timeframe confluence: don't fight a strong 1-hour
+            # trend just because the 5-minute RSI dipped. Entries only -
+            # never gates an exit or an existing position.
+            higher_tf = await get_higher_tf_trend(session, config["symbol"])
+            if (side == "long" and higher_tf == "DOWN") or (side == "short" and higher_tf == "UP"):
+                log.info(f"[APEX_589296] 🚫 {side.upper()} {contract} skipped — 1H trend ({higher_tf}) opposes 5min signal")
+                continue
+
             if len(open_prop_positions) < MAX_POSITIONS:
                 log.info(f"[APEX_589296] 📡 {side.upper()} {contract} — RSI:{rsi} Trend:{trend}")
                 await try_open(contract, config, side, price, rsi, trend, MAX_POSITIONS - len(open_prop_positions))
