@@ -590,6 +590,18 @@
         </div>
 
         <div class="panel">
+            <h3>🎰 Crypto Scalper Bot #2</h3>
+            <p style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">
+                A separate bot (bot_2_crypto_scalper.py) with its own tracked capital, deployed as its own
+                Railway service and served here via bot_api.py - not part of the account-wide equity panels
+                above. "Portfolio Value" is this bot's own live value (not its all-time peak).
+            </p>
+            <p id="botApiMeta" style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">Loading...</p>
+            <div id="botApiSummary">Loading...</div>
+            <div id="botApiPositions"></div>
+        </div>
+
+        <div class="panel">
             <h3>📋 Today's Trades</h3>
             <p style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">
                 Real filled orders from your Alpaca account today - what actually bought/sold, not just a count.
@@ -691,6 +703,10 @@
         // artifact preview on a different origin - CORS is open (allow_origins
         // = ["*"]) so the cross-origin fetch works fine either way.
         const API_BASE = 'https://empire-v2-production.up.railway.app/api/trading-dashboard';
+        // Separate bot - proxied straight through to the bot-api Railway
+        // service by main.py's /api/bot/{path} route, not gated by the
+        // admin key (no Depends(require_admin_key) on that proxy route).
+        const BOT_API_BASE = 'https://empire-v2-production.up.railway.app/api/bot';
         let adminKey = localStorage.getItem('bmb_admin_key') || '';
 
         // Tracks previous poll's values so we can log real transitions (not
@@ -1006,6 +1022,64 @@
             }).join('');
         }
 
+        async function refreshBotApiStatus() {
+            let status, positions;
+            try {
+                const [statusRes, positionsRes] = await Promise.all([
+                    fetch(BOT_API_BASE + '/status'),
+                    fetch(BOT_API_BASE + '/positions'),
+                ]);
+                status = await statusRes.json();
+                positions = await positionsRes.json();
+            } catch (e) {
+                document.getElementById('botApiMeta').textContent = '❌ bot-api unreachable: ' + e.message;
+                return;
+            }
+
+            if (!status || status.portfolio_value === undefined) {
+                document.getElementById('botApiMeta').textContent = '❌ bot-api returned no data (service may be down).';
+                return;
+            }
+
+            const metaEl = document.getElementById('botApiMeta');
+            metaEl.textContent = `${status.mode} | Day ${status.day} | W:${status.wins} L:${status.losses} (${status.win_rate}% WR)`;
+
+            const profitClass = status.profit >= 0 ? 'positive' : 'negative';
+            document.getElementById('botApiSummary').innerHTML = `
+                <div class="pair">
+                    <span class="pair-name">Portfolio Value (live, not peak)</span>
+                    <span class="pair-status status-holding-long">$${status.portfolio_value.toFixed(2)}</span>
+                </div>
+                <div class="pair">
+                    <span class="pair-name">All-Time Peak</span>
+                    <span class="pair-status">$${status.peak_portfolio.toFixed(2)}</span>
+                </div>
+                <div class="pair">
+                    <span class="pair-name">Profit vs Starting Capital</span>
+                    <span class="pair-status ${profitClass}">${status.profit >= 0 ? '+' : ''}$${status.profit.toFixed(2)} (${status.profit_pct.toFixed(2)}%)</span>
+                </div>
+                <div class="pair">
+                    <span class="pair-name">Active Positions</span>
+                    <span class="pair-status">${status.active_positions}</span>
+                </div>
+            `;
+
+            const posContainer = document.getElementById('botApiPositions');
+            if (!positions || !positions.positions || positions.positions.length === 0) {
+                posContainer.innerHTML = `<p style="color: #ccffcc; margin-top: 10px;">No open positions.</p>`;
+                return;
+            }
+            posContainer.innerHTML = positions.positions.map(p => {
+                const pnlClass = p.pnl_pct >= 0 ? 'status-holding-long' : 'status-holding-short';
+                return `
+                <div class="pair">
+                    <span class="pair-name">${p.symbol}</span>
+                    <span class="pair-status ${pnlClass}">Entry $${p.entry_price} → $${p.current_price} | ${p.pnl_pct >= 0 ? '+' : ''}${p.pnl_pct}% (${p.pnl_dollar >= 0 ? '+' : ''}$${p.pnl_dollar})</span>
+                </div>
+            `;
+            }).join('');
+        }
+
         async function refreshTrades() {
             let data;
             try {
@@ -1193,12 +1267,14 @@
         refreshWithdrawals();
         refreshSignals();
         refreshCryptoAlpacaStatus();
+        refreshBotApiStatus();
         refreshTrades();
         refreshDividends();
         setInterval(refreshStatus, 30000);
         setInterval(refreshWithdrawals, 30000);
         setInterval(refreshSignals, 30000);
         setInterval(refreshCryptoAlpacaStatus, 30000);
+        setInterval(refreshBotApiStatus, 30000);
         setInterval(refreshTrades, 30000);
         setInterval(refreshDividends, 300000); // dividends don't change fast - every 5 min is plenty
     </script>
