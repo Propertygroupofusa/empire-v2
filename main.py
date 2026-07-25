@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
-from sqlalchemy import text, inspect
+from sqlalchemy import text, inspect, String
 from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from datetime import datetime
 import os
@@ -306,54 +306,50 @@ async def run_migrations():
             table_name = model.__tablename__
             try:
                 existing_columns = await conn.run_sync(
-                    lambda sync_conn, t=table_name: [c["name"] for c in inspect(sync_conn).get_columns(t)]
+                    lambda sync_conn, t=table_name: {c["name"]: c["type"] for c in inspect(sync_conn).get_columns(t)}
                 )
             except Exception as e:
                 log.warning(f"Migration: could not inspect {table_name} table columns: {e}")
                 continue
 
             for column in model.__table__.columns:
-                if column.name in existing_columns:
+                if column.name not in existing_columns:
+                    try:
+                        ddl_type = column.type.compile(dialect=conn.dialect)
+                        # Always added nullable regardless of the model's own
+                        # nullable=False, even for required-looking columns like
+                        # name/email - a NOT NULL ALTER TABLE ADD COLUMN without a
+                        # default fails outright on Postgres if the table already
+                        # has rows, which is exactly the scenario this exists for.
+                        await conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN "{column.name}" {ddl_type}'))
+                        log.info(f"Migration OK: {table_name}.{column.name}")
+                    except Exception as e:
+                        log.debug(f"Migration skip {table_name}.{column.name}: {e}")
                     continue
-                try:
-                    ddl_type = column.type.compile(dialect=conn.dialect)
-                    # Always added nullable regardless of the model's own
-                    # nullable=False, even for required-looking columns like
-                    # name/email - a NOT NULL ALTER TABLE ADD COLUMN without a
-                    # default fails outright on Postgres if the table already
-                    # has rows, which is exactly the scenario this exists for.
-                    await conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN "{column.name}" {ddl_type}'))
-                    log.info(f"Migration OK: {table_name}.{column.name}")
-                except Exception as e:
-                    log.debug(f"Migration skip {table_name}.{column.name}: {e}")
 
-        # jobs.status drift: confirmed live in production - the real
-        # column is a native Postgres ENUM type ("jobstatus"), not the
-        # plain VARCHAR the Job model declares. Some earlier version of
-        # Job.status must have used SQLAlchemy's Enum(...) (which
-        # auto-creates that type) before the model was simplified to
-        # plain String, but the existing production table's column was
-        # never migrated to match. Comparing an enum column to a string
-        # bind param fails outright ("operator does not exist: jobstatus
-        # = character varying"), breaking notary_bot.py's matching cycle
-        # every single run. Only the missing-column loop above wouldn't
-        # catch this - the column exists, just with the wrong type.
-        try:
-            job_columns = await conn.run_sync(
-                lambda sync_conn: {c["name"]: c["type"] for c in inspect(sync_conn).get_columns("jobs")}
-            )
-            status_type = job_columns.get("status")
-            # isinstance, not string-matching str(status_type) - that
-            # renders as "VARCHAR(9)" even for a real Postgres ENUM column
-            # (only repr() shows the enum info), which would silently
-            # never detect the drift this exists to catch.
-            if isinstance(status_type, PGEnum):
-                await conn.execute(text(
-                    "ALTER TABLE jobs ALTER COLUMN status TYPE VARCHAR USING status::text"
-                ))
-                log.info("Migration OK: jobs.status converted from enum to VARCHAR")
-        except Exception as e:
-            log.debug(f"Migration skip jobs.status type fix: {e}")
+                # Type drift, not just missing-column drift: confirmed live
+                # in production on jobs.status - the real column was a
+                # native Postgres ENUM type ("jobstatus"), not the plain
+                # VARCHAR the model declares. Some earlier version of the
+                # model must have used SQLAlchemy's Enum(...) (which
+                # auto-creates that type) before being simplified to plain
+                # String, but the existing production table's column was
+                # never migrated to match - comparing an enum column to a
+                # string bind param fails outright ("operator does not
+                # exist: jobstatus = character varying"). Checked generally
+                # across every String column on all 4 models here, not just
+                # jobs.status, since Worker/Client/Booking all have their
+                # own "status" columns from the same era and could have the
+                # identical drift (e.g. routers/bookings.py already filters
+                # on Booking.status == status the same way).
+                if isinstance(column.type, String) and isinstance(existing_columns[column.name], PGEnum):
+                    try:
+                        await conn.execute(text(
+                            f'ALTER TABLE {table_name} ALTER COLUMN "{column.name}" TYPE VARCHAR USING "{column.name}"::text'
+                        ))
+                        log.info(f"Migration OK: {table_name}.{column.name} converted from enum to VARCHAR")
+                    except Exception as e:
+                        log.debug(f"Migration skip {table_name}.{column.name} type fix: {e}")
 
 
 @asynccontextmanager
