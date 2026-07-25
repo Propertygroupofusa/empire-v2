@@ -104,9 +104,13 @@ def initialize_client():
 
 def get_price_and_rsi(pair: str):
     """Fetch current price and calculate RSI from 1-min candles"""
+    if client is None:
+        log.warning(f"Binance client not initialized, cannot fetch {pair}")
+        return None
+
     try:
         klines = client.get_klines(symbol=pair, interval="1m", limit=20)
-        closes = [float(k[4]) for k in klines]  # close price
+        closes = [float(k[4]) for k in klines]
 
         if len(closes) < 14:
             return None
@@ -120,7 +124,7 @@ def get_price_and_rsi(pair: str):
         rs = avg_gain / avg_loss if avg_loss > 0 else 100
         rsi = 100 - (100 / (1 + rs))
 
-        return {"price": price, "rsi": round(rsi, 1)}
+        return {"price": round(price, 4), "rsi": round(rsi, 1)}
     except Exception as e:
         log.error(f"Failed to fetch price/RSI for {pair}: {e}")
         return None
@@ -128,6 +132,14 @@ def get_price_and_rsi(pair: str):
 
 def place_limit_order(pair: str, side: str, qty: float, price: float) -> dict:
     """Place a limit order on Binance"""
+    if client is None:
+        log.warning(f"Binance client not initialized, cannot place order for {pair}")
+        return None
+
+    if qty <= 0 or price <= 0:
+        log.error(f"Invalid order params: qty={qty}, price={price}")
+        return None
+
     try:
         order = client.order_limit(
             symbol=pair,
@@ -136,18 +148,25 @@ def place_limit_order(pair: str, side: str, qty: float, price: float) -> dict:
             quantity=qty,
             price=price
         )
-        log.info(f"📤 LIMIT ORDER | {side.upper()} {qty} {pair} @ ${price:.4f} | orderId={order['orderId']}")
+        log.info(f"📤 LIMIT | {side.upper()} {qty} {pair} @ ${price:.4f}")
         return order
     except BinanceOrderException as e:
-        log.error(f"Order failed for {pair}: {e}")
+        log.error(f"❌ Order failed for {pair}: {e}")
         return None
     except Exception as e:
-        log.error(f"Order placement error: {e}")
+        log.error(f"❌ Order error: {e}")
         return None
 
 
 def place_market_order(pair: str, side: str, qty: float) -> dict:
     """Place a market order on Binance"""
+    if client is None:
+        log.warning(f"Binance client not initialized, cannot place order for {pair}")
+        return None
+
+    if qty <= 0:
+        log.error(f"Invalid order quantity: {qty}")
+        return None
     try:
         order = client.order_market(
             symbol=pair,

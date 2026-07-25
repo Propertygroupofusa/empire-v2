@@ -37,8 +37,10 @@ def load_bot_state() -> dict:
     try:
         if os.path.exists(BOT_STATE_FILE):
             with open(BOT_STATE_FILE, "r") as f:
-                return json.load(f)
-    except Exception as e:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except (json.JSONDecodeError, IOError) as e:
         log.error(f"Error loading bot state: {e}")
 
     return {
@@ -48,6 +50,7 @@ def load_bot_state() -> dict:
         "is_live": False,
         "start_pf": STARTING_CAPITAL,
         "peak_pf": STARTING_CAPITAL,
+        "current_pf": STARTING_CAPITAL,
     }
 
 
@@ -56,8 +59,10 @@ def load_positions() -> dict:
     try:
         if os.path.exists(POSITIONS_FILE):
             with open(POSITIONS_FILE, "r") as f:
-                return json.load(f)
-    except Exception as e:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except (json.JSONDecodeError, IOError) as e:
         log.debug(f"Error loading positions: {e}")
 
     return {}
@@ -70,7 +75,7 @@ def load_trades() -> list:
             with open(TRADES_FILE, "r") as f:
                 data = json.load(f)
                 return data if isinstance(data, list) else []
-    except Exception as e:
+    except (json.JSONDecodeError, IOError) as e:
         log.debug(f"Error loading trades: {e}")
 
     return []
@@ -79,7 +84,7 @@ def load_trades() -> list:
 def get_portfolio_value() -> float:
     """Get current portfolio value (sum of cash + position values)"""
     state = load_bot_state()
-    return state.get("peak_pf", STARTING_CAPITAL)
+    return float(state.get("current_pf", state.get("peak_pf", STARTING_CAPITAL)))
 
 
 @app.get("/api/bot/status")
@@ -124,24 +129,31 @@ async def bot_positions():
 
     result = []
     for symbol, pos_data in positions.items():
-        entry_px = pos_data.get("entry_price", 0)
-        current_px = pos_data.get("current_price", entry_px)
+        if not isinstance(pos_data, dict):
+            continue
 
-        if entry_px > 0:
-            pnl = ((current_px - entry_px) / entry_px) * 100
-            pnl_dollar = current_px - entry_px
-        else:
-            pnl = 0
-            pnl_dollar = 0
+        try:
+            entry_px = float(pos_data.get("entry_price", 0))
+            current_px = float(pos_data.get("current_price", entry_px))
 
-        result.append({
-            "symbol": symbol,
-            "entry_price": round(entry_px, 4),
-            "current_price": round(current_px, 4),
-            "pnl_pct": round(pnl, 2),
-            "pnl_dollar": round(pnl_dollar, 2),
-            "position_size": round(pos_data.get("position_size", 0), 2),
-        })
+            if entry_px > 0:
+                pnl = ((current_px - entry_px) / entry_px) * 100
+                pnl_dollar = current_px - entry_px
+            else:
+                pnl = 0
+                pnl_dollar = 0
+
+            result.append({
+                "symbol": str(symbol),
+                "entry_price": round(entry_px, 4),
+                "current_price": round(current_px, 4),
+                "pnl_pct": round(pnl, 2),
+                "pnl_dollar": round(pnl_dollar, 2),
+                "position_size": round(float(pos_data.get("position_size", 0)), 2),
+            })
+        except (ValueError, TypeError) as e:
+            log.warning(f"Skipping malformed position for {symbol}: {e}")
+            continue
 
     return {"positions": result, "count": len(result)}
 
@@ -168,14 +180,17 @@ async def bot_health():
     try:
         state = load_bot_state()
         pf = get_portfolio_value()
+        total_trades = state.get("wins", 0) + state.get("losses", 0)
 
         return {
             "status": "ok",
-            "bot_running": state.get("wins", 0) + state.get("losses", 0) > 0,
+            "bot_running": total_trades > 0,
             "portfolio_value": round(pf, 2),
+            "total_trades": total_trades,
             "last_update": datetime.now().isoformat(),
         }
     except Exception as e:
+        log.error(f"Health check failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -4,13 +4,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from datetime import datetime
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import smtplib
 import stripe
 import os
 import logging
+import re
 
 from database import get_db
 from models import Campaign, CampaignContact
@@ -39,6 +40,11 @@ TIERS = {
 # - Monitor: GET /trading/signals/stats for win rate and subscriber growth
 
 
+def validate_email(email: str) -> bool:
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(pattern, email))
+
+
 class SignalSubscriber(BaseModel):
     email: str
     tier: str = "free"
@@ -46,6 +52,11 @@ class SignalSubscriber(BaseModel):
 
     class Config:
         from_attributes = True
+
+    def validate(self) -> bool:
+        if not validate_email(self.email):
+            raise ValueError(f"Invalid email format: {self.email}")
+        return True
 
 
 class TradingSignal(BaseModel):
@@ -84,10 +95,13 @@ class SignalResponse(BaseModel):
 @router.post("/signals/subscribe")
 async def subscribe_to_signals(subscriber: SignalSubscriber, db: AsyncSession = Depends(get_db)):
     """Subscribe to trading signals (FREEMIUM: Free tier only during beta)."""
-    # FREEMIUM MODE: Force free tier for all subscribers during validation phase
-    tier = "free"  # Override subscriber.tier to free only
+    try:
+        subscriber.validate()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    # Log if user tried to subscribe to paid tier
+    tier = "free"
+
     if subscriber.tier != "free":
         log.info(f"Paid tier '{subscriber.tier}' requested but freemium mode active. Assigned free tier. Email: {subscriber.email}")
 
@@ -167,19 +181,24 @@ async def list_subscribers(
     )
 
     if tier:
-        # This is a simplified check - in production, filter by tier in contact_data
-        pass
+        result = await db.execute(query)
+        all_contacts = result.scalars().all()
+        filtered = [c for c in all_contacts if c.contact_data.get("tier") == tier]
+        contacts = filtered[skip:skip+limit]
+    else:
+        query = query.offset(skip).limit(limit)
+        result = await db.execute(query)
+        contacts = result.scalars().all()
 
-    query = query.offset(skip).limit(limit)
-    result = await db.execute(query)
-    contacts = result.scalars().all()
+    result = await db.execute(select(CampaignContact).where(CampaignContact.campaign_id == signal_campaign.id))
+    all_contacts = result.scalars().all()
 
     return {
         "total": len(contacts),
         "tier_breakdown": {
-            "free": sum(1 for c in contacts if c.contact_data.get("tier") == "free"),
-            "pro": sum(1 for c in contacts if c.contact_data.get("tier") == "pro"),
-            "enterprise": sum(1 for c in contacts if c.contact_data.get("tier") == "enterprise"),
+            "free": sum(1 for c in all_contacts if c.contact_data.get("tier") == "free"),
+            "pro": sum(1 for c in all_contacts if c.contact_data.get("tier") == "pro"),
+            "enterprise": sum(1 for c in all_contacts if c.contact_data.get("tier") == "enterprise"),
         },
         "subscribers": [
             {
@@ -266,13 +285,17 @@ Tier: {tier.upper()}
 Time: {datetime.utcnow().isoformat()}
         """.strip()
 
-        # Record delivery without touching status: "active" here means
-        # "subscribed", not "already sent one signal" - status is also what
-        # list_subscribers/broadcast filter on, so overwriting it here used
-        # to make every subscriber invisible to all future broadcasts after
-        # their first signal.
+        if not hasattr(subscriber, 'sent_at'):
+            subscriber.sent_at = None
+        if not hasattr(subscriber, 'custom_metadata'):
+            subscriber.custom_metadata = {}
+
         subscriber.sent_at = datetime.utcnow()
-        subscriber.custom_metadata = {"last_signal": signal.contract, "last_action": signal.action}
+        subscriber.custom_metadata = {
+            "last_signal": signal.contract,
+            "last_action": signal.action,
+            "last_sent_at": datetime.utcnow().isoformat()
+        }
 
         sent_count += 1
 
