@@ -133,6 +133,22 @@ def api_call(method, endpoint, body=None, live=False):
 
 def get_crypto_prices(symbol, limit=50):
     """Get crypto OHLCV bars — 15min timeframe"""
+    if not API_KEY:
+        # Generate realistic demo data for backtesting mode
+        import random
+        random.seed(hash(symbol) % 2**32)  # Consistent per-symbol randomness
+        closes = []
+        price = 50000.0 if "BTC" in symbol else 3000.0 if "ETH" in symbol else 150.0
+        for i in range(limit):
+            change = random.uniform(-0.02, 0.03)
+            price *= (1 + change)
+            closes.append(round(price, 2))
+
+        highs = [c * (1 + random.uniform(0, 0.01)) for c in closes]
+        lows = [c * (1 - random.uniform(0, 0.01)) for c in closes]
+        volumes = [random.randint(1000000, 5000000) for _ in range(limit)]
+        return closes, highs, lows, volumes
+
     sym = symbol.replace("/", "%2F")
     url = f"{DATA_URL}/v1beta3/crypto/us/bars?symbols={sym}&timeframe=15Min&limit={limit}"
     headers = {
@@ -155,10 +171,21 @@ def get_crypto_prices(symbol, limit=50):
 
 
 def get_account():
+    if not API_KEY:
+        # Return demo account when API key missing
+        return {
+            "portfolio_value": CONFIG["starting_capital"],
+            "cash": CONFIG["starting_capital"],
+            "status": "demo"
+        }
     return api_call("GET", "/v2/account", live=state.is_live)
 
 
 def place_buy(symbol, notional, live=False):
+    if not API_KEY:
+        log.info(f"  [DEMO] Would BUY {symbol} ${notional:.2f}")
+        return True
+
     body = {
         "symbol": symbol,
         "notional": str(round(notional, 2)),
@@ -174,6 +201,10 @@ def place_buy(symbol, notional, live=False):
 
 
 def place_sell(symbol, live=False):
+    if not API_KEY:
+        log.info(f"  [DEMO] Would SELL {symbol}")
+        return True
+
     body = {
         "symbol": symbol,
         "qty": "100%",
@@ -288,6 +319,7 @@ def get_signal(closes, highs, lows, volumes, in_pos, entry_px, peak_px, symbol):
 class State:
     def __init__(self):
         self.positions = {}
+        self.trades = []  # Track closed trades
         self.trades_today = 0
         self.wins = 0
         self.losses = 0
@@ -295,23 +327,45 @@ class State:
         self.start_pf = CONFIG["starting_capital"]
         self.day_start_pf = CONFIG["starting_capital"]
         self.peak_pf = CONFIG["starting_capital"]
+        self.current_pf = CONFIG["starting_capital"]  # Current portfolio value
         self.is_live = False
         self.load()
 
     def load(self):
+        state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot2_state.json")
+        positions_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot2_positions.json")
+        trades_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot2_trades.json")
+
         try:
-            d = json.load(open("bot2_state.json"))
+            d = json.load(open(state_file))
             self.day = d.get("day", 1)
             self.wins = d.get("wins", 0)
             self.losses = d.get("losses", 0)
             self.is_live = d.get("is_live", False)
             self.start_pf = d.get("start_pf", CONFIG["starting_capital"])
             self.peak_pf = d.get("peak_pf", CONFIG["starting_capital"])
-            log.info(f"📂 Loaded: Day {self.day} W:{self.wins} L:{self.losses}")
+            self.current_pf = d.get("current_pf", CONFIG["starting_capital"])
+            log.info(f"📂 Loaded: Day {self.day} W:{self.wins} L:{self.losses} P&L: ${self.current_pf - self.start_pf:+.2f}")
         except:
             pass
 
+        # Load positions
+        try:
+            self.positions = json.load(open(positions_file))
+        except:
+            self.positions = {}
+
+        # Load trades
+        try:
+            self.trades = json.load(open(trades_file))
+        except:
+            self.trades = []
+
     def save(self):
+        state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot2_state.json")
+        positions_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot2_positions.json")
+        trades_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot2_trades.json")
+
         json.dump(
             {
                 "day": self.day,
@@ -320,10 +374,17 @@ class State:
                 "is_live": self.is_live,
                 "start_pf": self.start_pf,
                 "peak_pf": self.peak_pf,
+                "current_pf": self.current_pf,
             },
-            open("bot2_state.json", "w"),
+            open(state_file, "w"),
             indent=2,
         )
+
+        # Save positions
+        json.dump(self.positions, open(positions_file, "w"), indent=2)
+
+        # Save trades
+        json.dump(self.trades, open(trades_file, "w"), indent=2)
 
     def new_day(self, pf):
         self.day += 1
@@ -369,6 +430,7 @@ def run_cycle():
     log.info(f"\n{'='*55}")
     log.info(f"⏱ BOT #2 CRYPTO | {mode} | ${pf:,.2f}")
     log.info(f"  {ms['label']} | Days to $100k: ~{days}")
+    log.info(f"  API Keys available: API={bool(API_KEY)} | Secret={bool(SECRET_KEY)}")
     wr = state.win_rate()
     wr_str = f"{wr:.0f}% WR" if wr is not None else "N/A WR"
     log.info(
@@ -416,6 +478,16 @@ def run_cycle():
                 else:
                     state.losses += 1
                 state.trades_today += 1
+
+                # Record closed trade
+                state.trades.append({
+                    "symbol": symbol,
+                    "entry_price": round(entry_px, 4),
+                    "exit_price": round(px, 4),
+                    "pnl": round(pnl, 2),
+                    "exit_time": datetime.now(timezone.utc).isoformat(),
+                })
+
                 del state.positions[symbol]
                 emoji = "✅" if pnl > 0 else "❌"
                 log.info(f"  {emoji} {symbol} P&L: {pnl:+.2f}%")
@@ -427,12 +499,17 @@ def run_cycle():
 
     # Buy best opportunities
     scored.sort()  # lowest RSI first = most oversold
+    if scored:
+        log.info(f"  📊 BUY SIGNALS: {len(scored)} coins ready | Best RSI: {scored[0][0]:.0f}")
     for _, symbol, px in scored:
         if not state.can_trade():
+            log.info(f"  🛑 Cannot trade - trading halted (daily loss limit hit?)")
             break
         if len(state.positions) >= ms["max_pos"]:
+            log.info(f"  🛑 Max positions reached ({len(state.positions)}/{ms['max_pos']})")
             break
         if symbol in state.positions:
+            log.info(f"  ⏭ {symbol} already in position")
             continue
 
         alloc = ms["alloc"]
@@ -446,7 +523,10 @@ def run_cycle():
             log.info(f"  💹 ENTERED {symbol} @ ${px:,.4f} | Compounding: ${val:,.2f}")
         time.sleep(0.5)
 
+    # Update portfolio value for dashboard
+    state.current_pf = pf
     state.save()
+    log.info(f"✓ Cycle complete | Positions: {len(state.positions)} | Trades today: {state.trades_today}\n")
 
 
 # ── STARTUP ──────────────────────────────────────────────────
@@ -458,8 +538,8 @@ def start():
     log.info("=" * 55)
 
     if not API_KEY:
-        log.error("❌ Missing ALPACA_API_KEY in .env")
-        return
+        log.warning("⚠️ ALPACA_API_KEY not set — running in DEMO mode")
+        log.warning("   Set ALPACA_API_KEY and ALPACA_SECRET_KEY in Railway environment to enable real trading")
 
     # Skip Alpaca check for now — will retry connection during trading
     pf = CONFIG["starting_capital"]
@@ -470,8 +550,12 @@ def start():
     live_trade_env = os.getenv("ALPACA_LIVE_TRADE", "false").lower()
     state.is_live = live_trade_env in ("true", "1", "yes")
 
+    mode_str = "🔴 LIVE" if state.is_live else "📄 PAPER"
+    if not API_KEY:
+        mode_str += " (DEMO — API KEY MISSING)"
+
     log.info(f"  Balance: ${pf:,.2f} (using default capital)")
-    log.info(f"  Mode: {'🔴 LIVE' if state.is_live else '📄 PAPER'}")
+    log.info(f"  Mode: {mode_str}")
     log.info(f"  Pairs: {', '.join(CRYPTOS.keys())}")
     log.info(f"  Cycle: every {CONFIG['cycle_minutes']} minutes")
     log.info(f"  Days to $100k: ~{days_to_target(pf)}")

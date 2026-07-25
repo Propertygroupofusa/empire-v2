@@ -20,8 +20,17 @@ from urllib.parse import quote
 
 from database import get_db, AsyncSessionLocal
 from admin_auth import require_admin_key
-from models import VideoQuoteOrder
+from models import VideoQuoteOrder, User
 from payments_pause import payments_paused, PAUSE_MESSAGE
+
+# Try to import auth utilities
+try:
+    from routers.auth import get_current_user
+    AUTH_AVAILABLE = True
+except Exception as e:
+    AUTH_AVAILABLE = False
+    get_current_user = None
+    log.warning(f"Auth utilities not available: {e}")
 
 log = logging.getLogger("orders")
 
@@ -70,44 +79,80 @@ class QuoteRequest(BaseModel):
 # POST /request-quote - Customer submits video request
 # ============================================================
 
-@router.post("/request-quote")
-async def request_quote(quote: QuoteRequest, db: AsyncSession = Depends(get_db)):
+async def get_optional_current_user() -> Optional[User]:
+    """Get current user if authenticated, otherwise None"""
+    if AUTH_AVAILABLE and get_current_user:
+        return None  # Simplified: always None for now
+    return None
+
+
+@router.post("/request-quote", response_model=None)
+async def request_quote(
+    quote: Optional[QuoteRequest] = None,
+    customer_name: Optional[str] = None,
+    customer_email: Optional[str] = None,
+    customer_company: Optional[str] = None,
+    phone: Optional[str] = None,
+    video_type: Optional[str] = None,
+    script_or_topic: Optional[str] = None,
+    target_audience: Optional[str] = None,
+    avatar: Optional[str] = None,
+    language: Optional[str] = None,
+    delivery_days: int = 2,
+    reference_url: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
     """
     Customer submits a video request with script, avatar, and language.
+    Accepts either JSON body or query parameters.
     Returns order ID and quote price for payment processing.
     """
-    if not quote.customer_name or not quote.customer_email or not quote.video_type or not quote.avatar or not quote.language:
+    # Support both JSON body and query parameters
+    if quote:
+        customer_name = quote.customer_name or customer_name
+        customer_email = quote.customer_email or customer_email
+        customer_company = quote.customer_company or customer_company
+        phone = quote.phone or phone
+        video_type = quote.video_type or video_type
+        script_or_topic = quote.script_or_topic or script_or_topic
+        target_audience = quote.target_audience or target_audience
+        avatar = quote.avatar or avatar
+        language = quote.language or language
+        delivery_days = quote.delivery_days or delivery_days
+        reference_url = quote.reference_url or reference_url
+
+    if not customer_name or not customer_email or not video_type or not avatar or not language:
         raise HTTPException(status_code=400, detail="Missing required fields")
 
-    quote_price = calculate_quote_price(quote.video_type, quote.delivery_days)
+    quote_price = calculate_quote_price(video_type, delivery_days)
 
     order = VideoQuoteOrder(
         status="quote_requested",
-        customer_name=quote.customer_name,
-        customer_email=quote.customer_email,
-        customer_company=quote.customer_company,
-        phone=quote.phone,
-        video_type=quote.video_type,
-        script_or_topic=quote.script_or_topic,
-        target_audience=quote.target_audience,
-        avatar=quote.avatar,
-        language=quote.language,
-        delivery_days=quote.delivery_days,
-        reference_url=quote.reference_url,
+        customer_name=customer_name,
+        customer_email=customer_email,
+        customer_company=customer_company,
+        phone=phone,
+        video_type=video_type,
+        script_or_topic=script_or_topic,
+        target_audience=target_audience,
+        avatar=avatar,
+        language=language,
+        delivery_days=delivery_days,
+        reference_url=reference_url,
         quote_price=quote_price,
     )
     db.add(order)
     await db.commit()
     await db.refresh(order)
 
-    log.info(f"New quote request from {quote.customer_name} ({quote.customer_email}): {quote.video_type}, ${quote_price}")
+    log.info(f"New quote request from {customer_name} ({customer_email}): {video_type}, ${quote_price}")
 
     return {
         "success": True,
         "message": "Quote created successfully",
         "order_id": order.id,
         "quote_price": quote_price,
-        "customer_email": quote.customer_email,
+        "customer_email": customer_email,
     }
 
 
@@ -302,6 +347,27 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
             else:
                 log.warning(f"HeyGen not available, skipping video generation for order {order_id}")
 
+    # Handle charge.refunded event
+    elif event["type"] == "charge.refunded":
+        charge = event["data"]["object"]
+        amount_refunded = charge.get("amount_refunded", 0)
+
+        # Find order by transaction_id (Stripe charge ID)
+        result = await db.execute(
+            select(VideoQuoteOrder).where(VideoQuoteOrder.transaction_id == charge["id"])
+        )
+        order = result.scalars().first()
+
+        if order:
+            order.refunded = True
+            order.refund_amount = amount_refunded
+            order.refund_status = "completed"
+            order.refund_transaction_id = charge.get("refunds", {}).get("data", [{}])[0].get("id")
+            order.refunded_at = datetime.utcnow()
+            order.status = "refunded"
+            await db.commit()
+            log.info(f"Refund processed for order {order.id}: ${amount_refunded/100:.2f}")
+
     return {"status": "success"}
 
 
@@ -413,13 +479,17 @@ async def admin_dashboard(db: AsyncSession = Depends(get_db)):
     """Complete admin dashboard view"""
     result = await db.execute(select(VideoQuoteOrder))
     all_orders = result.scalars().all()
-    pending_orders = [o for o in all_orders if o.status != "delivered"]
+    pending_orders = [o for o in all_orders if o.status not in ["delivered", "refunded"]]
     completed_orders = [o for o in all_orders if o.status == "delivered"]
+    refunded_orders = [o for o in all_orders if o.status == "refunded"]
 
     # Count orders by video generation status
     generating = sum(1 for o in pending_orders if o.video_generation_status == "generating")
     video_ready = sum(1 for o in pending_orders if o.video_generation_status == "completed")
     failed = sum(1 for o in pending_orders if o.video_generation_status in ["failed", "error", "timeout"])
+
+    # Calculate refund totals
+    total_refunded = sum(o.refund_amount for o in refunded_orders if o.refund_amount)
 
     return {
         "pending_orders": {
@@ -432,6 +502,7 @@ async def admin_dashboard(db: AsyncSession = Depends(get_db)):
                     "video_type": o.video_type,
                     "quote_price": o.quote_price,
                     "paid": o.paid,
+                    "refunded": o.refunded,
                     "status": o.status,
                     "video_generation_status": o.video_generation_status,
                     "video_url": o.video_url,
@@ -439,7 +510,7 @@ async def admin_dashboard(db: AsyncSession = Depends(get_db)):
                 }
                 for o in pending_orders
             ],
-            "revenue_at_stake": sum(o.quote_price for o in pending_orders if o.paid),
+            "revenue_at_stake": sum(o.quote_price for o in pending_orders if o.paid and not o.refunded),
         },
         "completed_orders": {
             "count": len(completed_orders),
@@ -458,16 +529,34 @@ async def admin_dashboard(db: AsyncSession = Depends(get_db)):
             ],
             "total_revenue": sum(o.quote_price for o in completed_orders if o.paid),
         },
+        "refunded_orders": {
+            "count": len(refunded_orders),
+            "total_refunded": total_refunded / 100 if total_refunded else 0,
+            "list": [
+                {
+                    "id": o.id,
+                    "customer_name": o.customer_name,
+                    "customer_email": o.customer_email,
+                    "quote_price": o.quote_price / 100,
+                    "refund_amount": o.refund_amount / 100 if o.refund_amount else 0,
+                    "refunded_at": o.refunded_at.isoformat() if o.refunded_at else None,
+                }
+                for o in refunded_orders[-10:]
+            ],
+        },
         "video_generation_status": {
             "generating": generating,
             "ready": video_ready,
             "failed": failed,
         },
         "stats": {
-            "total_requests": len(pending_orders) + len(completed_orders),
-            "conversion_rate": len(completed_orders) / (len(pending_orders) + len(completed_orders)) if (len(pending_orders) + len(completed_orders)) > 0 else 0,
+            "total_requests": len(all_orders),
+            "conversion_rate": len(completed_orders) / len(all_orders) if all_orders else 0,
             "total_revenue": sum(o.quote_price for o in completed_orders if o.paid),
+            "total_refunded": total_refunded / 100 if total_refunded else 0,
+            "net_revenue": (sum(o.quote_price for o in completed_orders if o.paid) - total_refunded) / 100 if completed_orders else 0,
             "avg_order_value": sum(o.quote_price for o in completed_orders if o.paid) // len([o for o in completed_orders if o.paid]) if any(o.paid for o in completed_orders) else 0,
+            "refund_rate": len(refunded_orders) / len(all_orders) if all_orders else 0,
         },
     }
 
@@ -640,6 +729,9 @@ async def customer_portal(order_id: int, email: str, db: AsyncSession = Depends(
         "language": order.language or "N/A",
         "quote_price": order.quote_price,
         "paid": order.paid,
+        "refunded": order.refunded,
+        "refund_amount": order.refund_amount / 100 if order.refund_amount else 0,
+        "refund_status": order.refund_status,
         "requested_at": order.requested_at.isoformat() if order.requested_at else None,
         "video_generation_status": order.video_generation_status,
         "video_generation_message": video_generation_messages.get(order.video_generation_status),
@@ -673,9 +765,95 @@ async def customer_orders_by_email(email: str, db: AsyncSession = Depends(get_db
                 "status": o.status,
                 "quote_price": o.quote_price,
                 "paid": o.paid,
+                "refunded": o.refunded,
                 "video_ready": o.video_url is not None,
                 "requested_at": o.requested_at.isoformat() if o.requested_at else None,
             }
             for o in customer_orders
         ]
+    }
+
+
+# ============================================================
+# POST /orders/{order_id}/refund - Admin refund endpoint
+# ============================================================
+
+@router.post("/{order_id}/refund", dependencies=[Depends(require_admin_key)])
+async def refund_order(order_id: int, reason: str = "Customer request", db: AsyncSession = Depends(get_db)):
+    """
+    Admin endpoint to refund a paid order via Stripe.
+    """
+    order = await db.get(VideoQuoteOrder, order_id)
+
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if not order.paid:
+        raise HTTPException(status_code=400, detail="Order has not been paid")
+
+    if order.refunded:
+        raise HTTPException(status_code=400, detail="Order has already been refunded")
+
+    try:
+        # Refund via Stripe using the charge ID (transaction_id)
+        refund = stripe.Refund.create(
+            charge=order.transaction_id,
+            reason=reason,
+            metadata={
+                "order_id": order_id,
+                "customer_email": order.customer_email,
+            }
+        )
+
+        # Update order with refund info
+        order.refunded = True
+        order.refund_amount = refund.amount
+        order.refund_status = "completed"
+        order.refund_transaction_id = refund.id
+        order.refunded_at = datetime.utcnow()
+        order.status = "refunded"
+        await db.commit()
+
+        log.info(f"Refund processed for order {order_id}: ${refund.amount/100:.2f} (ID: {refund.id})")
+
+        return {
+            "success": True,
+            "order_id": order_id,
+            "refund_id": refund.id,
+            "amount_refunded": refund.amount / 100,
+            "status": "completed",
+            "message": f"Order refunded: ${refund.amount/100:.2f}",
+        }
+
+    except stripe.error.InvalidRequestError as e:
+        log.error(f"Stripe refund failed for order {order_id}: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Refund failed: {str(e)}")
+    except Exception as e:
+        log.error(f"Unexpected error refunding order {order_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Refund processing error")
+
+
+# ============================================================
+# GET /orders/{order_id}/refund-status - Customer refund status
+# ============================================================
+
+@router.get("/{order_id}/refund-status")
+async def get_refund_status(order_id: int, email: str, db: AsyncSession = Depends(get_db)):
+    """
+    Customer endpoint to check refund status for an order.
+    Requires email verification.
+    """
+    order = await db.get(VideoQuoteOrder, order_id)
+
+    if not order or order.customer_email.lower() != email.lower():
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    return {
+        "order_id": order.id,
+        "refunded": order.refunded,
+        "refund_status": order.refund_status,
+        "refund_amount": order.refund_amount / 100 if order.refund_amount else 0,
+        "refund_transaction_id": order.refund_transaction_id,
+        "refunded_at": order.refunded_at.isoformat() if order.refunded_at else None,
+        "order_status": order.status,
     }

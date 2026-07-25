@@ -1,22 +1,13 @@
 #!/usr/bin/env python3
-"""
-BOT DATA API — Real-time trading data from bot_2_crypto_scalper.py
-
-Serves bot state, portfolio value, trades, P&L via REST API
-Used by trading_dashboard.html to display REAL trading data
-"""
+"""REST API for trading bot status, positions, and trades."""
 import json
 import os
-from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import logging
 
-log = logging.getLogger("bot_api")
+app = FastAPI(title="Bot API", version="1.0")
 
-app = FastAPI(title="Bot Data API", version="1.0.0")
-
-# Enable CORS for dashboard
+# Enable CORS for dashboard access
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,173 +16,131 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Bot constants
-STARTING_CAPITAL = 980.0
-BOT_STATE_FILE = "bot2_state.json"
-POSITIONS_FILE = "bot2_positions.json"  # Will be created by bot
-TRADES_FILE = "bot2_trades.json"
+# Use absolute paths for Railway compatibility
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+STATE_FILE = os.path.join(SCRIPT_DIR, "bot2_state.json")
+POSITIONS_FILE = os.path.join(SCRIPT_DIR, "bot2_positions.json")
+TRADES_FILE = os.path.join(SCRIPT_DIR, "bot2_trades.json")
 
 
-def load_bot_state() -> dict:
-    """Load current bot state from file"""
-    try:
-        if os.path.exists(BOT_STATE_FILE):
-            with open(BOT_STATE_FILE, "r") as f:
+def load_state():
+    """Load bot state from JSON file."""
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
                 return json.load(f)
-    except Exception as e:
-        log.error(f"Error loading bot state: {e}")
-
+        except:
+            pass
     return {
-        "day": 1,
+        "start_pf": 980.0,
+        "day_start_pf": 980.0,
         "wins": 0,
         "losses": 0,
+        "trades_today": 0,
         "is_live": False,
-        "start_pf": STARTING_CAPITAL,
-        "peak_pf": STARTING_CAPITAL,
     }
 
 
-def load_positions() -> dict:
-    """Load current positions from bot"""
-    try:
-        if os.path.exists(POSITIONS_FILE):
+def load_positions():
+    """Load open positions from JSON file."""
+    if os.path.exists(POSITIONS_FILE):
+        try:
             with open(POSITIONS_FILE, "r") as f:
                 return json.load(f)
-    except Exception as e:
-        log.debug(f"Error loading positions: {e}")
-
+        except:
+            pass
     return {}
 
 
-def load_trades() -> list:
-    """Load trade history from bot"""
-    try:
-        if os.path.exists(TRADES_FILE):
+def load_trades():
+    """Load closed trades from JSON file."""
+    if os.path.exists(TRADES_FILE):
+        try:
             with open(TRADES_FILE, "r") as f:
-                data = json.load(f)
-                return data if isinstance(data, list) else []
-    except Exception as e:
-        log.debug(f"Error loading trades: {e}")
-
+                return json.load(f)
+        except:
+            pass
     return []
 
 
-def get_portfolio_value() -> float:
-    """Get current portfolio value (sum of cash + position values)"""
-    state = load_bot_state()
-    return state.get("peak_pf", STARTING_CAPITAL)
+@app.get("/health")
+async def health():
+    """Health check."""
+    return {"status": "ok"}
 
 
 @app.get("/api/bot/status")
 async def bot_status():
-    """Get bot trading status"""
-    state = load_bot_state()
+    """Get current bot status: portfolio value, P&L, win rate, positions."""
+    state = load_state()
     positions = load_positions()
 
-    is_live = state.get("is_live", False)
-    pf_value = get_portfolio_value()
-    starting = state.get("start_pf", STARTING_CAPITAL)
+    start_pf = state.get("start_pf", 980.0)
+    current_pf = state.get("current_pf", start_pf)  # In production, would query Alpaca
 
-    profit = pf_value - starting
-    profit_pct = (profit / starting * 100) if starting > 0 else 0
+    pnl_amount = current_pf - start_pf
+    pnl_pct = ((pnl_amount / start_pf) * 100) if start_pf > 0 else 0
 
-    total_trades = state.get("wins", 0) + state.get("losses", 0)
-    win_rate = (state.get("wins", 0) / total_trades * 100) if total_trades > 0 else 0
+    wins = state.get("wins", 0)
+    losses = state.get("losses", 0)
+    total = wins + losses
+    win_rate = (wins / total * 100) if total > 0 else 0
 
     return {
-        "mode": "🔴 LIVE" if is_live else "📄 PAPER",
-        "is_live": is_live,
-        "portfolio_value": round(pf_value, 2),
-        "starting_capital": round(starting, 2),
-        "profit": round(profit, 2),
-        "profit_pct": round(profit_pct, 2),
-        "cash_available": round(starting, 2),
-        "active_positions": len(positions),
-        "total_trades": total_trades,
-        "wins": state.get("wins", 0),
-        "losses": state.get("losses", 0),
-        "win_rate": round(win_rate, 2),
-        "day": state.get("day", 1),
-        "peak_portfolio": round(state.get("peak_pf", STARTING_CAPITAL), 2),
-        "timestamp": datetime.now().isoformat(),
+        "portfolio_value": round(current_pf, 2),
+        "pnl_amount": round(pnl_amount, 2),
+        "pnl_percent": round(pnl_pct, 2),
+        "win_rate": round(win_rate, 1),
+        "wins": wins,
+        "losses": losses,
+        "total_trades": total,
+        "open_positions": len(positions),
+        "mode": "LIVE" if state.get("is_live") else "PAPER",
     }
 
 
 @app.get("/api/bot/positions")
 async def bot_positions():
-    """Get current open positions"""
+    """Get open positions with entry/current prices and P&L."""
     positions = load_positions()
-
     result = []
-    for symbol, pos_data in positions.items():
-        entry_px = pos_data.get("entry_price", 0)
-        current_px = pos_data.get("current_price", entry_px)
 
-        if entry_px > 0:
-            pnl = ((current_px - entry_px) / entry_px) * 100
-            pnl_dollar = current_px - entry_px
-        else:
-            pnl = 0
-            pnl_dollar = 0
+    for symbol, pos in positions.items():
+        entry = pos.get("entry_price", 0)
+        current = pos.get("current_price", entry)  # Would fetch from market data
+        pnl = ((current - entry) / entry * 100) if entry > 0 else 0
 
         result.append({
             "symbol": symbol,
-            "entry_price": round(entry_px, 4),
-            "current_price": round(current_px, 4),
-            "pnl_pct": round(pnl, 2),
-            "pnl_dollar": round(pnl_dollar, 2),
-            "position_size": round(pos_data.get("position_size", 0), 2),
+            "entry_price": round(entry, 4),
+            "current_price": round(current, 4),
+            "pnl_percent": round(pnl, 2),
+            "peak_price": pos.get("peak_price", entry),
         })
 
     return {"positions": result, "count": len(result)}
 
 
 @app.get("/api/bot/trades")
-async def bot_trades(limit: int = 10):
-    """Get recent closed trades"""
-    state = load_bot_state()
-    recent_trades = load_trades()
+async def bot_trades():
+    """Get recent closed trades."""
+    trades = load_trades()
 
-    total = state.get("wins", 0) + state.get("losses", 0)
+    # Calculate stats
+    total = len(trades)
+    wins = sum(1 for t in trades if t.get("pnl", 0) > 0)
+    losses = sum(1 for t in trades if t.get("pnl", 0) < 0)
+    avg_pnl = sum(t.get("pnl", 0) for t in trades) / total if total > 0 else 0
+
     return {
-        "total_trades": total,
-        "wins": state.get("wins", 0),
-        "losses": state.get("losses", 0),
-        "win_rate": round((state.get("wins", 0) / total * 100) if total > 0 else 0, 2),
-        "recent_trades": recent_trades[-limit:] if recent_trades else []
-    }
-
-
-@app.get("/api/bot/health")
-async def bot_health():
-    """Health check for bot API"""
-    try:
-        state = load_bot_state()
-        pf = get_portfolio_value()
-
-        return {
-            "status": "ok",
-            "bot_running": state.get("wins", 0) + state.get("losses", 0) > 0,
-            "portfolio_value": round(pf, 2),
-            "last_update": datetime.now().isoformat(),
+        "trades": trades[-50:],  # Last 50 trades
+        "stats": {
+            "total_closed": total,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round(wins / total * 100, 1) if total > 0 else 0,
+            "avg_pnl": round(avg_pnl, 4),
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/")
-async def root():
-    """API documentation"""
-    return {
-        "name": "Bot Data API",
-        "version": "1.0.0",
-        "description": "Real-time trading data from crypto scalper bot",
-        "endpoints": {
-            "/api/bot/status": "Current bot status, portfolio, P&L",
-            "/api/bot/positions": "Open positions",
-            "/api/bot/trades": "Trade history and statistics",
-            "/api/bot/health": "API health check",
-        },
     }
 
 

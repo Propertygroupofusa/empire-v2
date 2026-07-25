@@ -5,6 +5,31 @@ from datetime import datetime
 from database import Base
 
 
+class User(Base):
+    """Customer/user account for authentication."""
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True)
+    password_hash = Column(String)
+    name = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True, index=True)
+    is_verified = Column(Boolean, default=False)
+    verification_code = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "email": self.email,
+            "name": self.name,
+            "is_active": self.is_active,
+            "is_verified": self.is_verified,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 class Campaign(Base):
     """Outreach campaign with persistent storage."""
     __tablename__ = "campaigns"
@@ -175,6 +200,11 @@ class VideoQuoteOrder(Base):
     video_url = Column(String, nullable=True)
     video_download_link = Column(String, nullable=True)
     video_generation_status = Column(String, default="pending")
+    refunded = Column(Boolean, default=False)
+    refund_amount = Column(Integer, nullable=True)
+    refund_status = Column(String, nullable=True)
+    refund_transaction_id = Column(String, nullable=True)
+    refunded_at = Column(DateTime, nullable=True)
 
     def to_dict(self):
         return {

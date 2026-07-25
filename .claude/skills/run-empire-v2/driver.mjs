@@ -169,7 +169,7 @@ async function runTests() {
     {
       name: "Create Order (Request Quote)",
       method: "POST",
-      endpoint: "/orders/orders/request-quote",
+      endpoint: "/orders/request-quote",
       query: {
         customer_name: "Test User",
         customer_email: "test@example.com",
@@ -234,12 +234,14 @@ async function runTests() {
   // Test order status if order was created
   if (orderId !== null) {
     try {
-      const res = await makeRequest("GET", `/orders/orders/${orderId}`);
-      if (res.status === 200 && res.body?.order?.id === orderId) {
+      const res = await makeRequest("GET", `/orders/customer/${orderId}`, {
+        email: "test@example.com",
+      });
+      if (res.status === 200 && res.body?.order_id === orderId) {
         console.log(`✓ Get Order Status: Order #${orderId} retrieved`);
         passedTests++;
       } else {
-        console.log(`✗ Get Order Status: Failed to retrieve order`);
+        console.log(`✗ Get Order Status: Failed to retrieve order (status=${res.status})`);
         failedTests++;
       }
     } catch (error) {
@@ -295,7 +297,7 @@ async function main() {
       case "create-order":
         const order = await makeRequest(
           "POST",
-          "/orders/orders/request-quote",
+          "/orders/request-quote",
           {
             customer_name: "Test User",
             customer_email: "test@example.com",
