@@ -9,6 +9,7 @@ import os
 import json
 import logging
 import httpx
+import asyncio
 
 log = logging.getLogger("ai_confirm")
 
@@ -19,6 +20,8 @@ GROK_KEY      = os.getenv("GROK_API_KEY", "")
 CLAUDE_MODEL  = "claude-haiku-4-5-20251001"
 GPT_MODEL     = "gpt-4o-mini"
 GROK_MODEL    = "grok-beta"
+
+CONFIDENCE_DEFAULT = 50
 
 # ── Prompt sent to all 3 AIs ─────────────────────────────────
 def build_prompt(signal: dict) -> str:
@@ -61,11 +64,19 @@ async def ask_claude(prompt: str) -> dict:
                     "messages": [{"role": "user", "content": prompt}],
                 },
             )
+            if r.status_code != 200:
+                log.error(f"Claude API error ({r.status_code}): {r.text}")
+                return {"approve": False, "confidence": CONFIDENCE_DEFAULT, "reason": "Claude API error"}
             text = r.json()["content"][0]["text"].strip()
-            return json.loads(text)
+            result = json.loads(text)
+            result.setdefault("confidence", CONFIDENCE_DEFAULT)
+            return result
+    except json.JSONDecodeError as e:
+        log.error(f"Claude JSON parse error: {e}")
+        return {"approve": False, "confidence": CONFIDENCE_DEFAULT, "reason": "Claude JSON parse error"}
     except Exception as e:
         log.error(f"Claude error: {e}")
-        return {"approve": False, "confidence": 0, "reason": f"Claude error: {e}"}
+        return {"approve": False, "confidence": CONFIDENCE_DEFAULT, "reason": f"Claude error: {e}"}
 
 
 # ── GPT-4o ────────────────────────────────────────────────────
@@ -85,11 +96,19 @@ async def ask_gpt(prompt: str) -> dict:
                     "messages": [{"role": "user", "content": prompt}],
                 },
             )
+            if r.status_code != 200:
+                log.error(f"GPT API error ({r.status_code}): {r.text}")
+                return {"approve": False, "confidence": CONFIDENCE_DEFAULT, "reason": "GPT API error"}
             text = r.json()["choices"][0]["message"]["content"].strip()
-            return json.loads(text)
+            result = json.loads(text)
+            result.setdefault("confidence", CONFIDENCE_DEFAULT)
+            return result
+    except json.JSONDecodeError as e:
+        log.error(f"GPT JSON parse error: {e}")
+        return {"approve": False, "confidence": CONFIDENCE_DEFAULT, "reason": "GPT JSON parse error"}
     except Exception as e:
         log.error(f"GPT error: {e}")
-        return {"approve": False, "confidence": 0, "reason": f"GPT error: {e}"}
+        return {"approve": False, "confidence": CONFIDENCE_DEFAULT, "reason": f"GPT error: {e}"}
 
 
 # ── Grok ──────────────────────────────────────────────────────
@@ -109,11 +128,19 @@ async def ask_grok(prompt: str) -> dict:
                     "messages": [{"role": "user", "content": prompt}],
                 },
             )
+            if r.status_code != 200:
+                log.error(f"Grok API error ({r.status_code}): {r.text}")
+                return {"approve": False, "confidence": CONFIDENCE_DEFAULT, "reason": "Grok API error"}
             text = r.json()["choices"][0]["message"]["content"].strip()
-            return json.loads(text)
+            result = json.loads(text)
+            result.setdefault("confidence", CONFIDENCE_DEFAULT)
+            return result
+    except json.JSONDecodeError as e:
+        log.error(f"Grok JSON parse error: {e}")
+        return {"approve": False, "confidence": CONFIDENCE_DEFAULT, "reason": "Grok JSON parse error"}
     except Exception as e:
         log.error(f"Grok error: {e}")
-        return {"approve": False, "confidence": 0, "reason": f"Grok error: {e}"}
+        return {"approve": False, "confidence": CONFIDENCE_DEFAULT, "reason": f"Grok error: {e}"}
 
 
 # ── MAIN CONFIRMATION GATE ────────────────────────────────────
@@ -121,15 +148,17 @@ async def confirm_trade(signal: dict) -> dict:
     """
     Call this before every trade.
     Returns: { "approved": True/False, "results": {...} }
-    
+
     Usage:
         result = await confirm_trade(signal)
         if result["approved"]:
             execute_trade()
     """
-    prompt = build_prompt(signal)
+    if not isinstance(signal, dict):
+        log.error(f"Invalid signal type: {type(signal)}")
+        return {"approved": False, "avg_confidence": 0, "results": {}, "signal": signal}
 
-    import asyncio
+    prompt = build_prompt(signal)
     claude_r, gpt_r, grok_r = await asyncio.gather(
         ask_claude(prompt),
         ask_gpt(prompt),
@@ -150,9 +179,9 @@ async def confirm_trade(signal: dict) -> dict:
     )
 
     avg_confidence = (
-        claude_r.get("confidence", 0) +
-        gpt_r.get("confidence", 0) +
-        grok_r.get("confidence", 0)
+        claude_r.get("confidence", CONFIDENCE_DEFAULT) +
+        gpt_r.get("confidence", CONFIDENCE_DEFAULT) +
+        grok_r.get("confidence", CONFIDENCE_DEFAULT)
     ) / 3
 
     if all_approved:

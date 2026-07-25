@@ -89,7 +89,7 @@ daily_pnl = 0.0
 latest_signals = {}
 last_cycle_at = None
 
-TRADE_ALERT_EMAIL = os.getenv("TRADE_ALERT_EMAIL", "delfarrell591@gmail.com")
+TRADE_ALERT_EMAIL = os.getenv("TRADE_ALERT_EMAIL", "")
 
 
 def send_trade_alert(subject: str, body: str):
@@ -97,18 +97,25 @@ def send_trade_alert(subject: str, body: str):
     no-ops quietly if creds aren't set."""
     sender_email = os.getenv("GMAIL_EMAIL", "")
     sender_password = os.getenv("GMAIL_PASSWORD", "")
+    alert_email = TRADE_ALERT_EMAIL
+
     if not sender_email or not sender_password:
-        log.info(f"(trade alert email skipped - GMAIL_EMAIL/GMAIL_PASSWORD not set) {subject}")
+        log.debug(f"(trade alert email skipped - GMAIL_EMAIL/GMAIL_PASSWORD not set) {subject}")
         return
+
+    if not alert_email:
+        log.debug(f"(trade alert email skipped - TRADE_ALERT_EMAIL not set) {subject}")
+        return
+
     try:
         msg = MIMEText(body)
         msg["Subject"] = subject
         msg["From"] = sender_email
-        msg["To"] = TRADE_ALERT_EMAIL
+        msg["To"] = alert_email
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender_email, sender_password)
-            server.sendmail(sender_email, TRADE_ALERT_EMAIL, msg.as_string())
-        log.info(f"📧 Trade alert emailed to {TRADE_ALERT_EMAIL}")
+            server.sendmail(sender_email, alert_email, msg.as_string())
+        log.info(f"📧 Trade alert emailed to {alert_email}")
     except Exception as e:
         log.warning(f"Trade alert email failed: {e}")
 
@@ -206,11 +213,13 @@ async def get_price_rsi(session, symbol):
             closes = None
 
         if closes and len(closes) >= 14:
+            rsi = _compute_rsi(closes)
+            price = closes[-1]
             if source_name != "alpaca":
-                log.info(f"[CRYPTO] {symbol} price/RSI from fallback source: {source_name}")
-            return {"price": closes[-1], "rsi": _compute_rsi(closes)}
+                log.info(f"✅ {symbol} using {source_name} (Alpaca unavailable) | Price: ${price:.2f} | RSI: {rsi:.1f}")
+            return {"price": price, "rsi": rsi}
 
-    log.error(f"Crypto price error {symbol}: all sources (alpaca, coinbase, binance) failed")
+    log.error(f"❌ {symbol}: all price sources failed (alpaca, coinbase, binance)")
     return None
 
 

@@ -32,53 +32,72 @@ STARTING_CAPITAL = 980.0
 # Data storage
 HISTORY_FILE = Path("bot_pl_history.json")
 MILESTONES = [1000, 5000, 10000, 25000, 50000, 100000]
+MAX_SNAPSHOTS = 1440  # Keep 1 day of minute-level snapshots
 
 
 class AlpacaTracker:
     def __init__(self):
-        self.client = httpx.Client(
-            headers={
-                "APCA-API-KEY-ID": ALPACA_API_KEY,
-                "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
-            },
-            timeout=10.0,
-        )
         self.base_url = ALPACA_BASE_URL
+        self.headers = {
+            "APCA-API-KEY-ID": ALPACA_API_KEY,
+            "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
+        }
         self.history = self._load_history()
         self.last_summary_time = None
+        self.retry_count = 0
+        self.max_retries = 3
 
     def _load_history(self):
         """Load historical data if exists."""
         if HISTORY_FILE.exists():
             try:
-                return json.loads(HISTORY_FILE.read_text())
-            except:
-                return defaultdict(list)
-        return defaultdict(list)
+                data = json.loads(HISTORY_FILE.read_text())
+                if isinstance(data, dict):
+                    return data
+            except (json.JSONDecodeError, IOError) as e:
+                logger.warning(f"Failed to load history: {e}")
+        return {"snapshots": [], "milestones_hit": []}
 
     def _save_history(self):
-        """Save history to file."""
-        HISTORY_FILE.write_text(json.dumps(self.history, indent=2, default=str))
+        """Save history to file, pruning old snapshots to prevent unbounded growth."""
+        if "snapshots" in self.history and len(self.history["snapshots"]) > MAX_SNAPSHOTS:
+            self.history["snapshots"] = self.history["snapshots"][-MAX_SNAPSHOTS:]
+        try:
+            HISTORY_FILE.write_text(json.dumps(self.history, indent=2, default=str))
+        except IOError as e:
+            logger.error(f"Failed to save history: {e}")
+
+    async def _fetch_with_retry(self, session: httpx.AsyncClient, endpoint: str, retries: int = 3) -> dict:
+        """Fetch with exponential backoff retry."""
+        for attempt in range(retries):
+            try:
+                response = await session.get(f"{self.base_url}{endpoint}")
+                response.raise_for_status()
+                self.retry_count = 0
+                return response.json()
+            except httpx.HTTPError as e:
+                if attempt < retries - 1:
+                    delay = 2 ** attempt
+                    logger.debug(f"Fetch failed, retrying in {delay}s: {e}")
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(f"Failed to fetch {endpoint}: {e}")
+                    self.retry_count += 1
+                    return None
+            except Exception as e:
+                logger.error(f"Unexpected error fetching {endpoint}: {e}")
+                return None
 
     async def get_account(self):
         """Fetch live account data from Alpaca."""
-        try:
-            response = self.client.get(f"{self.base_url}/v2/account")
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.error(f"Failed to fetch account: {e}")
-            return None
+        async with httpx.AsyncClient(headers=self.headers, timeout=10.0) as session:
+            return await self._fetch_with_retry(session, "/v2/account")
 
     async def get_positions(self):
         """Fetch open positions."""
-        try:
-            response = self.client.get(f"{self.base_url}/v2/positions")
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.error(f"Failed to fetch positions: {e}")
-            return []
+        async with httpx.AsyncClient(headers=self.headers, timeout=10.0) as session:
+            data = await self._fetch_with_retry(session, "/v2/positions")
+            return data if isinstance(data, list) else []
 
     async def track(self):
         """Main tracking loop."""
@@ -110,19 +129,22 @@ class AlpacaTracker:
                 profit = portfolio_value - STARTING_CAPITAL
                 profit_pct = (profit / STARTING_CAPITAL * 100) if STARTING_CAPITAL else 0
 
-                # Record snapshot
-                snapshot = {
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "portfolio_value": portfolio_value,
-                    "cash": cash,
-                    "profit": profit,
-                    "profit_pct": profit_pct,
-                    "unrealized_pl": unrealized_pl,
-                    "unrealized_plpc": unrealized_plpc,
-                    "buying_power": buying_power,
-                    "positions_count": len(positions),
-                }
-                self.history["snapshots"].append(snapshot)
+                try:
+                    snapshot = {
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "portfolio_value": round(portfolio_value, 2),
+                        "cash": round(cash, 2),
+                        "profit": round(profit, 2),
+                        "profit_pct": round(profit_pct, 2),
+                        "unrealized_pl": round(unrealized_pl, 2),
+                        "unrealized_plpc": round(unrealized_plpc, 2),
+                        "buying_power": round(buying_power, 2),
+                        "positions_count": len(positions),
+                    }
+                    self.history["snapshots"].append(snapshot)
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Failed to record snapshot: {e}")
+                    continue
 
                 # Log update
                 update_count += 1
@@ -169,18 +191,16 @@ class AlpacaTracker:
                         logger.info("  No open positions")
                         logger.info("")
 
-                    # Check milestones
+                    milestones_hit = self.history.get("milestones_hit", [])
                     for milestone in MILESTONES:
-                        if STARTING_CAPITAL < milestone <= portfolio_value:
-                            if milestone not in self.history.get("milestones_hit", []):
-                                logger.warning("")
-                                logger.warning("🎯 " + "=" * 66)
-                                logger.warning(f"🎯 MILESTONE HIT: ${milestone:,} 🎯")
-                                logger.warning("🎯 " + "=" * 66)
-                                logger.warning("")
-                                if "milestones_hit" not in self.history:
-                                    self.history["milestones_hit"] = []
-                                self.history["milestones_hit"].append(milestone)
+                        if STARTING_CAPITAL < milestone <= portfolio_value and milestone not in milestones_hit:
+                            logger.warning("")
+                            logger.warning("🎯 " + "=" * 66)
+                            logger.warning(f"🎯 MILESTONE HIT: ${milestone:,} 🎯")
+                            logger.warning("🎯 " + "=" * 66)
+                            logger.warning("")
+                            milestones_hit.append(milestone)
+                            self.history["milestones_hit"] = milestones_hit
 
                     logger.info("=" * 70)
                     logger.info("")

@@ -28,6 +28,10 @@ from database import get_db
 from admin_auth import require_admin_key
 from models import TradingBotState, WithdrawalRequest
 
+NUM_BOTS = int(os.getenv("PROP_NUM_BOTS", "8"))
+if NUM_BOTS <= 0:
+    raise ValueError("PROP_NUM_BOTS must be positive")
+
 log = logging.getLogger("trading_dashboard")
 router = APIRouter()
 
@@ -167,8 +171,12 @@ async def _fetch_todays_filled_orders(session: aiohttp.ClientSession) -> list:
     async with session.get(f"{ALPACA_BASE_URL}/v2/orders", headers=ALPACA_HEADERS, params=params) as r:
         if r.status != 200:
             return []
-        orders = await r.json()
-        return [o for o in orders if o.get("filled_at")]
+        try:
+            orders = await r.json()
+            return [o for o in orders if isinstance(o, dict) and o.get("filled_at")]
+        except Exception as e:
+            log.warning(f"Failed to parse orders: {e}")
+            return []
 
 
 @router.get("/status", dependencies=[Depends(require_admin_key)])
@@ -186,21 +194,18 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
         positions = await _fetch_alpaca_positions(session)
         todays_orders = await _fetch_todays_filled_orders(session)
 
-    equity = float(account["equity"])
-    cash = float(account["cash"])
-    buying_power = float(account["buying_power"])
-    last_equity = float(account["last_equity"])
-    session_pl = equity - last_equity
-    session_pl_pct = (session_pl / last_equity * 100) if last_equity else 0.0
+    try:
+        equity = float(account.get("equity", 0))
+        cash = float(account.get("cash", 0))
+        buying_power = float(account.get("buying_power", 0))
+        last_equity = float(account.get("last_equity", equity))
+    except (ValueError, TypeError) as e:
+        log.error(f"Failed to parse account fields: {e}")
+        raise HTTPException(status_code=502, detail="Invalid account data from Alpaca")
 
-    # Real account.multiplier/shorting_enabled fields - confirmed via a
-    # direct account check that this account sits at multiplier=1
-    # (cash-account behavior) despite "Shorting Enabled" being toggled on
-    # in Alpaca's UI, because margin hasn't actually been granted yet.
-    # MARGIN_MIN_EQUITY is Reg T's real ~$2,000 minimum to open a margin
-    # account - not a setting either side of this app can change; shown
-    # purely so the dashboard reflects why shorting is blocked instead of
-    # that only being visible by manually querying the account.
+    session_pl = equity - last_equity
+    session_pl_pct = (session_pl / last_equity * 100) if last_equity > 0 else 0.0
+
     margin_multiplier = account.get("multiplier")
     shorting_enabled = account.get("shorting_enabled")
 
@@ -219,19 +224,19 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
     total_withdrawn = sum(w.amount for w in all_withdrawals if w.status == "completed")
 
     return {
-        "equity": equity,
-        "cash": cash,
-        "buying_power": buying_power,
-        "session_pl": session_pl,
-        "session_pl_pct": session_pl_pct,
+        "equity": round(equity, 2),
+        "cash": round(cash, 2),
+        "buying_power": round(buying_power, 2),
+        "session_pl": round(session_pl, 2),
+        "session_pl_pct": round(session_pl_pct, 2),
         "active_positions": len(positions),
         "todays_trade_count": len(todays_orders),
         "bots": [{"name": b.bot_name, "capital": round(b.base_capital, 2)} for b in bots],
         "total_committed_capital": round(total_committed, 2),
         "rebalanced_this_check": round(rebalanced, 2),
-        "total_withdrawn": total_withdrawn,
-        "margin_multiplier": margin_multiplier,
-        "shorting_enabled": shorting_enabled,
+        "total_withdrawn": round(total_withdrawn, 2),
+        "margin_multiplier": margin_multiplier if margin_multiplier is not None else 1.0,
+        "shorting_enabled": shorting_enabled if shorting_enabled is not None else False,
         "margin_min_equity": MARGIN_MIN_EQUITY,
         "live_trading": os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true",
         "stop_trading": os.getenv("STOP_TRADING", "false").lower() == "true",
@@ -401,14 +406,23 @@ async def get_dividend_tracker():
         raise HTTPException(status_code=500, detail="Alpaca credentials not configured")
 
     async with aiohttp.ClientSession() as session:
-        activities = await _fetch_dividend_activities(session)
-        positions = await _fetch_alpaca_positions(session)
+        try:
+            activities = await _fetch_dividend_activities(session)
+            positions = await _fetch_alpaca_positions(session)
+        except Exception as e:
+            log.error(f"Failed to fetch dividend data: {e}")
+            raise HTTPException(status_code=502, detail="Failed to fetch dividend data")
 
     by_symbol = {}
     total_received = 0.0
     for a in activities:
+        if not isinstance(a, dict):
+            continue
         symbol = a.get("symbol") or "UNKNOWN"
-        amount = float(a.get("net_amount") or a.get("amount") or 0)
+        try:
+            amount = float(a.get("net_amount") or a.get("amount") or 0)
+        except (ValueError, TypeError):
+            continue
         entry = by_symbol.setdefault(symbol, {"symbol": symbol, "total_received": 0.0, "payment_count": 0, "last_payment_date": None})
         entry["total_received"] += amount
         entry["payment_count"] += 1
