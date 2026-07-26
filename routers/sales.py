@@ -1,15 +1,16 @@
 """Sales Agent Router — API endpoints for lead management and outreach"""
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 import logging
+import asyncio
 
 from database import get_db
 from models import Lead, Outreach, Response, LeadStatus, LeadSource, OutreachType
-from sales_agent import process_new_leads, process_followups, generate_daily_report
+from sales_agent import process_new_leads, process_followups, generate_daily_report, process_new_leads_bg, process_followups_bg
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["sales"])
@@ -144,30 +145,20 @@ async def get_lead(lead_id: int, db: AsyncSession = Depends(get_db)):
 @router.post("/process-leads")
 async def process_leads_manual(
     limit: int = 50,
-    background_tasks: BackgroundTasks = None,
     db: AsyncSession = Depends(get_db)
 ):
     """Manually trigger lead research and outreach"""
-    if background_tasks:
-        background_tasks.add_task(process_new_leads, db, limit)
-        return {"status": "processing", "message": f"Started processing up to {limit} leads"}
-    else:
-        await process_new_leads(db, limit)
-        return {"status": "completed", "message": f"Processed leads"}
+    # Spawn the task asynchronously without waiting for it to complete
+    asyncio.create_task(process_new_leads_bg(limit))
+    return {"status": "processing", "message": f"Started processing up to {limit} leads"}
 
 
 @router.post("/process-followups")
-async def process_followups_manual(
-    background_tasks: BackgroundTasks = None,
-    db: AsyncSession = Depends(get_db)
-):
+async def process_followups_manual(db: AsyncSession = Depends(get_db)):
     """Manually trigger follow-up emails"""
-    if background_tasks:
-        background_tasks.add_task(process_followups, db)
-        return {"status": "processing", "message": "Started processing follow-ups"}
-    else:
-        await process_followups(db)
-        return {"status": "completed", "message": "Processed follow-ups"}
+    # Spawn the task asynchronously without waiting for it to complete
+    asyncio.create_task(process_followups_bg())
+    return {"status": "processing", "message": "Started processing follow-ups"}
 
 
 @router.get("/outreach", response_model=List[OutreachRecord])

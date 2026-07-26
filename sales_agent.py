@@ -10,11 +10,17 @@ from models import Lead, Outreach, Response, LeadStatus, OutreachType
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from database import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 
 # Initialize Anthropic client
-client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+if ANTHROPIC_API_KEY:
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+else:
+    client = None
+    logger.warning("⚠️ ANTHROPIC_API_KEY not set - using mock research mode for testing")
 
 GMAIL_EMAIL = os.getenv("GMAIL_EMAIL")
 GMAIL_PASSWORD = os.getenv("GMAIL_PASSWORD")
@@ -24,7 +30,29 @@ def research_lead(lead: Lead) -> dict:
     """
     Use Claude to research a lead and identify pain points.
     In production, this would also fetch real LinkedIn/web data.
+    Falls back to mock research if API key not configured.
     """
+
+    # Test/mock mode - generate research data based on company profile
+    if not client:
+        import json
+        mock_research = {
+            "pain_points": [
+                f"Inefficient {lead.industry.lower() if lead.industry else 'business'} processes",
+                "High customer acquisition costs",
+                "Difficulty scaling operations"
+            ],
+            "recommended_product": lead.target_product or "video_production",
+            "urgency_signals": [
+                f"Company size {lead.company_size} suggests scaling phase",
+                "Growing competition in industry"
+            ],
+            "fit_score": 75 + (hash(lead.email) % 20),  # Deterministic fit score
+            "research_notes": f"Mock research: {lead.company_name} ({lead.industry}) - {lead.company_size} employees"
+        }
+        logger.info(f"📋 Mock research for {lead.email}: fit_score={mock_research['fit_score']}")
+        return mock_research
+
     prompt = f"""
     Research this prospect and provide insights:
 
@@ -76,6 +104,7 @@ def research_lead(lead: Lead) -> dict:
 def write_outreach(lead: Lead, outreach_type: OutreachType = OutreachType.INITIAL) -> dict:
     """
     Use Claude to write personalized outreach email.
+    Falls back to templates if API key not configured.
     """
 
     # Determine product pitch based on target
@@ -91,6 +120,34 @@ def write_outreach(lead: Lead, outreach_type: OutreachType = OutreachType.INITIA
         product_pitch = """We teach founders and developers how to build AI agents
         that automate business operations. Hundreds have built systems generating
         $1K-100K+ monthly revenue."""
+
+    # Mock mode - generate template emails when API key not available
+    if not client:
+        if outreach_type == OutreachType.INITIAL:
+            subject = f"Quick question about {lead.company_name}'s growth"
+            body = f"""Hi {lead.first_name},
+
+I came across {lead.company_name} and noticed you operate in {lead.industry}.
+
+We've been helping companies like yours with professional solutions in the space.
+
+Would you be open to a quick 15-minute call to explore if this could be valuable for your team?
+
+Best,
+Sales Team"""
+        else:
+            subject = f"Following up - {lead.company_name} opportunity"
+            body = f"""Hi {lead.first_name},
+
+Just wanted to follow up on my previous message. Many companies in your space have found our solution cuts costs significantly.
+
+Open to a quick conversation?
+
+Best,
+Sales Team"""
+
+        logger.info(f"✉️ Generated template email for {lead.email}: '{subject}'")
+        return {"subject": subject, "body": body}
 
     if outreach_type == OutreachType.INITIAL:
         subject_prompt = f"Write a subject line for cold outreach to {lead.first_name} at {lead.company_name}"
@@ -215,11 +272,14 @@ async def process_new_leads(db: AsyncSession, limit: int = 50):
             logger.info(f"✓ Processed lead: {lead.email} (fit: {lead.fit_score})")
 
         except Exception as e:
-            logger.error(f"Failed to process lead {lead.email}: {e}")
-            await db.rollback()
+            logger.error(f"Failed to process lead: {str(e)}")
+            try:
+                await db.rollback()
+            except:
+                pass
 
         # Small delay to avoid rate limiting
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
 
 
 async def process_followups(db: AsyncSession):
@@ -337,3 +397,23 @@ async def generate_daily_report(db: AsyncSession) -> dict:
 
     logger.info(f"Daily Report: {sent_count} sent, {len(responses)} responses")
     return report
+
+
+# ============================================================
+# BackgroundTask Wrappers (for use with FastAPI BackgroundTasks)
+# ============================================================
+
+async def process_new_leads_bg(limit: int = 50):
+    """
+    Wrapper for BackgroundTasks - creates its own session
+    """
+    async with AsyncSessionLocal() as db:
+        await process_new_leads(db, limit)
+
+
+async def process_followups_bg():
+    """
+    Wrapper for BackgroundTasks - creates its own session
+    """
+    async with AsyncSessionLocal() as db:
+        await process_followups(db)
