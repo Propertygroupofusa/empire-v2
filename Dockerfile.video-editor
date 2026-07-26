@@ -12,8 +12,13 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application
-COPY video_editor_api.py .
+# Copy the whole app, not just video_editor_api.py - this Dockerfile is
+# shared by video-generator (video_generator_bot.py) and video-auto-editor
+# (video_auto_editor.py) too, via their own startCommand overrides in
+# railway.json. Copying a single file meant those two services' start
+# commands pointed at a script that didn't exist in the built image at
+# all - they'd fail immediately on deploy.
+COPY . .
 
 # Create directories
 RUN mkdir -p video_uploads video_temp video_exports
