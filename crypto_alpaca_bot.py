@@ -356,6 +356,9 @@ def run():
     log.info("CRYPTO TRADING BOT — Alpaca crypto (same account as stocks)")
     log.info(f"Pairs: {', '.join(CRYPTO_PAIRS)} | Max allocation: ${MAX_ALLOCATION:.2f} | Max positions: {MAX_POSITIONS}")
     log.info("Runs 24/7 - crypto has no market close, unlike prop_bot.py's stock/ETF trading")
+    is_live = "api.alpaca.markets" in BASE_URL
+    mode = "🔴 LIVE TRADING" if is_live else "📄 PAPER TRADING"
+    log.info(f"Mode: {mode} | API: {BASE_URL}")
     log.info("=" * 60)
 
     if not (ALPACA_KEY and ALPACA_SECRET):
