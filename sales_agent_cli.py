@@ -6,7 +6,7 @@ import sys
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from database import AsyncSessionLocal, engine
-from models.sales import Lead, Outreach, LeadStatus, LeadSource
+from models import Lead, Outreach, LeadStatus, LeadSource
 from sales_agent import process_new_leads, process_followups, generate_daily_report
 
 async def add_lead(first_name: str, last_name: str, email: str, company: str,

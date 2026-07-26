@@ -1,8 +1,9 @@
 """SQLAlchemy models for all data entities."""
-from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, JSON, Float, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, JSON, Float, ForeignKey, Enum
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
+import enum
 
 
 class User(Base):
@@ -367,3 +368,125 @@ class StudyMaterial(Base):
             "created_at": self.created_at.isoformat(),
             "generated_content": self.generated_content,
         }
+
+
+# ============================================================
+# Sales Agent Models
+# ============================================================
+
+class LeadSource(str, enum.Enum):
+    LINKEDIN = "linkedin"
+    COMPANY_WEBSITE = "website"
+    DIRECTORY = "directory"
+    REFERRAL = "referral"
+    MANUAL = "manual"
+
+
+class LeadStatus(str, enum.Enum):
+    NEW = "new"
+    RESEARCHED = "researched"
+    OUTREACH_SENT = "outreach_sent"
+    RESPONDED = "responded"
+    MEETING_BOOKED = "meeting_booked"
+    QUALIFIED = "qualified"
+    DISQUALIFIED = "disqualified"
+    CLOSED = "closed"
+
+
+class OutreachType(str, enum.Enum):
+    INITIAL = "initial"
+    FOLLOWUP_1 = "followup_1"
+    FOLLOWUP_2 = "followup_2"
+    FOLLOWUP_3 = "followup_3"
+
+
+class Lead(Base):
+    """Prospect/Lead record for Sales Agent"""
+    __tablename__ = "sales_leads"
+
+    id = Column(Integer, primary_key=True)
+
+    # Contact info
+    first_name = Column(String(255))
+    last_name = Column(String(255))
+    email = Column(String(255), unique=True, index=True)
+    phone = Column(String(20), nullable=True)
+    linkedin_url = Column(String(500), nullable=True)
+
+    # Company info
+    company_name = Column(String(255), index=True)
+    company_website = Column(String(500), nullable=True)
+    company_size = Column(String(50), nullable=True)
+    industry = Column(String(255), nullable=True)
+
+    # Lead qualification
+    fit_score = Column(Integer, default=0)
+    target_product = Column(String(100))
+    pain_point = Column(Text, nullable=True)
+
+    # Source & tracking
+    source = Column(Enum(LeadSource), default=LeadSource.MANUAL)
+    status = Column(Enum(LeadStatus), default=LeadStatus.NEW, index=True)
+
+    # Research notes
+    research_notes = Column(Text, nullable=True)
+    recent_activity = Column(Text, nullable=True)
+
+    # Engagement
+    times_contacted = Column(Integer, default=0)
+    last_contact_date = Column(DateTime, nullable=True)
+    last_response_date = Column(DateTime, nullable=True)
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Outreach(Base):
+    """Email/message sent to a lead"""
+    __tablename__ = "sales_outreach"
+
+    id = Column(Integer, primary_key=True)
+
+    lead_id = Column(Integer, ForeignKey("sales_leads.id"), index=True)
+    outreach_type = Column(Enum(OutreachType), default=OutreachType.INITIAL)
+
+    # Message content
+    subject = Column(String(500))
+    body = Column(Text)
+
+    # Delivery
+    sent_at = Column(DateTime, default=datetime.utcnow, index=True)
+    sent_via = Column(String(50))
+    status = Column(String(50), default="sent")
+
+    # Engagement tracking
+    opened_at = Column(DateTime, nullable=True)
+    clicked_at = Column(DateTime, nullable=True)
+    replied_at = Column(DateTime, nullable=True)
+
+    # Scheduling
+    scheduled_followup_date = Column(DateTime, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Response(Base):
+    """Reply from a lead"""
+    __tablename__ = "sales_responses"
+
+    id = Column(Integer, primary_key=True)
+
+    lead_id = Column(Integer, ForeignKey("sales_leads.id"), index=True)
+    outreach_id = Column(Integer, ForeignKey("sales_outreach.id"), nullable=True)
+
+    # Response content
+    message = Column(Text)
+    sentiment = Column(String(50), nullable=True)
+
+    # Next action
+    next_action = Column(String(255), nullable=True)
+
+    received_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

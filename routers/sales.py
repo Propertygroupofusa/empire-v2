@@ -8,11 +8,11 @@ from datetime import datetime
 import logging
 
 from database import get_db
-from models.sales import Lead, Outreach, Response, LeadStatus, LeadSource, OutreachType
+from models import Lead, Outreach, Response, LeadStatus, LeadSource, OutreachType
 from sales_agent import process_new_leads, process_followups, generate_daily_report
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/sales", tags=["sales"])
+router = APIRouter(tags=["sales"])
 
 
 # ============================================================

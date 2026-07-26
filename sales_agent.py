@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import anthropic
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from models.sales import Lead, Outreach, Response, LeadStatus, OutreachType
+from models import Lead, Outreach, Response, LeadStatus, OutreachType
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
