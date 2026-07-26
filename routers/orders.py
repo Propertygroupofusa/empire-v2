@@ -23,6 +23,8 @@ from admin_auth import require_admin_key
 from models import VideoQuoteOrder, User
 from payments_pause import payments_paused, PAUSE_MESSAGE
 
+log = logging.getLogger("orders")
+
 # Try to import auth utilities
 try:
     from routers.auth import get_current_user
@@ -31,8 +33,6 @@ except Exception as e:
     AUTH_AVAILABLE = False
     get_current_user = None
     log.warning(f"Auth utilities not available: {e}")
-
-log = logging.getLogger("orders")
 
 # Try to import HeyGen integration, but don't crash if it fails
 try:

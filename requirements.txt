@@ -12,6 +12,7 @@ numpy==1.26.4
 aiohttp==3.10.5
 python-dotenv==1.0.1
 pydantic==2.9.2
+email-validator==2.2.0
 httpx==0.27.2
 python-jose[cryptography]==3.3.0
 bcrypt==5.0.0
