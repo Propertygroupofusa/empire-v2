@@ -69,7 +69,7 @@ _SessionLocal = sessionmaker(_engine, class_=AsyncSession, expire_on_commit=Fals
 
 async def _fetch_trading_snapshot() -> dict:
     """Real Alpaca account snapshot, plus whatever prop_bot.py and
-    crypto_alpaca_bot.py currently hold in memory - same read-only
+    crypto_coinbase_bot.py currently hold in memory - same read-only
     approach routers/trading_dashboard.py already uses. Never raises -
     a data-fetch hiccup should degrade the brief, not skip sending it."""
     snapshot = {"available": False}
@@ -98,9 +98,9 @@ async def _fetch_trading_snapshot() -> dict:
         pass
 
     try:
-        import crypto_alpaca_bot
-        snapshot["crypto_positions"] = len(crypto_alpaca_bot.open_crypto_positions)
-        snapshot["crypto_daily_pnl"] = round(crypto_alpaca_bot.daily_pnl, 2)
+        import crypto_coinbase_bot
+        snapshot["crypto_positions"] = len(crypto_coinbase_bot.open_crypto_positions)
+        snapshot["crypto_daily_pnl"] = round(crypto_coinbase_bot.daily_pnl, 2)
     except Exception:
         pass
 

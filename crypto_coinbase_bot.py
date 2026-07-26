@@ -1,71 +1,90 @@
 """
-CRYPTO TRADING BOT — Alpaca crypto, runs 24/7 (no market-hours gate)
-=====================================================================
-Explicit request: make money on nights/weekends when the stock market
-(and prop_bot.py) is closed, using the leftover/idle cash already
-sitting in the account - not a new exchange account.
+CRYPTO TRADING BOT — Coinbase Advanced Trade, runs 24/7 (no market-hours gate)
+================================================================================
+Replaces crypto_alpaca_bot.py. Alpaca crypto trading turned out to be
+blocked for this account: Alpaca only allows crypto orders for accounts
+whose state/jurisdiction is on their approved list (confirmed directly
+with Alpaca support - "crypto orders not allowed for account" was never
+a bug, it's a regulatory gate with no code-side workaround), and this
+account's state isn't on it. Coinbase has no such state restriction for
+US accounts, so this bot places real orders there instead.
 
-Trades BTC/USD and ETH/USD directly through the SAME Alpaca account and
-API keys prop_bot.py already uses for stocks. This is deliberately
-different from crypto_scalp_grid_bot.py, which trades on Binance - a
-completely separate exchange requiring its own account, its own
-funding, and (since Binance's international API isn't available to US
-persons) Binance.US specifically. Alpaca crypto needs none of that:
-same keys, same real cash balance, no new signup.
+Trades BTC-USD and ETH-USD on a SEPARATE Coinbase account/balance (not
+the Alpaca account prop_bot.py and daily_brief.py use for stocks) -
+funding this bot means depositing USD into Coinbase directly.
 
-Long-only: Alpaca crypto trading is spot-only, no shorting support -
-unlike prop_bot.py's stock/ETF trading there is no short side at all
-here, so the shorting-restriction issue prop_bot.py hit doesn't apply.
+Long-only, same reasoning as crypto_alpaca_bot.py had: Coinbase spot
+trading has no shorting, so there's no short side to manage here either.
 
-Runs against a CAPPED slice of the account's real cash (MAX_ALLOCATION,
-default $100), not the full balance - so this bot doesn't compete
-dollar-for-dollar with prop_bot.py's own stock entries for the same
-cash. Alpaca's own real-time balance check is still the final
-authority regardless (an order that would overdraw the real account
-simply gets rejected) - this cap is just a soft, self-imposed limit so
-one bot doesn't starve the other under normal conditions.
+Runs against a CAPPED slice of the Coinbase account's USD balance
+(MAX_ALLOCATION, default $100) rather than the full balance, same
+self-imposed-limit reasoning as before.
+
+Auth uses Coinbase Developer Platform (CDP) API keys - the current
+Advanced Trade API auth method, replacing the older HMAC/passphrase
+scheme Coinbase retired. Each request is signed as a short-lived
+ES256 JWT (Coinbase's documented format: sub/iss/nbf/exp/uri claims,
+kid+nonce headers), not a static signature.
 """
 import os
 import asyncio
+import json
 import logging
+import secrets
 import smtplib
 import time
+import uuid
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
 import aiohttp
+import jwt as pyjwt
+from cryptography.hazmat.primitives import serialization
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("crypto_alpaca_bot")
+log = logging.getLogger("crypto_coinbase_bot")
 
-ALPACA_KEY    = os.getenv("ALPACA_API_KEY", "")
-ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
-BASE_URL      = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
-DATA_URL      = "https://data.alpaca.markets"
-
-HEADERS = {
-    "APCA-API-KEY-ID": ALPACA_KEY,
-    "APCA-API-SECRET-KEY": ALPACA_SECRET,
-    "Content-Type": "application/json",
-}
+COINBASE_API_KEY_NAME = os.getenv("COINBASE_API_KEY_NAME", "")
+COINBASE_API_PRIVATE_KEY = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\n", "\n")
+COINBASE_HOST = "api.coinbase.com"
+COINBASE_BASE_URL = f"https://{COINBASE_HOST}"
 
 CRYPTO_PAIRS = ["BTC/USD", "ETH/USD"]
 
-# Same widened RSI thresholds prop_bot.py settled on, for the same reason:
+
+def _to_product_id(symbol: str) -> str:
+    """BTC/USD -> BTC-USD (Coinbase's product ID format)."""
+    return symbol.replace("/", "-")
+
+
+def _build_jwt(method: str, path: str) -> str:
+    """Coinbase CDP-style JWT, valid ~2 minutes, scoped to one method+path -
+    a fresh one is required per request, unlike a static API signature."""
+    private_key = serialization.load_pem_private_key(COINBASE_API_PRIVATE_KEY.encode(), password=None)
+    now = int(time.time())
+    payload = {
+        "sub": COINBASE_API_KEY_NAME,
+        "iss": "cdp",
+        "nbf": now,
+        "exp": now + 120,
+        "uri": f"{method} {COINBASE_HOST}{path}",
+    }
+    headers = {"kid": COINBASE_API_KEY_NAME, "nonce": secrets.token_hex(16)}
+    return pyjwt.encode(payload, private_key, algorithm="ES256", headers=headers)
+
+
+def _auth_headers(method: str, path: str) -> dict:
+    return {"Authorization": f"Bearer {_build_jwt(method, path)}", "Content-Type": "application/json"}
+
+
+# Same widened RSI thresholds prop_bot.py/crypto_alpaca_bot.py settled on -
 # narrower bands meant real trades were too rare.
 RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "45"))
 RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "50"))
 
-# Same principle as prop_bot.py's MAX_POSITIONS: defaults to every pair
-# currently tracked (len(CRYPTO_PAIRS)) rather than a fixed count below
-# that, so real cash (MAX_ALLOCATION/MIN_POSITION_NOTIONAL) is the actual
-# limit, not an arbitrary position cap.
 MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", str(len(CRYPTO_PAIRS))))
 MAX_ALLOCATION = float(os.getenv("CRYPTO_MAX_ALLOCATION", "100"))
 MIN_POSITION_NOTIONAL = float(os.getenv("CRYPTO_MIN_POSITION_NOTIONAL", "5"))
 
-# Same real-dollar-profit design as prop_bot.py's PROFIT_TARGET_DOLLARS_MILESTONES -
-# take the 50c-$1 real profit, don't hold out for a bigger move, scaling
-# up slightly as the whole account grows.
 PROFIT_TARGET_DOLLARS_MILESTONES = [
     (0,     0.50),
     (1000,  0.60),
@@ -93,7 +112,7 @@ TRADE_ALERT_EMAIL = os.getenv("TRADE_ALERT_EMAIL", "")
 
 
 def send_trade_alert(subject: str, body: str):
-    """Same GMAIL_EMAIL/GMAIL_PASSWORD SMTP pattern as prop_bot.py -
+    """Same GMAIL_EMAIL/GMAIL_PASSWORD SMTP pattern used elsewhere -
     no-ops quietly if creds aren't set."""
     sender_email = os.getenv("GMAIL_EMAIL", "")
     sender_password = os.getenv("GMAIL_PASSWORD", "")
@@ -120,18 +139,23 @@ def send_trade_alert(subject: str, body: str):
         log.warning(f"Trade alert email failed: {e}")
 
 
-async def get_account_equity_and_cash(session):
-    """Real Alpaca equity/cash - the SAME account prop_bot.py trades
-    stocks on. Falls back to (None, None) on any failure."""
+async def get_usd_balance(session):
+    """Real Coinbase USD balance available for trading. Returns None on
+    any failure (auth issue, network hiccup, no USD wallet)."""
+    path = "/api/v3/brokerage/accounts"
     try:
-        async with session.get(f"{BASE_URL}/v2/account", headers=HEADERS) as r:
+        async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path)) as r:
             if r.status != 200:
-                return None, None
+                log.warning(f"Could not fetch Coinbase accounts: HTTP {r.status} {await r.text()}")
+                return None
             data = await r.json()
-            return float(data.get("equity", 0)), float(data.get("cash", 0))
+            for account in data.get("accounts", []):
+                if account.get("currency") == "USD":
+                    return float(account["available_balance"]["value"])
+            return None
     except Exception as e:
-        log.warning(f"Could not fetch account for crypto sizing: {e}")
-        return None, None
+        log.warning(f"Could not fetch Coinbase account for crypto sizing: {e}")
+        return None
 
 
 def _compute_rsi(closes: list) -> float:
@@ -143,27 +167,10 @@ def _compute_rsi(closes: list) -> float:
     return round(100 - (100 / (1 + rs)), 1)
 
 
-async def _fetch_alpaca_closes(session, symbol):
-    """Alpaca's crypto bars endpoint returns bars keyed by symbol (not a
-    flat list like the stocks bars endpoint), since one request can ask
-    for multiple symbols at once."""
-    url = f"{DATA_URL}/v1beta3/crypto/us/bars"
-    params = {"symbols": symbol, "timeframe": "5Min", "limit": "20"}
-    async with session.get(url, headers=HEADERS, params=params) as r:
-        if r.status != 200:
-            return None
-        data = await r.json()
-        bars = (data.get("bars") or {}).get(symbol, [])
-        if len(bars) < 14:
-            return None
-        return [b["c"] for b in bars]
-
-
 async def _fetch_coinbase_closes(session, symbol):
-    """Free, no-auth public endpoint - BTC/USD -> BTC-USD. Price data
-    only, never used for order placement (that stays on Alpaca, the
-    real brokerage account)."""
-    pair = symbol.replace("/", "-")
+    """Free, no-auth public endpoint - BTC/USD -> BTC-USD. This is the
+    primary price source since it's the same exchange orders execute on."""
+    pair = _to_product_id(symbol)
     url = f"https://api.exchange.coinbase.com/products/{pair}/candles?granularity=300"
     async with session.get(url, headers={"Accept": "application/json"}) as r:
         if r.status != 200:
@@ -177,8 +184,8 @@ async def _fetch_coinbase_closes(session, symbol):
 
 
 async def _fetch_binance_closes(session, symbol):
-    """Free, no-auth public endpoint - BTC/USD -> BTCUSDT. Price data
-    only, same reasoning as Coinbase above."""
+    """Free, no-auth public endpoint - BTC/USD -> BTCUSDT. Fallback only,
+    used purely for price data if Coinbase's public feed has a hiccup."""
     pair = symbol.replace("/", "").replace("USD", "USDT")
     url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval=5m&limit=20"
     async with session.get(url, headers={"Accept": "application/json"}) as r:
@@ -187,24 +194,19 @@ async def _fetch_binance_closes(session, symbol):
         data = await r.json()
         if not data or len(data) < 14:
             return None
-        # Each row: [open_time, open, high, low, close, volume, ...]
         return [float(row[4]) for row in data]
 
 
 _PRICE_SOURCES = (
-    ("alpaca", _fetch_alpaca_closes),
     ("coinbase", _fetch_coinbase_closes),
     ("binance", _fetch_binance_closes),
 )
 
 
 async def get_price_rsi(session, symbol):
-    """Price+RSI with a fallback chain (Alpaca -> Coinbase -> Binance)
-    for resilience - crypto trades 24/7, so a single data-source outage
-    (rate limit, brief downtime) shouldn't silently stall trading on a
-    pair until Alpaca recovers. Alpaca is tried first since that's also
-    where real orders are placed; Coinbase/Binance are only ever used
-    for price data, never for order placement."""
+    """Price+RSI with a fallback chain (Coinbase -> Binance) for
+    resilience - crypto trades 24/7, so a single data-source outage
+    shouldn't silently stall trading on a pair."""
     for source_name, fetch_fn in _PRICE_SOURCES:
         try:
             closes = await fetch_fn(session, symbol)
@@ -215,21 +217,18 @@ async def get_price_rsi(session, symbol):
         if closes and len(closes) >= 14:
             rsi = _compute_rsi(closes)
             price = closes[-1]
-            if source_name != "alpaca":
-                log.info(f"✅ {symbol} using {source_name} (Alpaca unavailable) | Price: ${price:.2f} | RSI: {rsi:.1f}")
+            if source_name != "coinbase":
+                log.info(f"✅ {symbol} using {source_name} (Coinbase unavailable) | Price: ${price:.2f} | RSI: {rsi:.1f}")
             return {"price": price, "rsi": rsi}
 
-    log.error(f"❌ {symbol}: all price sources failed (alpaca, coinbase, binance)")
+    log.error(f"❌ {symbol}: all price sources failed (coinbase, binance)")
     return None
 
 
 def size_position(cash_pool_remaining, slots_remaining, price):
-    """Same dollar-based fractional sizing as prop_bot.py's
-    size_position() - splits whatever's left in the (capped) crypto
-    cash pool evenly across remaining open slots. 8-decimal rounding
-    (vs. prop_bot's 6) since crypto per-unit prices run much higher
-    (BTC), needing finer fractional precision for a small dollar
-    allocation - same precision crypto_scalp_grid_bot.py already uses."""
+    """Same dollar-based fractional sizing as crypto_alpaca_bot.py's
+    size_position() - splits whatever's left in the (capped) crypto cash
+    pool evenly across remaining open slots."""
     if slots_remaining <= 0 or cash_pool_remaining < MIN_POSITION_NOTIONAL:
         return None
     amount = min(max(cash_pool_remaining / slots_remaining, MIN_POSITION_NOTIONAL), cash_pool_remaining)
@@ -237,17 +236,30 @@ def size_position(cash_pool_remaining, slots_remaining, price):
     return qty if qty > 0 else None
 
 
-async def place_order(session, symbol, side, qty):
-    """Crypto orders require time_in_force='gtc' (or 'ioc') - 'day'
-    isn't valid since crypto has no daily close to expire against."""
-    order = {"symbol": symbol, "qty": str(qty), "side": side, "type": "market", "time_in_force": "gtc"}
+async def place_order(session, symbol, side, qty, price):
+    """Coinbase Advanced Trade market orders: BUY sizes by dollar amount
+    (quote_size), SELL sizes by coin amount (base_size) - unlike Alpaca,
+    which takes qty for both sides."""
+    product_id = _to_product_id(symbol)
+    path = "/api/v3/brokerage/orders"
+    order_config = (
+        {"market_market_ioc": {"quote_size": f"{qty * price:.2f}"}}
+        if side == "buy"
+        else {"market_market_ioc": {"base_size": f"{qty:.8f}"}}
+    )
+    order = {
+        "client_order_id": str(uuid.uuid4()),
+        "product_id": product_id,
+        "side": side.upper(),
+        "order_configuration": order_config,
+    }
     try:
-        async with session.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=order) as r:
+        async with session.post(COINBASE_BASE_URL + path, headers=_auth_headers("POST", path), json=order) as r:
             result = await r.json()
-            if r.status in (200, 201):
+            if r.status in (200, 201) and result.get("success", True):
                 log.info(f"✅ CRYPTO TRADE | {side.upper()} {qty} {symbol}")
                 return True
-            log.error(f"❌ Crypto order failed: {result.get('message', result)}")
+            log.error(f"❌ Crypto order failed: {result.get('error_response', result)}")
             return False
     except Exception as e:
         log.error(f"Crypto order error: {e}")
@@ -262,10 +274,10 @@ async def run_crypto_cycle():
     log.info(f"[CRYPTO] Scanning {', '.join(CRYPTO_PAIRS)} (24/7, no market-hours gate) | Daily P&L: ${daily_pnl:.2f}")
 
     async with aiohttp.ClientSession() as session:
-        equity, cash = await get_account_equity_and_cash(session)
-        profit_target = get_profit_target_dollars(equity)
+        cash = await get_usd_balance(session)
+        profit_target = get_profit_target_dollars(cash)
         cash_pool = min(cash, MAX_ALLOCATION) if cash is not None else MAX_ALLOCATION
-        log.info(f"[CRYPTO] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} (capped at ${MAX_ALLOCATION:.2f}) | Profit target: ${profit_target:.2f}/position")
+        log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} (capped at ${MAX_ALLOCATION:.2f}) | Profit target: ${profit_target:.2f}/position")
 
         scans = {}
         for symbol in CRYPTO_PAIRS:
@@ -292,13 +304,13 @@ async def run_crypto_cycle():
 
             if unrealized_pnl >= profit_target or rsi_exit:
                 reason = "PROFIT TARGET" if unrealized_pnl >= profit_target else "RSI"
-                filled = await place_order(session, symbol, "sell", qty)
+                filled = await place_order(session, symbol, "sell", qty, price)
                 if filled:
                     daily_pnl += unrealized_pnl
                     log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}")
                     send_trade_alert(
                         f"🤖 Crypto bot — {symbol} closed ({reason})",
-                        f"Position closed on your Alpaca account:\n\n"
+                        f"Position closed on your Coinbase account:\n\n"
                         f"{symbol} | Entry: ${entry:.2f} | Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}\n"
                         f"Reason: {reason}\n\nDashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
                     )
@@ -337,13 +349,13 @@ async def run_crypto_cycle():
                 continue
 
             log.info(f"[CRYPTO] 📡 BUY {symbol} — RSI:{rsi}")
-            filled = await place_order(session, symbol, "buy", qty)
+            filled = await place_order(session, symbol, "buy", qty, price)
             if filled:
                 open_crypto_positions[symbol] = {"entry": price, "qty": qty}
                 cash_pool -= qty * price
                 send_trade_alert(
                     f"🤖 Crypto bot — BUY {symbol} opened",
-                    f"Long opened on your Alpaca account:\n\n"
+                    f"Long opened on your Coinbase account:\n\n"
                     f"BUY {qty} {symbol} @ ${price:.2f} | RSI: {rsi}\n\n"
                     f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
                 )
@@ -353,16 +365,14 @@ async def run_crypto_cycle():
 
 def run():
     log.info("=" * 60)
-    log.info("CRYPTO TRADING BOT — Alpaca crypto (same account as stocks)")
+    log.info("CRYPTO TRADING BOT — Coinbase (separate account from Alpaca stocks)")
     log.info(f"Pairs: {', '.join(CRYPTO_PAIRS)} | Max allocation: ${MAX_ALLOCATION:.2f} | Max positions: {MAX_POSITIONS}")
     log.info("Runs 24/7 - crypto has no market close, unlike prop_bot.py's stock/ETF trading")
-    is_live = "api.alpaca.markets" in BASE_URL
-    mode = "🔴 LIVE TRADING" if is_live else "📄 PAPER TRADING"
-    log.info(f"Mode: {mode} | API: {BASE_URL}")
+    log.info("🔴 LIVE TRADING - Coinbase has no free paper-trading sandbox for Advanced Trade")
     log.info("=" * 60)
 
-    if not (ALPACA_KEY and ALPACA_SECRET):
-        log.warning("ALPACA_API_KEY/ALPACA_SECRET_KEY not configured - crypto_alpaca_bot will not start")
+    if not (COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY):
+        log.warning("COINBASE_API_KEY_NAME/COINBASE_API_PRIVATE_KEY not configured - crypto_coinbase_bot will not start")
         return
 
     while True:

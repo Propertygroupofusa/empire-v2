@@ -146,12 +146,12 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import notary_bot: {e}")
 
-crypto_alpaca_bot_module = None
+crypto_coinbase_bot_module = None
 try:
-    import crypto_alpaca_bot
-    crypto_alpaca_bot_module = crypto_alpaca_bot
+    import crypto_coinbase_bot
+    crypto_coinbase_bot_module = crypto_coinbase_bot
 except Exception as e:
-    logging.warning(f"Failed to import crypto_alpaca_bot: {e}")
+    logging.warning(f"Failed to import crypto_coinbase_bot: {e}")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pgusa")
@@ -445,12 +445,12 @@ async def lifespan(app: FastAPI):
         log.warning(f"Notary bot failed to start: {e}")
 
     try:
-        if crypto_alpaca_bot_module is not None:
+        if crypto_coinbase_bot_module is not None:
             import threading
-            threading.Thread(target=crypto_alpaca_bot_module.run, daemon=True).start()
-            log.info("₿ Crypto (Alpaca) bot started (background thread) | Pairs: BTC/USD, ETH/USD | Runs 24/7")
+            threading.Thread(target=crypto_coinbase_bot_module.run, daemon=True).start()
+            log.info("₿ Crypto (Coinbase) bot started (background thread) | Pairs: BTC/USD, ETH/USD | Runs 24/7")
     except Exception as e:
-        log.warning(f"Crypto (Alpaca) bot failed to start: {e}")
+        log.warning(f"Crypto (Coinbase) bot failed to start: {e}")
 
     # bot_2_crypto_scalper.py is NOT launched here. railway.json describes
     # a dedicated "crypto-trading-bot" service for it, but the actual
