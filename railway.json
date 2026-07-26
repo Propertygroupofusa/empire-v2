@@ -48,7 +48,7 @@
       "build": {
         "dockerfile": "Dockerfile"
       },
-      "startCommand": "python bot_2_crypto_scalper.py",
+      "startCommand": "python crypto_alpaca_bot.py",
       "restartPolicyType": "ON_FAILURE",
       "restartPolicyMaxRetries": 10
     },
