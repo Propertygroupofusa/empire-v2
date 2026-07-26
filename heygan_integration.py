@@ -9,7 +9,7 @@ from typing import Optional
 
 log = logging.getLogger("heygan")
 
-HEYGAN_API_KEY = os.getenv("HEYGAN_API_KEY")
+HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY")
 HEYGAN_API_BASE = "https://api.heygen.com"
 
 # Avatar mapping: user-friendly names to HeyGen avatar IDs
@@ -63,8 +63,8 @@ async def generate_video(
     Returns video URL if successful, None if failed
     """
 
-    if not HEYGAN_API_KEY:
-        log.error("HEYGAN_API_KEY not configured")
+    if not HEYGEN_API_KEY:
+        log.error("HEYGEN_API_KEY not configured")
         return None
 
     try:
@@ -77,7 +77,7 @@ async def generate_video(
 
         # Create video generation request
         headers = {
-            "X-Api-Key": HEYGAN_API_KEY,
+            "X-Api-Key": HEYGEN_API_KEY,
             "Content-Type": "application/json",
         }
 
@@ -119,12 +119,12 @@ async def get_video_url(video_id: str) -> Optional[str]:
     Returns video URL if ready, None if still processing
     """
 
-    if not HEYGAN_API_KEY:
+    if not HEYGEN_API_KEY:
         return None
 
     try:
         headers = {
-            "X-Api-Key": HEYGAN_API_KEY,
+            "X-Api-Key": HEYGEN_API_KEY,
         }
 
         async with httpx.AsyncClient(timeout=30.0) as client:
