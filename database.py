@@ -38,6 +38,7 @@ async def init_db():
     """Initialize database - create tables if needed"""
     try:
         import models  # noqa: F401  (registers model classes on Base.metadata)
+        from models.sales import Lead, Outreach, Response  # noqa: F401 (register sales models)
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
     except Exception as e:
