@@ -5,16 +5,17 @@ Full SaaS backend with worker management, client booking,
 job matching, payments, admin dashboard, and white label API.
 """
 
-from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
-from sqlalchemy import text, inspect
+from sqlalchemy import text
 from datetime import datetime
 import os
 import uvicorn
 import logging
+import httpx
 
 from database import init_db, engine
 
@@ -39,6 +40,7 @@ routers_to_load = {
     'study': None,
     'trading_dashboard': None,
     'support': None,
+    'sales': None,
 }
 
 for router_name in routers_to_load:
@@ -68,6 +70,7 @@ outreach = routers_to_load['outreach']
 study = routers_to_load['study']
 trading_dashboard = routers_to_load['trading_dashboard']
 support = routers_to_load['support']
+sales = routers_to_load['sales']
 
 # Load remaining modules gracefully
 payee_router = None
@@ -94,12 +97,6 @@ try:
     from daily_publisher import start_daily_publisher
 except Exception as e:
     logging.warning(f"Failed to import daily_publisher: {e}")
-
-start_daily_brief = None
-try:
-    from daily_brief import start_daily_brief
-except Exception as e:
-    logging.warning(f"Failed to import daily_brief: {e}")
 
 health_monitor_service = None
 try:
@@ -128,27 +125,6 @@ try:
     tradovate_bot_module = tradovate_bot
 except Exception as e:
     logging.warning(f"Failed to import tradovate_bot: {e}")
-
-crypto_scalp_grid_bot_module = None
-try:
-    import crypto_scalp_grid_bot
-    crypto_scalp_grid_bot_module = crypto_scalp_grid_bot
-except Exception as e:
-    logging.warning(f"Failed to import crypto_scalp_grid_bot: {e}")
-
-notary_bot_module = None
-try:
-    import notary_bot
-    notary_bot_module = notary_bot
-except Exception as e:
-    logging.warning(f"Failed to import notary_bot: {e}")
-
-crypto_alpaca_bot_module = None
-try:
-    import crypto_alpaca_bot
-    crypto_alpaca_bot_module = crypto_alpaca_bot
-except Exception as e:
-    logging.warning(f"Failed to import crypto_alpaca_bot: {e}")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pgusa")
@@ -273,58 +249,37 @@ async def create_monitor_tables():
 
 
 async def run_migrations():
-    """Add any columns models.py declares that the real tables are
-    actually missing - safe to run every startup (skips whatever already
-    exists).
-
-    Discovered live in production: the real "workers" table was missing
-    even "name" - one of the ORIGINAL base columns, not something added
-    this session (PR #72). Root cause: these tables were created some
-    other way before their ORM models existed (e.g. workers predates the
-    notary work via an unrelated /workers/payroll feature), and nothing
-    ever surfaced the drift because routers/workers.py, routers/jobs.py,
-    etc. were no-op empty stubs until the notary marketplace work - the
-    first code that ever actually queried these tables for real.
-
-    Confirmed the SAME issue hits "jobs" too (column jobs.job_type does
-    not exist, breaking notary_bot.py's matching cycle every 60s in
-    production) - so this now covers every model introduced alongside
-    Worker in that same PR (#70), not just Worker, since any of them
-    could have the same kind of pre-existing-table drift.
-
-    Model-driven (iterates each model's __table__.columns) rather than a
-    manually maintained list of column names/types, specifically so this
-    doesn't only patch the columns anyone remembered to add here - it
-    catches ANY drift between the ORM model and the real table, present
-    or future. Also dialect-agnostic (SQLAlchemy's inspector, not raw
-    SQLite PRAGMA), so it actually works on Postgres - production."""
-    from models import Worker, Client, Job, Booking
-
+    """Add any missing columns to existing tables — safe to run every startup."""
+    cols = [
+        ("w9_submitted",          "BOOLEAN DEFAULT FALSE"),
+        ("w9_legal_name",         "VARCHAR"),
+        ("w9_tax_classification", "VARCHAR"),
+        ("w9_tin_last4",          "VARCHAR"),
+        ("w9_address",            "TEXT"),
+        ("credentials_submitted",     "BOOLEAN DEFAULT FALSE"),
+        ("credentials_verified",      "BOOLEAN DEFAULT FALSE"),
+        ("notary_commission_number",  "VARCHAR"),
+        ("notary_commission_state",   "VARCHAR"),
+        ("notary_commission_expires", "VARCHAR"),
+        ("ron_authorized",            "BOOLEAN DEFAULT FALSE"),
+        ("ron_authorization_state",   "VARCHAR"),
+    ]
     async with engine.begin() as conn:
-        for model in (Worker, Client, Job, Booking):
-            table_name = model.__tablename__
+        for col, col_type in cols:
             try:
-                existing_columns = await conn.run_sync(
-                    lambda sync_conn, t=table_name: [c["name"] for c in inspect(sync_conn).get_columns(t)]
-                )
-            except Exception as e:
-                log.warning(f"Migration: could not inspect {table_name} table columns: {e}")
-                continue
+                # Check if column exists first (SQLite doesn't support IF NOT EXISTS for ALTER TABLE)
+                check_result = await conn.execute(text(
+                    f"PRAGMA table_info(workers)"
+                ))
+                existing_columns = [row[1] for row in await check_result.fetchall()]
 
-            for column in model.__table__.columns:
-                if column.name in existing_columns:
-                    continue
-                try:
-                    ddl_type = column.type.compile(dialect=conn.dialect)
-                    # Always added nullable regardless of the model's own
-                    # nullable=False, even for required-looking columns like
-                    # name/email - a NOT NULL ALTER TABLE ADD COLUMN without a
-                    # default fails outright on Postgres if the table already
-                    # has rows, which is exactly the scenario this exists for.
-                    await conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN "{column.name}" {ddl_type}'))
-                    log.info(f"Migration OK: {table_name}.{column.name}")
-                except Exception as e:
-                    log.debug(f"Migration skip {table_name}.{column.name}: {e}")
+                if col not in existing_columns:
+                    await conn.execute(text(
+                        f"ALTER TABLE workers ADD COLUMN {col} {col_type}"
+                    ))
+                    log.info(f"Migration OK: {col}")
+            except Exception as e:
+                log.debug(f"Migration skip {col}: {e}")
 
 
 @asynccontextmanager
@@ -362,12 +317,6 @@ async def lifespan(app: FastAPI):
         log.warning(f"Daily publisher failed: {e}")
 
     try:
-        if start_daily_brief is not None and start_daily_brief():
-            log.info("☀️ Daily Ventures Brief scheduled")
-    except Exception as e:
-        log.warning(f"Daily brief failed to start: {e}")
-
-    try:
         if health_monitor_service is not None:
             import asyncio
             await health_monitor_service()
@@ -399,31 +348,6 @@ async def lifespan(app: FastAPI):
             log.info("📊 Tradovate bot thread started (stays inert until TRADOVATE_* credentials are set)")
     except Exception as e:
         log.warning(f"Tradovate bot failed to start: {e}")
-
-    try:
-        if crypto_scalp_grid_bot_module is not None:
-            import threading
-            mode = "TESTNET" if os.getenv("CRYPTO_TESTNET", "false").lower() == "true" else "LIVE"
-            threading.Thread(target=crypto_scalp_grid_bot_module.run, daemon=True).start()
-            log.info(f"🪙 Crypto Scalp-Grid bot started (background thread) | Mode: {mode} | Pairs: BTC, ETH, XRP")
-    except Exception as e:
-        log.warning(f"Crypto scalp-grid bot failed to start: {e}")
-
-    try:
-        if notary_bot_module is not None:
-            import threading
-            threading.Thread(target=notary_bot_module.run, daemon=True).start()
-            log.info("🖋️ Notary matching bot started (background thread)")
-    except Exception as e:
-        log.warning(f"Notary bot failed to start: {e}")
-
-    try:
-        if crypto_alpaca_bot_module is not None:
-            import threading
-            threading.Thread(target=crypto_alpaca_bot_module.run, daemon=True).start()
-            log.info("₿ Crypto (Alpaca) bot started (background thread) | Pairs: BTC/USD, ETH/USD | Runs 24/7")
-    except Exception as e:
-        log.warning(f"Crypto (Alpaca) bot failed to start: {e}")
 
     try:
         import subprocess
@@ -494,6 +418,7 @@ routers_list = [
     (study, "/study", "Study Assistant"),
     (trading_dashboard, "/api/trading-dashboard", "Trading Dashboard"),
     (support, "/support", "AI Customer Support"),
+    (sales, "/sales", "AI Sales Agent"),
 ]
 
 for router_module, prefix, tag in routers_list:
@@ -562,12 +487,34 @@ async def serve_signals_signup():
     return FileResponse(signals_path, media_type="text/html")
 
 
-try:
-    from routers import bot_status
-    app.include_router(bot_status.router, prefix="/api/bot", tags=["Bot Status"])
-    log.info("Router loaded: /api/bot (in-process, no separate bot-api service required)")
-except Exception as e:
-    log.warning(f"Failed to include router /api/bot: {e}")
+@app.api_route("/api/bot/{path:path}", methods=["GET", "POST"])
+async def proxy_bot_api(path: str, request: Request, limit: int = None):
+    """Proxy requests to bot_api service for crypto bot dashboard"""
+    try:
+        bot_api_url = os.getenv("BOT_API_URL", "http://localhost:8001")
+        full_url = f"{bot_api_url}/api/bot/{path}"
+
+        # Preserve query parameters
+        if request.url.query:
+            full_url += f"?{request.url.query}"
+        elif limit:
+            full_url += f"?limit={limit}"
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            if request.method == "POST":
+                body = await request.body()
+                response = await client.post(full_url, content=body)
+            else:
+                response = await client.get(full_url)
+
+            if response.status_code == 200:
+                return response.json()
+            else:
+                log.warning(f"Bot API returned {response.status_code}: {response.text}")
+                return {}
+    except Exception as e:
+        log.warning(f"Bot API proxy error: {e}")
+        return {}
 
 
 @app.get("/trading-dashboard")

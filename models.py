@@ -1,8 +1,9 @@
 """SQLAlchemy models for all data entities."""
-from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, JSON, Float, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, JSON, Float, ForeignKey, Enum
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
+import enum
 
 
 class User(Base):
@@ -101,11 +102,7 @@ class CampaignContact(Base):
 
 
 class Worker(Base):
-    """Worker/contractor profile. Fields below (w9_*, credentials_*,
-    notary_*, ron_*) mirror the raw ALTER TABLE columns main.py's
-    run_migrations() adds to the real "workers" table - declared here too
-    so the ORM can actually read/write them (previously these existed only
-    as orphaned raw DB columns nothing in the code touched)."""
+    """Worker/contractor profile."""
     __tablename__ = "workers"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -117,31 +114,6 @@ class Worker(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     custom_metadata = Column(JSON, nullable=True)
 
-    # bcrypt hash for self-service worker login (see worker_auth.py) -
-    # nullable since workers registered before this existed have none yet
-    # (they'd need to go through a password-set flow to gain login access).
-    # Deliberately never included in to_dict().
-    password_hash = Column(String, nullable=True)
-
-    w9_submitted = Column(Boolean, default=False)
-    w9_legal_name = Column(String, nullable=True)
-    w9_tax_classification = Column(String, nullable=True)
-    w9_tin_last4 = Column(String, nullable=True)
-    w9_address = Column(Text, nullable=True)
-
-    credentials_submitted = Column(Boolean, default=False)
-    credentials_verified = Column(Boolean, default=False)
-
-    # Notary-specific credentials. A worker can be a notary, a tax
-    # preparer, or a legal-doc processor (this platform's other
-    # advertised verticals) - these fields are simply unused/null for
-    # non-notary workers rather than needing a separate table per role.
-    notary_commission_number = Column(String, nullable=True)
-    notary_commission_state = Column(String, nullable=True)
-    notary_commission_expires = Column(String, nullable=True)  # ISO date string
-    ron_authorized = Column(Boolean, default=False)  # Remote Online Notarization
-    ron_authorization_state = Column(String, nullable=True)
-
     def to_dict(self):
         return {
             "id": self.id,
@@ -152,17 +124,6 @@ class Worker(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "custom_metadata": self.custom_metadata,
-            "w9_submitted": self.w9_submitted,
-            "w9_legal_name": self.w9_legal_name,
-            "w9_tax_classification": self.w9_tax_classification,
-            "w9_tin_last4": self.w9_tin_last4,
-            "credentials_submitted": self.credentials_submitted,
-            "credentials_verified": self.credentials_verified,
-            "notary_commission_number": self.notary_commission_number,
-            "notary_commission_state": self.notary_commission_state,
-            "notary_commission_expires": self.notary_commission_expires,
-            "ron_authorized": self.ron_authorized,
-            "ron_authorization_state": self.ron_authorization_state,
         }
 
 
@@ -191,73 +152,6 @@ class Client(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "custom_metadata": self.custom_metadata,
-        }
-
-
-class Job(Base):
-    """A service request from a client (starts with job_type='notarization'
-    but the shape is generic enough for this platform's other advertised
-    verticals - tax prep, legal docs - without needing a separate table
-    per service type)."""
-    __tablename__ = "jobs"
-
-    id = Column(Integer, primary_key=True, index=True)
-    job_type = Column(String, index=True)  # "notarization", ...
-    client_id = Column(Integer, ForeignKey("clients.id"), index=True)
-    worker_id = Column(Integer, ForeignKey("workers.id"), nullable=True, index=True)
-    state = Column(String, index=True)  # US state jurisdiction the job must be handled in
-    description = Column(Text, nullable=True)
-    status = Column(String, default="requested", index=True)  # requested, matched, scheduled, completed, cancelled
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    matched_at = Column(DateTime, nullable=True)
-    completed_at = Column(DateTime, nullable=True)
-    custom_metadata = Column(JSON, nullable=True)
-
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "job_type": self.job_type,
-            "client_id": self.client_id,
-            "worker_id": self.worker_id,
-            "state": self.state,
-            "description": self.description,
-            "status": self.status,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-            "matched_at": self.matched_at.isoformat() if self.matched_at else None,
-            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
-            "custom_metadata": self.custom_metadata,
-        }
-
-
-class Booking(Base):
-    """A scheduled appointment for a matched job (e.g. a RON session)."""
-    __tablename__ = "bookings"
-
-    id = Column(Integer, primary_key=True, index=True)
-    job_id = Column(Integer, ForeignKey("jobs.id"), index=True)
-    worker_id = Column(Integer, ForeignKey("workers.id"), index=True)
-    client_id = Column(Integer, ForeignKey("clients.id"), index=True)
-    scheduled_start = Column(DateTime)
-    scheduled_end = Column(DateTime, nullable=True)
-    status = Column(String, default="scheduled", index=True)  # scheduled, completed, cancelled, no_show
-    meeting_link = Column(String, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "job_id": self.job_id,
-            "worker_id": self.worker_id,
-            "client_id": self.client_id,
-            "scheduled_start": self.scheduled_start.isoformat() if self.scheduled_start else None,
-            "scheduled_end": self.scheduled_end.isoformat() if self.scheduled_end else None,
-            "status": self.status,
-            "meeting_link": self.meeting_link,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
 
@@ -476,125 +370,123 @@ class StudyMaterial(Base):
         }
 
 
-class SupportAccount(Base):
-    """A tenant of the AI customer-service product - one per paying
-    business using it to handle their own customers' email support.
-    api_key is the shared secret their inbound-parse webhook URL is
-    scoped by (SendGrid doesn't sign inbound-parse requests the way
-    Stripe signs webhooks, so this is the auth for that endpoint)."""
-    __tablename__ = "support_accounts"
+# ============================================================
+# Sales Agent Models
+# ============================================================
 
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True)
-    business_name = Column(String)
-    api_key = Column(String, unique=True, index=True)
-    inbound_email = Column(String, nullable=True)  # the address customers email in to
-    status = Column(String, default="active")
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "email": self.email,
-            "business_name": self.business_name,
-            "inbound_email": self.inbound_email,
-            "status": self.status,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-        }
+class LeadSource(str, enum.Enum):
+    LINKEDIN = "linkedin"
+    COMPANY_WEBSITE = "website"
+    DIRECTORY = "directory"
+    REFERRAL = "referral"
+    MANUAL = "manual"
 
 
-class KnowledgeBaseEntry(Base):
-    """One Q&A/fact entry in a support account's knowledge base, used to
-    ground the AI agent's replies instead of letting it improvise."""
-    __tablename__ = "knowledge_base_entries"
-
-    id = Column(Integer, primary_key=True, index=True)
-    account_id = Column(Integer, ForeignKey("support_accounts.id"), index=True)
-    topic = Column(String)
-    content = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "account_id": self.account_id,
-            "topic": self.topic,
-            "content": self.content,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-        }
+class LeadStatus(str, enum.Enum):
+    NEW = "new"
+    RESEARCHED = "researched"
+    OUTREACH_SENT = "outreach_sent"
+    RESPONDED = "responded"
+    MEETING_BOOKED = "meeting_booked"
+    QUALIFIED = "qualified"
+    DISQUALIFIED = "disqualified"
+    CLOSED = "closed"
 
 
-class SupportConversation(Base):
-    """One customer's email thread with a support account. status covers
-    what a separate 'ticket' table would otherwise track - there's no
-    need for two objects when a conversation's lifecycle IS the ticket's
-    lifecycle here."""
-    __tablename__ = "support_conversations"
+class OutreachType(str, enum.Enum):
+    INITIAL = "initial"
+    FOLLOWUP_1 = "followup_1"
+    FOLLOWUP_2 = "followup_2"
+    FOLLOWUP_3 = "followup_3"
 
-    id = Column(Integer, primary_key=True, index=True)
-    account_id = Column(Integer, ForeignKey("support_accounts.id"), index=True)
-    customer_email = Column(String, index=True)
-    subject = Column(String, nullable=True)
-    status = Column(String, default="open", index=True)  # open, escalated, resolved
+
+class Lead(Base):
+    """Prospect/Lead record for Sales Agent"""
+    __tablename__ = "sales_leads"
+
+    id = Column(Integer, primary_key=True)
+
+    # Contact info
+    first_name = Column(String(255))
+    last_name = Column(String(255))
+    email = Column(String(255), unique=True, index=True)
+    phone = Column(String(20), nullable=True)
+    linkedin_url = Column(String(500), nullable=True)
+
+    # Company info
+    company_name = Column(String(255), index=True)
+    company_website = Column(String(500), nullable=True)
+    company_size = Column(String(50), nullable=True)
+    industry = Column(String(255), nullable=True)
+
+    # Lead qualification
+    fit_score = Column(Integer, default=0)
+    target_product = Column(String(100))
+    pain_point = Column(Text, nullable=True)
+
+    # Source & tracking
+    source = Column(Enum(LeadSource), default=LeadSource.MANUAL)
+    status = Column(Enum(LeadStatus), default=LeadStatus.NEW, index=True)
+
+    # Research notes
+    research_notes = Column(Text, nullable=True)
+    recent_activity = Column(Text, nullable=True)
+
+    # Engagement
+    times_contacted = Column(Integer, default=0)
+    last_contact_date = Column(DateTime, nullable=True)
+    last_response_date = Column(DateTime, nullable=True)
+
+    # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "account_id": self.account_id,
-            "customer_email": self.customer_email,
-            "subject": self.subject,
-            "status": self.status,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-        }
 
+class Outreach(Base):
+    """Email/message sent to a lead"""
+    __tablename__ = "sales_outreach"
 
-class SupportMessage(Base):
-    """One message within a SupportConversation, from either side."""
-    __tablename__ = "support_messages"
+    id = Column(Integer, primary_key=True)
 
-    id = Column(Integer, primary_key=True, index=True)
-    conversation_id = Column(Integer, ForeignKey("support_conversations.id"), index=True)
-    sender = Column(String)  # "customer" or "ai"
+    lead_id = Column(Integer, ForeignKey("sales_leads.id"), index=True)
+    outreach_type = Column(Enum(OutreachType), default=OutreachType.INITIAL)
+
+    # Message content
+    subject = Column(String(500))
     body = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "conversation_id": self.conversation_id,
-            "sender": self.sender,
-            "body": self.body,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-        }
+    # Delivery
+    sent_at = Column(DateTime, default=datetime.utcnow, index=True)
+    sent_via = Column(String(50))
+    status = Column(String(50), default="sent")
+
+    # Engagement tracking
+    opened_at = Column(DateTime, nullable=True)
+    clicked_at = Column(DateTime, nullable=True)
+    replied_at = Column(DateTime, nullable=True)
+
+    # Scheduling
+    scheduled_followup_date = Column(DateTime, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
-class DailyBrief(Base):
-    """One day's Daily Ventures Brief (see daily_brief.py) - persisted so
-    the briefing history becomes searchable later ("show me every day
-    revenue exceeded $X"), not just a one-off email that's gone once it
-    leaves the inbox. Raw snapshots are stored alongside the generated
-    summary so future querying isn't limited to whatever Claude happened
-    to mention in the prose that day."""
-    __tablename__ = "daily_briefs"
+class Response(Base):
+    """Reply from a lead"""
+    __tablename__ = "sales_responses"
 
-    id = Column(Integer, primary_key=True, index=True)
-    summary = Column(Text)
-    trading_snapshot = Column(JSON, nullable=True)
-    notary_snapshot = Column(JSON, nullable=True)
-    support_snapshot = Column(JSON, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    id = Column(Integer, primary_key=True)
 
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "summary": self.summary,
-            "trading_snapshot": self.trading_snapshot,
-            "notary_snapshot": self.notary_snapshot,
-            "support_snapshot": self.support_snapshot,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-        }
+    lead_id = Column(Integer, ForeignKey("sales_leads.id"), index=True)
+    outreach_id = Column(Integer, ForeignKey("sales_outreach.id"), nullable=True)
+
+    # Response content
+    message = Column(Text)
+    sentiment = Column(String(50), nullable=True)
+
+    # Next action
+    next_action = Column(String(255), nullable=True)
+
+    received_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
