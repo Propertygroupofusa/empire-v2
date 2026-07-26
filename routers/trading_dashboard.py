@@ -42,10 +42,10 @@ except Exception as e:
     prop_bot_module = None
 
 try:
-    import crypto_alpaca_bot as crypto_alpaca_bot_module
+    import crypto_coinbase_bot as crypto_coinbase_bot_module
 except Exception as e:
-    log.warning(f"crypto_alpaca_bot not importable, /crypto-alpaca-status will report unavailable: {e}")
-    crypto_alpaca_bot_module = None
+    log.warning(f"crypto_coinbase_bot not importable, /crypto-coinbase-status will report unavailable: {e}")
+    crypto_coinbase_bot_module = None
 
 ALPACA_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
@@ -371,23 +371,24 @@ async def get_live_signals():
     }
 
 
-@router.get("/crypto-alpaca-status", dependencies=[Depends(require_admin_key)])
-async def get_crypto_alpaca_status():
+@router.get("/crypto-coinbase-status", dependencies=[Depends(require_admin_key)])
+async def get_crypto_coinbase_status():
     """Same read-only in-memory view as /signals, but for
-    crypto_alpaca_bot.py - the 24/7 BTC/ETH bot trading through this
-    same Alpaca account (separate from crypto-status, which reports on
+    crypto_coinbase_bot.py - the 24/7 BTC/ETH bot trading through a
+    separate Coinbase account (Alpaca crypto is blocked for this
+    account's state; separate from crypto-status, which reports on
     the unrelated Binance-based crypto_scalp_grid_bot.py)."""
-    if crypto_alpaca_bot_module is None:
-        raise HTTPException(status_code=503, detail="crypto_alpaca_bot not available")
+    if crypto_coinbase_bot_module is None:
+        raise HTTPException(status_code=503, detail="crypto_coinbase_bot not available")
 
     return {
-        "last_cycle_at": crypto_alpaca_bot_module.last_cycle_at,
-        "daily_pnl": round(crypto_alpaca_bot_module.daily_pnl, 2),
-        "open_positions": crypto_alpaca_bot_module.open_crypto_positions,
-        "max_allocation": crypto_alpaca_bot_module.MAX_ALLOCATION,
-        "rsi_buy_below": crypto_alpaca_bot_module.RSI_BUY_BELOW,
-        "rsi_sell_above": crypto_alpaca_bot_module.RSI_SELL_ABOVE,
-        "signals": crypto_alpaca_bot_module.latest_signals,
+        "last_cycle_at": crypto_coinbase_bot_module.last_cycle_at,
+        "daily_pnl": round(crypto_coinbase_bot_module.daily_pnl, 2),
+        "open_positions": crypto_coinbase_bot_module.open_crypto_positions,
+        "max_allocation": crypto_coinbase_bot_module.MAX_ALLOCATION,
+        "rsi_buy_below": crypto_coinbase_bot_module.RSI_BUY_BELOW,
+        "rsi_sell_above": crypto_coinbase_bot_module.RSI_SELL_ABOVE,
+        "signals": crypto_coinbase_bot_module.latest_signals,
     }
 
 
