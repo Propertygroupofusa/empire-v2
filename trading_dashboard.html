@@ -583,8 +583,8 @@
                 account the stock bot above trades on. Runs around the clock since crypto has no market close.
                 Long-only (spot, no shorting) and compounds automatically - every trade sizes off the account's
                 current balance, so profit gets reinvested rather than sitting idle. Money only leaves this account
-                when withdrawn manually; the bot never transfers funds out on its own. Price data falls back to
-                Binance if Coinbase's feed has a hiccup - orders still only ever go through Coinbase.
+                when withdrawn manually; the bot never transfers funds out on its own. Price/RSI data comes from
+                Coinbase's own public feed - the same exchange orders execute on.
             </p>
             <p id="cryptoCoinbaseMeta" style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">Loading...</p>
             <div id="cryptoCoinbaseList">Loading...</div>
@@ -600,6 +600,24 @@
             <p id="botApiMeta" style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">Loading...</p>
             <div id="botApiSummary">Loading...</div>
             <div id="botApiPositions"></div>
+        </div>
+
+        <div class="panel">
+            <h3>🔍 YouTube SEO Backfill</h3>
+            <p style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">
+                Rewrites title/description/tags on videos already uploaded to the YouTube channel, using Claude to
+                optimize for search ranking and click-through. Every new upload already gets this automatically -
+                this button is only for videos that went up before that was wired in. Already-optimized videos are
+                skipped on repeat runs unless "Re-run already-optimized videos" is checked. Start with a small
+                limit (1-2) to check the results before running it over the whole channel - this edits live public
+                metadata with no built-in undo.
+            </p>
+            <div style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap; margin-bottom: 10px;">
+                <label style="font-size: 0.85em;">Limit: <input type="number" id="seoBackfillLimit" value="1" min="1" style="width: 60px;"></label>
+                <label style="font-size: 0.85em;"><input type="checkbox" id="seoBackfillForce"> Re-run already-optimized videos</label>
+                <button class="btn-withdraw" onclick="runYoutubeSeoBackfill()">Run Backfill</button>
+            </div>
+            <div id="seoBackfillStatus" style="font-size: 0.85em;">Not run yet.</div>
         </div>
 
         <div class="panel">
@@ -1185,6 +1203,50 @@
                 await refreshWithdrawals();
             } catch (e) {
                 logEvent('❌ Failed to mark withdrawal complete: ' + e.message, 'error');
+            }
+        }
+
+        // youtube_seo_optimizer.py's backfill endpoint lives on video_revenue_api.py,
+        // mounted with no prefix (not under /api/trading-dashboard like apiFetch's
+        // API_BASE) - so this hits the absolute URL directly, but still reuses the
+        // same shared admin key/localStorage as everything else on this page.
+        async function runYoutubeSeoBackfill() {
+            const statusEl = document.getElementById('seoBackfillStatus');
+            const limitInput = document.getElementById('seoBackfillLimit').value;
+            const limit = limitInput ? parseInt(limitInput, 10) : null;
+            const force = document.getElementById('seoBackfillForce').checked;
+
+            const confirmMsg = limit
+                ? `This will rewrite title/description/tags on up to ${limit} video(s) on the live channel. Continue?`
+                : 'No limit set - this will rewrite EVERY video on the channel. Continue?';
+            if (!limit || limit > 5) {
+                if (!confirm(confirmMsg)) return;
+            }
+
+            ensureAdminKey();
+            statusEl.textContent = 'Running... this takes about 1 second per video, so a full-channel run can take a while.';
+            try {
+                const res = await fetch('https://empire-v2-production.up.railway.app/youtube/backfill-seo', {
+                    method: 'POST',
+                    headers: { 'X-Admin-Key': adminKey, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ limit: limit, force: force }),
+                });
+                if (res.status === 401) {
+                    localStorage.removeItem('bmb_admin_key');
+                    adminKey = '';
+                    throw new Error('Unauthorized - check your admin key');
+                }
+                if (!res.ok) {
+                    const body = await res.json().catch(() => ({}));
+                    throw new Error(body.detail || ('Request failed: ' + res.status));
+                }
+                const data = await res.json();
+                statusEl.innerHTML = `✅ On channel: ${data.total_on_channel} | Rewritten: ${data.processed} | ` +
+                    `Already done (skipped): ${data.skipped_already_done} | Failed: ${data.failed.length}` +
+                    (data.failed.length ? `<br>Failed video IDs: ${data.failed.join(', ')}` : '');
+                logEvent(`🔍 YouTube SEO backfill: rewrote ${data.processed} video(s), skipped ${data.skipped_already_done}, failed ${data.failed.length}`);
+            } catch (e) {
+                statusEl.textContent = '❌ ' + e.message;
             }
         }
 
