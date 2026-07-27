@@ -17,17 +17,23 @@ jobs:
       - name: Install dependencies (bot module needs these to import)
         run: pip install -r requirements.txt
 
-      - name: Verify fee-aware profit target against real data
+      - name: Baseline (2% / 2%)
         run: python scripts/backtest_fee_aware_target.py
 
-      - name: Same test with a wider target / tighter stop (3% / 1%)
+      - name: Tighter target / wider stop (1.5% / 3%)
         env:
-          CRYPTO_PROFIT_TARGET_PCT: "0.03"
-          CRYPTO_STOP_LOSS_PCT: "0.01"
+          CRYPTO_PROFIT_TARGET_PCT: "0.015"
+          CRYPTO_STOP_LOSS_PCT: "0.03"
         run: python scripts/backtest_fee_aware_target.py
 
-      - name: Same test with an even wider target / tighter stop (4% / 0.75%)
+      - name: Tighter target / much wider stop (1.5% / 4%)
         env:
-          CRYPTO_PROFIT_TARGET_PCT: "0.04"
-          CRYPTO_STOP_LOSS_PCT: "0.0075"
+          CRYPTO_PROFIT_TARGET_PCT: "0.015"
+          CRYPTO_STOP_LOSS_PCT: "0.04"
+        run: python scripts/backtest_fee_aware_target.py
+
+      - name: Minimum viable target / wider stop (1.8% / 3%)
+        env:
+          CRYPTO_PROFIT_TARGET_PCT: "0.018"
+          CRYPTO_STOP_LOSS_PCT: "0.03"
         run: python scripts/backtest_fee_aware_target.py
