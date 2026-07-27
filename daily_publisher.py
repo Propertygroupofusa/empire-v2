@@ -3,8 +3,18 @@ Daily Video Publisher - Automated YouTube publishing system
 Generates and publishes videos on schedule to build audience
 
 NOTE: Scheduler DISABLED until video_generator_bot.py is deployed
-as a separate Railway service. Set DAILY_PUBLISHER_ENABLED=true
-in Railway variables to re-enable when ready.
+as a separate Railway service. To enable:
+  1. Deploy a Railway service running video_generator_bot.py (the
+     "video-generator" entry already in railway.json - Dockerfile.video-editor).
+     On THAT service, set:
+       - VIDEO_GENERATOR_PUBLIC_URL = that service's own public Railway URL
+       - YOUTUBE_API_URL            = this main app's public URL
+     (it publishes straight to this app's existing /publish/youtube/*
+     endpoints - see video_generator_bot.auto_publish_generated_video -
+     no YouTube credentials needed on the generator service itself.)
+  2. On THIS app (main.py's service), set:
+       - VIDEO_GENERATOR_URL   = the generator service's public URL
+       - DAILY_PUBLISHER_ENABLED = true
 """
 
 import os

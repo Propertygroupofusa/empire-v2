@@ -347,49 +347,52 @@ def generate_video(text, video_type='trading', voice='female', job_id=None):
 
 
 def auto_publish_generated_video(job_id, video_type, youtube_settings=None):
-    """Auto-submit generated video to auto-editor for publishing"""
+    """Publish straight to the main app's existing YouTube pipeline
+    (video_revenue_api.py's /publish/youtube/* endpoints - the same real,
+    working path client videos already go through, SEO auto-editor
+    included). Originally this hopped through video-editor-api and
+    video-auto-editor first for clip-splitting, but that chain was never
+    deployed and had a hardcoded localhost URL that wouldn't have worked
+    across separate Railway services anyway. Daily single-clip videos
+    don't need clip-splitting, so this skips straight to publishing."""
+    job = generation_jobs.get(job_id)
+    if not job or job['status'] != 'completed':
+        raise Exception("Video not ready")
+
+    # This service's own public URL, so the main app (a different Railway
+    # service) can reach back in to download the file this job produced -
+    # job['video_url'] is only a path (e.g. /api/video-gen/download/x.mp4),
+    # set by generate_video() above.
+    public_url = os.getenv('VIDEO_GENERATOR_PUBLIC_URL', 'http://localhost:5003').rstrip('/')
+    video_url = f"{public_url}{job['video_url']}"
+
+    main_app_url = os.getenv('YOUTUBE_API_URL', 'http://localhost:10000').rstrip('/')
+    endpoint = '/publish/youtube/property-listing' if video_type == 'property' else '/publish/youtube/social-content'
+
+    youtube_settings = youtube_settings or {}
+    payload = {
+        'video_url': video_url,
+        'title': youtube_settings.get('title') or f'{video_type.title()} Update',
+        'description': youtube_settings.get('description') or 'Auto-generated content',
+        'tags': youtube_settings.get('tags') or ['empire', video_type],
+        'privacy': youtube_settings.get('privacy', 'unlisted'),
+    }
+
     try:
-        job = generation_jobs.get(job_id)
-        if not job or job['status'] != 'completed':
-            raise Exception("Video not ready")
-
-        video_url = f"http://localhost:5001/api/video/download/{Path(job['output_file']).name}"
-
-        # Submit to auto-editor
-        auto_editor_url = os.getenv('VIDEO_AUTO_EDITOR_URL', 'http://localhost:5002')
-
-        if not youtube_settings:
-            youtube_settings = {
-                'autoPublish': True,
-                'privacy': 'unlisted',
-                'title': f'AI Generated {video_type.title()} Video',
-                'tags': ['ai', 'generated', 'empire']
-            }
-
-        response = requests.post(
-            f'{auto_editor_url}/api/auto-editor/edit',
-            json={
-                'videoUrl': video_url,
-                'videoType': video_type,
-                'youtubeSettings': youtube_settings
-            },
-            timeout=30
-        )
-
-        if response.status_code not in [200, 202]:
-            raise Exception(f"Auto-editor error: {response.text}")
+        response = requests.post(f'{main_app_url}{endpoint}', json=payload, timeout=30)
+        if not response.ok:
+            raise Exception(f"Publish failed: {response.status_code} {response.text[:300]}")
 
         result = response.json()
-        generation_jobs[job_id]['auto_editor_job'] = result.get('jobId')
-        generation_jobs[job_id]['status'] = 'publishing'
-
-        logger.info(f"Video submitted to auto-editor: {result.get('jobId')}")
-
+        generation_jobs[job_id]['youtube_url'] = result.get('url')
+        generation_jobs[job_id]['status'] = 'published'
+        logger.info(f"Published to YouTube: {result.get('url')}")
         return result
 
     except Exception as e:
         logger.error(f"Auto-publish failed: {str(e)}")
         generation_jobs[job_id]['auto_publish_error'] = str(e)
+        generation_jobs[job_id]['status'] = 'publish_failed'
         raise
 
 
