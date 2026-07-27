@@ -25,7 +25,6 @@ ALPACA_KEY    = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 BASE_URL      = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
-STOP          = os.getenv("STOP_TRADING", "false").lower() == "true"
 
 # RSI entry/exit thresholds. Widened again at the account owner's explicit
 # request - real trades were too rare at 38/48 (RSI mostly sat in the
@@ -619,7 +618,7 @@ def run():
     log.info("=" * 60)
 
     while True:
-        if STOP:
+        if os.getenv("STOP_TRADING", "false").lower() == "true":
             log.warning("STOP_TRADING=true — prop bot paused")
             time.sleep(60)
             continue
