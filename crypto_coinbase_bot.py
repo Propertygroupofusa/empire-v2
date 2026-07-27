@@ -104,6 +104,12 @@ PROFIT_TARGET_PCT = max(
     ROUND_TRIP_FEE_PCT * 1.5,
 )
 
+# Previously there was no stop-loss at all - the only exits were the
+# profit target and "RSI recovered to neutral," so a position that never
+# saw RSI recover again would just sit open indefinitely with the fee
+# already sunk. Caps downside at a fixed percentage instead.
+STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.02"))
+
 
 open_crypto_positions = {}
 daily_pnl = 0.0
@@ -278,7 +284,7 @@ async def run_crypto_cycle():
     async with aiohttp.ClientSession() as session:
         cash = await get_usd_balance(session)
         cash_pool = min(cash, MAX_ALLOCATION) if cash is not None else MAX_ALLOCATION
-        log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} (capped at ${MAX_ALLOCATION:.2f}) | Profit target: {PROFIT_TARGET_PCT*100:.2f}% (round-trip fee: {ROUND_TRIP_FEE_PCT*100:.2f}%)")
+        log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} (capped at ${MAX_ALLOCATION:.2f}) | Target: +{PROFIT_TARGET_PCT*100:.2f}% | Stop: -{STOP_LOSS_PCT*100:.2f}% | Round-trip fee: {ROUND_TRIP_FEE_PCT*100:.2f}%")
 
         scans = {}
         for symbol in CRYPTO_PAIRS:
@@ -297,16 +303,23 @@ async def run_crypto_cycle():
             entry, qty = position["entry"], position["qty"]
             unrealized_pnl = (price - entry) * qty
             unrealized_pct = (price - entry) / entry
-            rsi_exit = rsi > RSI_SELL_ABOVE
             target_hit = unrealized_pct >= PROFIT_TARGET_PCT
+            stop_hit = unrealized_pct <= -STOP_LOSS_PCT
+            # RSI recovering to neutral is only a real exit if it's already
+            # cleared the round-trip fee - otherwise this "safe-looking"
+            # exit is actually a guaranteed net loss (this was the actual
+            # source of the fee bleed a backtest caught: RSI_SELL_ABOVE=50
+            # fires on almost every trade long before PROFIT_TARGET_PCT
+            # ever does, and it used to have no profit floor at all).
+            rsi_exit = rsi > RSI_SELL_ABOVE and unrealized_pct > ROUND_TRIP_FEE_PCT
 
             latest_signals[symbol] = {
                 "price": price, "rsi": rsi, "status": "HOLDING_LONG",
                 "has_position": True, "checked_at": now.isoformat(),
             }
 
-            if target_hit or rsi_exit:
-                reason = "PROFIT TARGET" if target_hit else "RSI"
+            if target_hit or rsi_exit or stop_hit:
+                reason = "PROFIT TARGET" if target_hit else ("STOP LOSS" if stop_hit else "RSI")
                 filled = await place_order(session, symbol, "sell", qty, price)
                 if filled:
                     daily_pnl += unrealized_pnl

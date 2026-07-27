@@ -90,8 +90,9 @@ def run_backtest(rows, rsis):
         if position is not None:
             unrealized_pct = (close - position["entry"]) / position["entry"]
             target_hit = unrealized_pct >= bot.PROFIT_TARGET_PCT
-            rsi_exit = rsi > bot.RSI_SELL_ABOVE
-            if target_hit or rsi_exit:
+            stop_hit = unrealized_pct <= -bot.STOP_LOSS_PCT
+            rsi_exit = rsi > bot.RSI_SELL_ABOVE and unrealized_pct > bot.ROUND_TRIP_FEE_PCT
+            if target_hit or rsi_exit or stop_hit:
                 gross = (close - position["entry"]) * position["qty"]
                 net = gross - position["entry_fee"] - fee(position["qty"] * close)
                 trades.append(net)
@@ -132,7 +133,7 @@ def summarize(label, trades):
 def main():
     print(f"Testing the ACTUAL crypto_coinbase_bot.py module as it stands on this branch:")
     print(f"  RSI_BUY_BELOW={bot.RSI_BUY_BELOW}  RSI_SELL_ABOVE={bot.RSI_SELL_ABOVE}")
-    print(f"  PROFIT_TARGET_PCT={bot.PROFIT_TARGET_PCT*100:.2f}%  ROUND_TRIP_FEE_PCT={bot.ROUND_TRIP_FEE_PCT*100:.2f}%")
+    print(f"  PROFIT_TARGET_PCT={bot.PROFIT_TARGET_PCT*100:.2f}%  STOP_LOSS_PCT={bot.STOP_LOSS_PCT*100:.2f}%  ROUND_TRIP_FEE_PCT={bot.ROUND_TRIP_FEE_PCT*100:.2f}%")
     print(f"  MAX_ALLOCATION=${bot.MAX_ALLOCATION:.2f}  MIN_POSITION_NOTIONAL=${bot.MIN_POSITION_NOTIONAL:.2f}\n")
 
     for product_id in SYMBOLS:
