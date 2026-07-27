@@ -8,7 +8,7 @@ Includes Synthesia generation + YouTube auto-publish.
 import os
 import logging
 from typing import List, Optional
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
 from pydantic import BaseModel
 
 from synthesia_video_bot import (
@@ -17,6 +17,7 @@ from synthesia_video_bot import (
     social_content_script, cold_call_followup_script,
 )
 from youtube_upload_bot import synthesia_to_youtube
+from admin_auth import require_admin_key
 
 log = logging.getLogger("video_api")
 router = APIRouter()
@@ -187,6 +188,26 @@ async def publish_social_youtube(payload: PublishSocialRequest):
         privacy=payload.privacy,
     )
     return result
+
+
+class BackfillSeoRequest(BaseModel):
+    force: Optional[bool] = False
+    limit: Optional[int] = None
+
+
+@router.post("/youtube/backfill-seo", dependencies=[Depends(require_admin_key)])
+async def backfill_youtube_seo(payload: BackfillSeoRequest = BackfillSeoRequest()):
+    """One-time (re-runnable) pass that rewrites title/description/tags
+    for every video already on the channel via youtube_seo_optimizer.py.
+    Not run automatically - call this explicitly when you're ready to
+    edit everything that's already live. Already-optimized videos are
+    skipped on repeat calls unless force=true."""
+    from youtube_seo_optimizer import backfill_channel
+    try:
+        return await backfill_channel(force=payload.force, limit=payload.limit)
+    except Exception as e:
+        log.error(f"YouTube SEO backfill failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

@@ -105,6 +105,13 @@ async def upload_to_youtube(
         video_id = result.get("id")
         log.info(f"Uploaded to YouTube | ID: {video_id}")
 
+        if video_id:
+            try:
+                from youtube_seo_optimizer import optimize_uploaded_video
+                await optimize_uploaded_video(video_id, title, description, tags)
+            except Exception as e:
+                log.warning(f"SEO optimize skipped for {video_id}: {e}")
+
         return {
             "id": video_id,
             "url": f"https://youtube.com/watch?v={video_id}",
