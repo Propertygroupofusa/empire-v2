@@ -19,3 +19,15 @@ jobs:
 
       - name: Verify fee-aware profit target against real data
         run: python scripts/backtest_fee_aware_target.py
+
+      - name: Same test with a wider target / tighter stop (3% / 1%)
+        env:
+          CRYPTO_PROFIT_TARGET_PCT: "0.03"
+          CRYPTO_STOP_LOSS_PCT: "0.01"
+        run: python scripts/backtest_fee_aware_target.py
+
+      - name: Same test with an even wider target / tighter stop (4% / 0.75%)
+        env:
+          CRYPTO_PROFIT_TARGET_PCT: "0.04"
+          CRYPTO_STOP_LOSS_PCT: "0.0075"
+        run: python scripts/backtest_fee_aware_target.py
