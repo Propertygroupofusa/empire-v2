@@ -339,19 +339,6 @@ async def get_todays_trades():
     }
 
 
-@router.get("/crypto-status", dependencies=[Depends(require_admin_key)])
-async def get_crypto_bot_status():
-    """24/7 Crypto Scalp-Grid bot status (BTC, ETH, XRP)"""
-    try:
-        from crypto_scalp_grid_bot import get_status
-        return get_status()
-    except ImportError:
-        raise HTTPException(status_code=503, detail="Crypto bot not available")
-    except Exception as e:
-        log.error(f"Crypto status error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @router.get("/signals", dependencies=[Depends(require_admin_key)])
 async def get_live_signals():
     """Live per-symbol price/RSI/trend from prop_bot.py's most recent scan
@@ -376,8 +363,7 @@ async def get_crypto_coinbase_status():
     """Same read-only in-memory view as /signals, but for
     crypto_coinbase_bot.py - the 24/7 BTC/ETH bot trading through a
     separate Coinbase account (Alpaca crypto is blocked for this
-    account's state; separate from crypto-status, which reports on
-    the unrelated Binance-based crypto_scalp_grid_bot.py)."""
+    account's state)."""
     if crypto_coinbase_bot_module is None:
         raise HTTPException(status_code=503, detail="crypto_coinbase_bot not available")
 
