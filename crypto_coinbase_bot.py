@@ -202,20 +202,35 @@ async def get_usd_balance(session):
     issue, network hiccup, no USD wallet) - the reason travels back to
     the caller instead of only being logged here, so it shows up
     directly in the per-cycle log line instead of a separate one that's
-    easy to scroll past."""
+    easy to scroll past.
+
+    Paginates through every page of accounts (Coinbase caps each page
+    at ~49 regardless of the requested limit) - this account holds
+    dozens of small/dust altcoin wallets, so the USD wallet is often not
+    on the first page at all. Looking at only page 1 previously made
+    the bot think there was no USD wallet when there was one further in."""
     path = "/api/v3/brokerage/accounts"
+    all_currencies = []
+    cursor = None
     try:
-        async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path)) as r:
-            if r.status != 200:
-                body = (await r.text())[:300]
-                return None, f"HTTP {r.status}: {body}"
-            data = await r.json()
-            accounts = data.get("accounts", [])
-            for account in accounts:
-                if account.get("currency") == "USD":
-                    return float(account["available_balance"]["value"]), None
-            currencies = [a.get("currency") for a in accounts]
-            return None, f"no USD account found (accounts on this key: {currencies})"
+        while True:
+            params = {"limit": 250}
+            if cursor:
+                params["cursor"] = cursor
+            async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path), params=params) as r:
+                if r.status != 200:
+                    body = (await r.text())[:300]
+                    return None, f"HTTP {r.status}: {body}"
+                data = await r.json()
+                accounts = data.get("accounts", [])
+                for account in accounts:
+                    if account.get("currency") == "USD":
+                        return float(account["available_balance"]["value"]), None
+                all_currencies.extend(a.get("currency") for a in accounts)
+                if not data.get("has_next") or not data.get("cursor"):
+                    break
+                cursor = data.get("cursor")
+        return None, f"no USD account found across {len(all_currencies)} accounts on this key: {all_currencies}"
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
 
