@@ -85,22 +85,46 @@ MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", str(len(CRYPTO_PAIRS))))
 MAX_ALLOCATION = float(os.getenv("CRYPTO_MAX_ALLOCATION", "100"))
 MIN_POSITION_NOTIONAL = float(os.getenv("CRYPTO_MIN_POSITION_NOTIONAL", "5"))
 
-PROFIT_TARGET_DOLLARS_MILESTONES = [
-    (0,     0.50),
-    (1000,  0.60),
-    (5000,  0.80),
-    (10000, 1.00),
-]
+# Coinbase's real Advanced Trade taker fee for this account's volume tier -
+# used only to size the profit target sensibly, not charged/simulated here
+# (the real fee is already reflected in Coinbase's fill price/balance).
+TAKER_FEE_RATE = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.006"))
+ROUND_TRIP_FEE_PCT = TAKER_FEE_RATE * 2
 
+# A flat dollar profit target (the original design) doesn't scale with
+# position size, so on a small position it can be - and was, at $0.50 on a
+# ~$100 position - smaller than the ~1.2% round-trip fee itself, meaning
+# every "successful" exit still lost money net of fees. The target is a
+# percentage of the position's entry value instead, with a floor that
+# guarantees it clears the round-trip fee with real profit left over.
+PROFIT_TARGET_PCT = max(
+    float(os.getenv("CRYPTO_PROFIT_TARGET_PCT", "0.015")),
+    ROUND_TRIP_FEE_PCT * 1.5,
+)
 
-def get_profit_target_dollars(equity):
-    if equity is None:
-        return PROFIT_TARGET_DOLLARS_MILESTONES[0][1]
-    target = PROFIT_TARGET_DOLLARS_MILESTONES[0][1]
-    for threshold, t in PROFIT_TARGET_DOLLARS_MILESTONES:
-        if equity >= threshold:
-            target = t
-    return target
+# Previously there was no stop-loss at all - the only exits were the
+# profit target and "RSI recovered to neutral," so a position that never
+# saw RSI recover again would just sit open indefinitely with the fee
+# already sunk.
+#
+# Backtested against 30 days of real BTC/ETH 5-min candles with real fees
+# applied: a tight stop (2%) performs WORSE than a wide one here, because
+# this is a mean-reversion signal on volatile 5-min bars - normal noise
+# trips a tight stop before the RSI thesis has time to play out. Results
+# by stop width (this target, both symbols, same 30-day window):
+#   2% stop: -$35 / -$45      5% stop: -$3  / -$11
+#   4% stop: -$12 / -$19      6% stop: -$3  / -$6 (near breakeven)
+# Widening further (8-10%) barely improves on 6% and does so on very few
+# trades (10-16/month) - not enough to trust as a real edge, and it starts
+# giving up real protection against an actual sharp move. 5% is chosen as
+# the point that captures most of the realistic improvement without
+# relying on an extreme, thinly-tested width.
+#
+# IMPORTANT: this is a fee-survival fix, not a proven profitable edge -
+# every configuration tested landed at "roughly breakeven to slightly
+# negative," never a clear, robust win. Start with MAX_ALLOCATION kept
+# low and watch real results before trusting this with more capital.
+STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.05"))
 
 
 open_crypto_positions = {}
@@ -275,9 +299,8 @@ async def run_crypto_cycle():
 
     async with aiohttp.ClientSession() as session:
         cash = await get_usd_balance(session)
-        profit_target = get_profit_target_dollars(cash)
         cash_pool = min(cash, MAX_ALLOCATION) if cash is not None else MAX_ALLOCATION
-        log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} (capped at ${MAX_ALLOCATION:.2f}) | Profit target: ${profit_target:.2f}/position")
+        log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} (capped at ${MAX_ALLOCATION:.2f}) | Target: +{PROFIT_TARGET_PCT*100:.2f}% | Stop: -{STOP_LOSS_PCT*100:.2f}% | Round-trip fee: {ROUND_TRIP_FEE_PCT*100:.2f}%")
 
         scans = {}
         for symbol in CRYPTO_PAIRS:
@@ -295,15 +318,24 @@ async def run_crypto_cycle():
             price, rsi = data["price"], data["rsi"]
             entry, qty = position["entry"], position["qty"]
             unrealized_pnl = (price - entry) * qty
-            rsi_exit = rsi > RSI_SELL_ABOVE
+            unrealized_pct = (price - entry) / entry
+            target_hit = unrealized_pct >= PROFIT_TARGET_PCT
+            stop_hit = unrealized_pct <= -STOP_LOSS_PCT
+            # RSI recovering to neutral is only a real exit if it's already
+            # cleared the round-trip fee - otherwise this "safe-looking"
+            # exit is actually a guaranteed net loss (this was the actual
+            # source of the fee bleed a backtest caught: RSI_SELL_ABOVE=50
+            # fires on almost every trade long before PROFIT_TARGET_PCT
+            # ever does, and it used to have no profit floor at all).
+            rsi_exit = rsi > RSI_SELL_ABOVE and unrealized_pct > ROUND_TRIP_FEE_PCT
 
             latest_signals[symbol] = {
                 "price": price, "rsi": rsi, "status": "HOLDING_LONG",
                 "has_position": True, "checked_at": now.isoformat(),
             }
 
-            if unrealized_pnl >= profit_target or rsi_exit:
-                reason = "PROFIT TARGET" if unrealized_pnl >= profit_target else "RSI"
+            if target_hit or rsi_exit or stop_hit:
+                reason = "PROFIT TARGET" if target_hit else ("STOP LOSS" if stop_hit else "RSI")
                 filled = await place_order(session, symbol, "sell", qty, price)
                 if filled:
                     daily_pnl += unrealized_pnl
