@@ -197,22 +197,27 @@ def send_trade_alert(subject: str, body: str):
 
 
 async def get_usd_balance(session):
-    """Real Coinbase USD balance available for trading. Returns None on
-    any failure (auth issue, network hiccup, no USD wallet)."""
+    """Real Coinbase USD balance available for trading. Returns
+    (balance, None) on success, or (None, reason) on any failure (auth
+    issue, network hiccup, no USD wallet) - the reason travels back to
+    the caller instead of only being logged here, so it shows up
+    directly in the per-cycle log line instead of a separate one that's
+    easy to scroll past."""
     path = "/api/v3/brokerage/accounts"
     try:
         async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path)) as r:
             if r.status != 200:
-                log.warning(f"Could not fetch Coinbase accounts: HTTP {r.status} {await r.text()}")
-                return None
+                body = (await r.text())[:300]
+                return None, f"HTTP {r.status}: {body}"
             data = await r.json()
-            for account in data.get("accounts", []):
+            accounts = data.get("accounts", [])
+            for account in accounts:
                 if account.get("currency") == "USD":
-                    return float(account["available_balance"]["value"])
-            return None
+                    return float(account["available_balance"]["value"]), None
+            currencies = [a.get("currency") for a in accounts]
+            return None, f"no USD account found (accounts on this key: {currencies})"
     except Exception as e:
-        log.warning(f"Could not fetch Coinbase account for crypto sizing: {e}")
-        return None
+        return None, f"{type(e).__name__}: {e}"
 
 
 def _compute_rsi(closes: list) -> float:
@@ -309,9 +314,9 @@ async def run_crypto_cycle():
     log.info(f"[CRYPTO] Scanning {', '.join(CRYPTO_PAIRS)} (24/7, no market-hours gate) | Daily P&L: ${daily_pnl:.2f}")
 
     async with aiohttp.ClientSession() as session:
-        cash = await get_usd_balance(session)
+        cash, balance_error = await get_usd_balance(session)
         if cash is None:
-            log.warning("[CRYPTO] Could not read Coinbase USD balance - skipping entries this cycle (exits below still run on open positions)")
+            log.warning(f"[CRYPTO] Could not read Coinbase USD balance - {balance_error} - skipping entries this cycle (exits below still run on open positions)")
             cash_pool = 0.0
         else:
             cash_pool = min(cash, MAX_ALLOCATION) if MAX_ALLOCATION is not None else cash
