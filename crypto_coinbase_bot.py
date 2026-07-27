@@ -85,22 +85,24 @@ MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", str(len(CRYPTO_PAIRS))))
 MAX_ALLOCATION = float(os.getenv("CRYPTO_MAX_ALLOCATION", "100"))
 MIN_POSITION_NOTIONAL = float(os.getenv("CRYPTO_MIN_POSITION_NOTIONAL", "5"))
 
-PROFIT_TARGET_DOLLARS_MILESTONES = [
-    (0,     0.50),
-    (1000,  0.60),
-    (5000,  0.80),
-    (10000, 1.00),
-]
+# Coinbase's real Advanced Trade taker fee for this account's volume tier -
+# used only to size the profit target sensibly, not charged/simulated here
+# (the real fee is already reflected in Coinbase's fill price/balance).
+TAKER_FEE_RATE = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.006"))
+ROUND_TRIP_FEE_PCT = TAKER_FEE_RATE * 2
 
-
-def get_profit_target_dollars(equity):
-    if equity is None:
-        return PROFIT_TARGET_DOLLARS_MILESTONES[0][1]
-    target = PROFIT_TARGET_DOLLARS_MILESTONES[0][1]
-    for threshold, t in PROFIT_TARGET_DOLLARS_MILESTONES:
-        if equity >= threshold:
-            target = t
-    return target
+# A flat dollar profit target (the original design) doesn't scale with
+# position size, so on a small position it can be - and was, at $0.50 on a
+# ~$100 position - smaller than the ~1.2% round-trip fee itself, meaning
+# every "successful" exit still lost money net of fees. The target is a
+# percentage of the position's entry value instead, with a floor that
+# guarantees it clears the round-trip fee with real profit left over
+# (backtested against 30 days of real BTC/ETH data with this exact fee
+# rate applied - see PR description for the numbers).
+PROFIT_TARGET_PCT = max(
+    float(os.getenv("CRYPTO_PROFIT_TARGET_PCT", "0.02")),
+    ROUND_TRIP_FEE_PCT * 1.5,
+)
 
 
 open_crypto_positions = {}
@@ -275,9 +277,8 @@ async def run_crypto_cycle():
 
     async with aiohttp.ClientSession() as session:
         cash = await get_usd_balance(session)
-        profit_target = get_profit_target_dollars(cash)
         cash_pool = min(cash, MAX_ALLOCATION) if cash is not None else MAX_ALLOCATION
-        log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} (capped at ${MAX_ALLOCATION:.2f}) | Profit target: ${profit_target:.2f}/position")
+        log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} (capped at ${MAX_ALLOCATION:.2f}) | Profit target: {PROFIT_TARGET_PCT*100:.2f}% (round-trip fee: {ROUND_TRIP_FEE_PCT*100:.2f}%)")
 
         scans = {}
         for symbol in CRYPTO_PAIRS:
@@ -295,15 +296,17 @@ async def run_crypto_cycle():
             price, rsi = data["price"], data["rsi"]
             entry, qty = position["entry"], position["qty"]
             unrealized_pnl = (price - entry) * qty
+            unrealized_pct = (price - entry) / entry
             rsi_exit = rsi > RSI_SELL_ABOVE
+            target_hit = unrealized_pct >= PROFIT_TARGET_PCT
 
             latest_signals[symbol] = {
                 "price": price, "rsi": rsi, "status": "HOLDING_LONG",
                 "has_position": True, "checked_at": now.isoformat(),
             }
 
-            if unrealized_pnl >= profit_target or rsi_exit:
-                reason = "PROFIT TARGET" if unrealized_pnl >= profit_target else "RSI"
+            if target_hit or rsi_exit:
+                reason = "PROFIT TARGET" if target_hit else "RSI"
                 filled = await place_order(session, symbol, "sell", qty, price)
                 if filled:
                     daily_pnl += unrealized_pnl
