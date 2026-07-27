@@ -449,13 +449,26 @@ def run():
         log.warning("COINBASE_API_KEY_NAME/COINBASE_API_PRIVATE_KEY not configured - crypto_coinbase_bot will not start")
         return
 
+    # One event loop for this thread's entire life, not a fresh one every
+    # cycle. main.py's uvicorn server runs on uvloop, which installs its
+    # event loop policy process-wide - calling asyncio.run() fresh each
+    # cycle means tearing down and recreating a whole uvloop loop every
+    # 60 seconds in this background thread, which was intermittently
+    # producing "Task ... got Future ... attached to a different loop"
+    # errors (seen in production logs) that made every single balance
+    # fetch fail. A single persistent loop, reused via
+    # run_until_complete(), removes the repeated create/destroy cycle
+    # entirely.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     while True:
         if os.getenv("STOP_TRADING", "false").lower() == "true":
             log.warning("STOP_TRADING=true — crypto bot paused")
             time.sleep(60)
             continue
         try:
-            asyncio.run(run_crypto_cycle())
+            loop.run_until_complete(run_crypto_cycle())
         except Exception as e:
             log.error(f"Crypto cycle error: {e}")
         time.sleep(60)
