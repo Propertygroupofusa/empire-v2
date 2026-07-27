@@ -581,8 +581,10 @@
             <p style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">
                 Trades BTC/USD and ETH/USD on a SEPARATE Coinbase account and cash balance - not the Alpaca
                 account the stock bot above trades on. Runs around the clock since crypto has no market close.
-                Long-only (spot, no shorting) and capped to a limited slice of the account's cash. Price data
-                falls back to Binance if Coinbase's feed has a hiccup - orders still only ever go through Coinbase.
+                Long-only (spot, no shorting) and compounds automatically - every trade sizes off the account's
+                current balance, so profit gets reinvested rather than sitting idle. Money only leaves this account
+                when withdrawn manually; the bot never transfers funds out on its own. Price data falls back to
+                Binance if Coinbase's feed has a hiccup - orders still only ever go through Coinbase.
             </p>
             <p id="cryptoCoinbaseMeta" style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">Loading...</p>
             <div id="cryptoCoinbaseList">Loading...</div>
@@ -1000,8 +1002,9 @@
             }
 
             const metaEl = document.getElementById('cryptoCoinbaseMeta');
+            const allocationText = data.max_allocation == null ? 'full balance (compounding)' : `$${data.max_allocation.toFixed(2)} cap`;
             metaEl.textContent = data.last_cycle_at
-                ? `Last scan: ${new Date(data.last_cycle_at).toLocaleTimeString()} | Buy below RSI ${data.rsi_buy_below} | Sell above RSI ${data.rsi_sell_above} | Today's crypto P&L: $${data.daily_pnl.toFixed(2)} | Max allocation: $${data.max_allocation.toFixed(2)}`
+                ? `Last scan: ${new Date(data.last_cycle_at).toLocaleTimeString()} | Buy below RSI ${data.rsi_buy_below} | Sell above RSI ${data.rsi_sell_above} | Today's crypto P&L: $${data.daily_pnl.toFixed(2)} | Allocation: ${allocationText}`
                 : 'Bot has not completed a scan cycle yet.';
 
             const listEl = document.getElementById('cryptoCoinbaseList');

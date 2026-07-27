@@ -16,9 +16,17 @@ funding this bot means depositing USD into Coinbase directly.
 Long-only, same reasoning as crypto_alpaca_bot.py had: Coinbase spot
 trading has no shorting, so there's no short side to manage here either.
 
-Runs against a CAPPED slice of the Coinbase account's USD balance
-(MAX_ALLOCATION, default $100) rather than the full balance, same
-self-imposed-limit reasoning as before.
+Compounds by default: every cycle sizes new positions off the account's
+actual current USD balance (principal + whatever profit has accumulated),
+not a fixed slice - a winning trade grows the pool available to the next
+one automatically. There's no sibling bot sharing this Coinbase account
+(unlike the old Alpaca version, which capped itself so it wouldn't compete
+with prop_bot.py's stock entries for the same cash), so there's nothing
+left to protect by holding part of the balance back. CRYPTO_MAX_ALLOCATION
+remains available as an optional hard ceiling if a cap is ever wanted
+again, but compounds fully by default when unset. The bot never
+transfers/withdraws money on its own under any circumstance - funds only
+ever leave this account when withdrawn manually.
 
 Auth uses Coinbase Developer Platform (CDP) API keys - the current
 Advanced Trade API auth method, replacing the older HMAC/passphrase
@@ -82,7 +90,11 @@ RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "45"))
 RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "50"))
 
 MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", str(len(CRYPTO_PAIRS))))
-MAX_ALLOCATION = float(os.getenv("CRYPTO_MAX_ALLOCATION", "100"))
+# Unset by default - no ceiling, so the full account balance (principal +
+# compounded profit) is always in play. Set CRYPTO_MAX_ALLOCATION to cap
+# it at a fixed dollar amount instead, if ever wanted.
+_max_allocation_env = os.getenv("CRYPTO_MAX_ALLOCATION", "")
+MAX_ALLOCATION = float(_max_allocation_env) if _max_allocation_env else None
 MIN_POSITION_NOTIONAL = float(os.getenv("CRYPTO_MIN_POSITION_NOTIONAL", "5"))
 
 # Coinbase's real Advanced Trade taker fee for this account's volume tier -
@@ -251,8 +263,10 @@ async def get_price_rsi(session, symbol):
 
 def size_position(cash_pool_remaining, slots_remaining, price):
     """Same dollar-based fractional sizing as crypto_alpaca_bot.py's
-    size_position() - splits whatever's left in the (capped) crypto cash
-    pool evenly across remaining open slots."""
+    size_position() - splits whatever's left in the crypto cash pool
+    evenly across remaining open slots. That pool is the full account
+    balance by default (compounding), so a bigger balance means bigger
+    positions here automatically, with no other code change needed."""
     if slots_remaining <= 0 or cash_pool_remaining < MIN_POSITION_NOTIONAL:
         return None
     amount = min(max(cash_pool_remaining / slots_remaining, MIN_POSITION_NOTIONAL), cash_pool_remaining)
@@ -299,8 +313,14 @@ async def run_crypto_cycle():
 
     async with aiohttp.ClientSession() as session:
         cash = await get_usd_balance(session)
-        cash_pool = min(cash, MAX_ALLOCATION) if cash is not None else MAX_ALLOCATION
-        log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} (capped at ${MAX_ALLOCATION:.2f}) | Target: +{PROFIT_TARGET_PCT*100:.2f}% | Stop: -{STOP_LOSS_PCT*100:.2f}% | Round-trip fee: {ROUND_TRIP_FEE_PCT*100:.2f}%")
+        if cash is None:
+            log.warning("[CRYPTO] Could not read Coinbase USD balance - skipping entries this cycle (exits below still run on open positions)")
+            cash_pool = 0.0
+        else:
+            cash_pool = min(cash, MAX_ALLOCATION) if MAX_ALLOCATION is not None else cash
+
+        cap_desc = f"capped at ${MAX_ALLOCATION:.2f}" if MAX_ALLOCATION is not None else "full balance, compounding"
+        log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} ({cap_desc}) | Target: +{PROFIT_TARGET_PCT*100:.2f}% | Stop: -{STOP_LOSS_PCT*100:.2f}% | Round-trip fee: {ROUND_TRIP_FEE_PCT*100:.2f}%")
 
         scans = {}
         for symbol in CRYPTO_PAIRS:
@@ -398,7 +418,8 @@ async def run_crypto_cycle():
 def run():
     log.info("=" * 60)
     log.info("CRYPTO TRADING BOT — Coinbase (separate account from Alpaca stocks)")
-    log.info(f"Pairs: {', '.join(CRYPTO_PAIRS)} | Max allocation: ${MAX_ALLOCATION:.2f} | Max positions: {MAX_POSITIONS}")
+    alloc_desc = f"${MAX_ALLOCATION:.2f} cap" if MAX_ALLOCATION is not None else "full balance (compounding)"
+    log.info(f"Pairs: {', '.join(CRYPTO_PAIRS)} | Allocation: {alloc_desc} | Max positions: {MAX_POSITIONS}")
     log.info("Runs 24/7 - crypto has no market close, unlike prop_bot.py's stock/ETF trading")
     log.info("🔴 LIVE TRADING - Coinbase has no free paper-trading sandbox for Advanced Trade")
     log.info("=" * 60)
