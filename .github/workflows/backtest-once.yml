@@ -1,0 +1,28 @@
+name: One-off backtest (throwaway)
+
+on:
+  push:
+    branches: ["chore/backtest-trend-following-throwaway"]
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Trend-following (EMA9/21, 5% trail)
+        run: python scripts/backtest_trend_following.py
+
+      - name: Trend-following (EMA9/21, 8% trail)
+        env:
+          TREND_TRAIL_PCT: "0.08"
+        run: python scripts/backtest_trend_following.py
+
+      - name: Trend-following (EMA9/21, 3% trail)
+        env:
+          TREND_TRAIL_PCT: "0.03"
+        run: python scripts/backtest_trend_following.py
