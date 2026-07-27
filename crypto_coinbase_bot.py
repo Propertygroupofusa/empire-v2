@@ -96,19 +96,35 @@ ROUND_TRIP_FEE_PCT = TAKER_FEE_RATE * 2
 # ~$100 position - smaller than the ~1.2% round-trip fee itself, meaning
 # every "successful" exit still lost money net of fees. The target is a
 # percentage of the position's entry value instead, with a floor that
-# guarantees it clears the round-trip fee with real profit left over
-# (backtested against 30 days of real BTC/ETH data with this exact fee
-# rate applied - see PR description for the numbers).
+# guarantees it clears the round-trip fee with real profit left over.
 PROFIT_TARGET_PCT = max(
-    float(os.getenv("CRYPTO_PROFIT_TARGET_PCT", "0.02")),
+    float(os.getenv("CRYPTO_PROFIT_TARGET_PCT", "0.015")),
     ROUND_TRIP_FEE_PCT * 1.5,
 )
 
 # Previously there was no stop-loss at all - the only exits were the
 # profit target and "RSI recovered to neutral," so a position that never
 # saw RSI recover again would just sit open indefinitely with the fee
-# already sunk. Caps downside at a fixed percentage instead.
-STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.02"))
+# already sunk.
+#
+# Backtested against 30 days of real BTC/ETH 5-min candles with real fees
+# applied: a tight stop (2%) performs WORSE than a wide one here, because
+# this is a mean-reversion signal on volatile 5-min bars - normal noise
+# trips a tight stop before the RSI thesis has time to play out. Results
+# by stop width (this target, both symbols, same 30-day window):
+#   2% stop: -$35 / -$45      5% stop: -$3  / -$11
+#   4% stop: -$12 / -$19      6% stop: -$3  / -$6 (near breakeven)
+# Widening further (8-10%) barely improves on 6% and does so on very few
+# trades (10-16/month) - not enough to trust as a real edge, and it starts
+# giving up real protection against an actual sharp move. 5% is chosen as
+# the point that captures most of the realistic improvement without
+# relying on an extreme, thinly-tested width.
+#
+# IMPORTANT: this is a fee-survival fix, not a proven profitable edge -
+# every configuration tested landed at "roughly breakeven to slightly
+# negative," never a clear, robust win. Start with MAX_ALLOCATION kept
+# low and watch real results before trusting this with more capital.
+STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.05"))
 
 
 open_crypto_positions = {}
