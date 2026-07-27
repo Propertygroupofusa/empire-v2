@@ -2,6 +2,8 @@ name: One-off backtest (throwaway)
 
 on:
   workflow_dispatch: {}
+  push:
+    branches: ["chore/backtest-london-session-throwaway"]
 
 jobs:
   backtest:
