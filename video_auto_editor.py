@@ -495,4 +495,4 @@ if __name__ == '__main__':
     logger.info(f"   Editor API: {EDITOR_API_URL}")
     logger.info(f"   YouTube API: {YOUTUBE_API_URL}")
     logger.info(f"   Listening for Synthesia webhooks...")
-    app.run(host='0.0.0.0', port=5002, debug=False)
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5002)), debug=False)

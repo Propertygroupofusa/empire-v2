@@ -579,4 +579,4 @@ if __name__ == '__main__':
     logger.info("   Listening on :5003")
     logger.info("   Using edge-tts for voice generation (FREE)")
     logger.info("   Using FFmpeg for video creation")
-    app.run(host='0.0.0.0', port=5003, debug=False)
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5003)), debug=False)
