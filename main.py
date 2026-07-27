@@ -132,13 +132,6 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import tradovate_bot: {e}")
 
-crypto_scalp_grid_bot_module = None
-try:
-    import crypto_scalp_grid_bot
-    crypto_scalp_grid_bot_module = crypto_scalp_grid_bot
-except Exception as e:
-    logging.warning(f"Failed to import crypto_scalp_grid_bot: {e}")
-
 notary_bot_module = None
 try:
     import notary_bot
@@ -426,15 +419,6 @@ async def lifespan(app: FastAPI):
             log.info("📊 Tradovate bot thread started (stays inert until TRADOVATE_* credentials are set)")
     except Exception as e:
         log.warning(f"Tradovate bot failed to start: {e}")
-
-    try:
-        if crypto_scalp_grid_bot_module is not None:
-            import threading
-            mode = "TESTNET" if os.getenv("CRYPTO_TESTNET", "false").lower() == "true" else "LIVE"
-            threading.Thread(target=crypto_scalp_grid_bot_module.run, daemon=True).start()
-            log.info(f"🪙 Crypto Scalp-Grid bot started (background thread) | Mode: {mode} | Pairs: BTC, ETH, XRP")
-    except Exception as e:
-        log.warning(f"Crypto scalp-grid bot failed to start: {e}")
 
     try:
         if notary_bot_module is not None:

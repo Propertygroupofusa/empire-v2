@@ -222,30 +222,11 @@ at `./empire.db` in the repo root (no `DATABASE_URL` needed); set
 `empire.db` to reset local state between runs (e.g. if `create-order` keeps
 incrementing order IDs and you want a clean slate).
 
-### `python-binance` version pin can silently break the whole build
-
-**Issue:** `pip install -r requirements.txt` fails entirely (not just the
-optional crypto bot) with `No matching distribution found for
-python-binance==X.Y.Z` if that pin doesn't exist on PyPI.
-
-**Why:** `crypto_scalp_grid_bot.py`'s import is guarded in `main.py` (won't
-crash the app if missing), but `requirements.txt` itself isn't - a bad pin
-there fails the *entire* `pip install`, which fails the Railway build for
-every feature, not just the crypto bot. This actually happened - a pin of
-`python-binance==1.20.1` (a version that was never published; latest real
-release is `1.0.37`) broke production builds until fixed.
-
-**Fix:** `pip index versions python-binance` to check what's real before
-pinning. If `pip install -r requirements.txt` fails on an unrelated-looking
-package, check whether it's guarded in `main.py` but still hard-pinned in
-`requirements.txt` - the guard doesn't help if the file itself won't install.
-
 ## Troubleshooting
 
 | Error | Fix |
 |-------|-----|
 | `ModuleNotFoundError: No module named 'fastapi'` | Run `pip install -r requirements.txt` |
-| `No matching distribution found for python-binance==...` | Bad version pin in `requirements.txt` - check `pip index versions python-binance` and fix the pin (see Gotchas). Blocks *all* deps from installing, not just the crypto bot. |
 | `Address already in use: ('0.0.0.0', 8000)` | Another process is using port 8000. Run `pkill -f "python main.py"` or change PORT in driver. |
 | `ConnectionRefused` on smoke tests, or on `health`/`quote-form`/`create-order` | Server isn't running. `health`/`quote-form`/`create-order` don't start one themselves - run `start` first (or use `test`, which is self-contained). |
 | Stripe endpoint returns null publishable key | `STRIPE_PUBLISHABLE_KEY` env var not set. Set it or skip payment tests locally. |

@@ -240,45 +240,21 @@ async def _fetch_coinbase_closes(session, symbol):
         return [float(row[4]) for row in rows]
 
 
-async def _fetch_binance_closes(session, symbol):
-    """Free, no-auth public endpoint - BTC/USD -> BTCUSDT. Fallback only,
-    used purely for price data if Coinbase's public feed has a hiccup."""
-    pair = symbol.replace("/", "").replace("USD", "USDT")
-    url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval=5m&limit=20"
-    async with session.get(url, headers={"Accept": "application/json"}) as r:
-        if r.status != 200:
-            return None
-        data = await r.json()
-        if not data or len(data) < 14:
-            return None
-        return [float(row[4]) for row in data]
-
-
-_PRICE_SOURCES = (
-    ("coinbase", _fetch_coinbase_closes),
-    ("binance", _fetch_binance_closes),
-)
-
-
 async def get_price_rsi(session, symbol):
-    """Price+RSI with a fallback chain (Coinbase -> Binance) for
-    resilience - crypto trades 24/7, so a single data-source outage
-    shouldn't silently stall trading on a pair."""
-    for source_name, fetch_fn in _PRICE_SOURCES:
-        try:
-            closes = await fetch_fn(session, symbol)
-        except Exception as e:
-            log.debug(f"{source_name} price fetch failed for {symbol}: {e}")
-            closes = None
+    """Price+RSI from Coinbase's public candles endpoint - the same
+    exchange orders execute on, so there's no cross-exchange price drift."""
+    try:
+        closes = await _fetch_coinbase_closes(session, symbol)
+    except Exception as e:
+        log.debug(f"coinbase price fetch failed for {symbol}: {e}")
+        closes = None
 
-        if closes and len(closes) >= 14:
-            rsi = _compute_rsi(closes)
-            price = closes[-1]
-            if source_name != "coinbase":
-                log.info(f"✅ {symbol} using {source_name} (Coinbase unavailable) | Price: ${price:.2f} | RSI: {rsi:.1f}")
-            return {"price": price, "rsi": rsi}
+    if closes and len(closes) >= 14:
+        rsi = _compute_rsi(closes)
+        price = closes[-1]
+        return {"price": price, "rsi": rsi}
 
-    log.error(f"❌ {symbol}: all price sources failed (coinbase, binance)")
+    log.error(f"❌ {symbol}: coinbase price fetch failed")
     return None
 
 
