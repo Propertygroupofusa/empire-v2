@@ -22,10 +22,17 @@ self-imposed-limit reasoning as before.
 
 Auth uses Coinbase Developer Platform (CDP) API keys - the current
 Advanced Trade API auth method, replacing the older HMAC/passphrase
-scheme Coinbase retired. Each request is signed as a short-lived
-ES256 JWT (Coinbase's documented format: sub/iss/nbf/exp/uri claims,
-kid+nonce headers), not a static signature.
+scheme Coinbase retired. Each request is signed as a short-lived JWT
+(Coinbase's documented format: sub/iss/nbf/exp/uri claims, kid+nonce
+headers), not a static signature. CDP issues two different key types
+for this, and the portal doesn't ask which one you want - it just gives
+you whichever it defaults to:
+  - ECDSA: a PEM block ("-----BEGIN EC PRIVATE KEY-----...") -> ES256
+  - Ed25519: a bare base64 string -> EdDSA
+Both are handled here (see _load_signing_key) since which one gets
+issued isn't something this code controls.
 """
+import base64
 import os
 import asyncio
 import json
@@ -39,6 +46,7 @@ from email.mime.text import MIMEText
 import aiohttp
 import jwt as pyjwt
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("crypto_coinbase_bot")
@@ -56,10 +64,23 @@ def _to_product_id(symbol: str) -> str:
     return symbol.replace("/", "-")
 
 
+def _load_signing_key():
+    """Returns (key_object, jwt_algorithm). A PEM block is an ECDSA key
+    (ES256); anything else is treated as an Ed25519 key (EdDSA) - CDP's
+    Ed25519 secret is a base64 string decoding to 64 bytes (a 32-byte
+    seed followed by the 32-byte public key), of which only the seed is
+    the actual private key."""
+    raw = COINBASE_API_PRIVATE_KEY.strip()
+    if raw.startswith("-----BEGIN"):
+        return serialization.load_pem_private_key(raw.encode(), password=None), "ES256"
+    decoded = base64.b64decode(raw)
+    return Ed25519PrivateKey.from_private_bytes(decoded[:32]), "EdDSA"
+
+
 def _build_jwt(method: str, path: str) -> str:
     """Coinbase CDP-style JWT, valid ~2 minutes, scoped to one method+path -
     a fresh one is required per request, unlike a static API signature."""
-    private_key = serialization.load_pem_private_key(COINBASE_API_PRIVATE_KEY.encode(), password=None)
+    private_key, algorithm = _load_signing_key()
     now = int(time.time())
     payload = {
         "sub": COINBASE_API_KEY_NAME,
@@ -69,7 +90,7 @@ def _build_jwt(method: str, path: str) -> str:
         "uri": f"{method} {COINBASE_HOST}{path}",
     }
     headers = {"kid": COINBASE_API_KEY_NAME, "nonce": secrets.token_hex(16)}
-    return pyjwt.encode(payload, private_key, algorithm="ES256", headers=headers)
+    return pyjwt.encode(payload, private_key, algorithm=algorithm, headers=headers)
 
 
 def _auth_headers(method: str, path: str) -> dict:
