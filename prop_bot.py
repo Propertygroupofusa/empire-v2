@@ -314,6 +314,72 @@ async def get_account_shorting_enabled(session):
         return True
 
 
+# Reverse of FUTURES: proxy ETF symbol -> contract code, so a real Alpaca
+# position can be matched back to the contract key open_prop_positions
+# tracks by.
+_SYMBOL_TO_CONTRACT = {config["symbol"]: contract for contract, config in FUTURES.items()}
+
+
+async def reconcile_positions_with_broker(session):
+    """Confirmed in production: a real Alpaca position (USO/MCL) sat at
+    -4.9% - more than double STOP_LOSS_PCT - completely unmanaged, because
+    it was opened before the BotPosition table existed (pre position-
+    persistence fix) and so was never in the DB for load_open_positions()
+    to reload. The bot's own state said that slot was empty (it kept
+    trying to open a fresh MCL entry) while a real, real-money position
+    sat on the broker losing more than the stop-loss should ever allow -
+    the stop-loss protection is worthless if the bot doesn't know a
+    position exists to apply it to.
+
+    Runs every cycle (one extra cheap GET, not just at startup) so any
+    future desync - from any cause, not just this specific historical
+    bug - self-heals within one cycle instead of persisting indefinitely:
+    - A real position on a tracked symbol that open_prop_positions doesn't
+      know about gets ADOPTED (entry price taken from Alpaca's own
+      avg_entry_price, so the stop-loss/profit-target math is correct
+      from the moment it's adopted) and persisted to the DB.
+    - A tracked position whose real Alpaca position has vanished (closed
+      manually, liquidated, stopped out some other way) gets DROPPED from
+      tracking so the bot doesn't keep thinking it holds something it
+      doesn't.
+
+    Only ever touches contracts in FUTURES/_SYMBOL_TO_CONTRACT - a real
+    position on a symbol this bot doesn't trade (e.g. a manual purchase
+    unrelated to this bot) is left completely alone, adopted or not."""
+    try:
+        async with session.get(f"{BASE_URL}/v2/positions", headers=HEADERS) as r:
+            if r.status != 200:
+                return
+            broker_positions = await r.json()
+    except Exception as e:
+        log.warning(f"[APEX_589296] Could not fetch broker positions for reconciliation: {e}")
+        return
+
+    broker_by_contract = {}
+    for p in broker_positions:
+        contract = _SYMBOL_TO_CONTRACT.get(p.get("symbol"))
+        if contract:
+            broker_by_contract[contract] = p
+
+    for contract, p in broker_by_contract.items():
+        if contract in open_prop_positions:
+            continue
+        qty = float(p.get("qty", 0))
+        if qty == 0:
+            continue
+        side = "long" if qty > 0 else "short"
+        entry = float(p.get("avg_entry_price", 0))
+        open_prop_positions[contract] = {"side": side, "entry": entry, "qty": abs(qty)}
+        await _db_save_open(contract, side, entry, abs(qty))
+        log.warning(f"[APEX_589296] 🔧 Adopted orphaned {side} {contract} position found on Alpaca but not tracked (entry ${entry:.2f}, qty {abs(qty)}) - stop-loss/profit-target now apply to it")
+
+    for contract in list(open_prop_positions.keys()):
+        if contract not in broker_by_contract:
+            log.warning(f"[APEX_589296] 🔧 Tracked {contract} position no longer exists on Alpaca (closed outside the bot) - dropping from tracking")
+            open_prop_positions.pop(contract, None)
+            await _db_delete_open(contract)
+
+
 # Floor on a single position's dollar size. Below this, a position is too
 # small to bother with (order fees/slippage would dominate) - skip the
 # entry rather than place a near-zero fractional order.
@@ -501,6 +567,8 @@ async def run_prop_cycle():
         return opened
 
     async with aiohttp.ClientSession() as session:
+        await reconcile_positions_with_broker(session)
+
         equity = await get_account_equity(session)
         profit_target = get_profit_target_dollars(equity)
         log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | Profit target: ${profit_target:.2f}/position")
