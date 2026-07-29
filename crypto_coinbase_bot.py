@@ -57,7 +57,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select
 from database import AsyncSessionLocal
-from models import BotPosition
+from models import BotPosition, TradingBotState
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("crypto_coinbase_bot")
@@ -136,12 +136,48 @@ TIER_SIZE = float(os.getenv("CRYPTO_TIER_SIZE", "100"))
 
 
 def get_unlocked_tier(balance: float) -> float:
-    """How much of `balance` is actually tradable right now under the
-    staged-release rule - the highest whole multiple of TIER_SIZE that
-    balance has actually reached, or the full balance if tiering is off."""
+    """The highest whole multiple of TIER_SIZE that `balance` has actually
+    reached, or the full balance if tiering is off. This is the tier the
+    CURRENT balance qualifies for - see get_tier_highwater()/
+    set_tier_highwater() for the persisted version that survives a
+    withdrawal dropping the balance back down."""
     if TIER_SIZE <= 0:
         return balance
     return (balance // TIER_SIZE) * TIER_SIZE
+
+
+# Once a tier is unlocked it stays unlocked permanently, even if a
+# withdrawal drops the real balance back below it - a withdrawal is you
+# taking profit out, not the bot losing, so it shouldn't re-lock trading
+# privilege that was already earned. Reuses the same TradingBotState
+# table trading_dashboard.py already tracks base-capital baselines in,
+# under a dedicated bot_name key, rather than adding a new table.
+TIER_STATE_KEY = "crypto_coinbase_tier_highwater"
+
+
+async def get_tier_highwater() -> float:
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == TIER_STATE_KEY))
+            row = result.scalar_one_or_none()
+            return row.base_capital if row else 0.0
+    except Exception as e:
+        log.error(f"[CRYPTO] Failed to read tier high-water mark: {e}")
+        return 0.0
+
+
+async def set_tier_highwater(value: float):
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == TIER_STATE_KEY))
+            row = result.scalar_one_or_none()
+            if row:
+                row.base_capital = value
+            else:
+                db.add(TradingBotState(bot_name=TIER_STATE_KEY, base_capital=value))
+            await db.commit()
+    except Exception as e:
+        log.error(f"[CRYPTO] Failed to persist tier high-water mark: {e}")
 
 # Coinbase's real Advanced Trade taker fee for this account's volume tier -
 # used only to size the profit target sensibly, not charged/simulated here
@@ -405,17 +441,28 @@ async def run_crypto_cycle():
 
     async with aiohttp.ClientSession() as session:
         cash, balance_error = await get_usd_balance(session)
+        unlocked = 0.0
         if cash is None:
             log.warning(f"[CRYPTO] Could not read Coinbase USD balance - {balance_error} - skipping entries this cycle (exits below still run on open positions)")
             cash_pool = 0.0
-        else:
-            unlocked = get_unlocked_tier(cash)
+        elif TIER_SIZE <= 0:
+            unlocked = cash
             cash_pool = min(unlocked, MAX_ALLOCATION) if MAX_ALLOCATION is not None else unlocked
+        else:
+            raw_tier = get_unlocked_tier(cash)
+            highwater = await get_tier_highwater()
+            if raw_tier > highwater:
+                await set_tier_highwater(raw_tier)
+                log.info(f"[CRYPTO] 🎉 Tier up — ${raw_tier:.2f} unlocked for trading (was ${highwater:.2f}). This stays unlocked permanently, even if you withdraw and the balance drops back down.")
+                highwater = raw_tier
+            unlocked = highwater
+            # Tier is a permanent permission, not a promise there's still
+            # cash sitting there - can never trade more than what's real.
+            cash_pool = min(cash, unlocked, MAX_ALLOCATION) if MAX_ALLOCATION is not None else min(cash, unlocked)
 
         cap_desc = f"capped at ${MAX_ALLOCATION:.2f}" if MAX_ALLOCATION is not None else "full balance, compounding"
         if TIER_SIZE > 0:
-            next_tier = cash_pool + TIER_SIZE if cash is not None else TIER_SIZE
-            tier_desc = f"tier unlocked: ${cash_pool:.2f} (next tier at ${next_tier:.2f})"
+            tier_desc = f"tier unlocked (permanent): ${unlocked:.2f} | tradable now: ${cash_pool:.2f}"
         else:
             tier_desc = "tiering off"
         log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} ({cap_desc}, {tier_desc}) | Target: +{PROFIT_TARGET_PCT*100:.2f}% | Stop: -{STOP_LOSS_PCT*100:.2f}% | Round-trip fee: {ROUND_TRIP_FEE_PCT*100:.2f}%")
