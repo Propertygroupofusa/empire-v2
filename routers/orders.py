@@ -308,8 +308,8 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET_ORDERS") or os.getenv("STRIPE_WEBHOOK_SECRET")
 
     if not webhook_secret:
-        log.warning("STRIPE_WEBHOOK_SECRET_ORDERS (or STRIPE_WEBHOOK_SECRET) not configured")
-        return {"status": "success"}
+        log.warning("STRIPE_WEBHOOK_SECRET_ORDERS (or STRIPE_WEBHOOK_SECRET) not configured, cannot verify webhook")
+        raise HTTPException(status_code=500, detail="Webhook not configured")
 
     try:
         event = stripe.Webhook.construct_event(

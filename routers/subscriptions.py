@@ -297,8 +297,8 @@ async def subscription_stripe_webhook(request: Request, db: AsyncSession = Depen
     webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET_SUBSCRIPTIONS") or os.getenv("STRIPE_WEBHOOK_SECRET")
 
     if not webhook_secret:
-        log.warning("STRIPE_WEBHOOK_SECRET_SUBSCRIPTIONS (or STRIPE_WEBHOOK_SECRET) not configured")
-        return {"status": "success"}
+        log.warning("STRIPE_WEBHOOK_SECRET_SUBSCRIPTIONS (or STRIPE_WEBHOOK_SECRET) not configured, cannot verify webhook")
+        raise HTTPException(status_code=500, detail="Webhook not configured")
 
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
