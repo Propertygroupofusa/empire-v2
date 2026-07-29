@@ -613,6 +613,35 @@ async def serve_notary_portal():
     return FileResponse(portal_path, media_type="text/html")
 
 
+@app.get("/get-notarized")
+async def serve_notary_request():
+    """Public, no-auth client-facing intake page for POST
+    /jobs/notarization/request - the other half of the same gap the notary
+    portal fixed. Without this, the only way a real client could ever
+    submit a notarization job was hand-crafting a raw JSON POST - there was
+    no marketplace demand side at all, just a backend API nobody outside
+    this codebase could actually use."""
+    request_path = os.path.join(os.path.dirname(__file__), "notary_request.html")
+    if not os.path.exists(request_path):
+        raise HTTPException(status_code=404, detail="Notarization request page not found")
+    return FileResponse(request_path, media_type="text/html")
+
+
+@app.get("/notary-admin")
+async def serve_notary_admin():
+    """Admin-only (gated by X-Admin-Key on every API call it makes, same
+    pattern as /trading-dashboard) panel to review pending notary
+    credential submissions and approve/reject them, and to manually match
+    'requested' jobs to an eligible verified notary. Verification is
+    deliberately not self-service (see routers/workers.py) since these are
+    real legal credentials - this page is what makes that admin step
+    actually usable instead of requiring a raw curl command."""
+    admin_path = os.path.join(os.path.dirname(__file__), "notary_admin.html")
+    if not os.path.exists(admin_path):
+        raise HTTPException(status_code=404, detail="Notary admin panel not found")
+    return FileResponse(admin_path, media_type="text/html")
+
+
 @app.get("/quote")
 async def serve_quote_form():
     """Serve the subscription-aware video quote form"""
