@@ -24,13 +24,11 @@ JWT_ALGORITHM = "HS256"
 TOKEN_EXPIRE_DAYS = 7
 
 # Previously this only surfaced as an opaque 500 the moment a worker tried
-# to log in - invisible in the logs until someone actually hit it (this is
-# exactly how the missing TRADOVATE_CID/SECRET went unnoticed for a long
-# time). Logging it loudly at import time - same convention every other
-# integration in this app follows (see crypto_coinbase_bot.py,
-# tradovate_bot.py, stripe_subscriptions.py) - means a missing secret shows
-# up in the boot logs immediately instead of waiting for a real worker to
-# discover the whole login flow is broken.
+# to log in - invisible in the logs until someone actually hit it. Logging
+# it loudly at import time - same convention every other integration in
+# this app follows (see crypto_coinbase_bot.py, stripe_subscriptions.py) -
+# means a missing secret shows up in the boot logs immediately instead of
+# waiting for a real worker to discover the whole login flow is broken.
 if not os.getenv("WORKER_JWT_SECRET"):
     log.warning("WORKER_JWT_SECRET not configured - worker login/self-service (/workers/login, /workers/me/*) will fail with 500 until it's set in Railway Variables")
 

@@ -1,14 +1,14 @@
 ---
 name: verify
-description: Verify changes to the background trading bots (prop_bot.py, tradovate_bot.py) at runtime
+description: Verify changes to the background trading bots (prop_bot.py, crypto_coinbase_bot.py) at runtime
 type: project-skill
 ---
 
 # Verifying the trading bots
 
-`prop_bot.py` and `tradovate_bot.py` aren't HTTP surfaces — they're
+`prop_bot.py` and `crypto_coinbase_bot.py` aren't HTTP surfaces — they're
 `threading.Thread(target=..., daemon=True)` loops started in `main.py`'s
-startup event, calling a real broker API (Alpaca / Tradovate) on a timer.
+startup event, calling a real broker API (Alpaca / Coinbase) on a timer.
 There's no local `.env` with real credentials in this sandbox (only
 placeholders in `.railway.env.example`), and placing real orders is a
 destructive, real-money action — so don't call `run()` or
