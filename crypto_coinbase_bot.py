@@ -283,10 +283,20 @@ def size_position(cash_pool_remaining, slots_remaining, price):
     size_position() - splits whatever's left in the crypto cash pool
     evenly across remaining open slots. That pool is the full account
     balance by default (compounding), so a bigger balance means bigger
-    positions here automatically, with no other code change needed."""
+    positions here automatically, with no other code change needed.
+
+    Caps the order at a fraction of the pool (not 100% of it) - a market
+    BUY's quote_size is the dollar amount handed to Coinbase, and Coinbase
+    charges the taker fee on top of that from the same source account.
+    Requesting the literal full balance as quote_size leaves zero room for
+    that fee and Coinbase bounces the whole order as INSUFFICIENT_FUND
+    (seen in production with a single open slot sizing to 100% of a $49
+    balance). Reserving a couple points above the real taker fee covers
+    that with margin to spare."""
     if slots_remaining <= 0 or cash_pool_remaining < MIN_POSITION_NOTIONAL:
         return None
-    amount = min(max(cash_pool_remaining / slots_remaining, MIN_POSITION_NOTIONAL), cash_pool_remaining)
+    fee_safe_pool = cash_pool_remaining * (1 - max(TAKER_FEE_RATE * 2, 0.01))
+    amount = min(max(fee_safe_pool / slots_remaining, MIN_POSITION_NOTIONAL), fee_safe_pool)
     qty = round(amount / price, 8)
     return qty if qty > 0 else None
 
@@ -314,7 +324,7 @@ async def place_order(session, symbol, side, qty, price):
             if r.status in (200, 201) and result.get("success", True):
                 log.info(f"✅ CRYPTO TRADE | {side.upper()} {qty} {symbol}")
                 return True
-            log.error(f"❌ Crypto order failed: {result.get('error_response', result)}")
+            log.error(f"❌ Crypto order failed (requested {order_config}): {result.get('error_response', result)}")
             return False
     except Exception as e:
         log.error(f"Crypto order error: {e}")
