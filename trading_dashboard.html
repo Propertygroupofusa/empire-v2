@@ -678,10 +678,24 @@
             <div id="withdrawalStatus" class="withdrawal-status">
                 <div id="withdrawalMessage">Processing...</div>
             </div>
+
+            <hr style="border-color: #00aa00; opacity: 0.3; margin: 20px 0;">
+
+            <h3 style="margin-bottom: 5px;">💰 WITHDRAW ALL PROFIT</h3>
+            <p style="color: #00cc00; font-size: 0.85em; margin-bottom: 15px;">
+                Requests each bot's own profit only (never its starting capital) in one tap, for every bot currently
+                showing a gain. Same as above, this just logs the requests - still do the real transfer manually in
+                Alpaca's app, then confirm below.
+            </p>
+            <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
+                <button id="withdrawAllProfitBtn" class="btn-withdraw" onclick="withdrawAllProfit()" style="height: 50px; font-size: 1.05em; padding: 0 25px;" disabled>🏦 WITHDRAW ALL PROFIT</button>
+                <span id="withdrawAllProfitLabel" style="color: #ffaa00;">Loading...</span>
+            </div>
         </div>
 
         <div class="withdrawal-history">
             <h3>💳 WITHDRAWAL HISTORY & STRIPE DEPOSITS</h3>
+            <button id="completeAllBtn" class="btn-withdraw" onclick="completeAllWithdrawals()" style="padding: 6px 16px; font-size: 0.85em; margin-bottom: 10px;" disabled>✓ Mark All Requested as Completed</button>
             <div class="transaction-list" id="transactionList">
                 <div class="transaction-item" style="color: #00aa00;">
                     <div><strong>Date</strong></div>
@@ -909,9 +923,20 @@
             container.innerHTML = bots.map(b => `
                 <div class="pair">
                     <span class="pair-name">${b.name.replace('_', ' #')}</span>
-                    <span class="pair-status status-holding-long">$${b.capital.toFixed(2)}</span>
+                    <span class="pair-status status-holding-long">$${b.capital.toFixed(2)}${b.profit > 0 ? ` <span style="color:#00ff00;">(+$${b.profit.toFixed(2)} profit)</span>` : ''}</span>
                 </div>
             `).join('');
+
+            const totalProfit = bots.reduce((sum, b) => sum + (b.profit || 0), 0);
+            const profitableCount = bots.filter(b => b.profit > 0).length;
+            const allProfitBtn = document.getElementById('withdrawAllProfitBtn');
+            const allProfitLabel = document.getElementById('withdrawAllProfitLabel');
+            if (allProfitBtn && allProfitLabel) {
+                allProfitLabel.textContent = totalProfit > 0
+                    ? `$${totalProfit.toFixed(2)} profit available across ${profitableCount} bot${profitableCount === 1 ? '' : 's'}`
+                    : 'No bot currently has profit above its starting capital';
+                allProfitBtn.disabled = totalProfit <= 0;
+            }
 
             const select = document.getElementById('withdrawBotSelect');
             const previousValue = select.value || lastBotSelectValue;
@@ -1142,6 +1167,10 @@
             document.getElementById('withdrawalCountLabel').textContent =
                 data.withdrawals.length + (data.withdrawals.length === 1 ? ' withdrawal' : ' withdrawals');
 
+            const anyRequested = data.withdrawals.some(w => w.status === 'requested');
+            const completeAllBtn = document.getElementById('completeAllBtn');
+            if (completeAllBtn) completeAllBtn.disabled = !anyRequested;
+
             data.withdrawals.forEach(w => {
                 const item = document.createElement('div');
                 item.className = 'transaction-item';
@@ -1203,6 +1232,56 @@
                 await refreshWithdrawals();
             } catch (e) {
                 logEvent('❌ Failed to mark withdrawal complete: ' + e.message, 'error');
+            }
+        }
+
+        async function withdrawAllProfit() {
+            const bots = (lastStatus && lastStatus.bots) || [];
+            const totalProfit = bots.reduce((sum, b) => sum + (b.profit || 0), 0);
+            if (totalProfit <= 0) {
+                showWithdrawalStatus('❌ No bot currently has profit above its starting capital', 'error');
+                return;
+            }
+            if (!confirm(`Request withdrawal of $${totalProfit.toFixed(2)} profit across all profitable bots? This only logs the requests — you still do the real transfer manually in Alpaca's app afterward.`)) {
+                return;
+            }
+
+            showWithdrawalStatus('Logging profit withdrawal requests...', 'pending');
+            try {
+                const result = await apiFetch('/withdraw-all-profit', { method: 'POST' });
+                if (!result.requested.length) {
+                    showWithdrawalStatus('❌ ' + (result.message || 'No profit available to withdraw'), 'error');
+                    return;
+                }
+                result.requested.forEach(w => {
+                    logEvent(`💵 WITHDRAWAL REQUESTED: $${w.amount.toFixed(2)} profit from ${w.bot_name.replace('_', ' #')} | Ref: #${w.id}`, 'sell');
+                });
+                showWithdrawalStatus(
+                    `✅ Requested $${result.total.toFixed(2)} profit across ${result.requested.length} bot(s). This does NOT move real money — go do the actual transfers in Alpaca's app, then use "Mark All Requested as Completed" below.`,
+                    'success'
+                );
+                await refreshWithdrawals();
+                await refreshStatus();
+            } catch (e) {
+                showWithdrawalStatus('❌ ' + e.message, 'error');
+            }
+        }
+
+        async function completeAllWithdrawals() {
+            if (!confirm('Mark every currently-requested withdrawal as completed? Only do this once you\'ve actually done the real transfers in Alpaca\'s app for all of them.')) {
+                return;
+            }
+            try {
+                const result = await apiFetch('/withdrawals/complete-all-requested', { method: 'POST' });
+                if (!result.completed.length) {
+                    logEvent('No requested withdrawals to complete');
+                    return;
+                }
+                logEvent(`✅ MARKED ${result.completed.length} WITHDRAWAL(S) COMPLETE: $${result.total.toFixed(2)} total`);
+                await refreshWithdrawals();
+                await refreshStatus();
+            } catch (e) {
+                logEvent('❌ Failed to complete withdrawals: ' + e.message, 'error');
             }
         }
 

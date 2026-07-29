@@ -86,6 +86,15 @@ async def _get_or_init_bots(db: AsyncSession, current_equity: float) -> list:
     )
     bots = list(result.scalars().all())
     if bots:
+        # Buckets created before starting_capital existed have it as NULL -
+        # backfill it to their current value the first time we see that, so
+        # profit tracking (see _bot_profit) starts counting from right now
+        # rather than inventing a retroactive history it has no record of.
+        needs_backfill = [b for b in bots if b.starting_capital is None]
+        if needs_backfill:
+            for b in needs_backfill:
+                b.starting_capital = b.base_capital
+            await db.commit()
         return bots
 
     legacy_result = await db.execute(
@@ -99,7 +108,7 @@ async def _get_or_init_bots(db: AsyncSession, current_equity: float) -> list:
     share = starting_total / NUM_BOTS
     bots = []
     for i in range(1, NUM_BOTS + 1):
-        bot = TradingBotState(bot_name=f"{BOT_PREFIX}{i}", base_capital=share)
+        bot = TradingBotState(bot_name=f"{BOT_PREFIX}{i}", base_capital=share, starting_capital=share)
         db.add(bot)
         bots.append(bot)
     for r in legacy_rows:
@@ -134,6 +143,15 @@ def _rebalance_bots(bots: list, equity: float) -> float:
     for bot in bots:
         bot.base_capital += change * (bot.base_capital / total_tracked)
     return change
+
+
+def _bot_profit(bot: TradingBotState) -> float:
+    """This bucket's real gain since it started - base_capital minus its
+    never-updated starting_capital snapshot, floored at 0 (a bucket that's
+    currently underwater has no profit to withdraw, even though its
+    base_capital is still its own whole withdrawable balance)."""
+    baseline = bot.starting_capital if bot.starting_capital is not None else bot.base_capital
+    return max(0.0, bot.base_capital - baseline)
 
 
 async def _fetch_dividend_activities(session: aiohttp.ClientSession) -> list:
@@ -231,7 +249,7 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
         "session_pl_pct": round(session_pl_pct, 2),
         "active_positions": len(positions),
         "todays_trade_count": len(todays_orders),
-        "bots": [{"name": b.bot_name, "capital": round(b.base_capital, 2)} for b in bots],
+        "bots": [{"name": b.bot_name, "capital": round(b.base_capital, 2), "profit": round(_bot_profit(b), 2)} for b in bots],
         "total_committed_capital": round(total_committed, 2),
         "rebalanced_this_check": round(rebalanced, 2),
         "total_withdrawn": round(total_withdrawn, 2),
@@ -308,6 +326,72 @@ async def complete_withdrawal_request(withdrawal_id: int, db: AsyncSession = Dep
     await db.refresh(withdrawal)
     log.info(f"Withdrawal marked completed: ${withdrawal.amount:.2f} from {withdrawal.bot_name} (id={withdrawal.id})")
     return withdrawal.to_dict()
+
+
+@router.post("/withdraw-all-profit", dependencies=[Depends(require_admin_key)])
+async def withdraw_all_profit(db: AsyncSession = Depends(get_db)):
+    """One-tap version of create_withdrawal_request above, for every bot
+    that currently has real profit instead of picking one bot at a time.
+    Only ever requests each bucket's profit (base_capital minus its
+    starting_capital snapshot - see _bot_profit), never its principal, and
+    only for buckets where that's actually positive - a bucket sitting at
+    or below its starting point gets no request. Same bookkeeping-only
+    semantics as the single-bot endpoint: this logs the requests, it
+    doesn't move money - still requires the real manual transfer in
+    Alpaca's app, then confirming via complete_all_requested_withdrawals
+    below (or the single complete endpoint, per request)."""
+    async with aiohttp.ClientSession() as session:
+        account = await _fetch_alpaca_account(session)
+    equity = float(account["equity"])
+
+    bots = await _get_or_init_bots(db, equity)
+    created = []
+    for bot in bots:
+        profit = _bot_profit(bot)
+        if profit < 0.01:
+            continue
+        withdrawal = WithdrawalRequest(bot_name=bot.bot_name, amount=profit, status="requested")
+        db.add(withdrawal)
+        created.append(withdrawal)
+
+    if not created:
+        return {"requested": [], "total": 0.0, "message": "No bot currently has profit above its starting capital"}
+
+    await db.commit()
+    for w in created:
+        await db.refresh(w)
+    total = sum(w.amount for w in created)
+    log.info(f"Withdraw-all-profit: requested ${total:.2f} across {len(created)} bot(s)")
+    return {"requested": [w.to_dict() for w in created], "total": round(total, 2)}
+
+
+@router.post("/withdrawals/complete-all-requested", dependencies=[Depends(require_admin_key)])
+async def complete_all_requested_withdrawals(db: AsyncSession = Depends(get_db)):
+    """Bulk version of complete_withdrawal_request - confirms every
+    currently 'requested' withdrawal (from either the single-bot or
+    withdraw-all-profit endpoints) in one action, once you've actually
+    done the real transfers manually in Alpaca's app for all of them."""
+    result = await db.execute(select(WithdrawalRequest).where(WithdrawalRequest.status == "requested"))
+    pending = list(result.scalars().all())
+    if not pending:
+        return {"completed": [], "total": 0.0}
+
+    bots_result = await db.execute(select(TradingBotState))
+    bots_by_name = {b.bot_name: b for b in bots_result.scalars().all()}
+
+    for withdrawal in pending:
+        bot = bots_by_name.get(withdrawal.bot_name)
+        if bot:
+            bot.base_capital = max(bot.base_capital - withdrawal.amount, 0.0)
+        withdrawal.status = "completed"
+        withdrawal.completed_at = datetime.utcnow()
+
+    await db.commit()
+    for w in pending:
+        await db.refresh(w)
+    total = sum(w.amount for w in pending)
+    log.info(f"Completed {len(pending)} withdrawal(s) totaling ${total:.2f}")
+    return {"completed": [w.to_dict() for w in pending], "total": round(total, 2)}
 
 
 @router.get("/withdrawals", dependencies=[Depends(require_admin_key)])

@@ -294,10 +294,10 @@ async def run_migrations():
     catches ANY drift between the ORM model and the real table, present
     or future. Also dialect-agnostic (SQLAlchemy's inspector, not raw
     SQLite PRAGMA), so it actually works on Postgres - production."""
-    from models import Worker, Client, Job, Booking
+    from models import Worker, Client, Job, Booking, TradingBotState
 
     async with engine.begin() as conn:
-        for model in (Worker, Client, Job, Booking):
+        for model in (Worker, Client, Job, Booking, TradingBotState):
             table_name = model.__tablename__
             try:
                 existing_columns = await conn.run_sync(
