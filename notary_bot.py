@@ -80,7 +80,7 @@ async def match_pending_jobs():
     matched_count = 0
     async with _SessionLocal() as db:
         result = await db.execute(
-            select(Job).where(Job.job_type == "notarization", Job.status == "requested")
+            select(Job).where(Job.job_type == "notarization", Job.status == "requested", Job.paid == True)  # noqa: E712
         )
         pending_jobs = result.scalars().all()
         if not pending_jobs:

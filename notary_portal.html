@@ -70,6 +70,8 @@
     .badge.cancelled { background: #450a0a; color: #fca5a5; }
     .badge.verified { background: #14532d; color: #bbf7d0; }
     .badge.pending { background: #78350f; color: #fed7aa; }
+    .badge.owed { background: #78350f; color: #fed7aa; }
+    .badge.paid { background: #14532d; color: #bbf7d0; }
     .job {
         border: 1px solid #334155; border-radius: 8px; padding: 14px; margin-bottom: 10px;
     }
@@ -176,6 +178,12 @@
             <h2>My Jobs</h2>
             <div id="jobsList">Loading...</div>
         </div>
+
+        <div class="card">
+            <h2>💰 Earnings</h2>
+            <div id="earningsSummary" class="muted" style="margin-bottom: 10px;">Loading...</div>
+            <div id="earningsList">Loading...</div>
+        </div>
     </div>
 </div>
 
@@ -268,6 +276,7 @@
         document.getElementById('appSection').classList.remove('hidden');
         await loadProfile();
         await loadJobs();
+        await loadEarnings();
     }
 
     async function loadProfile() {
@@ -401,8 +410,50 @@
         try {
             await apiFetch('/workers/me/jobs/' + jobId + '/complete', { method: 'POST' });
             await loadJobs();
+            await loadEarnings();
         } catch (e) {
             showMsg('job-msg-' + jobId, e.message, true);
+        }
+    }
+
+    async function loadEarnings() {
+        let data;
+        try {
+            data = await apiFetch('/workers/me/earnings');
+        } catch (e) {
+            document.getElementById('earningsList').textContent = '❌ ' + e.message;
+            return;
+        }
+        const t = data.totals || {};
+        document.getElementById('earningsSummary').innerHTML =
+            '<strong>Owed:</strong> $' + (t.owed || 0).toFixed(2) +
+            ' | <strong>Requested:</strong> $' + (t.requested || 0).toFixed(2) +
+            ' | <strong>Paid out:</strong> $' + (t.paid || 0).toFixed(2);
+
+        const payouts = data.payouts || [];
+        const listEl = document.getElementById('earningsList');
+        if (payouts.length === 0) {
+            listEl.innerHTML = '<p class="muted">No earnings yet - completing a paid job creates a payout here.</p>';
+            return;
+        }
+        listEl.innerHTML = payouts.map(p => (
+            '<div class="job">' +
+                '<div class="job-top">' +
+                    '<strong>Job #' + p.job_id + ' — $' + p.amount.toFixed(2) + '</strong>' +
+                    '<span class="badge ' + p.status + '">' + p.status + '</span>' +
+                '</div>' +
+                (p.status === 'owed' ? '<button onclick="requestPayout(' + p.id + ')">Request Payout</button>' : '') +
+                '<div class="msg" id="payout-msg-' + p.id + '"></div>' +
+            '</div>'
+        )).join('');
+    }
+
+    async function requestPayout(payoutId) {
+        try {
+            await apiFetch('/workers/me/payouts/' + payoutId + '/request', { method: 'POST' });
+            await loadEarnings();
+        } catch (e) {
+            showMsg('payout-msg-' + payoutId, e.message, true);
         }
     }
 

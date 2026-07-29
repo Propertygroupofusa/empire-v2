@@ -72,6 +72,12 @@
         <h2>✅ Verified Notaries</h2>
         <div id="verifiedList">Loading...</div>
     </div>
+
+    <div class="card">
+        <h2>💰 Payouts</h2>
+        <p class="muted" style="margin-bottom: 10px;">Bookkeeping ledger, not automatic transfers - once you've actually sent a notary their money (Zelle/PayPal/check/ACH), click Mark Paid here.</p>
+        <div id="payoutsList">Loading...</div>
+    </div>
 </div>
 
 <script>
@@ -190,13 +196,13 @@
                     '<span class="badge ' + j.status + '">' + j.status + '</span>' +
                 '</div>' +
                 (j.description ? '<div class="muted">' + j.description + '</div>' : '') +
-                '<div class="muted">Worker: ' + (j.worker_id || 'unmatched') + '</div>' +
-                (j.status === 'requested' ? (
+                '<div class="muted">Worker: ' + (j.worker_id || 'unmatched') + ' | ' + (j.service_tier || '—') + ': $' + (j.price != null ? j.price.toFixed(2) : '—') + ' — ' + (j.paid ? 'paid' : 'NOT PAID YET') + '</div>' +
+                (j.status === 'requested' && j.paid ? (
                     '<div class="row2" style="margin-top:8px;">' +
                         '<select id="match-select-' + j.id + '"><option>Loading eligible notaries...</option></select>' +
                         '<button onclick="matchJob(' + j.id + ', \'' + j.state + '\')">Match</button>' +
                     '</div>'
-                ) : '') +
+                ) : (j.status === 'requested' ? '<div class="muted">Waiting on client payment before this can be matched.</div>' : '')) +
                 '<div class="msg" id="job-msg-' + j.id + '"></div>' +
             '</div>'
         )).join('');
@@ -237,10 +243,48 @@
         }
     }
 
+    async function loadPayouts() {
+        let data;
+        try {
+            data = await apiFetch('/workers/payouts?status=requested');
+        } catch (e) {
+            document.getElementById('payoutsList').textContent = '❌ ' + e.message;
+            return;
+        }
+        const el = document.getElementById('payoutsList');
+        if (data.payouts.length === 0) {
+            el.innerHTML = '<p class="muted">No payout requests pending.</p>';
+            return;
+        }
+        el.innerHTML = data.payouts.map(p => (
+            '<div class="item">' +
+                '<div class="item-top">' +
+                    '<strong>Worker #' + p.worker_id + ' — $' + p.amount.toFixed(2) + ' (job #' + p.job_id + ')</strong>' +
+                    '<span class="badge scheduled">requested</span>' +
+                '</div>' +
+                '<div class="muted">Requested: ' + (p.requested_at ? new Date(p.requested_at).toLocaleString() : '—') + '</div>' +
+                '<button onclick="markPayoutPaid(' + p.id + ')">Mark Paid</button>' +
+                '<div class="msg" id="payout-msg-' + p.id + '"></div>' +
+            '</div>'
+        )).join('');
+    }
+
+    async function markPayoutPaid(payoutId) {
+        const msgEl = document.getElementById('payout-msg-' + payoutId);
+        try {
+            await apiFetch('/workers/payouts/' + payoutId + '/mark-paid', { method: 'POST' });
+            await loadPayouts();
+        } catch (e) {
+            msgEl.className = 'msg error';
+            msgEl.textContent = e.message;
+        }
+    }
+
     loadPending();
     loadJobs();
     loadVerified();
-    setInterval(() => { loadPending(); loadJobs(); loadVerified(); }, 30000);
+    loadPayouts();
+    setInterval(() => { loadPending(); loadJobs(); loadVerified(); loadPayouts(); }, 30000);
 </script>
 </body>
 </html>
