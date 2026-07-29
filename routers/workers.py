@@ -19,7 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
 from admin_auth import require_admin_key
 from worker_auth import hash_password, verify_password, create_worker_token, require_worker_auth
-from models import Worker, Job, Booking
+from models import Worker, Job, Booking, NotaryPayout
+from routers.jobs import create_payout_for_completed_job
 
 log = logging.getLogger("workers")
 router = APIRouter()
@@ -192,10 +193,73 @@ async def complete_my_job(
 
     job.status = "completed"
     job.completed_at = datetime.utcnow()
+    await create_payout_for_completed_job(db, job)
     await db.commit()
     await db.refresh(job)
     log.info(f"Worker {worker_id} self-completed job {job.id}")
     return job.to_dict()
+
+
+@router.get("/me/earnings")
+async def list_my_earnings(worker_id: int = Depends(require_worker_auth), db: AsyncSession = Depends(get_db)):
+    """All payout ledger rows for the logged-in notary, plus running
+    totals by status - self-service replacement for needing an admin to
+    look this up. See models.NotaryPayout for why this is a bookkeeping
+    ledger, not a real automated transfer."""
+    result = await db.execute(select(NotaryPayout).where(NotaryPayout.worker_id == worker_id).order_by(NotaryPayout.created_at.desc()))
+    payouts = result.scalars().all()
+    totals = {"owed": 0.0, "requested": 0.0, "paid": 0.0}
+    for p in payouts:
+        totals[p.status] = totals.get(p.status, 0.0) + p.amount
+    return {"payouts": [p.to_dict() for p in payouts], "totals": totals}
+
+
+@router.post("/me/payouts/{payout_id}/request")
+async def request_my_payout(payout_id: int, worker_id: int = Depends(require_worker_auth), db: AsyncSession = Depends(get_db)):
+    """Self-service: notary asks to actually be paid the money they've
+    earned. Doesn't move any money - flips the ledger row to 'requested' so
+    it shows up for an admin to action in /notary-admin (see
+    routers/workers.py's admin-only mark-paid endpoint below)."""
+    payout = await db.get(NotaryPayout, payout_id)
+    if not payout or payout.worker_id != worker_id:
+        raise HTTPException(status_code=404, detail="Payout not found")
+    if payout.status != "owed":
+        raise HTTPException(status_code=400, detail=f"Payout is '{payout.status}', not 'owed' - cannot request")
+
+    payout.status = "requested"
+    payout.requested_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(payout)
+    log.info(f"Worker {worker_id} requested payout {payout.id} (${payout.amount:.2f})")
+    return payout.to_dict()
+
+
+@router.get("/payouts", dependencies=[Depends(require_admin_key)])
+async def list_payouts(status: str = None, db: AsyncSession = Depends(get_db)):
+    """Admin view of the payout ledger, backing /notary-admin's Payouts
+    panel."""
+    query = select(NotaryPayout).order_by(NotaryPayout.created_at.desc())
+    if status:
+        query = query.where(NotaryPayout.status == status)
+    result = await db.execute(query)
+    return {"payouts": [p.to_dict() for p in result.scalars().all()]}
+
+
+@router.post("/payouts/{payout_id}/mark-paid", dependencies=[Depends(require_admin_key)])
+async def mark_payout_paid(payout_id: int, db: AsyncSession = Depends(get_db)):
+    """Admin confirms a payout was actually sent to the notary manually
+    (Zelle/PayPal/check/ACH) - see models.NotaryPayout, there's no real
+    transfer API this calls."""
+    payout = await db.get(NotaryPayout, payout_id)
+    if not payout:
+        raise HTTPException(status_code=404, detail="Payout not found")
+
+    payout.status = "paid"
+    payout.paid_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(payout)
+    log.info(f"Payout {payout.id} (${payout.amount:.2f}) marked paid to worker {payout.worker_id}")
+    return payout.to_dict()
 
 
 @router.get("/{worker_id}")

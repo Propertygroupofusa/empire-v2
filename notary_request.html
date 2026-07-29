@@ -75,10 +75,17 @@
             <input type="text" id="clientState" maxlength="2" placeholder="e.g. TX" required>
         </div>
         <div class="form-group">
+            <label>Service Type</label>
+            <select id="serviceTier" required>
+                <option value="">Loading options...</option>
+            </select>
+            <div id="tierDescription" style="color:#888; font-size:12px; margin-top:4px;"></div>
+        </div>
+        <div class="form-group">
             <label>What do you need notarized?</label>
             <textarea id="clientDescription" placeholder="e.g. Real estate deed, power of attorney, loan documents..."></textarea>
         </div>
-        <button type="submit">Submit Request</button>
+        <button type="submit" id="submitBtn">Continue to Payment</button>
     </form>
 
     <div class="lookup-link">
@@ -101,21 +108,59 @@
 
 <script>
     const API_BASE = 'https://empire-v2-production.up.railway.app';
+    let tiers = [];
 
     function showLookup() {
         document.getElementById('lookupBox').style.display = 'block';
     }
+
+    async function loadServiceTiers() {
+        const selectEl = document.getElementById('serviceTier');
+        try {
+            const res = await fetch(API_BASE + '/jobs/service-tiers');
+            const data = await res.json();
+            tiers = data.tiers || [];
+            selectEl.innerHTML = tiers.map(t => `<option value="${t.key}">${t.label} - $${t.price.toFixed(2)}</option>`).join('');
+            updateTierDescription();
+        } catch (e) {
+            selectEl.innerHTML = '<option value="">Failed to load options - refresh the page</option>';
+        }
+    }
+
+    function updateTierDescription() {
+        const tier = tiers.find(t => t.key === document.getElementById('serviceTier').value);
+        document.getElementById('tierDescription').textContent = tier ? tier.description : '';
+    }
+
+    document.getElementById('serviceTier').addEventListener('change', updateTierDescription);
+
+    // If Stripe redirected back here after a successful payment (see
+    // success_url in routers/jobs.py's create-checkout), show that instead
+    // of a blank form.
+    (function checkPaymentReturn() {
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('paid') === '1' && params.get('job_id')) {
+            const msgEl = document.getElementById('msg');
+            msgEl.className = 'msg success';
+            msgEl.textContent = 'Payment received! Your request (#' + params.get('job_id') + ') is being matched with a notary now - you can check its status below.';
+            document.getElementById('requestForm').style.display = 'none';
+        }
+    })();
 
     document.getElementById('requestForm').addEventListener('submit', async (e) => {
         e.preventDefault();
         const msgEl = document.getElementById('msg');
         msgEl.className = 'msg';
         msgEl.textContent = '';
+        const submitBtn = document.getElementById('submitBtn');
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Redirecting to payment...';
 
         const payload = {
             client_name: document.getElementById('clientName').value.trim(),
             client_email: document.getElementById('clientEmail').value.trim(),
             state: document.getElementById('clientState').value.trim().toUpperCase(),
+            service_tier: document.getElementById('serviceTier').value,
             description: document.getElementById('clientDescription').value.trim() || null,
         };
 
@@ -128,14 +173,20 @@
             const data = await res.json();
             if (!res.ok) throw new Error(data.detail || 'Request failed');
 
-            msgEl.className = 'msg success';
-            msgEl.textContent = 'Request submitted! Your request ID is #' + data.id + ' - save it to check status later. We\'ll match you with a notary shortly.';
-            document.getElementById('requestForm').reset();
+            const checkoutRes = await fetch(API_BASE + '/jobs/' + data.id + '/create-checkout', { method: 'POST' });
+            const checkoutData = await checkoutRes.json();
+            if (!checkoutRes.ok) throw new Error(checkoutData.detail || 'Could not start payment');
+
+            window.location.href = checkoutData.checkout_url;
         } catch (err) {
             msgEl.className = 'msg error';
             msgEl.textContent = err.message;
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Continue to Payment';
         }
     });
+
+    loadServiceTiers();
 
     async function lookupJob() {
         const id = document.getElementById('lookupId').value.trim();

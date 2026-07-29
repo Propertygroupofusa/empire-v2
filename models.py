@@ -215,6 +215,14 @@ class Job(Base):
     completed_at = Column(DateTime, nullable=True)
     custom_metadata = Column(JSON, nullable=True)
 
+    # Payment - see routers/jobs.py's SERVICE_TIERS for the actual price
+    # list. Client pays upfront via Stripe Checkout at request time (not
+    # on completion) so a notary never does the work before it's paid for.
+    service_tier = Column(String, nullable=True)  # key into SERVICE_TIERS, e.g. "standard", "ron"
+    price = Column(Float, nullable=True)  # USD, snapshotted at request time so a later SERVICE_TIERS price change never rewrites an existing job's price
+    paid = Column(Boolean, default=False)
+    stripe_session_id = Column(String, nullable=True)
+
     def to_dict(self):
         return {
             "id": self.id,
@@ -229,6 +237,9 @@ class Job(Base):
             "matched_at": self.matched_at.isoformat() if self.matched_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "custom_metadata": self.custom_metadata,
+            "service_tier": self.service_tier,
+            "price": self.price,
+            "paid": self.paid,
         }
 
 
@@ -457,6 +468,44 @@ class WithdrawalRequest(Base):
             "status": self.status,
             "requested_at": self.requested_at.isoformat() if self.requested_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+        }
+
+
+class NotaryPayout(Base):
+    """What's owed to a notary after they complete a paid job - same
+    bookkeeping-ledger pattern as WithdrawalRequest above: this app has no
+    programmatic way to actually move money into a notary's bank account,
+    so this tracks that a payout is owed/requested/paid, not a real
+    automated transfer. The admin sends the money manually (Zelle/PayPal/
+    check/ACH) and marks it paid here once done.
+
+    One row is created per completed job (see routers/jobs.py and
+    routers/workers.py's complete-job endpoints), for NOTARY_PAYOUT_SHARE
+    (0.80 by default - the notary keeps 80%, the platform keeps 20%) of
+    that job's price, snapshotted at completion time so a later change to
+    the split or to SERVICE_TIERS pricing never rewrites an already-earned
+    payout."""
+    __tablename__ = "notary_payouts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey("jobs.id"), index=True)
+    worker_id = Column(Integer, ForeignKey("workers.id"), index=True)
+    amount = Column(Float)  # USD, the notary's cut
+    status = Column(String, default="owed", index=True)  # owed, requested, paid
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    requested_at = Column(DateTime, nullable=True)
+    paid_at = Column(DateTime, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "job_id": self.job_id,
+            "worker_id": self.worker_id,
+            "amount": self.amount,
+            "status": self.status,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "requested_at": self.requested_at.isoformat() if self.requested_at else None,
+            "paid_at": self.paid_at.isoformat() if self.paid_at else None,
         }
 
 
