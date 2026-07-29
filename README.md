@@ -35,7 +35,6 @@ No single AI can trigger a trade alone. All 3 must confirm = execute.
 
 | Broker | Account | Mode |
 |--------|---------|------|
-| Tradovate / APEX | APEX_589296 | Demo -> Live |
 | Alpaca | Paper account | Paper -> Live |
 | OANDA | Demo | Demo -> Live |
 
@@ -57,7 +56,6 @@ No single AI can trigger a trade alone. All 3 must confirm = execute.
 - [ ] All 3 AI keys active and responding
 - [ ] Change ALPACA_BASE_URL to api.alpaca.markets
 - [ ] Change ALPACA_LIVE_TRADE to true
-- [ ] Change TRADOVATE_MODE to live
 - [ ] Both Alpaca flags required — one alone does nothing
 
 ---
@@ -130,10 +128,6 @@ ALPACA_LIVE_TRADE=false
 ANTHROPIC_API_KEY=sk-ant-your_key_here
 OPENAI_API_KEY=sk-your_openai_key_here
 GROK_API_KEY=your_xai_key_here
-
-TRADOVATE_USER=APEX_589296
-TRADOVATE_PASS=your_tradovate_password_here
-TRADOVATE_MODE=demo
 
 SYNTHESIA_API_KEY=your_synthesia_key_here
 SYNTHESIA_WEBHOOK_SECRET=your_synthesia_webhook_secret_here

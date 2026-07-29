@@ -86,7 +86,7 @@ Set immediately in Railway:
 STOP_TRADING=true
 ```
 
-This **pauses all trading immediately** (both Alpaca and Tradovate bots).
+This **pauses all trading immediately** (both the Alpaca and Coinbase bots).
 
 ---
 

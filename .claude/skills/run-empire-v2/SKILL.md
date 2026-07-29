@@ -21,10 +21,10 @@ smoke tests on key endpoints (health check, quote form, subscription tiers,
 order creation, order status).
 
 **This skill covers the HTTP surface** (routes, orders, subscriptions). For
-the background trading bots (`prop_bot.py`, `tradovate_bot.py`) - which are
-daemon threads calling a real broker API on a timer, not HTTP endpoints -
-see the separate `.claude/skills/verify/SKILL.md`, which drives them with a
-stubbed network boundary instead.
+the background trading bots (`prop_bot.py`, `crypto_coinbase_bot.py`) -
+which are daemon threads calling a real broker API on a timer, not HTTP
+endpoints - see the separate `.claude/skills/verify/SKILL.md`, which drives
+them with a stubbed network boundary instead.
 
 ## Prerequisites
 
@@ -240,7 +240,7 @@ incrementing order IDs and you want a clean slate).
 - **main.py** — FastAPI app, guarded router imports (`routers_to_load` dict, each wrapped in try/except so one missing optional module doesn't crash the app), `routers_list` registration loop, background bot threads started at startup, core endpoints (`/health`, `/quote`, `/order-success`, `/trading-dashboard`)
 - **routers/orders.py** — Order lifecycle: quote (JSON body, DB-backed) → Stripe checkout → payment webhook → video generation → customer portal (email-gated) / admin lookup (key-gated)
 - **routers/trading_dashboard.py** — Real Alpaca account data + withdrawal-request log backing `trading_dashboard.html`; see the `verify` skill to drive this without hitting the real broker API
-- **prop_bot.py** / **tradovate_bot.py** — Background trading bots (daemon threads, not HTTP routes) - see `.claude/skills/verify/SKILL.md`
+- **prop_bot.py** / **crypto_coinbase_bot.py** — Background trading bots (daemon threads, not HTTP routes) - see `.claude/skills/verify/SKILL.md`
 - **models.py** / **database.py** — SQLAlchemy models and async engine; SQLite locally by default, Postgres via `DATABASE_URL`
 - **heygan_integration.py** — HeyGen API wrapper (avatar/language mapping, video polling)
 - **quote_request.html** — Frontend form with two-stage flow and Stripe.js integration

@@ -5,7 +5,7 @@ Backs trading_dashboard.html (Bare Metal Builders). All read endpoints hit
 Alpaca's real trading API for equity/cash/positions/orders - no mock data.
 
 Alpaca's standard self-directed trading API (the same APCA-API-KEY-ID/
-SECRET-KEY credentials prop_bot.py and tradovate_bot.py use) does not expose
+SECRET-KEY credentials prop_bot.py uses) does not expose
 a programmatic ACH/bank-transfer endpoint - that's only available through
 Alpaca's own app, or through the separate Broker API product (a different
 business relationship with Alpaca entirely). So "withdraw" here creates a
