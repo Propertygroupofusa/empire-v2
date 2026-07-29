@@ -462,6 +462,77 @@ async def get_crypto_coinbase_status():
     }
 
 
+# Chart-eligible symbols only - an explicit allowlist, checked before the
+# symbol is ever interpolated into an outbound URL, so this endpoint can
+# never be turned into an open SSRF proxy via an arbitrary path param.
+# Same tickers prop_bot.py/crypto_coinbase_bot.py already trade.
+CHART_STOCK_SYMBOLS = {"SPY", "QQQ", "DIA", "IWM", "GLD", "USO", "SLV"}
+CHART_CRYPTO_SYMBOLS = {"BTC-USD", "ETH-USD"}
+
+
+def _rolling_rsi(closes: list, period: int = 14) -> list:
+    """Same simple-rolling-average RSI prop_bot.py/crypto_coinbase_bot.py
+    use for their own trade decisions (get_price_rsi), computed at every
+    point instead of just the latest one, so the chart's RSI line matches
+    exactly what the bot itself was seeing at each point in time."""
+    n = len(closes)
+    rsi_series = [None] * n
+    if n <= period:
+        return rsi_series
+    gains = [max(closes[i] - closes[i - 1], 0) for i in range(1, n)]
+    losses = [max(closes[i - 1] - closes[i], 0) for i in range(1, n)]
+    for i in range(period, n):
+        avg_gain = sum(gains[i - period:i]) / period
+        avg_loss = sum(losses[i - period:i]) / period
+        rs = avg_gain / avg_loss if avg_loss > 0 else 100
+        rsi_series[i] = round(100 - (100 / (1 + rs)), 1)
+    return rsi_series
+
+
+@router.get("/price-history/{symbol}", dependencies=[Depends(require_admin_key)])
+async def get_price_history(symbol: str):
+    """Real OHLC candles + an RSI series for the dashboard's live chart -
+    fetched fresh from the exact same public data sources the bots already
+    use for their own RSI calc (Alpaca bars for the stock proxies,
+    Coinbase's public candles for BTC/ETH). Nothing new is stored; this is
+    a read-only view computed on each request, same spirit as /signals."""
+    symbol = symbol.upper()
+
+    async with aiohttp.ClientSession() as session:
+        if symbol in CHART_STOCK_SYMBOLS:
+            if not (ALPACA_KEY and ALPACA_SECRET):
+                raise HTTPException(status_code=500, detail="Alpaca credentials not configured")
+            url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=5Min&limit=100"
+            async with session.get(url, headers=ALPACA_HEADERS) as r:
+                if r.status != 200:
+                    raise HTTPException(status_code=502, detail=f"Alpaca bars request failed ({r.status})")
+                data = await r.json()
+            candles = [
+                {"t": b["t"], "o": b["o"], "h": b["h"], "l": b["l"], "c": b["c"]}
+                for b in data.get("bars", [])
+            ]
+        elif symbol in CHART_CRYPTO_SYMBOLS:
+            url = f"https://api.exchange.coinbase.com/products/{symbol}/candles?granularity=300"
+            async with session.get(url, headers={"Accept": "application/json"}) as r:
+                if r.status != 200:
+                    raise HTTPException(status_code=502, detail=f"Coinbase candles request failed ({r.status})")
+                data = await r.json()
+            # Coinbase returns newest-first; each row is [time, low, high, open, close, volume].
+            rows = list(reversed(data or []))[-100:]
+            candles = [
+                {
+                    "t": datetime.fromtimestamp(row[0], tz=timezone.utc).isoformat(),
+                    "o": row[3], "h": row[2], "l": row[1], "c": row[4],
+                }
+                for row in rows
+            ]
+        else:
+            raise HTTPException(status_code=404, detail=f"Unknown chart symbol: {symbol}")
+
+    closes = [c["c"] for c in candles]
+    return {"symbol": symbol, "candles": candles, "rsi": _rolling_rsi(closes)}
+
+
 @router.get("/dividends", dependencies=[Depends(require_admin_key)])
 async def get_dividend_tracker():
     """Real dividend income received into the account, grouped by symbol -
