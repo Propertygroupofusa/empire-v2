@@ -436,27 +436,20 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Crypto (Coinbase) bot failed to start: {e}")
 
-    # bot_2_crypto_scalper.py is NOT launched here. railway.json describes
-    # a dedicated "crypto-trading-bot" service for it, but the actual
-    # Railway project only has "empire-v2" and "aware-mindfulness" - that
-    # service was never provisioned, so this subprocess launch was its
-    # only way of running at all. See routers/bot_status.py: it reads
-    # bot2_state.json directly since that subprocess writes it into this
-    # same container's filesystem.
-    try:
-        import subprocess
-        import threading
-        def start_crypto_bot():
-            try:
-                subprocess.Popen(['python', 'bot_2_crypto_scalper.py'],
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                log.info("🤖 Crypto scalper bot #2 started (background subprocess)")
-            except Exception as e:
-                log.warning(f"Crypto bot subprocess failed: {e}")
-
-        threading.Thread(target=start_crypto_bot, daemon=True).start()
-    except Exception as e:
-        log.warning(f"Crypto bot startup failed: {e}")
+    # bot_2_crypto_scalper.py retired: it traded crypto (BTC/ETH/SOL/AVAX/
+    # DOGE/LINK) through Alpaca using the same ALPACA_API_KEY as prop_bot.py
+    # trades stocks with - but Alpaca crypto is blocked for this account's
+    # state (see crypto_coinbase_bot.py), so every order it placed almost
+    # certainly failed silently the entire time it ran (confirmed: 0 wins,
+    # 0 losses, ever). Its state also lived in a local JSON file on this
+    # same container's ephemeral filesystem, reset to defaults on every
+    # redeploy - the same "forgets everything on restart" bug PR #109 fixed
+    # for the other two bots, except this one never got that fix. And even
+    # if Alpaca crypto were ever enabled for this account, it sized every
+    # order off the SAME shared account balance prop_bot.py trades from,
+    # with zero coordination between them - a real capital-collision risk.
+    # Crypto trading belongs on Coinbase (crypto_coinbase_bot.py) - Alpaca
+    # is for stocks only.
 
     try:
         from stripe_subscriptions import setup_stripe_products
@@ -581,12 +574,8 @@ async def serve_signals_signup():
     return FileResponse(signals_path, media_type="text/html")
 
 
-try:
-    from routers import bot_status
-    app.include_router(bot_status.router, prefix="/api/bot", tags=["Bot Status"])
-    log.info("Router loaded: /api/bot (in-process, no separate bot-api service required)")
-except Exception as e:
-    log.warning(f"Failed to include router /api/bot: {e}")
+# routers/bot_status.py (mounted at /api/bot) was retired along with
+# bot_2_crypto_scalper.py - see the lifespan startup comment above for why.
 
 
 @app.get("/trading-dashboard")
@@ -842,20 +831,6 @@ def _read_json_file(filepath: str) -> dict:
         return {"status": "error", "message": str(e)}
 
 
-@app.get("/admin/bot-logs/crypto")
-async def get_crypto_bot_logs(lines: int = 100):
-    """Get last N lines from crypto trading bot log (bot2_crypto.log)"""
-    log_lines = _read_log_file("bot2_crypto.log", lines)
-    return {
-        "service": "crypto-trading-bot",
-        "log_file": "bot2_crypto.log",
-        "lines_requested": lines,
-        "lines_returned": len(log_lines),
-        "logs": [line.rstrip('\n') for line in log_lines],
-        "timestamp": datetime.now().isoformat()
-    }
-
-
 @app.get("/admin/bot-logs/pl-tracker")
 async def get_pl_tracker_logs(lines: int = 100):
     """Get last N lines from P&L tracker log (logs/bot_pl_tracker.log)"""
@@ -866,18 +841,6 @@ async def get_pl_tracker_logs(lines: int = 100):
         "lines_requested": lines,
         "lines_returned": len(log_lines),
         "logs": [line.rstrip('\n') for line in log_lines],
-        "timestamp": datetime.now().isoformat()
-    }
-
-
-@app.get("/admin/bot-state")
-async def get_bot_state():
-    """Get current bot state (day count, win/loss ratio, peak portfolio, etc)"""
-    state = _read_json_file("bot2_state.json")
-    return {
-        "service": "crypto-trading-bot",
-        "state_file": "bot2_state.json",
-        "data": state,
         "timestamp": datetime.now().isoformat()
     }
 
@@ -912,10 +875,8 @@ async def get_bot_pl_history(limit: int = 500):
 
 @app.get("/admin/bot-status")
 async def get_bot_status():
-    """Get comprehensive bot status - logs, state, and P&L in one call"""
-    crypto_logs = _read_log_file("bot2_crypto.log", 30)
+    """Get comprehensive bot status - logs and P&L in one call"""
     pl_logs = _read_log_file("logs/bot_pl_tracker.log", 20)
-    state = _read_json_file("bot2_state.json")
     history = _read_json_file("bot_pl_history.json")
 
     # Get latest snapshot if available
@@ -928,11 +889,6 @@ async def get_bot_status():
     return {
         "timestamp": datetime.now().isoformat(),
         "services": {
-            "crypto-trading-bot": {
-                "log_file": "bot2_crypto.log",
-                "recent_logs": [line.rstrip('\n') for line in crypto_logs],
-                "state": state
-            },
             "pl-tracker": {
                 "log_file": "logs/bot_pl_tracker.log",
                 "recent_logs": [line.rstrip('\n') for line in pl_logs],
