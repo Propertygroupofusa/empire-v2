@@ -38,6 +38,19 @@ LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "45"))
 RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "50"))
 
+# Real, enforced stop-loss. open_position() already computed a 2% stop
+# price for the informational subscriber-signal broadcast, but Pass 1's
+# exit check never actually looked at it - the only two ways a position
+# could close were hitting the dollar profit target or an RSI reversal,
+# and RSI reversals fired regardless of whether the position was
+# actually in profit. That meant a position that had been sitting on a
+# real gain could give it all back and close at a genuine loss the
+# moment RSI flipped, with no floor underneath it at all. Now enforced
+# for real in Pass 1, and RSI exits require the position to actually be
+# profitable first - the stop-loss below is what protects a loser, an
+# RSI reversal only ever locks in a winner early.
+STOP_LOSS_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.02"))
+
 HEADERS = {
     "APCA-API-KEY-ID": ALPACA_KEY,
     "APCA-API-SECRET-KEY": ALPACA_SECRET,
@@ -541,13 +554,22 @@ async def run_prop_cycle():
             qty = position["qty"]
             if side == "long":
                 unrealized_pnl = (price - entry) * qty
-                rsi_exit = rsi > RSI_SELL_ABOVE or (trend == "bearish" and rsi > 50)
+                rsi_signal = rsi > RSI_SELL_ABOVE or (trend == "bearish" and rsi > 50)
+                stop_hit = price <= entry * (1 - STOP_LOSS_PCT)
             else:
                 unrealized_pnl = (entry - price) * qty
-                rsi_exit = rsi < RSI_BUY_BELOW or (trend == "bullish" and rsi < 50)
+                rsi_signal = rsi < RSI_BUY_BELOW or (trend == "bullish" and rsi < 50)
+                stop_hit = price >= entry * (1 + STOP_LOSS_PCT)
 
-            if unrealized_pnl >= profit_target or rsi_exit:
-                reason = "PROFIT TARGET" if unrealized_pnl >= profit_target else "RSI"
+            # An RSI reversal only ever takes a real, existing profit off
+            # the table early - it never realizes a loss on its own. A
+            # losing position rides to the stop-loss below instead, same
+            # as a real trading desk would run it (cut losers on a hard
+            # stop, don't gamble on holding for a bounce that erases it).
+            rsi_exit = rsi_signal and unrealized_pnl > 0
+
+            if unrealized_pnl >= profit_target or rsi_exit or stop_hit:
+                reason = "PROFIT TARGET" if unrealized_pnl >= profit_target else ("STOP LOSS" if stop_hit else "RSI")
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
 
             await asyncio.sleep(0.3)
