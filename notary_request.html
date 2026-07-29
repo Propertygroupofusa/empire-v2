@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Request a Notarization</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+    }
+    .container {
+        background: white;
+        border-radius: 12px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        max-width: 560px;
+        width: 100%;
+        padding: 40px;
+    }
+    .header { text-align: center; margin-bottom: 30px; }
+    .header h1 { color: #333; font-size: 26px; margin-bottom: 10px; }
+    .header p { color: #666; font-size: 15px; line-height: 1.6; }
+    .form-group { margin-bottom: 20px; }
+    label { display: block; color: #333; font-weight: 600; margin-bottom: 8px; font-size: 14px; }
+    input[type="text"], input[type="email"], select, textarea {
+        width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 6px;
+        font-size: 14px; font-family: inherit;
+    }
+    input:focus, select:focus, textarea:focus {
+        outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+    }
+    textarea { resize: vertical; min-height: 90px; }
+    button {
+        width: 100%; padding: 14px 20px; border: none; border-radius: 6px;
+        font-size: 16px; font-weight: 600; cursor: pointer;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;
+        margin-top: 10px;
+    }
+    button:hover { transform: translateY(-2px); box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3); }
+    .msg { display: none; padding: 15px; border-radius: 6px; margin-bottom: 20px; text-align: center; }
+    .msg.success { display: block; background: #4caf50; color: white; }
+    .msg.error { display: block; background: #f44336; color: white; }
+    .lookup-link { text-align: center; margin-top: 20px; font-size: 13px; }
+    .lookup-link a { color: #667eea; }
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1>📝 Request a Notarization</h1>
+        <p>Tell us what you need notarized and where you're located. We'll match you with a licensed, verified notary in your state - including Remote Online Notarization (RON) where available.</p>
+    </div>
+
+    <div id="msg" class="msg"></div>
+    <div id="resultBox"></div>
+
+    <form id="requestForm">
+        <div class="form-group">
+            <label>Your Name</label>
+            <input type="text" id="clientName" required>
+        </div>
+        <div class="form-group">
+            <label>Your Email</label>
+            <input type="email" id="clientEmail" required>
+            <div style="color:#888; font-size:12px; margin-top:4px;">We'll use this to send you status updates and let you look up your request later.</div>
+        </div>
+        <div class="form-group">
+            <label>State (where the notarization must legally take place)</label>
+            <input type="text" id="clientState" maxlength="2" placeholder="e.g. TX" required>
+        </div>
+        <div class="form-group">
+            <label>What do you need notarized?</label>
+            <textarea id="clientDescription" placeholder="e.g. Real estate deed, power of attorney, loan documents..."></textarea>
+        </div>
+        <button type="submit">Submit Request</button>
+    </form>
+
+    <div class="lookup-link">
+        Already submitted a request? <a href="#" onclick="showLookup(); return false;">Check its status</a>
+    </div>
+
+    <div id="lookupBox" style="display:none; margin-top: 20px; border-top: 1px solid #e0e0e0; padding-top: 20px;">
+        <div class="form-group">
+            <label>Request ID</label>
+            <input type="text" id="lookupId">
+        </div>
+        <div class="form-group">
+            <label>Your Email</label>
+            <input type="email" id="lookupEmail">
+        </div>
+        <button onclick="lookupJob()">Check Status</button>
+        <div id="lookupResult" style="margin-top: 15px;"></div>
+    </div>
+</div>
+
+<script>
+    const API_BASE = 'https://empire-v2-production.up.railway.app';
+
+    function showLookup() {
+        document.getElementById('lookupBox').style.display = 'block';
+    }
+
+    document.getElementById('requestForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const msgEl = document.getElementById('msg');
+        msgEl.className = 'msg';
+        msgEl.textContent = '';
+
+        const payload = {
+            client_name: document.getElementById('clientName').value.trim(),
+            client_email: document.getElementById('clientEmail').value.trim(),
+            state: document.getElementById('clientState').value.trim().toUpperCase(),
+            description: document.getElementById('clientDescription').value.trim() || null,
+        };
+
+        try {
+            const res = await fetch(API_BASE + '/jobs/notarization/request', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || 'Request failed');
+
+            msgEl.className = 'msg success';
+            msgEl.textContent = 'Request submitted! Your request ID is #' + data.id + ' - save it to check status later. We\'ll match you with a notary shortly.';
+            document.getElementById('requestForm').reset();
+        } catch (err) {
+            msgEl.className = 'msg error';
+            msgEl.textContent = err.message;
+        }
+    });
+
+    async function lookupJob() {
+        const id = document.getElementById('lookupId').value.trim();
+        const email = document.getElementById('lookupEmail').value.trim();
+        const resultEl = document.getElementById('lookupResult');
+        if (!id || !email) {
+            resultEl.textContent = 'Enter both the request ID and your email.';
+            return;
+        }
+        try {
+            const res = await fetch(API_BASE + '/jobs/' + id + '?email=' + encodeURIComponent(email));
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || 'Not found');
+            resultEl.innerHTML = '<strong>Status:</strong> ' + data.status +
+                (data.matched_at ? '<br><strong>Matched:</strong> ' + new Date(data.matched_at).toLocaleString() : '') +
+                (data.completed_at ? '<br><strong>Completed:</strong> ' + new Date(data.completed_at).toLocaleString() : '');
+        } catch (err) {
+            resultEl.textContent = '❌ ' + err.message;
+        }
+    }
+</script>
+</body>
+</html>
