@@ -409,18 +409,27 @@ class CustomerSubscription(Base):
 class TradingBotState(Base):
     """Per-bot tracked state for the trading dashboard - Alpaca itself has no
     concept of 'base capital' vs 'profit', so we track our own baseline here.
-    Profit shown on the dashboard is real equity minus this stored value."""
+    Profit shown on the dashboard is real equity minus this stored value.
+
+    base_capital is the bucket's whole current tracked value (see
+    routers/trading_dashboard.py's per-bot withdrawal design). starting_capital
+    is a separate, never-updated snapshot of what the bucket started at, so
+    each bucket's own profit = base_capital - starting_capital - used by the
+    "withdraw all profit" bulk endpoint to know how much of each bucket is
+    actually gain versus original principal, without touching the principal."""
     __tablename__ = "trading_bot_state"
 
     id = Column(Integer, primary_key=True, index=True)
     bot_name = Column(String, unique=True, index=True)  # e.g. "bare_metal_builders"
     base_capital = Column(Float)
+    starting_capital = Column(Float, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def to_dict(self):
         return {
             "bot_name": self.bot_name,
             "base_capital": self.base_capital,
+            "starting_capital": self.starting_capital,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
@@ -721,3 +730,24 @@ class Response(Base):
 
     received_at = Column(DateTime, default=datetime.utcnow, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class BotPosition(Base):
+    """A trading bot's currently-open position, persisted so a Railway
+    restart can't silently orphan a real open position. Both prop_bot.py
+    and crypto_coinbase_bot.py track open positions in an in-memory dict
+    for fast per-cycle access - that dict is the source of truth for
+    trading decisions, but it used to live only in process memory, so
+    every redeploy wiped it while the position stayed open for real on
+    the broker. Each bot now mirrors its dict here (insert on open,
+    delete on close) and reloads from this table into the dict once on
+    startup, before its first cycle runs."""
+    __tablename__ = "bot_positions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot = Column(String, index=True)  # "crypto_coinbase" or "prop_apex"
+    symbol = Column(String, index=True)  # e.g. "BTC/USD" or a futures contract code
+    side = Column(String)  # "long" or "short"
+    entry_price = Column(Float)
+    qty = Column(Float)
+    opened_at = Column(DateTime, default=datetime.utcnow)

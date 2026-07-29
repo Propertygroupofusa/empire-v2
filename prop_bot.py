@@ -15,6 +15,9 @@ from email.mime.text import MIMEText
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import aiohttp
+from sqlalchemy import select
+from database import AsyncSessionLocal
+from models import BotPosition
 
 ET = ZoneInfo("America/New_York")
 
@@ -34,6 +37,19 @@ LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 # without a code change.
 RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "45"))
 RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "50"))
+
+# Real, enforced stop-loss. open_position() already computed a 2% stop
+# price for the informational subscriber-signal broadcast, but Pass 1's
+# exit check never actually looked at it - the only two ways a position
+# could close were hitting the dollar profit target or an RSI reversal,
+# and RSI reversals fired regardless of whether the position was
+# actually in profit. That meant a position that had been sitting on a
+# real gain could give it all back and close at a genuine loss the
+# moment RSI flipped, with no floor underneath it at all. Now enforced
+# for real in Pass 1, and RSI exits require the position to actually be
+# profitable first - the stop-loss below is what protects a loser, an
+# RSI reversal only ever locks in a winner early.
+STOP_LOSS_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.02"))
 
 HEADERS = {
     "APCA-API-KEY-ID": ALPACA_KEY,
@@ -99,6 +115,45 @@ def get_profit_target_dollars(equity):
 profitable_days = []
 daily_pnl = 0.0
 open_prop_positions = {}
+
+BOT_NAME = "prop_apex"
+
+
+async def load_open_positions():
+    """Reload open_prop_positions from the DB once at startup, before the
+    first cycle runs - otherwise a Railway restart wipes this dict while
+    the position is still open for real on Alpaca, and the bot can never
+    take profit or cut losses on it again (see BotPosition in models.py)."""
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
+            rows = result.scalars().all()
+            for row in rows:
+                open_prop_positions[row.symbol] = {"side": row.side, "entry": row.entry_price, "qty": row.qty}
+            if rows:
+                log.info(f"[APEX_589296] Reloaded {len(rows)} open position(s) from DB: {list(open_prop_positions.keys())}")
+    except Exception as e:
+        log.error(f"[APEX_589296] Failed to reload open positions from DB: {e}")
+
+
+async def _db_save_open(contract: str, side: str, entry: float, qty: float):
+    try:
+        async with AsyncSessionLocal() as db:
+            db.add(BotPosition(bot=BOT_NAME, symbol=contract, side=side, entry_price=entry, qty=qty))
+            await db.commit()
+    except Exception as e:
+        log.error(f"[APEX_589296] Failed to persist opened position {contract}: {e}")
+
+
+async def _db_delete_open(contract: str):
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME, BotPosition.symbol == contract))
+            for row in result.scalars().all():
+                await db.delete(row)
+            await db.commit()
+    except Exception as e:
+        log.error(f"[APEX_589296] Failed to remove closed position {contract} from DB: {e}")
 
 # Latest per-symbol scan snapshot, read by routers/trading_dashboard.py's
 # GET /signals so the dashboard can show live price/RSI/trend instead of
@@ -401,6 +456,7 @@ async def run_prop_cycle():
             f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
         )
         open_prop_positions.pop(contract, None)
+        await _db_delete_open(contract)
         return True
 
     async def open_position(session, contract, config, side, price, rsi, trend, qty):
@@ -415,6 +471,7 @@ async def run_prop_cycle():
             return False
 
         open_prop_positions[contract] = {"side": side, "entry": price, "qty": qty}
+        await _db_save_open(contract, side, price, qty)
         send_trade_alert(
             f"🤖 Bare Metal Builders — {side.upper()} {contract} opened",
             f"{'LIVE' if LIVE_TRADE else 'PAPER'} {side} opened on APEX_589296:\n\n"
@@ -497,13 +554,22 @@ async def run_prop_cycle():
             qty = position["qty"]
             if side == "long":
                 unrealized_pnl = (price - entry) * qty
-                rsi_exit = rsi > RSI_SELL_ABOVE or (trend == "bearish" and rsi > 50)
+                rsi_signal = rsi > RSI_SELL_ABOVE or (trend == "bearish" and rsi > 50)
+                stop_hit = price <= entry * (1 - STOP_LOSS_PCT)
             else:
                 unrealized_pnl = (entry - price) * qty
-                rsi_exit = rsi < RSI_BUY_BELOW or (trend == "bullish" and rsi < 50)
+                rsi_signal = rsi < RSI_BUY_BELOW or (trend == "bullish" and rsi < 50)
+                stop_hit = price >= entry * (1 + STOP_LOSS_PCT)
 
-            if unrealized_pnl >= profit_target or rsi_exit:
-                reason = "PROFIT TARGET" if unrealized_pnl >= profit_target else "RSI"
+            # An RSI reversal only ever takes a real, existing profit off
+            # the table early - it never realizes a loss on its own. A
+            # losing position rides to the stop-loss below instead, same
+            # as a real trading desk would run it (cut losers on a hard
+            # stop, don't gamble on holding for a bounce that erases it).
+            rsi_exit = rsi_signal and unrealized_pnl > 0
+
+            if unrealized_pnl >= profit_target or rsi_exit or stop_hit:
+                reason = "PROFIT TARGET" if unrealized_pnl >= profit_target else ("STOP LOSS" if stop_hit else "RSI")
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
 
             await asyncio.sleep(0.3)
@@ -616,6 +682,11 @@ def run():
     log.info(f"RSI thresholds: long entry < {RSI_BUY_BELOW} | short entry > {RSI_SELL_ABOVE} (trades both directions)")
     log.info(f"Profitable days: {len(profitable_days)}/7 needed")
     log.info("=" * 60)
+
+    try:
+        asyncio.run(load_open_positions())
+    except Exception as e:
+        log.error(f"[APEX_589296] Startup position reload failed: {e}")
 
     while True:
         if os.getenv("STOP_TRADING", "false").lower() == "true":
