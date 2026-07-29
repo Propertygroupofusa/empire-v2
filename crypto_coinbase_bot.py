@@ -55,6 +55,9 @@ import aiohttp
 import jwt as pyjwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from sqlalchemy import select
+from database import AsyncSessionLocal
+from models import BotPosition
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("crypto_coinbase_bot")
@@ -118,6 +121,28 @@ _max_allocation_env = os.getenv("CRYPTO_MAX_ALLOCATION", "")
 MAX_ALLOCATION = float(_max_allocation_env) if _max_allocation_env else None
 MIN_POSITION_NOTIONAL = float(os.getenv("CRYPTO_MIN_POSITION_NOTIONAL", "5"))
 
+# Staged capital release, requested after watching the account get drawn
+# down to single-digit cents trading with 100% of the balance every cycle:
+# instead of always trading the full balance, only ever risk it in fixed
+# $100 steps. Below the first $100 the bot places no new entries at all
+# (existing open positions still get managed normally, below in Pass 1 -
+# this only gates Pass 2's new entries). Once the real balance crosses a
+# tier, that whole tier becomes tradable; anything above the current tier
+# sits untouched until the balance actually grows past the next one, so a
+# losing streak can't eat into gains that already "graduated" to the next
+# tier. Set CRYPTO_TIER_SIZE=0 to disable and go back to trading 100% of
+# the balance (or whatever CRYPTO_MAX_ALLOCATION caps it at) every cycle.
+TIER_SIZE = float(os.getenv("CRYPTO_TIER_SIZE", "100"))
+
+
+def get_unlocked_tier(balance: float) -> float:
+    """How much of `balance` is actually tradable right now under the
+    staged-release rule - the highest whole multiple of TIER_SIZE that
+    balance has actually reached, or the full balance if tiering is off."""
+    if TIER_SIZE <= 0:
+        return balance
+    return (balance // TIER_SIZE) * TIER_SIZE
+
 # Coinbase's real Advanced Trade taker fee for this account's volume tier -
 # used only to size the profit target sensibly, not charged/simulated here
 # (the real fee is already reflected in Coinbase's fill price/balance).
@@ -164,6 +189,46 @@ open_crypto_positions = {}
 daily_pnl = 0.0
 latest_signals = {}
 last_cycle_at = None
+
+BOT_NAME = "crypto_coinbase"
+
+
+async def load_open_positions():
+    """Reload open_crypto_positions from the DB once at startup, before
+    the first cycle runs - otherwise a Railway restart wipes this dict
+    while the position is still open for real on Coinbase, and the bot
+    can never take profit or cut losses on it again (see BotPosition)."""
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
+            rows = result.scalars().all()
+            for row in rows:
+                open_crypto_positions[row.symbol] = {"entry": row.entry_price, "qty": row.qty}
+            if rows:
+                log.info(f"[CRYPTO] Reloaded {len(rows)} open position(s) from DB: {list(open_crypto_positions.keys())}")
+    except Exception as e:
+        log.error(f"[CRYPTO] Failed to reload open positions from DB: {e}")
+
+
+async def _db_save_open(symbol: str, side: str, entry: float, qty: float):
+    try:
+        async with AsyncSessionLocal() as db:
+            db.add(BotPosition(bot=BOT_NAME, symbol=symbol, side=side, entry_price=entry, qty=qty))
+            await db.commit()
+    except Exception as e:
+        log.error(f"[CRYPTO] Failed to persist opened position {symbol}: {e}")
+
+
+async def _db_delete_open(symbol: str):
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME, BotPosition.symbol == symbol))
+            for row in result.scalars().all():
+                await db.delete(row)
+            await db.commit()
+    except Exception as e:
+        log.error(f"[CRYPTO] Failed to remove closed position {symbol} from DB: {e}")
+
 
 TRADE_ALERT_EMAIL = os.getenv("TRADE_ALERT_EMAIL", "")
 
@@ -344,10 +409,16 @@ async def run_crypto_cycle():
             log.warning(f"[CRYPTO] Could not read Coinbase USD balance - {balance_error} - skipping entries this cycle (exits below still run on open positions)")
             cash_pool = 0.0
         else:
-            cash_pool = min(cash, MAX_ALLOCATION) if MAX_ALLOCATION is not None else cash
+            unlocked = get_unlocked_tier(cash)
+            cash_pool = min(unlocked, MAX_ALLOCATION) if MAX_ALLOCATION is not None else unlocked
 
         cap_desc = f"capped at ${MAX_ALLOCATION:.2f}" if MAX_ALLOCATION is not None else "full balance, compounding"
-        log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} ({cap_desc}) | Target: +{PROFIT_TARGET_PCT*100:.2f}% | Stop: -{STOP_LOSS_PCT*100:.2f}% | Round-trip fee: {ROUND_TRIP_FEE_PCT*100:.2f}%")
+        if TIER_SIZE > 0:
+            next_tier = cash_pool + TIER_SIZE if cash is not None else TIER_SIZE
+            tier_desc = f"tier unlocked: ${cash_pool:.2f} (next tier at ${next_tier:.2f})"
+        else:
+            tier_desc = "tiering off"
+        log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} ({cap_desc}, {tier_desc}) | Target: +{PROFIT_TARGET_PCT*100:.2f}% | Stop: -{STOP_LOSS_PCT*100:.2f}% | Round-trip fee: {ROUND_TRIP_FEE_PCT*100:.2f}%")
 
         scans = {}
         for symbol in CRYPTO_PAIRS:
@@ -394,6 +465,7 @@ async def run_crypto_cycle():
                         f"Reason: {reason}\n\nDashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
                     )
                     open_crypto_positions.pop(symbol, None)
+                    await _db_delete_open(symbol)
 
             await asyncio.sleep(0.3)
 
@@ -431,6 +503,7 @@ async def run_crypto_cycle():
             filled = await place_order(session, symbol, "buy", qty, price)
             if filled:
                 open_crypto_positions[symbol] = {"entry": price, "qty": qty}
+                await _db_save_open(symbol, "long", price, qty)
                 cash_pool -= qty * price
                 send_trade_alert(
                     f"🤖 Crypto bot — BUY {symbol} opened",
@@ -467,6 +540,11 @@ def run():
     # entirely.
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+
+    try:
+        loop.run_until_complete(load_open_positions())
+    except Exception as e:
+        log.error(f"[CRYPTO] Startup position reload failed: {e}")
 
     while True:
         if os.getenv("STOP_TRADING", "false").lower() == "true":

@@ -15,6 +15,9 @@ from email.mime.text import MIMEText
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import aiohttp
+from sqlalchemy import select
+from database import AsyncSessionLocal
+from models import BotPosition
 
 ET = ZoneInfo("America/New_York")
 
@@ -99,6 +102,45 @@ def get_profit_target_dollars(equity):
 profitable_days = []
 daily_pnl = 0.0
 open_prop_positions = {}
+
+BOT_NAME = "prop_apex"
+
+
+async def load_open_positions():
+    """Reload open_prop_positions from the DB once at startup, before the
+    first cycle runs - otherwise a Railway restart wipes this dict while
+    the position is still open for real on Alpaca, and the bot can never
+    take profit or cut losses on it again (see BotPosition in models.py)."""
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
+            rows = result.scalars().all()
+            for row in rows:
+                open_prop_positions[row.symbol] = {"side": row.side, "entry": row.entry_price, "qty": row.qty}
+            if rows:
+                log.info(f"[APEX_589296] Reloaded {len(rows)} open position(s) from DB: {list(open_prop_positions.keys())}")
+    except Exception as e:
+        log.error(f"[APEX_589296] Failed to reload open positions from DB: {e}")
+
+
+async def _db_save_open(contract: str, side: str, entry: float, qty: float):
+    try:
+        async with AsyncSessionLocal() as db:
+            db.add(BotPosition(bot=BOT_NAME, symbol=contract, side=side, entry_price=entry, qty=qty))
+            await db.commit()
+    except Exception as e:
+        log.error(f"[APEX_589296] Failed to persist opened position {contract}: {e}")
+
+
+async def _db_delete_open(contract: str):
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME, BotPosition.symbol == contract))
+            for row in result.scalars().all():
+                await db.delete(row)
+            await db.commit()
+    except Exception as e:
+        log.error(f"[APEX_589296] Failed to remove closed position {contract} from DB: {e}")
 
 # Latest per-symbol scan snapshot, read by routers/trading_dashboard.py's
 # GET /signals so the dashboard can show live price/RSI/trend instead of
@@ -401,6 +443,7 @@ async def run_prop_cycle():
             f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
         )
         open_prop_positions.pop(contract, None)
+        await _db_delete_open(contract)
         return True
 
     async def open_position(session, contract, config, side, price, rsi, trend, qty):
@@ -415,6 +458,7 @@ async def run_prop_cycle():
             return False
 
         open_prop_positions[contract] = {"side": side, "entry": price, "qty": qty}
+        await _db_save_open(contract, side, price, qty)
         send_trade_alert(
             f"🤖 Bare Metal Builders — {side.upper()} {contract} opened",
             f"{'LIVE' if LIVE_TRADE else 'PAPER'} {side} opened on APEX_589296:\n\n"
@@ -616,6 +660,11 @@ def run():
     log.info(f"RSI thresholds: long entry < {RSI_BUY_BELOW} | short entry > {RSI_SELL_ABOVE} (trades both directions)")
     log.info(f"Profitable days: {len(profitable_days)}/7 needed")
     log.info("=" * 60)
+
+    try:
+        asyncio.run(load_open_positions())
+    except Exception as e:
+        log.error(f"[APEX_589296] Startup position reload failed: {e}")
 
     while True:
         if os.getenv("STOP_TRADING", "false").lower() == "true":

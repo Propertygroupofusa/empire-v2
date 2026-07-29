@@ -721,3 +721,24 @@ class Response(Base):
 
     received_at = Column(DateTime, default=datetime.utcnow, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class BotPosition(Base):
+    """A trading bot's currently-open position, persisted so a Railway
+    restart can't silently orphan a real open position. Both prop_bot.py
+    and crypto_coinbase_bot.py track open positions in an in-memory dict
+    for fast per-cycle access - that dict is the source of truth for
+    trading decisions, but it used to live only in process memory, so
+    every redeploy wiped it while the position stayed open for real on
+    the broker. Each bot now mirrors its dict here (insert on open,
+    delete on close) and reloads from this table into the dict once on
+    startup, before its first cycle runs."""
+    __tablename__ = "bot_positions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot = Column(String, index=True)  # "crypto_coinbase" or "prop_apex"
+    symbol = Column(String, index=True)  # e.g. "BTC/USD" or a futures contract code
+    side = Column(String)  # "long" or "short"
+    entry_price = Column(Float)
+    qty = Column(Float)
+    opened_at = Column(DateTime, default=datetime.utcnow)
