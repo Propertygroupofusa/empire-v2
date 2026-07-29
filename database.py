@@ -2,6 +2,7 @@
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.pool import NullPool
 import os
 import traceback
 
@@ -15,12 +16,21 @@ if DATABASE_URL.startswith("postgresql://"):
 elif DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
 
-# Create async engine. pool_pre_ping avoids handing out connections Postgres
-# already dropped (common on managed DBs that kill idle connections), and
-# pool_recycle keeps us from reusing connections the server would've closed
-# anyway. connect_args timeout bounds how long a hung SSL handshake blocks
-# instead of stalling the health-monitor's reconnect loop indefinitely.
-_engine_kwargs = {"echo": False, "future": True, "pool_pre_ping": True, "pool_recycle": 300}
+# This engine is shared by the main FastAPI event loop AND every bot's own
+# background-thread event loop (prop_bot.py opens a brand-new loop every
+# single cycle via asyncio.run(); crypto_coinbase_bot.py/notary_bot.py each
+# keep one persistent loop for their thread's lifetime). A pooled connection
+# checked out on one loop and later handed back out to a call running on a
+# different loop is exactly what asyncpg's "attached to a different loop"/
+# "unknown protocol state" errors mean - seen in production once PR #109
+# started running DB reads/writes from these bot threads every cycle.
+# NullPool sidesteps this entirely: every checkout opens a fresh connection
+# instead of reusing one tied to a specific loop. These bots cycle every
+# 30-60s, so the extra connect overhead is a non-issue - correctness across
+# loops matters far more here than pooling a handful of infrequent queries.
+# pool_recycle is meaningless with NullPool (nothing is kept around to go
+# stale) so it's dropped; pool_pre_ping stays since it's harmless.
+_engine_kwargs = {"echo": False, "future": True, "pool_pre_ping": True, "poolclass": NullPool}
 if DATABASE_URL.startswith("postgresql+asyncpg://"):
     _engine_kwargs["connect_args"] = {"timeout": 10}
 
