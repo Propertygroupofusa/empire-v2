@@ -568,6 +568,34 @@
         </div>
 
         <div class="panel">
+            <h3>📈 Live Price Chart</h3>
+            <p style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">
+                Real candles pulled fresh from Alpaca (stock proxies) or Coinbase (crypto) - the exact same
+                price/RSI data the bots use to decide entries and exits, not a mock feed.
+            </p>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
+                <select id="chartSymbolSelect" onchange="refreshChart()" style="font-size: 1em; padding: 6px; background: rgba(0,0,0,0.3); color: #00ff00; border: 1px solid #00aa00; border-radius: 4px;">
+                    <optgroup label="Bare Metal Builders (stocks)">
+                        <option value="SPY">MES (SPY proxy)</option>
+                        <option value="QQQ">MNQ (QQQ proxy)</option>
+                        <option value="DIA">MYM (DIA proxy)</option>
+                        <option value="IWM">M2K (IWM proxy)</option>
+                        <option value="GLD">MGC (GLD proxy)</option>
+                        <option value="USO">MCL (USO proxy)</option>
+                        <option value="SLV">SIL (SLV proxy)</option>
+                    </optgroup>
+                    <optgroup label="Crypto Bot">
+                        <option value="BTC-USD">BTC/USD</option>
+                        <option value="ETH-USD">ETH/USD</option>
+                    </optgroup>
+                </select>
+                <span id="chartMeta" style="color: #00aa00; font-size: 0.85em; align-self: center;">Loading...</span>
+            </div>
+            <canvas id="priceChart" height="90"></canvas>
+            <canvas id="rsiChart" height="45" style="margin-top: 10px;"></canvas>
+        </div>
+
+        <div class="panel">
             <h3>⚖️ Margin & Shorting Status</h3>
             <p style="color: #00aa00; font-size: 0.85em; margin-bottom: 10px;">
                 Real account data from Alpaca, not a code setting - shorting requires a real margin account, which
@@ -722,6 +750,7 @@
         </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
     <script>
         // Real data only, pulled from your actual Alpaca account through
         // /api/trading-dashboard/* (see routers/trading_dashboard.py). No
@@ -1405,6 +1434,99 @@
             }
         }
 
+        // Live price + RSI chart, backed by /price-history/{symbol} - real
+        // candles fetched fresh from Alpaca/Coinbase (see that endpoint),
+        // not a stored/mocked series. Two stacked Chart.js canvases: price
+        // on top, RSI below with 30/70 reference lines, both keyed to the
+        // symbol picked in the dropdown.
+        let priceChartInstance = null;
+        let rsiChartInstance = null;
+
+        async function refreshChart() {
+            const symbol = document.getElementById('chartSymbolSelect').value;
+            const metaEl = document.getElementById('chartMeta');
+
+            let data;
+            try {
+                data = await apiFetch('/price-history/' + encodeURIComponent(symbol));
+            } catch (e) {
+                metaEl.textContent = '❌ ' + e.message;
+                return;
+            }
+
+            const candles = data.candles || [];
+            if (candles.length === 0) {
+                metaEl.textContent = 'No candle data returned for ' + symbol + ' yet.';
+                return;
+            }
+
+            const labels = candles.map(c => new Date(c.t).toLocaleTimeString());
+            const closes = candles.map(c => c.c);
+            const rsi = data.rsi || [];
+            const lastRsi = rsi.filter(v => v !== null).pop();
+
+            metaEl.textContent = symbol + ' | Last: $' + closes[closes.length - 1].toFixed(2) +
+                (lastRsi !== undefined ? ' | RSI: ' + lastRsi : '') +
+                ' | ' + candles.length + ' bars (5-min)';
+
+            const priceCtx = document.getElementById('priceChart').getContext('2d');
+            const rsiCtx = document.getElementById('rsiChart').getContext('2d');
+
+            if (priceChartInstance) priceChartInstance.destroy();
+            if (rsiChartInstance) rsiChartInstance.destroy();
+
+            const gridColor = 'rgba(0, 255, 0, 0.1)';
+            const tickColor = '#00aa00';
+
+            priceChartInstance = new Chart(priceCtx, {
+                type: 'line',
+                data: {
+                    labels,
+                    datasets: [{
+                        label: symbol + ' price',
+                        data: closes,
+                        borderColor: '#00ff00',
+                        backgroundColor: 'rgba(0, 255, 0, 0.08)',
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        fill: true,
+                        tension: 0.1,
+                    }],
+                },
+                options: {
+                    animation: false,
+                    scales: {
+                        x: { ticks: { color: tickColor, maxTicksLimit: 8 }, grid: { color: gridColor } },
+                        y: { ticks: { color: tickColor }, grid: { color: gridColor } },
+                    },
+                    plugins: { legend: { display: false } },
+                },
+            });
+
+            rsiChartInstance = new Chart(rsiCtx, {
+                type: 'line',
+                data: {
+                    labels,
+                    datasets: [{
+                        label: 'RSI',
+                        data: rsi,
+                        borderColor: '#ffaa00',
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        spanGaps: true,
+                    }],
+                },
+                options: {
+                    animation: false,
+                    scales: {
+                        x: { ticks: { color: tickColor, maxTicksLimit: 8 }, grid: { color: gridColor } },
+                        y: { min: 0, max: 100, ticks: { color: tickColor, stepSize: 25 }, grid: { color: gridColor } },
+                    },
+                    plugins: { legend: { display: false } },
+                },
+            });
+        }
+
         logEvent('🤖 Dashboard connected — loading real Alpaca account data...', 'signal');
         refreshStatus();
         refreshWithdrawals();
@@ -1413,6 +1535,7 @@
         refreshBotApiStatus();
         refreshTrades();
         refreshDividends();
+        refreshChart();
         setInterval(refreshStatus, 30000);
         setInterval(refreshWithdrawals, 30000);
         setInterval(refreshSignals, 30000);
@@ -1420,6 +1543,7 @@
         setInterval(refreshBotApiStatus, 30000);
         setInterval(refreshTrades, 30000);
         setInterval(refreshDividends, 300000); // dividends don't change fast - every 5 min is plenty
+        setInterval(refreshChart, 60000);
     </script>
 </body>
 </html>
