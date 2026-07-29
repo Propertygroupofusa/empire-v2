@@ -599,6 +599,20 @@ async def serve_trading_dashboard():
     return FileResponse(dashboard_path, media_type="text/html")
 
 
+@app.get("/notary-portal")
+async def serve_notary_portal():
+    """Serve the notary partner self-service portal. Until now, /workers,
+    /jobs, and /bookings only existed as bare JSON APIs - real notaries had
+    no page to actually register, log in, submit credentials, or see jobs
+    matched to them on. This is per-worker login (their own email+password,
+    see worker_auth.py), not the shared admin key the trading/social
+    dashboards use."""
+    portal_path = os.path.join(os.path.dirname(__file__), "notary_portal.html")
+    if not os.path.exists(portal_path):
+        raise HTTPException(status_code=404, detail="Notary portal not found")
+    return FileResponse(portal_path, media_type="text/html")
+
+
 @app.get("/quote")
 async def serve_quote_form():
     """Serve the subscription-aware video quote form"""
