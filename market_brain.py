@@ -194,8 +194,8 @@ CONFIG = {
     "max_positions":      3,
     "max_trades_day":     12,   # more trades
     "stop_loss_pct":      1.5,   # wider = exits trigger more
-    "take_profit_pct":    1.0,   # lower target = more exits
-    "trailing_stop_pct":  1.5,
+    "take_profit_pct":    0.8,   # quick wins — hits more often
+    "trailing_stop_pct":  0.5,   # trail after 1.5% peak
     "min_confidence":     1,   # lowered — need more trades
     "min_strength":       0.001,  # very loose — collect data
     "max_exposure":       0.60,
@@ -586,19 +586,39 @@ def entry_filter(closes):
 
 
 def mtf_exit(entry_price, current_price, peak_price):
-    """Tight exits to protect win rate."""
+    """
+    PROFIT-FIRST exit logic.
+    NEVER sell at a loss. Hold until green.
+    Only exit rules:
+      +2.0% = Take Profit (sell and lock in gain)
+      Trail from +1% peak = lock in profits
+      -8.0% = Emergency stop ONLY (catastrophic protection)
+    """
     if entry_price <= 0:
         return None
+
     pnl = ((current_price - entry_price) / entry_price) * 100
-    if pnl <= -CONFIG["stop_loss_pct"]:
-        return "STOP"
-    if pnl >= CONFIG["take_profit_pct"]:
+
+    # NEVER sell at a loss (unless catastrophic)
+    if pnl <= 0 and pnl > -8.0:
+        return None  # HOLD — let it recover
+
+    # Emergency stop — catastrophic loss only
+    if pnl <= -8.0:
+        return "EMERGENCY_STOP"
+
+    # Take profit — sell at +2%
+    if pnl >= 2.0:
         return "TP"
-    if peak_price > entry_price:
+
+    # Trail — only after reaching +1% peak (never in loss)
+    if peak_price > entry_price * 1.01:
         trail = ((current_price - peak_price) / peak_price) * 100
-        if trail <= -CONFIG["trailing_stop_pct"]:
+        if trail <= -0.8:
             return "TRAIL"
+
     return None
+
 
 
 def mtf_signal(symbol):
@@ -1367,12 +1387,9 @@ def run_cycle():
              f"| Positions:{len(state.positions)}/{ms['max_pos']}")
 
     # Tighten exits in bear market
-    if hedge_regime == "BEAR":
-        CONFIG["stop_loss_pct"]   = 0.6
-        CONFIG["take_profit_pct"] = 1.5
-    else:
-        CONFIG["stop_loss_pct"]   = 0.7
-        CONFIG["take_profit_pct"] = 1.8
+    # Keep exits wide — only sell in profit
+    CONFIG["stop_loss_pct"]   = 8.0
+    CONFIG["take_profit_pct"] = 2.0
 
     if profit_made >= (CONFIG["target_portfolio"] - CONFIG["starting_capital"]):
         log.info("  $100,000 TARGET REACHED!")
@@ -1389,21 +1406,26 @@ def run_cycle():
         pos = state.positions[symbol]
         pos["cycles"] = pos.get("cycles", 0) + 1
         state.positions[symbol] = pos
-        if pos["cycles"] >= 3:
-            if close_position(symbol):
-                entry_px = pos.get("entry_price", 0)
-                d = get_market_data(symbol, limit=5)
-                current = d["closes"][-1] if d and d.get("ok") and d["closes"] else entry_px
-                pnl_pct = ((current - entry_px) / entry_px * 100) if entry_px > 0 else 0
-                if pnl_pct > 0: state.wins   += 1
-                else:           state.losses += 1
-                state.trades_today += 1
-                if symbol in state.open_features:
-                    del state.open_features[symbol]
-                del state.positions[symbol]
-                result = "WIN" if pnl_pct > 0 else "LOSS"
-                log.info(f"  [FORCE {result}] {symbol} {pnl_pct:+.2f}% (max hold)")
-                state.save()
+        if pos["cycles"] >= 6:  # hold longer — 90 min
+            entry_px = pos.get("entry_price", 0)
+            d = get_market_data(symbol, limit=5)
+            current = d["closes"][-1] if d and d.get("ok") and d["closes"] else entry_px
+            pnl_pct = ((current - entry_px) / entry_px * 100) if entry_px > 0 else 0
+
+            # ONLY force close if winning
+            if pnl_pct > 0:
+                if close_position(symbol):
+                    state.wins += 1
+                    state.trades_today += 1
+                    if symbol in state.open_features:
+                        del state.open_features[symbol]
+                    del state.positions[symbol]
+                    log.info(f"  [FORCE WIN] {symbol} {pnl_pct:+.2f}%")
+                    state.save()
+            else:
+                log.info(f"  [HOLD] {symbol} {pnl_pct:+.2f}% — waiting for green")
+                # Reset cycle counter — keep holding
+                state.positions[symbol]["cycles"] = 0
 
     # ── MANAGE EXISTING POSITIONS ────────────────────────────
     for symbol, pos in list(state.positions.items()):
