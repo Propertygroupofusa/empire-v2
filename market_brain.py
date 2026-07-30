@@ -665,7 +665,15 @@ def mtf_signal(symbol):
 
     if slow_trend == "DOWN" and mid_trend == "DOWN":
         if fast_trend == "DOWN" and fast_str > CONFIG["min_strength"]:
+            # SHORT = sell now, profit when price falls
             return "SHORT", f"MTF_DOWN conf:{conf}/5 str:{fast_str:.3f}", fast_closes, conf
+
+    # FORCE SHORT if RSI very overbought
+    r = rsi(fast_closes) if fast_closes else 50
+    if r > 75 and len(fast_closes) > 20:
+        closes_recent = fast_closes[-10:]
+        if closes_recent[-1] < closes_recent[0]:  # price already falling
+            return "SHORT", f"overbought_short rsi={r:.0f}", fast_closes, 2
 
     # Force BUY if RSI very oversold (even without full alignment)
     r = rsi(fast_closes) if fast_closes else 50
