@@ -14,6 +14,7 @@ from sqlalchemy import text, inspect, String
 from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from datetime import datetime
 import os
+import asyncio
 import uvicorn
 import logging
 
@@ -340,8 +341,134 @@ async def run_migrations():
                         log.debug(f"Migration skip {table_name}.{column.name} type fix: {e}")
 
 
+# ── Bot Earnings System ──────────────────────────────────────
+
+async def initialize_bot():
+    """Initialize bot worker with Stripe Connect account"""
+    try:
+        from database import AsyncSessionLocal
+        from models import Worker
+        from passlib.context import CryptContext
+        from sqlalchemy import select
+        import stripe
+
+        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+        stripe_key = os.getenv("STRIPE_SECRET_KEY")
+        if stripe_key:
+            stripe.api_key = stripe_key
+
+        async with AsyncSessionLocal() as session:
+            bot_email = "bot@pgusa.local"
+            result = await session.execute(select(Worker).where(Worker.email == bot_email))
+            existing = result.scalar_one_or_none()
+
+            if not existing:
+                worker = Worker(
+                    email=bot_email,
+                    name="Job Bot",
+                    status="active",
+                    password_hash=pwd_context.hash("auto_bot_password_123"),
+                )
+                session.add(worker)
+                await session.flush()
+                await session.commit()
+                log.info(f"🤖 Bot worker created: {bot_email}")
+
+                if stripe_key:
+                    try:
+                        account = stripe.Account.create(
+                            type="express",
+                            email=bot_email,
+                            capabilities={"transfers": {"requested": True}},
+                        )
+                        worker.stripe_account_id = account.id
+                        await session.commit()
+                        log.info(f"💳 Stripe Connect account created for bot: {account.id}")
+                    except Exception as e:
+                        log.warning(f"Stripe Connect setup failed: {e}")
+            else:
+                log.info(f"🤖 Bot worker exists: {bot_email}")
+                if not existing.stripe_account_id and stripe_key:
+                    try:
+                        account = stripe.Account.create(
+                            type="express",
+                            email=bot_email,
+                            capabilities={"transfers": {"requested": True}},
+                        )
+                        existing.stripe_account_id = account.id
+                        await session.commit()
+                        log.info(f"💳 Stripe Connect account created for existing bot: {account.id}")
+                    except Exception as e:
+                        log.warning(f"Stripe Connect setup for existing bot failed: {e}")
+    except Exception as e:
+        log.warning(f"Bot initialization: {e}")
+
+
+async def start_job_bot():
+    """Job bot ready - can claim jobs from job board when API is available"""
+    log.info("🚀 Job Bot ready (job board integration pending)")
+
+
+async def process_payouts_periodically():
+    """Process pending payouts every 30 seconds"""
+    try:
+        import stripe
+        from database import AsyncSessionLocal
+        from models import Payment, Worker
+        from sqlalchemy import select
+
+        stripe_key = os.getenv("STRIPE_SECRET_KEY")
+        if not stripe_key:
+            log.warning("Stripe key not configured - payouts disabled")
+            return
+
+        stripe.api_key = stripe_key
+
+        while True:
+            try:
+                async with AsyncSessionLocal() as session:
+                    result = await session.execute(
+                        select(Payment).where(Payment.payout_status == "pending")
+                    )
+                    pending = result.scalars().all()
+
+                    for payment in pending:
+                        try:
+                            w_result = await session.execute(
+                                select(Worker).where(Worker.id == payment.worker_id)
+                            )
+                            worker = w_result.scalar_one_or_none()
+
+                            if worker and worker.stripe_account_id:
+                                transfer = stripe.Transfer.create(
+                                    amount=int(payment.worker_amount * 100),
+                                    currency="usd",
+                                    destination=worker.stripe_account_id,
+                                    description=f"Job payout: {payment.job_id}"
+                                )
+                                payment.payout_status = "paid"
+                                payment.stripe_transfer_id = transfer.id
+                                payment.paid_at = datetime.utcnow()
+                                log.info(f"💰 Payout processed: {payment.id} → {worker.email} (${payment.worker_amount})")
+                            else:
+                                log.debug(f"Payment {payment.id}: Worker has no Stripe Connect account")
+                        except Exception as e:
+                            log.error(f"Payout error for {payment.id}: {e}")
+                            payment.payout_status = "failed"
+
+                    await session.commit()
+            except Exception as e:
+                log.warning(f"Payout cycle error: {e}")
+
+            await asyncio.sleep(30)
+    except Exception as e:
+        log.warning(f"Payout processor error: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
+
     log.info("PGUSA Platform starting...")
     try:
         await init_db()
@@ -359,6 +486,24 @@ async def lifespan(app: FastAPI):
         await run_migrations()
     except Exception as e:
         log.warning(f"Migrations failed: {e}")
+
+    try:
+        await initialize_bot()
+        log.info("✅ Bot worker initialized")
+    except Exception as e:
+        log.warning(f"Bot initialization failed: {e}")
+
+    try:
+        asyncio.create_task(start_job_bot())
+        log.info("🤖 Job bot background task started")
+    except Exception as e:
+        log.warning(f"Job bot startup failed: {e}")
+
+    try:
+        asyncio.create_task(process_payouts_periodically())
+        log.info("💳 Automatic payout processor started")
+    except Exception as e:
+        log.warning(f"Payout processor startup failed: {e}")
 
     try:
         if payee_worker is not None:

@@ -143,6 +143,9 @@ class Worker(Base):
     ron_authorized = Column(Boolean, default=False)  # Remote Online Notarization
     ron_authorization_state = Column(String, nullable=True)
 
+    # Stripe Connect account for automated payouts
+    stripe_account_id = Column(String, nullable=True)
+
     def to_dict(self):
         return {
             "id": self.id,
