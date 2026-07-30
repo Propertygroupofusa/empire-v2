@@ -781,6 +781,44 @@ class Response(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class PayoutStatus(str, enum.Enum):
+    """Status of a worker payout."""
+    pending = "pending"
+    processing = "processing"
+    paid = "paid"
+    failed = "failed"
+
+
+class Payment(Base):
+    """Payment record for completed jobs - tracks earnings for workers."""
+    __tablename__ = "payments"
+
+    id = Column(String, primary_key=True, index=True)
+    job_id = Column(String, nullable=True, index=True)
+    worker_id = Column(String, nullable=True, index=True)
+    client_id = Column(String, nullable=True, index=True)
+    gross_amount = Column(Float)  # Total amount from client
+    worker_amount = Column(Float)  # Worker's earnings
+    platform_amount = Column(Float)  # Platform fee
+    payout_status = Column(String, default="pending", index=True)  # pending, processing, paid, failed
+    stripe_payout_id = Column(String, nullable=True, unique=True)  # Stripe payout ID when transferred
+    stripe_transfer_id = Column(String, nullable=True)  # Stripe Transfer ID if using Connect
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    paid_at = Column(DateTime, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "job_id": self.job_id,
+            "worker_id": self.worker_id,
+            "worker_amount": self.worker_amount,
+            "platform_amount": self.platform_amount,
+            "payout_status": self.payout_status,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "paid_at": self.paid_at.isoformat() if self.paid_at else None,
+        }
+
+
 class BotPosition(Base):
     """A trading bot's currently-open position, persisted so a Railway
     restart can't silently orphan a real open position. Both prop_bot.py
