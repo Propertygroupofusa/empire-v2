@@ -645,6 +645,33 @@ async def serve_quote_form():
             html_content = f.read()
         return HTMLResponse(content=html_content, status_code=200)
     except Exception as e:
+        log.error(f"Error serving quote form: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/bot-earnings")
+async def serve_bot_earnings_dashboard():
+    """Serve the bot earnings dashboard widget"""
+    try:
+        possible_paths = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_earnings.html"),
+            "/app/bot_earnings.html",
+            "bot_earnings.html",
+        ]
+
+        bot_path = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                bot_path = path
+                break
+
+        if not bot_path:
+            raise HTTPException(status_code=404, detail="Bot earnings dashboard not found")
+
+        with open(bot_path, 'r') as f:
+            html_content = f.read()
+        return HTMLResponse(content=html_content, status_code=200)
+    except Exception as e:
         log.error(f"Error serving quote form: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error serving quote form: {str(e)}")
 
