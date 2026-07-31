@@ -89,33 +89,34 @@ async def auto_scale_bots():
                 f"📊 Metrics - Pending: {pending}, Active Bots: {active}, Avg/Bot: {jobs_per_bot:.1f}"
             )
 
-            # Scaling logic
-            # If more than 5 jobs per bot, create a new bot
-            if jobs_per_bot > 5 and pending > active * 3:
-                next_bot_num = active + 1
-                await create_bot(next_bot_num)
-                log.info(
-                    f"📈 SCALED UP: Created bot{next_bot_num}@pgusa.local (demand: {pending} jobs, {active} bots)"
-                )
+            # Scaling logic: Add 2 bots for every 10 pending jobs (1 bot per 5 jobs)
+            if pending > 0:
+                # Calculate needed bots: 1 bot per 5 jobs
+                needed_bots = max(2, (pending + 4) // 5)  # Round up
+                bots_to_create = max(0, needed_bots - active)
 
-            # If queue is building up fast, create multiple bots
-            elif pending > active * 5:
-                for i in range(2):
-                    next_bot_num = active + i + 1
-                    await create_bot(next_bot_num)
+                if bots_to_create > 0:
                     log.info(
-                        f"🚀 RAPID SCALE: Created bot{next_bot_num}@pgusa.local (high demand: {pending} jobs)"
+                        f"📈 SCALING: Need {needed_bots} total bots for {pending} jobs (have {active})"
                     )
-
-            # Scale down if bots are idle (queue empty for 2+ cycles)
-            elif pending == 0 and active > 2:
-                log.info(
-                    f"📉 Queue empty, maintaining {active} bots for quick response"
-                )
+                    for i in range(bots_to_create):
+                        next_bot_num = active + i + 1
+                        await create_bot(next_bot_num)
+                        log.info(
+                            f"✨ Created bot{next_bot_num}@pgusa.local ({pending} jobs in queue)"
+                        )
+            else:
+                # Keep minimum 2 bots for fast response
+                if active < 2:
+                    for i in range(2 - active):
+                        next_bot_num = active + i + 1
+                        await create_bot(next_bot_num)
+                        log.info(f"✨ Maintaining minimum fleet: bot{next_bot_num}@pgusa.local")
+                elif active > 2:
+                    log.info(f"📉 Queue empty, maintaining {active} bots for quick response")
 
             # Log performance
             if metrics["total_completed"] > 0:
-                avg_earnings_per_bot = metrics["total_completed"] * 100 / active
                 log.info(f"💰 Total jobs completed: {metrics['total_completed']}")
                 log.info(f"💵 Avg jobs per bot: {jobs_per_bot:.1f}")
 
