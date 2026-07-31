@@ -3,7 +3,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from database import get_db, Payment, Worker, Job, PayoutStatus
+from database import get_db
+from models import Payment, Worker, Job
 import stripe
 import os
 from datetime import datetime
