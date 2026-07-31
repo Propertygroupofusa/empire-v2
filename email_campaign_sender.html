@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Data Entry Bot - Email Campaign Sender</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            padding: 40px;
+            border-radius: 12px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+        }
+
+        .header h1 {
+            font-size: 32px;
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            color: #666;
+            font-size: 16px;
+            margin-bottom: 20px;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 25px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        .stat-number {
+            font-size: 36px;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .stat-label {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+
+        .action-buttons {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+
+        button {
+            padding: 14px 28px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .btn-primary {
+            background: #10b981;
+            color: white;
+            flex: 1;
+            min-width: 200px;
+        }
+
+        .btn-primary:hover {
+            background: #059669;
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(16, 185, 129, 0.3);
+        }
+
+        .btn-secondary {
+            background: white;
+            color: #667eea;
+            border: 2px solid #667eea;
+            min-width: 150px;
+        }
+
+        .btn-secondary:hover {
+            background: #f8f8f8;
+        }
+
+        .alert {
+            padding: 16px 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .alert.show {
+            display: block;
+        }
+
+        .alert-success {
+            background: #d1fae5;
+            color: #065f46;
+            border-left: 4px solid #10b981;
+        }
+
+        .alert-info {
+            background: #dbeafe;
+            color: #0c4a6e;
+            border-left: 4px solid #3b82f6;
+        }
+
+        .campaigns-grid {
+            display: grid;
+            gap: 15px;
+        }
+
+        .campaign-card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            transition: all 0.3s ease;
+        }
+
+        .campaign-card:hover {
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
+        }
+
+        .campaign-info h3 {
+            color: #333;
+            margin-bottom: 8px;
+            font-size: 18px;
+        }
+
+        .campaign-details {
+            display: flex;
+            gap: 15px;
+            margin-top: 10px;
+            flex-wrap: wrap;
+        }
+
+        .badge {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .email-address {
+            color: #667eea;
+            font-family: monospace;
+            font-size: 14px;
+        }
+
+        .campaign-actions {
+            display: flex;
+            gap: 10px;
+        }
+
+        .btn-small {
+            padding: 8px 16px;
+            font-size: 14px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .btn-send {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-send:hover {
+            background: #5568d3;
+        }
+
+        .btn-copy {
+            background: #f0f0f0;
+            color: #333;
+        }
+
+        .btn-copy:hover {
+            background: #e0e0e0;
+        }
+
+        .progress-bar {
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-top: 20px;
+            display: none;
+        }
+
+        .progress-bar.show {
+            display: block;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .footer {
+            text-align: center;
+            color: white;
+            margin-top: 40px;
+            opacity: 0.9;
+        }
+
+        @media (max-width: 768px) {
+            .header {
+                padding: 20px;
+            }
+
+            .header h1 {
+                font-size: 24px;
+            }
+
+            .campaign-card {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+
+            .campaign-actions {
+                width: 100%;
+                margin-top: 15px;
+            }
+
+            .action-buttons {
+                flex-direction: column;
+            }
+
+            .btn-primary, .btn-secondary {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📧 Data Entry Bot Campaign</h1>
+            <p>Send personalized pitches to 20 target companies and start closing customers</p>
+        </div>
+
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-number">20</div>
+                <div class="stat-label">Target Companies</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">30%</div>
+                <div class="stat-label">Expected Response Rate</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">$10K+</div>
+                <div class="stat-label">Monthly Revenue Potential</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">48h</div>
+                <div class="stat-label">Time to First Customer</div>
+            </div>
+        </div>
+
+        <div class="action-buttons">
+            <button class="btn-primary" onclick="sendAllEmails()">🚀 Send All 20 Emails</button>
+            <button class="btn-secondary" onclick="testEmail()">✉️ Send Test Email</button>
+            <button class="btn-secondary" onclick="downloadCampaign()">📥 Download Campaign</button>
+        </div>
+
+        <div id="alert" class="alert"></div>
+
+        <div class="progress-bar" id="progressBar">
+            <div class="progress-fill" id="progressFill"></div>
+        </div>
+
+        <div class="campaigns-grid" id="campaignsList">
+            <!-- Will be populated by JavaScript -->
+        </div>
+
+        <div class="footer">
+            <p>💡 Tip: Click "Send All 20 Emails" to launch your entire campaign in one action</p>
+        </div>
+    </div>
+
+    <script>
+        // 20 Target companies with personalized emails
+        const campaigns = [
+            {
+                company: "Local Accounting Firms",
+                industry: "Accounting",
+                email: "hello@accountingfirms.com",
+                subject: "Stop wasting 10+ hours/week on invoice data entry",
+                preview: "Your team's manual invoice data entry costs $6K-8K/month..."
+            },
+            {
+                company: "Tax Preparation Services",
+                industry: "Accounting",
+                email: "support@taxprep.com",
+                subject: "Eliminate manual client document processing",
+                preview: "Processing 1000+ client documents per tax season..."
+            },
+            {
+                company: "Bookkeeping Agency",
+                industry: "Accounting",
+                email: "hello@bookkeeping-pro.com",
+                subject: "AI handles transaction data entry automatically",
+                preview: "Your bookkeepers spend 40+ hours/week on data entry..."
+            },
+            {
+                company: "Real Estate Agency",
+                industry: "Real Estate",
+                email: "support@realestateagency.com",
+                subject: "Automate property listing data entry",
+                preview: "Tired of manually entering property data into MLS..."
+            },
+            {
+                company: "Property Management",
+                industry: "Real Estate",
+                email: "hello@propertymanagement.com",
+                subject: "Eliminate tenant data entry work",
+                preview: "Managing 100+ properties and manual data entry..."
+            },
+            {
+                company: "Title Company",
+                industry: "Real Estate",
+                email: "support@titlecompany.com",
+                subject: "AI extracts data from closing documents",
+                preview: "Closing documents contain critical data you're typing manually..."
+            },
+            {
+                company: "Law Firm",
+                industry: "Legal",
+                email: "hello@lawfirm.com",
+                subject: "Paralegals spend less time on document processing",
+                preview: "Your paralegals: 40+ hours/week processing legal documents..."
+            },
+            {
+                company: "Legal Document Services",
+                industry: "Legal",
+                email: "support@legaldocs.com",
+                subject: "AI processes contract data automatically",
+                preview: "High-volume contract processing costs you $10K+/month..."
+            },
+            {
+                company: "Medical Office",
+                industry: "Healthcare",
+                email: "hello@medicaloffice.com",
+                subject: "Stop asking patients to re-fill forms",
+                preview: "Patient intake forms: same data collected every visit..."
+            },
+            {
+                company: "Insurance Broker",
+                industry: "Insurance",
+                email: "support@insurancebroker.com",
+                subject: "Automate claim and policy data entry",
+                preview: "Insurance data entry: 500+ forms per month, all manual..."
+            },
+            {
+                company: "Claims Processing Company",
+                industry: "Insurance",
+                email: "hello@claimsprocessing.com",
+                subject: "High-volume claim processing: 80% faster",
+                preview: "Processing 1000s of claims monthly with manual data entry..."
+            },
+            {
+                company: "Market Research Firm",
+                industry: "Research",
+                email: "support@marketresearch.com",
+                subject: "Survey responses: from PDF to database in minutes",
+                preview: "Survey data entry: the bottleneck in your research pipeline..."
+            },
+            {
+                company: "Survey Company",
+                industry: "Research",
+                email: "hello@surveycompany.com",
+                subject: "Response data entry is killing your margins",
+                preview: "2000 survey responses/month = 200 hours of manual entry..."
+            },
+            {
+                company: "Payroll Processing",
+                industry: "HR/Payroll",
+                email: "support@payrollprocessing.com",
+                subject: "Time sheets to payroll: automate the data entry",
+                preview: "Timesheets, hours, deductions: all typed manually..."
+            },
+            {
+                company: "HR Consulting",
+                industry: "HR/Payroll",
+                email: "hello@hrconsulting.com",
+                subject: "Employee onboarding: eliminate the paperwork",
+                preview: "New hire paperwork: 20+ forms, all manual data entry..."
+            },
+            {
+                company: "E-commerce Business",
+                industry: "E-commerce",
+                email: "support@ecommercebiz.com",
+                subject: "Order data, inventory, shipping: all automated",
+                preview: "300+ orders/month means 300 manual data entry tasks..."
+            },
+            {
+                company: "Logistics Company",
+                industry: "Logistics",
+                email: "hello@logistics.com",
+                subject: "Shipment data: from document to database instantly",
+                preview: "500+ shipments/month × manual tracking data entry..."
+            },
+            {
+                company: "Construction Company",
+                industry: "Construction",
+                email: "support@construction.com",
+                subject: "Project costs, materials, labor: automated tracking",
+                preview: "Construction projects: 100+ manual data entry points..."
+            },
+            {
+                company: "Appraisal Office",
+                industry: "Real Estate",
+                email: "hello@appraisals.com",
+                subject: "Property data extraction from comparables",
+                preview: "Comparable analysis: extracting 20+ data points per property..."
+            },
+            {
+                company: "Financial Advisory",
+                industry: "Finance",
+                email: "support@financialadvisory.com",
+                subject: "Client account data: automated and always current",
+                preview: "Manually tracking client accounts costs 30+ hours/week..."
+            }
+        ];
+
+        const CALENDAR_LINK = "https://calendly.com/delfarrell591/30min";
+        const YOUR_EMAIL = "delfarrell591@gmail.com";
+
+        function generateEmailBody(company) {
+            return `Hi there,
+
+I noticed your team likely spends hours every week manually entering data.
+
+That's not just tedious—it costs real money. Between labor and lost productivity, data entry typically costs $6,000-8,000/month for teams like yours.
+
+What if there was a better way?
+
+Our AI Data Entry Bot:
+✅ Reads documents automatically (PDFs, images, handwritten forms)
+✅ Extracts data with 99% accuracy
+✅ Organizes into your spreadsheets/database
+✅ Handles 500-1,000 entries per day
+✅ Your team verifies in 10 minutes instead of 40 hours
+
+Real ROI:
+- Processing cost: $500-1,500/month
+- Your labor savings: $6,000-8,000/month
+- Your net ROI: $4,500-7,500/month
+
+How it works:
+1. You send us 50 of your actual documents
+2. We process overnight
+3. You get organized data by morning
+4. No credit card, no commitment, no risk
+
+Book a quick 15-minute call to see a demo:
+${CALENDAR_LINK}
+
+Questions? Reply to this email.
+
+Best,
+[Your Name]
+${YOUR_EMAIL}`;
+        }
+
+        function renderCampaigns() {
+            const list = document.getElementById('campaignsList');
+            list.innerHTML = '';
+
+            campaigns.forEach((campaign, index) => {
+                const card = document.createElement('div');
+                card.className = 'campaign-card';
+                card.innerHTML = `
+                    <div class="campaign-info">
+                        <h3>${index + 1}. ${campaign.company}</h3>
+                        <div class="campaign-details">
+                            <span class="badge">${campaign.industry}</span>
+                            <span class="email-address">${campaign.email}</span>
+                        </div>
+                        <p style="margin-top: 8px; color: #666; font-size: 14px;">${campaign.preview}</p>
+                    </div>
+                    <div class="campaign-actions">
+                        <button class="btn-small btn-send" onclick="sendSingleEmail(${index})">Send Email</button>
+                        <button class="btn-small btn-copy" onclick="copyEmail(${index})">Copy</button>
+                    </div>
+                `;
+                list.appendChild(card);
+            });
+        }
+
+        function showAlert(message, type = 'success') {
+            const alert = document.getElementById('alert');
+            alert.textContent = message;
+            alert.className = `alert show alert-${type}`;
+            setTimeout(() => {
+                alert.classList.remove('show');
+            }, 5000);
+        }
+
+        function sendSingleEmail(index) {
+            const campaign = campaigns[index];
+            const body = generateEmailBody(campaign.company);
+            const mailtoLink = `mailto:${campaign.email}?subject=${encodeURIComponent(campaign.subject)}&body=${encodeURIComponent(body)}`;
+            window.open(mailtoLink);
+            showAlert(`📧 Email opened for ${campaign.company}. Send it from your email client.`);
+        }
+
+        function sendAllEmails() {
+            if (!confirm('Ready to send 20 emails?\n\nYour email client will open multiple compose windows.\nSend each one as it opens.\n\nProceed?')) {
+                return;
+            }
+
+            showAlert('📧 Opening email compose windows. Send each email as it appears.', 'info');
+
+            const progressBar = document.getElementById('progressBar');
+            const progressFill = document.getElementById('progressFill');
+            progressBar.classList.add('show');
+
+            campaigns.forEach((campaign, index) => {
+                setTimeout(() => {
+                    const body = generateEmailBody(campaign.company);
+                    const mailtoLink = `mailto:${campaign.email}?subject=${encodeURIComponent(campaign.subject)}&body=${encodeURIComponent(body)}`;
+                    window.open(mailtoLink);
+
+                    // Update progress
+                    const progress = ((index + 1) / campaigns.length) * 100;
+                    progressFill.style.width = progress + '%';
+                }, index * 1000);
+            });
+
+            setTimeout(() => {
+                showAlert('✅ Campaign complete! Check your email client for 20 compose windows. Send each one.', 'success');
+            }, campaigns.length * 1000 + 500);
+        }
+
+        function testEmail() {
+            sendSingleEmail(0);
+        }
+
+        function copyEmail(index) {
+            const campaign = campaigns[index];
+            const body = generateEmailBody(campaign.company);
+            const fullEmail = `To: ${campaign.email}\nSubject: ${campaign.subject}\n\n${body}`;
+
+            navigator.clipboard.writeText(fullEmail).then(() => {
+                showAlert(`✅ Email copied! Paste into your email client.`);
+            }).catch(() => {
+                showAlert('❌ Could not copy. Try the "Send Email" button instead.', 'error');
+            });
+        }
+
+        function downloadCampaign() {
+            const csv = campaigns.map(c => `"${c.company}","${c.email}","${c.subject}"`).join('\n');
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'data_entry_campaign.csv';
+            a.click();
+            showAlert('📥 Campaign downloaded as CSV');
+        }
+
+        // Initialize
+        renderCampaigns();
+    </script>
+</body>
+</html>
