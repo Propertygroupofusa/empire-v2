@@ -18,6 +18,14 @@ import asyncio
 import uvicorn
 import logging
 
+# CRITICAL: Ensure greenlet is available for SQLAlchemy async support
+try:
+    import greenlet
+    assert greenlet.__version__, "greenlet module loaded"
+except (ImportError, AssertionError) as e:
+    logging.error(f"FATAL: greenlet not available - async database will fail: {e}")
+    raise
+
 from database import init_db, engine
 
 # Load routers gracefully to prevent import errors from crashing startup
