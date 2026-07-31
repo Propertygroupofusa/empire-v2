@@ -1,12 +1,52 @@
 """Bot earnings and payout dashboard"""
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from database import get_db
 from models import Payment, Worker, Job
 from datetime import datetime, timedelta
+from passlib.context import CryptContext
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
+
+
+@router.post("/initialize-bots")
+async def initialize_bots(db: AsyncSession = Depends(get_db)):
+    """Initialize bot workers if they don't exist"""
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+    try:
+        # Check if bots already exist
+        result = await db.execute(
+            select(Worker).where(Worker.email.like("%bot%pgusa.local"))
+        )
+        existing_bots = result.scalars().all()
+
+        if existing_bots:
+            return {"status": "ok", "message": f"{len(existing_bots)} bots already exist"}
+
+        # Create initial bot fleet (2 bots to start)
+        created = []
+        for i in range(1, 3):
+            bot_email = f"bot{i if i > 1 else ''}@pgusa.local"
+            bot = Worker(
+                email=bot_email,
+                name=f"Job Bot {i}",
+                status="active",
+                password_hash=pwd_context.hash("auto_bot_password_123"),
+            )
+            db.add(bot)
+            created.append(bot_email)
+
+        await db.commit()
+        return {
+            "status": "ok",
+            "message": f"Created {len(created)} bots",
+            "bots": created
+        }
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(500, f"Failed to initialize bots: {e}")
 
 
 @router.get("/bot-earnings")
