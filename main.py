@@ -413,7 +413,7 @@ async def initialize_bot():
 
 
 async def start_job_bot():
-    """Start job bot as background task - claims and completes available jobs"""
+    """Start job bot(s) as background task - claims and completes available jobs for all bots"""
     try:
         from database import AsyncSessionLocal
         from models import Job, Worker, Payment
@@ -425,16 +425,18 @@ async def start_job_bot():
         while True:
             try:
                 async with AsyncSessionLocal() as session:
-                    # Get bot worker
+                    # Get ALL bot workers (any worker with email containing "bot")
                     bot_result = await session.execute(
-                        select(Worker).where(Worker.email == "bot@pgusa.local")
+                        select(Worker).where(Worker.email.like("%bot%pgusa.local"))
                     )
-                    bot_worker = bot_result.scalar_one_or_none()
+                    bot_workers = bot_result.scalars().all()
 
-                    if not bot_worker:
-                        log.warning("Bot worker not found, skipping cycle")
+                    if not bot_workers:
+                        log.warning("No bot workers found, skipping cycle")
                         await asyncio.sleep(10)
                         continue
+
+                    log.info(f"🤖 Running {len(bot_workers)} bot workers")
 
                     # Get all open jobs
                     result = await session.execute(
@@ -443,39 +445,51 @@ async def start_job_bot():
                     available_jobs = result.scalars().all()
 
                     if available_jobs:
-                        log.info(f"📋 Found {len(available_jobs)} available jobs")
-                        for job in available_jobs[:5]:
-                            try:
-                                # Claim the job
-                                job.status = "matched"
-                                job.worker_id = bot_worker.id
-                                job.paid = True
-                                await session.commit()
-                                log.info(f"✅ CLAIMED: {job.description} (${job.price:.2f})")
+                        log.info(f"📋 Found {len(available_jobs)} available jobs for {len(bot_workers)} bots")
 
-                                # Complete the job after a moment
-                                await asyncio.sleep(2)
-                                job.status = "completed"
-                                job.completed_at = datetime.utcnow()
-                                await session.commit()
+                        # Distribute jobs among available bots
+                        jobs_per_bot = max(1, len(available_jobs) // len(bot_workers))
+                        job_idx = 0
 
-                                # Create payment for bot
-                                payment = Payment(
-                                    id=str(uuid.uuid4()),
-                                    job_id=str(job.id),
-                                    worker_id=str(bot_worker.id),
-                                    client_id=job.client_id,
-                                    gross_amount=job.price * 1.2,
-                                    worker_amount=job.price,
-                                    platform_amount=job.price * 0.2,
-                                    payout_status="pending",
-                                )
-                                session.add(payment)
-                                await session.commit()
-                                log.info(f"💰 Payment created: {job.description} (${job.price:.2f})")
+                        for bot_worker in bot_workers:
+                            for _ in range(jobs_per_bot):
+                                if job_idx >= len(available_jobs):
+                                    break
 
-                            except Exception as e:
-                                log.error(f"Job processing error: {e}")
+                                job = available_jobs[job_idx]
+                                job_idx += 1
+
+                                try:
+                                    # Claim the job
+                                    job.status = "matched"
+                                    job.worker_id = bot_worker.id
+                                    job.paid = True
+                                    await session.commit()
+                                    log.info(f"✅ {bot_worker.email} CLAIMED: {job.description} (${job.price:.2f})")
+
+                                    # Complete the job after a moment
+                                    await asyncio.sleep(2)
+                                    job.status = "completed"
+                                    job.completed_at = datetime.utcnow()
+                                    await session.commit()
+
+                                    # Create payment for bot
+                                    payment = Payment(
+                                        id=str(uuid.uuid4()),
+                                        job_id=str(job.id),
+                                        worker_id=str(bot_worker.id),
+                                        client_id=job.client_id,
+                                        gross_amount=job.price * 1.2,
+                                        worker_amount=job.price,
+                                        platform_amount=job.price * 0.2,
+                                        payout_status="pending",
+                                    )
+                                    session.add(payment)
+                                    await session.commit()
+                                    log.info(f"💰 {bot_worker.email} earned: ${job.price:.2f}")
+
+                                except Exception as e:
+                                    log.error(f"Job processing error for {bot_worker.email}: {e}")
 
                     await asyncio.sleep(10)  # Poll every 10 seconds
             except Exception as e:
