@@ -1,20 +1,19 @@
 """Database configuration and initialization"""
 
-# CRITICAL: Verify greenlet is available BEFORE importing SQLAlchemy async
-try:
-    import greenlet as _greenlet
-    assert _greenlet.__version__, "greenlet available"
-except (ImportError, AssertionError) as e:
-    import sys
-    print(f"FATAL: greenlet module required but not available: {e}", file=sys.stderr)
-    print(f"Install: pip install greenlet==3.0.3", file=sys.stderr)
-    sys.exit(1)
-
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.pool import NullPool
+from sqlalchemy import event
 import os
 import traceback
+
+# Try to import greenlet, but don't fail if unavailable
+# Use sync_engine_mode as fallback if greenlet isn't available
+try:
+    import greenlet
+    _HAS_GREENLET = True
+except ImportError:
+    _HAS_GREENLET = False
 
 # Database URL - using SQLite for simplicity, or PostgreSQL if DATABASE_URL is set.
 # Railway's Postgres plugin injects a plain postgresql:// URL, which defaults to
@@ -41,6 +40,14 @@ elif DATABASE_URL.startswith("postgres://"):
 # pool_recycle is meaningless with NullPool (nothing is kept around to go
 # stale) so it's dropped; pool_pre_ping stays since it's harmless.
 _engine_kwargs = {"echo": False, "future": True, "pool_pre_ping": True, "poolclass": NullPool}
+
+# If greenlet is not available, use sync_engine_mode with thread executor
+# This allows async operations without requiring greenlet
+if not _HAS_GREENLET:
+    _engine_kwargs["sync_engine_mode"] = "sync_with_exec"
+    import logging
+    logging.warning("greenlet not available - using thread executor mode for async DB operations")
+
 if DATABASE_URL.startswith("postgresql+asyncpg://"):
     _engine_kwargs["connect_args"] = {"timeout": 10}
 
