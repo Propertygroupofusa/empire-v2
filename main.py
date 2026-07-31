@@ -776,6 +776,14 @@ if trading_signals is not None:
     except Exception as e:
         log.warning(f"Failed to include trading signals /api alias: {e}")
 
+# Bot earnings and payouts dashboard
+try:
+    from routers import dashboard
+    app.include_router(dashboard.router, tags=["Bot Dashboard"])
+    log.info("✅ Router loaded: /dashboard (bot earnings)")
+except Exception as e:
+    log.warning(f"Failed to load bot dashboard router: {e}")
+
 
 @app.get("/dashboard")
 async def serve_dashboard():
