@@ -352,7 +352,7 @@ async def run_migrations():
 # ── Bot Earnings System ──────────────────────────────────────
 
 async def initialize_bot():
-    """Initialize bot worker with Stripe Connect account"""
+    """Initialize bot workers with Stripe Connect accounts"""
     try:
         from database import AsyncSessionLocal
         from models import Worker
@@ -366,48 +366,42 @@ async def initialize_bot():
             stripe.api_key = stripe_key
 
         async with AsyncSessionLocal() as session:
-            bot_email = "bot@pgusa.local"
-            result = await session.execute(select(Worker).where(Worker.email == bot_email))
-            existing = result.scalar_one_or_none()
+            # Check existing bots
+            result = await session.execute(
+                select(Worker).where(Worker.email.like("%bot%pgusa.local"))
+            )
+            existing_bots = result.scalars().all()
 
-            if not existing:
-                worker = Worker(
-                    email=bot_email,
-                    name="Job Bot",
-                    status="active",
-                    password_hash=pwd_context.hash("auto_bot_password_123"),
-                )
-                session.add(worker)
-                await session.flush()
+            # If no bots exist, create initial fleet of 2
+            if not existing_bots:
+                for i in range(1, 3):
+                    bot_email = f"bot{i if i > 1 else ''}@pgusa.local"
+                    worker = Worker(
+                        email=bot_email,
+                        name=f"Job Bot {i}",
+                        status="active",
+                        password_hash=pwd_context.hash("auto_bot_password_123"),
+                    )
+                    session.add(worker)
+                    await session.flush()
+                    log.info(f"🤖 Bot worker created: {bot_email}")
+
+                    if stripe_key:
+                        try:
+                            account = stripe.Account.create(
+                                type="express",
+                                email=bot_email,
+                                capabilities={"transfers": {"requested": True}},
+                            )
+                            worker.stripe_account_id = account.id
+                            log.info(f"💳 Stripe Connect account created: {account.id}")
+                        except Exception as e:
+                            log.warning(f"Stripe Connect setup failed for {bot_email}: {e}")
+
                 await session.commit()
-                log.info(f"🤖 Bot worker created: {bot_email}")
-
-                if stripe_key:
-                    try:
-                        account = stripe.Account.create(
-                            type="express",
-                            email=bot_email,
-                            capabilities={"transfers": {"requested": True}},
-                        )
-                        worker.stripe_account_id = account.id
-                        await session.commit()
-                        log.info(f"💳 Stripe Connect account created for bot: {account.id}")
-                    except Exception as e:
-                        log.warning(f"Stripe Connect setup failed: {e}")
+                log.info(f"✅ Initialized {len(range(1, 3))} bot workers")
             else:
-                log.info(f"🤖 Bot worker exists: {bot_email}")
-                if not existing.stripe_account_id and stripe_key:
-                    try:
-                        account = stripe.Account.create(
-                            type="express",
-                            email=bot_email,
-                            capabilities={"transfers": {"requested": True}},
-                        )
-                        existing.stripe_account_id = account.id
-                        await session.commit()
-                        log.info(f"💳 Stripe Connect account created for existing bot: {account.id}")
-                    except Exception as e:
-                        log.warning(f"Stripe Connect setup for existing bot failed: {e}")
+                log.info(f"✅ {len(existing_bots)} bot workers already exist")
     except Exception as e:
         log.warning(f"Bot initialization: {e}")
 
