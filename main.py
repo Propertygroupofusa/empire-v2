@@ -597,6 +597,13 @@ async def lifespan(app: FastAPI):
         log.warning(f"Payout processor startup failed: {e}")
 
     try:
+        from bot_autoscaler import auto_scale_bots
+        asyncio.create_task(auto_scale_bots())
+        log.info("📈 Bot auto-scaler started - will create bots based on demand")
+    except Exception as e:
+        log.warning(f"Bot auto-scaler startup failed: {e}")
+
+    try:
         if payee_worker is not None:
             import asyncio
             asyncio.create_task(payee_worker())
