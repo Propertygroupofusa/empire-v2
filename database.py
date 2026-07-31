@@ -1,5 +1,15 @@
 """Database configuration and initialization"""
 
+# CRITICAL: Verify greenlet is available BEFORE importing SQLAlchemy async
+try:
+    import greenlet as _greenlet
+    assert _greenlet.__version__, "greenlet available"
+except (ImportError, AssertionError) as e:
+    import sys
+    print(f"FATAL: greenlet module required but not available: {e}", file=sys.stderr)
+    print(f"Install: pip install greenlet==3.0.3", file=sys.stderr)
+    sys.exit(1)
+
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.pool import NullPool
