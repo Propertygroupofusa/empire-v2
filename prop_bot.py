@@ -94,22 +94,53 @@ MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", str(len(FUTURES))))
 # try_open), a $0.25 underlying move on a $10-$150 fractional position
 # could mean only a few cents of real profit - nowhere near the 50c-$1
 # actually wanted here.
-PROFIT_TARGET_DOLLARS_MILESTONES = [
-    (0,     0.50),
-    (1000,  0.60),
-    (5000,  0.80),
-    (10000, 1.00),
-]
+#
+# THE UNIT BUG THIS REPLACES
+# --------------------------
+# The old version set the profit target in ABSOLUTE DOLLARS ($0.50, rising
+# to $1.00 at $10k equity) while STOP_LOSS_PCT cuts losers at a PERCENTAGE
+# of the position. Two different units on the two sides of the same trade,
+# so the risk:reward ratio was never a fixed number - it drifted with
+# account size, and always against us:
+#
+#     equity   ~position   stop (2%)   target    R:R        breakeven WR
+#     $980     $140        $2.80       $0.50     5.6:1 vs   85%
+#     $5,000   $714        $14.29      $0.80    17.9:1 vs   95%
+#     $10,000  $1,428      $28.57      $1.00    28.6:1 vs   97%
+#
+# Risking $2.80 to make $0.50 needs an ~85% win rate just to break even,
+# and every dollar the account grows made that requirement worse, not
+# better. No entry signal survives that math. This is the single reason
+# the account traded actively for weeks and finished flat.
+#
+# Expressing the target as a PERCENTAGE puts both sides in the same units,
+# so R:R is constant at any account size and the required win rate stops
+# moving:
+#
+#     target 3% vs stop 2%  ->  1.5:1 in our favour  ->  breakeven WR 40%
+PROFIT_TARGET_PCT = float(os.getenv("PROP_PROFIT_TARGET_PCT", "0.03"))
+
+# Absolute floor, in dollars. A position can be as small as
+# MIN_POSITION_NOTIONAL ($10), where 3% is only $0.30 - thin enough that
+# spread and slippage could eat the whole "win". Never exit for less than
+# this regardless of what the percentage works out to.
+MIN_PROFIT_DOLLARS = float(os.getenv("PROP_MIN_PROFIT_DOLLARS", "0.50"))
 
 
-def get_profit_target_dollars(equity):
-    if equity is None:
-        return PROFIT_TARGET_DOLLARS_MILESTONES[0][1]
-    target = PROFIT_TARGET_DOLLARS_MILESTONES[0][1]
-    for threshold, t in PROFIT_TARGET_DOLLARS_MILESTONES:
-        if equity >= threshold:
-            target = t
-    return target
+def get_profit_target_dollars(position_value=None):
+    """Dollar profit target for ONE position, from that position's own size.
+
+    Must be called per-position, not once per cycle: positions are sized in
+    dollars (see size_position) and can differ a lot from each other, so a
+    single cycle-wide number would be wrong for every position but one.
+
+    Falls back to the floor when position value is unknown, which is the
+    conservative direction - it exits earlier rather than holding for a
+    target that may never be reachable.
+    """
+    if position_value is None or position_value <= 0:
+        return MIN_PROFIT_DOLLARS
+    return max(position_value * PROFIT_TARGET_PCT, MIN_PROFIT_DOLLARS)
 
 # Track profitable days for APEX 7-day rule
 profitable_days = []
@@ -570,8 +601,13 @@ async def run_prop_cycle():
         await reconcile_positions_with_broker(session)
 
         equity = await get_account_equity(session)
-        profit_target = get_profit_target_dollars(equity)
-        log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | Profit target: ${profit_target:.2f}/position")
+        # Target is per-position now (it scales with each position's own
+        # size), so it can't be resolved to one number here - see
+        # get_profit_target_dollars at the exit check below.
+        log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | "
+                 f"Target: {PROFIT_TARGET_PCT * 100:.1f}%/position (min ${MIN_PROFIT_DOLLARS:.2f}) | "
+                 f"Stop: {STOP_LOSS_PCT * 100:.1f}% | "
+                 f"R:R {PROFIT_TARGET_PCT / STOP_LOSS_PCT:.2f}:1")
 
         # Tracked and spent-down across this cycle's entries so dollar-based
         # sizing (see try_open/size_position) reflects money already
@@ -602,9 +638,10 @@ async def run_prop_cycle():
         # A long profits as price rises and exits on overbought RSI; a
         # short profits as price falls and exits on oversold RSI. Profit
         # target is checked against the position's actual real dollar
-        # P&L (see PROFIT_TARGET_DOLLARS_MILESTONES) - take the 50c-$1,
-        # don't hold out for a bigger move - and scales up slightly as
-        # the real account grows.
+        # P&L, sized per-position as a percentage of that position's cost
+        # basis (see get_profit_target_dollars) so it stays in the same
+        # units as the percentage stop-loss and the risk:reward ratio
+        # holds at any account size.
         for contract, position in list(open_prop_positions.items()):
             data = scans.get(contract)
             config = FUTURES[contract]
@@ -635,6 +672,11 @@ async def run_prop_cycle():
             # as a real trading desk would run it (cut losers on a hard
             # stop, don't gamble on holding for a bounce that erases it).
             rsi_exit = rsi_signal and unrealized_pnl > 0
+
+            # Sized from THIS position's own cost basis, so the target is
+            # always the same percentage of what's actually at risk here -
+            # which is what keeps R:R fixed against the percentage stop.
+            profit_target = get_profit_target_dollars(entry * qty)
 
             if unrealized_pnl >= profit_target or rsi_exit or stop_hit:
                 reason = "PROFIT TARGET" if unrealized_pnl >= profit_target else ("STOP LOSS" if stop_hit else "RSI")
