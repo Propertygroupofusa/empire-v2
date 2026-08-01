@@ -1,0 +1,33 @@
+name: One-off backtest — prop_bot profit target (throwaway)
+
+# Validation run for PR #122, not part of CI. Triggered by pushes to that
+# PR's branch only - workflow_dispatch would be tidier, but GitHub only
+# exposes dispatch for workflows that already exist on the default branch,
+# and this one deliberately never lands there. Same pattern the previous
+# one-off backtest used for the same reason.
+on:
+  push:
+    branches: ["claude/prop-bot-profit-target-units"]
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (bot module needs these to import)
+        run: pip install -r requirements.txt
+
+      - name: Backtest old vs new profit target on real bars
+        env:
+          # Read-only use: the script fetches historical bars and never
+          # places an order. Free-tier IEX keys are sufficient.
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          BACKTEST_DAYS: "30"
+          BACKTEST_CASH: "980"
+        run: python scripts/backtest_prop_target.py
