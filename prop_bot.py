@@ -142,6 +142,109 @@ def get_profit_target_dollars(position_value=None):
         return MIN_PROFIT_DOLLARS
     return max(position_value * PROFIT_TARGET_PCT, MIN_PROFIT_DOLLARS)
 
+
+# ── ATR-BASED EXITS ──────────────────────────────────────────────────────
+#
+# A single flat 3%/2% is right in UNITS but wrong in SCALE, because the
+# seven proxies do not move alike. DIA drifts a few tenths of a percent in
+# a day; USO and SLV can travel several percent. A flat 3% target is
+# routinely reachable on USO and nearly unreachable on DIA - while the flat
+# 2% stop is reachable on BOTH. So the fixed rule quietly becomes "stop
+# often, target rarely" on exactly the low-volatility symbols.
+#
+# Note what this does and does not buy us. It is NOT a better risk:reward
+# ratio - 2.5x/1.5x ATR is 1.67:1 against the flat rule's 1.5:1, near
+# enough the same. What it buys is REACHABILITY: both levels get sized to
+# what each instrument actually does, so the distribution the arithmetic
+# assumes is the distribution that actually shows up.
+#
+# Default stays "fixed" so merging this changes no live behaviour. Flip
+# PROP_EXIT_MODE=atr only once the backtest says ATR actually wins.
+EXIT_MODE = os.getenv("PROP_EXIT_MODE", "fixed").strip().lower()
+
+ATR_PERIOD = int(os.getenv("PROP_ATR_PERIOD", "14"))
+ATR_STOP_MULT = float(os.getenv("PROP_ATR_STOP_MULT", "1.5"))
+ATR_TARGET_MULT = float(os.getenv("PROP_ATR_TARGET_MULT", "2.5"))
+
+# Guard rails. A freak-quiet stretch can drive ATR toward zero, which would
+# derive a stop so tight that ordinary spread noise closes the position
+# instantly; a volatility spike can drive it wide enough to risk far more
+# per trade than intended. Clamp both ends.
+ATR_MIN_STOP_PCT = float(os.getenv("PROP_ATR_MIN_STOP_PCT", "0.005"))   # 0.5%
+ATR_MAX_STOP_PCT = float(os.getenv("PROP_ATR_MAX_STOP_PCT", "0.05"))    # 5%
+
+
+def compute_atr_pct(bars, period=None):
+    """Average True Range over `period` bars, returned as a FRACTION of the
+    latest close (so it composes with the percentage-based stop/target).
+
+    True range is the widest of: this bar's high-low, and each of the gaps
+    from the previous close - which is what makes it capture overnight and
+    session gaps that a simple high-low range misses.
+
+    Needs the 'h' and 'l' fields. get_price_rsi already fetches them in the
+    same request and previously discarded them; nothing extra is called.
+
+    Returns None when there aren't enough bars or the data is malformed, so
+    callers can fall back to the fixed rule rather than trade on a
+    fabricated number.
+    """
+    period = period or ATR_PERIOD
+    if not bars or len(bars) < period + 1:
+        return None
+    try:
+        trs = []
+        for i in range(1, len(bars)):
+            high, low = float(bars[i]["h"]), float(bars[i]["l"])
+            prev_close = float(bars[i - 1]["c"])
+            trs.append(max(high - low,
+                           abs(high - prev_close),
+                           abs(low - prev_close)))
+        if len(trs) < period:
+            return None
+        atr = sum(trs[-period:]) / period
+        last_close = float(bars[-1]["c"])
+        if last_close <= 0:
+            return None
+        return atr / last_close
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def get_exit_levels(atr_pct=None):
+    """Resolve (stop_pct, target_pct) as fractions, per the active mode.
+
+    Falls back to the fixed pair whenever ATR is unavailable - a data
+    hiccup should degrade to the known-good rule, never to no stop at all.
+    """
+    if EXIT_MODE != "atr" or atr_pct is None or atr_pct <= 0:
+        return STOP_LOSS_PCT, PROFIT_TARGET_PCT
+
+    stop = max(ATR_MIN_STOP_PCT, min(atr_pct * ATR_STOP_MULT, ATR_MAX_STOP_PCT))
+    # Derive the target from the CLAMPED stop, never from raw ATR. Deriving
+    # it from raw ATR looks equivalent and isn't: when a volatility spike
+    # clamps the stop down (12% -> 5%) but leaves the target at 2.5x raw
+    # ATR (20%), R:R silently becomes 4:1 - a stop that's now easy to reach
+    # paired with a target that isn't. That is precisely the "stop often,
+    # target rarely" failure this whole change exists to remove, and it
+    # would have hit hardest on the most volatile symbols. Anchoring to the
+    # clamped stop holds the ratio at both ends.
+    return stop, stop * (ATR_TARGET_MULT / ATR_STOP_MULT)
+
+
+# ── TIME STOP ────────────────────────────────────────────────────────────
+#
+# prop_bot has a rotation path (swap the weakest loser out for a fresh
+# signal) but it only runs when at MAX_POSITIONS - and MAX_POSITIONS
+# defaults to len(FUTURES), so there is never an eighth symbol needing a
+# slot and the path is unreachable. Net effect: a position that goes red
+# and stays red has nothing to close it but the stop, and capital sits
+# parked in it indefinitely while signals on other symbols go unacted.
+#
+# This is the missing third layer: give a loser room to recover, but a
+# bounded amount. 0 disables it.
+MAX_UNDERWATER_CYCLES = int(os.getenv("PROP_MAX_UNDERWATER_CYCLES", "0"))
+
 # Track profitable days for APEX 7-day rule
 profitable_days = []
 daily_pnl = 0.0
@@ -247,7 +350,12 @@ async def get_price_rsi(session, symbol):
             sma10 = sum(closes[-10:]) / 10
             trend = "bullish" if sma5 > sma10 else "bearish"
 
-            return {"price": price, "rsi": round(rsi, 1), "trend": trend}
+            # Same bars, no extra request - the h/l fields were already in
+            # this response and were being discarded.
+            atr_pct = compute_atr_pct(bars)
+
+            return {"price": price, "rsi": round(rsi, 1), "trend": trend,
+                    "atr_pct": atr_pct}
     except Exception as e:
         log.error(f"Price error {symbol}: {e}")
         return None
@@ -657,14 +765,20 @@ async def run_prop_cycle():
             side = position["side"]
             entry = position["entry"]
             qty = position["qty"]
+
+            # Exit levels sized to THIS symbol's own volatility when
+            # PROP_EXIT_MODE=atr, else the flat pair. Falls back to flat
+            # automatically if ATR couldn't be computed this cycle.
+            stop_pct, target_pct = get_exit_levels(data.get("atr_pct"))
+
             if side == "long":
                 unrealized_pnl = (price - entry) * qty
                 rsi_signal = rsi > RSI_SELL_ABOVE or (trend == "bearish" and rsi > 50)
-                stop_hit = price <= entry * (1 - STOP_LOSS_PCT)
+                stop_hit = price <= entry * (1 - stop_pct)
             else:
                 unrealized_pnl = (entry - price) * qty
                 rsi_signal = rsi < RSI_BUY_BELOW or (trend == "bullish" and rsi < 50)
-                stop_hit = price >= entry * (1 + STOP_LOSS_PCT)
+                stop_hit = price >= entry * (1 + stop_pct)
 
             # An RSI reversal only ever takes a real, existing profit off
             # the table early - it never realizes a loss on its own. A
@@ -676,10 +790,22 @@ async def run_prop_cycle():
             # Sized from THIS position's own cost basis, so the target is
             # always the same percentage of what's actually at risk here -
             # which is what keeps R:R fixed against the percentage stop.
-            profit_target = get_profit_target_dollars(entry * qty)
+            profit_target = max(entry * qty * target_pct, MIN_PROFIT_DOLLARS)
 
-            if unrealized_pnl >= profit_target or rsi_exit or stop_hit:
-                reason = "PROFIT TARGET" if unrealized_pnl >= profit_target else ("STOP LOSS" if stop_hit else "RSI")
+            # Time stop: count only cycles where this position is actually
+            # underwater, and reset the moment it goes green, so the count
+            # measures CONSECUTIVE time spent losing rather than age.
+            if unrealized_pnl < 0:
+                position["cycles_underwater"] = position.get("cycles_underwater", 0) + 1
+            else:
+                position["cycles_underwater"] = 0
+            stale = (MAX_UNDERWATER_CYCLES > 0
+                     and position["cycles_underwater"] >= MAX_UNDERWATER_CYCLES)
+
+            if unrealized_pnl >= profit_target or rsi_exit or stop_hit or stale:
+                reason = ("PROFIT TARGET" if unrealized_pnl >= profit_target
+                          else "STOP LOSS" if stop_hit
+                          else "RSI" if rsi_exit else "TIME STOP")
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
 
             await asyncio.sleep(0.3)
