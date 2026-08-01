@@ -162,10 +162,46 @@ def trend_at(hourly, ts):
     return best
 
 
-def simulate(bars_by_symbol, rsi_by_symbol, hourly_by_symbol, mode):
+def atr_pct_series(bars):
+    """Rolling ATR-as-fraction-of-close at every bar, using only bars up to
+    and including i - same no-lookahead rule as the RSI series. Delegates to
+    the real bot.compute_atr_pct so this can't drift from production."""
+    out = [None] * len(bars)
+    window = bot.ATR_PERIOD + 6
+    for i in range(len(bars)):
+        if i + 1 < bot.ATR_PERIOD + 1:
+            continue
+        out[i] = bot.compute_atr_pct(bars[max(0, i + 1 - window):i + 1])
+    return out
+
+
+def exit_levels_for(mode, atr_now):
+    """(stop_pct, target_pct) for the arm under test.
+
+    The ATR arm calls the REAL bot.get_exit_levels, temporarily forcing
+    EXIT_MODE, so the clamps and the fixed-rule fallback under test are the
+    production ones - not a second implementation that could quietly
+    disagree with the code we'd actually ship. Recomputed per bar because
+    production recomputes per cycle.
+    """
+    if mode != "atr":
+        return bot.STOP_LOSS_PCT, bot.PROFIT_TARGET_PCT
+    saved = bot.EXIT_MODE
+    try:
+        bot.EXIT_MODE = "atr"
+        return bot.get_exit_levels(atr_now)
+    finally:
+        bot.EXIT_MODE = saved
+
+
+def simulate(bars_by_symbol, rsi_by_symbol, hourly_by_symbol, atr_by_symbol, mode):
     """Replays run_prop_cycle's Pass 1 (exits) then Pass 2 (entries) over
     every 5-minute timestamp in the sample. `mode` is the ONLY difference
-    between runs: 'old' = absolute-dollar target, 'new' = percentage."""
+    between runs:
+        'old'   absolute-dollar target vs percentage stop (the shipped bug)
+        'fixed' flat 3% target / 2% stop
+        'atr'   both levels scaled to each symbol's own volatility
+    """
     cash = STARTING_CASH
     positions = {}          # symbol -> {"entry", "qty"}
     trades = []
@@ -191,13 +227,17 @@ def simulate(bars_by_symbol, rsi_by_symbol, hourly_by_symbol, mode):
             pos = positions[symbol]
             entry, qty = pos["entry"], pos["qty"]
 
+            stop_pct, target_pct = exit_levels_for(mode, atr_by_symbol[symbol][i])
+
             unrealized = (price - entry) * qty
             rsi_signal = rsi > bot.RSI_SELL_ABOVE or (trend == "bearish" and rsi > 50)
-            stop_hit = price <= entry * (1 - bot.STOP_LOSS_PCT)
+            stop_hit = price <= entry * (1 - stop_pct)
             rsi_exit = rsi_signal and unrealized > 0
 
-            target = (old_profit_target(equity) if mode == "old"
-                      else bot.get_profit_target_dollars(entry * qty))
+            if mode == "old":
+                target = old_profit_target(equity)
+            else:
+                target = max(entry * qty * target_pct, bot.MIN_PROFIT_DOLLARS)
 
             if unrealized >= target or rsi_exit or stop_hit:
                 reason = ("PROFIT TARGET" if unrealized >= target
@@ -285,7 +325,7 @@ def main():
     print(f"  NEW target     {bot.PROFIT_TARGET_PCT * 100:.1f}% of position, "
           f"min ${bot.MIN_PROFIT_DOLLARS:.2f}")
 
-    bars_by_symbol, rsi_by_symbol, hourly_by_symbol = {}, {}, {}
+    bars_by_symbol, rsi_by_symbol, hourly_by_symbol, atr_by_symbol = {}, {}, {}, {}
     for symbol in SYMBOLS:
         bars = fetch_bars(symbol, "5Min", LOOKBACK_DAYS)
         if len(bars) < 100:
@@ -293,29 +333,44 @@ def main():
             continue
         bars_by_symbol[symbol] = bars
         rsi_by_symbol[symbol] = rsi_trend_series([b["c"] for b in bars])
+        atr_by_symbol[symbol] = atr_pct_series(bars)
         hourly_by_symbol[symbol] = hourly_trend_series(fetch_bars(symbol, "1Hour", LOOKBACK_DAYS + 10))
-        print(f"  {symbol}: {len(bars)} 5m bars")
+        live_atr = [a for a in atr_by_symbol[symbol] if a]
+        med = sorted(live_atr)[len(live_atr) // 2] if live_atr else 0
+        print(f"  {symbol}: {len(bars)} 5m bars   median ATR {med * 100:.2f}%")
         time.sleep(0.3)
 
     if not bars_by_symbol:
         print("FAIL: no usable market data fetched.", file=sys.stderr)
         return 1
 
-    old = summarize("OLD  (absolute-dollar target)",
-                    simulate(bars_by_symbol, rsi_by_symbol, hourly_by_symbol, "old"))
-    new = summarize(f"NEW  ({bot.PROFIT_TARGET_PCT * 100:.0f}% target)",
-                    simulate(bars_by_symbol, rsi_by_symbol, hourly_by_symbol, "new"))
+    arms = [
+        ("old",   "OLD    absolute-dollar target (what is live now)"),
+        ("fixed", f"FIXED  {bot.PROFIT_TARGET_PCT * 100:.0f}% target / {bot.STOP_LOSS_PCT * 100:.0f}% stop"),
+        ("atr",   f"ATR    {bot.ATR_TARGET_MULT}x ATR target / {bot.ATR_STOP_MULT}x ATR stop"),
+    ]
+    results = {}
+    for mode, label in arms:
+        results[mode] = summarize(label, simulate(
+            bars_by_symbol, rsi_by_symbol, hourly_by_symbol, atr_by_symbol, mode))
 
-    print("\n  " + "=" * 60)
-    delta = new["final"] - old["final"]
-    print(f"  VERDICT: new rule {'BEATS' if delta > 0 else 'LOSES TO'} old by "
-          f"${abs(delta):,.2f} ({new['return_pct'] - old['return_pct']:+.2f} pts)")
-    print(f"  profit factor  {old['pf']:.2f} -> {new['pf']:.2f}")
-    print(f"  trade count    {old['trades']} -> {new['trades']}")
-    print("  " + "=" * 60)
-    print("\n  NOTE: one sample over one regime. A positive result here means"
-          "\n  the change is not obviously harmful - it is not proof of future"
-          "\n  profit, and this window may not contain a real drawdown.")
+    print("\n  " + "=" * 66)
+    print(f"  {'arm':7} {'final':>10} {'return':>9} {'trades':>7} {'WR':>7} {'PF':>7}")
+    for mode, _ in arms:
+        r = results[mode]
+        print(f"  {mode:7} ${r['final']:>9,.2f} {r['return_pct']:>8.2f}% "
+              f"{r['trades']:>7} {r['wr']:>6.1f}% {r['pf']:>7.2f}")
+
+    best = max(results, key=lambda m: results[m]["final"])
+    print(f"\n  BEST ON THIS SAMPLE: {best}")
+    print("  " + "=" * 66)
+    print("\n  Read the exit-reason mix above before trusting the winner. If")
+    print("  PROFIT TARGET barely appears for an arm, that arm's target was")
+    print("  effectively unreachable and its result is an artifact of the")
+    print("  stop and RSI exits, not of the target being well chosen.")
+    print("\n  One sample over one regime. A win here means a rule is not")
+    print("  obviously harmful - not that it will be profitable, and this")
+    print("  window may contain no real drawdown at all.")
     return 0
 
 
