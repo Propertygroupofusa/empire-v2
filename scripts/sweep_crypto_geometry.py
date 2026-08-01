@@ -122,6 +122,7 @@ def simulate(data, target_pct, stop_pct, atr_mult, entry_fee, exit_fee):
     atr_mult, when given, is (stop_x, target_x) and overrides the fixed pair."""
     cash = STARTING_CASH
     trades = []
+    unclosed = 0
     round_trip = entry_fee + exit_fee
 
     for pair, (candles, rsis, atrs) in data.items():
@@ -160,10 +161,27 @@ def simulate(data, target_pct, stop_pct, atr_mult, entry_fee, exit_fee):
                 cash += net
                 pos = None
 
+        # CRITICAL: mark any still-open position to the final close.
+        #
+        # Without this the sweep reports profit factor = infinity on wide
+        # stops, and it is pure survivorship bias: with a 8-12% stop that
+        # 30 days never reaches, the ONLY exits that can fire are the
+        # profit target and the fee-gated RSI exit - both of which require
+        # a gain. Losers simply stay open and never enter the books, so
+        # every "closed" trade is a winner by construction. The first run
+        # of this script produced 14 configs at PF inf with 100%
+        # out-of-sample survival, which is what a broken metric looks like,
+        # not an edge.
+        if pos is not None:
+            final = candles[-1][4]
+            pct = (final - pos["entry"]) / pos["entry"]
+            trades.append(pos["size"] * (pct - round_trip))
+            unclosed += 1
+
     wins = sum(t for t in trades if t > 0)
     losses = abs(sum(t for t in trades if t <= 0))
     pf = (wins / losses) if losses else (float("inf") if wins else 0.0)
-    return {"pf": pf, "n": len(trades), "net": sum(trades),
+    return {"pf": pf, "n": len(trades), "net": sum(trades), "open_at_end": unclosed,
             "ret": sum(trades) / STARTING_CASH * 100}
 
 
@@ -213,9 +231,10 @@ def main():
         return f"target {r['t']*100:.1f}% / stop {r['s']*100:.0f}%"
 
     print(f"\n  IN-SAMPLE top 10 of {len(rows)}")
-    print(f"  {'config':32} {'PF':>7} {'trades':>7} {'return':>9}")
+    print(f"  {'config':32} {'PF':>7} {'trades':>7} {'open':>5} {'return':>9}")
     for r in rows[:10]:
-        print(f"  {label(r):32} {r['pf']:>7.3f} {r['n']:>7} {r['ret']:>8.2f}%")
+        print(f"  {label(r):32} {r['pf']:>7.3f} {r['n']:>7} "
+              f"{r['open_at_end']:>5} {r['ret']:>8.2f}%")
 
     cleared = [r for r in rows if r["pf"] > 1.0 and r["n"] >= 10]
     print(f"\n  cleared PF 1.0 in-sample (>=10 trades): {len(cleared)} / {len(rows)}")
@@ -226,6 +245,9 @@ def main():
     print(f"  IN-SAMPLE WINNER: {label(best)}")
     print(f"    in-sample      PF {best['pf']:.3f}  {best['n']:>4} trades  {best['ret']:+.2f}%")
     print(f"    OUT-OF-SAMPLE  PF {o['pf']:.3f}  {o['n']:>4} trades  {o['ret']:+.2f}%")
+    if o['pf'] == float('inf') or best['pf'] == float('inf'):
+        print("    !! PF inf means zero losing trades - treat as a broken")
+        print("       metric, not an edge, and investigate before believing it.")
     print(f"    -> {'HELD UP' if o['pf'] > 1.0 else 'COLLAPSED'}")
     print("  " + "=" * 62)
 
