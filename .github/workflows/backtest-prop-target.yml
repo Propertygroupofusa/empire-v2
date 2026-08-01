@@ -44,3 +44,17 @@ jobs:
           BACKTEST_DAYS: "30"
           BACKTEST_CASH: "980"
         run: python scripts/sweep_prop_entries.py
+
+      # DEMO ONLY. Bootstraps the measured out-of-sample trade distribution
+      # into a range of outcomes, because a single backtest number is one
+      # draw and deploying on it is judging a coin from one flip. Also
+      # answers what capital the measured edge would actually require to
+      # hit a daily dollar target. Places no orders.
+      - name: Demo projection (range of outcomes, capital required)
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          BACKTEST_DAYS: "30"
+          BACKTEST_CASH: "980"
+          DEMO_DAILY_TARGET: "1000"
+        run: python scripts/demo_projection.py
