@@ -31,3 +31,16 @@ jobs:
           BACKTEST_DAYS: "30"
           BACKTEST_CASH: "980"
         run: python scripts/backtest_prop_target.py
+
+      # The exit sweep came back with profit factor < 1.0 on all three arms
+      # and RSI as the dominant exit in each - so the exits were not the
+      # binding constraint. This asks the upstream question: does any RSI
+      # threshold produce an edge at all? Split-sample, so the answer can
+      # be "no" rather than "here is the luckiest of 60 draws".
+      - name: Sweep entry thresholds (in-sample select, out-of-sample validate)
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          BACKTEST_DAYS: "30"
+          BACKTEST_CASH: "980"
+        run: python scripts/sweep_prop_entries.py

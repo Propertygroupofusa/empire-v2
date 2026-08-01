@@ -194,7 +194,8 @@ def exit_levels_for(mode, atr_now):
         bot.EXIT_MODE = saved
 
 
-def simulate(bars_by_symbol, rsi_by_symbol, hourly_by_symbol, atr_by_symbol, mode):
+def simulate(bars_by_symbol, rsi_by_symbol, hourly_by_symbol, atr_by_symbol, mode,
+             use_trend_filter=True):
     """Replays run_prop_cycle's Pass 1 (exits) then Pass 2 (entries) over
     every 5-minute timestamp in the sample. `mode` is the ONLY difference
     between runs:
@@ -257,7 +258,7 @@ def simulate(bars_by_symbol, rsi_by_symbol, hourly_by_symbol, atr_by_symbol, mod
             if not sig or sig["rsi"] >= bot.RSI_BUY_BELOW:
                 continue
             # higher-timeframe confluence filter (entries only, as in prod)
-            if trend_at(hourly_by_symbol[symbol], ts) == "DOWN":
+            if use_trend_filter and trend_at(hourly_by_symbol[symbol], ts) == "DOWN":
                 continue
             candidates.append((bot.RSI_BUY_BELOW - sig["rsi"], symbol, bars_by_symbol[symbol][i]["c"]))
 
