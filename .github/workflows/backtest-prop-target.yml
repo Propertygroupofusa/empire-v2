@@ -58,3 +58,17 @@ jobs:
           BACKTEST_CASH: "980"
           DEMO_DAILY_TARGET: "1000"
         run: python scripts/demo_projection.py
+
+      # Crypto side. The live 1.8% target vs 5% stop needs an 85% win rate
+      # net of real fees - and 73.5% even at zero fees, so the geometry is
+      # the larger problem and the order type the smaller one. Sweeps
+      # target x stop plus ATR-scaled levels against real Coinbase candles.
+      # No secrets: Coinbase's candle endpoint is public, and this is the
+      # same source the bot itself reads.
+      - name: Sweep crypto target/stop geometry
+        env:
+          SWEEP_DAYS: "30"
+          SWEEP_CASH: "130"
+          SWEEP_TAKER: "0.004"     # real account fee tier, not the code default
+          SWEEP_MAKER: "0.0025"
+        run: python scripts/sweep_crypto_geometry.py
