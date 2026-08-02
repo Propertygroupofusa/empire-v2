@@ -411,58 +411,73 @@ async def run_migrations():
 # ── Bot Earnings System ──────────────────────────────────────
 
 async def initialize_bot():
-    """Initialize bot workers with Stripe Connect accounts"""
-    try:
-        from database import AsyncSessionLocal
-        from models import Worker
-        from passlib.context import CryptContext
-        from sqlalchemy import select
-        import stripe
+    """Initialize bot workers with Stripe Connect accounts.
 
-        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-        stripe_key = os.getenv("STRIPE_SECRET_KEY")
-        if stripe_key:
-            stripe.api_key = stripe_key
+    Raises on failure. It used to swallow its own exceptions into a
+    warning while the caller logged "Bot worker initialized" regardless,
+    which is how the failure below survived unnoticed for months."""
+    from database import AsyncSessionLocal
+    from models import Worker
+    # bcrypt's own API, not passlib's CryptContext. passlib was never in
+    # requirements.txt, so this import raised ModuleNotFoundError and took
+    # the whole function down before a single worker was created - and it
+    # would not have worked if added, because passlib's bcrypt backend
+    # reads bcrypt.__about__.__version__ which bcrypt removed in 4.x:
+    #
+    #   AttributeError: module 'bcrypt' has no attribute '__about__'
+    #
+    # against the pinned bcrypt==5.0.0. worker_auth.py already hit this
+    # and documented it; reusing its helper rather than adding a fourth
+    # copy of the same two lines.
+    from worker_auth import hash_password
+    from sqlalchemy import select
+    import stripe
 
-        async with AsyncSessionLocal() as session:
-            # Check existing bots
-            result = await session.execute(
-                select(Worker).where(Worker.email.like("%bot%pgusa.local"))
-            )
-            existing_bots = result.scalars().all()
+    stripe_key = os.getenv("STRIPE_SECRET_KEY")
+    if stripe_key:
+        stripe.api_key = stripe_key
 
-            # If no bots exist, create initial fleet of 2
-            if not existing_bots:
-                for i in range(1, 3):
-                    bot_email = f"bot{i if i > 1 else ''}@pgusa.local"
-                    worker = Worker(
-                        email=bot_email,
-                        name=f"Job Bot {i}",
-                        status="active",
-                        password_hash=pwd_context.hash("auto_bot_password_123"),
-                    )
-                    session.add(worker)
-                    await session.flush()
-                    log.info(f"🤖 Bot worker created: {bot_email}")
+    async with AsyncSessionLocal() as session:
+        # Check existing bots
+        result = await session.execute(
+            select(Worker).where(Worker.email.like("%bot%pgusa.local"))
+        )
+        existing_bots = result.scalars().all()
 
-                    if stripe_key:
-                        try:
-                            account = stripe.Account.create(
-                                type="express",
-                                email=bot_email,
-                                capabilities={"transfers": {"requested": True}},
-                            )
-                            worker.stripe_account_id = account.id
-                            log.info(f"💳 Stripe Connect account created: {account.id}")
-                        except Exception as e:
-                            log.warning(f"Stripe Connect setup failed for {bot_email}: {e}")
+        # If no bots exist, create initial fleet of 2
+        if not existing_bots:
+            created = 0
+            for i in range(1, 3):
+                bot_email = f"bot{i if i > 1 else ''}@pgusa.local"
+                worker = Worker(
+                    email=bot_email,
+                    name=f"Job Bot {i}",
+                    status="active",
+                    password_hash=hash_password("auto_bot_password_123"),
+                )
+                session.add(worker)
+                await session.flush()
+                created += 1
+                log.info(f"🤖 Bot worker created: {bot_email}")
 
-                await session.commit()
-                log.info(f"✅ Initialized {len(range(1, 3))} bot workers")
-            else:
-                log.info(f"✅ {len(existing_bots)} bot workers already exist")
-    except Exception as e:
-        log.warning(f"Bot initialization: {e}")
+                if stripe_key:
+                    try:
+                        account = stripe.Account.create(
+                            type="express",
+                            email=bot_email,
+                            capabilities={"transfers": {"requested": True}},
+                        )
+                        worker.stripe_account_id = account.id
+                        log.info(f"💳 Stripe Connect account created: {account.id}")
+                    except Exception as e:
+                        log.warning(f"Stripe Connect setup failed for {bot_email}: {e}")
+
+            await session.commit()
+            # Count what was actually created, not len(range(1, 3)) - that
+            # is the constant 2 regardless of what happened in the loop.
+            log.info(f"✅ Initialized {created} bot workers")
+        else:
+            log.info(f"✅ {len(existing_bots)} bot workers already exist")
 
 
 async def start_job_bot():
@@ -747,7 +762,15 @@ async def lifespan(app: FastAPI):
         await initialize_bot()
         log.info("✅ Bot worker initialized")
     except Exception as e:
-        log.warning(f"Bot initialization failed: {e}")
+        # ERROR with a traceback, not a bare warning. This branch was
+        # unreachable while initialize_bot swallowed its own exceptions,
+        # so "✅ Bot worker initialized" printed even when zero workers
+        # existed - and the only other signal was "No bot workers found,
+        # skipping cycle" 30 seconds later, in a different log line, from
+        # a different task. Nothing connected the two.
+        log.error(f"Bot initialization FAILED - no bot workers will exist, so no "
+                  f"jobs will be claimed and no payments created: "
+                  f"[{type(e).__name__}] {e}", exc_info=True)
 
     try:
         asyncio.create_task(start_job_bot())
