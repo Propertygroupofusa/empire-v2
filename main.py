@@ -562,7 +562,7 @@ async def process_payouts_periodically():
         import stripe
         from database import AsyncSessionLocal
         from models import Payment, Worker
-        from sqlalchemy import select
+        from sqlalchemy import select, update as sa_update
 
         # This loop has never completed a single successful pass in
         # production. Every cycle died at the SELECT below, because
@@ -604,8 +604,19 @@ async def process_payouts_periodically():
         while True:
             try:
                 async with AsyncSessionLocal() as session:
+                    # stripe_transfer_id IS NULL is a second, independent
+                    # guard against paying twice. The idempotency key below
+                    # is the primary one, but Stripe expires keys after 24
+                    # hours - past that window the same key is treated as
+                    # new and would create a second transfer. A payment that
+                    # already carries a transfer id has demonstrably been
+                    # paid, whatever its status column says, so it is never
+                    # a candidate again regardless of elapsed time.
                     result = await session.execute(
-                        select(Payment).where(Payment.payout_status == "pending")
+                        select(Payment).where(
+                            Payment.payout_status == "pending",
+                            Payment.stripe_transfer_id.is_(None),
+                        )
                     )
                     pending = result.scalars().all()
 
@@ -617,23 +628,62 @@ async def process_payouts_periodically():
                             worker = w_result.scalar_one_or_none()
 
                             if worker and worker.stripe_account_id:
+                                # Derived from payment.id, so it is stable
+                                # across retries, restarts and redeploys.
+                                # Replaying this call returns the ORIGINAL
+                                # transfer instead of creating a second one,
+                                # which is what makes the window between
+                                # "money moved" and "database updated"
+                                # survivable rather than expensive.
                                 transfer = stripe.Transfer.create(
                                     amount=int(payment.worker_amount * 100),
                                     currency="usd",
                                     destination=worker.stripe_account_id,
-                                    description=f"Job payout: {payment.job_id}"
+                                    description=f"Job payout: {payment.job_id}",
+                                    idempotency_key=f"payout-{payment.id}",
                                 )
                                 payment.payout_status = "paid"
                                 payment.stripe_transfer_id = transfer.id
                                 payment.paid_at = datetime.utcnow()
+                                # Commit per payment, immediately after the
+                                # transfer. The commit used to sit after the
+                                # whole loop, so one failure discarded the
+                                # "paid" status of every transfer in the
+                                # pass while the transfers stayed real - and
+                                # 30 seconds later all of them were sent
+                                # again. Committing here bounds the exposure
+                                # to a single payment, and the idempotency
+                                # key covers even that one.
+                                await session.commit()
                                 log.info(f"💰 Payout processed: {payment.id} → {worker.email} (${payment.worker_amount})")
                             else:
                                 log.debug(f"Payment {payment.id}: Worker has no Stripe Connect account")
                         except Exception as e:
                             log.error(f"Payout error for {payment.id}: {e}")
-                            payment.payout_status = "failed"
-
-                    await session.commit()
+                            # The session may hold a failed flush, so the
+                            # "failed" mark cannot ride on it - roll back
+                            # first, then write the status through a fresh
+                            # UPDATE. Without the rollback every subsequent
+                            # payment in this pass dies on PendingRollback,
+                            # turning one bad payment into a dead cycle.
+                            #
+                            # Deliberately does NOT touch rows that already
+                            # have a transfer id: if the failure happened
+                            # after Stripe accepted the transfer, the money
+                            # is gone and marking it "failed" would invite
+                            # someone to pay it a second time by hand.
+                            await session.rollback()
+                            try:
+                                await session.execute(
+                                    sa_update(Payment)
+                                    .where(Payment.id == payment.id,
+                                           Payment.stripe_transfer_id.is_(None))
+                                    .values(payout_status="failed")
+                                )
+                                await session.commit()
+                            except Exception as mark_err:
+                                log.error(f"Could not mark {payment.id} failed: {mark_err}")
+                                await session.rollback()
             except Exception as e:
                 log.warning(f"Payout cycle error: {e}")
 
