@@ -57,7 +57,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select
 from database import AsyncSessionLocal
-from models import BotPosition, TradingBotState
+from models import BotPosition, ClosedTrade, TradingBotState
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("crypto_coinbase_bot")
@@ -246,13 +246,47 @@ async def load_open_positions():
         log.error(f"[CRYPTO] Failed to reload open positions from DB: {e}")
 
 
-async def _db_save_open(symbol: str, side: str, entry: float, qty: float):
+async def _db_save_open(symbol: str, side: str, entry: float, qty: float, rsi=None):
+    """Persist the open position AND the RSI that triggered it.
+
+    This bot computes only price and RSI, so RSI is the single feature it
+    can contribute - but a feature recorded is worth more than three
+    discarded into a log line."""
     try:
         async with AsyncSessionLocal() as db:
-            db.add(BotPosition(bot=BOT_NAME, symbol=symbol, side=side, entry_price=entry, qty=qty))
+            db.add(BotPosition(bot=BOT_NAME, symbol=symbol, side=side,
+                               entry_price=entry, qty=qty, entry_rsi=rsi))
             await db.commit()
     except Exception as e:
         log.error(f"[CRYPTO] Failed to persist opened position {symbol}: {e}")
+
+
+async def _db_record_closed(symbol: str, entry: float, qty: float, exit_price: float,
+                            reason: str, pnl: float, pnl_pct: float):
+    """Append the completed round trip, carrying the entry snapshot across.
+
+    Runs BEFORE _db_delete_open, which removes the row holding entry_rsi.
+    Best-effort: a lost training row matters far less than an exception on
+    the close path leaving the DB believing a closed position is open."""
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(BotPosition).where(BotPosition.bot == BOT_NAME,
+                                          BotPosition.symbol == symbol))
+            row = result.scalars().first()
+            opened_at = row.opened_at if row else None
+            hold_hours = ((datetime.utcnow() - opened_at).total_seconds() / 3600) if opened_at else 0.0
+            db.add(ClosedTrade(
+                bot=BOT_NAME, symbol=symbol, side="long",
+                entry_price=entry, qty=qty,
+                entry_rsi=row.entry_rsi if row else None,
+                exit_price=exit_price, exit_reason=reason,
+                pnl=pnl, pnl_pct=pnl_pct, hold_hours=hold_hours,
+                opened_at=opened_at,
+            ))
+            await db.commit()
+    except Exception as e:
+        log.warning(f"[CRYPTO] Could not record closed trade {symbol}: {e}")
 
 
 async def _db_delete_open(symbol: str):
@@ -511,6 +545,9 @@ async def run_crypto_cycle():
                         f"{symbol} | Entry: ${entry:.2f} | Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}\n"
                         f"Reason: {reason}\n\nDashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
                     )
+                    # Before the delete - that row holds entry_rsi.
+                    await _db_record_closed(symbol, entry, qty, price, reason,
+                                            unrealized_pnl, unrealized_pct * 100)
                     open_crypto_positions.pop(symbol, None)
                     await _db_delete_open(symbol)
 
@@ -550,7 +587,7 @@ async def run_crypto_cycle():
             filled = await place_order(session, symbol, "buy", qty, price)
             if filled:
                 open_crypto_positions[symbol] = {"entry": price, "qty": qty}
-                await _db_save_open(symbol, "long", price, qty)
+                await _db_save_open(symbol, "long", price, qty, rsi=rsi)
                 cash_pool -= qty * price
                 send_trade_alert(
                     f"🤖 Crypto bot — BUY {symbol} opened",

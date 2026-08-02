@@ -853,3 +853,88 @@ class BotPosition(Base):
     # reloaded from this table. Nullable so existing rows migrate cleanly;
     # readers treat None as "no peak recorded yet".
     peak_pct = Column(Float, nullable=True)
+
+    # ── Signal snapshot at the moment of entry ───────────────────────────
+    #
+    # Both bots already compute these to DECIDE the trade and then throw
+    # them away - they reach a log line and nothing else. That makes it
+    # impossible to ask afterwards "did entries below RSI 35 do better?"
+    # or "did high-volatility entries lose more?", because the conditions
+    # that caused each trade no longer exist anywhere by the time its
+    # outcome is known.
+    #
+    # Captured here so that when the position closes, ClosedTrade can pair
+    # these inputs with the realised result and every trade becomes one
+    # labelled row. Nullable throughout: positions already open at deploy
+    # time, and any adopted by reconcile_positions_with_broker (which only
+    # learns of a position after the fact and never sees its entry
+    # signals), legitimately have none.
+    entry_rsi = Column(Float, nullable=True)
+    entry_trend = Column(String, nullable=True)      # "bullish" / "bearish"
+    entry_atr_pct = Column(Float, nullable=True)     # ATR as a fraction of price
+
+
+class ClosedTrade(Base):
+    """One completed round trip, with the conditions that caused it.
+
+    Nothing durable records a finished trade today. prop_bot and
+    crypto_coinbase_bot log the close and DELETE the BotPosition row, so
+    the outcome survives only in Railway stdout (which rotates) and in
+    ml_trades.json, which is gitignored AND on Railway's ephemeral disk -
+    wiped on every redeploy. That is why market_brain's ML filter never
+    accumulated a training set: its dataset was being deleted continuously.
+
+    This table is the missing half. Paired with the entry snapshot copied
+    off BotPosition, each row is a supervised training example - features
+    known BEFORE the trade, label known after - which is the minimum needed
+    to answer "which conditions predict wins" from real money rather than
+    from a backtest.
+
+    Deliberately append-only and never deleted. Rows are cheap and the
+    value is entirely in the accumulated history.
+    """
+    __tablename__ = "closed_trades"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot = Column(String, index=True)
+    symbol = Column(String, index=True)
+    side = Column(String)
+
+    # features - all known at entry, before the outcome exists
+    entry_price = Column(Float)
+    entry_rsi = Column(Float, nullable=True)
+    entry_trend = Column(String, nullable=True)
+    entry_atr_pct = Column(Float, nullable=True)
+    qty = Column(Float)
+
+    # label - known only at exit
+    exit_price = Column(Float)
+    exit_reason = Column(String, index=True)   # PROFIT TARGET / STOP LOSS / RSI / TRAIL / TIME STOP
+    pnl = Column(Float, index=True)            # realised dollars, gross of fees
+    pnl_pct = Column(Float)
+    peak_pct = Column(Float, nullable=True)    # best it ever reached, for giveback analysis
+    hold_hours = Column(Float)
+
+    opened_at = Column(DateTime, nullable=True)
+    closed_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "bot": self.bot,
+            "symbol": self.symbol,
+            "side": self.side,
+            "entry_price": self.entry_price,
+            "entry_rsi": self.entry_rsi,
+            "entry_trend": self.entry_trend,
+            "entry_atr_pct": self.entry_atr_pct,
+            "qty": self.qty,
+            "exit_price": self.exit_price,
+            "exit_reason": self.exit_reason,
+            "pnl": self.pnl,
+            "pnl_pct": self.pnl_pct,
+            "peak_pct": self.peak_pct,
+            "hold_hours": self.hold_hours,
+            "opened_at": self.opened_at.isoformat() if self.opened_at else None,
+            "closed_at": self.closed_at.isoformat() if self.closed_at else None,
+        }
