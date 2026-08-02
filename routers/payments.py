@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update as sa_update
 from database import get_db
 from models import Payment, Worker, Job
 import stripe
@@ -30,6 +30,32 @@ else:
 # invocation pays it again. Gating only the background loop would leave a
 # public POST able to do the thing the flag exists to prevent.
 PAYOUTS_ENABLED = os.getenv("PAYOUTS_ENABLED", "false").strip().lower() == "true"
+
+
+async def _mark_failed(db: AsyncSession, payment_id: str):
+    """Record a payout failure without trusting the current session state.
+
+    A failed Stripe call can leave the session holding a failed flush, so
+    mutating the ORM object and committing would raise PendingRollbackError
+    and take down every remaining payment in the request. Roll back first,
+    then write through a standalone UPDATE.
+
+    The stripe_payout_id IS NULL condition is the important part: if Stripe
+    accepted the payout and the failure happened afterwards, the money has
+    already left, and marking that row "failed" would invite someone to pay
+    it a second time by hand.
+    """
+    await db.rollback()
+    try:
+        await db.execute(
+            sa_update(Payment)
+            .where(Payment.id == payment_id, Payment.stripe_payout_id.is_(None))
+            .values(payout_status="failed")
+        )
+        await db.commit()
+    except Exception as e:
+        log.error(f"Could not mark payment {payment_id} failed: {e}")
+        await db.rollback()
 
 
 @router.get("/bot/earnings", summary="Bot worker earnings dashboard")
@@ -146,9 +172,15 @@ async def process_pending_payouts(db: AsyncSession = Depends(get_db)):
         }
 
     try:
-        # Get all pending payments
+        # stripe_payout_id IS NULL is the backstop for Stripe's 24h
+        # idempotency-key expiry: past that window the same key is treated
+        # as new, but a payment already carrying a payout id has provably
+        # been paid and must never be a candidate again.
         result = await db.execute(
-            select(Payment).where(Payment.payout_status == "pending")
+            select(Payment).where(
+                Payment.payout_status == "pending",
+                Payment.stripe_payout_id.is_(None),
+            )
         )
         pending_payments = result.scalars().all()
 
@@ -177,6 +209,12 @@ async def process_pending_payouts(db: AsyncSession = Depends(get_db)):
                 # Create Stripe payout
                 # Note: This uses direct API call; for production with Stripe Connect,
                 # you'd use connected account IDs instead of bank transfer
+                # Stable across retries and restarts, so replaying this
+                # call returns the ORIGINAL payout rather than issuing a
+                # second one. Namespaced apart from the background loop's
+                # "payout-" keys: these are different Stripe operations on
+                # the same payment, and sharing a key would make whichever
+                # ran second silently return the other's object.
                 payout = stripe.Payout.create(
                     amount=int(payment.worker_amount * 100),  # Convert to cents
                     currency="usd",
@@ -185,7 +223,8 @@ async def process_pending_payouts(db: AsyncSession = Depends(get_db)):
                         "payment_id": payment.id,
                         "worker_id": payment.worker_id,
                         "worker_email": worker.email,
-                    }
+                    },
+                    idempotency_key=f"manual-payout-{payment.id}",
                 )
 
                 # Update payment record
@@ -198,11 +237,18 @@ async def process_pending_payouts(db: AsyncSession = Depends(get_db)):
             except stripe.error.StripeError as e:
                 failed += 1
                 log.error(f"Payment {payment.id}: Stripe error: {e}")
-                payment.payout_status = "failed"
-                await db.commit()
+                # Roll back before marking, then write through a fresh
+                # UPDATE - the session may be carrying a failed flush, and
+                # without the rollback every remaining payment in this
+                # request dies on PendingRollbackError. Skips rows that
+                # already have a payout id: if Stripe accepted the payout
+                # and the failure came later, the money is gone and
+                # "failed" would invite a manual re-pay.
+                await _mark_failed(db, payment.id)
             except Exception as e:
                 failed += 1
                 log.error(f"Payment {payment.id}: Error: {e}")
+                await _mark_failed(db, payment.id)
 
         return {
             "status": "ok",
