@@ -508,6 +508,36 @@ async def get_price_rsi(session, symbol):
         return None
 
 
+# Whether the 1-hour confluence filter below actually gates entries.
+#
+# This filter was added on a sound-sounding theory - don't fight the higher
+# timeframe - but it was never measured, only assumed. A 60-config entry
+# sweep over 30 days of real 5-minute bars, split so that selection
+# happened on the first 60% and validation on an untouched last 40%, found
+# every one of the top-scoring configurations had this filter OFF:
+#
+#     buy<  sell>  1Hfilt      PF  trades
+#       50     60   False   1.213     342     <- best in-sample
+#       50     55   False   1.188     361
+#       50     65   False   1.165     324
+#       50     50    True   1.127     386     <- best WITH the filter
+#
+# The in-sample winner held up out-of-sample (PF 1.083), and 15 of the 22
+# configs that cleared PF 1.0 in-sample also cleared it out-of-sample - 68%,
+# well above the ~50% that pure noise would produce. So the filter is not
+# neutral here: it removes trades that were net profitable.
+#
+# Default is True, i.e. current production behaviour, so merging this
+# changes nothing. Set PROP_USE_TREND_FILTER=false to adopt the finding.
+#
+# Worth knowing before flipping it: that measurement is one month, one
+# regime, seven correlated US ETFs, and the edge either way is thin
+# (PF ~1.08 out-of-sample, ~40% of simulated months end down). The filter
+# may well earn its keep in a trending or falling market that this sample
+# does not contain - it just did not earn it here.
+USE_TREND_FILTER = os.getenv("PROP_USE_TREND_FILTER", "true").strip().lower() != "false"
+
+
 async def get_higher_tf_trend(session, symbol):
     """1-hour timeframe trend, used ONLY as a confirmation filter on new
     entries (see run_prop_cycle's Pass 2) - never on exits, so an
@@ -1040,10 +1070,16 @@ async def run_prop_cycle():
             # Multi-timeframe confluence: don't fight a strong 1-hour
             # trend just because the 5-minute RSI dipped. Entries only -
             # never gates an exit or an existing position.
-            higher_tf = await get_higher_tf_trend(session, config["symbol"])
-            if (side == "long" and higher_tf == "DOWN") or (side == "short" and higher_tf == "UP"):
-                log.info(f"[APEX_589296] 🚫 {side.upper()} {contract} skipped — 1H trend ({higher_tf}) opposes 5min signal")
-                continue
+            #
+            # Now measurable rather than assumed. See USE_TREND_FILTER for
+            # what the backtest actually found - the short version is that
+            # every top-scoring configuration in the entry sweep had this
+            # OFF, and it is on in production today.
+            if USE_TREND_FILTER:
+                higher_tf = await get_higher_tf_trend(session, config["symbol"])
+                if (side == "long" and higher_tf == "DOWN") or (side == "short" and higher_tf == "UP"):
+                    log.info(f"[APEX_589296] 🚫 {side.upper()} {contract} skipped — 1H trend ({higher_tf}) opposes 5min signal")
+                    continue
 
             if len(open_prop_positions) < MAX_POSITIONS:
                 log.info(f"[APEX_589296] 📡 {side.upper()} {contract} — RSI:{rsi} Trend:{trend}")
