@@ -542,14 +542,47 @@ async def initialize_bot():
 
 
 async def start_job_bot():
-    """Start job bot(s) as background task - claims and completes available jobs for all bots"""
+    """DEMO ONLY - off unless DEMO_JOB_BOT_ENABLED=true.
+
+    Claims jobs, marks them complete two seconds later, and books a
+    payment. It is a demo of the marketplace mechanics, not the
+    marketplace: no notarization actually happens.
+
+    WHY IT IS GATED
+    ---------------
+    It selects on `Job.status == "requested"` with NO filter on `paid`,
+    and then sets `job.paid = True` itself. The real notarization flow
+    depends on that flag: routers/jobs.py opens a job with paid=False and
+    routes the client to Stripe checkout, and notary_bot.py plus
+    POST /{job_id}/match both refuse to match a job that is not paid.
+    This loop bypasses that gate and overwrites the flag.
+
+    So a real customer submitting a notarization request would have their
+    job claimed within 10 seconds - before they entered a card - stamped
+    paid, marked completed 2 seconds later, and turned into a payout
+    obligation for the full price. No work performed, no money collected.
+
+    That was harmless only because two other bugs kept it inert: there
+    were no bot workers (passlib, #129) and no jobs (nothing creates them
+    but real intake and a seeder nothing runs). #129 and #131 removed the
+    first protection, so this needs a deliberate one.
+
+    Turning it on is safe when the only jobs in the table came from
+    seed_bot_jobs.py. It is not safe while real client intake is open."""
+    if os.getenv("DEMO_JOB_BOT_ENABLED", "false").strip().lower() != "true":
+        log.info("Demo job bot disabled (DEMO_JOB_BOT_ENABLED not set to true) "
+                 "- jobs will not be auto-claimed or auto-completed")
+        return
+
     try:
         from database import AsyncSessionLocal
         from models import Job, Worker, Payment
         from sqlalchemy import select
         import uuid
 
-        log.info("🚀 Job Bot starting - polling for work...")
+        log.warning("🚀 Demo Job Bot ARMED - DEMO_JOB_BOT_ENABLED=true. It will "
+                    "claim ANY job in 'requested' status, including unpaid real "
+                    "client jobs, mark it paid and completed, and book a payout.")
 
         while True:
             try:
