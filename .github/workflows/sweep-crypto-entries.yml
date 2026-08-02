@@ -1,0 +1,32 @@
+name: One-off sweep — crypto entry signals (throwaway)
+
+# Research run, not CI. Triggered by pushes to this PR's branch only -
+# workflow_dispatch would be tidier, but GitHub only exposes dispatch for
+# workflows already on the default branch, and this one deliberately
+# never lands there. Same pattern the previous one-off sweeps used.
+#
+# Exists because Coinbase's public candle API is unreachable from the
+# agent environment (network policy denies api.exchange.coinbase.com),
+# and a GitHub runner has open egress.
+on:
+  push:
+    branches: ["claude/crypto-entry-sweep"]
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The sweep is deliberately dependency-free - stdlib only, no
+      # requirements.txt install. It reads public candles and does
+      # arithmetic; pulling in the whole app would only add failure modes.
+      - name: Sweep entry signals (forward returns vs unconditional baseline)
+        env:
+          SWEEP_DAYS: "30"
+          SWEEP_TAKER: "0.004"     # real account fee tier, not the code default
+        run: python scripts/sweep_crypto_entries.py
