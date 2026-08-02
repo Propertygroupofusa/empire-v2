@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
-from sqlalchemy import text, inspect, String
+from sqlalchemy import text, inspect, String, Enum as SAEnum
 from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from datetime import datetime
 import os
@@ -290,35 +290,46 @@ async def run_migrations():
     Worker in that same PR (#70), not just Worker, since any of them
     could have the same kind of pre-existing-table drift.
 
-    Model-driven (iterates each model's __table__.columns) rather than a
-    manually maintained list of column names/types, specifically so this
-    doesn't only patch the columns anyone remembered to add here - it
-    catches ANY drift between the ORM model and the real table, present
-    or future. Also dialect-agnostic (SQLAlchemy's inspector, not raw
-    SQLite PRAGMA), so it actually works on Postgres - production."""
-    from models import Worker, Client, Job, Booking, TradingBotState, BotPosition, ClosedTrade
+    Model-driven (iterates each table's columns) rather than a manually
+    maintained list of column names/types, specifically so this doesn't
+    only patch the columns anyone remembered to add here - it catches ANY
+    drift between the ORM model and the real table, present or future.
+    Also dialect-agnostic (SQLAlchemy's inspector, not raw SQLite PRAGMA),
+    so it actually works on Postgres - production.
+
+    The set of TABLES is now derived the same way: every table registered
+    on Base.metadata, not a hand-picked tuple. The tuple was the actual
+    bug. create_all (database.py) creates tables that do not exist yet,
+    but it never adds a column to a table that already exists - so a new
+    field on any pre-existing table is invisible to the real table unless
+    it is migrated HERE, and every write then fails with "column does not
+    exist". Two separate outages came from a model being absent from that
+    tuple: bot_positions.peak_pct, and then payments.stripe_payout_id,
+    which errored the payout cycle on every pass. Enumerating the registry
+    means adding a model can no longer silently opt out of migration."""
+    import models  # noqa: F401  (registers every model on Base.metadata)
+    from database import Base
+
+    # Counters exist so the run reports what it DID, not just that it ran.
+    # Both outages so far were invisible in the logs: nothing announced that
+    # payments was never considered, because a table absent from the old
+    # tuple produced no output at all. Silence read exactly like success.
+    scanned = added = converted = failed = 0
 
     async with engine.begin() as conn:
-        # BotPosition and ClosedTrade included deliberately. create_all
-        # (database.py) creates tables that do not exist yet, but it never
-        # adds a column to a table that already exists - and bot_positions
-        # has existed since positions were first persisted. So a new field
-        # on BotPosition is invisible to the real table unless it is
-        # migrated HERE, and every insert then fails with "column does not
-        # exist", silently stopping position persistence altogether. That
-        # is exactly what peak_pct would have done.
-        for model in (Worker, Client, Job, Booking, TradingBotState,
-                      BotPosition, ClosedTrade):
-            table_name = model.__tablename__
+        for table in Base.metadata.sorted_tables:
+            table_name = table.name
             try:
                 existing_columns = await conn.run_sync(
                     lambda sync_conn, t=table_name: {c["name"]: c["type"] for c in inspect(sync_conn).get_columns(t)}
                 )
             except Exception as e:
                 log.warning(f"Migration: could not inspect {table_name} table columns: {e}")
+                failed += 1
                 continue
+            scanned += 1
 
-            for column in model.__table__.columns:
+            for column in table.columns:
                 if column.name not in existing_columns:
                     try:
                         ddl_type = column.type.compile(dialect=conn.dialect)
@@ -329,8 +340,19 @@ async def run_migrations():
                         # has rows, which is exactly the scenario this exists for.
                         await conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN "{column.name}" {ddl_type}'))
                         log.info(f"Migration OK: {table_name}.{column.name}")
+                        added += 1
                     except Exception as e:
-                        log.debug(f"Migration skip {table_name}.{column.name}: {e}")
+                        # WARNING, not debug. Reaching here means the column
+                        # is genuinely absent from the real table AND the
+                        # ALTER to add it failed - so every write touching
+                        # that column will now fail, which is precisely the
+                        # payments/bot_positions outage. At debug level that
+                        # never appears in Railway's logs, so the migration
+                        # would report itself as fine while leaving the
+                        # column missing.
+                        log.warning(f"Migration FAILED {table_name}.{column.name}: "
+                                    f"[{type(e).__name__}] {e}")
+                        failed += 1
                     continue
 
                 # Type drift, not just missing-column drift: confirmed live
@@ -348,14 +370,42 @@ async def run_migrations():
                 # own "status" columns from the same era and could have the
                 # identical drift (e.g. routers/bookings.py already filters
                 # on Booking.status == status the same way).
-                if isinstance(column.type, String) and isinstance(existing_columns[column.name], PGEnum):
+                #
+                # SAEnum is excluded, and that exclusion is load-bearing now
+                # that this loop covers every table instead of four.
+                # sqlalchemy.Enum SUBCLASSES String, so isinstance(...,
+                # String) is True for a column the model declares as
+                # Enum(SomePyEnum) - and such a column is SUPPOSED to be a
+                # native PG enum in the database. Without this guard the
+                # widened loop would "fix" sales_leads.source,
+                # sales_leads.status and sales_outreach.outreach_type by
+                # converting three deliberately-enum columns to VARCHAR:
+                # a destructive change, applied to exactly the columns where
+                # model and database already agree. The rule this encodes is
+                # "model says plain string, database says enum", not
+                # "database says enum".
+                if (isinstance(column.type, String)
+                        and not isinstance(column.type, SAEnum)
+                        and isinstance(existing_columns[column.name], PGEnum)):
                     try:
                         await conn.execute(text(
                             f'ALTER TABLE {table_name} ALTER COLUMN "{column.name}" TYPE VARCHAR USING "{column.name}"::text'
                         ))
                         log.info(f"Migration OK: {table_name}.{column.name} converted from enum to VARCHAR")
+                        converted += 1
                     except Exception as e:
-                        log.debug(f"Migration skip {table_name}.{column.name} type fix: {e}")
+                        log.warning(f"Migration FAILED {table_name}.{column.name} type fix: "
+                                    f"[{type(e).__name__}] {e}")
+                        failed += 1
+
+    # One line that is always emitted, including on a clean no-op run. This
+    # is the line to grep for in Railway after a deploy: "tables=26" proves
+    # the registry-wide sweep actually happened, and failed=0 proves nothing
+    # was left broken. A deploy where this line is missing entirely means
+    # run_migrations raised before finishing - main.py catches that and logs
+    # "Migrations failed", which is easy to miss among startup noise.
+    log.info(f"Migration summary: tables={scanned} columns_added={added} "
+             f"enum_conversions={converted} failures={failed}")
 
 
 # ── Bot Earnings System ──────────────────────────────────────
@@ -504,12 +554,43 @@ async def start_job_bot():
 
 
 async def process_payouts_periodically():
-    """Process pending payouts every 30 seconds"""
+    """Process pending payouts every 30 seconds.
+
+    OFF BY DEFAULT - set PAYOUTS_ENABLED=true to arm. See the note below
+    before doing that."""
     try:
         import stripe
         from database import AsyncSessionLocal
         from models import Payment, Worker
         from sqlalchemy import select
+
+        # This loop has never completed a single successful pass in
+        # production. Every cycle died at the SELECT below, because
+        # select(Payment) emits every mapped column and
+        # payments.stripe_payout_id did not exist on the real table - the
+        # "Payout cycle error" repeating every 30s in Railway. That failure
+        # happened BEFORE stripe.Transfer.create, so no money ever moved,
+        # and the broken schema was the only thing holding it back.
+        #
+        # Repairing the migration removes that accidental safety, so the
+        # loop needs a deliberate one. What it would be armed into:
+        #
+        #   - session.commit() is OUTSIDE the per-payment loop, so one
+        #     failed commit loses the "paid" status of EVERY transfer in
+        #     that pass while the transfers themselves are real and final
+        #   - Transfer.create carries no idempotency key
+        #   - rows therefore stay "pending", and 30 seconds later the same
+        #     payments are transferred again, unbounded
+        #
+        # A redeploy mid-loop is enough to trigger it. Idempotency keys and
+        # per-payment commits are the actual fix and are being handled
+        # separately; until that lands this stays off, so that enabling
+        # payouts is a decision someone makes rather than a side effect of
+        # fixing an unrelated schema bug.
+        if os.getenv("PAYOUTS_ENABLED", "false").strip().lower() != "true":
+            log.info("Payout processor disabled (PAYOUTS_ENABLED not set to true) "
+                     "- no Stripe transfers will be attempted")
+            return
 
         stripe_key = os.getenv("STRIPE_SECRET_KEY")
         if not stripe_key:
@@ -517,6 +598,8 @@ async def process_payouts_periodically():
             return
 
         stripe.api_key = stripe_key
+        log.warning("Payout processor ARMED - PAYOUTS_ENABLED=true, real Stripe "
+                    "transfers will be attempted every 30s")
 
         while True:
             try:

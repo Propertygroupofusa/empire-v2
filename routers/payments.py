@@ -22,6 +22,15 @@ else:
     STRIPE_AVAILABLE = False
     log.warning("STRIPE_SECRET_KEY not configured - automatic payouts disabled")
 
+# Same gate as the background payout loop in main.py, and for the same
+# reason. This endpoint reaches Stripe by a different call
+# (Payout.create rather than Transfer.create) but has the identical
+# unguarded shape: money moves first, then the row is updated, and a
+# failure between the two leaves the payment "pending" so the next
+# invocation pays it again. Gating only the background loop would leave a
+# public POST able to do the thing the flag exists to prevent.
+PAYOUTS_ENABLED = os.getenv("PAYOUTS_ENABLED", "false").strip().lower() == "true"
+
 
 @router.get("/bot/earnings", summary="Bot worker earnings dashboard")
 async def bot_earnings(db: AsyncSession = Depends(get_db)):
@@ -121,6 +130,15 @@ async def worker_earnings(worker_id: str, db: AsyncSession = Depends(get_db)):
 @router.post("/process-pending-payouts", summary="Process pending payouts via Stripe")
 async def process_pending_payouts(db: AsyncSession = Depends(get_db)):
     """Process all pending payouts - can be called manually or by scheduler"""
+    if not PAYOUTS_ENABLED:
+        return {
+            "status": "disabled",
+            "message": ("Payouts are disabled. Set PAYOUTS_ENABLED=true to arm. "
+                        "Pending idempotency-key and per-payment-commit fixes - "
+                        "without them a failure between Stripe and the database "
+                        "leaves the payment pending and it is paid again.")
+        }
+
     if not STRIPE_AVAILABLE:
         return {
             "status": "disabled",
