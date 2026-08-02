@@ -436,10 +436,191 @@ def size_position(cash_pool_remaining, slots_remaining, price):
     return qty if qty > 0 else None
 
 
-async def place_order(session, symbol, side, qty, price):
+# Maker vs taker. Coinbase charges 0.40% taker and 0.25% maker on this
+# tier, so routing both legs as maker takes the round trip from 0.80% to
+# 0.50%. On a measured edge of roughly 0.2-0.4% that 0.30% is not a
+# refinement - it is most of the difference between negative and
+# marginally positive.
+#
+# Off by default. A maker order is a resting limit that may simply never
+# fill, and that failure mode is not symmetric between the two sides:
+# see maker_allowed() below.
+ORDER_MODE = os.getenv("CRYPTO_ORDER_MODE", "taker").strip().lower()
+MAKER_FILL_TIMEOUT_S = float(os.getenv("CRYPTO_MAKER_FILL_TIMEOUT", "60"))
+# Clamped above zero deliberately. The fill loop advances its own clock by
+# this value, so a zero or negative interval would never reach the timeout -
+# it would spin forever, polling Coinbase as fast as the event loop allows
+# until the rate limiter cut it off. Found by setting it to 0 in a test and
+# watching the process hang.
+MAKER_POLL_INTERVAL_S = max(0.5, float(os.getenv("CRYPTO_MAKER_POLL_SECONDS", "5")))
+
+
+def maker_allowed(side: str, reason: str = "") -> bool:
+    """Whether this specific order may rest as a maker.
+
+    An unfilled BUY costs nothing - no position is opened, no risk is
+    taken, and the bot simply tries again next cycle. Skipping an entry
+    is free.
+
+    An unfilled SELL is a different animal: the position stays open and
+    the exit did not happen. For a profit-target or RSI exit that is
+    merely annoying - the position is in profit and can be sold next
+    cycle. For a STOP LOSS it is unacceptable. A stop that might not fill
+    is not a stop, and posting one behind the market while the price runs
+    away from it is precisely how a small loss becomes a large one. Stops
+    always cross the spread and pay the taker fee, which is what the fee
+    is for.
+    """
+    if ORDER_MODE != "maker":
+        return False
+    if side == "sell" and reason == "STOP LOSS":
+        return False
+    return True
+
+
+async def get_best_quote(session, symbol):
+    """(best_bid, best_ask) from the level-1 book, or (None, None)."""
+    product_id = _to_product_id(symbol)
+    path = f"/api/v3/brokerage/product_book?product_id={product_id}&limit=1"
+    try:
+        async with session.get(COINBASE_BASE_URL + path,
+                               headers=_auth_headers("GET", path)) as r:
+            if r.status != 200:
+                return None, None
+            book = (await r.json()).get("pricebook", {})
+            bids, asks = book.get("bids") or [], book.get("asks") or []
+            bid = float(bids[0]["price"]) if bids else None
+            ask = float(asks[0]["price"]) if asks else None
+            return bid, ask
+    except Exception as e:
+        log.warning(f"[CRYPTO] Could not read book for {symbol}: {e}")
+        return None, None
+
+
+async def _order_filled_size(session, order_id):
+    """(status, filled_base_size) for an order, or (None, 0.0)."""
+    path = f"/api/v3/brokerage/orders/historical/{order_id}"
+    try:
+        async with session.get(COINBASE_BASE_URL + path,
+                               headers=_auth_headers("GET", path)) as r:
+            if r.status != 200:
+                return None, 0.0
+            o = (await r.json()).get("order", {})
+            return o.get("status"), float(o.get("filled_size") or 0.0)
+    except Exception as e:
+        log.warning(f"[CRYPTO] Could not read order {order_id}: {e}")
+        return None, 0.0
+
+
+async def _cancel_order(session, order_id):
+    path = "/api/v3/brokerage/orders/batch_cancel"
+    try:
+        async with session.post(COINBASE_BASE_URL + path,
+                                headers=_auth_headers("POST", path),
+                                json={"order_ids": [order_id]}) as r:
+            return r.status in (200, 201)
+    except Exception as e:
+        log.warning(f"[CRYPTO] Could not cancel order {order_id}: {e}")
+        return False
+
+
+async def place_maker_order(session, symbol, side, qty):
+    """Rest a post-only limit at the near touch and wait for it to fill.
+
+    Returns True ONLY on a confirmed fill. This matters more than it
+    looks: every caller treats a True return as "the position changed",
+    recording an open position or booking a realised P&L. A maker order
+    that is merely ACCEPTED has not traded anything, so returning True on
+    acceptance would have the bot record a position it does not own and
+    later try to sell coins that were never bought.
+
+    post_only makes Coinbase reject the order outright rather than cross
+    the spread, which is what guarantees the maker fee - the order can
+    fail to be maker, but it can never silently become a taker.
+
+    Bounded wait, then cancel. Partial fills are treated as no fill and
+    cancelled: the remainder would otherwise sit on the book unmanaged,
+    and the caller's accounting assumes all-or-nothing on `qty`.
+    """
+    product_id = _to_product_id(symbol)
+    bid, ask = await get_best_quote(session, symbol)
+    # BUY rests at the bid, SELL rests at the ask - at the near touch, so
+    # it is first in the queue without crossing.
+    limit_price = bid if side == "buy" else ask
+    if not limit_price:
+        log.warning(f"[CRYPTO] No book for {symbol}, falling back to taker")
+        return None            # None = caller should retry as taker
+
+    path = "/api/v3/brokerage/orders"
+    order = {
+        "client_order_id": str(uuid.uuid4()),
+        "product_id": product_id,
+        "side": side.upper(),
+        "order_configuration": {"limit_limit_gtc": {
+            "base_size": f"{qty:.8f}",
+            "limit_price": f"{limit_price:.2f}",
+            "post_only": True,
+        }},
+    }
+    try:
+        async with session.post(COINBASE_BASE_URL + path,
+                                headers=_auth_headers("POST", path),
+                                json=order) as r:
+            result = await r.json()
+            if r.status not in (200, 201) or not result.get("success", True):
+                log.warning(f"[CRYPTO] Maker {side} {symbol} rejected "
+                            f"(post_only would have crossed?): "
+                            f"{result.get('error_response', result)}")
+                return None    # let the caller decide about taker
+            order_id = (result.get("success_response") or {}).get("order_id")
+    except Exception as e:
+        log.error(f"[CRYPTO] Maker order error: {e}")
+        return None
+
+    if not order_id:
+        return None
+
+    log.info(f"[CRYPTO] Maker {side.upper()} {qty} {symbol} resting @ "
+             f"${limit_price:.2f} - waiting up to {MAKER_FILL_TIMEOUT_S:.0f}s")
+    waited = 0.0
+    while waited < MAKER_FILL_TIMEOUT_S:
+        await asyncio.sleep(MAKER_POLL_INTERVAL_S)
+        waited += MAKER_POLL_INTERVAL_S
+        status, filled = await _order_filled_size(session, order_id)
+        if status == "FILLED" and filled > 0:
+            log.info(f"✅ CRYPTO TRADE (maker) | {side.upper()} {filled} {symbol} "
+                     f"@ ${limit_price:.2f} - saved the taker spread")
+            return True
+        if status in ("CANCELLED", "EXPIRED", "FAILED"):
+            log.info(f"[CRYPTO] Maker {side} {symbol} ended {status} without filling")
+            return False
+
+    await _cancel_order(session, order_id)
+    log.info(f"[CRYPTO] Maker {side} {symbol} did not fill in "
+             f"{MAKER_FILL_TIMEOUT_S:.0f}s - cancelled")
+    return False
+
+
+async def place_order(session, symbol, side, qty, price, reason=""):
     """Coinbase Advanced Trade market orders: BUY sizes by dollar amount
     (quote_size), SELL sizes by coin amount (base_size) - unlike Alpaca,
     which takes qty for both sides."""
+    if maker_allowed(side, reason):
+        maker_result = await place_maker_order(session, symbol, side, qty)
+        if maker_result is True:
+            return True
+        if maker_result is False:
+            # Rested and did not fill. For a BUY that is a free miss - do
+            # NOT chase with a taker order, because paying 0.40% to force
+            # an entry undoes the entire reason for being here. For a
+            # non-stop SELL the position is in profit and can wait for the
+            # next cycle.
+            return False
+        # maker_result is None: could not even place (no book, or
+        # post_only rejected). Fall through to taker rather than silently
+        # skipping the order.
+        log.info(f"[CRYPTO] Falling back to taker for {side} {symbol}")
+
     product_id = _to_product_id(symbol)
     path = "/api/v3/brokerage/orders"
     order_config = (
@@ -535,7 +716,7 @@ async def run_crypto_cycle():
 
             if target_hit or rsi_exit or stop_hit:
                 reason = "PROFIT TARGET" if target_hit else ("STOP LOSS" if stop_hit else "RSI")
-                filled = await place_order(session, symbol, "sell", qty, price)
+                filled = await place_order(session, symbol, "sell", qty, price, reason=reason)
                 if filled:
                     daily_pnl += unrealized_pnl
                     log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}")
