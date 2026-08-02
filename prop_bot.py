@@ -282,7 +282,25 @@ TRAIL_GIVEBACK_PCT = float(os.getenv("PROP_TRAIL_GIVEBACK_PCT", "0.01"))
 #
 # Re-checks real buying power against the order's cost before sending, with
 # headroom for slippage between quote and fill.
+# A percentage headroom alone scales the wrong way. At $1,000 buying power
+# 5% reserves $50, which is ample; at the $1.14 this account has actually
+# sat at, it reserves six cents - nowhere near one fill's worth of
+# slippage. Quote-to-fill drift is roughly a fixed number of cents per
+# share, not a percentage of the account, so the absolute floor is what
+# protects small balances and the percentage is what protects large ones.
+# Take whichever limit is TIGHTER.
 BUYING_POWER_HEADROOM = float(os.getenv("PROP_BUYING_POWER_HEADROOM", "0.95"))
+BUYING_POWER_BUFFER_USD = float(os.getenv("PROP_BUYING_POWER_BUFFER_USD", "1.00"))
+
+
+def spendable_buying_power(buying_power):
+    """Usable buying power after both guardrails, floored at zero so a
+    balance smaller than the buffer blocks entries rather than returning a
+    negative budget that later comparisons would treat as permissive."""
+    if buying_power is None:
+        return None
+    return max(0.0, min(buying_power * BUYING_POWER_HEADROOM,
+                        buying_power - BUYING_POWER_BUFFER_USD))
 
 
 async def get_account_buying_power(session):
@@ -793,9 +811,11 @@ async def run_prop_cycle():
         # size_position plus the broker's own rejection remain as backstops.
         cost = qty * price
         buying_power = await get_account_buying_power(session)
-        if buying_power is not None and cost > buying_power * BUYING_POWER_HEADROOM:
+        spendable = spendable_buying_power(buying_power)
+        if spendable is not None and cost > spendable:
             log.info(f"[APEX_589296] Skipping {contract} {side} — cost ${cost:.2f} exceeds "
-                     f"{BUYING_POWER_HEADROOM:.0%} of buying power (${buying_power:.2f})")
+                     f"spendable ${spendable:.2f} of ${buying_power:.2f} buying power "
+                     f"({BUYING_POWER_HEADROOM:.0%} cap / ${BUYING_POWER_BUFFER_USD:.2f} buffer)")
             return False
 
         opened = await open_position(session, contract, config, side, price, rsi, trend, qty)
