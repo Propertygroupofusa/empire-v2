@@ -554,12 +554,43 @@ async def start_job_bot():
 
 
 async def process_payouts_periodically():
-    """Process pending payouts every 30 seconds"""
+    """Process pending payouts every 30 seconds.
+
+    OFF BY DEFAULT - set PAYOUTS_ENABLED=true to arm. See the note below
+    before doing that."""
     try:
         import stripe
         from database import AsyncSessionLocal
         from models import Payment, Worker
         from sqlalchemy import select
+
+        # This loop has never completed a single successful pass in
+        # production. Every cycle died at the SELECT below, because
+        # select(Payment) emits every mapped column and
+        # payments.stripe_payout_id did not exist on the real table - the
+        # "Payout cycle error" repeating every 30s in Railway. That failure
+        # happened BEFORE stripe.Transfer.create, so no money ever moved,
+        # and the broken schema was the only thing holding it back.
+        #
+        # Repairing the migration removes that accidental safety, so the
+        # loop needs a deliberate one. What it would be armed into:
+        #
+        #   - session.commit() is OUTSIDE the per-payment loop, so one
+        #     failed commit loses the "paid" status of EVERY transfer in
+        #     that pass while the transfers themselves are real and final
+        #   - Transfer.create carries no idempotency key
+        #   - rows therefore stay "pending", and 30 seconds later the same
+        #     payments are transferred again, unbounded
+        #
+        # A redeploy mid-loop is enough to trigger it. Idempotency keys and
+        # per-payment commits are the actual fix and are being handled
+        # separately; until that lands this stays off, so that enabling
+        # payouts is a decision someone makes rather than a side effect of
+        # fixing an unrelated schema bug.
+        if os.getenv("PAYOUTS_ENABLED", "false").strip().lower() != "true":
+            log.info("Payout processor disabled (PAYOUTS_ENABLED not set to true) "
+                     "- no Stripe transfers will be attempted")
+            return
 
         stripe_key = os.getenv("STRIPE_SECRET_KEY")
         if not stripe_key:
@@ -567,6 +598,8 @@ async def process_payouts_periodically():
             return
 
         stripe.api_key = stripe_key
+        log.warning("Payout processor ARMED - PAYOUTS_ENABLED=true, real Stripe "
+                    "transfers will be attempted every 30s")
 
         while True:
             try:
