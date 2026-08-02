@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
-from sqlalchemy import text, inspect, String, Enum as SAEnum
+from sqlalchemy import text, inspect, String, Integer, Enum as SAEnum
 from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from datetime import datetime
 import os
@@ -314,20 +314,80 @@ async def run_migrations():
     # Both outages so far were invisible in the logs: nothing announced that
     # payments was never considered, because a table absent from the old
     # tuple produced no output at all. Silence read exactly like success.
-    scanned = added = converted = failed = 0
+    scanned = added = converted = failed = sequenced = 0
 
     async with engine.begin() as conn:
         for table in Base.metadata.sorted_tables:
             table_name = table.name
             try:
-                existing_columns = await conn.run_sync(
-                    lambda sync_conn, t=table_name: {c["name"]: c["type"] for c in inspect(sync_conn).get_columns(t)}
+                raw_columns = await conn.run_sync(
+                    lambda sync_conn, t=table_name: inspect(sync_conn).get_columns(t)
                 )
+                existing_columns = {c["name"]: c["type"] for c in raw_columns}
             except Exception as e:
                 log.warning(f"Migration: could not inspect {table_name} table columns: {e}")
                 failed += 1
                 continue
             scanned += 1
+
+            # ── auto-increment repair ───────────────────────────────────
+            #
+            # Confirmed live: inserting a Worker died with
+            #
+            #   asyncpg.exceptions.NotNullViolationError: null value in
+            #   column "id" of relation "workers" violates not-null
+            #   constraint
+            #
+            # The model declares id as an Integer primary key, so
+            # SQLAlchemy omits it from the INSERT and expects the database
+            # to generate it (note the RETURNING workers.id). But the real
+            # workers table was created outside the ORM as a plain INTEGER
+            # PRIMARY KEY - no SERIAL, no IDENTITY, no DEFAULT - so nothing
+            # generates a value and the NOT NULL implied by PRIMARY KEY
+            # rejects the row. Every bot-worker insert failed this way,
+            # from initialize_bot and from the autoscaler alike.
+            #
+            # Same drift class this function already exists for, so it is
+            # repaired the same way: generically, across every table, not
+            # just the one that happened to surface it. clients/jobs/
+            # bookings all have Integer primary keys and could have been
+            # created the same way.
+            #
+            # Postgres only - SQLite makes INTEGER PRIMARY KEY an alias for
+            # rowid and assigns automatically, which is exactly why this
+            # bug is invisible in a SQLite test.
+            if conn.dialect.name == "postgresql":
+                by_name = {c["name"]: c for c in raw_columns}
+                for column in table.primary_key.columns:
+                    info = by_name.get(column.name)
+                    if info is None or not isinstance(column.type, Integer):
+                        continue
+                    # a serial column has default nextval(...); an identity
+                    # column reports an identity dict. Neither => nothing
+                    # will ever populate it.
+                    if info.get("default") or info.get("identity"):
+                        continue
+                    seq = f"{table_name}_{column.name}_seq"
+                    try:
+                        await conn.execute(text(f'CREATE SEQUENCE IF NOT EXISTS "{seq}"'))
+                        await conn.execute(text(
+                            f'ALTER SEQUENCE "{seq}" OWNED BY "{table_name}"."{column.name}"'))
+                        # Start above any rows already present, so the
+                        # repair cannot collide with existing primary keys.
+                        await conn.execute(text(
+                            f'SELECT setval(\'"{seq}"\', '
+                            f'COALESCE((SELECT MAX("{column.name}") FROM "{table_name}"), 0) + 1, '
+                            f'false)'))
+                        await conn.execute(text(
+                            f'ALTER TABLE "{table_name}" ALTER COLUMN "{column.name}" '
+                            f'SET DEFAULT nextval(\'"{seq}"\')'))
+                        log.info(f"Migration OK: {table_name}.{column.name} "
+                                 f"auto-increment restored via {seq}")
+                        sequenced += 1
+                    except Exception as e:
+                        log.warning(f"Migration FAILED {table_name}.{column.name} "
+                                    f"auto-increment: [{type(e).__name__}] {e}")
+                        failed += 1
 
             for column in table.columns:
                 if column.name not in existing_columns:
@@ -405,7 +465,8 @@ async def run_migrations():
     # run_migrations raised before finishing - main.py catches that and logs
     # "Migrations failed", which is easy to miss among startup noise.
     log.info(f"Migration summary: tables={scanned} columns_added={added} "
-             f"enum_conversions={converted} failures={failed}")
+             f"enum_conversions={converted} autoincrement_fixed={sequenced} "
+             f"failures={failed}")
 
 
 # ── Bot Earnings System ──────────────────────────────────────
