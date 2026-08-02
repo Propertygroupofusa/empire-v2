@@ -622,8 +622,37 @@ async def process_payouts_periodically():
 
                     for payment in pending:
                         try:
+                            # Worker.id is Integer, Payment.worker_id is
+                            # String. Comparing them directly does not work
+                            # on Postgres - verified against a real server:
+                            #
+                            #   asyncpg.exceptions.UndefinedFunctionError:
+                            #   operator does not exist: integer = character
+                            #   varying
+                            #
+                            # SQLAlchemy's Integer has no bind processor on
+                            # the postgresql dialect, so the Python str went
+                            # straight through to the driver. This raised on
+                            # EVERY payment, before Stripe was ever reached,
+                            # and the handler below then marked each one
+                            # "failed" - so arming payouts would have flipped
+                            # the whole pending table to failed rather than
+                            # paying anything.
+                            #
+                            # routers/payments.py already casts with int() at
+                            # both of its call sites; only this one did not.
+                            # SQLite hides the bug completely (it coerces
+                            # '7' == 7), so it is Postgres-only.
+                            try:
+                                worker_pk = int(payment.worker_id)
+                            except (TypeError, ValueError):
+                                log.warning(f"Payment {payment.id}: worker_id "
+                                            f"{payment.worker_id!r} is not a valid "
+                                            f"worker id, skipping")
+                                continue
+
                             w_result = await session.execute(
-                                select(Worker).where(Worker.id == payment.worker_id)
+                                select(Worker).where(Worker.id == worker_pk)
                             )
                             worker = w_result.scalar_one_or_none()
 
