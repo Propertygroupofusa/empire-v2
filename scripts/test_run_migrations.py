@@ -63,17 +63,22 @@ import models  # noqa: E402  (registers every model on the fake Base)
 Base = _fake_db.Base
 
 
-def load_run_migrations(engine):
-    """Pull the real run_migrations out of main.py and bind it to `engine`."""
+def load_run_migrations(engine, sink):
+    """Pull the real run_migrations out of main.py and bind it to `engine`.
+    `sink` collects every log line so the summary can be asserted on."""
     tree = ast.parse((REPO / "main.py").read_text())
     fn = next(n for n in tree.body
               if isinstance(n, ast.AsyncFunctionDef) and n.name == "run_migrations")
 
-    log = types.SimpleNamespace(
-        info=lambda m: print(f"    info  {m}"),
-        warning=lambda m: print(f"    WARN  {m}"),
-        debug=lambda m: None,
-    )
+    def cap(level):
+        def _log(m):
+            sink.append((level, str(m)))
+            if level != "debug":
+                print(f"    {level:7} {m}")
+        return _log
+
+    log = types.SimpleNamespace(info=cap("info"), warning=cap("WARNING"),
+                                debug=cap("debug"))
     ns = {"engine": engine, "log": log, "text": text, "inspect": inspect,
           "String": String, "SAEnum": SAEnum, "PGEnum": PGEnum}
     exec(compile(ast.Module(body=[fn], type_ignores=[]), "main.py", "exec"), ns)
@@ -108,7 +113,8 @@ async def main():
     if "stripe_payout_id" in before:
         failures.append("setup invalid: column present before migration")
 
-    await load_run_migrations(engine)()
+    logs = []
+    await load_run_migrations(engine, logs)()
 
     async with engine.begin() as conn:
         after = await conn.run_sync(
@@ -160,6 +166,66 @@ async def main():
     print(f"  enum columns protected: {enum_cols}")
     if not enum_cols:
         failures.append("expected Enum(...) columns to exist; guard untested")
+
+    # ── 4. the run has to report itself ────────────────────────────────
+    #
+    # Both outages were invisible in the logs: a table absent from the old
+    # tuple produced no output at all, so silence read exactly like success.
+    # This is the line to grep for in Railway after a deploy, so it has to
+    # be emitted, carry the counts, and never be downgraded to debug.
+    summary = [m for lvl, m in logs
+               if lvl == "info" and m.startswith("Migration summary:")]
+    if len(summary) != 1:
+        failures.append(f"expected exactly one INFO summary line, got {summary}")
+    else:
+        print(f"  summary: {summary[0]}")
+        n_tables = len(Base.metadata.sorted_tables)
+        for expect in (f"tables={n_tables}", "columns_added=8", "failures=0"):
+            if expect not in summary[0]:
+                failures.append(f"summary missing/wrong '{expect}': {summary[0]}")
+
+    # ── 5. a failed ALTER must be a WARNING, not a swallowed debug line ─
+    #
+    # This is the branch that matters most. Reaching it means the column is
+    # genuinely absent AND adding it failed, so every write touching that
+    # column will fail - the exact shape of both outages. It used to log at
+    # debug, which never reaches Railway, so the migration would report
+    # itself as fine while leaving the column missing.
+    #
+    # Forced with a VIEW named `payments`: inspect() reports its columns
+    # happily, so the loop gets past inspection and decides columns are
+    # missing, but ALTER TABLE against a view fails. That exercises the
+    # ADD COLUMN failure path specifically, rather than the missing-table
+    # path already covered by the inspect() guard.
+    bad_logs = []
+    bad_engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with bad_engine.begin() as conn:
+        for t in Base.metadata.sorted_tables:
+            if t.name != "payments":
+                await conn.run_sync(t.create)
+        await conn.execute(text("CREATE VIEW payments AS SELECT 'x' AS id"))
+
+    await load_run_migrations(bad_engine, bad_logs)()
+
+    alter_warnings = [m for lvl, m in bad_logs
+                      if lvl == "WARNING" and m.startswith("Migration FAILED payments.")]
+    if not alter_warnings:
+        failures.append("failed ADD COLUMN produced no 'Migration FAILED' WARNING "
+                        f"(got: {[m for l, m in bad_logs if l == 'WARNING']})")
+    else:
+        print(f"  failed-ALTER warning: {alter_warnings[0][:88]}...")
+    if any(lvl == "debug" and "payments" in m for lvl, m in bad_logs):
+        failures.append("failure detail was logged at debug level")
+
+    bad_summary = [m for lvl, m in bad_logs
+                   if lvl == "info" and m.startswith("Migration summary:")]
+    if not bad_summary:
+        failures.append("no summary emitted on the failure path")
+    elif "failures=0" in bad_summary[0]:
+        failures.append(f"failures not counted in summary: {bad_summary[0]}")
+    else:
+        print(f"  failure-path summary: {bad_summary[0]}")
+    await bad_engine.dispose()
 
     await engine.dispose()
 

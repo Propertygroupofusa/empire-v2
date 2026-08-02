@@ -310,6 +310,12 @@ async def run_migrations():
     import models  # noqa: F401  (registers every model on Base.metadata)
     from database import Base
 
+    # Counters exist so the run reports what it DID, not just that it ran.
+    # Both outages so far were invisible in the logs: nothing announced that
+    # payments was never considered, because a table absent from the old
+    # tuple produced no output at all. Silence read exactly like success.
+    scanned = added = converted = failed = 0
+
     async with engine.begin() as conn:
         for table in Base.metadata.sorted_tables:
             table_name = table.name
@@ -319,7 +325,9 @@ async def run_migrations():
                 )
             except Exception as e:
                 log.warning(f"Migration: could not inspect {table_name} table columns: {e}")
+                failed += 1
                 continue
+            scanned += 1
 
             for column in table.columns:
                 if column.name not in existing_columns:
@@ -332,8 +340,19 @@ async def run_migrations():
                         # has rows, which is exactly the scenario this exists for.
                         await conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN "{column.name}" {ddl_type}'))
                         log.info(f"Migration OK: {table_name}.{column.name}")
+                        added += 1
                     except Exception as e:
-                        log.debug(f"Migration skip {table_name}.{column.name}: {e}")
+                        # WARNING, not debug. Reaching here means the column
+                        # is genuinely absent from the real table AND the
+                        # ALTER to add it failed - so every write touching
+                        # that column will now fail, which is precisely the
+                        # payments/bot_positions outage. At debug level that
+                        # never appears in Railway's logs, so the migration
+                        # would report itself as fine while leaving the
+                        # column missing.
+                        log.warning(f"Migration FAILED {table_name}.{column.name}: "
+                                    f"[{type(e).__name__}] {e}")
+                        failed += 1
                     continue
 
                 # Type drift, not just missing-column drift: confirmed live
@@ -373,8 +392,20 @@ async def run_migrations():
                             f'ALTER TABLE {table_name} ALTER COLUMN "{column.name}" TYPE VARCHAR USING "{column.name}"::text'
                         ))
                         log.info(f"Migration OK: {table_name}.{column.name} converted from enum to VARCHAR")
+                        converted += 1
                     except Exception as e:
-                        log.debug(f"Migration skip {table_name}.{column.name} type fix: {e}")
+                        log.warning(f"Migration FAILED {table_name}.{column.name} type fix: "
+                                    f"[{type(e).__name__}] {e}")
+                        failed += 1
+
+    # One line that is always emitted, including on a clean no-op run. This
+    # is the line to grep for in Railway after a deploy: "tables=26" proves
+    # the registry-wide sweep actually happened, and failed=0 proves nothing
+    # was left broken. A deploy where this line is missing entirely means
+    # run_migrations raised before finishing - main.py catches that and logs
+    # "Migrations failed", which is easy to miss among startup noise.
+    log.info(f"Migration summary: tables={scanned} columns_added={added} "
+             f"enum_conversions={converted} failures={failed}")
 
 
 # ── Bot Earnings System ──────────────────────────────────────
