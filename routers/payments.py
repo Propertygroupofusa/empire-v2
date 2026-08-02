@@ -2,7 +2,8 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, update as sa_update
+from sqlalchemy import (select, func, update as sa_update, cast, case,
+                        String as SqlString)
 from database import get_db
 from models import Payment, Worker, Job
 import stripe
@@ -151,6 +152,89 @@ async def worker_earnings(worker_id: str, db: AsyncSession = Depends(get_db)):
         raise
     except Exception as e:
         raise HTTPException(500, f"Error fetching earnings: {e}")
+
+
+@router.get("/pending-summary", summary="Preview what a payout run would pay (read-only)")
+async def pending_summary(db: AsyncSession = Depends(get_db)):
+    """What the payout loop would pay if it ran right now. Reads only -
+    no writes, no Stripe calls.
+
+    Exists because there was no way to see this. Every other read path
+    here is scoped to a single worker (/bot/earnings hardcodes
+    bot@pgusa.local, /worker/{id}/earnings takes one id), so the only code
+    that saw the whole pending set was the payout loop itself - which pays
+    it as it reads it. Arming a payout system with no way to preview what
+    it is about to send is the wrong shape for money, especially given the
+    loop has never completed a successful pass and its backlog has never
+    been drained.
+
+    The `payable` bucket mirrors main.process_payouts_periodically
+    exactly: payout_status 'pending', no stripe_transfer_id, and a worker
+    that exists and has a Connect account. That number is what leaves the
+    Stripe balance within 30 seconds of setting PAYOUTS_ENABLED=true.
+
+    NOTE ON THE JOIN: Worker.id is Integer and Payment.worker_id is
+    String, so the two cannot be compared directly on Postgres. Cast here,
+    deliberately and in one place. routers/payments.py works around the
+    same mismatch with int(payment.worker_id) at the call site;
+    main.py's background loop does neither, which is tracked separately.
+    """
+    try:
+        # Bucket by why a row would or would not be paid. Rows that
+        # already carry a transfer id are excluded outright - those have
+        # provably been sent, and #126 made the payout query skip them.
+        bucket = case(
+            (Worker.id.is_(None), "worker_not_found"),
+            (Worker.stripe_account_id.is_(None), "worker_missing_stripe_account"),
+            else_="payable",
+        )
+
+        rows = (await db.execute(
+            select(
+                Payment.payout_status,
+                bucket.label("bucket"),
+                func.count().label("n"),
+                func.coalesce(func.sum(Payment.worker_amount), 0.0).label("dollars"),
+            )
+            .select_from(Payment)
+            .outerjoin(Worker, cast(Worker.id, SqlString) == Payment.worker_id)
+            .where(Payment.stripe_transfer_id.is_(None))
+            .group_by(Payment.payout_status, bucket)
+        )).all()
+
+        breakdown = {}
+        would_pay_n, would_pay_usd = 0, 0.0
+        for status, buck, n, dollars in rows:
+            breakdown.setdefault(status or "unknown", {})[buck] = {
+                "count": n,
+                "dollars": round(float(dollars or 0), 2),
+            }
+            if status == "pending" and buck == "payable":
+                would_pay_n += n
+                would_pay_usd += float(dollars or 0)
+
+        already = (await db.execute(
+            select(func.count(),
+                   func.coalesce(func.sum(Payment.worker_amount), 0.0))
+            .where(Payment.stripe_transfer_id.isnot(None))
+        )).one()
+
+        return {
+            "payouts_enabled": PAYOUTS_ENABLED,
+            "would_pay_now": {
+                "count": would_pay_n,
+                "dollars": round(would_pay_usd, 2),
+                "note": ("This is what leaves your Stripe balance within 30s "
+                         "of PAYOUTS_ENABLED=true."),
+            },
+            "breakdown_by_status_and_reason": breakdown,
+            "already_transferred": {
+                "count": already[0],
+                "dollars": round(float(already[1] or 0), 2),
+            },
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Error building pending summary: {e}")
 
 
 @router.post("/process-pending-payouts", summary="Process pending payouts via Stripe")
