@@ -296,10 +296,19 @@ async def run_migrations():
     catches ANY drift between the ORM model and the real table, present
     or future. Also dialect-agnostic (SQLAlchemy's inspector, not raw
     SQLite PRAGMA), so it actually works on Postgres - production."""
-    from models import Worker, Client, Job, Booking, TradingBotState
+    from models import Worker, Client, Job, Booking, TradingBotState, BotPosition, ClosedTrade
 
     async with engine.begin() as conn:
-        for model in (Worker, Client, Job, Booking, TradingBotState):
+        # BotPosition and ClosedTrade included deliberately. create_all
+        # (database.py) creates tables that do not exist yet, but it never
+        # adds a column to a table that already exists - and bot_positions
+        # has existed since positions were first persisted. So a new field
+        # on BotPosition is invisible to the real table unless it is
+        # migrated HERE, and every insert then fails with "column does not
+        # exist", silently stopping position persistence altogether. That
+        # is exactly what peak_pct would have done.
+        for model in (Worker, Client, Job, Booking, TradingBotState,
+                      BotPosition, ClosedTrade):
             table_name = model.__tablename__
             try:
                 existing_columns = await conn.run_sync(

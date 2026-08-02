@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 from sqlalchemy import select
 from database import AsyncSessionLocal
-from models import BotPosition
+from models import BotPosition, ClosedTrade
 
 ET = ZoneInfo("America/New_York")
 
@@ -348,14 +348,61 @@ async def load_open_positions():
         log.error(f"[APEX_589296] Failed to reload open positions from DB: {e}")
 
 
-async def _db_save_open(contract: str, side: str, entry: float, qty: float):
+async def _db_save_open(contract: str, side: str, entry: float, qty: float,
+                        rsi=None, trend=None, atr_pct=None):
+    """Persist the open position AND the signal snapshot that caused it.
+
+    These three values are computed every cycle to decide the trade and
+    were previously discarded into a log line. Storing them is what lets
+    ClosedTrade later pair "conditions before" with "result after" - the
+    minimum needed to ask which setups actually predict wins."""
     try:
         async with AsyncSessionLocal() as db:
             db.add(BotPosition(bot=BOT_NAME, symbol=contract, side=side,
-                               entry_price=entry, qty=qty, peak_pct=0.0))
+                               entry_price=entry, qty=qty, peak_pct=0.0,
+                               entry_rsi=rsi, entry_trend=trend, entry_atr_pct=atr_pct))
             await db.commit()
     except Exception as e:
         log.error(f"[APEX_589296] Failed to persist opened position {contract}: {e}")
+
+
+async def _db_record_closed(contract: str, side: str, entry: float, qty: float,
+                            exit_price: float, reason: str, pnl: float,
+                            pnl_pct: float, peak_pct=None):
+    """Append the completed round trip, carrying the entry snapshot across.
+
+    Reads the BotPosition row FIRST so the entry signals survive the
+    delete that follows - this must run before _db_delete_open, and a
+    failure here must never block that delete, or a closed position would
+    stay in the open table and be re-managed as if it were still live.
+
+    Best-effort by design: losing one training row is a far smaller
+    problem than an exception on the close path leaving broker state and
+    DB state disagreeing."""
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(BotPosition).where(BotPosition.bot == BOT_NAME,
+                                          BotPosition.symbol == contract))
+            row = result.scalars().first()
+            opened_at = row.opened_at if row else None
+            hold_hours = 0.0
+            if opened_at:
+                hold_hours = (datetime.utcnow() - opened_at).total_seconds() / 3600
+            db.add(ClosedTrade(
+                bot=BOT_NAME, symbol=contract, side=side,
+                entry_price=entry, qty=qty,
+                entry_rsi=row.entry_rsi if row else None,
+                entry_trend=row.entry_trend if row else None,
+                entry_atr_pct=row.entry_atr_pct if row else None,
+                exit_price=exit_price, exit_reason=reason,
+                pnl=pnl, pnl_pct=pnl_pct,
+                peak_pct=(row.peak_pct if row else None) if peak_pct is None else peak_pct,
+                hold_hours=hold_hours, opened_at=opened_at,
+            ))
+            await db.commit()
+    except Exception as e:
+        log.warning(f"[APEX_589296] Could not record closed trade {contract}: {e}")
 
 
 async def _db_update_peak(contract: str, peak_pct: float):
@@ -760,6 +807,11 @@ async def run_prop_cycle():
             f"P&L: ${pnl:.2f} ({profit_pct:.2f}%) | Reason: {reason_label}\n\n"
             f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
         )
+        # Must run BEFORE _db_delete_open - that delete removes the row
+        # holding the entry snapshot this trade needs to become a labelled
+        # training example.
+        await _db_record_closed(contract, side, entry, qty, price, reason_label,
+                                pnl, profit_pct, position.get("peak_pct"))
         open_prop_positions.pop(contract, None)
         await _db_delete_open(contract)
         return True
@@ -776,7 +828,12 @@ async def run_prop_cycle():
             return False
 
         open_prop_positions[contract] = {"side": side, "entry": price, "qty": qty}
-        await _db_save_open(contract, side, price, qty)
+        # Snapshot the signals that caused this entry. scans[] holds the
+        # same dict Pass 1/2 read from, so atr_pct comes from the very
+        # fetch that produced this decision rather than a re-read.
+        scan = scans.get(contract) or {}
+        await _db_save_open(contract, side, price, qty,
+                            rsi=rsi, trend=trend, atr_pct=scan.get("atr_pct"))
         send_trade_alert(
             f"🤖 Bare Metal Builders — {side.upper()} {contract} opened",
             f"{'LIVE' if LIVE_TRADE else 'PAPER'} {side} opened on APEX_589296:\n\n"
