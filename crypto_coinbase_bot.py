@@ -108,9 +108,38 @@ def _auth_headers(method: str, path: str) -> dict:
     return {"Authorization": f"Bearer {_build_jwt(method, path)}", "Content-Type": "application/json"}
 
 
-# Same widened RSI thresholds prop_bot.py/crypto_alpaca_bot.py settled on -
-# narrower bands meant real trades were too rare.
-RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "45"))
+# Narrowed from 45 to 25 on measurement. An entry-signal sweep over 30
+# days of real 5-minute candles compared each signal's forward return
+# against the UNCONDITIONAL forward return over the same bars - so the
+# result is independent of whatever target/stop is chosen, and cannot be
+# tuned into existence by adjusting exits.
+#
+# 24h-horizon edge over a random entry in the same window:
+#
+#     signal        BTC        ETH
+#     rsi < 25    +0.229%    +0.455%
+#     rsi < 30    +0.183%    +0.258%
+#     rsi < 35    +0.090%    +0.122%
+#     rsi < 40    +0.091%    +0.066%
+#     rsi < 45    +0.050%    +0.043%   <- the old setting
+#
+# Monotonic on both pairs independently, which is what a structural
+# effect looks like and what noise does not. Every momentum signal
+# (rsi > 55/60/65/70, price above SMAs, breakouts) came out NEGATIVE on
+# both pairs, so the mean-reversion direction is right and the threshold
+# was simply far too loose.
+#
+# The trade-count difference is most of the point: rsi < 45 fired 1,838
+# times in the sample against 309 for rsi < 25 - six times the fee drag
+# for a fifth of the per-trade edge. On an edge this size the fee is the
+# adversary, so trading less is the improvement.
+#
+# HONEST LIMIT: the absolute return of rsi < 25 was still around zero
+# after fees (BTC mean -0.213%, ETH +0.220%), and out-of-sample the ETH
+# edge decayed to roughly nil. This is a real but small effect, roughly
+# the same size as trading costs - a reason to trade more selectively,
+# not evidence of a profitable system.
+RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "25"))
 RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "50"))
 
 MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", str(len(CRYPTO_PAIRS))))
@@ -182,7 +211,11 @@ async def set_tier_highwater(value: float):
 # Coinbase's real Advanced Trade taker fee for this account's volume tier -
 # used only to size the profit target sensibly, not charged/simulated here
 # (the real fee is already reflected in Coinbase's fill price/balance).
-TAKER_FEE_RATE = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.006"))
+# 0.40%, the account's real taker tier. Was 0.006, which is simply wrong
+# and made every fee-derived number downstream wrong with it - including
+# the "Round-trip fee: 1.20%" printed every cycle in Railway, when the
+# true cost is 0.80%.
+TAKER_FEE_RATE = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.004"))
 ROUND_TRIP_FEE_PCT = TAKER_FEE_RATE * 2
 
 # A flat dollar profit target (the original design) doesn't scale with
@@ -191,6 +224,22 @@ ROUND_TRIP_FEE_PCT = TAKER_FEE_RATE * 2
 # every "successful" exit still lost money net of fees. The target is a
 # percentage of the position's entry value instead, with a floor that
 # guarantees it clears the round-trip fee with real profit left over.
+# NOTE - correcting TAKER_FEE_RATE moves this, and the move is intended
+# rather than an oversight. The floor is ROUND_TRIP_FEE_PCT * 1.5, so:
+#
+#     old (fee 0.006):  max(1.50%, 1.80%) = 1.80%   <- floor was binding
+#     new (fee 0.004):  max(1.50%, 1.20%) = 1.50%   <- floor no longer binds
+#
+# The target was 1.80% only because the fee constant was overstated. With
+# the real 0.80% round trip, a 1.50% target still clears costs with 0.70%
+# left over, which is exactly what the floor exists to guarantee. The
+# formula is doing its job; it was being fed a wrong number.
+#
+# Deliberately NOT tuned beyond that. The entry sweep measured forward
+# returns, which says nothing about where to place a target, and the
+# earlier geometry sweep found no target/stop pair that survived
+# out-of-sample. Changing the entry threshold and the exit geometry in
+# the same commit would also make the next measurement unattributable.
 PROFIT_TARGET_PCT = max(
     float(os.getenv("CRYPTO_PROFIT_TARGET_PCT", "0.015")),
     ROUND_TRIP_FEE_PCT * 1.5,
