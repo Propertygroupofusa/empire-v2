@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
-from sqlalchemy import text, inspect, String
+from sqlalchemy import text, inspect, String, Enum as SAEnum
 from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from datetime import datetime
 import os
@@ -290,26 +290,29 @@ async def run_migrations():
     Worker in that same PR (#70), not just Worker, since any of them
     could have the same kind of pre-existing-table drift.
 
-    Model-driven (iterates each model's __table__.columns) rather than a
-    manually maintained list of column names/types, specifically so this
-    doesn't only patch the columns anyone remembered to add here - it
-    catches ANY drift between the ORM model and the real table, present
-    or future. Also dialect-agnostic (SQLAlchemy's inspector, not raw
-    SQLite PRAGMA), so it actually works on Postgres - production."""
-    from models import Worker, Client, Job, Booking, TradingBotState, BotPosition, ClosedTrade
+    Model-driven (iterates each table's columns) rather than a manually
+    maintained list of column names/types, specifically so this doesn't
+    only patch the columns anyone remembered to add here - it catches ANY
+    drift between the ORM model and the real table, present or future.
+    Also dialect-agnostic (SQLAlchemy's inspector, not raw SQLite PRAGMA),
+    so it actually works on Postgres - production.
+
+    The set of TABLES is now derived the same way: every table registered
+    on Base.metadata, not a hand-picked tuple. The tuple was the actual
+    bug. create_all (database.py) creates tables that do not exist yet,
+    but it never adds a column to a table that already exists - so a new
+    field on any pre-existing table is invisible to the real table unless
+    it is migrated HERE, and every write then fails with "column does not
+    exist". Two separate outages came from a model being absent from that
+    tuple: bot_positions.peak_pct, and then payments.stripe_payout_id,
+    which errored the payout cycle on every pass. Enumerating the registry
+    means adding a model can no longer silently opt out of migration."""
+    import models  # noqa: F401  (registers every model on Base.metadata)
+    from database import Base
 
     async with engine.begin() as conn:
-        # BotPosition and ClosedTrade included deliberately. create_all
-        # (database.py) creates tables that do not exist yet, but it never
-        # adds a column to a table that already exists - and bot_positions
-        # has existed since positions were first persisted. So a new field
-        # on BotPosition is invisible to the real table unless it is
-        # migrated HERE, and every insert then fails with "column does not
-        # exist", silently stopping position persistence altogether. That
-        # is exactly what peak_pct would have done.
-        for model in (Worker, Client, Job, Booking, TradingBotState,
-                      BotPosition, ClosedTrade):
-            table_name = model.__tablename__
+        for table in Base.metadata.sorted_tables:
+            table_name = table.name
             try:
                 existing_columns = await conn.run_sync(
                     lambda sync_conn, t=table_name: {c["name"]: c["type"] for c in inspect(sync_conn).get_columns(t)}
@@ -318,7 +321,7 @@ async def run_migrations():
                 log.warning(f"Migration: could not inspect {table_name} table columns: {e}")
                 continue
 
-            for column in model.__table__.columns:
+            for column in table.columns:
                 if column.name not in existing_columns:
                     try:
                         ddl_type = column.type.compile(dialect=conn.dialect)
@@ -348,7 +351,23 @@ async def run_migrations():
                 # own "status" columns from the same era and could have the
                 # identical drift (e.g. routers/bookings.py already filters
                 # on Booking.status == status the same way).
-                if isinstance(column.type, String) and isinstance(existing_columns[column.name], PGEnum):
+                #
+                # SAEnum is excluded, and that exclusion is load-bearing now
+                # that this loop covers every table instead of four.
+                # sqlalchemy.Enum SUBCLASSES String, so isinstance(...,
+                # String) is True for a column the model declares as
+                # Enum(SomePyEnum) - and such a column is SUPPOSED to be a
+                # native PG enum in the database. Without this guard the
+                # widened loop would "fix" sales_leads.source,
+                # sales_leads.status and sales_outreach.outreach_type by
+                # converting three deliberately-enum columns to VARCHAR:
+                # a destructive change, applied to exactly the columns where
+                # model and database already agree. The rule this encodes is
+                # "model says plain string, database says enum", not
+                # "database says enum".
+                if (isinstance(column.type, String)
+                        and not isinstance(column.type, SAEnum)
+                        and isinstance(existing_columns[column.name], PGEnum)):
                     try:
                         await conn.execute(text(
                             f'ALTER TABLE {table_name} ALTER COLUMN "{column.name}" TYPE VARCHAR USING "{column.name}"::text'
