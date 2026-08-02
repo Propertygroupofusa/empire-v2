@@ -18,8 +18,33 @@ from googleapiclient.discovery import build
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("youtube_monetization")
 
-SCOPES = ['https://www.googleapis.com/auth/youtube.readonly',
-          'https://www.googleapis.com/auth/youtube']
+# The scopes the YOUTUBE_REFRESH_TOKEN must have been granted. This list
+# is documentation, not configuration - the token is minted out of band
+# (OAuth Playground / a consent flow) and carries whatever scopes were
+# ticked there. Getting this list wrong therefore does not fail loudly at
+# startup; it fails as an opaque 403 the first time analytics is queried.
+#
+# It WAS wrong. get_daily_analytics calls the youtubeAnalytics v2 API with
+# metrics='views,estimatedMinutesWatched,estimatedRevenue,
+# monetizedPlaybacks,impressions', and neither youtube.readonly nor
+# youtube grants access to that API at all:
+#
+#   views, estimatedMinutesWatched, impressions
+#       -> yt-analytics.readonly
+#   estimatedRevenue, monetizedPlaybacks
+#       -> yt-analytics-monetary.readonly
+#
+# A token minted with only the first two scopes gets
+# 403 insufficientPermissions on every analytics call, forever, no matter
+# how many times it is refreshed.
+SCOPES = [
+    'https://www.googleapis.com/auth/youtube.readonly',
+    'https://www.googleapis.com/auth/youtube',
+    # required by get_daily_analytics - views / watch time / impressions
+    'https://www.googleapis.com/auth/yt-analytics.readonly',
+    # required by get_daily_analytics - estimatedRevenue / monetizedPlaybacks
+    'https://www.googleapis.com/auth/yt-analytics-monetary.readonly',
+]
 
 
 class YouTubeMonetizationTracker:
@@ -170,6 +195,27 @@ class YouTubeMonetizationTracker:
 
             return analytics
         except Exception as e:
+            # 403 insufficientPermissions here is not transient and not
+            # fixable in code - the refresh token was minted without the
+            # analytics scopes and no amount of retrying or refreshing
+            # changes that. Say so, instead of logging an opaque error that
+            # looks like something that might clear on its own.
+            detail = str(e)
+            if "insufficientPermissions" in detail or "403" in detail:
+                log.error(
+                    "YouTube Analytics returned 403 insufficientPermissions. The "
+                    "YOUTUBE_REFRESH_TOKEN was granted without the analytics "
+                    "scopes, so this will fail on every call until the token is "
+                    "regenerated with: %s . Note estimatedRevenue and "
+                    "monetizedPlaybacks additionally require the channel to be "
+                    "in the YouTube Partner Program - a non-monetized channel "
+                    "403s on those metrics even with correct scopes.",
+                    " ".join(SCOPES[2:]),
+                )
+                return {"error": "insufficientPermissions",
+                        "detail": "YOUTUBE_REFRESH_TOKEN lacks the yt-analytics "
+                                  "scopes; regenerate it",
+                        "required_scopes": SCOPES[2:]}
             log.error(f"Failed to fetch analytics: {e}")
             return {"error": str(e)}
 
