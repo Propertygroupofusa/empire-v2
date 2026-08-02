@@ -841,3 +841,15 @@ class BotPosition(Base):
     entry_price = Column(Float)
     qty = Column(Float)
     opened_at = Column(DateTime, default=datetime.utcnow)
+
+    # Best unrealized return this position has reached, as a fraction
+    # (0.023 = it was up 2.3% at some point). Needed by prop_bot's
+    # trailing stop, and persisted rather than kept in a module-level dict
+    # for the same reason the rest of this row is: a Railway redeploy
+    # wipes process memory while the position stays open on the broker.
+    # An in-memory peak would silently reset to zero on every restart,
+    # disarming the trailing stop on exactly the positions that had run up
+    # the most - and a dict lookup would KeyError against a position
+    # reloaded from this table. Nullable so existing rows migrate cleanly;
+    # readers treat None as "no peak recorded yet".
+    peak_pct = Column(Float, nullable=True)

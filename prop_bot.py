@@ -94,22 +94,228 @@ MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", str(len(FUTURES))))
 # try_open), a $0.25 underlying move on a $10-$150 fractional position
 # could mean only a few cents of real profit - nowhere near the 50c-$1
 # actually wanted here.
-PROFIT_TARGET_DOLLARS_MILESTONES = [
-    (0,     0.50),
-    (1000,  0.60),
-    (5000,  0.80),
-    (10000, 1.00),
-]
+#
+# THE UNIT BUG THIS REPLACES
+# --------------------------
+# The old version set the profit target in ABSOLUTE DOLLARS ($0.50, rising
+# to $1.00 at $10k equity) while STOP_LOSS_PCT cuts losers at a PERCENTAGE
+# of the position. Two different units on the two sides of the same trade,
+# so the risk:reward ratio was never a fixed number - it drifted with
+# account size, and always against us:
+#
+#     equity   ~position   stop (2%)   target    R:R        breakeven WR
+#     $980     $140        $2.80       $0.50     5.6:1 vs   85%
+#     $5,000   $714        $14.29      $0.80    17.9:1 vs   95%
+#     $10,000  $1,428      $28.57      $1.00    28.6:1 vs   97%
+#
+# Risking $2.80 to make $0.50 needs an ~85% win rate just to break even,
+# and every dollar the account grows made that requirement worse, not
+# better. No entry signal survives that math. This is the single reason
+# the account traded actively for weeks and finished flat.
+#
+# Expressing the target as a PERCENTAGE puts both sides in the same units,
+# so R:R is constant at any account size and the required win rate stops
+# moving:
+#
+#     target 3% vs stop 2%  ->  1.5:1 in our favour  ->  breakeven WR 40%
+PROFIT_TARGET_PCT = float(os.getenv("PROP_PROFIT_TARGET_PCT", "0.03"))
+
+# Absolute floor, in dollars. A position can be as small as
+# MIN_POSITION_NOTIONAL ($10), where 3% is only $0.30 - thin enough that
+# spread and slippage could eat the whole "win". Never exit for less than
+# this regardless of what the percentage works out to.
+MIN_PROFIT_DOLLARS = float(os.getenv("PROP_MIN_PROFIT_DOLLARS", "0.50"))
 
 
-def get_profit_target_dollars(equity):
-    if equity is None:
-        return PROFIT_TARGET_DOLLARS_MILESTONES[0][1]
-    target = PROFIT_TARGET_DOLLARS_MILESTONES[0][1]
-    for threshold, t in PROFIT_TARGET_DOLLARS_MILESTONES:
-        if equity >= threshold:
-            target = t
-    return target
+def get_profit_target_dollars(position_value=None):
+    """Dollar profit target for ONE position, from that position's own size.
+
+    Must be called per-position, not once per cycle: positions are sized in
+    dollars (see size_position) and can differ a lot from each other, so a
+    single cycle-wide number would be wrong for every position but one.
+
+    Falls back to the floor when position value is unknown, which is the
+    conservative direction - it exits earlier rather than holding for a
+    target that may never be reachable.
+    """
+    if position_value is None or position_value <= 0:
+        return MIN_PROFIT_DOLLARS
+    return max(position_value * PROFIT_TARGET_PCT, MIN_PROFIT_DOLLARS)
+
+
+# ── ATR-BASED EXITS ──────────────────────────────────────────────────────
+#
+# A single flat 3%/2% is right in UNITS but wrong in SCALE, because the
+# seven proxies do not move alike. DIA drifts a few tenths of a percent in
+# a day; USO and SLV can travel several percent. A flat 3% target is
+# routinely reachable on USO and nearly unreachable on DIA - while the flat
+# 2% stop is reachable on BOTH. So the fixed rule quietly becomes "stop
+# often, target rarely" on exactly the low-volatility symbols.
+#
+# Note what this does and does not buy us. It is NOT a better risk:reward
+# ratio - 2.5x/1.5x ATR is 1.67:1 against the flat rule's 1.5:1, near
+# enough the same. What it buys is REACHABILITY: both levels get sized to
+# what each instrument actually does, so the distribution the arithmetic
+# assumes is the distribution that actually shows up.
+#
+# Default stays "fixed" so merging this changes no live behaviour. Flip
+# PROP_EXIT_MODE=atr only once the backtest says ATR actually wins.
+EXIT_MODE = os.getenv("PROP_EXIT_MODE", "fixed").strip().lower()
+
+ATR_PERIOD = int(os.getenv("PROP_ATR_PERIOD", "14"))
+ATR_STOP_MULT = float(os.getenv("PROP_ATR_STOP_MULT", "1.5"))
+ATR_TARGET_MULT = float(os.getenv("PROP_ATR_TARGET_MULT", "2.5"))
+
+# Guard rails. A freak-quiet stretch can drive ATR toward zero, which would
+# derive a stop so tight that ordinary spread noise closes the position
+# instantly; a volatility spike can drive it wide enough to risk far more
+# per trade than intended. Clamp both ends.
+ATR_MIN_STOP_PCT = float(os.getenv("PROP_ATR_MIN_STOP_PCT", "0.005"))   # 0.5%
+ATR_MAX_STOP_PCT = float(os.getenv("PROP_ATR_MAX_STOP_PCT", "0.05"))    # 5%
+
+
+def compute_atr_pct(bars, period=None):
+    """Average True Range over `period` bars, returned as a FRACTION of the
+    latest close (so it composes with the percentage-based stop/target).
+
+    True range is the widest of: this bar's high-low, and each of the gaps
+    from the previous close - which is what makes it capture overnight and
+    session gaps that a simple high-low range misses.
+
+    Needs the 'h' and 'l' fields. get_price_rsi already fetches them in the
+    same request and previously discarded them; nothing extra is called.
+
+    Returns None when there aren't enough bars or the data is malformed, so
+    callers can fall back to the fixed rule rather than trade on a
+    fabricated number.
+    """
+    period = period or ATR_PERIOD
+    if not bars or len(bars) < period + 1:
+        return None
+    try:
+        trs = []
+        for i in range(1, len(bars)):
+            high, low = float(bars[i]["h"]), float(bars[i]["l"])
+            prev_close = float(bars[i - 1]["c"])
+            trs.append(max(high - low,
+                           abs(high - prev_close),
+                           abs(low - prev_close)))
+        if len(trs) < period:
+            return None
+        atr = sum(trs[-period:]) / period
+        last_close = float(bars[-1]["c"])
+        if last_close <= 0:
+            return None
+        return atr / last_close
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def get_exit_levels(atr_pct=None):
+    """Resolve (stop_pct, target_pct) as fractions, per the active mode.
+
+    Falls back to the fixed pair whenever ATR is unavailable - a data
+    hiccup should degrade to the known-good rule, never to no stop at all.
+    """
+    if EXIT_MODE != "atr" or atr_pct is None or atr_pct <= 0:
+        return STOP_LOSS_PCT, PROFIT_TARGET_PCT
+
+    stop = max(ATR_MIN_STOP_PCT, min(atr_pct * ATR_STOP_MULT, ATR_MAX_STOP_PCT))
+    # Derive the target from the CLAMPED stop, never from raw ATR. Deriving
+    # it from raw ATR looks equivalent and isn't: when a volatility spike
+    # clamps the stop down (12% -> 5%) but leaves the target at 2.5x raw
+    # ATR (20%), R:R silently becomes 4:1 - a stop that's now easy to reach
+    # paired with a target that isn't. That is precisely the "stop often,
+    # target rarely" failure this whole change exists to remove, and it
+    # would have hit hardest on the most volatile symbols. Anchoring to the
+    # clamped stop holds the ratio at both ends.
+    return stop, stop * (ATR_TARGET_MULT / ATR_STOP_MULT)
+
+
+# ── TIME STOP ────────────────────────────────────────────────────────────
+#
+# prop_bot has a rotation path (swap the weakest loser out for a fresh
+# signal) but it only runs when at MAX_POSITIONS - and MAX_POSITIONS
+# defaults to len(FUTURES), so there is never an eighth symbol needing a
+# slot and the path is unreachable. Net effect: a position that goes red
+# and stays red has nothing to close it but the stop, and capital sits
+# parked in it indefinitely while signals on other symbols go unacted.
+#
+# This is the missing third layer: give a loser room to recover, but a
+# bounded amount. 0 disables it.
+MAX_UNDERWATER_CYCLES = int(os.getenv("PROP_MAX_UNDERWATER_CYCLES", "0"))
+
+
+# ── TRAILING STOP ────────────────────────────────────────────────────────
+#
+# Today a position that runs to +2.5% and then rolls over gives the whole
+# gain back: the profit target never triggered, and the RSI exit only fires
+# if RSI actually reverses. Between those two there is no mechanism that
+# says "this was a winner, stop letting it become a loser."
+#
+# Arms only after the position has genuinely run (TRAIL_ARM_PCT), then
+# exits if it gives back TRAIL_GIVEBACK_PCT from its best. Arming matters:
+# a trail that is live from entry is just a tighter stop wearing a
+# different name, and would fire on ordinary noise before any thesis plays
+# out - the same failure that made 2% stops perform worse than 5% ones on
+# the crypto side.
+#
+# The peak is persisted on BotPosition.peak_pct, NOT held in a dict. A
+# module-level dict resets to zero on every Railway redeploy, which would
+# silently disarm the trail on exactly the positions that had run up most,
+# and would KeyError outright against a position reloaded from the DB by
+# load_open_positions(). That failure mode is not hypothetical here - it
+# is what produced the fragmented DIA entries in July.
+USE_TRAILING_STOP = os.getenv("PROP_USE_TRAILING_STOP", "false").strip().lower() == "true"
+TRAIL_ARM_PCT = float(os.getenv("PROP_TRAIL_ARM_PCT", "0.02"))
+TRAIL_GIVEBACK_PCT = float(os.getenv("PROP_TRAIL_GIVEBACK_PCT", "0.01"))
+
+
+# ── BUYING-POWER GATE ────────────────────────────────────────────────────
+#
+# size_position already divides whatever cash is left across the remaining
+# slots, so it rarely oversizes - but it trusts cash_remaining, a value
+# decremented locally across the cycle. If a fill came in at a worse price
+# than the quote used to size it, or a position was opened outside the bot,
+# that local figure drifts above reality and the order is rejected by the
+# broker instead of being skipped cleanly.
+#
+# Re-checks real buying power against the order's cost before sending, with
+# headroom for slippage between quote and fill.
+# A percentage headroom alone scales the wrong way. At $1,000 buying power
+# 5% reserves $50, which is ample; at the $1.14 this account has actually
+# sat at, it reserves six cents - nowhere near one fill's worth of
+# slippage. Quote-to-fill drift is roughly a fixed number of cents per
+# share, not a percentage of the account, so the absolute floor is what
+# protects small balances and the percentage is what protects large ones.
+# Take whichever limit is TIGHTER.
+BUYING_POWER_HEADROOM = float(os.getenv("PROP_BUYING_POWER_HEADROOM", "0.95"))
+BUYING_POWER_BUFFER_USD = float(os.getenv("PROP_BUYING_POWER_BUFFER_USD", "1.00"))
+
+
+def spendable_buying_power(buying_power):
+    """Usable buying power after both guardrails, floored at zero so a
+    balance smaller than the buffer blocks entries rather than returning a
+    negative budget that later comparisons would treat as permissive."""
+    if buying_power is None:
+        return None
+    return max(0.0, min(buying_power * BUYING_POWER_HEADROOM,
+                        buying_power - BUYING_POWER_BUFFER_USD))
+
+
+async def get_account_buying_power(session):
+    """Real Alpaca buying power. None on any failure, which callers treat
+    as 'unknown' and fall through to the existing cash logic rather than
+    blocking a trade on a transient API hiccup."""
+    try:
+        async with session.get(f"{BASE_URL}/v2/account", headers=HEADERS) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+            return float(data.get("buying_power", 0))
+    except Exception as e:
+        log.warning(f"[APEX_589296] Could not fetch buying power: {e}")
+        return None
 
 # Track profitable days for APEX 7-day rule
 profitable_days = []
@@ -129,7 +335,13 @@ async def load_open_positions():
             result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
             rows = result.scalars().all()
             for row in rows:
-                open_prop_positions[row.symbol] = {"side": row.side, "entry": row.entry_price, "qty": row.qty}
+                open_prop_positions[row.symbol] = {
+                    "side": row.side, "entry": row.entry_price, "qty": row.qty,
+                    # Restore the trailing high-water mark too. Without this
+                    # a redeploy would reset the peak to zero and disarm the
+                    # trail on whatever had run up furthest.
+                    "peak_pct": row.peak_pct if row.peak_pct is not None else 0.0,
+                }
             if rows:
                 log.info(f"[APEX_589296] Reloaded {len(rows)} open position(s) from DB: {list(open_prop_positions.keys())}")
     except Exception as e:
@@ -139,10 +351,32 @@ async def load_open_positions():
 async def _db_save_open(contract: str, side: str, entry: float, qty: float):
     try:
         async with AsyncSessionLocal() as db:
-            db.add(BotPosition(bot=BOT_NAME, symbol=contract, side=side, entry_price=entry, qty=qty))
+            db.add(BotPosition(bot=BOT_NAME, symbol=contract, side=side,
+                               entry_price=entry, qty=qty, peak_pct=0.0))
             await db.commit()
     except Exception as e:
         log.error(f"[APEX_589296] Failed to persist opened position {contract}: {e}")
+
+
+async def _db_update_peak(contract: str, peak_pct: float):
+    """Persist a new trailing high-water mark.
+
+    Only called when the peak actually advances, so this is a handful of
+    writes per position over its life rather than one per cycle. Failures
+    are logged and swallowed: losing a peak update degrades the trail to a
+    slightly stale high-water mark, which is far better than an exception
+    inside the exit loop preventing every OTHER position from being
+    managed that cycle."""
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(BotPosition).where(BotPosition.bot == BOT_NAME,
+                                          BotPosition.symbol == contract))
+            for row in result.scalars().all():
+                row.peak_pct = peak_pct
+            await db.commit()
+    except Exception as e:
+        log.warning(f"[APEX_589296] Could not persist peak for {contract}: {e}")
 
 
 async def _db_delete_open(contract: str):
@@ -216,7 +450,12 @@ async def get_price_rsi(session, symbol):
             sma10 = sum(closes[-10:]) / 10
             trend = "bullish" if sma5 > sma10 else "bearish"
 
-            return {"price": price, "rsi": round(rsi, 1), "trend": trend}
+            # Same bars, no extra request - the h/l fields were already in
+            # this response and were being discarded.
+            atr_pct = compute_atr_pct(bars)
+
+            return {"price": price, "rsi": round(rsi, 1), "trend": trend,
+                    "atr_pct": atr_pct}
     except Exception as e:
         log.error(f"Price error {symbol}: {e}")
         return None
@@ -561,6 +800,24 @@ async def run_prop_cycle():
         else:
             qty = config["qty"]
 
+        # Buying-power gate. cash_remaining is decremented locally across
+        # the cycle from quoted prices; real fills drift from those quotes,
+        # and anything opened outside the bot never touches it at all. When
+        # it drifts high the broker rejects the order, which costs a cycle
+        # and logs an error instead of skipping cleanly. Re-check reality.
+        #
+        # Unknown buying power falls THROUGH rather than blocking: a
+        # transient API hiccup should not silently halt all trading, and
+        # size_position plus the broker's own rejection remain as backstops.
+        cost = qty * price
+        buying_power = await get_account_buying_power(session)
+        spendable = spendable_buying_power(buying_power)
+        if spendable is not None and cost > spendable:
+            log.info(f"[APEX_589296] Skipping {contract} {side} — cost ${cost:.2f} exceeds "
+                     f"spendable ${spendable:.2f} of ${buying_power:.2f} buying power "
+                     f"({BUYING_POWER_HEADROOM:.0%} cap / ${BUYING_POWER_BUFFER_USD:.2f} buffer)")
+            return False
+
         opened = await open_position(session, contract, config, side, price, rsi, trend, qty)
         if opened and cash_remaining is not None:
             cash_remaining -= qty * price
@@ -570,8 +827,13 @@ async def run_prop_cycle():
         await reconcile_positions_with_broker(session)
 
         equity = await get_account_equity(session)
-        profit_target = get_profit_target_dollars(equity)
-        log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | Profit target: ${profit_target:.2f}/position")
+        # Target is per-position now (it scales with each position's own
+        # size), so it can't be resolved to one number here - see
+        # get_profit_target_dollars at the exit check below.
+        log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | "
+                 f"Target: {PROFIT_TARGET_PCT * 100:.1f}%/position (min ${MIN_PROFIT_DOLLARS:.2f}) | "
+                 f"Stop: {STOP_LOSS_PCT * 100:.1f}% | "
+                 f"R:R {PROFIT_TARGET_PCT / STOP_LOSS_PCT:.2f}:1")
 
         # Tracked and spent-down across this cycle's entries so dollar-based
         # sizing (see try_open/size_position) reflects money already
@@ -602,9 +864,10 @@ async def run_prop_cycle():
         # A long profits as price rises and exits on overbought RSI; a
         # short profits as price falls and exits on oversold RSI. Profit
         # target is checked against the position's actual real dollar
-        # P&L (see PROFIT_TARGET_DOLLARS_MILESTONES) - take the 50c-$1,
-        # don't hold out for a bigger move - and scales up slightly as
-        # the real account grows.
+        # P&L, sized per-position as a percentage of that position's cost
+        # basis (see get_profit_target_dollars) so it stays in the same
+        # units as the percentage stop-loss and the risk:reward ratio
+        # holds at any account size.
         for contract, position in list(open_prop_positions.items()):
             data = scans.get(contract)
             config = FUTURES[contract]
@@ -620,14 +883,20 @@ async def run_prop_cycle():
             side = position["side"]
             entry = position["entry"]
             qty = position["qty"]
+
+            # Exit levels sized to THIS symbol's own volatility when
+            # PROP_EXIT_MODE=atr, else the flat pair. Falls back to flat
+            # automatically if ATR couldn't be computed this cycle.
+            stop_pct, target_pct = get_exit_levels(data.get("atr_pct"))
+
             if side == "long":
                 unrealized_pnl = (price - entry) * qty
                 rsi_signal = rsi > RSI_SELL_ABOVE or (trend == "bearish" and rsi > 50)
-                stop_hit = price <= entry * (1 - STOP_LOSS_PCT)
+                stop_hit = price <= entry * (1 - stop_pct)
             else:
                 unrealized_pnl = (entry - price) * qty
                 rsi_signal = rsi < RSI_BUY_BELOW or (trend == "bullish" and rsi < 50)
-                stop_hit = price >= entry * (1 + STOP_LOSS_PCT)
+                stop_hit = price >= entry * (1 + stop_pct)
 
             # An RSI reversal only ever takes a real, existing profit off
             # the table early - it never realizes a loss on its own. A
@@ -636,8 +905,47 @@ async def run_prop_cycle():
             # stop, don't gamble on holding for a bounce that erases it).
             rsi_exit = rsi_signal and unrealized_pnl > 0
 
-            if unrealized_pnl >= profit_target or rsi_exit or stop_hit:
-                reason = "PROFIT TARGET" if unrealized_pnl >= profit_target else ("STOP LOSS" if stop_hit else "RSI")
+            # Sized from THIS position's own cost basis, so the target is
+            # always the same percentage of what's actually at risk here -
+            # which is what keeps R:R fixed against the percentage stop.
+            profit_target = max(entry * qty * target_pct, MIN_PROFIT_DOLLARS)
+
+            # Trailing stop. Peak is tracked as a RETURN FRACTION, not a
+            # price, so it works identically for longs and shorts - a short
+            # profits as price falls, and a price-based high-water mark
+            # would have the sign backwards.
+            trail_exit = False
+            if USE_TRAILING_STOP and entry > 0:
+                ret_pct = ((price - entry) / entry) if side == "long" else ((entry - price) / entry)
+                prev_peak = position.get("peak_pct", 0.0) or 0.0
+                if ret_pct > prev_peak:
+                    position["peak_pct"] = ret_pct
+                    await _db_update_peak(contract, ret_pct)
+                    prev_peak = ret_pct
+                # Armed only once the position has genuinely run. Before
+                # that this does nothing, so it can't act as a stealth
+                # tight stop on a position that never went anywhere.
+                if prev_peak >= TRAIL_ARM_PCT and ret_pct <= prev_peak - TRAIL_GIVEBACK_PCT:
+                    trail_exit = True
+
+            # Time stop: count only cycles where this position is actually
+            # underwater, and reset the moment it goes green, so the count
+            # measures CONSECUTIVE time spent losing rather than age.
+            if unrealized_pnl < 0:
+                position["cycles_underwater"] = position.get("cycles_underwater", 0) + 1
+            else:
+                position["cycles_underwater"] = 0
+            stale = (MAX_UNDERWATER_CYCLES > 0
+                     and position["cycles_underwater"] >= MAX_UNDERWATER_CYCLES)
+
+            if unrealized_pnl >= profit_target or rsi_exit or stop_hit or stale or trail_exit:
+                # Order matters only for the label. STOP LOSS is checked
+                # before TRAIL so a position that gapped through both is
+                # reported as what actually protected it.
+                reason = ("PROFIT TARGET" if unrealized_pnl >= profit_target
+                          else "STOP LOSS" if stop_hit
+                          else "TRAIL" if trail_exit
+                          else "RSI" if rsi_exit else "TIME STOP")
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
 
             await asyncio.sleep(0.3)
