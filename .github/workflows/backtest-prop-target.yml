@@ -72,3 +72,17 @@ jobs:
           SWEEP_TAKER: "0.004"     # real account fee tier, not the code default
           SWEEP_MAKER: "0.0025"
         run: python scripts/sweep_crypto_geometry.py
+
+      # Real execution on real money, from Alpaca's own records. Every
+      # other number in this workflow comes from replaying historical bars,
+      # which measures a strategy but cannot measure execution. The bots'
+      # own metrics.json / equity.csv are no substitute - gitignored, and
+      # written to Railway's ephemeral filesystem, so they are wiped on
+      # every redeploy. Read-only: GET against account/orders/history.
+      - name: Live performance from Alpaca account history
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          ALPACA_BASE_URL: "https://api.alpaca.markets"
+          REPORT_DAYS: "90"
+        run: python scripts/live_performance_report.py
