@@ -245,6 +245,60 @@ def get_exit_levels(atr_pct=None):
 # bounded amount. 0 disables it.
 MAX_UNDERWATER_CYCLES = int(os.getenv("PROP_MAX_UNDERWATER_CYCLES", "0"))
 
+
+# ── TRAILING STOP ────────────────────────────────────────────────────────
+#
+# Today a position that runs to +2.5% and then rolls over gives the whole
+# gain back: the profit target never triggered, and the RSI exit only fires
+# if RSI actually reverses. Between those two there is no mechanism that
+# says "this was a winner, stop letting it become a loser."
+#
+# Arms only after the position has genuinely run (TRAIL_ARM_PCT), then
+# exits if it gives back TRAIL_GIVEBACK_PCT from its best. Arming matters:
+# a trail that is live from entry is just a tighter stop wearing a
+# different name, and would fire on ordinary noise before any thesis plays
+# out - the same failure that made 2% stops perform worse than 5% ones on
+# the crypto side.
+#
+# The peak is persisted on BotPosition.peak_pct, NOT held in a dict. A
+# module-level dict resets to zero on every Railway redeploy, which would
+# silently disarm the trail on exactly the positions that had run up most,
+# and would KeyError outright against a position reloaded from the DB by
+# load_open_positions(). That failure mode is not hypothetical here - it
+# is what produced the fragmented DIA entries in July.
+USE_TRAILING_STOP = os.getenv("PROP_USE_TRAILING_STOP", "false").strip().lower() == "true"
+TRAIL_ARM_PCT = float(os.getenv("PROP_TRAIL_ARM_PCT", "0.02"))
+TRAIL_GIVEBACK_PCT = float(os.getenv("PROP_TRAIL_GIVEBACK_PCT", "0.01"))
+
+
+# ── BUYING-POWER GATE ────────────────────────────────────────────────────
+#
+# size_position already divides whatever cash is left across the remaining
+# slots, so it rarely oversizes - but it trusts cash_remaining, a value
+# decremented locally across the cycle. If a fill came in at a worse price
+# than the quote used to size it, or a position was opened outside the bot,
+# that local figure drifts above reality and the order is rejected by the
+# broker instead of being skipped cleanly.
+#
+# Re-checks real buying power against the order's cost before sending, with
+# headroom for slippage between quote and fill.
+BUYING_POWER_HEADROOM = float(os.getenv("PROP_BUYING_POWER_HEADROOM", "0.95"))
+
+
+async def get_account_buying_power(session):
+    """Real Alpaca buying power. None on any failure, which callers treat
+    as 'unknown' and fall through to the existing cash logic rather than
+    blocking a trade on a transient API hiccup."""
+    try:
+        async with session.get(f"{BASE_URL}/v2/account", headers=HEADERS) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+            return float(data.get("buying_power", 0))
+    except Exception as e:
+        log.warning(f"[APEX_589296] Could not fetch buying power: {e}")
+        return None
+
 # Track profitable days for APEX 7-day rule
 profitable_days = []
 daily_pnl = 0.0
@@ -263,7 +317,13 @@ async def load_open_positions():
             result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
             rows = result.scalars().all()
             for row in rows:
-                open_prop_positions[row.symbol] = {"side": row.side, "entry": row.entry_price, "qty": row.qty}
+                open_prop_positions[row.symbol] = {
+                    "side": row.side, "entry": row.entry_price, "qty": row.qty,
+                    # Restore the trailing high-water mark too. Without this
+                    # a redeploy would reset the peak to zero and disarm the
+                    # trail on whatever had run up furthest.
+                    "peak_pct": row.peak_pct if row.peak_pct is not None else 0.0,
+                }
             if rows:
                 log.info(f"[APEX_589296] Reloaded {len(rows)} open position(s) from DB: {list(open_prop_positions.keys())}")
     except Exception as e:
@@ -273,10 +333,32 @@ async def load_open_positions():
 async def _db_save_open(contract: str, side: str, entry: float, qty: float):
     try:
         async with AsyncSessionLocal() as db:
-            db.add(BotPosition(bot=BOT_NAME, symbol=contract, side=side, entry_price=entry, qty=qty))
+            db.add(BotPosition(bot=BOT_NAME, symbol=contract, side=side,
+                               entry_price=entry, qty=qty, peak_pct=0.0))
             await db.commit()
     except Exception as e:
         log.error(f"[APEX_589296] Failed to persist opened position {contract}: {e}")
+
+
+async def _db_update_peak(contract: str, peak_pct: float):
+    """Persist a new trailing high-water mark.
+
+    Only called when the peak actually advances, so this is a handful of
+    writes per position over its life rather than one per cycle. Failures
+    are logged and swallowed: losing a peak update degrades the trail to a
+    slightly stale high-water mark, which is far better than an exception
+    inside the exit loop preventing every OTHER position from being
+    managed that cycle."""
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(BotPosition).where(BotPosition.bot == BOT_NAME,
+                                          BotPosition.symbol == contract))
+            for row in result.scalars().all():
+                row.peak_pct = peak_pct
+            await db.commit()
+    except Exception as e:
+        log.warning(f"[APEX_589296] Could not persist peak for {contract}: {e}")
 
 
 async def _db_delete_open(contract: str):
@@ -700,6 +782,22 @@ async def run_prop_cycle():
         else:
             qty = config["qty"]
 
+        # Buying-power gate. cash_remaining is decremented locally across
+        # the cycle from quoted prices; real fills drift from those quotes,
+        # and anything opened outside the bot never touches it at all. When
+        # it drifts high the broker rejects the order, which costs a cycle
+        # and logs an error instead of skipping cleanly. Re-check reality.
+        #
+        # Unknown buying power falls THROUGH rather than blocking: a
+        # transient API hiccup should not silently halt all trading, and
+        # size_position plus the broker's own rejection remain as backstops.
+        cost = qty * price
+        buying_power = await get_account_buying_power(session)
+        if buying_power is not None and cost > buying_power * BUYING_POWER_HEADROOM:
+            log.info(f"[APEX_589296] Skipping {contract} {side} — cost ${cost:.2f} exceeds "
+                     f"{BUYING_POWER_HEADROOM:.0%} of buying power (${buying_power:.2f})")
+            return False
+
         opened = await open_position(session, contract, config, side, price, rsi, trend, qty)
         if opened and cash_remaining is not None:
             cash_remaining -= qty * price
@@ -792,6 +890,24 @@ async def run_prop_cycle():
             # which is what keeps R:R fixed against the percentage stop.
             profit_target = max(entry * qty * target_pct, MIN_PROFIT_DOLLARS)
 
+            # Trailing stop. Peak is tracked as a RETURN FRACTION, not a
+            # price, so it works identically for longs and shorts - a short
+            # profits as price falls, and a price-based high-water mark
+            # would have the sign backwards.
+            trail_exit = False
+            if USE_TRAILING_STOP and entry > 0:
+                ret_pct = ((price - entry) / entry) if side == "long" else ((entry - price) / entry)
+                prev_peak = position.get("peak_pct", 0.0) or 0.0
+                if ret_pct > prev_peak:
+                    position["peak_pct"] = ret_pct
+                    await _db_update_peak(contract, ret_pct)
+                    prev_peak = ret_pct
+                # Armed only once the position has genuinely run. Before
+                # that this does nothing, so it can't act as a stealth
+                # tight stop on a position that never went anywhere.
+                if prev_peak >= TRAIL_ARM_PCT and ret_pct <= prev_peak - TRAIL_GIVEBACK_PCT:
+                    trail_exit = True
+
             # Time stop: count only cycles where this position is actually
             # underwater, and reset the moment it goes green, so the count
             # measures CONSECUTIVE time spent losing rather than age.
@@ -802,9 +918,13 @@ async def run_prop_cycle():
             stale = (MAX_UNDERWATER_CYCLES > 0
                      and position["cycles_underwater"] >= MAX_UNDERWATER_CYCLES)
 
-            if unrealized_pnl >= profit_target or rsi_exit or stop_hit or stale:
+            if unrealized_pnl >= profit_target or rsi_exit or stop_hit or stale or trail_exit:
+                # Order matters only for the label. STOP LOSS is checked
+                # before TRAIL so a position that gapped through both is
+                # reported as what actually protected it.
                 reason = ("PROFIT TARGET" if unrealized_pnl >= profit_target
                           else "STOP LOSS" if stop_hit
+                          else "TRAIL" if trail_exit
                           else "RSI" if rsi_exit else "TIME STOP")
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
 
