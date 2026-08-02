@@ -111,8 +111,16 @@ def main():
         print(f"  monetary metrics {sorted(monetary)} covered by "
               f"yt-analytics-monetary.readonly")
 
-    # A 403 here is permanent, so it must not be logged as a generic error
-    # that reads like something which might clear on its own.
+    # A 403 here is permanent, so it must not be reported as a generic
+    # error that reads like something which might clear on its own.
+    #
+    # Originally this looked for the literal "insufficientPermissions"
+    # inside get_daily_analytics. That check broke - correctly - when the
+    # handling moved into the shared _latch_scope_error circuit breaker,
+    # which also pauses further calls. The requirement was never "the
+    # string appears in this function"; it is "this function's error path
+    # routes 403s somewhere that recognises them". Assert that instead, so
+    # the test tracks the intent rather than one implementation of it.
     fn = next((n for n in ast.walk(tree)
                if isinstance(n, ast.FunctionDef) and n.name == "get_daily_analytics"),
               None)
@@ -120,12 +128,19 @@ def main():
         failures.append("get_daily_analytics not found")
     else:
         body = ast.get_source_segment(src, fn) or ""
-        if "insufficientPermissions" not in body:
+        handled_inline = "insufficientPermissions" in body
+        handled_by_latch = "_latch_scope_error" in body
+        if not (handled_inline or handled_by_latch):
             failures.append("get_daily_analytics does not special-case "
                             "insufficientPermissions - a permanent scope "
                             "misconfiguration logs as a generic transient error")
+        elif handled_by_latch and "insufficientPermissions" not in src:
+            failures.append("_latch_scope_error is called but the module never "
+                            "checks for insufficientPermissions, so the 403 "
+                            "would not actually be recognised")
         else:
-            print("  403 insufficientPermissions is reported as a scope problem")
+            where = "the shared circuit breaker" if handled_by_latch else "inline"
+            print(f"  403 insufficientPermissions is handled ({where})")
 
     print()
     if failures:
