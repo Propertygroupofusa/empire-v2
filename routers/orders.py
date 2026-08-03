@@ -61,6 +61,21 @@ async def get_stripe_key():
     }
 
 
+# ============================================================
+# GET /config-check - Diagnostic endpoint (REMOVE AFTER DEBUGGING)
+# ============================================================
+
+@router.get("/config-check")
+async def config_check():
+    """Check Stripe configuration - for debugging only"""
+    return {
+        "stripe_secret_configured": bool(stripe.api_key),
+        "stripe_publishable_configured": bool(stripe_publishable_key),
+        "stripe_api_key_preview": stripe.api_key[:10] + "..." if stripe.api_key else "NOT SET",
+        "publishable_key_preview": stripe_publishable_key[:10] + "..." if stripe_publishable_key else "NOT SET",
+    }
+
+
 class QuoteRequest(BaseModel):
     customer_name: str
     customer_email: str
