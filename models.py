@@ -282,6 +282,12 @@ class StudyUser(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True)
+    # bcrypt hash. Nullable because rows created under the old
+    # no-authentication scheme have no password - those accounts cannot
+    # log in until they sign up properly, which is the intended outcome:
+    # they were never owned by anyone in the first place, since any caller
+    # could conjure one by sending an arbitrary email as a bearer token.
+    password_hash = Column(String, nullable=True)
     tier = Column(String, default="free")  # free, paid
     materials_generated_month = Column(Integer, default=0)
     stripe_customer_id = Column(String, nullable=True)
