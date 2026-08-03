@@ -865,32 +865,36 @@ async def serve_notary_admin():
 async def serve_quote_form():
     """Serve the subscription-aware video quote form"""
     try:
-        # Try multiple possible paths for new subscription form first
+        app_dir = os.path.dirname(os.path.abspath(__file__))
         possible_paths = [
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "subscription_quote_form.html"),
+            os.path.join(app_dir, "subscription_quote_form.html"),
+            os.path.join(app_dir, "quote_request.html"),
             "/app/subscription_quote_form.html",
-            "subscription_quote_form.html",
-            # Fallback to old form if new one not found
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "quote_request.html"),
             "/app/quote_request.html",
+            "subscription_quote_form.html",
             "quote_request.html",
+            os.path.join(os.getcwd(), "quote_request.html"),
         ]
 
         quote_path = None
         for path in possible_paths:
             if os.path.exists(path):
                 quote_path = path
+                log.info(f"✓ Quote form found at: {path}")
                 break
 
         if not quote_path:
-            log.error(f"Quote form HTML file not found in any location: {possible_paths}")
+            log.error(f"Quote form not found. Tried: {possible_paths}. CWD: {os.getcwd()}, APP_DIR: {app_dir}")
             raise HTTPException(status_code=404, detail="Quote form file not found")
 
         with open(quote_path, 'r') as f:
             html_content = f.read()
         return HTMLResponse(content=html_content, status_code=200)
+    except HTTPException:
+        raise
     except Exception as e:
         log.error(f"Error serving quote form: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 
