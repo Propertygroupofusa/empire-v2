@@ -17,6 +17,9 @@ import anthropic
 from database import get_db
 from models import StudyMaterial, StudyUser
 from payments_pause import payments_paused, PAUSE_MESSAGE
+from study_auth import (require_study_auth, create_study_token, hash_password,
+                        verify_password, validate_password, normalize_email)
+from pydantic import BaseModel
 
 log = logging.getLogger("study")
 router = APIRouter()
@@ -30,6 +33,10 @@ stripe_publishable_key = os.getenv("STRIPE_PUBLISHABLE_KEY")
 # Free tier limits
 FREE_LIMIT = 5  # materials per month
 PAID_LIMIT = 999
+
+# Burn-rate cap, separate from the monthly billing allowance and applied
+# to paid accounts too. See check_rate_limit.
+RATE_LIMIT_PER_HOUR = int(os.getenv("STUDY_RATE_LIMIT_PER_HOUR", "20"))
 
 # OFF by default. /upload-and-generate is the only endpoint here that
 # spends money, and until it has real authentication in front of it,
@@ -56,42 +63,75 @@ PAID_LIMIT = 999
 # drain is minutes, building real auth is not, and the two should not be
 # tangled together.
 #
-# To re-enable, the honest prerequisite is authentication, not the flag.
-# worker_auth.py already does bcrypt + JWT correctly and is the pattern
-# to copy.
+# UPDATE: that prerequisite is now met. study_auth.py provides real
+# signup/login with bcrypt + JWT, verify_user below authenticates a signed
+# token instead of trusting a bearer email, and check_rate_limit bounds
+# the burn rate for every tier. The flag still defaults to OFF so that
+# turning generation back on stays a deliberate act - set
+# STUDY_GENERATION_ENABLED=true, and STUDY_JWT_SECRET along with it or
+# every request will 500 by design rather than fall open.
 STUDY_GENERATION_ENABLED = (
     os.getenv("STUDY_GENERATION_ENABLED", "false").strip().lower() == "true"
 )
 STUDY_DISABLED_MESSAGE = (
-    "Study material generation is temporarily unavailable. It is disabled "
-    "pending authentication: the endpoint currently accepts any email as an "
-    "identity, which makes the free-tier limit unenforceable and bills the "
-    "operator for every request."
+    "Study material generation is currently disabled. Set "
+    "STUDY_GENERATION_ENABLED=true (and STUDY_JWT_SECRET) to enable it."
 )
 PAID_TIER_PRICE_CENTS = 999  # $9.99/month, per STUDY_MVP_SUMMARY.md
 
 
 async def verify_user(authorization: Optional[str] = Header(None), db: AsyncSession = Depends(get_db)):
-    """Extract user email from auth header (Bearer token format)"""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Unauthorized - use Bearer token with email")
+    """Resolve the authenticated student from a signed JWT.
 
-    email = authorization.replace("Bearer ", "").strip()
-    if not email or "@" not in email:
-        raise HTTPException(status_code=401, detail="Invalid email in Bearer token")
+    This used to accept any string containing "@" as an identity and
+    auto-create the account. It now verifies a token issued by /login and
+    looks the account up; it never creates one. Account creation belongs
+    to /signup, where a password is set.
 
-    # Get or create user
-    result = await db.execute(select(StudyUser).where(StudyUser.email == email))
+    The lookup is by ID from the token's `sub`, not by the email claim. A
+    token is a bearer credential for one account, and the ID is the thing
+    that cannot be re-pointed by changing an email address later.
+    """
+    claims = await require_study_auth(authorization)
+
+    result = await db.execute(select(StudyUser).where(StudyUser.id == claims["id"]))
     user = result.scalar_one_or_none()
-
     if not user:
-        user = StudyUser(email=email, tier="free")
-        db.add(user)
-        await db.commit()
-        await db.refresh(user)
-        log.info(f"Created new study user: {email}")
+        # Valid signature, deleted account. 401 rather than 404: from the
+        # caller's side the credential is simply no longer good.
+        raise HTTPException(status_code=401, detail="Account no longer exists")
 
-    return {"email": email, "tier": user.tier, "user_obj": user}
+    return {"email": user.email, "tier": user.tier, "user_obj": user}
+
+
+async def check_rate_limit(user: dict, db: AsyncSession):
+    """Short-window throttle, applied to EVERY tier including paid.
+
+    The monthly allowance is a billing control, not an abuse control. A
+    paid account is capped at PAID_LIMIT per month, and each generation
+    costs two claude-3-5-sonnet calls, so a single subscriber running flat
+    out can spend far more than $9.99 in API cost long before the monthly
+    cap stops them. This bounds the burn rate.
+
+    Counted from StudyMaterial rows rather than an in-memory counter, so
+    it survives restarts and stays correct if the service is ever run as
+    more than one container - an in-process dict would reset on every
+    deploy and be per-replica, i.e. no limit at all under exactly the
+    conditions where one matters.
+    """
+    window_start = datetime.utcnow() - timedelta(hours=1)
+    result = await db.execute(
+        select(func.count(StudyMaterial.id)).where(
+            (StudyMaterial.user_id == user["email"]) &
+            (StudyMaterial.created_at >= window_start)
+        )
+    )
+    if (result.scalar() or 0) >= RATE_LIMIT_PER_HOUR:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit: {RATE_LIMIT_PER_HOUR} materials per hour. "
+                   f"Try again shortly.")
+    return True
 
 
 async def check_limit(user: dict, db: AsyncSession):
@@ -355,6 +395,7 @@ async def upload_and_generate(
 
     # Verify user
     user = await verify_user(authorization, db)
+    await check_rate_limit(user, db)
     await check_limit(user, db)
 
     # Validate file
@@ -482,6 +523,71 @@ async def get_material(
 async def get_study_stripe_key():
     """Get Stripe publishable key for the study app frontend"""
     return {"publishable_key": stripe_publishable_key}
+
+
+class SignupRequest(BaseModel):
+    email: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+@router.post("/signup")
+async def signup(payload: SignupRequest, db: AsyncSession = Depends(get_db)):
+    """Create an account. The only way a StudyUser now comes into
+    existence - previously any request conjured one."""
+    email = normalize_email(payload.email)
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="A valid email is required")
+    validate_password(payload.password)
+
+    existing = (await db.execute(
+        select(StudyUser).where(StudyUser.email == email))).scalar_one_or_none()
+
+    if existing and existing.password_hash:
+        raise HTTPException(status_code=409, detail="An account with that email exists")
+
+    if existing:
+        # A row left over from the no-auth era. Nobody ever proved
+        # ownership of it, so the first person to set a password claims
+        # it - along with whatever tier it carries. That tier can only
+        # have become "paid" through a real Stripe payment keyed to this
+        # address, so honouring it is right.
+        existing.password_hash = hash_password(payload.password)
+        await db.commit()
+        await db.refresh(existing)
+        user = existing
+        log.info(f"Claimed pre-auth study account: {email}")
+    else:
+        user = StudyUser(email=email, tier="free",
+                         password_hash=hash_password(payload.password))
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+        log.info(f"New study user registered: {email}")
+
+    return {"token": create_study_token(user.id, user.email),
+            "email": user.email, "tier": user.tier}
+
+
+@router.post("/login")
+async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
+    email = normalize_email(payload.email)
+    user = (await db.execute(
+        select(StudyUser).where(StudyUser.email == email))).scalar_one_or_none()
+
+    # One message for "no such account", "no password set" and "wrong
+    # password". Distinguishing them turns this endpoint into an oracle
+    # for which email addresses are registered.
+    if not user or not user.password_hash or not verify_password(payload.password,
+                                                                 user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    return {"token": create_study_token(user.id, user.email),
+            "email": user.email, "tier": user.tier}
 
 
 @router.post("/checkout")
