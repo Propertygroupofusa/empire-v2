@@ -30,6 +30,44 @@ stripe_publishable_key = os.getenv("STRIPE_PUBLISHABLE_KEY")
 # Free tier limits
 FREE_LIMIT = 5  # materials per month
 PAID_LIMIT = 999
+
+# OFF by default. /upload-and-generate is the only endpoint here that
+# spends money, and until it has real authentication in front of it,
+# leaving it reachable is a standing cost drain rather than a product.
+#
+# verify_user() performs NO authentication. It accepts any string
+# containing "@" as an identity, auto-creates a StudyUser at tier="free",
+# and returns that user's tier. Two consequences:
+#
+#   - the paywall does not hold. The free allowance is 5/month keyed on
+#     email, so a different email is another 5, forever, with no signup
+#     and no confirmation step.
+#   - a paying customer can be impersonated. Bearer <their-email> returns
+#     tier="paid" and unlimited generations on their subscription.
+#
+# Meanwhile each call to /upload-and-generate makes TWO claude-3-5-sonnet
+# requests - a vision call to read the image, then a generation call -
+# and there is no rate limiting anywhere in this application. So the
+# endpoint bills the Anthropic account per request, without a cap, for
+# anyone who finds the URL, and cannot charge for any of it.
+#
+# That is not a product that fails to earn; it is one that loses money
+# for anyone who calls it. Hence a flag rather than a fix: closing the
+# drain is minutes, building real auth is not, and the two should not be
+# tangled together.
+#
+# To re-enable, the honest prerequisite is authentication, not the flag.
+# worker_auth.py already does bcrypt + JWT correctly and is the pattern
+# to copy.
+STUDY_GENERATION_ENABLED = (
+    os.getenv("STUDY_GENERATION_ENABLED", "false").strip().lower() == "true"
+)
+STUDY_DISABLED_MESSAGE = (
+    "Study material generation is temporarily unavailable. It is disabled "
+    "pending authentication: the endpoint currently accepts any email as an "
+    "identity, which makes the free-tier limit unenforceable and bills the "
+    "operator for every request."
+)
 PAID_TIER_PRICE_CENTS = 999  # $9.99/month, per STUDY_MVP_SUMMARY.md
 
 
@@ -300,6 +338,13 @@ async def upload_and_generate(
     Returns:
         Generated study material with title and content
     """
+
+    # FIRST, before anything else. Ahead of verify_user in particular,
+    # which auto-creates a StudyUser row for any email it is handed - so
+    # gating after it would still let an unauthenticated caller fill the
+    # table, just without spending Claude tokens.
+    if not STUDY_GENERATION_ENABLED:
+        raise HTTPException(status_code=503, detail=STUDY_DISABLED_MESSAGE)
 
     # Validate material type
     if material_type not in ["guide", "quiz", "flashcards"]:
