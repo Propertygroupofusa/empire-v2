@@ -24,11 +24,18 @@ else:
     STRIPE_AVAILABLE = False
     log.warning("STRIPE_SECRET_KEY not configured - automatic payouts disabled")
 
-# Initialize PayPal
-PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "Ac-Xy2QAqaaYuUQjUEd4EyME7g62fPvme0mBuP6pWQHDvjwwHFCEa_z1Gi8EeXWOF-TL93Pi-gufyLuo")
-PAYPAL_SECRET = os.getenv("PAYPAL_SECRET", "EGpl4jKJx_BlqKKKQixEpGrZ5IfwpIbLGqrFeCu4E69AFjqS3C45gO9PGXR9tdKzC4LRE_g_LQOsLAX9")
-PAYPAL_RECIPIENT_EMAIL = os.getenv("PAYPAL_RECIPIENT_EMAIL", "delfarrell591@gmail.com")
-PAYPAL_AVAILABLE = bool(PAYPAL_CLIENT_ID and PAYPAL_SECRET)
+# Initialize PayPal.
+#
+# These previously carried a live client id and secret as literal
+# defaults, in a public repository, so anyone reading the source held
+# working credentials and the app would authenticate against
+# api.paypal.com even with nothing configured. No defaults now: absent
+# configuration means PayPal payouts are unavailable, which is the only
+# safe reading of "not configured".
+PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "")
+PAYPAL_SECRET = os.getenv("PAYPAL_SECRET", "")
+PAYPAL_RECIPIENT_EMAIL = os.getenv("PAYPAL_RECIPIENT_EMAIL", "")
+PAYPAL_AVAILABLE = bool(PAYPAL_CLIENT_ID and PAYPAL_SECRET and PAYPAL_RECIPIENT_EMAIL)
 
 if PAYPAL_AVAILABLE:
     log.info("PayPal payout system configured")
@@ -133,7 +140,25 @@ async def worker_earnings(worker_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.post("/process-pending-payouts", summary="Process pending payouts via Stripe Connect")
 async def process_pending_payouts(db: AsyncSession = Depends(get_db)):
-    """Process all pending payouts via Stripe Connect transfers"""
+    """Process all pending payouts via Stripe Connect transfers.
+
+    OFF unless PAYOUTS_ENABLED=true, the same flag that gates the
+    background loop in main.process_payouts_periodically. Gating only the
+    loop left this endpoint as an unauthenticated POST that moved real
+    money on demand - the flag looked like it disarmed payouts while one
+    HTTP request still armed them.
+
+    Read from the environment on each call rather than at import, so
+    disarming takes effect immediately instead of at the next redeploy.
+    """
+    if os.getenv("PAYOUTS_ENABLED", "false").strip().lower() != "true":
+        log.warning("Payout endpoint called while PAYOUTS_ENABLED is not true - refusing")
+        return {
+            "status": "disabled",
+            "message": "Payouts are disabled. Set PAYOUTS_ENABLED=true to arm them.",
+            "processed": 0,
+        }
+
     if not STRIPE_AVAILABLE:
         return {
             "status": "disabled",
@@ -141,9 +166,17 @@ async def process_pending_payouts(db: AsyncSession = Depends(get_db)):
         }
 
     try:
-        # Get all pending payments
+        # Rows that already carry a transfer id are excluded, not just
+        # rows marked paid. Stripe idempotency keys expire after 24 hours,
+        # so the key alone stops a same-day replay but not next week's -
+        # and a row can keep payout_status "pending" while its transfer
+        # already went out, if the commit after Transfer.create failed.
+        # This filter is what makes that survivable.
         result = await db.execute(
-            select(Payment).where(Payment.payout_status == "pending")
+            select(Payment).where(
+                Payment.payout_status == "pending",
+                Payment.stripe_transfer_id.is_(None),
+            )
         )
         pending_payments = result.scalars().all()
 
@@ -179,6 +212,11 @@ async def process_pending_payouts(db: AsyncSession = Depends(get_db)):
 
                 # Create Stripe Transfer to connected account
                 # This transfers funds from platform to worker's connected account
+                # idempotency_key makes a retry a no-op at Stripe rather
+                # than a second transfer. Without it, any repeat of this
+                # request - a double click, a proxy retry, a redeploy
+                # mid-loop - pays the worker twice, because the row is
+                # only marked "processing" after the transfer returns.
                 transfer = stripe.Transfer.create(
                     amount=int(payment.worker_amount * 100),  # Convert to cents
                     currency="usd",
@@ -188,7 +226,8 @@ async def process_pending_payouts(db: AsyncSession = Depends(get_db)):
                         "payment_id": payment.id,
                         "worker_id": str(worker.id),
                         "worker_email": worker.email,
-                    }
+                    },
+                    idempotency_key=f"manual-payout-{payment.id}",
                 )
 
                 # Update payment record with transfer ID
@@ -533,7 +572,25 @@ async def get_crypto_account():
 
 @router.post("/process-paypal-payouts", summary="Process pending payouts via PayPal")
 async def process_paypal_payouts(db: AsyncSession = Depends(get_db)):
-    """Process all pending payouts via PayPal to recipient email"""
+    """Process all pending payouts via PayPal to recipient email.
+
+    OFF unless PAYOUTS_ENABLED=true - this hits api.paypal.com (live, not
+    sandbox) and moves real money, so it needs the same arming as the
+    Stripe path.
+
+    Note for whoever arms it: sender_batch_id is derived from
+    datetime.now(), so PayPal treats every call as a new batch. Two calls
+    pay twice. The flag is the only thing standing between a double click
+    and a double payout here.
+    """
+    if os.getenv("PAYOUTS_ENABLED", "false").strip().lower() != "true":
+        log.warning("PayPal payout endpoint called while PAYOUTS_ENABLED is not true - refusing")
+        return {
+            "status": "disabled",
+            "message": "Payouts are disabled. Set PAYOUTS_ENABLED=true to arm them.",
+            "processed": 0,
+        }
+
     if not PAYPAL_AVAILABLE:
         return {
             "status": "disabled",
@@ -671,7 +728,26 @@ async def process_bank_transfer(
     routing_number: str = Form(...),
     db: AsyncSession = Depends(get_db)
 ):
-    """Process direct bank transfer payout to pending payments."""
+    """Record an intent to pay pending payments by direct bank transfer.
+
+    THIS ENDPOINT MOVES NO MONEY. There is no ACH integration behind it -
+    it collects bank details, flips rows to "processing", and returns
+    "Transfer initiated ... 1-2 business days". Nothing is sent anywhere.
+
+    That combination is worse than an outage. The rows it touches leave
+    the "pending" set, so the Stripe and PayPal paths will never pick them
+    up again: real debts get marked settled by a call that paid nobody. It
+    is gated with the other two, and it no longer sets paid_at, because
+    nothing was paid.
+    """
+    if os.getenv("PAYOUTS_ENABLED", "false").strip().lower() != "true":
+        log.warning("Bank transfer endpoint called while PAYOUTS_ENABLED is not true - refusing")
+        return {
+            "status": "disabled",
+            "message": "Payouts are disabled. Set PAYOUTS_ENABLED=true to arm them.",
+            "processed": 0,
+        }
+
     try:
         # Get all pending payments
         result = await db.execute(
@@ -695,24 +771,32 @@ async def process_bank_transfer(
         for payment in pending_payments:
             payment.payout_status = "processing"
             payment.stripe_transfer_id = payout_id
-            payment.paid_at = datetime.utcnow()  # Mark as initiated
+            # paid_at deliberately not set - no transfer has occurred.
+            # Stamping it here made an unpaid debt indistinguishable from
+            # a settled one in every report that reads paid_at.
 
         await db.commit()
         processed = len(pending_payments)
 
-        log.info(f"Bank transfer initiated: ${total_amount:.2f} to {bank_account_holder} ({bank_name}) account {account_number}")
+        # Never log the account or routing number. Application logs are
+        # retained, shipped to third parties, and read by people who have
+        # no business holding someone's bank details.
+        log.info(f"Bank transfer RECORDED (no funds moved): ${total_amount:.2f} "
+                 f"for {bank_account_holder} ({bank_name}), account ending "
+                 f"{account_number[-4:]}, payout_id={payout_id}")
 
         return {
-            "status": "ok",
-            "message": f"Bank transfer initiated - ${total_amount:.2f} queued for {bank_account_holder}",
+            "status": "recorded",
+            "message": f"Recorded intent to pay ${total_amount:.2f} to {bank_account_holder}. "
+                       f"NO FUNDS HAVE BEEN TRANSFERRED - this endpoint has no ACH "
+                       f"integration. You must send this payment yourself.",
+            "funds_moved": False,
             "processed": processed,
             "total_amount": round(total_amount, 2),
             "payout_id": payout_id,
             "account_holder": bank_account_holder,
             "bank_name": bank_name,
             "account_number": account_number[-4:],  # Return last 4 for verification
-            "estimated_arrival": "1-2 business days",
-            "status_note": "Transfer initiated via direct bank routing"
         }
 
     except Exception as e:
