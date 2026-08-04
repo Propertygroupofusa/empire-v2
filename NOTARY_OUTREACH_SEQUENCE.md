@@ -1,224 +1,250 @@
-# Cold Outreach Sequence for the Notary Service
-## Complete Campaign Ready to Deploy TODAY
+# Notary Outreach — Ten Sends
 
-Landing page for every link below: **https://empire-v2-production.up.railway.app/get-notarized**
+Landing page for every client link below:
+**https://empire-v2-production.up.railway.app/get-notarized** (`main.py:1407`)
 
-Note on pricing: exact rates aren't finalized yet (billing isn't wired up in the app yet either), so the numbers below are industry-typical placeholders for remote/mobile notarization — swap in your real pricing once you've decided it, before sending anything.
-
----
-
-## PART 1: CLIENT ACQUISITION (this is what actually gets Keisha paid work)
-
-Notarization is a recurring-need service, not a one-time purchase — the highest-value targets are businesses that need notarizations *constantly*, not individuals who need one every few years. Prioritize accordingly.
-
-### EMAIL SEQUENCE OVERVIEW
-3-email sequence with 3-day gaps. Same formula that worked for the video service: Problem → Social Proof → Urgency → CTA.
+Notary signup page:
+**https://empire-v2-production.up.railway.app/notary-portal**
 
 ---
 
-### EMAIL 1: The Problem Email
-**Send to:** Real estate agents/title companies, mortgage loan officers, law firms, small business owners
-**Subject Line:** [Pick One]
-- "Stop losing deals waiting on a notary"
-- "Same-day notarization, no office visit required"
-- "How [Company Name] stopped scheduling around notary availability"
-- "Remote notarization, licensed and verified, same-day"
+## READ THIS BEFORE SENDING ANYTHING
 
-**Body:**
-```
-Hi [First Name],
+**A client email sent into a state with no verified notary produces a refund, not
+a customer.**
 
-Quick question: how many deals have stalled this month waiting on a notary's schedule?
+The intake page takes payment *upfront* — the submit button literally reads
+"Continue to Payment" (`notary_request.html:88`), and `create_job_checkout`
+charges before a notary ever sees the job (`routers/jobs.py:115`). Matching then
+happens in `match_pending_jobs()` (`notary_bot.py:72`), which will only assign a
+worker who is **all** of:
 
-Most title companies and law offices are stuck coordinating in-person appointments
-around one or two local notaries - if they're busy, sick, or booked, your closing
-slips.
+- `credentials_verified == True`
+- `status == "active"`
+- `notary_commission_state == job.state` **or** (`ron_authorized` and
+  `ron_authorization_state == job.state`)
 
-We just launched a notary marketplace with licensed, verified notaries
-(including Remote Online Notarization where authorized):
-• Submit a request in under 2 minutes
-• Matched automatically to a verified, state-commissioned notary
-• Most requests matched same-day
-• No subscription - pay only for what you use
+If nobody clears that bar, the code does `continue` (`notary_bot.py:109`) — the
+job sits in `requested` forever, paid. There is no timeout, no auto-refund, and
+no alert to the client.
 
-Perfect for:
-- Real estate closings and loan signings
-- Powers of attorney and estate documents
-- Business contracts and affidavits
-- HR/employment paperwork
+**So the order is forced.** Part 1 first. Do not send a single client email into
+a state until at least one verified notary is commissioned in that same state.
 
-Want to try it on your next document?
-
-→ https://empire-v2-production.up.railway.app/get-notarized
-
-[Your Name]
-[Your Title]
-[Your Company]
-[Phone Number]
-```
+**Check before you send:** open `/notary-admin` and confirm a verified notary
+exists for the state you're about to email into. If the list is empty, you are
+running Part 1 only.
 
 ---
 
-### EMAIL 2: The Social Proof Email
-**Send 3 days later if no response**
-**Subject Line:** [Pick One]
-- "How much a stalled closing actually costs you"
-- "Why title companies are switching to on-demand notaries"
-- "Your competitors already stopped scheduling around one notary"
+## REAL PRICING — live, read out of the code
 
-**Body:**
-```
-Hi [First Name],
+Source of truth is `SERVICE_TIERS` in `routers/jobs.py:32`. The intake form pulls
+these from `GET /jobs/service-tiers` at page load, so the page and this document
+cannot drift apart.
 
-Following up on my last note about on-demand notarization.
+| Tier | What it covers | Price |
+|---|---|---|
+| Standard Notarization | In-person or RON, 1–2 signatures | **$35.00** |
+| Remote Online Notarization (RON) | Live video session with a RON-authorized notary | **$45.00** |
+| Business & Legal Documents | Contracts, affidavits, powers of attorney | **$55.00** |
+| Real Estate Closing / Loan Signing Package | Full closing document package | **$200.00** |
 
-THE PROBLEM WE SOLVE:
-Most offices rely on one or two notaries they know personally. When that
-notary is out, booked, or slow to respond, everything downstream stalls -
-closings, signings, filings.
+The notary keeps **80%** (`NOTARY_PAYOUT_SHARE`, `routers/jobs.py:59`); the
+platform keeps 20%. So a closing package nets you $40 and pays the notary $160.
 
-WHAT'S DIFFERENT HERE:
-• Every notary is credential-verified before they can take a job
-  (commission number, state, RON authorization all checked)
-• Jobs are matched automatically the moment they're submitted
-• You only pay when you actually need a notarization - no retainer,
-  no monthly fee
-
-Would a 2-minute request form save you time on your next document?
-
-→ https://empire-v2-production.up.railway.app/get-notarized
-
-[Your Name]
-[Your Title]
-[Your Company]
-[Phone Number]
-```
+**Only the $200 tier can fund customer acquisition.** At $35 with a 20% take you
+earn $7 a job — that does not pay for the time it takes to send an email. Target
+closings.
 
 ---
 
-### EMAIL 3: The Urgency + Direct Ask Email
-**Send 3 days after Email 2 if still no response**
-**Subject Line:** [Pick One]
-- "Last note: try it free on your next document"
-- "[First Name], one more thing about notarization"
-- "Would this actually help or not?"
+## PART 1: FIVE NOTARY RECRUITMENT MESSAGES — SEND THESE FIRST
 
-**Body:**
-```
-Hi [First Name],
+Capacity before demand. Five is enough; you need one verified notary per state
+you intend to sell into, not a roster.
 
-I'll keep this short.
+**Where to find them:** state-specific notary Facebook groups, "Notary Loan
+Signing Agents" groups, the NNA member directory, LinkedIn `"notary public" +
+[state]`. Prioritize notaries who are **already RON-authorized** — RON coverage
+is statewide, so one RON notary unlocks a whole state, while a mobile-only
+notary unlocks a radius.
 
-Next time you have a document that needs notarizing - real estate closing,
-POA, affidavit, contract - just submit it here and see what happens:
-
-→ https://empire-v2-production.up.railway.app/get-notarized
-
-Takes 2 minutes. You'll be matched with a verified, licensed notary
-automatically. If it's not useful for your workflow, no hard feelings -
-just wanted to put it in front of you once.
-
-[Your Name]
-[Your Title]
-[Your Company]
-[Phone Number]
-```
-
----
-
-## PROSPECT TARGETING TIERS
-
-### TIER 1: Highest Priority (recurring, high-volume need)
-**Target:** Title companies & real estate closing attorneys
-- Search: "title company" + your state/metro area
-- Every single closing needs a notary - this is the highest-frequency use case
-- Budget: pays per-closing, effectively unlimited if it removes a bottleneck
-- Decision speed: fast - a stalled closing costs them money today
-
-### TIER 2: High Priority
-**Target:** Mortgage loan officers & loan signing coordinators
-- Search: "loan officer" OR "mortgage broker" + metro area, LinkedIn
-- Loan packages need notarized signatures on nearly every deal
-- Decision speed: fast, especially near month-end closing pushes
-
-### TIER 3: High Priority
-**Target:** Estate planning & small business law firms
-- Search: "estate planning attorney" OR "small business attorney"
-- POAs, wills, trusts, business formation docs all need notarization
-- Decision speed: moderate - often has an existing notary relationship to displace
-
-### TIER 4: Medium Priority
-**Target:** HR departments / small business owners
-- Employment verification forms, contractor agreements, business affidavits
-- Lower frequency per client but larger total addressable pool
-- Decision speed: moderate
-
-### TIER 5: Medium Priority
-**Target:** Individual consumers (via local Facebook groups, Nextdoor, community boards)
-- One-off needs: vehicle title transfers, travel consent letters, individual affidavits
-- Lowest volume per contact, but zero-cost to reach (organic posts, not cold email)
-
----
-
-## DAILY OUTREACH GOAL
-
-**Week 1:**
-- Day 1-3: Send 10 Tier 1/2 emails/day (Email 1)
-- Day 4-5: Send 10 new + follow up on Day 1's 10 (Email 2)
-- **Week 1 Total: 70 outreach touches**
-
-**Month 1 Projection (based on the video service's actual reply-rate ranges):**
-- 300+ outreach touches
-- 5-8% reply rate = 15-24 replies
-- 3-7 clients actually submitting requests
-- Given notarization is recurring, even 3-4 title companies can generate steady weekly volume
-
----
-
-## PART 2: NOTARY RECRUITMENT (grows supply so demand doesn't outpace Keisha)
-
-Right now Keisha may be the only (or one of very few) verified notaries. Getting more clients without more notary supply just creates backlog. Run this in parallel, lighter-weight than the client sequence.
-
-**Where to post/reach out:**
-- Facebook groups for notaries (e.g. "Notary Loan Signing Agents," state-specific notary groups)
-- National Notary Association (NNA) member forums/directories
-- LinkedIn search: "notary public" + your target states
-- Local notary supply/training pages often have community boards
-
-**Message template:**
 ```
 Hi [Name],
 
-I run a notary marketplace platform that matches verified notaries with
-real client requests - real estate closings, POAs, business documents,
-and more. No cold-calling for clients yourself; jobs come to you once
-you're verified.
+I run a notary marketplace that routes paid client requests to verified
+notaries — real estate closings, POAs, business documents. You don't
+prospect for the clients; jobs are matched to you once you're verified.
 
-- Free to register: https://empire-v2-production.up.railway.app/notary-portal
-- Submit your commission info, get verified, start receiving matched jobs
-- You control your own schedule - accept and schedule what works for you
+Pay is 80% of the client price, per job: $28 on a standard notarization,
+$36 on a RON session, $44 on business/legal documents, $160 on a full
+real estate closing package. Client pays upfront, so you're never doing
+the work before it's funded.
 
-Worth 5 minutes to set up your profile?
+Register free: https://empire-v2-production.up.railway.app/notary-portal
+You'll enter your commission number, state, and RON authorization — all
+three get verified before any job routes to you.
+
+Straight answer, because you'll ask: I'm early, and I don't have steady
+volume yet. I'm recruiting notaries and clients in the same week. If
+you'd rather wait until there's proven flow, that's fair — tell me and
+I'll come back to you when there is.
+
+[Your Name] — [Phone]
 ```
 
-**Where to prioritize recruiting:** notaries already RON-authorized in high-population states (TX, FL, CA, NY, OH) cover the most potential job volume per notary.
+That last paragraph stays in. A notary who registers expecting volume, gets
+nothing for three weeks, and goes inactive costs you the state.
+
+**Track:** name, state, RON yes/no, date messaged, registered yes/no, verified
+yes/no.
 
 ---
 
-## TRACKING SPREADSHEET TEMPLATE
+## PART 2: THE TEN CLIENT SENDS
 
-| Date | Name | Company | Type (Client/Notary) | Tier | Email1_Sent | Email2_Sent | Email3_Sent | Replied? | Reply_Date | Submitted_Request? | Registered_As_Notary? | Status |
-|------|------|---------|----------------------|------|------------|------------|------------|---------|-----------|--------------------|-----------------------|--------|
+### Build the list of ten
 
-Track separately: client reply/conversion rate vs. notary recruitment reply/conversion rate - they're different funnels with different goals (revenue vs. capacity).
+I have not pre-filled company names here on purpose — I don't know your metro,
+and a list of plausible-looking firms I invented is worse than an empty table.
+Fill it yourself; it takes about fifteen minutes.
+
+**Search:** `"title company" [your city]` and `"escrow officer" [your city]` on
+Google Maps and LinkedIn.
+
+**Who you actually want:** the **escrow officer** or **closing coordinator** —
+not the owner, not "info@". They are the person whose day is ruined when a signing
+falls through, and they schedule notaries without needing anyone's approval.
+
+| # | Company | Contact name | Role | Email | State | Verified notary in that state? | Sent | Replied |
+|---|---------|--------------|------|-------|-------|-------------------------------|------|---------|
+| 1 |  |  |  |  |  |  |  |  |
+| 2 |  |  |  |  |  |  |  |  |
+| 3 |  |  |  |  |  |  |  |  |
+| 4 |  |  |  |  |  |  |  |  |
+| 5 |  |  |  |  |  |  |  |  |
+| 6 |  |  |  |  |  |  |  |  |
+| 7 |  |  |  |  |  |  |  |  |
+| 8 |  |  |  |  |  |  |  |  |
+| 9 |  |  |  |  |  |  |  |  |
+| 10 |  |  |  |  |  |  |  |  |
+
+If the "verified notary in that state?" column says no, **do not send that row.**
 
 ---
 
-## WHAT TO DO RIGHT NOW
+### EMAIL 1
 
-1. **Pick 10 Tier 1 prospects** (title companies in your area) - 15 minutes
-2. **Send Email 1** to those 10 today
-3. **In parallel, message 5 notaries** from Part 2 to grow supply
-4. **Add everything to the tracking sheet**
-5. **Day 4:** send Email 2 follow-ups to Day 1's non-responders
-6. **Once you get your first real client request:** watch it land in `/notary-admin` and make sure it gets matched and scheduled fast - a great first experience is what turns a one-time client into a recurring one
+Send to all ten rows that cleared the check. Send them by hand, individually.
+
+**Subject:** `Backup notary for [City] closings — $200 flat`
+
+```
+Hi [First Name],
+
+You schedule closings in [City]. When your usual notary is booked or
+cancels, what happens to that signing?
+
+I run a notary marketplace. Full closing / loan signing package is $200
+flat, and the notary is credential-verified before the job routes to
+them — commission number, state, and RON authorization all checked
+against the state.
+
+Two things I'd rather say up front than have you find out:
+
+  - I'm new. I'm not asking to replace your notary. I'm asking to be the
+    number you call when they're unavailable.
+  - Payment is upfront, at request time. If I can't staff it, you get
+    refunded — I'd rather tell you that now than have you discover it.
+
+If you want to test it, the form takes about two minutes:
+https://empire-v2-production.up.railway.app/get-notarized
+
+Or just reply and I'll walk your first one through myself.
+
+[Your Name]
+[Your Company] — [Phone]
+[Street address, City, State ZIP]
+
+Don't want to hear from me again? Reply "stop" and I'll remove you.
+```
+
+---
+
+### EMAIL 2 — one follow-up, four days later, non-responders only
+
+**Subject:** `Re: Backup notary for [City] closings`
+
+```
+Hi [First Name],
+
+One follow-up and then I'll stop.
+
+The specific case I'm useful for: it's Thursday, the signing is
+tomorrow, and your notary just called out. That's the call I want.
+
+$200 flat for the closing package, verified notary, refunded if I
+can't staff it.
+
+https://empire-v2-production.up.railway.app/get-notarized
+
+If it's not useful, no reply needed — I won't email again.
+
+[Your Name]
+[Your Company] — [Phone]
+[Street address, City, State ZIP]
+
+Reply "stop" to be removed.
+```
+
+**Two emails, then stop.** The old third email in this document said "last note"
+and then didn't stop, which trains people to ignore you.
+
+---
+
+## LEGAL: DO NOT SKIP THE FOOTER
+
+Cold commercial email in the US is governed by CAN-SPAM. Both templates above
+carry the two things it requires and the earlier version of this document lacked:
+
+1. **A real physical postal address.** A PO box registered with the USPS is fine.
+2. **A working opt-out**, honored within 10 business days.
+
+Subject lines must not be deceptive. Penalties are per-email, so ten sends with a
+missing footer is ten violations, not one.
+
+---
+
+## WHEN THE FIRST REQUEST LANDS
+
+1. Watch `/notary-admin`. Confirm it moved out of `requested`.
+2. If it's still `requested` after a few minutes, no eligible notary matched —
+   refund it yourself, immediately, and tell the client why. Do not let them
+   discover it.
+3. If it matched: call the notary directly and make sure the signing happens.
+   One flawless closing is what makes an escrow officer save your number, and
+   that saved number is worth more than the other nine emails.
+
+---
+
+## WHAT WAS REMOVED FROM THIS DOCUMENT, AND WHY
+
+- **"Rates aren't finalized, billing isn't wired up yet"** — both stale. Prices
+  are live in `SERVICE_TIERS` and Stripe Checkout is wired
+  (`routers/jobs.py:115`). The real prices are now in the table above.
+- **"Most requests matched same-day"** — no data supports this, and with zero
+  verified notaries it is false. Nothing in this document now claims a match
+  time.
+- **"Matched automatically the moment they're submitted"** — matching also
+  requires payment *and* a state-eligible verified notary
+  (`notary_bot.py:104`). Rewritten to promise a refund instead of a match.
+- **"Same formula that worked for the video service"** and **"based on the video
+  service's actual reply-rate ranges"** — the `sales_outreach` table
+  (`models.py:745`) has no sent rows. There is no measured reply rate to base a
+  projection on.
+- **"5-8% reply rate = 15-24 replies, 3-7 clients"** — invented. Removed rather
+  than re-estimated; ten real sends will produce a real number in a week.
+- **"70 outreach touches in week 1", 300+ in month 1** — a volume target for a
+  marketplace with no supply. Replaced with ten.
+- **Email 3** — added nothing Email 2 didn't, and broke its own promise to stop.
