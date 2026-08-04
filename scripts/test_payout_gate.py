@@ -134,6 +134,41 @@ def check_default_off(path, failures):
         failures.append(f"{path}: no getenv({FLAG}) found")
 
 
+def check_guard_precedes_effects(path, funcname, failures):
+    """The guard must return before the function's FIRST await.
+
+    stripe_calls() only finds `stripe.X.create`, so it says nothing about
+    the PayPal path (an aiohttp POST to api.paypal.com) or the bank
+    transfer path (a db.commit that flips rows out of "pending"). Those
+    move money, or destroy the record of money owed, without ever naming
+    stripe.
+
+    Every effect in these functions - network call, database read, commit
+    - happens under an await. So "the guard returns before the first
+    await" covers all three uniformly, and keeps covering them if the
+    payment provider changes again.
+    """
+    tree = ast.parse((REPO / path).read_text())
+    fn = find_func(tree, funcname)
+    if fn is None:
+        failures.append(f"{path}: function {funcname} not found")
+        return
+
+    awaits = [n.lineno for n in ast.walk(fn) if isinstance(n, ast.Await)]
+    if not awaits:
+        failures.append(f"{path}:{funcname}: no awaits found - has it stopped "
+                        f"touching the database or the network?")
+        return
+
+    first = min(awaits)
+    if guard_returns_before(fn, first):
+        print(f"  {path}:{funcname}: guard returns before first effect (line {first})")
+    else:
+        failures.append(f"{path}:{funcname}: no {FLAG} guard returns before the "
+                        f"first await at line {first} - the endpoint can reach "
+                        f"the network or mutate payment rows while disarmed")
+
+
 def main():
     failures = []
     print(f"Asserting every Stripe money call is behind {FLAG}\n")
@@ -141,6 +176,15 @@ def main():
     check("main.py", "process_payouts_periodically", failures)
     check("routers/payments.py", "process_pending_payouts", failures)
 
+    # All three payout endpoints, not just the Stripe one. Each reaches a
+    # different provider - or, in the bank-transfer case, no provider at
+    # all while still marking debts settled.
+    print()
+    for fn in ("process_pending_payouts", "process_paypal_payouts",
+               "process_bank_transfer"):
+        check_guard_precedes_effects("routers/payments.py", fn, failures)
+
+    print()
     for p in ("main.py", "routers/payments.py"):
         check_default_off(p, failures)
     print(f"  {FLAG} defaults to OFF in both modules")
