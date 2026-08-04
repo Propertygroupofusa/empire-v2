@@ -18,8 +18,33 @@ from googleapiclient.discovery import build
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("youtube_monetization")
 
-SCOPES = ['https://www.googleapis.com/auth/youtube.readonly',
-          'https://www.googleapis.com/auth/youtube']
+# The scopes the YOUTUBE_REFRESH_TOKEN must have been granted. This list
+# is documentation, not configuration - the token is minted out of band
+# (OAuth Playground / a consent flow) and carries whatever scopes were
+# ticked there. Getting this list wrong therefore does not fail loudly at
+# startup; it fails as an opaque 403 the first time analytics is queried.
+#
+# It WAS wrong. get_daily_analytics calls the youtubeAnalytics v2 API with
+# metrics='views,estimatedMinutesWatched,estimatedRevenue,
+# monetizedPlaybacks,impressions', and neither youtube.readonly nor
+# youtube grants access to that API at all:
+#
+#   views, estimatedMinutesWatched, impressions
+#       -> yt-analytics.readonly
+#   estimatedRevenue, monetizedPlaybacks
+#       -> yt-analytics-monetary.readonly
+#
+# A token minted with only the first two scopes gets
+# 403 insufficientPermissions on every analytics call, forever, no matter
+# how many times it is refreshed.
+SCOPES = [
+    'https://www.googleapis.com/auth/youtube.readonly',
+    'https://www.googleapis.com/auth/youtube',
+    # required by get_daily_analytics - views / watch time / impressions
+    'https://www.googleapis.com/auth/yt-analytics.readonly',
+    # required by get_daily_analytics - estimatedRevenue / monetizedPlaybacks
+    'https://www.googleapis.com/auth/yt-analytics-monetary.readonly',
+]
 
 
 class YouTubeMonetizationTracker:
@@ -36,7 +61,59 @@ class YouTubeMonetizationTracker:
         self.metrics_cache = {}
         self.earnings_cache = {}
 
+        # Circuit breaker for 403 insufficientPermissions.
+        #
+        # That 403 is permanent: the refresh token was granted without the
+        # scopes these calls need, and no amount of retrying or refreshing
+        # changes it. But revenue_dashboard polls three of these methods
+        # on a loop, so a single misconfiguration produced an endless
+        # stream of identical ERROR lines that drowned out everything else
+        # in the Railway logs.
+        #
+        # Once one call comes back with insufficientPermissions, every
+        # subsequent call short-circuits and returns the same explanation
+        # without touching the network.
+        #
+        # Deliberately an in-memory latch rather than an env flag: it
+        # clears on process restart, so regenerating YOUTUBE_REFRESH_TOKEN
+        # and redeploying resumes analytics automatically. An env flag
+        # would be one more thing to remember to switch back on, and
+        # forgetting it looks exactly like the bug it was hiding.
+        self._scope_error = None
+
         self._init_services()
+
+    def _scope_blocked(self):
+        """The cached refusal, if a permanent scope 403 has been seen."""
+        return self._scope_error
+
+    def _latch_scope_error(self, e):
+        """Return a cached-refusal dict if `e` is a permanent scope 403,
+        else None so the caller reports it as an ordinary error."""
+        detail = str(e)
+        if "insufficientPermissions" not in detail and "403" not in detail:
+            return None
+        if self._scope_error is None:
+            log.error(
+                "YouTube returned 403 insufficientPermissions. The "
+                "YOUTUBE_REFRESH_TOKEN was granted without the required "
+                "scopes, so this will fail on every call until the token is "
+                "regenerated with: %s . PAUSING all YouTube API calls until "
+                "restart - further attempts would fail identically and only "
+                "fill the logs. Note estimatedRevenue and monetizedPlaybacks "
+                "additionally require the channel to be in the YouTube "
+                "Partner Program.",
+                " ".join(SCOPES[2:]),
+            )
+            self._scope_error = {
+                "error": "insufficientPermissions",
+                "detail": "YOUTUBE_REFRESH_TOKEN lacks the required scopes; "
+                          "regenerate it and redeploy. YouTube API calls are "
+                          "paused until then.",
+                "required_scopes": SCOPES[2:],
+                "paused": True,
+            }
+        return self._scope_error
 
     def _init_services(self):
         """Initialize YouTube API services"""
@@ -71,6 +148,8 @@ class YouTubeMonetizationTracker:
 
     def get_channel_metrics(self) -> Dict:
         """Get current channel metrics (views, subscribers, videos)"""
+        if self._scope_blocked():
+            return self._scope_blocked()
         try:
             if not self.youtube_service:
                 return {"error": "YouTube service not initialized"}
@@ -99,11 +178,16 @@ class YouTubeMonetizationTracker:
             self.metrics_cache = metrics
             return metrics
         except Exception as e:
+            blocked = self._latch_scope_error(e)
+            if blocked:
+                return blocked
             log.error(f"Failed to fetch channel metrics: {e}")
             return {"error": str(e)}
 
     def get_daily_analytics(self, days_back: int = 7) -> Dict:
         """Get analytics for last N days"""
+        if self._scope_blocked():
+            return self._scope_blocked()
         try:
             if not self.youtube_analytics_service:
                 return {"error": "YouTube Analytics service not initialized"}
@@ -170,6 +254,12 @@ class YouTubeMonetizationTracker:
 
             return analytics
         except Exception as e:
+            # A permanent scope 403 latches the circuit breaker so the
+            # polling callers stop hammering an endpoint that cannot
+            # succeed; anything else is reported normally.
+            blocked = self._latch_scope_error(e)
+            if blocked:
+                return blocked
             log.error(f"Failed to fetch analytics: {e}")
             return {"error": str(e)}
 
@@ -220,6 +310,8 @@ class YouTubeMonetizationTracker:
 
     def get_top_videos(self, limit: int = 10) -> Dict:
         """Get top performing videos"""
+        if self._scope_blocked():
+            return self._scope_blocked()
         try:
             if not self.youtube_service:
                 return {"error": "YouTube service not initialized"}
@@ -260,6 +352,9 @@ class YouTubeMonetizationTracker:
                 "fetched_at": datetime.utcnow().isoformat()
             }
         except Exception as e:
+            blocked = self._latch_scope_error(e)
+            if blocked:
+                return blocked
             log.error(f"Failed to get top videos: {e}")
             return {"error": str(e)}
 

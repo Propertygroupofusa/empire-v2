@@ -5,7 +5,13 @@ from sqlalchemy import select, func
 from database import get_db
 from models import Payment, Worker, Job
 from datetime import datetime, timedelta
-from passlib.context import CryptContext
+# bcrypt's own API, not passlib's CryptContext. passlib is not in
+# requirements.txt, so this module-level import raised
+# ModuleNotFoundError and the whole Bot Dashboard router failed to load.
+# Adding passlib would not fix it either: its bcrypt backend reads
+# bcrypt.__about__.__version__, removed in bcrypt 4.x, and the repo pins
+# bcrypt==5.0.0. See worker_auth.py, which documented this already.
+from worker_auth import hash_password
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -13,8 +19,6 @@ router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 @router.post("/initialize-bots")
 async def initialize_bots(db: AsyncSession = Depends(get_db)):
     """Initialize bot workers if they don't exist"""
-    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
     try:
         # Check if bots already exist
         result = await db.execute(
@@ -33,7 +37,7 @@ async def initialize_bots(db: AsyncSession = Depends(get_db)):
                 email=bot_email,
                 name=f"Job Bot {i}",
                 status="active",
-                password_hash=pwd_context.hash("auto_bot_password_123"),
+                password_hash=hash_password("auto_bot_password_123"),
             )
             db.add(bot)
             created.append(bot_email)

@@ -5,7 +5,14 @@ from datetime import datetime
 from database import AsyncSessionLocal
 from models import Worker, Job, Payment
 from sqlalchemy import select, func
-from passlib.context import CryptContext
+# bcrypt's own API, not passlib's CryptContext. passlib is not in
+# requirements.txt, so this module-level import raised
+# ModuleNotFoundError and main.py's `from bot_autoscaler import
+# auto_scale_bots` failed, disabling autoscaling entirely. Adding passlib
+# would not fix it: its bcrypt backend reads bcrypt.__about__.__version__,
+# removed in bcrypt 4.x, against the pinned bcrypt==5.0.0. See
+# worker_auth.py, which documented this already.
+from worker_auth import hash_password
 
 log = logging.getLogger("bot_autoscaler")
 
@@ -50,8 +57,6 @@ async def get_bot_metrics():
 
 async def create_bot(bot_number: int) -> Worker:
     """Create a new bot worker"""
-    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
     async with AsyncSessionLocal() as session:
         bot_email = f"bot{bot_number}@pgusa.local"
 
@@ -66,7 +71,7 @@ async def create_bot(bot_number: int) -> Worker:
             email=bot_email,
             name=f"Job Bot {bot_number}",
             status="active",
-            password_hash=pwd_context.hash("auto_bot_password_123"),
+            password_hash=hash_password("auto_bot_password_123"),
         )
         session.add(bot)
         await session.commit()

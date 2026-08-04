@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
-from sqlalchemy import text, inspect, String
+from sqlalchemy import text, inspect, String, Integer, Enum as SAEnum
 from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from datetime import datetime
 import os
@@ -290,26 +290,106 @@ async def run_migrations():
     Worker in that same PR (#70), not just Worker, since any of them
     could have the same kind of pre-existing-table drift.
 
-    Model-driven (iterates each model's __table__.columns) rather than a
-    manually maintained list of column names/types, specifically so this
-    doesn't only patch the columns anyone remembered to add here - it
-    catches ANY drift between the ORM model and the real table, present
-    or future. Also dialect-agnostic (SQLAlchemy's inspector, not raw
-    SQLite PRAGMA), so it actually works on Postgres - production."""
-    from models import Worker, Client, Job, Booking, TradingBotState
+    Model-driven (iterates each table's columns) rather than a manually
+    maintained list of column names/types, specifically so this doesn't
+    only patch the columns anyone remembered to add here - it catches ANY
+    drift between the ORM model and the real table, present or future.
+    Also dialect-agnostic (SQLAlchemy's inspector, not raw SQLite PRAGMA),
+    so it actually works on Postgres - production.
+
+    The set of TABLES is now derived the same way: every table registered
+    on Base.metadata, not a hand-picked tuple. The tuple was the actual
+    bug. create_all (database.py) creates tables that do not exist yet,
+    but it never adds a column to a table that already exists - so a new
+    field on any pre-existing table is invisible to the real table unless
+    it is migrated HERE, and every write then fails with "column does not
+    exist". Two separate outages came from a model being absent from that
+    tuple: bot_positions.peak_pct, and then payments.stripe_payout_id,
+    which errored the payout cycle on every pass. Enumerating the registry
+    means adding a model can no longer silently opt out of migration."""
+    import models  # noqa: F401  (registers every model on Base.metadata)
+    from database import Base
+
+    # Counters exist so the run reports what it DID, not just that it ran.
+    # Both outages so far were invisible in the logs: nothing announced that
+    # payments was never considered, because a table absent from the old
+    # tuple produced no output at all. Silence read exactly like success.
+    scanned = added = converted = failed = sequenced = 0
 
     async with engine.begin() as conn:
-        for model in (Worker, Client, Job, Booking, TradingBotState):
-            table_name = model.__tablename__
+        for table in Base.metadata.sorted_tables:
+            table_name = table.name
             try:
-                existing_columns = await conn.run_sync(
-                    lambda sync_conn, t=table_name: {c["name"]: c["type"] for c in inspect(sync_conn).get_columns(t)}
+                raw_columns = await conn.run_sync(
+                    lambda sync_conn, t=table_name: inspect(sync_conn).get_columns(t)
                 )
+                existing_columns = {c["name"]: c["type"] for c in raw_columns}
             except Exception as e:
                 log.warning(f"Migration: could not inspect {table_name} table columns: {e}")
+                failed += 1
                 continue
+            scanned += 1
 
-            for column in model.__table__.columns:
+            # ── auto-increment repair ───────────────────────────────────
+            #
+            # Confirmed live: inserting a Worker died with
+            #
+            #   asyncpg.exceptions.NotNullViolationError: null value in
+            #   column "id" of relation "workers" violates not-null
+            #   constraint
+            #
+            # The model declares id as an Integer primary key, so
+            # SQLAlchemy omits it from the INSERT and expects the database
+            # to generate it (note the RETURNING workers.id). But the real
+            # workers table was created outside the ORM as a plain INTEGER
+            # PRIMARY KEY - no SERIAL, no IDENTITY, no DEFAULT - so nothing
+            # generates a value and the NOT NULL implied by PRIMARY KEY
+            # rejects the row. Every bot-worker insert failed this way,
+            # from initialize_bot and from the autoscaler alike.
+            #
+            # Same drift class this function already exists for, so it is
+            # repaired the same way: generically, across every table, not
+            # just the one that happened to surface it. clients/jobs/
+            # bookings all have Integer primary keys and could have been
+            # created the same way.
+            #
+            # Postgres only - SQLite makes INTEGER PRIMARY KEY an alias for
+            # rowid and assigns automatically, which is exactly why this
+            # bug is invisible in a SQLite test.
+            if conn.dialect.name == "postgresql":
+                by_name = {c["name"]: c for c in raw_columns}
+                for column in table.primary_key.columns:
+                    info = by_name.get(column.name)
+                    if info is None or not isinstance(column.type, Integer):
+                        continue
+                    # a serial column has default nextval(...); an identity
+                    # column reports an identity dict. Neither => nothing
+                    # will ever populate it.
+                    if info.get("default") or info.get("identity"):
+                        continue
+                    seq = f"{table_name}_{column.name}_seq"
+                    try:
+                        await conn.execute(text(f'CREATE SEQUENCE IF NOT EXISTS "{seq}"'))
+                        await conn.execute(text(
+                            f'ALTER SEQUENCE "{seq}" OWNED BY "{table_name}"."{column.name}"'))
+                        # Start above any rows already present, so the
+                        # repair cannot collide with existing primary keys.
+                        await conn.execute(text(
+                            f'SELECT setval(\'"{seq}"\', '
+                            f'COALESCE((SELECT MAX("{column.name}") FROM "{table_name}"), 0) + 1, '
+                            f'false)'))
+                        await conn.execute(text(
+                            f'ALTER TABLE "{table_name}" ALTER COLUMN "{column.name}" '
+                            f'SET DEFAULT nextval(\'"{seq}"\')'))
+                        log.info(f"Migration OK: {table_name}.{column.name} "
+                                 f"auto-increment restored via {seq}")
+                        sequenced += 1
+                    except Exception as e:
+                        log.warning(f"Migration FAILED {table_name}.{column.name} "
+                                    f"auto-increment: [{type(e).__name__}] {e}")
+                        failed += 1
+
+            for column in table.columns:
                 if column.name not in existing_columns:
                     try:
                         ddl_type = column.type.compile(dialect=conn.dialect)
@@ -320,8 +400,19 @@ async def run_migrations():
                         # has rows, which is exactly the scenario this exists for.
                         await conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN "{column.name}" {ddl_type}'))
                         log.info(f"Migration OK: {table_name}.{column.name}")
+                        added += 1
                     except Exception as e:
-                        log.debug(f"Migration skip {table_name}.{column.name}: {e}")
+                        # WARNING, not debug. Reaching here means the column
+                        # is genuinely absent from the real table AND the
+                        # ALTER to add it failed - so every write touching
+                        # that column will now fail, which is precisely the
+                        # payments/bot_positions outage. At debug level that
+                        # never appears in Railway's logs, so the migration
+                        # would report itself as fine while leaving the
+                        # column missing.
+                        log.warning(f"Migration FAILED {table_name}.{column.name}: "
+                                    f"[{type(e).__name__}] {e}")
+                        failed += 1
                     continue
 
                 # Type drift, not just missing-column drift: confirmed live
@@ -339,82 +430,159 @@ async def run_migrations():
                 # own "status" columns from the same era and could have the
                 # identical drift (e.g. routers/bookings.py already filters
                 # on Booking.status == status the same way).
-                if isinstance(column.type, String) and isinstance(existing_columns[column.name], PGEnum):
+                #
+                # SAEnum is excluded, and that exclusion is load-bearing now
+                # that this loop covers every table instead of four.
+                # sqlalchemy.Enum SUBCLASSES String, so isinstance(...,
+                # String) is True for a column the model declares as
+                # Enum(SomePyEnum) - and such a column is SUPPOSED to be a
+                # native PG enum in the database. Without this guard the
+                # widened loop would "fix" sales_leads.source,
+                # sales_leads.status and sales_outreach.outreach_type by
+                # converting three deliberately-enum columns to VARCHAR:
+                # a destructive change, applied to exactly the columns where
+                # model and database already agree. The rule this encodes is
+                # "model says plain string, database says enum", not
+                # "database says enum".
+                if (isinstance(column.type, String)
+                        and not isinstance(column.type, SAEnum)
+                        and isinstance(existing_columns[column.name], PGEnum)):
                     try:
                         await conn.execute(text(
                             f'ALTER TABLE {table_name} ALTER COLUMN "{column.name}" TYPE VARCHAR USING "{column.name}"::text'
                         ))
                         log.info(f"Migration OK: {table_name}.{column.name} converted from enum to VARCHAR")
+                        converted += 1
                     except Exception as e:
-                        log.debug(f"Migration skip {table_name}.{column.name} type fix: {e}")
+                        log.warning(f"Migration FAILED {table_name}.{column.name} type fix: "
+                                    f"[{type(e).__name__}] {e}")
+                        failed += 1
+
+    # One line that is always emitted, including on a clean no-op run. This
+    # is the line to grep for in Railway after a deploy: "tables=26" proves
+    # the registry-wide sweep actually happened, and failed=0 proves nothing
+    # was left broken. A deploy where this line is missing entirely means
+    # run_migrations raised before finishing - main.py catches that and logs
+    # "Migrations failed", which is easy to miss among startup noise.
+    log.info(f"Migration summary: tables={scanned} columns_added={added} "
+             f"enum_conversions={converted} autoincrement_fixed={sequenced} "
+             f"failures={failed}")
 
 
 # ── Bot Earnings System ──────────────────────────────────────
 
 async def initialize_bot():
-    """Initialize bot workers with Stripe Connect accounts"""
-    try:
-        from database import AsyncSessionLocal
-        from models import Worker
-        from passlib.context import CryptContext
-        from sqlalchemy import select
-        import stripe
+    """Initialize bot workers with Stripe Connect accounts.
 
-        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-        stripe_key = os.getenv("STRIPE_SECRET_KEY")
-        if stripe_key:
-            stripe.api_key = stripe_key
+    Raises on failure. It used to swallow its own exceptions into a
+    warning while the caller logged "Bot worker initialized" regardless,
+    which is how the failure below survived unnoticed for months."""
+    from database import AsyncSessionLocal
+    from models import Worker
+    # bcrypt's own API, not passlib's CryptContext. passlib was never in
+    # requirements.txt, so this import raised ModuleNotFoundError and took
+    # the whole function down before a single worker was created - and it
+    # would not have worked if added, because passlib's bcrypt backend
+    # reads bcrypt.__about__.__version__ which bcrypt removed in 4.x:
+    #
+    #   AttributeError: module 'bcrypt' has no attribute '__about__'
+    #
+    # against the pinned bcrypt==5.0.0. worker_auth.py already hit this
+    # and documented it; reusing its helper rather than adding a fourth
+    # copy of the same two lines.
+    from worker_auth import hash_password
+    from sqlalchemy import select
+    import stripe
 
-        async with AsyncSessionLocal() as session:
-            # Check existing bots
-            result = await session.execute(
-                select(Worker).where(Worker.email.like("%bot%pgusa.local"))
-            )
-            existing_bots = result.scalars().all()
+    stripe_key = os.getenv("STRIPE_SECRET_KEY")
+    if stripe_key:
+        stripe.api_key = stripe_key
 
-            # If no bots exist, create initial fleet of 2
-            if not existing_bots:
-                for i in range(1, 3):
-                    bot_email = f"bot{i if i > 1 else ''}@pgusa.local"
-                    worker = Worker(
-                        email=bot_email,
-                        name=f"Job Bot {i}",
-                        status="active",
-                        password_hash=pwd_context.hash("auto_bot_password_123"),
-                    )
-                    session.add(worker)
-                    await session.flush()
-                    log.info(f"🤖 Bot worker created: {bot_email}")
+    async with AsyncSessionLocal() as session:
+        # Check existing bots
+        result = await session.execute(
+            select(Worker).where(Worker.email.like("%bot%pgusa.local"))
+        )
+        existing_bots = result.scalars().all()
 
-                    if stripe_key:
-                        try:
-                            account = stripe.Account.create(
-                                type="express",
-                                email=bot_email,
-                                capabilities={"transfers": {"requested": True}},
-                            )
-                            worker.stripe_account_id = account.id
-                            log.info(f"💳 Stripe Connect account created: {account.id}")
-                        except Exception as e:
-                            log.warning(f"Stripe Connect setup failed for {bot_email}: {e}")
+        # If no bots exist, create initial fleet of 2
+        if not existing_bots:
+            created = 0
+            for i in range(1, 3):
+                bot_email = f"bot{i if i > 1 else ''}@pgusa.local"
+                worker = Worker(
+                    email=bot_email,
+                    name=f"Job Bot {i}",
+                    status="active",
+                    password_hash=hash_password("auto_bot_password_123"),
+                )
+                session.add(worker)
+                await session.flush()
+                created += 1
+                log.info(f"🤖 Bot worker created: {bot_email}")
 
-                await session.commit()
-                log.info(f"✅ Initialized {len(range(1, 3))} bot workers")
-            else:
-                log.info(f"✅ {len(existing_bots)} bot workers already exist")
-    except Exception as e:
-        log.warning(f"Bot initialization: {e}")
+                if stripe_key:
+                    try:
+                        account = stripe.Account.create(
+                            type="express",
+                            email=bot_email,
+                            capabilities={"transfers": {"requested": True}},
+                        )
+                        worker.stripe_account_id = account.id
+                        log.info(f"💳 Stripe Connect account created: {account.id}")
+                    except Exception as e:
+                        log.warning(f"Stripe Connect setup failed for {bot_email}: {e}")
+
+            await session.commit()
+            # Count what was actually created, not len(range(1, 3)) - that
+            # is the constant 2 regardless of what happened in the loop.
+            log.info(f"✅ Initialized {created} bot workers")
+        else:
+            log.info(f"✅ {len(existing_bots)} bot workers already exist")
 
 
 async def start_job_bot():
-    """Start job bot(s) as background task - claims and completes available jobs for all bots"""
+    """DEMO ONLY - off unless DEMO_JOB_BOT_ENABLED=true.
+
+    Claims jobs, marks them complete two seconds later, and books a
+    payment. It is a demo of the marketplace mechanics, not the
+    marketplace: no notarization actually happens.
+
+    WHY IT IS GATED
+    ---------------
+    It selects on `Job.status == "requested"` with NO filter on `paid`,
+    and then sets `job.paid = True` itself. The real notarization flow
+    depends on that flag: routers/jobs.py opens a job with paid=False and
+    routes the client to Stripe checkout, and notary_bot.py plus
+    POST /{job_id}/match both refuse to match a job that is not paid.
+    This loop bypasses that gate and overwrites the flag.
+
+    So a real customer submitting a notarization request would have their
+    job claimed within 10 seconds - before they entered a card - stamped
+    paid, marked completed 2 seconds later, and turned into a payout
+    obligation for the full price. No work performed, no money collected.
+
+    That was harmless only because two other bugs kept it inert: there
+    were no bot workers (passlib, #129) and no jobs (nothing creates them
+    but real intake and a seeder nothing runs). #129 and #131 removed the
+    first protection, so this needs a deliberate one.
+
+    Turning it on is safe when the only jobs in the table came from
+    seed_bot_jobs.py. It is not safe while real client intake is open."""
+    if os.getenv("DEMO_JOB_BOT_ENABLED", "false").strip().lower() != "true":
+        log.info("Demo job bot disabled (DEMO_JOB_BOT_ENABLED not set to true) "
+                 "- jobs will not be auto-claimed or auto-completed")
+        return
+
     try:
         from database import AsyncSessionLocal
         from models import Job, Worker, Payment
         from sqlalchemy import select
         import uuid
 
-        log.info("🚀 Job Bot starting - polling for work...")
+        log.warning("🚀 Demo Job Bot ARMED - DEMO_JOB_BOT_ENABLED=true. It will "
+                    "claim ANY job in 'requested' status, including unpaid real "
+                    "client jobs, mark it paid and completed, and book a payout.")
 
         while True:
             try:
@@ -495,12 +663,43 @@ async def start_job_bot():
 
 
 async def process_payouts_periodically():
-    """Process pending payouts every 30 seconds"""
+    """Process pending payouts every 30 seconds.
+
+    OFF BY DEFAULT - set PAYOUTS_ENABLED=true to arm. See the note below
+    before doing that."""
     try:
         import stripe
         from database import AsyncSessionLocal
         from models import Payment, Worker
-        from sqlalchemy import select
+        from sqlalchemy import select, update as sa_update
+
+        # This loop has never completed a single successful pass in
+        # production. Every cycle died at the SELECT below, because
+        # select(Payment) emits every mapped column and
+        # payments.stripe_payout_id did not exist on the real table - the
+        # "Payout cycle error" repeating every 30s in Railway. That failure
+        # happened BEFORE stripe.Transfer.create, so no money ever moved,
+        # and the broken schema was the only thing holding it back.
+        #
+        # Repairing the migration removes that accidental safety, so the
+        # loop needs a deliberate one. What it would be armed into:
+        #
+        #   - session.commit() is OUTSIDE the per-payment loop, so one
+        #     failed commit loses the "paid" status of EVERY transfer in
+        #     that pass while the transfers themselves are real and final
+        #   - Transfer.create carries no idempotency key
+        #   - rows therefore stay "pending", and 30 seconds later the same
+        #     payments are transferred again, unbounded
+        #
+        # A redeploy mid-loop is enough to trigger it. Idempotency keys and
+        # per-payment commits are the actual fix and are being handled
+        # separately; until that lands this stays off, so that enabling
+        # payouts is a decision someone makes rather than a side effect of
+        # fixing an unrelated schema bug.
+        if os.getenv("PAYOUTS_ENABLED", "false").strip().lower() != "true":
+            log.info("Payout processor disabled (PAYOUTS_ENABLED not set to true) "
+                     "- no Stripe transfers will be attempted")
+            return
 
         stripe_key = os.getenv("STRIPE_SECRET_KEY")
         if not stripe_key:
@@ -508,40 +707,121 @@ async def process_payouts_periodically():
             return
 
         stripe.api_key = stripe_key
+        log.warning("Payout processor ARMED - PAYOUTS_ENABLED=true, real Stripe "
+                    "transfers will be attempted every 30s")
 
         while True:
             try:
                 async with AsyncSessionLocal() as session:
+                    # stripe_transfer_id IS NULL is a second, independent
+                    # guard against paying twice. The idempotency key below
+                    # is the primary one, but Stripe expires keys after 24
+                    # hours - past that window the same key is treated as
+                    # new and would create a second transfer. A payment that
+                    # already carries a transfer id has demonstrably been
+                    # paid, whatever its status column says, so it is never
+                    # a candidate again regardless of elapsed time.
                     result = await session.execute(
-                        select(Payment).where(Payment.payout_status == "pending")
+                        select(Payment).where(
+                            Payment.payout_status == "pending",
+                            Payment.stripe_transfer_id.is_(None),
+                        )
                     )
                     pending = result.scalars().all()
 
                     for payment in pending:
                         try:
+                            # Worker.id is Integer, Payment.worker_id is
+                            # String. Comparing them directly does not work
+                            # on Postgres - verified against a real server:
+                            #
+                            #   asyncpg.exceptions.UndefinedFunctionError:
+                            #   operator does not exist: integer = character
+                            #   varying
+                            #
+                            # SQLAlchemy's Integer has no bind processor on
+                            # the postgresql dialect, so the Python str went
+                            # straight through to the driver. This raised on
+                            # EVERY payment, before Stripe was ever reached,
+                            # and the handler below then marked each one
+                            # "failed" - so arming payouts would have flipped
+                            # the whole pending table to failed rather than
+                            # paying anything.
+                            #
+                            # routers/payments.py already casts with int() at
+                            # both of its call sites; only this one did not.
+                            # SQLite hides the bug completely (it coerces
+                            # '7' == 7), so it is Postgres-only.
+                            try:
+                                worker_pk = int(payment.worker_id)
+                            except (TypeError, ValueError):
+                                log.warning(f"Payment {payment.id}: worker_id "
+                                            f"{payment.worker_id!r} is not a valid "
+                                            f"worker id, skipping")
+                                continue
+
                             w_result = await session.execute(
-                                select(Worker).where(Worker.id == payment.worker_id)
+                                select(Worker).where(Worker.id == worker_pk)
                             )
                             worker = w_result.scalar_one_or_none()
 
                             if worker and worker.stripe_account_id:
+                                # Derived from payment.id, so it is stable
+                                # across retries, restarts and redeploys.
+                                # Replaying this call returns the ORIGINAL
+                                # transfer instead of creating a second one,
+                                # which is what makes the window between
+                                # "money moved" and "database updated"
+                                # survivable rather than expensive.
                                 transfer = stripe.Transfer.create(
                                     amount=int(payment.worker_amount * 100),
                                     currency="usd",
                                     destination=worker.stripe_account_id,
-                                    description=f"Job payout: {payment.job_id}"
+                                    description=f"Job payout: {payment.job_id}",
+                                    idempotency_key=f"payout-{payment.id}",
                                 )
                                 payment.payout_status = "paid"
                                 payment.stripe_transfer_id = transfer.id
                                 payment.paid_at = datetime.utcnow()
+                                # Commit per payment, immediately after the
+                                # transfer. The commit used to sit after the
+                                # whole loop, so one failure discarded the
+                                # "paid" status of every transfer in the
+                                # pass while the transfers stayed real - and
+                                # 30 seconds later all of them were sent
+                                # again. Committing here bounds the exposure
+                                # to a single payment, and the idempotency
+                                # key covers even that one.
+                                await session.commit()
                                 log.info(f"💰 Payout processed: {payment.id} → {worker.email} (${payment.worker_amount})")
                             else:
                                 log.debug(f"Payment {payment.id}: Worker has no Stripe Connect account")
                         except Exception as e:
                             log.error(f"Payout error for {payment.id}: {e}")
-                            payment.payout_status = "failed"
-
-                    await session.commit()
+                            # The session may hold a failed flush, so the
+                            # "failed" mark cannot ride on it - roll back
+                            # first, then write the status through a fresh
+                            # UPDATE. Without the rollback every subsequent
+                            # payment in this pass dies on PendingRollback,
+                            # turning one bad payment into a dead cycle.
+                            #
+                            # Deliberately does NOT touch rows that already
+                            # have a transfer id: if the failure happened
+                            # after Stripe accepted the transfer, the money
+                            # is gone and marking it "failed" would invite
+                            # someone to pay it a second time by hand.
+                            await session.rollback()
+                            try:
+                                await session.execute(
+                                    sa_update(Payment)
+                                    .where(Payment.id == payment.id,
+                                           Payment.stripe_transfer_id.is_(None))
+                                    .values(payout_status="failed")
+                                )
+                                await session.commit()
+                            except Exception as mark_err:
+                                log.error(f"Could not mark {payment.id} failed: {mark_err}")
+                                await session.rollback()
             except Exception as e:
                 log.warning(f"Payout cycle error: {e}")
 
@@ -576,7 +856,15 @@ async def lifespan(app: FastAPI):
         await initialize_bot()
         log.info("✅ Bot worker initialized")
     except Exception as e:
-        log.warning(f"Bot initialization failed: {e}")
+        # ERROR with a traceback, not a bare warning. This branch was
+        # unreachable while initialize_bot swallowed its own exceptions,
+        # so "✅ Bot worker initialized" printed even when zero workers
+        # existed - and the only other signal was "No bot workers found,
+        # skipping cycle" 30 seconds later, in a different log line, from
+        # a different task. Nothing connected the two.
+        log.error(f"Bot initialization FAILED - no bot workers will exist, so no "
+                  f"jobs will be claimed and no payments created: "
+                  f"[{type(e).__name__}] {e}", exc_info=True)
 
     try:
         asyncio.create_task(start_job_bot())

@@ -1,0 +1,88 @@
+name: One-off backtest — prop_bot profit target (throwaway)
+
+# Validation run for PR #122, not part of CI. Triggered by pushes to that
+# PR's branch only - workflow_dispatch would be tidier, but GitHub only
+# exposes dispatch for workflows that already exist on the default branch,
+# and this one deliberately never lands there. Same pattern the previous
+# one-off backtest used for the same reason.
+on:
+  push:
+    branches: ["claude/prop-bot-profit-target-units"]
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (bot module needs these to import)
+        run: pip install -r requirements.txt
+
+      - name: Backtest old vs new profit target on real bars
+        env:
+          # Read-only use: the script fetches historical bars and never
+          # places an order. Free-tier IEX keys are sufficient.
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          BACKTEST_DAYS: "30"
+          BACKTEST_CASH: "980"
+        run: python scripts/backtest_prop_target.py
+
+      # The exit sweep came back with profit factor < 1.0 on all three arms
+      # and RSI as the dominant exit in each - so the exits were not the
+      # binding constraint. This asks the upstream question: does any RSI
+      # threshold produce an edge at all? Split-sample, so the answer can
+      # be "no" rather than "here is the luckiest of 60 draws".
+      - name: Sweep entry thresholds (in-sample select, out-of-sample validate)
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          BACKTEST_DAYS: "30"
+          BACKTEST_CASH: "980"
+        run: python scripts/sweep_prop_entries.py
+
+      # DEMO ONLY. Bootstraps the measured out-of-sample trade distribution
+      # into a range of outcomes, because a single backtest number is one
+      # draw and deploying on it is judging a coin from one flip. Also
+      # answers what capital the measured edge would actually require to
+      # hit a daily dollar target. Places no orders.
+      - name: Demo projection (range of outcomes, capital required)
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          BACKTEST_DAYS: "30"
+          BACKTEST_CASH: "980"
+          DEMO_DAILY_TARGET: "1000"
+        run: python scripts/demo_projection.py
+
+      # Crypto side. The live 1.8% target vs 5% stop needs an 85% win rate
+      # net of real fees - and 73.5% even at zero fees, so the geometry is
+      # the larger problem and the order type the smaller one. Sweeps
+      # target x stop plus ATR-scaled levels against real Coinbase candles.
+      # No secrets: Coinbase's candle endpoint is public, and this is the
+      # same source the bot itself reads.
+      - name: Sweep crypto target/stop geometry
+        env:
+          SWEEP_DAYS: "30"
+          SWEEP_CASH: "130"
+          SWEEP_TAKER: "0.004"     # real account fee tier, not the code default
+          SWEEP_MAKER: "0.0025"
+        run: python scripts/sweep_crypto_geometry.py
+
+      # Real execution on real money, from Alpaca's own records. Every
+      # other number in this workflow comes from replaying historical bars,
+      # which measures a strategy but cannot measure execution. The bots'
+      # own metrics.json / equity.csv are no substitute - gitignored, and
+      # written to Railway's ephemeral filesystem, so they are wiped on
+      # every redeploy. Read-only: GET against account/orders/history.
+      - name: Live performance from Alpaca account history
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          ALPACA_BASE_URL: "https://api.alpaca.markets"
+          REPORT_DAYS: "90"
+        run: python scripts/live_performance_report.py
