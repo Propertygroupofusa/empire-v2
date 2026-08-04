@@ -203,7 +203,7 @@ ROUND_TRIP_FEE_PCT = TAKER_FEE_RATE * 2
 # Increased from 1.5% to 3% to let winners run and match crypto volatility.
 # BTC/ETH see 1-5% daily moves - capture those instead of closing at first tick.
 PROFIT_TARGET_PCT = max(
-    float(os.getenv("CRYPTO_PROFIT_TARGET_PCT", "0.03")),
+    float(os.getenv("CRYPTO_PROFIT_TARGET_PCT", "0.05")),  # Increased from 3% to 5%
     ROUND_TRIP_FEE_PCT * 1.5,
 )
 
@@ -235,7 +235,7 @@ STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.05"))
 # Tier 1: Exit 1/3 at 1.5% (half profit target, lock early gain)
 # Tier 2: Exit 1/3 at 3% (full profit target)
 # Tier 3: Exit final 1/3 at 5% (let winners run 2x the target)
-CRYPTO_TIER_LEVELS = [0.015, 0.03, 0.05]  # percentage multipliers
+CRYPTO_TIER_LEVELS = [0.02, 0.05, 0.10]  # OPTIMIZED: Exit at 2%, 5%, 10% for max profit
 
 open_crypto_positions = {}
 daily_pnl = 0.0

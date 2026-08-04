@@ -30,12 +30,11 @@ ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 BASE_URL      = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 
-# RSI entry/exit thresholds. Tightened to EXTREME signals only for profitability.
-# Weak signals (45/50) were losing money - every trade went immediately underwater.
-# Switch to standard oversold/overbought: only trade RSI < 30 (longs) or > 70 (shorts).
-# Fewer trades but higher win rate. Configurable via env for tuning without code change.
-RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "30"))
-RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "70"))
+# RSI entry/exit thresholds. OPTIMIZED for stronger entry signals = higher win rate
+# Tightened to only EXTREME oversold/overbought for maximum quality trades.
+# Fewer but better trades. Configurable via env for tuning without code change.
+RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "25"))  # Tighter: only extreme oversold
+RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "75"))  # Tighter: only extreme overbought
 
 # Real, enforced stop-loss. open_position() already computed a 2% stop
 # price for the informational subscriber-signal broadcast, but Pass 1's
@@ -104,18 +103,18 @@ MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", str(len(FUTURES))))
 # to let winners run instead of closing too early. With $1000+ positions, these
 # targets are achievable on 1%+ daily moves that we see in the market.
 PROFIT_TARGET_DOLLARS_MILESTONES = [
-    (0,     5.00),      # Micro: $5.00 (0.50% on $1000)
-    (500,   7.50),      # Small: $7.50
-    (1000,  10.00),     # Medium: $10.00 (1% on $1000)
-    (5000,  15.00),     # Large: $15.00 (0.30% on $5000)
-    (10000, 20.00),     # Huge: $20.00 (0.20% on $10000)
+    (0,     8.00),      # Micro: $8.00 (0.80% on $1000) - increased for higher profits
+    (500,   12.00),     # Small: $12.00 (1.20% on $1000)
+    (1000,  16.00),     # Medium: $16.00 (1.60% on $1000) - chase bigger moves
+    (5000,  25.00),     # Large: $25.00 (0.50% on $5000) - scale targets
+    (10000, 35.00),     # Huge: $35.00 (0.35% on $10000) - maximize winners
 ]
 
-# Professional tiered exit levels - lock in profits at milestones, let winners run
-# Tier 1: Exit 1/3 at 50% of target (lock in early win)
-# Tier 2: Exit 1/3 at 100% of target (take second third)
-# Tier 3: Exit final 1/3 at 150% of target (let winners run to max)
-TIER_LEVELS = [0.50, 1.00, 1.50]  # multipliers of profit target
+# Professional tiered exit levels - OPTIMIZED for higher profits
+# Tier 1: Exit 1/3 at 75% of target (early win lock-in)
+# Tier 2: Exit 1/3 at 150% of target (double the target)
+# Tier 3: Exit final 1/3 at 250% of target (let winners REALLY run)
+TIER_LEVELS = [0.75, 1.50, 2.50]  # multipliers of profit target (optimized for max profit)
 
 
 def get_profit_target_dollars(equity):
@@ -419,7 +418,7 @@ async def reconcile_positions_with_broker(session):
 # need meaningful capital to achieve real dollar P&L).
 # Increased from $100 to $1000 for profitability: $100 trades with $0.55 fees can't win.
 # $1000 trades × 0.60% move = $6+ profit, beats fees and compounds account.
-MIN_POSITION_NOTIONAL = float(os.getenv("PROP_MIN_POSITION_NOTIONAL", "1000"))
+MIN_POSITION_NOTIONAL = float(os.getenv("PROP_MIN_POSITION_NOTIONAL", "1500"))  # Increased from $1000 to $1500 per trade
 
 # HARD MARGIN SAFETY LIMITS — prevent over-leverage ever again
 # Minimum buying power buffer required before opening ANY new position
