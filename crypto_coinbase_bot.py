@@ -108,10 +108,11 @@ def _auth_headers(method: str, path: str) -> dict:
     return {"Authorization": f"Bearer {_build_jwt(method, path)}", "Content-Type": "application/json"}
 
 
-# Same widened RSI thresholds prop_bot.py/crypto_alpaca_bot.py settled on -
-# narrower bands meant real trades were too rare.
-RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "45"))
-RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "50"))
+# Tightened to EXTREME RSI signals only - same fix as prop_bot.py.
+# Weak signals (45/50) lose money. Switch to standard oversold/overbought:
+# only trade RSI < 30 (longs) or > 70 (shorts). Fewer trades, higher win rate.
+RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "30"))
+RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "70"))
 
 MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", str(len(CRYPTO_PAIRS))))
 # Unset by default - no ceiling, so the full account balance (principal +
@@ -119,7 +120,9 @@ MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", str(len(CRYPTO_PAIRS))))
 # it at a fixed dollar amount instead, if ever wanted.
 _max_allocation_env = os.getenv("CRYPTO_MAX_ALLOCATION", "")
 MAX_ALLOCATION = float(_max_allocation_env) if _max_allocation_env else None
-MIN_POSITION_NOTIONAL = float(os.getenv("CRYPTO_MIN_POSITION_NOTIONAL", "5"))
+# Increased from $5 to $50 minimum for profitability: $5 trades with fees can't win.
+# $50 × 1% move = $0.50 profit, beats fees and compounds account faster.
+MIN_POSITION_NOTIONAL = float(os.getenv("CRYPTO_MIN_POSITION_NOTIONAL", "50"))
 
 # Staged capital release, requested after watching the account get drawn
 # down to single-digit cents trading with 100% of the balance every cycle:
@@ -191,8 +194,10 @@ ROUND_TRIP_FEE_PCT = TAKER_FEE_RATE * 2
 # every "successful" exit still lost money net of fees. The target is a
 # percentage of the position's entry value instead, with a floor that
 # guarantees it clears the round-trip fee with real profit left over.
+# Increased from 1.5% to 3% to let winners run and match crypto volatility.
+# BTC/ETH see 1-5% daily moves - capture those instead of closing at first tick.
 PROFIT_TARGET_PCT = max(
-    float(os.getenv("CRYPTO_PROFIT_TARGET_PCT", "0.015")),
+    float(os.getenv("CRYPTO_PROFIT_TARGET_PCT", "0.03")),
     ROUND_TRIP_FEE_PCT * 1.5,
 )
 
