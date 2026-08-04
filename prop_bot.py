@@ -401,12 +401,10 @@ async def reconcile_positions_with_broker(session):
 
 # Floor on a single position's dollar size. Below this, a position is too
 # small to bother with (order fees/slippage would dominate) - skip the
-# entry rather than place a near-zero fractional order. Increased to $100
-# to ensure positions are large enough to hit profit targets (50c-$1 moves
-# need meaningful capital to achieve real dollar P&L).
-# Increased from $100 to $1000 for profitability: $100 trades with $0.55 fees can't win.
-# $1000 trades × 0.60% move = $6+ profit, beats fees and compounds account.
-MIN_POSITION_NOTIONAL = float(os.getenv("PROP_MIN_POSITION_NOTIONAL", "1500"))  # Increased from $1000 to $1500 per trade
+# entry rather than place a near-zero fractional order.
+# Micro-account ($978): $50 minimum allows actual execution while maintaining profitability
+# $50 trade × 1-2% move = $0.50-$1.00 profit (after $0.05 fees = $0.45-0.95 net)
+MIN_POSITION_NOTIONAL = float(os.getenv("PROP_MIN_POSITION_NOTIONAL", "50"))  # Reduced from $1500 for micro account
 
 # HARD MARGIN SAFETY LIMITS — prevent over-leverage ever again
 # Minimum buying power buffer required before opening ANY new position
