@@ -81,6 +81,10 @@ FUTURES = {
     # Additional commodities and bonds
     "DBC": {"name": "Commodities",          "qty": 1, "symbol": "DBC"},   # Broad commodities
     "TLT": {"name": "Long Treasuries",      "qty": 1, "symbol": "TLT"},   # US bonds 24/5
+    # China stocks (direct exposure)
+    "FXI": {"name": "China Large-Cap ETF",  "qty": 1, "symbol": "FXI"},   # iShares China Large-Cap
+    "ASHR": {"name": "China A-Shares ETF",  "qty": 1, "symbol": "ASHR"},  # Xtrackers CSI 300 China
+    "CNE": {"name": "China ETF",            "qty": 1, "symbol": "CNE"},   # iShares MSCI China
 }
 
 # Max concurrent open positions. Explicit request: don't cap this below
