@@ -37,18 +37,10 @@ LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "30"))
 RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "70"))
 
-# Real, enforced stop-loss. open_position() already computed a 2% stop
-# price for the informational subscriber-signal broadcast, but Pass 1's
-# exit check never actually looked at it - the only two ways a position
-# could close were hitting the dollar profit target or an RSI reversal,
-# and RSI reversals fired regardless of whether the position was
-# actually in profit. That meant a position that had been sitting on a
-# real gain could give it all back and close at a genuine loss the
-# moment RSI flipped, with no floor underneath it at all. Now enforced
-# for real in Pass 1, and RSI exits require the position to actually be
-# profitable first - the stop-loss below is what protects a loser, an
-# RSI reversal only ever locks in a winner early.
-STOP_LOSS_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.02"))
+# Micro-account stop-loss: 1% (not 2%) for $980 account
+# At 1%, max loss per trade = $10 (manageable for small account)
+# Prevents account blowup from single losing trade
+STOP_LOSS_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.01"))
 
 HEADERS = {
     "APCA-API-KEY-ID": ALPACA_KEY,
@@ -99,23 +91,19 @@ FUTURES = {
 # there's no 8th symbol to need a slot from.
 MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", str(len(FUTURES))))
 
-# Profit target, in REAL DOLLARS of profit on the position (not a raw
-# price move on the underlying) - scaled by real account equity. Increased targets
-# to let winners run instead of closing too early. With $1000+ positions, these
-# targets are achievable on 1%+ daily moves that we see in the market.
+# SCALPING STRATEGY: Take small 1-2% profits and exit immediately
+# Profit targets in REAL DOLLARS - micro-account optimized for $980-$5k
 PROFIT_TARGET_DOLLARS_MILESTONES = [
-    (0,     5.00),      # Micro: $5.00 (0.50% on $1000)
-    (500,   7.50),      # Small: $7.50
-    (1000,  10.00),     # Medium: $10.00 (1% on $1000)
-    (5000,  15.00),     # Large: $15.00 (0.30% on $5000)
-    (10000, 20.00),     # Huge: $20.00 (0.20% on $10000)
+    (0,     3.00),      # Micro ($980): $3.00 (0.3% profit target)
+    (500,   5.00),      # Small ($500-$1k): $5.00
+    (1000,  8.00),      # Medium ($1k+): $8.00
+    (5000,  12.00),     # Large ($5k+): $12.00
 ]
 
-# Professional tiered exit levels - lock in profits at milestones, let winners run
-# Tier 1: Exit 1/3 at 50% of target (lock in early win)
-# Tier 2: Exit 1/3 at 100% of target (take second third)
-# Tier 3: Exit final 1/3 at 150% of target (let winners run to max)
-TIER_LEVELS = [0.50, 1.00, 1.50]  # multipliers of profit target
+# Scalping tier levels: Exit quickly at 1% and 2% profit targets
+# Tier 1: Exit 100% at 100% of target (take 1% profit and close)
+# NO multi-tier exits - scalp and exit immediately
+TIER_LEVELS = [1.00]  # Single exit level: 1-2% profit, close position
 
 
 def get_profit_target_dollars(equity):
