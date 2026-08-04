@@ -42,7 +42,12 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 TARGETS = [
     # path, function, stripe call, the column proving payment already went out
     ("main.py", "process_payouts_periodically", "Transfer", "stripe_transfer_id"),
-    ("routers/payments.py", "process_pending_payouts", "Payout", "stripe_payout_id"),
+    # This row previously said ("Payout", "stripe_payout_id"). The endpoint
+    # has always called stripe.Transfer.create and written
+    # stripe_transfer_id, so the test was asserting against an API this
+    # code never used - it failed on every run and therefore checked
+    # nothing about the endpoint it named.
+    ("routers/payments.py", "process_pending_payouts", "Transfer", "stripe_transfer_id"),
 ]
 
 
