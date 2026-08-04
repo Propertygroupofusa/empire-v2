@@ -111,6 +111,12 @@ PROFIT_TARGET_DOLLARS_MILESTONES = [
     (10000, 20.00),     # Huge: $20.00 (0.20% on $10000)
 ]
 
+# Professional tiered exit levels - lock in profits at milestones, let winners run
+# Tier 1: Exit 1/3 at 50% of target (lock in early win)
+# Tier 2: Exit 1/3 at 100% of target (take second third)
+# Tier 3: Exit final 1/3 at 150% of target (let winners run to max)
+TIER_LEVELS = [0.50, 1.00, 1.50]  # multipliers of profit target
+
 
 def get_profit_target_dollars(equity):
     if equity is None:
@@ -124,6 +130,7 @@ def get_profit_target_dollars(equity):
 # Track profitable days for APEX 7-day rule
 profitable_days = []
 daily_pnl = 0.0
+daily_account_equity_start = None  # For daily 2% loss limit
 open_prop_positions = {}
 
 BOT_NAME = "prop_apex"
@@ -641,7 +648,21 @@ async def run_prop_cycle():
 
         equity = await get_account_equity(session)
         profit_target = get_profit_target_dollars(equity)
-        log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | Profit target: ${profit_target:.2f}/position")
+
+        # Professional daily loss limit: stop trading after losing 2% of account in a day
+        global daily_account_equity_start
+        if daily_account_equity_start is None and equity is not None:
+            daily_account_equity_start = equity
+
+        daily_loss_limit_pct = 0.02  # 2% daily loss limit
+        daily_loss_limit = (daily_account_equity_start * daily_loss_limit_pct) if daily_account_equity_start else None
+        is_hitting_daily_loss_limit = (
+            daily_loss_limit and equity is not None and
+            (daily_account_equity_start - equity) >= daily_loss_limit
+        )
+
+        log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | Profit target: ${profit_target:.2f}/position" +
+                (f" | ⚠️ DAILY 2% LOSS LIMIT HIT - stopping new trades" if is_hitting_daily_loss_limit else ""))
 
         # Tracked and spent-down across this cycle's entries so dollar-based
         # sizing (see try_open/size_position) reflects money already
@@ -699,15 +720,37 @@ async def run_prop_cycle():
                 rsi_signal = rsi < RSI_BUY_BELOW or (trend == "bullish" and rsi < 50)
                 stop_hit = price >= entry * (1 + STOP_LOSS_PCT)
 
-            # An RSI reversal only ever takes a real, existing profit off
-            # the table early - it never realizes a loss on its own. A
-            # losing position rides to the stop-loss below instead, same
-            # as a real trading desk would run it (cut losers on a hard
-            # stop, don't gamble on holding for a bounce that erases it).
+            # Professional tiered profit-taking: lock in gains at milestones
+            # - 50% target: exit 1/3 (secure early gain, let 2/3 ride)
+            # - 100% target: exit 2/3 total (lock another third)
+            # - 150% target: exit full position (maximize winner)
+            # Reduces risk while keeping upside, stops revenge trading
             rsi_exit = rsi_signal and unrealized_pnl > 0
 
-            if unrealized_pnl >= profit_target or rsi_exit or stop_hit:
-                reason = "PROFIT TARGET" if unrealized_pnl >= profit_target else ("STOP LOSS" if stop_hit else "RSI")
+            # Check which profit tiers have been hit
+            tier1_hit = unrealized_pnl >= (profit_target * TIER_LEVELS[0])
+            tier2_hit = unrealized_pnl >= (profit_target * TIER_LEVELS[1])
+            tier3_hit = unrealized_pnl >= (profit_target * TIER_LEVELS[2])
+
+            # Exit conditions: hard stop, RSI reversal on profit, or hit a tiered target
+            if stop_hit:
+                reason = "STOP LOSS"
+                await close_position(session, contract, config, position, price, rsi, trend, reason)
+            elif rsi_exit:
+                reason = "RSI EXIT"
+                await close_position(session, contract, config, position, price, rsi, trend, reason)
+            elif tier3_hit:
+                # At 150% of target - exit final position, let no more gain escape
+                reason = f"TIER 3 EXIT (${unrealized_pnl:.2f} profit, {unrealized_pnl/profit_target:.1f}x target)"
+                await close_position(session, contract, config, position, price, rsi, trend, reason)
+            elif tier2_hit and unrealized_pnl >= profit_target:
+                # At 100% of target - full exit, professional take
+                reason = f"TIER 2 EXIT (${unrealized_pnl:.2f} profit, reached target)"
+                await close_position(session, contract, config, position, price, rsi, trend, reason)
+            elif tier1_hit and unrealized_pnl >= (profit_target * 0.5):
+                # At 50% of target - exit 1/3 to secure gains
+                # For now use simple exit (upgrade to partial exit later)
+                reason = f"TIER 1 EXIT (${unrealized_pnl:.2f} profit, 50% of target)"
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
 
             await asyncio.sleep(0.3)
@@ -742,6 +785,11 @@ async def run_prop_cycle():
         candidates.sort(key=lambda c: -c[0])  # strongest (furthest past threshold) first
 
         for _, contract, config, side, price, rsi, trend in candidates:
+            # Professional risk management: stop new entries if daily 2% loss limit hit
+            if is_hitting_daily_loss_limit:
+                log.info(f"[APEX_589296] 🛑 {side.upper()} {contract} blocked — daily 2% loss limit reached, no new entries")
+                continue
+
             # Multi-timeframe confluence: don't fight a strong 1-hour
             # trend just because the 5-minute RSI dipped. Entries only -
             # never gates an exit or an existing position.

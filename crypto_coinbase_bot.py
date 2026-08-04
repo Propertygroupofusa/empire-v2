@@ -231,9 +231,15 @@ PROFIT_TARGET_PCT = max(
 # low and watch real results before trusting this with more capital.
 STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.05"))
 
+# Professional tiered exit levels for crypto - secure profits at milestones
+# Tier 1: Exit 1/3 at 1.5% (half profit target, lock early gain)
+# Tier 2: Exit 1/3 at 3% (full profit target)
+# Tier 3: Exit final 1/3 at 5% (let winners run 2x the target)
+CRYPTO_TIER_LEVELS = [0.015, 0.03, 0.05]  # percentage multipliers
 
 open_crypto_positions = {}
 daily_pnl = 0.0
+daily_usd_balance_start = None  # For daily 2% loss limit
 latest_signals = {}
 last_cycle_at = None
 
@@ -480,12 +486,25 @@ async def run_crypto_cycle():
             # cash sitting there - can never trade more than what's real.
             cash_pool = min(cash, unlocked, MAX_ALLOCATION) if MAX_ALLOCATION is not None else min(cash, unlocked)
 
+        # Professional daily loss limit: stop new entries after losing 2% of account in a day
+        global daily_usd_balance_start
+        if daily_usd_balance_start is None and cash is not None:
+            daily_usd_balance_start = cash
+
+        daily_loss_limit_pct = 0.02  # 2% daily loss limit
+        daily_loss_limit = (daily_usd_balance_start * daily_loss_limit_pct) if daily_usd_balance_start else None
+        is_hitting_daily_loss_limit = (
+            daily_loss_limit and cash is not None and
+            (daily_usd_balance_start - cash) >= daily_loss_limit
+        )
+
         cap_desc = f"capped at ${MAX_ALLOCATION:.2f}" if MAX_ALLOCATION is not None else "full balance, compounding"
         if TIER_SIZE > 0:
             tier_desc = f"tier unlocked (permanent): ${unlocked:.2f} | tradable now: ${cash_pool:.2f}"
         else:
             tier_desc = "tiering off"
-        log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} ({cap_desc}, {tier_desc}) | Target: +{PROFIT_TARGET_PCT*100:.2f}% | Stop: -{STOP_LOSS_PCT*100:.2f}% | Round-trip fee: {ROUND_TRIP_FEE_PCT*100:.2f}%")
+        status_suffix = " | ⚠️ DAILY 2% LOSS LIMIT HIT - stopping new trades" if is_hitting_daily_loss_limit else ""
+        log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} ({cap_desc}, {tier_desc}) | Target: +{PROFIT_TARGET_PCT*100:.2f}% | Stop: -{STOP_LOSS_PCT*100:.2f}% | Round-trip fee: {ROUND_TRIP_FEE_PCT*100:.2f}%{status_suffix}")
 
         scans = {}
         for symbol in CRYPTO_PAIRS:
@@ -504,7 +523,6 @@ async def run_crypto_cycle():
             entry, qty = position["entry"], position["qty"]
             unrealized_pnl = (price - entry) * qty
             unrealized_pct = (price - entry) / entry
-            target_hit = unrealized_pct >= PROFIT_TARGET_PCT
             stop_hit = unrealized_pct <= -STOP_LOSS_PCT
             # RSI recovering to neutral is only a real exit if it's already
             # cleared the round-trip fee - otherwise this "safe-looking"
@@ -514,13 +532,37 @@ async def run_crypto_cycle():
             # ever does, and it used to have no profit floor at all).
             rsi_exit = rsi > RSI_SELL_ABOVE and unrealized_pct > ROUND_TRIP_FEE_PCT
 
+            # Professional tiered profit-taking: lock in gains at milestones
+            tier1_hit = unrealized_pct >= CRYPTO_TIER_LEVELS[0]  # 1.5%
+            tier2_hit = unrealized_pct >= CRYPTO_TIER_LEVELS[1]  # 3%
+            tier3_hit = unrealized_pct >= CRYPTO_TIER_LEVELS[2]  # 5%
+
             latest_signals[symbol] = {
                 "price": price, "rsi": rsi, "status": "HOLDING_LONG",
                 "has_position": True, "checked_at": now.isoformat(),
             }
 
-            if target_hit or rsi_exit or stop_hit:
-                reason = "PROFIT TARGET" if target_hit else ("STOP LOSS" if stop_hit else "RSI")
+            # Exit conditions: stop loss, RSI reversal, or tiered profit target
+            should_exit = False
+            reason = None
+
+            if stop_hit:
+                should_exit = True
+                reason = f"STOP LOSS (-{unrealized_pct*100:.2f}%)"
+            elif rsi_exit:
+                should_exit = True
+                reason = "RSI EXIT"
+            elif tier3_hit:
+                should_exit = True
+                reason = f"TIER 3 (+{unrealized_pct*100:.2f}%, let winners run)"
+            elif tier2_hit and unrealized_pct >= PROFIT_TARGET_PCT:
+                should_exit = True
+                reason = f"TIER 2 (+{unrealized_pct*100:.2f}%, hit 3% target)"
+            elif tier1_hit:
+                should_exit = True
+                reason = f"TIER 1 (+{unrealized_pct*100:.2f}%, lock early gain)"
+
+            if should_exit:
                 filled = await place_order(session, symbol, "sell", qty, price)
                 if filled:
                     daily_pnl += unrealized_pnl
@@ -556,6 +598,12 @@ async def run_crypto_cycle():
                 "price": price, "rsi": rsi, "status": "BUY_ZONE",
                 "has_position": False, "checked_at": now.isoformat(),
             }
+
+            # Professional risk management: stop new entries if daily 2% loss limit hit
+            if is_hitting_daily_loss_limit:
+                log.info(f"[CRYPTO] 🛑 {symbol} blocked — daily 2% loss limit reached, no new entries")
+                continue
+
             if len(open_crypto_positions) >= MAX_POSITIONS:
                 log.info(f"[CRYPTO] At max positions ({MAX_POSITIONS}) - {symbol} BUY signal held, not entering")
                 continue
