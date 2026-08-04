@@ -1,4 +1,4 @@
-"""Payment and payout management for workers - Stripe automatic payouts"""
+"""Payment and payout management for workers - Stripe and PayPal automatic payouts"""
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +9,8 @@ import stripe
 import os
 from datetime import datetime
 import logging
+import aiohttp
+import base64
 
 log = logging.getLogger("pgusa")
 router = APIRouter()
@@ -21,6 +23,17 @@ if STRIPE_SECRET_KEY:
 else:
     STRIPE_AVAILABLE = False
     log.warning("STRIPE_SECRET_KEY not configured - automatic payouts disabled")
+
+# Initialize PayPal
+PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "BAAo2C6VSgdC7vy5a85eKJsq61ql1vmC7nElI8UBM9nCNOvfRwqKhv6a-49I7IXjN1AuItn6XLOIM4AN28")
+PAYPAL_SECRET = os.getenv("PAYPAL_SECRET", "EJxoypzETpRw1w_rPobbgpx4oaCanzLFeaFktl_oHiRHJG0Eh9-enLwXX0cqOvNdJKwaAdreC9qNzGNV")
+PAYPAL_RECIPIENT_EMAIL = os.getenv("PAYPAL_RECIPIENT_EMAIL", "delfarrell591@gmail.com")
+PAYPAL_AVAILABLE = bool(PAYPAL_CLIENT_ID and PAYPAL_SECRET)
+
+if PAYPAL_AVAILABLE:
+    log.info("PayPal payout system configured")
+else:
+    log.warning("PayPal credentials not configured - paypal payouts disabled")
 
 
 @router.get("/bot/earnings", summary="Bot worker earnings dashboard")
@@ -515,4 +528,136 @@ async def get_crypto_account():
             "message": str(e),
             "pairs": ["BTC-USD", "ETH-USD"],
             "mode": "🔴 LIVE CRYPTO"
+        }
+
+
+@router.post("/process-paypal-payouts", summary="Process pending payouts via PayPal")
+async def process_paypal_payouts(db: AsyncSession = Depends(get_db)):
+    """Process all pending payouts via PayPal to recipient email"""
+    if not PAYPAL_AVAILABLE:
+        return {
+            "status": "disabled",
+            "message": "PayPal not configured - payouts unavailable"
+        }
+
+    try:
+        # Get PayPal access token
+        auth = aiohttp.BasicAuth(PAYPAL_CLIENT_ID, PAYPAL_SECRET)
+
+        async with aiohttp.ClientSession() as session:
+            # Get access token
+            async with session.post(
+                "https://api.paypal.com/v1/oauth2/token",
+                auth=auth,
+                data={"grant_type": "client_credentials"},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as token_resp:
+                if token_resp.status != 200:
+                    log.error(f"PayPal auth failed: {token_resp.status}")
+                    return {
+                        "status": "error",
+                        "message": "Failed to authenticate with PayPal",
+                        "processed": 0
+                    }
+
+                token_data = await token_resp.json()
+                access_token = token_data.get("access_token")
+
+                if not access_token:
+                    return {
+                        "status": "error",
+                        "message": "No access token received from PayPal",
+                        "processed": 0
+                    }
+
+            # Get all pending payments
+            result = await db.execute(
+                select(Payment).where(Payment.payout_status == "pending")
+            )
+            pending_payments = result.scalars().all()
+
+            if not pending_payments:
+                return {
+                    "status": "ok",
+                    "message": "No pending payouts",
+                    "processed": 0
+                }
+
+            processed = 0
+            failed = 0
+            total_amount = sum(p.worker_amount for p in pending_payments)
+
+            # Create batch payout to recipient email
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+                "PayPal-Request-Id": f"payout-batch-{datetime.now().timestamp()}"
+            }
+
+            payout_items = []
+            for payment in pending_payments:
+                payout_items.append({
+                    "recipient_type": "EMAIL",
+                    "amount": {
+                        "value": str(round(payment.worker_amount, 2)),
+                        "currency": "USD"
+                    },
+                    "receiver": PAYPAL_RECIPIENT_EMAIL,
+                    "note": f"Payout for job {payment.job_id}",
+                    "sender_item_id": str(payment.id)
+                })
+
+            payout_payload = {
+                "sender_batch_header": {
+                    "sender_batch_id": f"batch-{datetime.now().timestamp()}",
+                    "email_subject": "You have a payout",
+                    "email_message": f"You have received ${total_amount:.2f} in payouts"
+                },
+                "items": payout_items
+            }
+
+            # Send payout request
+            async with session.post(
+                "https://api.paypal.com/v1/payments/payouts",
+                headers=headers,
+                json=payout_payload,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as payout_resp:
+                if payout_resp.status not in [200, 201]:
+                    error_text = await payout_resp.text()
+                    log.error(f"PayPal payout failed: {payout_resp.status} - {error_text}")
+                    return {
+                        "status": "error",
+                        "message": f"PayPal API error: {payout_resp.status}",
+                        "processed": 0
+                    }
+
+                payout_result = await payout_resp.json()
+                batch_id = payout_result.get("batch_header", {}).get("payout_batch_id")
+
+                if batch_id:
+                    # Update all payments to processing status
+                    for payment in pending_payments:
+                        payment.payout_status = "processing"
+                        payment.stripe_transfer_id = batch_id
+
+                    await db.commit()
+                    processed = len(pending_payments)
+                    log.info(f"PayPal payout batch created: {batch_id} - {processed} items, ${total_amount:.2f}")
+
+            return {
+                "status": "ok",
+                "message": f"Payouts queued for processing",
+                "processed": processed,
+                "total_amount": round(total_amount, 2),
+                "batch_id": batch_id,
+                "recipient": PAYPAL_RECIPIENT_EMAIL
+            }
+
+    except Exception as e:
+        log.error(f"Error processing PayPal payouts: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "processed": 0
         }
