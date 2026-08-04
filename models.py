@@ -101,6 +101,51 @@ class CampaignContact(Base):
         }
 
 
+class ReferralContact(Base):
+    """Past customers enrolled in the post-delivery referral campaign
+    (email_campaigns.py) - a different thing from CampaignContact above,
+    which is a recipient row belonging to a Campaign.
+
+    This used to be a second class named CampaignContact declared inside
+    email_campaigns.py against the SAME "campaign_contacts" table and the
+    same Base. Importing both raised
+
+        InvalidRequestError: Table 'campaign_contacts' is already defined
+        for this MetaData instance.
+
+    which only stayed latent because main.py never imported
+    email_campaigns. It lives here now so that it has its own table and
+    so run_migrations() actually creates it - the migration walks
+    Base.metadata.sorted_tables, and a model declared in a module the app
+    never imports is not in that registry at all.
+    """
+    __tablename__ = "referral_contacts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    customer_name = Column(String, nullable=True)
+    customer_email = Column(String, index=True, unique=True)
+    company = Column(String, nullable=True)
+    referral_code = Column(String, unique=True, index=True)
+    status = Column(String, default="new", index=True)  # new, sent, opened, clicked, converted
+    email_sent_at = Column(DateTime, nullable=True)
+    opened_at = Column(DateTime, nullable=True)
+    clicked_at = Column(DateTime, nullable=True)
+    converted_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "customer_name": self.customer_name,
+            "customer_email": self.customer_email,
+            "company": self.company,
+            "referral_code": self.referral_code,
+            "status": self.status,
+            "email_sent_at": self.email_sent_at.isoformat() if self.email_sent_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 class Worker(Base):
     """Worker/contractor profile. Fields below (w9_*, credentials_*,
     notary_*, ron_*) mirror the raw ALTER TABLE columns main.py's

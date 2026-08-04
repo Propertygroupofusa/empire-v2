@@ -12,9 +12,13 @@ import uuid
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
-from sqlalchemy import select, Column, String, DateTime, Integer, Boolean
-from sqlalchemy.orm import declarative_base
-from database import AsyncSessionLocal, Base
+from sqlalchemy import select
+from database import AsyncSessionLocal
+# ReferralContact lives in models.py, not here. It was previously declared
+# in this module as a second class named CampaignContact mapped to the
+# "campaign_contacts" table, which models.py already owns - importing both
+# raised InvalidRequestError. See the class docstring in models.py.
+from models import ReferralContact
 
 log = logging.getLogger("email_campaigns")
 
@@ -90,22 +94,6 @@ REFERRAL_EMAIL_TEMPLATE = """
 """
 
 
-class CampaignContact(Base):
-    """Track customer emails for campaigns."""
-    __tablename__ = "campaign_contacts"
-
-    id = Column(Integer, primary_key=True)
-    customer_name = Column(String)
-    customer_email = Column(String, index=True, unique=True)
-    company = Column(String)
-    referral_code = Column(String, unique=True)
-    status = Column(String, default="new")  # new, sent, opened, clicked, converted
-    email_sent_at = Column(DateTime)
-    opened_at = Column(DateTime)
-    clicked_at = Column(DateTime)
-    converted_at = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
 
 async def add_customer_to_campaign(name: str, email: str, company: str):
     """Add customer to email campaign after their order is placed."""
@@ -119,12 +107,12 @@ async def add_customer_to_campaign(name: str, email: str, company: str):
 
             # Check if already exists
             result = await db.execute(
-                select(CampaignContact).where(CampaignContact.customer_email == email)
+                select(ReferralContact).where(ReferralContact.customer_email == email)
             )
             existing = result.scalar()
 
             if not existing:
-                contact = CampaignContact(
+                contact = ReferralContact(
                     customer_name=name,
                     customer_email=email,
                     company=company,
@@ -143,8 +131,8 @@ async def send_referral_email(customer_email: str):
     try:
         async with AsyncSessionLocal() as db:
             result = await db.execute(
-                select(CampaignContact).where(
-                    CampaignContact.customer_email == customer_email
+                select(ReferralContact).where(
+                    ReferralContact.customer_email == customer_email
                 )
             )
             contact = result.scalar()
@@ -195,8 +183,8 @@ async def send_campaign_batch(batch_size: int = 50):
     try:
         async with AsyncSessionLocal() as db:
             result = await db.execute(
-                select(CampaignContact).where(
-                    CampaignContact.status == "new"
+                select(ReferralContact).where(
+                    ReferralContact.status == "new"
                 ).limit(batch_size)
             )
             contacts = result.scalars().all()
