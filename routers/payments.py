@@ -1,6 +1,6 @@
 """Payment and payout management for workers - Stripe and PayPal automatic payouts"""
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from database import get_db
@@ -665,10 +665,10 @@ async def process_paypal_payouts(db: AsyncSession = Depends(get_db)):
 
 @router.post("/process-bank-transfer", summary="Direct bank account payout")
 async def process_bank_transfer(
-    bank_account_holder: str,
-    bank_name: str,
-    account_number: str,
-    routing_number: str,
+    bank_account_holder: str = Form(...),
+    bank_name: str = Form(...),
+    account_number: str = Form(...),
+    routing_number: str = Form(...),
     db: AsyncSession = Depends(get_db)
 ):
     """Process direct bank transfer payout to pending payments using Stripe."""
