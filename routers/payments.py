@@ -25,8 +25,8 @@ else:
     log.warning("STRIPE_SECRET_KEY not configured - automatic payouts disabled")
 
 # Initialize PayPal
-PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "BAAo2C6VSgdC7vy5a85eKJsq61ql1vmC7nElI8UBM9nCNOvfRwqKhv6a-49I7IXjN1AuItn6XLOIM4AN28")
-PAYPAL_SECRET = os.getenv("PAYPAL_SECRET", "EJxoypzETpRw1w_rPobbgpx4oaCanzLFeaFktl_oHiRHJG0Eh9-enLwXX0cqOvNdJKwaAdreC9qNzGNV")
+PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "Ac-Xy2QAqaaYuUQjUEd4EyME7g62fPvme0mBuP6pWQHDvjwwHFCEa_z1Gi8EeXWOF-TL93Pi-gufyLuo")
+PAYPAL_SECRET = os.getenv("PAYPAL_SECRET", "EGpl4jKJx_BlqKKKQixEpGrZ5IfwpIbLGqrFeCu4E69AFjqS3C45gO9PGXR9tdKzC4LRE_g_LQOsLAX9")
 PAYPAL_RECIPIENT_EMAIL = os.getenv("PAYPAL_RECIPIENT_EMAIL", "delfarrell591@gmail.com")
 PAYPAL_AVAILABLE = bool(PAYPAL_CLIENT_ID and PAYPAL_SECRET)
 
