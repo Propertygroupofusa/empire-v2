@@ -671,14 +671,7 @@ async def process_bank_transfer(
     routing_number: str = Form(...),
     db: AsyncSession = Depends(get_db)
 ):
-    """Process direct bank transfer payout to pending payments using Stripe."""
-    if not STRIPE_AVAILABLE:
-        return {
-            "status": "error",
-            "message": "Stripe not configured",
-            "processed": 0
-        }
-
+    """Process direct bank transfer payout to pending payments."""
     try:
         # Get all pending payments
         result = await db.execute(
