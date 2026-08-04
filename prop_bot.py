@@ -15,9 +15,10 @@ from email.mime.text import MIMEText
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import aiohttp
+import uuid
 from sqlalchemy import select
 from database import AsyncSessionLocal
-from models import BotPosition
+from models import BotPosition, Payment
 
 ET = ZoneInfo("America/New_York")
 
@@ -58,14 +59,30 @@ HEADERS = {
 }
 
 # APEX futures — use micro contracts (lower risk during evaluation)
+# Expanded to include international markets and forex for 24/5 global trading opportunities
 FUTURES = {
+    # American indices
     "MES": {"name": "Micro E-mini S&P 500", "qty": 1, "symbol": "SPY"},   # Use SPY as proxy
     "MNQ": {"name": "Micro E-mini Nasdaq",  "qty": 1, "symbol": "QQQ"},   # Use QQQ as proxy
     "MYM": {"name": "Micro E-mini Dow",     "qty": 1, "symbol": "DIA"},   # Use DIA as proxy
     "M2K": {"name": "Micro E-mini Russell", "qty": 1, "symbol": "IWM"},   # Use IWM as proxy
+    # Commodities
     "MGC": {"name": "Micro Gold",           "qty": 1, "symbol": "GLD"},   # Use GLD as proxy
     "MCL": {"name": "Micro Crude Oil",      "qty": 1, "symbol": "USO"},   # Use USO as proxy
     "SIL": {"name": "Micro Silver",         "qty": 1, "symbol": "SLV"},   # Use SLV as proxy
+    # International stock indices
+    "EWJ": {"name": "Japan ETF",            "qty": 1, "symbol": "EWJ"},   # Japan stocks 24/5
+    "EWG": {"name": "Germany ETF",          "qty": 1, "symbol": "EWG"},   # Germany/Europe 24/5
+    "EWU": {"name": "UK ETF",               "qty": 1, "symbol": "EWU"},   # UK stocks 24/5
+    "EWA": {"name": "Australia ETF",        "qty": 1, "symbol": "EWA"},   # Australia 24/5
+    "IEMG": {"name": "Emerging Markets",    "qty": 1, "symbol": "IEMG"},  # Global emerging markets
+    # Forex pairs (as ETFs for 24/5 trading)
+    "FXE": {"name": "Euro/USD",             "qty": 1, "symbol": "FXE"},   # EUR/USD 24/5
+    "FXB": {"name": "British Pound",        "qty": 1, "symbol": "FXB"},   # GBP/USD 24/5
+    "FXY": {"name": "Japanese Yen",         "qty": 1, "symbol": "FXY"},   # JPY/USD 24/5
+    # Additional commodities and bonds
+    "DBC": {"name": "Commodities",          "qty": 1, "symbol": "DBC"},   # Broad commodities
+    "TLT": {"name": "Long Treasuries",      "qty": 1, "symbol": "TLT"},   # US bonds 24/5
 }
 
 # Max concurrent open positions. Explicit request: don't cap this below
@@ -738,9 +755,40 @@ async def run_prop_cycle():
     if daily_pnl > 0 and (not profitable_days or profitable_days[-1] != today):
         profitable_days.append(today)
         log.info(f"✅ PROFITABLE DAY #{len(profitable_days)} | ${daily_pnl:.2f} | APEX_589296")
+        # Record daily earnings to database as a payment
+        await record_daily_earnings(daily_pnl)
         if len(profitable_days) >= 7:
             log.info("🎯 7 CONSECUTIVE PROFITABLE DAYS ACHIEVED — READY TO GO LIVE!")
             log.info("ACTION: Change ALPACA_LIVE_TRADE=true in Railway to go live")
+
+
+async def record_daily_earnings(pnl_amount):
+    """Record daily bot trading profits as a payment in the database."""
+    if pnl_amount <= 0:
+        return
+
+    # 83% to worker (bot), 17% to platform
+    worker_amount = pnl_amount * 0.83
+    platform_amount = pnl_amount * 0.17
+
+    payment = Payment(
+        id=f"bot_trade_{uuid.uuid4().hex[:8]}",
+        job_id=f"bot_daily_{datetime.now(ET).strftime('%Y%m%d')}",
+        worker_id="prop_bot_worker",
+        client_id="alpaca_trading",
+        gross_amount=pnl_amount,
+        worker_amount=worker_amount,
+        platform_amount=platform_amount,
+        payout_status="pending",
+    )
+
+    try:
+        async with AsyncSessionLocal() as session:
+            session.add(payment)
+            await session.commit()
+            log.info(f"[APEX_589296] 💰 Recorded daily earnings: ${worker_amount:.2f} to payments table")
+    except Exception as e:
+        log.error(f"[APEX_589296] Failed to record daily earnings: {e}")
 
 
 def run():
