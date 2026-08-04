@@ -236,3 +236,80 @@ async def create_payment(
     except Exception as e:
         log.error(f"Error creating payment: {e}")
         raise HTTPException(500, f"Error creating payment: {e}")
+
+
+@router.get("/alpaca/account", summary="Get Alpaca trading account status")
+async def get_alpaca_account():
+    """Fetch real Alpaca account balance, buying power, and equity"""
+    import aiohttp
+
+    alpaca_key = os.getenv("ALPACA_API_KEY", "")
+    alpaca_secret = os.getenv("ALPACA_SECRET_KEY", "")
+    base_url = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+    live_trade = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
+
+    if not alpaca_key or not alpaca_secret:
+        return {
+            "status": "unconfigured",
+            "message": "Alpaca credentials not configured",
+            "trading_mode": "unknown"
+        }
+
+    headers = {
+        "APCA-API-KEY-ID": alpaca_key,
+        "APCA-API-SECRET-KEY": alpaca_secret,
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{base_url}/v2/account", headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    return {
+                        "status": "error",
+                        "message": f"API returned {resp.status}",
+                        "trading_mode": "LIVE" if live_trade else "PAPER"
+                    }
+
+                data = await resp.json()
+
+                return {
+                    "status": "ok",
+                    "trading_mode": "🔴 LIVE TRADING" if live_trade else "🟢 PAPER TRADING",
+                    "account_id": data.get("id"),
+                    "capital": {
+                        "cash": round(float(data.get("cash", 0)), 2),
+                        "portfolio_value": round(float(data.get("portfolio_value", 0)), 2),
+                        "equity": round(float(data.get("equity", 0)), 2),
+                    },
+                    "buying_power": {
+                        "available": round(float(data.get("buying_power", 0)), 2),
+                        "long_market_value": round(float(data.get("long_market_value", 0)), 2),
+                        "short_market_value": round(float(data.get("short_market_value", 0)), 2),
+                    },
+                    "leverage": {
+                        "multiplier": data.get("multiplier", "N/A"),
+                        "initial_margin_requirement": data.get("initial_margin_requirement", "N/A"),
+                        "maintenance_margin_requirement": data.get("maintenance_margin_requirement", "N/A"),
+                    },
+                    "status": {
+                        "account_status": data.get("account_status", "unknown"),
+                        "trading_status": data.get("trading_status", "unknown"),
+                        "daytrader_status": data.get("daytrader_status", "unknown"),
+                        "shorting_enabled": data.get("shorting_enabled", False),
+                    }
+                }
+
+    except aiohttp.ClientError as e:
+        log.error(f"Alpaca API error: {e}")
+        return {
+            "status": "error",
+            "message": f"Connection error: {str(e)}",
+            "trading_mode": "LIVE" if live_trade else "PAPER"
+        }
+    except Exception as e:
+        log.error(f"Error fetching Alpaca account: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "trading_mode": "LIVE" if live_trade else "PAPER"
+        }
