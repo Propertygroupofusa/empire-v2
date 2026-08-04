@@ -99,23 +99,17 @@ MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", str(len(FUTURES))))
 
 # Profit target, in REAL DOLLARS of profit on the position (not a raw
 # price move on the underlying) - scaled by real account equity. Explicit
-# request: take profit daily even if it's just 50 cents to a dollar,
+# request: take profit daily even if it's just 25-50 cents on small accounts,
 # then immediately look for another promising signal, rather than
 # holding out for a bigger move. Checked against real Alpaca equity each
-# cycle.
-#
-# This replaces an earlier version that checked a raw per-share price
-# move (e.g. "SPY moved $0.25") instead of the position's actual dollar
-# P&L. That was fine when positions were a fixed 1 share, but once
-# size_position() started sizing positions in fractional dollars (see
-# try_open), a $0.25 underlying move on a $10-$150 fractional position
-# could mean only a few cents of real profit - nowhere near the 50c-$1
-# actually wanted here.
+# cycle. Lowered for small accounts so positions actually close instead
+# of being held indefinitely waiting for larger moves.
 PROFIT_TARGET_DOLLARS_MILESTONES = [
-    (0,     0.50),
-    (1000,  0.60),
-    (5000,  0.80),
-    (10000, 1.00),
+    (0,     0.25),      # Micro: $0.25 (was $0.50)
+    (500,   0.35),      # Small: $0.35
+    (1000,  0.50),      # Medium: $0.50 (was $0.60)
+    (5000,  0.75),      # Large: $0.75 (was $0.80)
+    (10000, 1.00),      # Huge: $1.00
 ]
 
 
@@ -414,8 +408,10 @@ async def reconcile_positions_with_broker(session):
 
 # Floor on a single position's dollar size. Below this, a position is too
 # small to bother with (order fees/slippage would dominate) - skip the
-# entry rather than place a near-zero fractional order.
-MIN_POSITION_NOTIONAL = float(os.getenv("PROP_MIN_POSITION_NOTIONAL", "10"))
+# entry rather than place a near-zero fractional order. Increased to $100
+# to ensure positions are large enough to hit profit targets (50c-$1 moves
+# need meaningful capital to achieve real dollar P&L).
+MIN_POSITION_NOTIONAL = float(os.getenv("PROP_MIN_POSITION_NOTIONAL", "100"))
 
 # HARD MARGIN SAFETY LIMITS — prevent over-leverage ever again
 # Minimum buying power buffer required before opening ANY new position
