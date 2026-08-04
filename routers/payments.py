@@ -693,7 +693,7 @@ async def process_bank_transfer(
                 "processed": 0
             }
 
-        total_amount = sum(p.amount_cents for p in pending_payments) / 100
+        total_amount = sum(p.gross_amount for p in pending_payments)
         processed = 0
 
         # Mark payments as processing for direct bank transfer
