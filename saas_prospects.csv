@@ -1,0 +1,49 @@
+Company Name,Contact Title,Industry,Website,Email Guess,Likelihood
+Slack,Product Lead,Collaboration Software,slack.com,sales@slack.com,High
+Zapier,CEO,Automation,zapier.com,contact@zapier.com,High
+Stripe,Marketing,Payments,stripe.com,sales@stripe.com,High
+Figma,Product,Design Tools,figma.com,sales@figma.com,High
+Notion,Growth,Productivity,notion.so,contact@notion.so,High
+Intercom,Revenue,Customer Support,intercom.com,sales@intercom.com,High
+HubSpot,Marketing,CRM,hubspot.com,sales@hubspot.com,High
+Salesforce,Sales,CRM,salesforce.com,contact@salesforce.com,High
+Asana,Product,Project Management,asana.com,sales@asana.com,High
+Monday,Sales,Work OS,monday.com,sales@monday.com,High
+Calendly,Growth,Scheduling,calendly.com,partnerships@calendly.com,High
+Webflow,Marketing,No-Code,webflow.com,sales@webflow.com,High
+Framer,Product,Design,framer.com,hello@framer.com,High
+Typeform,Revenue,Forms,typeform.com,sales@typeform.com,High
+Segment,Partnerships,Data Platform,segment.com,partnerships@segment.com,High
+Amplitude,Growth,Analytics,amplitude.com,sales@amplitude.com,High
+Mixpanel,Sales,Analytics,mixpanel.com,sales@mixpanel.com,High
+Databox,Revenue,Dashboards,databox.com,contact@databox.com,High
+Pipedream,Partnerships,API,pipedream.com,hello@pipedream.com,High
+Auth0,Enterprise Sales,Identity,auth0.com,sales@auth0.com,High
+Firebase,Developer,Backend,firebase.google.com,firebase-sales@google.com,High
+AWS,SMB,Cloud,aws.amazon.com,sales@amazon.com,High
+Azure,Sales,Cloud,azure.microsoft.com,sales@microsoft.com,High
+DigitalOcean,Marketing,Cloud,digitalocean.com,sales@digitalocean.com,High
+Heroku,Sales,Platform,heroku.com,sales@heroku.com,High
+PagerDuty,Revenue,Incident Response,pagerduty.com,sales@pagerduty.com,High
+LaunchDarkly,Marketing,Feature Management,launchdarkly.com,partnerships@launchdarkly.com,High
+HashiCorp,Sales,Infrastructure,hashicorp.com,sales@hashicorp.com,High
+Atlassian,Enterprise,Productivity,atlassian.com,sales@atlassian.com,High
+Okta,Enterprise Sales,Identity,okta.com,sales@okta.com,High
+Cloudflare,Marketing,Security,cloudflare.com,sales@cloudflare.com,High
+Supabase,Growth,Backend,supabase.com,sales@supabase.io,High
+Vercel,Marketing,Hosting,vercel.com,sales@vercel.com,High
+Netlify,Sales,Hosting,netlify.com,sales@netlify.com,High
+Twilio,Enterprise,Communications,twilio.com,sales@twilio.com,High
+Sendgrid,Revenue,Email,sendgrid.com,sales@sendgrid.com,High
+Mailgun,Sales,Email,mailgun.com,sales@mailgun.com,High
+Braintree,Enterprise,Payments,braintreepayments.com,sales@braintreepayments.com,High
+Square,Revenue,Payments,squareup.com,sales@squareup.com,High
+Shopify,Marketing,E-commerce,shopify.com,sales@shopify.com,High
+WooCommerce,Support,E-commerce,woocommerce.com,support@woocommerce.com,Medium
+BigCommerce,Sales,E-commerce,bigcommerce.com,sales@bigcommerce.com,High
+Adobe,Enterprise,Creative Suite,adobe.com,sales@adobe.com,High
+Canva,Growth,Design,canva.com,partnerships@canva.com,High
+Grammarly,Marketing,Writing,grammarly.com,sales@grammarly.com,High
+Loom,Growth,Video Recording,loom.com,sales@loom.com,High
+Descript,Marketing,Video Editing,descript.com,sales@descript.com,High
+Retool,Sales,Internal Tools,retool.com,sales@retool.com,High
