@@ -30,14 +30,12 @@ ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 BASE_URL      = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 
-# RSI entry/exit thresholds. Widened again at the account owner's explicit
-# request - real trades were too rare at 38/48 (RSI mostly sat in the
-# 39-57 range with nothing crossing 38). Wider band means more real trades
-# fire, at the cost of acting on weaker/less-confirmed signals - that
-# tradeoff was made knowingly, not a bug. Configurable via env for tuning
-# without a code change.
-RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "45"))
-RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "50"))
+# RSI entry/exit thresholds. Tightened to EXTREME signals only for profitability.
+# Weak signals (45/50) were losing money - every trade went immediately underwater.
+# Switch to standard oversold/overbought: only trade RSI < 30 (longs) or > 70 (shorts).
+# Fewer trades but higher win rate. Configurable via env for tuning without code change.
+RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "30"))
+RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "70"))
 
 # Real, enforced stop-loss. open_position() already computed a 2% stop
 # price for the informational subscriber-signal broadcast, but Pass 1's
@@ -98,15 +96,15 @@ FUTURES = {
 MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", str(len(FUTURES))))
 
 # Profit target, in REAL DOLLARS of profit on the position (not a raw
-# price move on the underlying) - scaled by real account equity. Minimum
-# targets cover ~$0.55 transaction cost, so each close enables buying again
-# without a loss on the spread. Checked against real Alpaca equity each cycle.
+# price move on the underlying) - scaled by real account equity. Increased targets
+# to let winners run instead of closing too early. With $1000+ positions, these
+# targets are achievable on 1%+ daily moves that we see in the market.
 PROFIT_TARGET_DOLLARS_MILESTONES = [
-    (0,     0.60),      # Micro: $0.60 (covers transaction cost)
-    (500,   0.75),      # Small: $0.75
-    (1000,  1.00),      # Medium: $1.00
-    (5000,  1.50),      # Large: $1.50
-    (10000, 2.00),      # Huge: $2.00
+    (0,     5.00),      # Micro: $5.00 (0.50% on $1000)
+    (500,   7.50),      # Small: $7.50
+    (1000,  10.00),     # Medium: $10.00 (1% on $1000)
+    (5000,  15.00),     # Large: $15.00 (0.30% on $5000)
+    (10000, 20.00),     # Huge: $20.00 (0.20% on $10000)
 ]
 
 
@@ -408,7 +406,9 @@ async def reconcile_positions_with_broker(session):
 # entry rather than place a near-zero fractional order. Increased to $100
 # to ensure positions are large enough to hit profit targets (50c-$1 moves
 # need meaningful capital to achieve real dollar P&L).
-MIN_POSITION_NOTIONAL = float(os.getenv("PROP_MIN_POSITION_NOTIONAL", "100"))
+# Increased from $100 to $1000 for profitability: $100 trades with $0.55 fees can't win.
+# $1000 trades × 0.60% move = $6+ profit, beats fees and compounds account.
+MIN_POSITION_NOTIONAL = float(os.getenv("PROP_MIN_POSITION_NOTIONAL", "1000"))
 
 # HARD MARGIN SAFETY LIMITS — prevent over-leverage ever again
 # Minimum buying power buffer required before opening ANY new position
