@@ -118,9 +118,9 @@ async def worker_earnings(worker_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(500, f"Error fetching earnings: {e}")
 
 
-@router.post("/process-pending-payouts", summary="Process pending payouts via Stripe")
+@router.post("/process-pending-payouts", summary="Process pending payouts via Stripe Connect")
 async def process_pending_payouts(db: AsyncSession = Depends(get_db)):
-    """Process all pending payouts - can be called manually or by scheduler"""
+    """Process all pending payouts via Stripe Connect transfers"""
     if not STRIPE_AVAILABLE:
         return {
             "status": "disabled",
@@ -143,10 +143,11 @@ async def process_pending_payouts(db: AsyncSession = Depends(get_db)):
 
         processed = 0
         failed = 0
+        no_account = 0
 
         for payment in pending_payments:
             try:
-                # Get worker details for bank account
+                # Get worker details including Stripe Connect account
                 worker_result = await db.execute(
                     select(Worker).where(Worker.id == int(payment.worker_id))
                 )
@@ -154,28 +155,35 @@ async def process_pending_payouts(db: AsyncSession = Depends(get_db)):
 
                 if not worker:
                     log.warning(f"Payment {payment.id}: Worker not found")
+                    failed += 1
                     continue
 
-                # Create Stripe payout
-                # Note: This uses direct API call; for production with Stripe Connect,
-                # you'd use connected account IDs instead of bank transfer
-                payout = stripe.Payout.create(
+                # Check if worker has Stripe Connect account
+                if not worker.stripe_account_id:
+                    log.warning(f"Payment {payment.id}: Worker {worker.email} has no Stripe Connect account")
+                    no_account += 1
+                    continue
+
+                # Create Stripe Transfer to connected account
+                # This transfers funds from platform to worker's connected account
+                transfer = stripe.Transfer.create(
                     amount=int(payment.worker_amount * 100),  # Convert to cents
                     currency="usd",
+                    destination=worker.stripe_account_id,
                     description=f"Payout for job {payment.job_id}",
                     metadata={
                         "payment_id": payment.id,
-                        "worker_id": payment.worker_id,
+                        "worker_id": str(worker.id),
                         "worker_email": worker.email,
                     }
                 )
 
-                # Update payment record
+                # Update payment record with transfer ID
                 payment.payout_status = "processing"
-                payment.stripe_payout_id = payout.id
+                payment.stripe_transfer_id = transfer.id
                 await db.commit()
                 processed += 1
-                log.info(f"Payment {payment.id}: Payout created {payout.id}")
+                log.info(f"Payment {payment.id}: Transfer created {transfer.id} to {worker.email}")
 
             except stripe.error.StripeError as e:
                 failed += 1
@@ -190,7 +198,8 @@ async def process_pending_payouts(db: AsyncSession = Depends(get_db)):
             "status": "ok",
             "processed": processed,
             "failed": failed,
-            "message": f"Processed {processed} payouts, {failed} failed"
+            "no_account": no_account,
+            "message": f"Processed {processed} transfers, {failed} failed, {no_account} workers without Stripe accounts"
         }
 
     except Exception as e:
@@ -313,6 +322,99 @@ async def get_alpaca_account():
             "message": str(e),
             "trading_mode": "LIVE" if live_trade else "PAPER"
         }
+
+
+@router.post("/worker/{worker_id}/connect-stripe", summary="Start Stripe Connect onboarding for a worker")
+async def start_stripe_connect_onboarding(worker_id: str, db: AsyncSession = Depends(get_db)):
+    """Create Stripe Connect account for worker and return onboarding link"""
+    try:
+        # Get worker
+        result = await db.execute(select(Worker).where(Worker.id == int(worker_id)))
+        worker = result.scalar_one_or_none()
+
+        if not worker:
+            raise HTTPException(404, "Worker not found")
+
+        # If already has Stripe Connect account, return it
+        if worker.stripe_account_id:
+            return {
+                "status": "ok",
+                "message": "Worker already has Stripe Connect account",
+                "stripe_account_id": worker.stripe_account_id
+            }
+
+        # Create new Stripe Connect account (Express account for fast onboarding)
+        account = stripe.Account.create(
+            type="express",
+            email=worker.email,
+            metadata={
+                "worker_id": str(worker.id),
+                "worker_name": worker.name,
+            }
+        )
+
+        # Save Stripe Connect account ID to worker
+        worker.stripe_account_id = account.id
+        await db.commit()
+
+        # Create onboarding link for worker to complete setup
+        onboarding_link = stripe.AccountLink.create(
+            account=account.id,
+            type="account_onboarding",
+            refresh_url="https://empire-v2-production.up.railway.app/payments/worker/connect/refresh",
+            return_url="https://empire-v2-production.up.railway.app/payments/worker/connect/success",
+        )
+
+        log.info(f"Stripe Connect account created for worker {worker.email}: {account.id}")
+
+        return {
+            "status": "ok",
+            "message": "Stripe Connect account created. Worker must complete onboarding.",
+            "stripe_account_id": account.id,
+            "onboarding_url": onboarding_link.url,
+            "next_step": "Send worker the onboarding_url to complete bank account setup"
+        }
+
+    except stripe.error.StripeError as e:
+        log.error(f"Stripe error creating Connect account: {e}")
+        raise HTTPException(500, f"Stripe error: {str(e)}")
+    except Exception as e:
+        log.error(f"Error creating Stripe Connect account: {e}")
+        raise HTTPException(500, f"Error: {str(e)}")
+
+
+@router.get("/worker/connect/refresh", summary="Stripe Connect refresh callback")
+async def stripe_connect_refresh():
+    """Callback when worker refreshes during onboarding"""
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse("""
+    <html>
+    <body style="font-family: Arial; text-align: center; padding: 50px;">
+        <h2>Stripe Setup</h2>
+        <p>Return to complete Stripe Connect setup</p>
+        <a href="https://dashboard.stripe.com" style="padding: 10px 20px; background: #0066cc; color: white; text-decoration: none; border-radius: 5px;">
+            Back to Dashboard
+        </a>
+    </body>
+    </html>
+    """)
+
+
+@router.get("/worker/connect/success", summary="Stripe Connect success callback")
+async def stripe_connect_success():
+    """Callback when worker completes onboarding"""
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse("""
+    <html>
+    <body style="font-family: Arial; text-align: center; padding: 50px;">
+        <h2>✅ Stripe Setup Complete!</h2>
+        <p>Your Stripe Connect account is ready. Payouts will start flowing to your bank account.</p>
+        <a href="https://empire-v2-production.up.railway.app/dashboard" style="padding: 10px 20px; background: #28a745; color: white; text-decoration: none; border-radius: 5px;">
+            Back to Dashboard
+        </a>
+    </body>
+    </html>
+    """)
 
 
 @router.get("/crypto/account", summary="Get Coinbase crypto trading account status")
