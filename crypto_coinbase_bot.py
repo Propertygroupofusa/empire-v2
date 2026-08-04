@@ -82,10 +82,16 @@ def _load_signing_key():
     seed followed by the 32-byte public key), of which only the seed is
     the actual private key."""
     raw = COINBASE_API_PRIVATE_KEY.strip()
-    if raw.startswith("-----BEGIN"):
-        return serialization.load_pem_private_key(raw.encode(), password=None), "ES256"
-    decoded = base64.b64decode(raw)
-    return Ed25519PrivateKey.from_private_bytes(decoded[:32]), "EdDSA"
+    try:
+        if raw.startswith("-----BEGIN"):
+            return serialization.load_pem_private_key(raw.encode(), password=None), "ES256"
+        decoded = base64.b64decode(raw)
+        if len(decoded) != 64:
+            log.error(f"Coinbase private key decoded to {len(decoded)} bytes, expected 64 - key may be corrupted")
+        return Ed25519PrivateKey.from_private_bytes(decoded[:32]), "EdDSA"
+    except Exception as e:
+        log.error(f"Failed to load Coinbase signing key: {type(e).__name__}: {e} - key={raw[:40]}...")
+        raise
 
 
 def _build_jwt(method: str, path: str) -> str:
