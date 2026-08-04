@@ -581,3 +581,31 @@ async def get_dividend_tracker():
         ),
         "currently_held_symbols": sorted({p["symbol"] for p in positions}),
     }
+
+
+@router.get("/account/balance")
+async def get_account_balance():
+    """Get real Alpaca account balance - cash available, buying power, equity.
+    Shows how much you can withdraw or use for trading."""
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        raise HTTPException(status_code=500, detail="Alpaca credentials not configured")
+
+    async with aiohttp.ClientSession() as session:
+        try:
+            account = await _fetch_alpaca_account(session)
+        except Exception as e:
+            log.error(f"Failed to fetch account balance: {e}")
+            raise HTTPException(status_code=502, detail="Failed to fetch account balance")
+
+    if not account:
+        raise HTTPException(status_code=502, detail="No account data returned")
+
+    return {
+        "cash": round(float(account.get("cash", 0)), 2),
+        "buying_power": round(float(account.get("buying_power", 0)), 2),
+        "equity": round(float(account.get("equity", 0)), 2),
+        "account_value": round(float(account.get("portfolio_value", 0)), 2),
+        "status": account.get("status", "unknown"),
+        "day_trading_buying_power": round(float(account.get("daytrading_buying_power", 0)), 2),
+        "cash_withdrawable": round(float(account.get("cash", 0)), 2),
+    }
