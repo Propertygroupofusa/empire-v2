@@ -313,3 +313,104 @@ async def get_alpaca_account():
             "message": str(e),
             "trading_mode": "LIVE" if live_trade else "PAPER"
         }
+
+
+@router.get("/crypto/account", summary="Get Coinbase crypto trading account status")
+async def get_crypto_account():
+    """Fetch Coinbase USD balance and crypto trading status"""
+    import aiohttp
+    import base64
+    import json
+    import time
+    import jwt
+
+    coinbase_key_name = os.getenv("COINBASE_API_KEY_NAME", "")
+    coinbase_private_key = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\n", "\n")
+
+    if not coinbase_key_name or not coinbase_private_key:
+        return {
+            "status": "unconfigured",
+            "message": "Coinbase credentials not configured",
+            "pairs": ["BTC-USD", "ETH-USD"],
+            "mode": "24/7 crypto trading (not configured)"
+        }
+
+    # Build JWT for Coinbase CDP auth
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        raw = coinbase_private_key.strip()
+        if raw.startswith("-----BEGIN"):
+            from cryptography.hazmat.backends import default_backend
+            private_key = serialization.load_pem_private_key(raw.encode(), password=None, backend=default_backend())
+            algorithm = "ES256"
+        else:
+            decoded = base64.b64decode(raw)
+            private_key = Ed25519PrivateKey.from_private_bytes(decoded[:32])
+            algorithm = "EdDSA"
+
+        now = int(time.time())
+        payload = {
+            "sub": coinbase_key_name,
+            "iss": "cdp",
+            "nbf": now,
+            "exp": now + 120,
+            "uri": "GET /api/v3/brokerage/accounts",
+        }
+        jwt_token = jwt.encode(payload, private_key, algorithm=algorithm)
+
+        headers = {
+            "Authorization": f"Bearer {jwt_token}",
+            "Content-Type": "application/json",
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://api.coinbase.com/api/v3/brokerage/accounts",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status != 200:
+                    return {
+                        "status": "error",
+                        "message": f"Coinbase API returned {resp.status}",
+                        "pairs": ["BTC-USD", "ETH-USD"],
+                        "mode": "🔴 LIVE CRYPTO (24/7)"
+                    }
+
+                data = await resp.json()
+                accounts = data.get("accounts", [])
+
+                # Find USD account
+                usd_account = next(
+                    (a for a in accounts if a.get("currency") == "USD"),
+                    None
+                )
+
+                return {
+                    "status": "ok",
+                    "mode": "🔴 LIVE CRYPTO (24/7, no paper trading on Coinbase)",
+                    "pairs": ["BTC-USD", "ETH-USD"],
+                    "capital": {
+                        "usd_balance": round(float(usd_account.get("available_balance", {}).get("value", 0)), 2) if usd_account else 0.0,
+                        "total_accounts": len(accounts),
+                    },
+                    "note": "Crypto trading on separate Coinbase account (not Alpaca). BTC/ETH trades 24/7 with 30/70 RSI strategy.",
+                }
+
+    except ImportError:
+        return {
+            "status": "error",
+            "message": "cryptography or jwt module not available",
+            "pairs": ["BTC-USD", "ETH-USD"],
+            "mode": "🔴 LIVE CRYPTO"
+        }
+    except Exception as e:
+        log.error(f"Crypto account error: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "pairs": ["BTC-USD", "ETH-USD"],
+            "mode": "🔴 LIVE CRYPTO"
+        }
