@@ -120,6 +120,31 @@ def main():
     if not dupes:
         print(f"  {len(by_table)} table names, each declared exactly once")
 
+    # ── 2b. extend_existing must not be used to silence a collision ────
+    # This is how the collision came back after it was first fixed. Faced
+    # with "Table 'campaign_contacts' is already defined", the response
+    # was __table_args__ = {"extend_existing": True}. That does not
+    # resolve the conflict, it hides it: both classes then share ONE
+    # Table object whose columns are the union of both schemas, so two
+    # unrelated entities land in one physical table each leaving the
+    # other's columns NULL. The exception was the useful part.
+    for path in sorted(REPO.glob("*.py")):
+        try:
+            src = path.read_text()
+        except OSError:
+            continue
+        if "extend_existing" not in src:
+            continue
+        info = declared.get(path.name)
+        if info and info["shared"]:
+            failures.append(f'{path.name} sets extend_existing on a shared-Base '
+                            f'model. That silences the "already defined" error '
+                            f'instead of fixing it - the two classes end up '
+                            f'sharing one Table with the union of their columns. '
+                            f'Give the second entity its own table instead.')
+    if not [f for f in failures if "extend_existing" in f]:
+        print("  no shared-Base model papers over a collision with extend_existing")
+
     # ── 3. anything on the SHARED Base lives in models.py ──────────────
     stray = {m: [c for c, _ in i["models"]]
              for m, i in declared.items() if i["shared"] and m != "models.py"}
