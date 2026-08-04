@@ -414,16 +414,25 @@ def size_position(cash_pool_remaining, slots_remaining, price):
 
 
 async def place_order(session, symbol, side, qty, price):
-    """Coinbase Advanced Trade market orders: BUY sizes by dollar amount
-    (quote_size), SELL sizes by coin amount (base_size) - unlike Alpaca,
-    which takes qty for both sides."""
+    """Coinbase Advanced Trade orders:
+    - BUY: market IOC for immediate entry
+    - SELL: limit GTC at profit target to hold order until price reached
+    """
     product_id = _to_product_id(symbol)
     path = "/api/v3/brokerage/orders"
-    order_config = (
-        {"market_market_ioc": {"quote_size": f"{qty * price:.2f}"}}
-        if side == "buy"
-        else {"market_market_ioc": {"base_size": f"{qty:.8f}"}}
-    )
+
+    if side == "buy":
+        # Use IOC market for immediate entry
+        order_config = {"market_market_ioc": {"quote_size": f"{qty * price:.2f}"}}
+    else:
+        # Use GTC limit for profit-taking - order persists until target price hit
+        order_config = {
+            "limit_limit_gtc": {
+                "base_size": f"{qty:.8f}",
+                "limit_price": f"{price:.2f}"
+            }
+        }
+
     order = {
         "client_order_id": str(uuid.uuid4()),
         "product_id": product_id,

@@ -501,12 +501,16 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
     symbol = FUTURES[contract]["symbol"]
     side = "buy" if action == "BUY" else "sell"
 
+    # Use GTC (Good Till Canceled) for profit-taking sells to let orders persist until profit target hits
+    # Use DAY for entry buys to avoid holding stale orders overnight
+    time_in_force = "gtc" if action == "SELL" else "day"
+
     order = {
         "symbol": symbol,
         "qty": str(qty),
         "side": side,
         "type": "market",
-        "time_in_force": "day",
+        "time_in_force": time_in_force,
     }
 
     mode = "LIVE" if LIVE_TRADE else "PAPER"
