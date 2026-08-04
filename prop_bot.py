@@ -309,6 +309,21 @@ async def get_account_cash(session):
         return None
 
 
+async def get_account_buying_power(session):
+    """Real Alpaca buying power. Returns buying power or None on failure.
+    Used for hard margin safety checks to prevent over-leverage."""
+    try:
+        async with session.get(f"{BASE_URL}/v2/account", headers=HEADERS) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+            bp = float(data.get("buying_power", 0))
+            return bp
+    except Exception as e:
+        log.warning(f"Could not fetch buying power for margin safety: {e}")
+        return None
+
+
 async def get_account_shorting_enabled(session):
     """Real Alpaca account.shorting_enabled flag. Discovered in production
     that every single short attempt was failing with "account is not
@@ -402,6 +417,16 @@ async def reconcile_positions_with_broker(session):
 # entry rather than place a near-zero fractional order.
 MIN_POSITION_NOTIONAL = float(os.getenv("PROP_MIN_POSITION_NOTIONAL", "10"))
 
+# HARD MARGIN SAFETY LIMITS — prevent over-leverage ever again
+# Minimum buying power buffer required before opening ANY new position
+MIN_BUYING_POWER_BUFFER = float(os.getenv("PROP_MIN_BUYING_POWER_BUFFER", "500"))
+
+# Maximum percentage of account equity that can be at risk in open positions
+MAX_RISK_PERCENT = float(os.getenv("PROP_MAX_RISK_PERCENT", "0.50"))  # 50% max
+
+# Buying power threshold to STOP opening new positions (emergency brake)
+CRITICAL_BUYING_POWER_THRESHOLD = float(os.getenv("PROP_CRITICAL_BP_THRESHOLD", "100"))
+
 
 def size_position(cash_remaining, slots_remaining, price):
     """Dollar-based (fractional-share) position sizing. A fixed 1-share
@@ -418,6 +443,25 @@ def size_position(cash_remaining, slots_remaining, price):
     amount = min(max(cash_remaining / slots_remaining, MIN_POSITION_NOTIONAL), cash_remaining)
     qty = round(amount / price, 6)
     return qty if qty > 0 else None
+
+
+def check_margin_safety(buying_power, equity, open_positions_count):
+    """Hard check: is it safe to open a new position?
+    Returns (is_safe, reason_if_not)"""
+    # Buying power must be positive with minimum buffer
+    if buying_power < MIN_BUYING_POWER_BUFFER:
+        return False, f"Insufficient buying power: ${buying_power:.2f} < ${MIN_BUYING_POWER_BUFFER:.2f} buffer"
+
+    # Emergency brake: if buying power drops near zero, stop ALL new positions
+    if buying_power < CRITICAL_BUYING_POWER_THRESHOLD:
+        return False, f"CRITICAL: Buying power ${buying_power:.2f} near zero — halting new positions"
+
+    # Total open position risk can't exceed max % of equity
+    total_open_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in open_positions.values())
+    if equity > 0 and total_open_notional > (equity * MAX_RISK_PERCENT):
+        return False, f"Risk limit exceeded: ${total_open_notional:.2f} > {MAX_RISK_PERCENT*100:.0f}% of ${equity:.2f} equity"
+
+    return True, "OK"
 
 
 async def broadcast_signal_to_subscribers(session, contract, action, price, rsi, trend, stop_loss=None, target=None):
@@ -570,6 +614,14 @@ async def run_prop_cycle():
         over from run_prop_cycle) - falls back to the fixed 1-share size
         if the real cash balance couldn't be fetched this cycle."""
         nonlocal cash_remaining
+
+        # HARD MARGIN SAFETY CHECK — prevent over-leverage
+        buying_power = await get_account_buying_power(session)
+        is_safe, reason = check_margin_safety(buying_power, equity, len(open_prop_positions))
+        if not is_safe:
+            log.warning(f"[APEX_589296] ⛔ MARGIN SAFETY: Blocking {contract} entry — {reason}")
+            return False
+
         if cash_remaining is not None:
             qty = size_position(cash_remaining, slots_remaining, price)
             if qty is None:
