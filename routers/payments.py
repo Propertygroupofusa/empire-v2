@@ -661,3 +661,89 @@ async def process_paypal_payouts(db: AsyncSession = Depends(get_db)):
             "message": str(e),
             "processed": 0
         }
+
+
+@router.post("/process-bank-transfer", summary="Direct bank account payout")
+async def process_bank_transfer(
+    bank_account_holder: str,
+    bank_name: str,
+    account_number: str,
+    routing_number: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """Process direct bank transfer payout to pending payments using Stripe."""
+    if not STRIPE_AVAILABLE:
+        return {
+            "status": "error",
+            "message": "Stripe not configured",
+            "processed": 0
+        }
+
+    try:
+        # Get all pending payments
+        result = await db.execute(
+            select(Payment).where(Payment.payout_status == "pending")
+        )
+        pending_payments = result.scalars().all()
+
+        if not pending_payments:
+            return {
+                "status": "ok",
+                "message": "No pending payments to process",
+                "processed": 0
+            }
+
+        total_amount = sum(p.amount_cents for p in pending_payments) / 100
+        processed = 0
+
+        # Create Stripe payout for bank account
+        try:
+            payout = stripe.Payout.create(
+                amount=int(sum(p.amount_cents for p in pending_payments)),
+                currency="usd",
+                method="instant",  # Use instant for faster delivery
+                destination=account_number,  # Stripe will use routing number context
+                metadata={
+                    "bank_account_holder": bank_account_holder,
+                    "bank_name": bank_name,
+                    "routing_number": routing_number,
+                    "payout_date": datetime.utcnow().isoformat()
+                }
+            )
+
+            # Update payments to processing
+            for payment in pending_payments:
+                payment.payout_status = "processing"
+                payment.stripe_transfer_id = payout.id
+
+            await db.commit()
+            processed = len(pending_payments)
+
+            log.info(f"Bank transfer initiated: Payout {payout.id} - ${total_amount:.2f} to {bank_account_holder}")
+
+            return {
+                "status": "ok",
+                "message": f"Bank transfer initiated",
+                "processed": processed,
+                "total_amount": round(total_amount, 2),
+                "payout_id": payout.id,
+                "account_holder": bank_account_holder,
+                "bank_name": bank_name,
+                "estimated_arrival": "1-2 business days"
+            }
+
+        except stripe.error.StripeError as e:
+            log.error(f"Stripe bank transfer error: {e}")
+            return {
+                "status": "error",
+                "message": f"Stripe error: {str(e)}",
+                "processed": 0
+            }
+
+    except Exception as e:
+        log.error(f"Error processing bank transfer: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "processed": 0
+        }
