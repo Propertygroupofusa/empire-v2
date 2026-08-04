@@ -1106,6 +1106,290 @@ async def serve_trading_dashboard():
     return FileResponse(dashboard_path, media_type="text/html")
 
 
+@app.get("/api/orchestrator/stats")
+async def get_orchestrator_stats(db = Depends(lambda: None)):
+    """Aggregate all earnings: video production + trading (prop + crypto)"""
+    import aiohttp
+    import asyncio
+
+    try:
+        stats = {
+            "timestamp": datetime.now().isoformat(),
+            "video_production": {"total_earned": 0, "jobs_completed": 0, "pending": 0},
+            "trading": {"total_earned": 0, "equity": 0, "daily_pnl": 0, "accounts": []},
+            "summary": {"total_earned": 0, "net_equity": 0, "status": "loading"}
+        }
+
+        # Video production stats
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("http://localhost:8000/payments/bot/earnings", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        video_data = await resp.json()
+                        stats["video_production"] = {
+                            "total_earned": video_data.get("total_earned", 0),
+                            "jobs_completed": video_data.get("payment_count", 0),
+                            "pending": video_data.get("pending_payout", 0)
+                        }
+        except Exception as e:
+            log.warning(f"Error fetching video stats: {e}")
+
+        # Alpaca trading stats
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("http://localhost:8000/payments/alpaca/account", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        alpaca_data = await resp.json()
+                        if alpaca_data.get("status") == "ok":
+                            stats["trading"]["accounts"].append({
+                                "name": "Alpaca (Stocks/ETFs/Futures)",
+                                "equity": alpaca_data.get("capital", {}).get("equity", 0),
+                                "buying_power": alpaca_data.get("buying_power", {}).get("available", 0),
+                                "mode": alpaca_data.get("trading_mode", "PAPER")
+                            })
+                            stats["trading"]["equity"] += alpaca_data.get("capital", {}).get("equity", 0)
+        except Exception as e:
+            log.warning(f"Error fetching Alpaca stats: {e}")
+
+        # Coinbase crypto stats
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("http://localhost:8000/payments/crypto/account", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        crypto_data = await resp.json()
+                        if crypto_data.get("status") == "ok":
+                            stats["trading"]["accounts"].append({
+                                "name": "Coinbase (BTC/ETH 24/7)",
+                                "usd_balance": crypto_data.get("capital", {}).get("usd_balance", 0),
+                                "mode": crypto_data.get("mode", "LIVE CRYPTO")
+                            })
+                            stats["trading"]["equity"] += crypto_data.get("capital", {}).get("usd_balance", 0)
+        except Exception as e:
+            log.warning(f"Error fetching Coinbase stats: {e}")
+
+        # Calculate totals
+        stats["trading"]["total_earned"] = stats["trading"]["equity"]
+        stats["summary"]["total_earned"] = stats["video_production"]["total_earned"] + stats["trading"]["total_earned"]
+        stats["summary"]["net_equity"] = stats["trading"]["equity"]
+        stats["summary"]["status"] = "ok"
+
+        return stats
+
+    except Exception as e:
+        log.error(f"Error in orchestrator stats: {e}")
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e),
+            "status": "error"
+        }
+
+
+@app.get("/orchestrator")
+async def serve_orchestrator_dashboard():
+    """Serve the unified Orchestrator dashboard - video production + trading earnings"""
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>🎯 Orchestrator Dashboard - Empire v2</title>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+                background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+                color: #fff;
+                min-height: 100vh;
+                padding: 20px;
+            }
+            .container { max-width: 1400px; margin: 0 auto; }
+            h1 { text-align: center; margin-bottom: 30px; font-size: 2.5em; text-shadow: 0 2px 10px rgba(0,0,0,0.3); }
+
+            .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 20px; margin-bottom: 30px; }
+            .card {
+                background: rgba(255,255,255,0.1);
+                border: 1px solid rgba(255,255,255,0.2);
+                border-radius: 12px;
+                padding: 25px;
+                backdrop-filter: blur(10px);
+                box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+                transition: transform 0.3s ease, box-shadow 0.3s ease;
+            }
+            .card:hover { transform: translateY(-5px); box-shadow: 0 12px 40px rgba(0,0,0,0.3); }
+
+            .card h2 { font-size: 1.2em; margin-bottom: 15px; opacity: 0.9; }
+            .metric { margin: 12px 0; display: flex; justify-content: space-between; align-items: center; }
+            .metric-label { opacity: 0.8; font-size: 0.95em; }
+            .metric-value { font-size: 1.5em; font-weight: bold; color: #4ade80; }
+
+            .summary-card {
+                grid-column: 1 / -1;
+                background: linear-gradient(135deg, rgba(74,222,128,0.2), rgba(59,130,246,0.2));
+                border: 2px solid rgba(74,222,128,0.4);
+            }
+            .summary-card h2 { font-size: 1.8em; color: #4ade80; }
+            .summary-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; }
+
+            .status-badge {
+                display: inline-block;
+                padding: 6px 12px;
+                border-radius: 20px;
+                font-size: 0.85em;
+                font-weight: 600;
+                background: rgba(74,222,128,0.2);
+                color: #4ade80;
+                border: 1px solid rgba(74,222,128,0.5);
+            }
+            .status-badge.error { background: rgba(239,68,68,0.2); color: #ef4444; border-color: rgba(239,68,68,0.5); }
+            .status-badge.loading { background: rgba(59,130,246,0.2); color: #3b82f6; border-color: rgba(59,130,246,0.5); }
+
+            .account-list { margin-top: 15px; }
+            .account-item {
+                background: rgba(255,255,255,0.05);
+                padding: 10px;
+                border-radius: 6px;
+                margin: 8px 0;
+                font-size: 0.9em;
+            }
+            .account-item .name { font-weight: 600; margin-bottom: 5px; }
+            .account-item .details { opacity: 0.8; display: flex; justify-content: space-between; }
+
+            .refresh-btn {
+                background: rgba(59,130,246,0.3);
+                border: 1px solid rgba(59,130,246,0.6);
+                color: #fff;
+                padding: 10px 20px;
+                border-radius: 6px;
+                cursor: pointer;
+                font-size: 1em;
+                transition: all 0.3s ease;
+            }
+            .refresh-btn:hover { background: rgba(59,130,246,0.5); }
+            .controls { text-align: center; margin-bottom: 30px; }
+
+            .last-update { text-align: center; opacity: 0.7; font-size: 0.9em; margin-top: 20px; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🎯 Orchestrator Dashboard</h1>
+
+            <div class="controls">
+                <button class="refresh-btn" onclick="refreshData()">🔄 Refresh</button>
+            </div>
+
+            <div class="grid" id="dashboard">
+                <div class="card" style="grid-column: 1 / -1;">
+                    <h2>Loading data...</h2>
+                    <p>Aggregating video production, trading, and equity data...</p>
+                </div>
+            </div>
+
+            <div class="last-update" id="lastUpdate"></div>
+        </div>
+
+        <script>
+            async function loadData() {
+                try {
+                    const resp = await fetch('/api/orchestrator/stats');
+                    const data = await resp.json();
+                    renderDashboard(data);
+                } catch (e) {
+                    console.error('Error loading data:', e);
+                    document.getElementById('dashboard').innerHTML = '<div class="card" style="grid-column: 1 / -1;"><h2>⚠️ Error Loading Data</h2><p>' + e.message + '</p></div>';
+                }
+            }
+
+            function renderDashboard(data) {
+                const dashboard = document.getElementById('dashboard');
+                let html = '';
+
+                // Summary card
+                html += `
+                    <div class="card summary-card">
+                        <h2>💰 Total Earnings</h2>
+                        <div class="summary-metrics">
+                            <div>
+                                <div class="metric-label">Combined Revenue</div>
+                                <div class="metric-value">$${data.summary.total_earned.toFixed(2)}</div>
+                            </div>
+                            <div>
+                                <div class="metric-label">Trading Equity</div>
+                                <div class="metric-value">$${data.summary.net_equity.toFixed(2)}</div>
+                            </div>
+                            <div>
+                                <div class="metric-label">System Status</div>
+                                <div style="margin-top: 8px;"><span class="status-badge ${data.summary.status === 'ok' ? '' : 'error'}">● ${data.summary.status.toUpperCase()}</span></div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                // Video production
+                html += `
+                    <div class="card">
+                        <h2>🎬 Video Production</h2>
+                        <div class="metric">
+                            <span class="metric-label">Total Earned</span>
+                            <span class="metric-value">$${data.video_production.total_earned.toFixed(2)}</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Jobs Completed</span>
+                            <span class="metric-value">${data.video_production.jobs_completed}</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Pending Payout</span>
+                            <span class="metric-value" style="color: #fbbf24;">$${data.video_production.pending.toFixed(2)}</span>
+                        </div>
+                    </div>
+                `;
+
+                // Trading summary
+                html += `
+                    <div class="card">
+                        <h2>📈 Trading Accounts</h2>
+                        <div class="metric">
+                            <span class="metric-label">Total Equity</span>
+                            <span class="metric-value">$${data.trading.equity.toFixed(2)}</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Active Accounts</span>
+                            <span class="metric-value">${data.trading.accounts.length}</span>
+                        </div>
+                        <div class="account-list">
+                            ${data.trading.accounts.map(acc => `
+                                <div class="account-item">
+                                    <div class="name">${acc.name}</div>
+                                    <div class="details">
+                                        <span>Equity: $${(acc.equity || acc.usd_balance || 0).toFixed(2)}</span>
+                                        <span>${acc.mode}</span>
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+
+                dashboard.innerHTML = html;
+                document.getElementById('lastUpdate').textContent = '🕐 Updated: ' + new Date(data.timestamp).toLocaleString();
+            }
+
+            function refreshData() {
+                loadData();
+            }
+
+            // Load on page load
+            loadData();
+            // Auto-refresh every 30 seconds
+            setInterval(loadData, 30000);
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+
 @app.get("/notary-portal")
 async def serve_notary_portal():
     """Serve the notary partner self-service portal. Until now, /workers,
