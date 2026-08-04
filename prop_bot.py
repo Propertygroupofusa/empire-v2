@@ -98,18 +98,15 @@ FUTURES = {
 MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", str(len(FUTURES))))
 
 # Profit target, in REAL DOLLARS of profit on the position (not a raw
-# price move on the underlying) - scaled by real account equity. Explicit
-# request: take profit daily even if it's just 25-50 cents on small accounts,
-# then immediately look for another promising signal, rather than
-# holding out for a bigger move. Checked against real Alpaca equity each
-# cycle. Lowered for small accounts so positions actually close instead
-# of being held indefinitely waiting for larger moves.
+# price move on the underlying) - scaled by real account equity. Minimum
+# targets cover ~$0.55 transaction cost, so each close enables buying again
+# without a loss on the spread. Checked against real Alpaca equity each cycle.
 PROFIT_TARGET_DOLLARS_MILESTONES = [
-    (0,     0.25),      # Micro: $0.25 (was $0.50)
-    (500,   0.35),      # Small: $0.35
-    (1000,  0.50),      # Medium: $0.50 (was $0.60)
-    (5000,  0.75),      # Large: $0.75 (was $0.80)
-    (10000, 1.00),      # Huge: $1.00
+    (0,     0.60),      # Micro: $0.60 (covers transaction cost)
+    (500,   0.75),      # Small: $0.75
+    (1000,  1.00),      # Medium: $1.00
+    (5000,  1.50),      # Large: $1.50
+    (10000, 2.00),      # Huge: $2.00
 ]
 
 
