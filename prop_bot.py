@@ -69,13 +69,64 @@ FUTURES = {
     "MGC": {"name": "Micro Gold",           "qty": 1, "symbol": "GLD"},   # Use GLD as proxy
     "MCL": {"name": "Micro Crude Oil",      "qty": 1, "symbol": "USO"},   # Use USO as proxy
     "SIL": {"name": "Micro Silver",         "qty": 1, "symbol": "SLV"},   # Use SLV as proxy
-    # Cryptocurrencies (24/7 trading on Alpaca) — OPTIMIZED FOR MICRO-ACCOUNT COMPOUNDING
-    # Focus: 4 pairs only. High liquidity + predictability + volatility for fast scalp wins.
-    # Goal: $2-3 per trade, frequent wins, reinvest immediately → $992 to $1K+ in hours
-    "BTC": {"name": "Bitcoin",              "qty": 1, "symbol": "BTC/USD"},   # Mega cap: stable, liquid, predictable
-    "ETH": {"name": "Ethereum",             "qty": 1, "symbol": "ETH/USD"},   # Mega cap: follows BTC, reliable
-    "SOL": {"name": "Solana",               "qty": 1, "symbol": "SOL/USD"},   # High vol: catches big swings, ~$3-5 per trade
-    "DOGE": {"name": "Dogecoin",            "qty": 1, "symbol": "DOGE/USD"},  # Extreme vol: scalp-friendly, fast moves
+    # Cryptocurrencies (24/7 trading on Alpaca) — 50+ PAIRS FOR MAXIMUM OPPORTUNITIES
+    # Strategy: Scan all, trade best signals only. MAX_POSITIONS=2 keeps capital focused.
+    # Every signal = potential $2-3 win. More pairs = more winning chances per day.
+    # Mega cap tier (stable baseline):
+    "BTC": {"name": "Bitcoin",              "qty": 1, "symbol": "BTC/USD"},
+    "ETH": {"name": "Ethereum",             "qty": 1, "symbol": "ETH/USD"},
+    # Tier 1 - High liquidity altcoins (proven winners):
+    "SOL": {"name": "Solana",               "qty": 1, "symbol": "SOL/USD"},
+    "ADA": {"name": "Cardano",              "qty": 1, "symbol": "ADA/USD"},
+    "DOGE": {"name": "Dogecoin",            "qty": 1, "symbol": "DOGE/USD"},
+    "XRP": {"name": "Ripple",               "qty": 1, "symbol": "XRP/USD"},
+    "LINK": {"name": "Chainlink",           "qty": 1, "symbol": "LINK/USD"},
+    "AVAX": {"name": "Avalanche",           "qty": 1, "symbol": "AVAX/USD"},
+    "NEAR": {"name": "NEAR Protocol",       "qty": 1, "symbol": "NEAR/USD"},
+    "MATIC": {"name": "Polygon",            "qty": 1, "symbol": "MATIC/USD"},
+    # Tier 2 - Hot altcoins (emerging volume leaders):
+    "ARB": {"name": "Arbitrum",             "qty": 1, "symbol": "ARB/USD"},
+    "OP": {"name": "Optimism",              "qty": 1, "symbol": "OP/USD"},
+    "APT": {"name": "Aptos",                "qty": 1, "symbol": "APT/USD"},
+    "SEI": {"name": "Sei",                  "qty": 1, "symbol": "SEI/USD"},
+    "SUI": {"name": "Sui",                  "qty": 1, "symbol": "SUI/USD"},
+    "BLUR": {"name": "Blur",                "qty": 1, "symbol": "BLUR/USD"},
+    "LDO": {"name": "Lido DAO",             "qty": 1, "symbol": "LDO/USD"},
+    "MKR": {"name": "Maker",                "qty": 1, "symbol": "MKR/USD"},
+    "AAVE": {"name": "Aave",                "qty": 1, "symbol": "AAVE/USD"},
+    "UNI": {"name": "Uniswap",              "qty": 1, "symbol": "UNI/USD"},
+    # Tier 3 - Volume surge candidates:
+    "PEPE": {"name": "Pepe",                "qty": 1, "symbol": "PEPE/USD"},
+    "SHIB": {"name": "Shiba Inu",           "qty": 1, "symbol": "SHIB/USD"},
+    "FLOKI": {"name": "Floki",              "qty": 1, "symbol": "FLOKI/USD"},
+    "STX": {"name": "Stacks",               "qty": 1, "symbol": "STX/USD"},
+    "FIL": {"name": "Filecoin",             "qty": 1, "symbol": "FIL/USD"},
+    "ATOM": {"name": "Cosmos",              "qty": 1, "symbol": "ATOM/USD"},
+    "ALGO": {"name": "Algorand",            "qty": 1, "symbol": "ALGO/USD"},
+    "SAND": {"name": "Sandbox",             "qty": 1, "symbol": "SAND/USD"},
+    "MANA": {"name": "Decentraland",        "qty": 1, "symbol": "MANA/USD"},
+    "ENS": {"name": "ENS",                  "qty": 1, "symbol": "ENS/USD"},
+    "RNDR": {"name": "Render",              "qty": 1, "symbol": "RNDR/USD"},
+    "IMX": {"name": "Immutable",            "qty": 1, "symbol": "IMX/USD"},
+    "GALA": {"name": "Gala",                "qty": 1, "symbol": "GALA/USD"},
+    "BEAM": {"name": "Beam",                "qty": 1, "symbol": "BEAM/USD"},
+    # Tier 4 - Emerging micro-cap movers:
+    "WIF": {"name": "dogwifhat",            "qty": 1, "symbol": "WIF/USD"},
+    "POPCAT": {"name": "Popcat",            "qty": 1, "symbol": "POPCAT/USD"},
+    "MOO": {"name": "Moo Deng",             "qty": 1, "symbol": "MOO/USD"},
+    "BONK": {"name": "Bonk",                "qty": 1, "symbol": "BONK/USD"},
+    "RENDER": {"name": "Render",            "qty": 1, "symbol": "RENDER/USD"},
+    "JTO": {"name": "Jito",                 "qty": 1, "symbol": "JTO/USD"},
+    "ORCA": {"name": "Orca",                "qty": 1, "symbol": "ORCA/USD"},
+    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
+    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
+    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
+    # Add more as they become available on Alpaca
+    "WLD": {"name": "Worldcoin",            "qty": 1, "symbol": "WLD/USD"},
+    "INJ": {"name": "Injective",            "qty": 1, "symbol": "INJ/USD"},
+    "SUSHI": {"name": "Sushi",              "qty": 1, "symbol": "SUSHI/USD"},
+    "CURVE": {"name": "Curve",              "qty": 1, "symbol": "CURVE/USD"},
+    "CRV": {"name": "Curve DAO",            "qty": 1, "symbol": "CRV/USD"},
 }
 
 # Max concurrent open positions. Explicit request: don't cap this below
