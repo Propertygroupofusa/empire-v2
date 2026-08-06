@@ -72,6 +72,11 @@ FUTURES = {
     "MGC": {"name": "Micro Gold",           "qty": 1, "symbol": "GLD"},   # Use GLD as proxy
     "MCL": {"name": "Micro Crude Oil",      "qty": 1, "symbol": "USO"},   # Use USO as proxy
     "SIL": {"name": "Micro Silver",         "qty": 1, "symbol": "SLV"},   # Use SLV as proxy
+    # Cryptocurrencies (24/7 trading on Alpaca)
+    "BTC": {"name": "Bitcoin",              "qty": 1, "symbol": "BTC/USD"},   # 24/7 crypto
+    "ETH": {"name": "Ethereum",             "qty": 1, "symbol": "ETH/USD"},  # 24/7 crypto
+    "SOL": {"name": "Solana",               "qty": 1, "symbol": "SOL/USD"},   # 24/7 crypto
+    "ADA": {"name": "Cardano",              "qty": 1, "symbol": "ADA/USD"},   # 24/7 crypto
     # International stock indices
     "EWJ": {"name": "Japan ETF",            "qty": 1, "symbol": "EWJ"},   # Japan stocks 24/5
     "EWG": {"name": "Germany ETF",          "qty": 1, "symbol": "EWG"},   # Germany/Europe 24/5
@@ -547,10 +552,8 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
 async def run_prop_cycle():
     global daily_pnl, profitable_days, last_cycle_at, last_market_open
 
-    # Only trade during market hours (9:30am-4pm ET). Checked against real
-    # ET wall-clock time (DST-aware) rather than a hardcoded UTC range -
-    # a fixed 14:30-21:00 UTC window is wrong by an hour for about 8
-    # months of the year whenever ET is in daylight time.
+    # Trade during market hours (9:30am-4pm ET) for stocks/futures.
+    # Crypto trades 24/7. Checked against real ET wall-clock time (DST-aware).
     now = datetime.now(ET)
     is_weekday = now.weekday() < 5
     market_open_t = now.replace(hour=9, minute=30, second=0, microsecond=0)
@@ -558,12 +561,15 @@ async def run_prop_cycle():
 
     last_cycle_at = now.isoformat()
 
-    if not (is_weekday and market_open_t <= now <= market_close_t):
+    # Check if it's market hours for stocks (9:30am-4pm ET weekdays) or if we're trading crypto (24/7)
+    is_market_hours = is_weekday and market_open_t <= now <= market_close_t
+    is_crypto_trading = True  # Crypto trades 24/7
+
+    if not (is_market_hours or is_crypto_trading):
         last_market_open = False
-        log.info(f"[APEX_589296] Market closed — waiting for 9:30am ET")
         return
 
-    last_market_open = True
+    last_market_open = is_market_hours
 
     log.info(f"[APEX_589296] Scanning futures markets ({', '.join(FUTURES)})... | Daily P&L: ${daily_pnl:.2f}")
 
@@ -701,6 +707,11 @@ async def run_prop_cycle():
 
         scans = {}
         for contract, config in FUTURES.items():
+            # Skip non-crypto symbols during after-hours (outside 9:30am-4pm ET weekdays)
+            is_crypto = "/" in config["symbol"]  # Crypto symbols have "/" like BTC/USD
+            if not is_market_hours and not is_crypto:
+                continue
+
             data = await get_price_rsi(session, config["symbol"])
             if data:
                 scans[contract] = data
@@ -776,6 +787,11 @@ async def run_prop_cycle():
         # ── Pass 2: new entries, with rotation if already at the cap ─────
         candidates = []
         for contract, config in FUTURES.items():
+            # Skip non-crypto symbols during after-hours
+            is_crypto = "/" in config["symbol"]
+            if not is_market_hours and not is_crypto:
+                continue
+
             if contract in open_prop_positions:
                 continue
             data = scans.get(contract)
