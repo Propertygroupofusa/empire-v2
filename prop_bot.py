@@ -237,7 +237,10 @@ async def get_price_rsi(session, symbol):
             sma10 = sum(closes[-10:]) / 10
             trend = "bullish" if sma5 > sma10 else "bearish"
 
-            return {"price": price, "rsi": round(rsi, 1), "trend": trend}
+            # Momentum: price change over last 3 bars (shows direction/strength)
+            momentum = ((price - closes[-3]) / closes[-3]) * 100 if closes[-3] > 0 else 0
+
+            return {"price": price, "rsi": round(rsi, 1), "trend": trend, "momentum": round(momentum, 2)}
     except Exception as e:
         log.error(f"Price error {symbol}: {e}")
         return None
@@ -701,7 +704,7 @@ async def run_prop_cycle():
             data = await get_price_rsi(session, config["symbol"])
             if data:
                 scans[contract] = data
-                log.info(f"[APEX_589296] {contract} ({config['symbol']}) | ${data['price']:.2f} | RSI:{data['rsi']} | {data['trend']}")
+                log.info(f"[APEX_589296] {contract} ({config['symbol']}) | ${data['price']:.2f} | RSI:{data['rsi']} | Momentum:{data.get('momentum', 0):+.2f}% | {data['trend']}")
             await asyncio.sleep(0.3)
 
         # ── Pass 1: manage exits for symbols already held ────────────────
@@ -779,22 +782,30 @@ async def run_prop_cycle():
             if not data:
                 continue
             price, rsi, trend = data["price"], data["rsi"], data["trend"]
+            momentum = data.get("momentum", 0)
 
             if rsi < RSI_BUY_BELOW:
-                candidates.append((RSI_BUY_BELOW - rsi, contract, config, "long", price, rsi, trend))
-                status = "BUY_ZONE"
+                # Long entry: RSI oversold + positive momentum (price trending up, not just dipping down)
+                if momentum > 0:
+                    candidates.append((RSI_BUY_BELOW - rsi, contract, config, "long", price, rsi, trend))
+                    status = "BUY_ZONE"
+                else:
+                    status = "BUY_SIGNAL_BLOCKED (momentum negative)"
             elif rsi > RSI_SELL_ABOVE:
-                # Signal is real either way - only gate acting on it. Still
-                # shown as SHORT_ZONE on the dashboard so it accurately
-                # reflects RSI conditions even while shorting is disabled.
+                # Short entry: RSI overbought + negative momentum (price trending down)
                 if shorting_enabled:
-                    candidates.append((rsi - RSI_SELL_ABOVE, contract, config, "short", price, rsi, trend))
-                status = "SHORT_ZONE"
+                    if momentum < 0:
+                        candidates.append((rsi - RSI_SELL_ABOVE, contract, config, "short", price, rsi, trend))
+                        status = "SHORT_ZONE"
+                    else:
+                        status = "SHORT_SIGNAL_BLOCKED (momentum positive)"
+                else:
+                    status = "SHORT_ZONE"
             else:
                 status = "NEUTRAL"
             latest_signals[contract] = {
                 "symbol": config["symbol"], "price": price, "rsi": rsi, "trend": trend,
-                "status": status, "has_position": False, "checked_at": now.isoformat(),
+                "momentum": momentum, "status": status, "has_position": False, "checked_at": now.isoformat(),
             }
 
         candidates.sort(key=lambda c: -c[0])  # strongest (furthest past threshold) first
@@ -814,7 +825,9 @@ async def run_prop_cycle():
                 continue
 
             if len(open_prop_positions) < MAX_POSITIONS:
-                log.info(f"[APEX_589296] 📡 {side.upper()} {contract} — RSI:{rsi} Trend:{trend}")
+                scan_data = scans.get(contract)
+                momentum = scan_data.get("momentum", 0) if scan_data else 0
+                log.info(f"[APEX_589296] 📡 {side.upper()} {contract} — RSI:{rsi} Momentum:{momentum:+.2f}% Trend:{trend}")
                 await try_open(contract, config, side, price, rsi, trend, MAX_POSITIONS - len(open_prop_positions))
             else:
                 # At the cap - find the weakest held position (lowest
