@@ -126,9 +126,10 @@ MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", str(len(CRYPTO_PAIRS))))
 # it at a fixed dollar amount instead, if ever wanted.
 _max_allocation_env = os.getenv("CRYPTO_MAX_ALLOCATION", "")
 MAX_ALLOCATION = float(_max_allocation_env) if _max_allocation_env else None
-# Increased from $5 to $50 minimum for profitability: $5 trades with fees can't win.
-# $50 × 1% move = $0.50 profit, beats fees and compounds account faster.
-MIN_POSITION_NOTIONAL = float(os.getenv("CRYPTO_MIN_POSITION_NOTIONAL", "50"))
+# Micro-trades on small balances: $0.50 minimum lets bot scalp $0.58-100 accounts
+# without sitting idle. At $0.58 balance: $0.50 × 0.5% move = $0.0025 profit (micro-compounding)
+# $100+ balance: trades full notional, beats fees, compounds faster.
+MIN_POSITION_NOTIONAL = float(os.getenv("CRYPTO_MIN_POSITION_NOTIONAL", "0.50"))
 
 # Staged capital release, requested after watching the account get drawn
 # down to single-digit cents trading with 100% of the balance every cycle:
