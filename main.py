@@ -3,6 +3,9 @@ PROPERTY GROUP USA — DOCUMENTS PLATFORM BACKEND
 =================================================
 Full SaaS backend with worker management, client booking,
 job matching, payments, admin dashboard, and white label API.
+
+VERSION: v2.1-trading-signals-coinbase-active
+Deployed: 2026-08-06 04:15 UTC | Coinbase bot enabled with API credentials
 """
 
 from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks
