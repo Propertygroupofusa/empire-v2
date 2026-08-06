@@ -109,7 +109,7 @@ class Worker(Base):
     as orphaned raw DB columns nothing in the code touched)."""
     __tablename__ = "workers"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True, autoincrement=True, index=True)
     email = Column(String, unique=True, index=True)
     name = Column(String)
     phone = Column(String, nullable=True)
