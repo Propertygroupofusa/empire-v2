@@ -76,23 +76,6 @@ FUTURES = {
     "ETH": {"name": "Ethereum",             "qty": 1, "symbol": "ETH/USD"},   # Mega cap: follows BTC, reliable
     "SOL": {"name": "Solana",               "qty": 1, "symbol": "SOL/USD"},   # High vol: catches big swings, ~$3-5 per trade
     "DOGE": {"name": "Dogecoin",            "qty": 1, "symbol": "DOGE/USD"},  # Extreme vol: scalp-friendly, fast moves
-    # International stock indices
-    "EWJ": {"name": "Japan ETF",            "qty": 1, "symbol": "EWJ"},   # Japan stocks 24/5
-    "EWG": {"name": "Germany ETF",          "qty": 1, "symbol": "EWG"},   # Germany/Europe 24/5
-    "EWU": {"name": "UK ETF",               "qty": 1, "symbol": "EWU"},   # UK stocks 24/5
-    "EWA": {"name": "Australia ETF",        "qty": 1, "symbol": "EWA"},   # Australia 24/5
-    "IEMG": {"name": "Emerging Markets",    "qty": 1, "symbol": "IEMG"},  # Global emerging markets
-    # Forex pairs (as ETFs for 24/5 trading)
-    "FXE": {"name": "Euro/USD",             "qty": 1, "symbol": "FXE"},   # EUR/USD 24/5
-    "FXB": {"name": "British Pound",        "qty": 1, "symbol": "FXB"},   # GBP/USD 24/5
-    "FXY": {"name": "Japanese Yen",         "qty": 1, "symbol": "FXY"},   # JPY/USD 24/5
-    # Additional commodities and bonds
-    "DBC": {"name": "Commodities",          "qty": 1, "symbol": "DBC"},   # Broad commodities
-    "TLT": {"name": "Long Treasuries",      "qty": 1, "symbol": "TLT"},   # US bonds 24/5
-    # China stocks (direct exposure)
-    "FXI": {"name": "China Large-Cap ETF",  "qty": 1, "symbol": "FXI"},   # iShares China Large-Cap
-    "ASHR": {"name": "China A-Shares ETF",  "qty": 1, "symbol": "ASHR"},  # Xtrackers CSI 300 China
-    "CNE": {"name": "China ETF",            "qty": 1, "symbol": "CNE"},   # iShares MSCI China
 }
 
 # Max concurrent open positions. Explicit request: don't cap this below
