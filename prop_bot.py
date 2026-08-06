@@ -50,6 +50,10 @@ RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "70"))
 # RSI reversal only ever locks in a winner early.
 STOP_LOSS_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.005"))
 
+# Daily maximum loss in dollars — circuit breaker stops all trading when hit
+# Protects micro accounts from catastrophic streaks
+DAILY_MAX_LOSS_DOLLARS = float(os.getenv("PROP_DAILY_MAX_LOSS", "20"))
+
 HEADERS = {
     "APCA-API-KEY-ID": ALPACA_KEY,
     "APCA-API-SECRET-KEY": ALPACA_SECRET,
@@ -663,6 +667,17 @@ async def run_prop_cycle():
 
         log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | Profit target: ${profit_target:.2f}/position" +
                 (f" | ⚠️ DAILY 2% LOSS LIMIT HIT - stopping new trades" if is_hitting_daily_loss_limit else ""))
+
+        # Circuit breaker: if daily loss exceeds $20, close ALL open positions immediately
+        daily_loss_dollars = (daily_account_equity_start - equity) if daily_account_equity_start and equity else 0
+        if daily_loss_dollars >= DAILY_MAX_LOSS_DOLLARS:
+            log.warning(f"[APEX_589296] 🛑 CIRCUIT BREAKER: Daily loss ${daily_loss_dollars:.2f} >= ${DAILY_MAX_LOSS_DOLLARS:.2f} — closing ALL positions")
+            for contract in list(open_prop_positions.keys()):
+                data = scans.get(contract)
+                config = FUTURES[contract]
+                if data:
+                    await close_position(session, contract, config, open_prop_positions[contract],
+                                       data["price"], data["rsi"], data["trend"], "CIRCUIT BREAKER - DAILY LOSS LIMIT")
 
         # Tracked and spent-down across this cycle's entries so dollar-based
         # sizing (see try_open/size_position) reflects money already
