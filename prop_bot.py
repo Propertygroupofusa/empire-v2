@@ -32,9 +32,9 @@ LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 
 # RSI entry/exit thresholds. Tightened to EXTREME signals only for profitability.
 # Weak signals (45/50) were losing money - every trade went immediately underwater.
-# Switch to standard oversold/overbought: only trade RSI < 30 (longs) or > 70 (shorts).
+# Switch to standard oversold/overbought: only trade RSI < 25 (longs) or > 70 (shorts).
 # Fewer trades but higher win rate. Configurable via env for tuning without code change.
-RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "30"))
+RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "25"))
 RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "70"))
 
 # Real, enforced stop-loss. open_position() already computed a 2% stop
