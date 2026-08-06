@@ -30,25 +30,19 @@ ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 BASE_URL      = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 
-# RSI entry/exit thresholds. Tightened to EXTREME signals only for profitability.
-# Weak signals (45/50) were losing money - every trade went immediately underwater.
-# Switch to standard oversold/overbought: only trade RSI < 25 (longs) or > 70 (shorts).
-# Fewer trades but higher win rate. Configurable via env for tuning without code change.
+# RSI entry/exit thresholds
 RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "30"))
 RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "70"))
 
-# Real, enforced stop-loss. open_position() already computed a 2% stop
-# price for the informational subscriber-signal broadcast, but Pass 1's
-# exit check never actually looked at it - the only two ways a position
-# could close were hitting the dollar profit target or an RSI reversal,
-# and RSI reversals fired regardless of whether the position was
-# actually in profit. That meant a position that had been sitting on a
-# real gain could give it all back and close at a genuine loss the
-# moment RSI flipped, with no floor underneath it at all. Now enforced
-# for real in Pass 1, and RSI exits require the position to actually be
-# profitable first - the stop-loss below is what protects a loser, an
-# RSI reversal only ever locks in a winner early.
-STOP_LOSS_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.005"))
+# Crypto-specific thresholds: more aggressive due to higher volatility & faster moves
+CRYPTO_RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "25"))   # Tighter oversold for crypto
+CRYPTO_RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "75"))  # Tighter overbought for crypto
+
+# Real, enforced stop-loss — tighter than older versions to protect micro account
+STOP_LOSS_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.005"))  # 0.5% for stocks/futures
+
+# Crypto-specific tighter stop-loss: crypto volatility demands faster bail-outs
+CRYPTO_STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.003"))  # 0.3% for crypto (faster exit)
 
 # Daily maximum loss in dollars — circuit breaker stops all trading when hit
 # Protects micro accounts from catastrophic streaks
@@ -72,11 +66,19 @@ FUTURES = {
     "MGC": {"name": "Micro Gold",           "qty": 1, "symbol": "GLD"},   # Use GLD as proxy
     "MCL": {"name": "Micro Crude Oil",      "qty": 1, "symbol": "USO"},   # Use USO as proxy
     "SIL": {"name": "Micro Silver",         "qty": 1, "symbol": "SLV"},   # Use SLV as proxy
-    # Cryptocurrencies (24/7 trading on Alpaca)
-    "BTC": {"name": "Bitcoin",              "qty": 1, "symbol": "BTC/USD"},   # 24/7 crypto
-    "ETH": {"name": "Ethereum",             "qty": 1, "symbol": "ETH/USD"},  # 24/7 crypto
-    "SOL": {"name": "Solana",               "qty": 1, "symbol": "SOL/USD"},   # 24/7 crypto
-    "ADA": {"name": "Cardano",              "qty": 1, "symbol": "ADA/USD"},   # 24/7 crypto
+    # Cryptocurrencies (24/7 trading on Alpaca) — highest volume + volatility
+    "BTC": {"name": "Bitcoin",              "qty": 1, "symbol": "BTC/USD"},   # Tier 1: mega cap
+    "ETH": {"name": "Ethereum",             "qty": 1, "symbol": "ETH/USD"},   # Tier 1: mega cap
+    "SOL": {"name": "Solana",               "qty": 1, "symbol": "SOL/USD"},   # Tier 2: high vol
+    "ADA": {"name": "Cardano",              "qty": 1, "symbol": "ADA/USD"},   # Tier 2: stable
+    "XRP": {"name": "Ripple",               "qty": 1, "symbol": "XRP/USD"},   # Tier 2: stable
+    "DOGE": {"name": "Dogecoin",            "qty": 1, "symbol": "DOGE/USD"},  # Tier 2: high vol
+    "LINK": {"name": "Chainlink",           "qty": 1, "symbol": "LINK/USD"},  # Tier 2: vol
+    "AVAX": {"name": "Avalanche",           "qty": 1, "symbol": "AVAX/USD"},  # Tier 2: vol
+    "NEAR": {"name": "NEAR Protocol",       "qty": 1, "symbol": "NEAR/USD"},  # Tier 2: vol
+    "MATIC": {"name": "Polygon",            "qty": 1, "symbol": "MATIC/USD"}, # Tier 3: emerging
+    "ARB": {"name": "Arbitrum",             "qty": 1, "symbol": "ARB/USD"},   # Tier 3: emerging
+    "OP": {"name": "Optimism",              "qty": 1, "symbol": "OP/USD"},    # Tier 3: emerging
     # International stock indices
     "EWJ": {"name": "Japan ETF",            "qty": 1, "symbol": "EWJ"},   # Japan stocks 24/5
     "EWG": {"name": "Germany ETF",          "qty": 1, "symbol": "EWG"},   # Germany/Europe 24/5
@@ -740,14 +742,21 @@ async def run_prop_cycle():
             side = position["side"]
             entry = position["entry"]
             qty = position["qty"]
+
+            # Use crypto-specific RSI thresholds and tighter stops
+            is_crypto = "/" in config["symbol"]
+            exit_sell_threshold = CRYPTO_RSI_SELL_ABOVE if is_crypto else RSI_SELL_ABOVE
+            exit_buy_threshold = CRYPTO_RSI_BUY_BELOW if is_crypto else RSI_BUY_BELOW
+            stop_loss = CRYPTO_STOP_LOSS_PCT if is_crypto else STOP_LOSS_PCT
+
             if side == "long":
                 unrealized_pnl = (price - entry) * qty
-                rsi_signal = rsi > RSI_SELL_ABOVE or (trend == "bearish" and rsi > 50)
-                stop_hit = price <= entry * (1 - STOP_LOSS_PCT)
+                rsi_signal = rsi > exit_sell_threshold or (trend == "bearish" and rsi > 50)
+                stop_hit = price <= entry * (1 - stop_loss)
             else:
                 unrealized_pnl = (entry - price) * qty
-                rsi_signal = rsi < RSI_BUY_BELOW or (trend == "bullish" and rsi < 50)
-                stop_hit = price >= entry * (1 + STOP_LOSS_PCT)
+                rsi_signal = rsi < exit_buy_threshold or (trend == "bullish" and rsi < 50)
+                stop_hit = price >= entry * (1 + stop_loss)
 
             # Professional tiered profit-taking: lock in gains at milestones
             # - 50% target: exit 1/3 (secure early gain, let 2/3 ride)
@@ -800,18 +809,23 @@ async def run_prop_cycle():
             price, rsi, trend = data["price"], data["rsi"], data["trend"]
             momentum = data.get("momentum", 0)
 
-            if rsi < RSI_BUY_BELOW:
+            # Use crypto-specific RSI thresholds if this is a crypto symbol (contains /)
+            is_crypto = "/" in config["symbol"]
+            buy_threshold = CRYPTO_RSI_BUY_BELOW if is_crypto else RSI_BUY_BELOW
+            sell_threshold = CRYPTO_RSI_SELL_ABOVE if is_crypto else RSI_SELL_ABOVE
+
+            if rsi < buy_threshold:
                 # Long entry: RSI oversold + positive momentum (price trending up, not just dipping down)
                 if momentum > 0:
-                    candidates.append((RSI_BUY_BELOW - rsi, contract, config, "long", price, rsi, trend))
+                    candidates.append((buy_threshold - rsi, contract, config, "long", price, rsi, trend))
                     status = "BUY_ZONE"
                 else:
                     status = "BUY_SIGNAL_BLOCKED (momentum negative)"
-            elif rsi > RSI_SELL_ABOVE:
+            elif rsi > sell_threshold:
                 # Short entry: RSI overbought + negative momentum (price trending down)
                 if shorting_enabled:
                     if momentum < 0:
-                        candidates.append((rsi - RSI_SELL_ABOVE, contract, config, "short", price, rsi, trend))
+                        candidates.append((rsi - sell_threshold, contract, config, "short", price, rsi, trend))
                         status = "SHORT_ZONE"
                     else:
                         status = "SHORT_SIGNAL_BLOCKED (momentum positive)"
