@@ -34,15 +34,18 @@ LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "30"))
 RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "70"))
 
-# Crypto-specific thresholds: more aggressive due to higher volatility & faster moves
-CRYPTO_RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "25"))   # Tighter oversold for crypto
-CRYPTO_RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "75"))  # Tighter overbought for crypto
+# Crypto-specific thresholds: OPTIMIZED FOR SCALPING + HIGH FREQUENCY
+# Use standard RSI (30/70) not extreme (25/75) to MAXIMIZE entry frequency
+# More trades × smaller wins = faster compounding toward $1K milestone
+CRYPTO_RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "30"))   # Catch oversold bounces (more entries)
+CRYPTO_RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "70"))  # Exit overbought rallies (more exits)
 
 # Real, enforced stop-loss — tighter than older versions to protect micro account
 STOP_LOSS_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.005"))  # 0.5% for stocks/futures
 
-# Crypto-specific tighter stop-loss: crypto volatility demands faster bail-outs
-CRYPTO_STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.003"))  # 0.3% for crypto (faster exit)
+# Crypto-specific stop-loss: BACK TO 0.5% FOR CAPITAL PRESERVATION
+# On $992 account: 0.5% = $5 max loss per trade. Protect capital, compound wins.
+CRYPTO_STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.005"))  # 0.5% for crypto (same as stocks)
 
 # Daily maximum loss in dollars — circuit breaker stops all trading when hit
 # Protects micro accounts from catastrophic streaks
@@ -66,19 +69,13 @@ FUTURES = {
     "MGC": {"name": "Micro Gold",           "qty": 1, "symbol": "GLD"},   # Use GLD as proxy
     "MCL": {"name": "Micro Crude Oil",      "qty": 1, "symbol": "USO"},   # Use USO as proxy
     "SIL": {"name": "Micro Silver",         "qty": 1, "symbol": "SLV"},   # Use SLV as proxy
-    # Cryptocurrencies (24/7 trading on Alpaca) — highest volume + volatility
-    "BTC": {"name": "Bitcoin",              "qty": 1, "symbol": "BTC/USD"},   # Tier 1: mega cap
-    "ETH": {"name": "Ethereum",             "qty": 1, "symbol": "ETH/USD"},   # Tier 1: mega cap
-    "SOL": {"name": "Solana",               "qty": 1, "symbol": "SOL/USD"},   # Tier 2: high vol
-    "ADA": {"name": "Cardano",              "qty": 1, "symbol": "ADA/USD"},   # Tier 2: stable
-    "XRP": {"name": "Ripple",               "qty": 1, "symbol": "XRP/USD"},   # Tier 2: stable
-    "DOGE": {"name": "Dogecoin",            "qty": 1, "symbol": "DOGE/USD"},  # Tier 2: high vol
-    "LINK": {"name": "Chainlink",           "qty": 1, "symbol": "LINK/USD"},  # Tier 2: vol
-    "AVAX": {"name": "Avalanche",           "qty": 1, "symbol": "AVAX/USD"},  # Tier 2: vol
-    "NEAR": {"name": "NEAR Protocol",       "qty": 1, "symbol": "NEAR/USD"},  # Tier 2: vol
-    "MATIC": {"name": "Polygon",            "qty": 1, "symbol": "MATIC/USD"}, # Tier 3: emerging
-    "ARB": {"name": "Arbitrum",             "qty": 1, "symbol": "ARB/USD"},   # Tier 3: emerging
-    "OP": {"name": "Optimism",              "qty": 1, "symbol": "OP/USD"},    # Tier 3: emerging
+    # Cryptocurrencies (24/7 trading on Alpaca) — OPTIMIZED FOR MICRO-ACCOUNT COMPOUNDING
+    # Focus: 4 pairs only. High liquidity + predictability + volatility for fast scalp wins.
+    # Goal: $2-3 per trade, frequent wins, reinvest immediately → $992 to $1K+ in hours
+    "BTC": {"name": "Bitcoin",              "qty": 1, "symbol": "BTC/USD"},   # Mega cap: stable, liquid, predictable
+    "ETH": {"name": "Ethereum",             "qty": 1, "symbol": "ETH/USD"},   # Mega cap: follows BTC, reliable
+    "SOL": {"name": "Solana",               "qty": 1, "symbol": "SOL/USD"},   # High vol: catches big swings, ~$3-5 per trade
+    "DOGE": {"name": "Dogecoin",            "qty": 1, "symbol": "DOGE/USD"},  # Extreme vol: scalp-friendly, fast moves
     # International stock indices
     "EWJ": {"name": "Japan ETF",            "qty": 1, "symbol": "EWJ"},   # Japan stocks 24/5
     "EWG": {"name": "Germany ETF",          "qty": 1, "symbol": "EWG"},   # Germany/Europe 24/5
@@ -108,7 +105,10 @@ FUTURES = {
 # logic in run_prop_cycle (swap out a losing position for a fresh signal)
 # still exists as a safety net, but can't trigger at this default since
 # there's no 8th symbol to need a slot from.
-MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", str(len(FUTURES))))
+# Max concurrent positions: OPTIMIZED FOR MICRO-ACCOUNT COMPOUNDING
+# 2 positions max concentrates capital, maximizes profits per position, enables faster compounding
+# With 4 crypto pairs, averaging 2 positions = focused capital deployment
+MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", "2"))
 
 # Profit target, in REAL DOLLARS of profit on the position (not a raw
 # price move on the underlying) - scaled by real account equity. Increased targets
@@ -122,18 +122,36 @@ PROFIT_TARGET_DOLLARS_MILESTONES = [
     (10000, 20.00),     # Huge: $20.00 (0.20% on $10000)
 ]
 
-# Professional tiered exit levels - lock in profits at milestones, let winners run
+# Crypto-specific LOWER profit targets for fast compounding & high frequency
+# On $992: aim for $2-3 per trade (hit more targets, reinvest faster)
+CRYPTO_PROFIT_TARGET_MILESTONES = [
+    (0,     2.50),      # Micro: $2.50 (0.25% on $1000) — fast wins
+    (500,   3.00),      # Small: $3.00
+    (1000,  3.50),      # Medium: $3.50
+    (5000,  5.00),      # Large: $5.00
+    (10000, 7.50),      # Huge: $7.50
+]
+
+# Crypto-specific AGGRESSIVE tiered exits — lock wins faster, reinvest sooner
+# Tier 1: Exit 50% at 50% of target (very early win lock)
+# Tier 2: Exit 25% at 75% of target (partial second exit)
+# Tier 3: Exit final 25% at 100% of target (close all, start fresh)
+CRYPTO_TIER_LEVELS = [0.50, 0.75, 1.00]  # multipliers of crypto profit target
+
+# Professional tiered exit levels for stocks - lock in profits at milestones, let winners run
 # Tier 1: Exit 1/3 at 50% of target (lock in early win)
 # Tier 2: Exit 1/3 at 100% of target (take second third)
 # Tier 3: Exit final 1/3 at 150% of target (let winners run to max)
 TIER_LEVELS = [0.50, 1.00, 1.50]  # multipliers of profit target
 
 
-def get_profit_target_dollars(equity):
+def get_profit_target_dollars(equity, is_crypto=False):
+    """Get profit target based on account equity. Crypto uses lower targets for fast compounding."""
+    milestones = CRYPTO_PROFIT_TARGET_MILESTONES if is_crypto else PROFIT_TARGET_DOLLARS_MILESTONES
     if equity is None:
-        return PROFIT_TARGET_DOLLARS_MILESTONES[0][1]
-    target = PROFIT_TARGET_DOLLARS_MILESTONES[0][1]
-    for threshold, t in PROFIT_TARGET_DOLLARS_MILESTONES:
+        return milestones[0][1]
+    target = milestones[0][1]
+    for threshold, t in milestones:
         if equity >= threshold:
             target = t
     return target
@@ -758,17 +776,19 @@ async def run_prop_cycle():
                 rsi_signal = rsi < exit_buy_threshold or (trend == "bullish" and rsi < 50)
                 stop_hit = price >= entry * (1 + stop_loss)
 
-            # Professional tiered profit-taking: lock in gains at milestones
-            # - 50% target: exit 1/3 (secure early gain, let 2/3 ride)
-            # - 100% target: exit 2/3 total (lock another third)
-            # - 150% target: exit full position (maximize winner)
-            # Reduces risk while keeping upside, stops revenge trading
+            # Use crypto-specific profit targets for crypto positions
+            position_profit_target = get_profit_target_dollars(equity, is_crypto=is_crypto)
+            tier_levels = CRYPTO_TIER_LEVELS if is_crypto else TIER_LEVELS
+
+            # Tiered profit-taking: lock in gains at milestones
+            # CRYPTO: aggressive (50% exit, 75%, 100%) — reinvest faster
+            # STOCKS: professional (50%, 100%, 150%) — let winners run
             rsi_exit = rsi_signal and unrealized_pnl > 0
 
             # Check which profit tiers have been hit
-            tier1_hit = unrealized_pnl >= (profit_target * TIER_LEVELS[0])
-            tier2_hit = unrealized_pnl >= (profit_target * TIER_LEVELS[1])
-            tier3_hit = unrealized_pnl >= (profit_target * TIER_LEVELS[2])
+            tier1_hit = unrealized_pnl >= (position_profit_target * tier_levels[0])
+            tier2_hit = unrealized_pnl >= (position_profit_target * tier_levels[1])
+            tier3_hit = unrealized_pnl >= (position_profit_target * tier_levels[2])
 
             # Exit conditions: hard stop, RSI reversal on profit, or hit a tiered target
             if stop_hit:
@@ -778,17 +798,13 @@ async def run_prop_cycle():
                 reason = "RSI EXIT"
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
             elif tier3_hit:
-                # At 150% of target - exit final position, let no more gain escape
-                reason = f"TIER 3 EXIT (${unrealized_pnl:.2f} profit, {unrealized_pnl/profit_target:.1f}x target)"
+                reason = f"TIER 3 EXIT (${unrealized_pnl:.2f} profit, {unrealized_pnl/position_profit_target:.1f}x target)"
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
-            elif tier2_hit and unrealized_pnl >= profit_target:
-                # At 100% of target - full exit, professional take
+            elif tier2_hit and unrealized_pnl >= position_profit_target:
                 reason = f"TIER 2 EXIT (${unrealized_pnl:.2f} profit, reached target)"
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
-            elif tier1_hit and unrealized_pnl >= (profit_target * 0.5):
-                # At 50% of target - exit 1/3 to secure gains
-                # For now use simple exit (upgrade to partial exit later)
-                reason = f"TIER 1 EXIT (${unrealized_pnl:.2f} profit, 50% of target)"
+            elif tier1_hit and unrealized_pnl >= (position_profit_target * tier_levels[0]):
+                reason = f"TIER 1 EXIT (${unrealized_pnl:.2f} profit, {tier_levels[0]*100:.0f}% of target)"
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
 
             await asyncio.sleep(0.3)
