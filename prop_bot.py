@@ -48,7 +48,7 @@ RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "70"))
 # for real in Pass 1, and RSI exits require the position to actually be
 # profitable first - the stop-loss below is what protects a loser, an
 # RSI reversal only ever locks in a winner early.
-STOP_LOSS_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.02"))
+STOP_LOSS_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.01"))
 
 HEADERS = {
     "APCA-API-KEY-ID": ALPACA_KEY,
