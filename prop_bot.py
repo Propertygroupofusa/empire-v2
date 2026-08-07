@@ -40,16 +40,23 @@ RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "70"))
 CRYPTO_RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "35"))   # MORE oversold entries (faster compounding)
 CRYPTO_RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "65"))  # MORE overbought exits (more profit locks)
 
-# Real, enforced stop-loss — tighter than older versions to protect micro account
-STOP_LOSS_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.005"))  # 0.5% for stocks/futures
+# AGGRESSIVE WINS + STRICT LOSS PREVENTION
+# Stop-loss TIGHTENED to 0.3% to exit losing trades immediately
+# On $1,000 account: 0.3% = $3 max loss per trade (cut losses quickly)
+STOP_LOSS_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.003"))  # 0.3% for stocks/futures (TIGHTER)
 
-# Crypto-specific stop-loss: BACK TO 0.5% FOR CAPITAL PRESERVATION
-# On $992 account: 0.5% = $5 max loss per trade. Protect capital, compound wins.
-CRYPTO_STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.005"))  # 0.5% for crypto (same as stocks)
+# Crypto-specific stop-loss: 0.3% MAXIMUM LOSS PER TRADE
+# Quick exit on losers = more capital for winning trades
+CRYPTO_STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.003"))  # 0.3% crypto (TIGHTER - fast losses)
 
-# Daily maximum loss in dollars — circuit breaker stops all trading when hit
-# Protects micro accounts from catastrophic streaks
-DAILY_MAX_LOSS_DOLLARS = float(os.getenv("PROP_DAILY_MAX_LOSS", "20"))
+# Daily maximum loss in dollars — STRICT CIRCUIT BREAKER
+# $10 daily max loss = 1% of $1K account. Stops all trading immediately.
+# Prevents drawdown spirals, preserves capital for winning days.
+DAILY_MAX_LOSS_DOLLARS = float(os.getenv("PROP_DAILY_MAX_LOSS", "10"))  # Reduced from $20 to $10
+
+# AGGRESSIVE EXIT ON RED — Close any position down 0.5% immediately
+# Don't wait for stop-loss to trigger. Exit fast, preserve capital.
+QUICK_EXIT_LOSS_PCT = float(os.getenv("QUICK_EXIT_LOSS_PCT", "0.005"))  # Exit any loser at 0.5% down
 
 HEADERS = {
     "APCA-API-KEY-ID": ALPACA_KEY,
@@ -871,10 +878,20 @@ async def run_prop_cycle():
                 unrealized_pnl = (price - entry) * qty
                 rsi_signal = rsi > exit_sell_threshold or (trend == "bearish" and rsi > 50)
                 stop_hit = price <= entry * (1 - stop_loss)
+                quick_loss_hit = price <= entry * (1 - QUICK_EXIT_LOSS_PCT)  # AGGRESSIVE: exit losers at 0.5% down
             else:
                 unrealized_pnl = (entry - price) * qty
                 rsi_signal = rsi < exit_buy_threshold or (trend == "bullish" and rsi < 50)
                 stop_hit = price >= entry * (1 + stop_loss)
+                quick_loss_hit = price >= entry * (1 + QUICK_EXIT_LOSS_PCT)  # AGGRESSIVE: exit losers at 0.5% down
+
+            # **AGGRESSIVE LOSS EXIT** — Close ANY losing position at 0.5% down
+            # Don't wait for full stop-loss. Quick exit = preserve capital for winners.
+            if unrealized_pnl < 0 and quick_loss_hit:
+                loss_pct = (unrealized_pnl / (entry * qty)) * 100 if entry * qty > 0 else 0
+                log.warning(f"[APEX_589296] 🚨 AGGRESSIVE LOSS EXIT: {contract} down {abs(loss_pct):.2f}% (${abs(unrealized_pnl):.2f}) — exiting immediately")
+                await close_position(session, contract, config, position, price, rsi, trend, f"QUICK EXIT - DOWN {abs(loss_pct):.2f}%")
+                continue  # Skip rest of position checks, move to next contract
 
             # Use crypto-specific profit targets for crypto positions
             position_profit_target = get_profit_target_dollars(equity, is_crypto=is_crypto)
