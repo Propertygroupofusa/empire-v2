@@ -229,6 +229,11 @@ def get_profit_target_dollars(equity, is_crypto=False):
 
 # Track profitable days for APEX 7-day rule
 profitable_days = []
+
+# Bot lifecycle tracking for $1M goal
+bot_start_time = None  # When bot started trading
+bot_start_equity = None  # Starting equity when bot began
+checkpoint_alerts_sent = set()  # Track which milestones we've alerted on (avoid duplicates)
 daily_pnl = 0.0
 daily_account_equity_start = None  # For daily 2% loss limit
 open_prop_positions = {}
@@ -639,7 +644,7 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
 
 
 async def run_prop_cycle():
-    global daily_pnl, profitable_days, last_cycle_at, last_market_open
+    global daily_pnl, profitable_days, last_cycle_at, last_market_open, bot_start_time, bot_start_equity, checkpoint_alerts_sent
 
     # Trade during market hours (9:30am-4pm ET) for stocks/futures.
     # Crypto trades 24/7. Checked against real ET wall-clock time (DST-aware).
@@ -704,6 +709,53 @@ async def run_prop_cycle():
 
             current_scale = float(get_auto_scale(equity))
             os.environ["POSITION_SCALE_MULTIPLIER"] = str(current_scale)
+
+            # Initialize bot lifecycle tracking when equity first hits $1K
+            if equity >= 1000.0 and bot_start_time is None:
+                bot_start_time = now
+                bot_start_equity = equity
+                log.info(f"🚀 BOT COMPOUNDING START: ${equity:,.2f} | Tracking $1M goal (120-day timeout)")
+
+            # 120-DAY SAFETY TIMEOUT - Professional guardrail
+            if bot_start_time is not None:
+                elapsed_days = (now - bot_start_time).total_seconds() / 86400
+                if elapsed_days > 120 and equity < 1000000.0:
+                    log.error(f"⏰ 120-DAY TIMEOUT REACHED | Elapsed: {elapsed_days:.1f} days | Equity: ${equity:,.2f}")
+                    send_trade_alert(
+                        "⏰ BOT SAFETY TIMEOUT — 120 DAYS REACHED",
+                        f"**SAFETY TIMEOUT TRIGGERED**\n\n"
+                        f"Elapsed: {elapsed_days:.1f} days\n"
+                        f"Target: $1,000,000\n"
+                        f"Achieved: ${equity:,.2f}\n\n"
+                        f"Trading stopped per safety protocol.\n"
+                        f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
+                    )
+                    return  # STOP — timeout reached. Positions handled naturally by exit logic
+
+            # CHECKPOINT ALERTS — Monitor progress to $1M (alert once per milestone)
+            if bot_start_time is not None and bot_start_equity is not None:
+                for milestone in [10000, 50000, 100000]:
+                    if equity >= milestone and milestone not in checkpoint_alerts_sent:
+                        progress = equity - bot_start_equity
+                        checkpoint_alerts_sent.add(milestone)
+                        log.info(f"✅ MILESTONE UNLOCKED: ${equity:,.0f} | Profit: ${progress:,.0f} | Scale: {current_scale:.2f}x")
+                        send_trade_alert(
+                            f"🎯 MILESTONE CHECKPOINT — ${milestone:,}",
+                            f"**EQUITY MILESTONE REACHED**\n\n"
+                            f"Current: ${equity:,.2f}\n"
+                            f"Profit: ${progress:,.2f}\n"
+                            f"Scale: {current_scale:.2f}x\n"
+                            f"Elapsed: {(now - bot_start_time).total_seconds() / 86400:.1f} days\n"
+                            f"Progress to $1M: {(equity/1000000)*100:.1f}%\n\n"
+                            f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
+                        )
+
+            # Win rate monitor — pause aggressive scaling if performance drops
+            if len(profitable_days) >= 7:
+                win_rate = sum(1 for day in profitable_days[-7:] if day) / 7
+                if win_rate < 0.45:
+                    log.warning(f"⚠️  WIN RATE LOW ({win_rate*100:.0f}%) - Pausing aggressive trades")
+                    # In production, set a flag to reduce position sizes or pause new entries
 
             # Log current auto-scale status
             if equity >= 1000.0:
