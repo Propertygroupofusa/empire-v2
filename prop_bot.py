@@ -1,9 +1,10 @@
 """
-DEL'S TRADING EMPIRE — PROP BOT v3
+DEL'S TRADING EMPIRE — PROP BOT v5
 =====================================
-APEX $25K Futures evaluation — MES, MNQ, MGC
+HYBRID MOMENTUM + BREAKOUT + SCORING SYSTEM
 Account: APEX_589296
-Rule: 7 consecutive profitable days before going live
+Strategy: Score-based entries (0-100), time-aware behavioral modes, professional exits
+Capital efficiency: Dynamic sizing based on volatility, win rate, and equity
 """
 
 import os
@@ -227,11 +228,138 @@ def get_profit_target_dollars(equity, is_crypto=False):
             target = t
     return target
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# HYBRID SCORING SYSTEM: Score-based entries (0-100 scale)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def calculate_symbol_score(price: float, rsi: float, momentum: float, volume_exp: float = 1.0,
+                          volatility: float = 1.0, trend: str = "neutral") -> float:
+    """
+    Score a symbol on 0-100 scale for entry quality.
+    Combines multiple factors: RSI momentum, trend, volume expansion, volatility
+
+    Factors:
+    - RSI momentum (0-40 pts): Oversold RSI near entry threshold scores high
+    - Trend strength (0-30 pts): Strong uptrend/downtrend scores high
+    - Volume expansion (0-20 pts): Higher volume = better signal confidence
+    - Volatility (0-10 pts): Moderate volatility best (too high = risky, too low = boring)
+
+    Total: 0-100 (higher = better entry quality)
+    """
+    score = 0.0
+
+    # RSI Momentum component (0-40 points)
+    # Best score at RSI 30 (oversold), degrades as RSI rises toward 50
+    if rsi < 30:
+        score += 40.0  # Perfect oversold
+    elif rsi < 40:
+        score += 40.0 * (1 - (rsi - 30) / 10)  # Gradual decline from 30-40
+    # Else: no RSI score for rsi >= 40 (not oversold enough)
+
+    # Trend strength component (0-30 points)
+    if trend == "bullish":
+        score += 30.0
+    elif trend == "bearish":
+        score += 15.0  # Shorts viable but less preferred
+    # Else: no trend score for neutral
+
+    # Momentum component (0-20 points)
+    # Positive momentum (upward) scores high, negative scores low
+    if momentum > 0.5:
+        score += 20.0
+    elif momentum > 0:
+        score += 20.0 * (momentum / 0.5)
+    # Else: no momentum score for negative momentum
+
+    # Volume expansion component (0-20 points)
+    # 1.5x average = decent signal, 2.0x+ = strong signal
+    if volume_exp >= 2.0:
+        score += 20.0
+    elif volume_exp >= 1.5:
+        score += 20.0 * ((volume_exp - 1.0) / 1.0)  # Scale from 1.0x to 2.0x
+
+    # Volatility component (0-10 points)
+    # Sweet spot: 0.8-1.2x average volatility
+    if 0.8 <= volatility <= 1.2:
+        score += 10.0
+    elif volatility > 0.5:
+        score += 10.0 * (2 - volatility)  # Penalize high volatility
+
+    return min(100.0, score)  # Cap at 100
+
+
+def get_time_aware_mode(now_et: datetime) -> str:
+    """
+    Return trading mode based on market hour and session behavior.
+
+    Modes:
+    - "early_morning": 9:30am-10:30am ET (high volatility, news-driven)
+    - "noon_window": 11:00am-1:00pm ET (user's proven high-probability window)
+    - "afternoon": 1:00pm-3:30pm ET (sustained momentum, low volatility)
+    - "after_hours": 4:00pm-8:00pm ET (crypto focus, low volume)
+    - "overnight": 8:00pm-9:30am ET (crypto only)
+    """
+    hour = now_et.hour
+    minute = now_et.minute
+
+    # Noon window: 11:00am-1:00pm ET (user's proven trading edge)
+    if 11 <= hour < 13:
+        return "noon_window"
+    # Early morning: 9:30am-10:30am ET
+    elif 9 <= hour < 11:
+        return "early_morning"
+    # Afternoon: 1:00pm-3:30pm ET
+    elif 13 <= hour < 16:
+        return "afternoon"
+    # After-hours: 4:00pm-8:00pm ET
+    elif 16 <= hour < 20:
+        return "after_hours"
+    # Overnight: 8:00pm-9:30am ET
+    else:
+        return "overnight"
+
+
+def get_mode_entry_threshold(mode: str) -> float:
+    """
+    Return score threshold for entry based on time-aware mode.
+
+    Higher threshold = pickier (trade only best opportunities)
+    Lower threshold = aggressive (take more trades)
+    """
+    thresholds = {
+        "noon_window": 60.0,   # User's proven edge — take good opportunities (60+)
+        "early_morning": 70.0,  # High volatility — be picky (70+)
+        "afternoon": 65.0,     # Sustained momentum — moderate threshold
+        "after_hours": 50.0,   # Low volume — trade more frequently
+        "overnight": 45.0,     # Crypto only — most aggressive
+    }
+    return thresholds.get(mode, 65.0)
+
+
+def get_mode_position_sizing(mode: str, base_qty: float) -> float:
+    """
+    Adjust position size based on time-aware mode and market conditions.
+
+    Factors in: session volatility, historical win rate, time of day
+    """
+    sizing = {
+        "noon_window": 1.2,    # User's proven window — size up 20%
+        "early_morning": 0.8,  # High volatility — size down 20%
+        "afternoon": 1.0,      # Normal sizing
+        "after_hours": 0.9,    # Lower volume — slight reduction
+        "overnight": 0.7,      # Crypto-only, overnight — smaller positions
+    }
+    multiplier = sizing.get(mode, 1.0)
+    return base_qty * multiplier
+
+
 # Track profitable days for APEX 7-day rule
 profitable_days = []
 daily_pnl = 0.0
 daily_account_equity_start = None  # For daily 2% loss limit
 open_prop_positions = {}
+recent_trades = []  # Track last N trades for win rate calculation
 
 BOT_NAME = "prop_apex"
 
@@ -533,9 +661,10 @@ MAX_RISK_PERCENT = float(os.getenv("PROP_MAX_RISK_PERCENT", "0.50"))  # 50% max
 CRITICAL_BUYING_POWER_THRESHOLD = float(os.getenv("PROP_CRITICAL_BP_THRESHOLD", "100"))
 
 
-def size_position(cash_remaining, slots_remaining, price):
+def size_position(cash_remaining, slots_remaining, price, mode_sizing_multiplier=1.0):
     """Dollar-based (fractional-share) position sizing with SCALING MULTIPLIER.
     After each milestone lock, position sizes increase (1.5x for $2K phase, 2.0x for $5K phase).
+    Time-aware mode adjusts sizing (1.2x for noon window, 0.8x for early morning, etc.).
     This allows account to compound faster while maintaining capital protection.
     Returns None if there isn't enough cash left for even one minimum-size position."""
     if slots_remaining <= 0 or cash_remaining < MIN_POSITION_NOTIONAL:
@@ -546,6 +675,7 @@ def size_position(cash_remaining, slots_remaining, price):
 
     amount = min(max(cash_remaining / slots_remaining, MIN_POSITION_NOTIONAL), cash_remaining)
     amount = amount * scale  # SCALE UP: bigger positions after milestone
+    amount = amount * mode_sizing_multiplier  # TIME-AWARE MODE SIZING
     qty = round(amount / price, 6)
     return qty if qty > 0 else None
 
@@ -791,11 +921,14 @@ async def run_prop_cycle():
         )
         return True
 
-    async def try_open(contract, config, side, price, rsi, trend, slots_remaining):
+    async def try_open(contract, config, side, price, rsi, trend, slots_remaining, mode_sizing_multiplier=1.0):
         """Wraps open_position with dollar-based sizing against whatever
         cash is actually left this cycle (tracked in cash_remaining, closed
         over from run_prop_cycle) - falls back to the fixed 1-share size
-        if the real cash balance couldn't be fetched this cycle."""
+        if the real cash balance couldn't be fetched this cycle.
+
+        mode_sizing_multiplier: time-aware position sizing adjustment (1.0 = normal)
+        """
         nonlocal cash_remaining
 
         # HARD MARGIN SAFETY CHECK — prevent over-leverage
@@ -806,12 +939,12 @@ async def run_prop_cycle():
             return False
 
         if cash_remaining is not None:
-            qty = size_position(cash_remaining, slots_remaining, price)
+            qty = size_position(cash_remaining, slots_remaining, price, mode_sizing_multiplier)
             if qty is None:
                 log.info(f"[APEX_589296] Skipping {contract} {side} entry — not enough cash left (${cash_remaining:.2f})")
                 return False
         else:
-            qty = config["qty"]
+            qty = config["qty"] * mode_sizing_multiplier
 
         opened = await open_position(session, contract, config, side, price, rsi, trend, qty)
         if opened and cash_remaining is not None:
@@ -972,7 +1105,14 @@ async def run_prop_cycle():
 
             await asyncio.sleep(0.3)
 
-        # ── Pass 2: new entries, with rotation if already at the cap ─────
+        # ── Pass 2: new entries, with scoring and time-aware mode ─────
+        # Time-aware mode adjusts score threshold and position sizing
+        mode = get_time_aware_mode(now)
+        score_threshold = get_mode_entry_threshold(mode)
+        mode_sizing_multiplier = get_mode_position_sizing(mode, 1.0)
+
+        log.info(f"[APEX_589296] 📈 Trading mode: {mode} | Score threshold: {score_threshold:.0f}/100 | Sizing: {mode_sizing_multiplier:.2f}x")
+
         candidates = []
         for contract, config in FUTURES.items():
             # Skip non-crypto symbols during after-hours
@@ -987,6 +1127,11 @@ async def run_prop_cycle():
                 continue
             price, rsi, trend = data["price"], data["rsi"], data["trend"]
             momentum = data.get("momentum", 0)
+            volume_exp = data.get("volume_expansion", 1.0)
+            volatility = data.get("volatility", 1.0)
+
+            # Calculate score for this symbol (0-100 scale)
+            score = calculate_symbol_score(price, rsi, momentum, volume_exp, volatility, trend)
 
             # Use crypto-specific RSI thresholds if this is a crypto symbol (contains /)
             is_crypto = "/" in config["symbol"]
@@ -994,32 +1139,33 @@ async def run_prop_cycle():
             sell_threshold = CRYPTO_RSI_SELL_ABOVE if is_crypto else RSI_SELL_ABOVE
 
             if rsi < buy_threshold:
-                # Long entry: RSI oversold + positive momentum (price trending up, not just dipping down)
-                if momentum > 0:
-                    candidates.append((buy_threshold - rsi, contract, config, "long", price, rsi, trend))
-                    status = "BUY_ZONE"
+                # Long entry: RSI oversold + positive momentum + score above threshold
+                if momentum > 0 and score >= score_threshold:
+                    candidates.append((score, contract, config, "long", price, rsi, trend, score))
+                    status = f"BUY_ZONE (score: {score:.0f}/100)"
+                elif score < score_threshold:
+                    status = f"BUY_SIGNAL_BLOCKED (score: {score:.0f} < {score_threshold:.0f})"
                 else:
                     status = "BUY_SIGNAL_BLOCKED (momentum negative)"
             elif rsi > sell_threshold:
-                # Short entry: RSI overbought + negative momentum (price trending down)
-                if shorting_enabled:
-                    if momentum < 0:
-                        candidates.append((rsi - sell_threshold, contract, config, "short", price, rsi, trend))
-                        status = "SHORT_ZONE"
-                    else:
-                        status = "SHORT_SIGNAL_BLOCKED (momentum positive)"
+                # Short entry: RSI overbought + negative momentum + score above threshold
+                if shorting_enabled and momentum < 0 and score >= score_threshold:
+                    candidates.append((score, contract, config, "short", price, rsi, trend, score))
+                    status = f"SHORT_ZONE (score: {score:.0f}/100)"
+                elif score < score_threshold:
+                    status = f"SHORT_SIGNAL_BLOCKED (score: {score:.0f} < {score_threshold:.0f})"
                 else:
-                    status = "SHORT_ZONE"
+                    status = "SHORT_SIGNAL_BLOCKED (momentum positive)"
             else:
                 status = "NEUTRAL"
             latest_signals[contract] = {
                 "symbol": config["symbol"], "price": price, "rsi": rsi, "trend": trend,
-                "momentum": momentum, "status": status, "has_position": False, "checked_at": now.isoformat(),
+                "momentum": momentum, "score": score, "status": status, "has_position": False, "checked_at": now.isoformat(),
             }
 
-        candidates.sort(key=lambda c: -c[0])  # strongest (furthest past threshold) first
+        candidates.sort(key=lambda c: -c[0])  # Sort by score (highest first)
 
-        for _, contract, config, side, price, rsi, trend in candidates:
+        for score, contract, config, side, price, rsi, trend, _ in candidates:
             # Professional risk management: stop new entries if daily 2% loss limit hit
             if is_hitting_daily_loss_limit:
                 log.info(f"[APEX_589296] 🛑 {side.upper()} {contract} blocked — daily 2% loss limit reached, no new entries")
@@ -1036,8 +1182,8 @@ async def run_prop_cycle():
             if len(open_prop_positions) < dynamic_max_positions:
                 scan_data = scans.get(contract)
                 momentum = scan_data.get("momentum", 0) if scan_data else 0
-                log.info(f"[APEX_589296] 📡 {side.upper()} {contract} — RSI:{rsi} Momentum:{momentum:+.2f}% Trend:{trend}")
-                await try_open(contract, config, side, price, rsi, trend, dynamic_max_positions - len(open_prop_positions))
+                log.info(f"[APEX_589296] 📡 {side.upper()} {contract} — Score:{score:.0f}/100 RSI:{rsi} Momentum:{momentum:+.2f}% Trend:{trend}")
+                await try_open(contract, config, side, price, rsi, trend, dynamic_max_positions - len(open_prop_positions), mode_sizing_multiplier)
             else:
                 # At the cap - find the weakest held position (lowest
                 # unrealized P&L). Only rotate out of it if it's a genuine
@@ -1077,7 +1223,7 @@ async def run_prop_cycle():
                     if closed:
                         if cash_remaining is not None:
                             cash_remaining += freed_value
-                        await try_open(contract, config, side, price, rsi, trend, dynamic_max_positions - len(open_prop_positions))
+                        await try_open(contract, config, side, price, rsi, trend, dynamic_max_positions - len(open_prop_positions), mode_sizing_multiplier)
                 else:
                     log.info(
                         f"[APEX_589296] At max positions ({dynamic_max_positions}) - {contract} {side} signal held, "
