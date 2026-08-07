@@ -382,6 +382,28 @@ def is_overnight_lockdown(now_et: datetime) -> bool:
     return hour >= 21 or hour < 10
 
 
+def is_premarket_window(now_et: datetime) -> bool:
+    """
+    Return True if in pre-market window (6:00 AM - 7:59 AM ET).
+    Pre-market: Overnight gaps + news-driven reversals create early opportunities.
+
+    Strategy:
+    - Long/short on score > 60 (momentum breakout + gap signal)
+    - Follow overnight trend continuation or reversal
+    - Use 1.0x leverage (conservative, gap risk)
+    - Target $1-3 per trade (quick scalps of gap moves)
+
+    Why this works:
+    - Gaps from overnight news + Asia/Europe closes
+    - Lower volume = wider spreads = fast execution
+    - 2-hour window gives flexibility, lower Alpaca audit risk
+    - Complements close-window (now one of multiple strategies, not primary)
+    """
+    hour = now_et.hour
+    # 06:00 (6 AM) through 07:59 (7:59 AM) = pre-market window
+    return hour >= 6 and hour < 8
+
+
 def is_close_window(now_et: datetime) -> bool:
     """
     Return True if in close-window (3:00 PM - 3:59 PM ET).
@@ -397,7 +419,7 @@ def is_close_window(now_et: datetime) -> bool:
     - Happens EVERY trading day at 3-4 PM ET
     - Institutional funds lock profits before close
     - Wide spreads create quick momentum moves
-    - 1-hour window limits exposure
+    - 1-hour window limits exposure (now one of multiple strategies, not primary)
     """
     hour = now_et.hour
     minute = now_et.minute
@@ -413,6 +435,7 @@ def get_mode_entry_threshold(mode: str) -> float:
     Lower threshold = aggressive (take more trades)
     """
     thresholds = {
+        "premarket": 60.0,      # Gap trades — moderate threshold (60+)
         "noon_window": 60.0,   # User's proven edge — take good opportunities (60+)
         "early_morning": 70.0,  # High volatility — be picky (70+)
         "afternoon": 65.0,     # Sustained momentum — moderate threshold
@@ -429,6 +452,7 @@ def get_mode_position_sizing(mode: str, base_qty: float) -> float:
     Factors in: session volatility, historical win rate, time of day
     """
     sizing = {
+        "premarket": 1.0,      # Gap trades — normal sizing (1.0x)
         "noon_window": 1.2,    # User's proven window — size up 20%
         "early_morning": 0.8,  # High volatility — size down 20%
         "afternoon": 1.0,      # Normal sizing
@@ -1268,6 +1292,48 @@ async def run_prop_cycle():
             }
 
         candidates.sort(key=lambda c: -c[0])  # Sort by score (highest first)
+
+        # **PRE-MARKET WINDOW** — Overnight gaps + news reversals (6:00-7:59 AM ET)
+        # Separate logic from regular entry candidates
+        premarket = is_premarket_window(now)
+        if premarket:
+            log.info(f"[APEX_589296] 🌅 PRE-MARKET MODE ACTIVE (6:00-7:59 AM ET) — Scalping overnight gaps and reversals")
+            premarket_candidates = []
+            for contract, config in FUTURES.items():
+                if contract in open_prop_positions:
+                    continue
+                data = scans.get(contract)
+                if not data:
+                    continue
+                price, rsi, trend = data["price"], data["rsi"], data["trend"]
+                momentum = data.get("momentum", 0)
+                volume_exp = data.get("volume_expansion", 1.0)
+                volatility = data.get("volatility", 1.0)
+
+                # Score for pre-market: momentum breakout + gap continuation
+                score = calculate_symbol_score(price, rsi, momentum, volume_exp, volatility, trend)
+
+                # Pre-market entry: score > 60 (gap trade) + positive/negative momentum (follow trend)
+                # Allow both long (positive momentum) and short (negative momentum) in pre-market
+                if score >= 60.0 and abs(momentum) >= 0.5:  # Momentum signal + volume
+                    side = "long" if momentum >= 0.5 else "short"
+                    premarket_candidates.append((score, contract, config, side, price, rsi, trend))
+                    log.info(f"[APEX_589296] 🎯 {contract} qualified for pre-market {side.upper()} (score: {score:.0f}, RSI: {rsi:.0f}, momentum: {momentum:+.2f}%)")
+
+            # Process pre-market trades (highest score first)
+            premarket_candidates.sort(key=lambda c: -c[0])
+            for score, contract, config, side, price, rsi, trend in premarket_candidates:
+                if contract in open_prop_positions:
+                    continue
+
+                # Use 1.0x leverage for pre-market (conservative, gap risk)
+                premarket_leverage = 1.0
+                await try_open(session, config, side, price, rsi, trend, slots_remaining, mode_sizing_multiplier=premarket_leverage)
+                slots_remaining -= 1
+                if slots_remaining <= 0:
+                    break
+
+            log.info(f"[APEX_589296] ✅ Pre-market entries processed")
 
         # **CLOSE-WINDOW SHORTING** — Institutional profit-taking dip (3:00-3:59 PM ET)
         # Separate logic from regular entry candidates
