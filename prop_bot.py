@@ -1,9 +1,10 @@
 """
-DEL'S TRADING EMPIRE — PROP BOT v3
+DEL'S TRADING EMPIRE — PROP BOT v4
 =====================================
-APEX $25K Futures evaluation — MES, MNQ, MGC
+PROFESSIONAL MOMENTUM + BREAKOUT SYSTEM
 Account: APEX_589296
-Rule: 7 consecutive profitable days before going live
+Strategy: Multi-condition entries (trend + volume + breakout + support/resistance)
+Exits: Partial profits with trailing stops, risk/reward 2:1 minimum
 """
 
 import os
@@ -12,7 +13,7 @@ import logging
 import smtplib
 import time
 from email.mime.text import MIMEText
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import aiohttp
 import uuid
@@ -30,39 +31,102 @@ ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 BASE_URL      = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 
-# RSI entry/exit thresholds
-RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "30"))
-RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "70"))
+# PROFESSIONAL MOMENTUM + BREAKOUT STRATEGY
+# Multi-condition entry: Trend + Volume + Breakout + Support/Resistance
+# Exits: Partial profits at 2-3%, trailing stops, momentum-based exits
 
-# Crypto-specific thresholds: AGGRESSIVE SCALPING FOR MILESTONE SPEED
-# Lowered from 30/70 to 35/65 to catch MORE entry/exit opportunities
-# Maximizes trade frequency to hit $1,000 ASAP, then $2,000 within 24hr
-CRYPTO_RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "35"))   # MORE oversold entries (faster compounding)
-CRYPTO_RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "65"))  # MORE overbought exits (more profit locks)
+# Trend confirmation: EMA alignment (short > long for uptrend)
+EMA_SHORT_PERIOD = int(os.getenv("EMA_SHORT", "9"))
+EMA_LONG_PERIOD = int(os.getenv("EMA_LONG", "21"))
 
-# AGGRESSIVE WINS + STRICT LOSS PREVENTION
-# Base stop-loss: 0.3% to exit losing trades immediately
-# At higher scales: tighter stops to prevent multiplied losses
-# 1.0x scale: 0.3% stop
-# 1.5x scale: 0.2% stop (1.5x scaled position needs tighter exit)
-# 2.0x scale: 0.2% stop (maximum scale = maximum discipline)
-STOP_LOSS_BASE_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.003"))  # Base: 0.3% for stocks/futures
+# Entry RSI (not oversold, but catching momentum): 55-70 range
+RSI_MIN_FOR_ENTRY = float(os.getenv("RSI_MIN", "55"))
+RSI_MAX_FOR_ENTRY = float(os.getenv("RSI_MAX", "70"))
 
-# Crypto-specific stop-loss: dynamically tightens with scale
-# Base: 0.3%, tightens to 0.2% at 1.5x scale
-CRYPTO_STOP_LOSS_BASE_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.003"))  # Base: 0.3%
+# Volume expansion: needs 1.5x-2x average volume
+VOLUME_EXPANSION_THRESHOLD = float(os.getenv("VOLUME_EXPANSION", "1.5"))
 
-def get_dynamic_stop_loss(scale: float) -> float:
-    """Tighten stop-loss as positions scale up (1.5x+ = tighter discipline)"""
-    if scale >= 1.5:
-        return 0.002  # 0.2% at 1.5x scale and higher
-    return STOP_LOSS_BASE_PCT  # 0.3% baseline
+# ATR-based stops and targets
+ATR_PERIOD = int(os.getenv("ATR_PERIOD", "14"))
+ATR_STOP_MULTIPLE = float(os.getenv("ATR_STOP_MULTIPLE", "1.5"))  # Stop at 1.5x ATR below entry
+ATR_PROFIT_MULTIPLE = float(os.getenv("ATR_PROFIT_MULTIPLE", "3.0"))  # Target 3x ATR above entry
 
-def get_dynamic_crypto_stop_loss(scale: float) -> float:
-    """Crypto: same dynamic tightening as stocks"""
-    if scale >= 1.5:
-        return 0.002  # 0.2% at 1.5x scale and higher
-    return CRYPTO_STOP_LOSS_BASE_PCT  # 0.3% baseline
+# Risk/reward minimum: 2:1
+MIN_RISK_REWARD_RATIO = 2.0
+
+# Partial profit levels: take 1/3 at 2%, 1/3 at 3%, hold 1/3 with trailing stop
+PARTIAL_PROFIT_1_PCT = 0.02  # 2%
+PARTIAL_PROFIT_2_PCT = 0.03  # 3%
+PARTIAL_PROFIT_PORTION = 0.333  # Take 1/3 at each level
+
+# Trailing stop: move stop to breakeven after 2%, then trail by 1.5x ATR
+TRAILING_STOP_ACTIVATION = 0.02
+TRAILING_STOP_MULTIPLE = 1.5
+
+# Stop-loss base (for symbols without clear ATR signal)
+STOP_LOSS_BASE_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.005"))  # 0.5% base
+
+# Helper functions for technical analysis
+
+def calculate_ema(prices: list, period: int) -> float:
+    """Calculate Exponential Moving Average"""
+    if len(prices) < period:
+        return sum(prices) / len(prices) if prices else 0
+    multiplier = 2 / (period + 1)
+    ema = sum(prices[:period]) / period
+    for price in prices[period:]:
+        ema = price * multiplier + ema * (1 - multiplier)
+    return ema
+
+def calculate_atr(highs: list, lows: list, closes: list, period: int) -> float:
+    """Calculate Average True Range"""
+    if len(highs) < period:
+        return 0
+    trs = []
+    for i in range(len(highs)):
+        if i == 0:
+            tr = highs[i] - lows[i]
+        else:
+            tr = max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i-1]),
+                abs(lows[i] - closes[i-1])
+            )
+        trs.append(tr)
+    return sum(trs[-period:]) / period if len(trs) >= period else 0
+
+def calculate_rsi(prices: list, period: int = 14) -> float:
+    """Calculate Relative Strength Index"""
+    if len(prices) < period + 1:
+        return 50
+    deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
+    gains = [d if d > 0 else 0 for d in deltas]
+    losses = [abs(d) if d < 0 else 0 for d in deltas]
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    if avg_loss == 0:
+        return 100 if avg_gain > 0 else 50
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def check_trend_up(prices_short: list, prices_long: list) -> bool:
+    """Check if short-term EMA > long-term EMA (bullish trend)"""
+    ema_short = calculate_ema(prices_short, min(len(prices_short), EMA_SHORT_PERIOD))
+    ema_long = calculate_ema(prices_long, min(len(prices_long), EMA_LONG_PERIOD))
+    return ema_short > ema_long
+
+def check_volume_spike(current_volume: float, avg_volume: float) -> bool:
+    """Check if volume is 1.5x average or higher"""
+    if avg_volume == 0:
+        return False
+    return current_volume >= (avg_volume * VOLUME_EXPANSION_THRESHOLD)
+
+def check_breakout(current_price: float, recent_high: float, resistance_level: float = None) -> bool:
+    """Check if price breaks above resistance"""
+    if resistance_level:
+        return current_price > resistance_level * 1.001  # 0.1% above resistance
+    return current_price > recent_high * 1.001  # 0.1% above recent high
 
 # Daily maximum loss in dollars — DYNAMIC CIRCUIT BREAKER
 # Base: $10 daily max loss at 1.0x scale. SCALES with position multiplier.
@@ -86,94 +150,43 @@ HEADERS = {
 # $1K lock → scale to 1.5x, $2K lock → scale to 2.0x, $5K lock → scale to 3.0x
 POSITION_SCALE_MULTIPLIER = float(os.getenv("POSITION_SCALE_MULTIPLIER", "1.0"))  # Starts at 1.0x, increases per milestone
 
-# APEX futures — use micro contracts (lower risk during evaluation)
-# Expanded to include international markets and forex for 24/5 global trading opportunities
+# PROFESSIONAL SYMBOL LIST — FOCUSED ON PROVEN HIGH-PROBABILITY WINNERS
+# These are the symbols with highest liquidity, volatility, and trend-following potential
 FUTURES = {
-    # American indices
-    "MES": {"name": "Micro E-mini S&P 500", "qty": 1, "symbol": "SPY"},   # Use SPY as proxy
-    "MNQ": {"name": "Micro E-mini Nasdaq",  "qty": 1, "symbol": "QQQ"},   # Use QQQ as proxy
-    "MYM": {"name": "Micro E-mini Dow",     "qty": 1, "symbol": "DIA"},   # Use DIA as proxy
-    "M2K": {"name": "Micro E-mini Russell", "qty": 1, "symbol": "IWM"},   # Use IWM as proxy
-    # Commodities
-    "MGC": {"name": "Micro Gold",           "qty": 1, "symbol": "GLD"},   # Use GLD as proxy
-    "MCL": {"name": "Micro Crude Oil",      "qty": 1, "symbol": "USO"},   # Use USO as proxy
-    "SIL": {"name": "Micro Silver",         "qty": 1, "symbol": "SLV"},   # Use SLV as proxy
-    # Cryptocurrencies (24/7 trading on Alpaca) — 50+ PAIRS FOR MAXIMUM OPPORTUNITIES
-    # Strategy: Scan all, trade best signals only. MAX_POSITIONS=2 keeps capital focused.
-    # Every signal = potential $2-3 win. More pairs = more winning chances per day.
-    # Mega cap tier (stable baseline):
-    "BTC": {"name": "Bitcoin",              "qty": 1, "symbol": "BTC/USD"},
-    "ETH": {"name": "Ethereum",             "qty": 1, "symbol": "ETH/USD"},
-    # Tier 1 - High liquidity altcoins (proven winners):
-    "SOL": {"name": "Solana",               "qty": 1, "symbol": "SOL/USD"},
-    "ADA": {"name": "Cardano",              "qty": 1, "symbol": "ADA/USD"},
-    "DOGE": {"name": "Dogecoin",            "qty": 1, "symbol": "DOGE/USD"},
-    "XRP": {"name": "Ripple",               "qty": 1, "symbol": "XRP/USD"},
-    "LINK": {"name": "Chainlink",           "qty": 1, "symbol": "LINK/USD"},
-    "AVAX": {"name": "Avalanche",           "qty": 1, "symbol": "AVAX/USD"},
-    "NEAR": {"name": "NEAR Protocol",       "qty": 1, "symbol": "NEAR/USD"},
-    "MATIC": {"name": "Polygon",            "qty": 1, "symbol": "MATIC/USD"},
-    # Tier 2 - Hot altcoins (emerging volume leaders):
-    "ARB": {"name": "Arbitrum",             "qty": 1, "symbol": "ARB/USD"},
-    "OP": {"name": "Optimism",              "qty": 1, "symbol": "OP/USD"},
-    "APT": {"name": "Aptos",                "qty": 1, "symbol": "APT/USD"},
-    "SEI": {"name": "Sei",                  "qty": 1, "symbol": "SEI/USD"},
-    "SUI": {"name": "Sui",                  "qty": 1, "symbol": "SUI/USD"},
-    "BLUR": {"name": "Blur",                "qty": 1, "symbol": "BLUR/USD"},
-    "LDO": {"name": "Lido DAO",             "qty": 1, "symbol": "LDO/USD"},
-    "MKR": {"name": "Maker",                "qty": 1, "symbol": "MKR/USD"},
-    "AAVE": {"name": "Aave",                "qty": 1, "symbol": "AAVE/USD"},
-    "UNI": {"name": "Uniswap",              "qty": 1, "symbol": "UNI/USD"},
-    # Tier 3 - Volume surge candidates:
-    "PEPE": {"name": "Pepe",                "qty": 1, "symbol": "PEPE/USD"},
-    "SHIB": {"name": "Shiba Inu",           "qty": 1, "symbol": "SHIB/USD"},
-    "FLOKI": {"name": "Floki",              "qty": 1, "symbol": "FLOKI/USD"},
-    "STX": {"name": "Stacks",               "qty": 1, "symbol": "STX/USD"},
-    "FIL": {"name": "Filecoin",             "qty": 1, "symbol": "FIL/USD"},
-    "ATOM": {"name": "Cosmos",              "qty": 1, "symbol": "ATOM/USD"},
-    "ALGO": {"name": "Algorand",            "qty": 1, "symbol": "ALGO/USD"},
-    "SAND": {"name": "Sandbox",             "qty": 1, "symbol": "SAND/USD"},
-    "MANA": {"name": "Decentraland",        "qty": 1, "symbol": "MANA/USD"},
-    "ENS": {"name": "ENS",                  "qty": 1, "symbol": "ENS/USD"},
-    "RNDR": {"name": "Render",              "qty": 1, "symbol": "RNDR/USD"},
-    "IMX": {"name": "Immutable",            "qty": 1, "symbol": "IMX/USD"},
-    "GALA": {"name": "Gala",                "qty": 1, "symbol": "GALA/USD"},
-    "BEAM": {"name": "Beam",                "qty": 1, "symbol": "BEAM/USD"},
-    # Tier 4 - Emerging micro-cap movers:
-    "WIF": {"name": "dogwifhat",            "qty": 1, "symbol": "WIF/USD"},
-    "POPCAT": {"name": "Popcat",            "qty": 1, "symbol": "POPCAT/USD"},
-    "MOO": {"name": "Moo Deng",             "qty": 1, "symbol": "MOO/USD"},
-    "BONK": {"name": "Bonk",                "qty": 1, "symbol": "BONK/USD"},
-    "RENDER": {"name": "Render",            "qty": 1, "symbol": "RENDER/USD"},
-    "JTO": {"name": "Jito",                 "qty": 1, "symbol": "JTO/USD"},
-    "ORCA": {"name": "Orca",                "qty": 1, "symbol": "ORCA/USD"},
-    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
-    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
-    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
-    # Add more as they become available on Alpaca
-    "WLD": {"name": "Worldcoin",            "qty": 1, "symbol": "WLD/USD"},
-    "INJ": {"name": "Injective",            "qty": 1, "symbol": "INJ/USD"},
-    "SUSHI": {"name": "Sushi",              "qty": 1, "symbol": "SUSHI/USD"},
-    "CURVE": {"name": "Curve",              "qty": 1, "symbol": "CURVE/USD"},
-    "CRV": {"name": "Curve DAO",            "qty": 1, "symbol": "CRV/USD"},
+    # TIER 1: CRYPTO - HIGHEST LIQUIDITY + VOLATILITY (24/7 trading)
+    "BTC": {"name": "Bitcoin",              "qty": 1, "symbol": "BTC/USD", "profile": "crypto_mega"},
+    "ETH": {"name": "Ethereum",             "qty": 1, "symbol": "ETH/USD", "profile": "crypto_mega"},
+    "SOL": {"name": "Solana",               "qty": 1, "symbol": "SOL/USD", "profile": "crypto_alt"},  # High volatility
+
+    # TIER 2: STOCKS - STRONG MOMENTUM + NEWS-DRIVEN MOVES
+    "NVDA": {"name": "NVIDIA",              "qty": 1, "symbol": "NVDA",    "profile": "stock_momentum"},  # AI momentum leader
+    "TSLA": {"name": "Tesla",               "qty": 1, "symbol": "TSLA",    "profile": "stock_momentum"},  # Big intraday swings
+
+    # TIER 3: BROAD MARKET INDICES - CONSISTENT LIQUIDITY + TRENDS
+    "QQQ":  {"name": "Nasdaq 100",          "qty": 1, "symbol": "QQQ",     "profile": "index_momentum"},  # Nasdaq momentum
+    "TQQQ": {"name": "3x Nasdaq 100",       "qty": 1, "symbol": "TQQQ",    "profile": "index_momentum"},  # Amplified Nasdaq
+    "SPY":  {"name": "S&P 500",             "qty": 1, "symbol": "SPY",     "profile": "index_stable"},    # Consistent liquidity
+
+    # TIER 4: FUTURES - HIGHEST PROFIT POTENTIAL + LEVERAGE (if using APEX)
+    "NQ":   {"name": "Nasdaq-100 Futures",  "qty": 1, "symbol": "NQ",      "profile": "futures_high"},    # Highest profit potential
+    "MNQ":  {"name": "Micro Nasdaq",        "qty": 1, "symbol": "MNQ",     "profile": "futures_micro"},   # Same behavior, smaller size
+    "ES":   {"name": "E-mini S&P 500",      "qty": 1, "symbol": "ES",      "profile": "futures_stable"},  # More stable trends
+    "MES":  {"name": "Micro E-mini S&P",    "qty": 1, "symbol": "MES",     "profile": "futures_micro"},   # Lower risk
+    "YM":   {"name": "Dow Jones Futures",   "qty": 1, "symbol": "YM",      "profile": "futures_clean"},   # Sometimes cleaner trends
 }
 
-# Max concurrent open positions. Explicit request: don't cap this below
-# what the account can actually afford - open as many of the tracked
-# symbols as there's real cash and a signal for, not an arbitrary count.
-# Defaults to every symbol currently tracked (len(FUTURES)) rather than a
-# fixed number below that, so it never artificially blocks a signal on a
-# symbol that isn't already held - real cash (see size_position/
-# MIN_POSITION_NOTIONAL) is the actual limiting factor. The rotation
-# logic in run_prop_cycle (swap out a losing position for a fresh signal)
-# still exists as a safety net, but can't trigger at this default since
-# there's no 8th symbol to need a slot from.
-# Max concurrent positions: SCALED WITH POSITION MULTIPLIER
-# Base: 2 positions at 1.0x scale
-# At 1.5x scale: reduce to 1 position (1.5x loss on 1 trade < 1.0x loss on 2 trades)
-# At 2.0x scale: stay at 1 position (conservative with max scaling)
-# This prevents multiplied losses across multiple scaled positions
-BASE_MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", "2"))
+# PROFESSIONAL POSITION MANAGEMENT
+# Max positions based on account size and risk profile
+# Conservative: 1-2 positions (highest win rate per trade)
+# Moderate: 2-3 positions (balance between opportunities and risk)
+# Aggressive: 3-4 positions (more opportunities but requires tight risk management)
+BASE_MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", "2"))  # Start conservative
+
+# Time-based filters: only trade aggressively during high-probability windows
+# First 30-90 minutes after market open (strong momentum)
+# Crypto: US-Europe overlap (high volume, strong moves)
+MARKET_OPEN_AGGRESSIVE_MINUTES = 90
+CRYPTO_BEST_HOURS_UTC = (12, 13, 14, 15, 16, 17, 18, 19, 20)  # 7am-2pm ET is crypto best time
 
 def get_dynamic_max_positions(scale: float) -> int:
     """Reduce max positions as scale increases to limit compounded losses"""
@@ -181,51 +194,41 @@ def get_dynamic_max_positions(scale: float) -> int:
         return 1  # Single position when scaled 1.5x or higher
     return BASE_MAX_POSITIONS  # 2 positions at baseline 1.0x scale
 
-# Profit target, in REAL DOLLARS of profit on the position (not a raw
-# price move on the underlying) - scaled by real account equity. Increased targets
-# to let winners run instead of closing too early. With $1000+ positions, these
-# targets are achievable on 1%+ daily moves that we see in the market.
-PROFIT_TARGET_DOLLARS_MILESTONES = [
-    (0,     5.00),      # Micro: $5.00 (0.50% on $1000)
-    (500,   7.50),      # Small: $7.50
-    (1000,  10.00),     # Medium: $10.00 (1% on $1000)
-    (5000,  15.00),     # Large: $15.00 (0.30% on $5000)
-    (10000, 20.00),     # Huge: $20.00 (0.20% on $10000)
-]
+# PROFESSIONAL EXIT STRATEGY
+# Partial profit taking: lock in wins at key levels, trail remainder
+# Level 1: Exit 1/3 at 2% profit
+# Level 2: Exit 1/3 at 3% profit
+# Level 3: Exit final 1/3 with trailing stop
 
-# Crypto-specific LOWER profit targets for fast compounding & high frequency
-# On $992: aim for $2-3 per trade (hit more targets, reinvest faster)
-CRYPTO_PROFIT_TARGET_MILESTONES = [
-    (0,     2.50),      # Micro: $2.50 (0.25% on $1000) — fast wins
-    (500,   3.00),      # Small: $3.00
-    (1000,  3.50),      # Medium: $3.50
-    (5000,  5.00),      # Large: $5.00
-    (10000, 7.50),      # Huge: $7.50
-]
+def calculate_exit_targets(entry_price: float, atr: float = None) -> dict:
+    """Calculate professional exit targets based on risk/reward"""
+    if atr and atr > 0:
+        # ATR-based targets: 3x ATR for target, 1.5x ATR for stop
+        profit_target = entry_price + (atr * ATR_PROFIT_MULTIPLE)
+        stop_loss = entry_price - (atr * ATR_STOP_MULTIPLE)
+    else:
+        # Fallback: percentage-based targets (2% for first partial, 3% for second)
+        profit_target = entry_price * (1 + PARTIAL_PROFIT_2_PCT)
+        stop_loss = entry_price * (1 - STOP_LOSS_BASE_PCT)
 
-# Crypto-specific AGGRESSIVE tiered exits — lock wins faster, reinvest sooner
-# Tier 1: Exit 50% at 50% of target (very early win lock)
-# Tier 2: Exit 25% at 75% of target (partial second exit)
-# Tier 3: Exit final 25% at 100% of target (close all, start fresh)
-CRYPTO_TIER_LEVELS = [0.50, 0.75, 1.00]  # multipliers of crypto profit target
+    partial_1 = entry_price * (1 + PARTIAL_PROFIT_1_PCT)
+    partial_2 = entry_price * (1 + PARTIAL_PROFIT_2_PCT)
 
-# Professional tiered exit levels for stocks - lock in profits at milestones, let winners run
-# Tier 1: Exit 1/3 at 50% of target (lock in early win)
-# Tier 2: Exit 1/3 at 100% of target (take second third)
-# Tier 3: Exit final 1/3 at 150% of target (let winners run to max)
-TIER_LEVELS = [0.50, 1.00, 1.50]  # multipliers of profit target
+    return {
+        "partial_1": partial_1,  # Exit 1/3 here
+        "partial_2": partial_2,  # Exit 2/3 here
+        "target": profit_target,  # Hold final 1/3 to here (or trail)
+        "stop": stop_loss,
+        "risk": abs(entry_price - stop_loss),
+        "reward": abs(profit_target - entry_price)
+    }
 
-
-def get_profit_target_dollars(equity, is_crypto=False):
-    """Get profit target based on account equity. Crypto uses lower targets for fast compounding."""
-    milestones = CRYPTO_PROFIT_TARGET_MILESTONES if is_crypto else PROFIT_TARGET_DOLLARS_MILESTONES
-    if equity is None:
-        return milestones[0][1]
-    target = milestones[0][1]
-    for threshold, t in milestones:
-        if equity >= threshold:
-            target = t
-    return target
+def validate_risk_reward(targets: dict) -> bool:
+    """Check if risk/reward ratio meets minimum (2:1)"""
+    if targets["risk"] == 0:
+        return False
+    ratio = targets["reward"] / targets["risk"]
+    return ratio >= MIN_RISK_REWARD_RATIO
 
 # Track profitable days for APEX 7-day rule
 profitable_days = []
