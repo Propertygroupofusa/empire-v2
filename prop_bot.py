@@ -145,18 +145,21 @@ FUTURES = {
     "POPCAT": {"name": "Popcat",            "qty": 1, "symbol": "POPCAT/USD"},
     "MOO": {"name": "Moo Deng",             "qty": 1, "symbol": "MOO/USD"},
     "BONK": {"name": "Bonk",                "qty": 1, "symbol": "BONK/USD"},
-    "RENDER": {"name": "Render",            "qty": 1, "symbol": "RENDER/USD"},
     "JTO": {"name": "Jito",                 "qty": 1, "symbol": "JTO/USD"},
     "ORCA": {"name": "Orca",                "qty": 1, "symbol": "ORCA/USD"},
-    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
-    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
-    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
-    # Add more as they become available on Alpaca
     "WLD": {"name": "Worldcoin",            "qty": 1, "symbol": "WLD/USD"},
     "INJ": {"name": "Injective",            "qty": 1, "symbol": "INJ/USD"},
     "SUSHI": {"name": "Sushi",              "qty": 1, "symbol": "SUSHI/USD"},
     "CURVE": {"name": "Curve",              "qty": 1, "symbol": "CURVE/USD"},
     "CRV": {"name": "Curve DAO",            "qty": 1, "symbol": "CRV/USD"},
+    # NEW Alpaca Crypto Expansion (11 new assets, May 2026)
+    "HYPE": {"name": "Hyperliquid",         "qty": 1, "symbol": "HYPE/USD"},
+    "ARB": {"name": "Arbitrum",             "qty": 1, "symbol": "ARB/USD"},
+    "ONDO": {"name": "Ondo",                "qty": 1, "symbol": "ONDO/USD"},
+    "STX": {"name": "Stacks",               "qty": 1, "symbol": "STX/USD"},
+    "FIL": {"name": "Filecoin",             "qty": 1, "symbol": "FIL/USD"},
+    "ATOM": {"name": "Cosmos",              "qty": 1, "symbol": "ATOM/USD"},
+    "ALGO": {"name": "Algorand",            "qty": 1, "symbol": "ALGO/USD"},
 }
 
 # Max concurrent open positions. Explicit request: don't cap this below
@@ -298,7 +301,7 @@ def get_time_aware_mode(now_et: datetime) -> str:
     - "noon_window": 11:00am-1:00pm ET (user's proven high-probability window)
     - "afternoon": 1:00pm-3:30pm ET (sustained momentum, low volatility)
     - "after_hours": 4:00pm-8:00pm ET (crypto focus, low volume)
-    - "overnight": 8:00pm-9:30am ET (crypto only)
+    - "overnight": 8:00pm-9:30am ET (crypto only, NEW ENTRIES BLOCKED)
     """
     hour = now_et.hour
     minute = now_et.minute
@@ -315,9 +318,27 @@ def get_time_aware_mode(now_et: datetime) -> str:
     # After-hours: 4:00pm-8:00pm ET
     elif 16 <= hour < 20:
         return "after_hours"
-    # Overnight: 8:00pm-9:30am ET
+    # Overnight: 8:00pm-9:30am ET (crypto only, NEW ENTRIES BLOCKED)
     else:
         return "overnight"
+
+
+def is_overnight_lockdown(now_et: datetime) -> bool:
+    """
+    Return True if trading is in overnight lockdown (9 PM - 10 AM ET).
+    During lockdown: NO new entries, only manage existing positions and monitor.
+
+    Rationale: Overnight hours (8 PM - 10 AM) have:
+    - Lower liquidity (crypto spreads widen)
+    - Higher volatility (fewer market participants)
+    - News gaps (US market closed, Asia/EU mixed)
+    - Bot was losing on overnight entries that got whipsawed
+
+    Focus trading during high-liquidity hours: 10 AM - 8 PM ET
+    """
+    hour = now_et.hour
+    # 21:00 (9 PM) through 09:59 (9:59 AM) = lockdown
+    return hour >= 21 or hour < 10
 
 
 def get_mode_entry_threshold(mode: str) -> float:
@@ -1111,7 +1132,14 @@ async def run_prop_cycle():
         score_threshold = get_mode_entry_threshold(mode)
         mode_sizing_multiplier = get_mode_position_sizing(mode, 1.0)
 
-        log.info(f"[APEX_589296] 📈 Trading mode: {mode} | Score threshold: {score_threshold:.0f}/100 | Sizing: {mode_sizing_multiplier:.2f}x")
+        # **OVERNIGHT LOCKDOWN: NO NEW ENTRIES 9 PM - 10 AM ET**
+        # Prevents whipsaws and stops during low-liquidity overnight hours
+        overnight_lockdown = is_overnight_lockdown(now)
+        if overnight_lockdown:
+            log.info(f"[APEX_589296] 🌙 OVERNIGHT LOCKDOWN (9 PM - 10 AM ET) — No new entries, managing existing positions only")
+
+        log.info(f"[APEX_589296] 📈 Trading mode: {mode} | Score threshold: {score_threshold:.0f}/100 | Sizing: {mode_sizing_multiplier:.2f}x" +
+                (f" | 🔒 LOCKDOWN" if overnight_lockdown else ""))
 
         candidates = []
         for contract, config in FUTURES.items():
@@ -1166,6 +1194,11 @@ async def run_prop_cycle():
         candidates.sort(key=lambda c: -c[0])  # Sort by score (highest first)
 
         for score, contract, config, side, price, rsi, trend, _ in candidates:
+            # **OVERNIGHT LOCKDOWN** — Block new entries 9 PM - 10 AM ET
+            if overnight_lockdown:
+                log.info(f"[APEX_589296] 🌙 {side.upper()} {contract} blocked — overnight lockdown (9 PM - 10 AM ET), no new entries")
+                continue
+
             # Professional risk management: stop new entries if daily 2% loss limit hit
             if is_hitting_daily_loss_limit:
                 log.info(f"[APEX_589296] 🛑 {side.upper()} {contract} blocked — daily 2% loss limit reached, no new entries")
