@@ -160,6 +160,15 @@ FUTURES = {
     "FIL": {"name": "Filecoin",             "qty": 1, "symbol": "FIL/USD"},
     "ATOM": {"name": "Cosmos",              "qty": 1, "symbol": "ATOM/USD"},
     "ALGO": {"name": "Algorand",            "qty": 1, "symbol": "ALGO/USD"},
+    # MAJOR CURRENCY PAIRS (Forex Futures)
+    # Highly liquid, tight spreads, 24/5 trading
+    "EUR": {"name": "Euro FX",              "qty": 1, "symbol": "EUR/USD"},
+    "GBP": {"name": "British Pound",        "qty": 1, "symbol": "GBP/USD"},
+    "JPY": {"name": "Japanese Yen",         "qty": 1, "symbol": "JPY/USD"},
+    "CHF": {"name": "Swiss Franc",          "qty": 1, "symbol": "CHF/USD"},
+    "AUD": {"name": "Australian Dollar",    "qty": 1, "symbol": "AUD/USD"},
+    "NZD": {"name": "New Zealand Dollar",   "qty": 1, "symbol": "NZD/USD"},
+    "CAD": {"name": "Canadian Dollar",      "qty": 1, "symbol": "CAD/USD"},
 }
 
 # Max concurrent open positions. Explicit request: don't cap this below
@@ -219,10 +228,42 @@ CRYPTO_TIER_LEVELS = [0.50, 0.75, 1.00]  # multipliers of crypto profit target
 # Tier 3: Exit final 1/3 at 150% of target (let winners run to max)
 TIER_LEVELS = [0.50, 1.00, 1.50]  # multipliers of profit target
 
+# Forex-specific CONSERVATIVE profit targets (low volatility, tight stops)
+# Forex moves are smaller (typically 0.5-2% daily), so targets are lower than crypto/stocks
+FOREX_PROFIT_TARGET_MILESTONES = [
+    (0,     1.50),      # Micro: $1.50 (0.15% on $1000) — very tight, fast exits
+    (500,   2.00),      # Small: $2.00
+    (1000,  2.50),      # Medium: $2.50
+    (5000,  3.50),      # Large: $3.50
+    (10000, 5.00),      # Huge: $5.00
+]
 
-def get_profit_target_dollars(equity, is_crypto=False):
-    """Get profit target based on account equity. Crypto uses lower targets for fast compounding."""
-    milestones = CRYPTO_PROFIT_TARGET_MILESTONES if is_crypto else PROFIT_TARGET_DOLLARS_MILESTONES
+# Forex tiered exits - faster, smaller targets (low volatility requires quick exits)
+FOREX_TIER_LEVELS = [0.50, 1.00]  # Exit at 50% and 100% of target (no extended runner)
+
+
+def is_forex_pair(symbol: str) -> bool:
+    """Detect if symbol is forex (EUR, GBP, JPY, CHF, AUD, NZD, CAD paired with USD)"""
+    forex_bases = {"EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD"}
+    base = symbol.split("/")[0] if "/" in symbol else symbol
+    return base in forex_bases
+
+
+def get_profit_target_dollars(equity, symbol: str = "", is_crypto=False):
+    """Get profit target based on account equity and asset class.
+
+    Priorities:
+    1. Forex pairs: conservative targets (0.15%-0.5% moves)
+    2. Crypto: aggressive targets (fast compounding)
+    3. Stocks: standard targets
+    """
+    if is_forex_pair(symbol):
+        milestones = FOREX_PROFIT_TARGET_MILESTONES
+    elif is_crypto:
+        milestones = CRYPTO_PROFIT_TARGET_MILESTONES
+    else:
+        milestones = PROFIT_TARGET_DOLLARS_MILESTONES
+
     if equity is None:
         return milestones[0][1]
     target = milestones[0][1]
@@ -1093,9 +1134,14 @@ async def run_prop_cycle():
                 await close_position(session, contract, config, position, price, rsi, trend, f"QUICK EXIT - DOWN {abs(loss_pct):.2f}%")
                 continue  # Skip rest of position checks, move to next contract
 
-            # Use crypto-specific profit targets for crypto positions
-            position_profit_target = get_profit_target_dollars(equity, is_crypto=is_crypto)
-            tier_levels = CRYPTO_TIER_LEVELS if is_crypto else TIER_LEVELS
+            # Use asset-class-specific profit targets (forex conservative, crypto aggressive, stocks standard)
+            position_profit_target = get_profit_target_dollars(equity, symbol=config["symbol"], is_crypto=is_crypto)
+            if is_forex_pair(config["symbol"]):
+                tier_levels = FOREX_TIER_LEVELS
+            elif is_crypto:
+                tier_levels = CRYPTO_TIER_LEVELS
+            else:
+                tier_levels = TIER_LEVELS
 
             # Tiered profit-taking: lock in gains at milestones
             # CRYPTO: aggressive (50% exit, 75%, 100%) — reinvest faster
@@ -1104,8 +1150,8 @@ async def run_prop_cycle():
 
             # Check which profit tiers have been hit
             tier1_hit = unrealized_pnl >= (position_profit_target * tier_levels[0])
-            tier2_hit = unrealized_pnl >= (position_profit_target * tier_levels[1])
-            tier3_hit = unrealized_pnl >= (position_profit_target * tier_levels[2])
+            tier2_hit = unrealized_pnl >= (position_profit_target * tier_levels[1]) if len(tier_levels) > 1 else False
+            tier3_hit = unrealized_pnl >= (position_profit_target * tier_levels[2]) if len(tier_levels) > 2 else False
 
             # Exit conditions: hard stop, RSI reversal on profit, or hit a tiered target
             if stop_hit:
