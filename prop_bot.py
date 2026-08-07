@@ -660,16 +660,17 @@ async def run_prop_cycle():
 
     last_market_open = is_market_hours
 
-    # **DUAL MILESTONE SYSTEM** — $1,000 lock, then $2,000 within 24hr
+    # CONTINUOUS AUTO-SCALING TO $1,000,000 — No milestones, just compound
+    # Scale formula: 1.0x baseline + 0.01x per $1000 earned, capped at 5.0x
+    # $1K equity → 1.0x, $100K equity → 2.0x, $400K+ equity → 5.0x (capped)
     connector = aiohttp.TCPConnector(use_dns_cache=True)
     async with aiohttp.ClientSession(connector=connector, trust_env=False) as session:
         equity = await get_account_equity(session)
         if equity is not None:
-            # MILESTONE 1: $1,000 — LOCK PROFITS
-            if equity >= 1000.0 and not os.getenv("MILESTONE_1K_LOCKED", "false").lower() == "true":
-                log.warning(f"🎯 **$1,000 MILESTONE REACHED** — Equity: ${equity:.2f}")
-                log.warning(f"Closing ALL positions to lock profits...")
-                # Close all open positions immediately
+            # Check if $1M goal achieved — STOP TRADING
+            if equity >= 1000000.0:
+                log.warning(f"🏆 **$1,000,000 MILESTONE REACHED** — Equity: ${equity:,.2f}")
+                # Close all positions and stop
                 for contract in list(open_prop_positions.keys()):
                     pos = open_prop_positions[contract]
                     try:
@@ -681,95 +682,32 @@ async def run_prop_cycle():
                             price = pos["entry"]
                     except:
                         price = pos["entry"]
-
-                    await close_position(session, contract, FUTURES.get(contract, {}), pos, price, 0, "milestone", "PROFIT LOCK - $1K REACHED")
-
-                # SCALE UP: Increase position sizes for next phase
-                os.environ["POSITION_SCALE_MULTIPLIER"] = "1.5"  # Scale to 1.5x for $2K phase
+                    await close_position(session, contract, FUTURES.get(contract, {}), pos, price, 0, "milestone", "PROFIT LOCK - $1M REACHED")
 
                 send_trade_alert(
-                    "🎯 EMPIRE BOT — $1,000 MILESTONE REACHED",
-                    f"**PROFIT LOCK ACTIVATED - MILESTONE #1 COMPLETE**\n\n"
-                    f"Account Equity: ${equity:.2f}\n"
-                    f"All positions closed to secure milestone.\n\n"
+                    "🏆 EMPIRE BOT — $1,000,000 ACHIEVED!",
+                    f"**ULTIMATE GOAL UNLOCKED**\n\n"
+                    f"Account Equity: ${equity:,.2f}\n"
+                    f"🎉 ONE MILLION DOLLARS!\n\n"
                     f"Daily P&L: ${daily_pnl:.2f}\n"
-                    f"Status: SCALING UP → 1.5x position sizes for $2,000 TARGET (24hr)\n\n"
+                    f"Status: TRADING STOPPED. All positions closed.\n\n"
                     f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
                 )
-                # Mark milestone as locked, resume trading for $2K target
-                os.environ["MILESTONE_1K_LOCKED"] = "true"
-                time.sleep(2)  # Brief pause before resuming
-                # Resume trading cycle — DON'T RETURN, continue to next milestone
+                return  # STOP — goal achieved
 
-            # CONTINUOUS MILESTONE SCALING — $2K → $5K → $10K → ... → $1M
-            # Each milestone: lock profits, scale positions, resume trading
-            milestones = [
-                (2000.0, "MILESTONE_2K_LOCKED", "2.0", "$2,000"),
-                (5000.0, "MILESTONE_5K_LOCKED", "2.5", "$5,000"),
-                (10000.0, "MILESTONE_10K_LOCKED", "3.0", "$10,000"),
-                (25000.0, "MILESTONE_25K_LOCKED", "3.5", "$25,000"),
-                (50000.0, "MILESTONE_50K_LOCKED", "4.0", "$50,000"),
-                (100000.0, "MILESTONE_100K_LOCKED", "4.5", "$100,000"),
-                (250000.0, "MILESTONE_250K_LOCKED", "5.0", "$250,000"),
-                (500000.0, "MILESTONE_500K_LOCKED", "5.0", "$500,000"),
-                (1000000.0, "MILESTONE_1M_LOCKED", "5.0", "$1,000,000"),
-            ]
+            # Auto-scale formula: increase scale as equity grows
+            # 1.0x at $1K, 1.5x at $50K, 2.0x at $100K, 5.0x at $400K+
+            def get_auto_scale(eq: float) -> str:
+                scale = 1.0 + (eq / 100000.0)  # +0.01x per $1K earned
+                scale = min(scale, 5.0)  # Cap at 5.0x max
+                return f"{scale:.2f}"
 
-            for threshold, flag_name, scale_multiplier, milestone_name in milestones:
-                if equity >= threshold and not os.getenv(flag_name, "false").lower() == "true":
-                    log.warning(f"🎯 **{milestone_name} MILESTONE REACHED** — Equity: ${equity:.2f}")
-                    log.warning(f"Closing ALL positions to lock profits...")
+            current_scale = float(get_auto_scale(equity))
+            os.environ["POSITION_SCALE_MULTIPLIER"] = str(current_scale)
 
-                    # Close all open positions
-                    for contract in list(open_prop_positions.keys()):
-                        pos = open_prop_positions[contract]
-                        try:
-                            price_resp = await session.get(f"{BASE_URL}/v1/last?symbols={pos.get('symbol', contract)}", headers=HEADERS)
-                            if price_resp.status == 200:
-                                data = await price_resp.json()
-                                price = data.get("last", {}).get("price", pos["entry"])
-                            else:
-                                price = pos["entry"]
-                        except:
-                            price = pos["entry"]
-
-                        await close_position(session, contract, FUTURES.get(contract, {}), pos, price, 0, "milestone", f"PROFIT LOCK - {milestone_name} REACHED")
-
-                    # Scale up positions for next phase
-                    os.environ["POSITION_SCALE_MULTIPLIER"] = scale_multiplier
-
-                    if threshold >= 1000000.0:
-                        # $1M ACHIEVED — STOP TRADING
-                        send_trade_alert(
-                            "🏆 EMPIRE BOT — $1,000,000 MILESTONE REACHED!",
-                            f"**ULTIMATE ACHIEVEMENT UNLOCKED**\n\n"
-                            f"Account Equity: ${equity:,.2f}\n"
-                            f"🎉 ONE MILLION DOLLARS ACHIEVED!\n\n"
-                            f"Daily P&L: ${daily_pnl:.2f}\n"
-                            f"Status: TRADING STOPPED. Milestone locked. All positions closed.\n\n"
-                            f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
-                        )
-                        os.environ[flag_name] = "true"
-                        return  # STOP — goal achieved
-
-                    else:
-                        # Continue scaling
-                        next_milestone = [m for m in milestones if m[0] > threshold]
-                        next_target = f"(targeting {next_milestone[0][3]})" if next_milestone else ""
-
-                        send_trade_alert(
-                            f"📈 EMPIRE BOT — {milestone_name} MILESTONE REACHED",
-                            f"**PROFIT LOCK ACTIVATED**\n\n"
-                            f"Account Equity: ${equity:,.2f}\n"
-                            f"Progress: {milestone_name} ✅\n\n"
-                            f"Daily P&L: ${daily_pnl:.2f}\n"
-                            f"Status: SCALING UP → {float(scale_multiplier):.1f}x position sizes {next_target}\n\n"
-                            f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
-                        )
-
-                        os.environ[flag_name] = "true"
-                        time.sleep(2)  # Brief pause before resuming
-                        # Resume trading cycle — continue to scan and trade
+            # Log current auto-scale status
+            if equity >= 1000.0:
+                log.info(f"[APEX_589296] AUTO-SCALE: Equity ${equity:,.0f} → Scale {current_scale:.2f}x | Progress to $1M: {(equity/1000000)*100:.1f}%")
 
     log.info(f"[APEX_589296] Scanning futures markets ({', '.join(FUTURES)})... | Daily P&L: ${daily_pnl:.2f}")
 
