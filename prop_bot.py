@@ -382,6 +382,29 @@ def is_overnight_lockdown(now_et: datetime) -> bool:
     return hour >= 21 or hour < 10
 
 
+def is_close_window(now_et: datetime) -> bool:
+    """
+    Return True if in close-window (3:00 PM - 3:59 PM ET).
+    Close-window: Institutional profit-taking creates predictable dip.
+
+    Strategy:
+    - Short on score > 65 (reversal signal + volume)
+    - Exit at RSI > 60 or hard stop at 3:59 PM
+    - Use 2x leverage (intraday, $0 interest)
+    - Target $2-5 per trade (tight, fast exits)
+
+    Why this works:
+    - Happens EVERY trading day at 3-4 PM ET
+    - Institutional funds lock profits before close
+    - Wide spreads create quick momentum moves
+    - 1-hour window limits exposure
+    """
+    hour = now_et.hour
+    minute = now_et.minute
+    # 15:00 (3 PM) through 15:59 (3:59 PM) = close window
+    return hour == 15 and minute < 60
+
+
 def get_mode_entry_threshold(mode: str) -> float:
     """
     Return score threshold for entry based on time-aware mode.
@@ -1126,6 +1149,13 @@ async def run_prop_cycle():
                 stop_hit = price >= entry * (1 + stop_loss)
                 quick_loss_hit = price >= entry * (1 + QUICK_EXIT_LOSS_PCT)  # AGGRESSIVE: exit losers at 0.5% down
 
+            # **CLOSE-WINDOW HARD EXIT** — Force close all shorts at 3:59 PM ET
+            # No holding past close, eliminate overnight gap risk
+            if side == "short" and now.hour == 15 and now.minute >= 58:
+                log.warning(f"[APEX_589296] 🔴 CLOSE-WINDOW HARD EXIT: {contract} closing short at 3:58 PM (no holding past close)")
+                await close_position(session, contract, config, position, price, rsi, trend, "CLOSE-WINDOW HARD EXIT (3:59 PM limit)")
+                continue
+
             # **AGGRESSIVE LOSS EXIT** — Close ANY losing position at 0.5% down
             # Don't wait for full stop-loss. Quick exit = preserve capital for winners.
             if unrealized_pnl < 0 and quick_loss_hit:
@@ -1238,6 +1268,46 @@ async def run_prop_cycle():
             }
 
         candidates.sort(key=lambda c: -c[0])  # Sort by score (highest first)
+
+        # **CLOSE-WINDOW SHORTING** — Institutional profit-taking dip (3:00-3:59 PM ET)
+        # Separate logic from regular entry candidates
+        close_window = is_close_window(now)
+        if close_window:
+            log.info(f"[APEX_589296] 🔴 CLOSE-WINDOW MODE ACTIVE (3:00-3:59 PM ET) — Shorting institutional profit-taking dip")
+            close_window_candidates = []
+            for contract, config in FUTURES.items():
+                if contract in open_prop_positions:
+                    continue
+                data = scans.get(contract)
+                if not data:
+                    continue
+                price, rsi, trend = data["price"], data["rsi"], data["trend"]
+                momentum = data.get("momentum", 0)
+                volume_exp = data.get("volume_expansion", 1.0)
+                volatility = data.get("volatility", 1.0)
+
+                # Score for close-window: reversal signal (RSI > 60 = overbought) + volume
+                score = calculate_symbol_score(price, rsi, momentum, volume_exp, volatility, trend)
+
+                # Close-window entry: score > 65 (reversal) + volume expansion (profit-taking signal)
+                if score >= 65.0 and volume_exp >= 1.5 and rsi >= 60:
+                    close_window_candidates.append((score, contract, config, "short", price, rsi, trend))
+                    log.info(f"[APEX_589296] 🎯 {contract} qualified for close-window short (score: {score:.0f}, RSI: {rsi:.0f}, vol: {volume_exp:.1f}x)")
+
+            # Process close-window shorts (highest score first)
+            close_window_candidates.sort(key=lambda c: -c[0])
+            for score, contract, config, side, price, rsi, trend in close_window_candidates:
+                if contract in open_prop_positions:
+                    continue
+
+                # Use 2x intraday leverage for close-window (safe, no interest)
+                close_window_leverage = 2.0
+                await try_open(session, config, "short", price, rsi, trend, slots_remaining, mode_sizing_multiplier=close_window_leverage)
+                slots_remaining -= 1
+                if slots_remaining <= 0:
+                    break
+
+            log.info(f"[APEX_589296] ✅ Close-window short entries processed")
 
         for score, contract, config, side, price, rsi, trend, _ in candidates:
             # **OVERNIGHT LOCKDOWN** — Block new entries 9 PM - 10 AM ET
