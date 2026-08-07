@@ -128,6 +128,55 @@ def check_breakout(current_price: float, recent_high: float, resistance_level: f
         return current_price > resistance_level * 1.001  # 0.1% above resistance
     return current_price > recent_high * 1.001  # 0.1% above recent high
 
+def check_professional_entry(data: dict, is_crypto: bool = False) -> dict:
+    """
+    Multi-condition entry checker: validates all professional entry criteria
+    Returns: {"should_enter": bool, "conditions": {...}, "reason": str}
+    """
+    if not data:
+        return {"should_enter": False, "reason": "No price data"}
+
+    result = {
+        "should_enter": False,
+        "conditions": {
+            "trend_up": False,
+            "rsi_momentum": False,
+            "above_recent_high": False,
+            "risk_reward_valid": False,
+        },
+        "reason": ""
+    }
+
+    price = data.get("price", 0)
+    rsi = data.get("rsi", 50)
+    trend = data.get("trend", "neutral")
+
+    # Check 1: Trend is up (bullish)
+    result["conditions"]["trend_up"] = trend == "bullish"
+
+    # Check 2: RSI in momentum range (55-70), not oversold/overbought extremes
+    result["conditions"]["rsi_momentum"] = RSI_MIN_FOR_ENTRY <= rsi <= RSI_MAX_FOR_ENTRY
+
+    # Check 3: Price above recent high (breakout signal)
+    recent_high = data.get("high_52week", price * 1.02)  # Fallback: 2% above current
+    result["conditions"]["above_recent_high"] = price > recent_high * 0.99  # Near or above recent high
+
+    # Check 4: Risk/reward ratio is acceptable (would be checked with ATR stops)
+    # Placeholder: assume valid if other conditions met
+    result["conditions"]["risk_reward_valid"] = True
+
+    # Entry decision: all conditions must be true
+    all_met = all(result["conditions"].values())
+    result["should_enter"] = all_met
+
+    if all_met:
+        result["reason"] = f"✅ Professional entry: Trend={trend}, RSI={rsi}, Price>${price:.2f}"
+    else:
+        missing = [k for k, v in result["conditions"].items() if not v]
+        result["reason"] = f"❌ Entry blocked: missing {', '.join(missing)}"
+
+    return result
+
 # Daily maximum loss in dollars — DYNAMIC CIRCUIT BREAKER
 # Base: $10 daily max loss at 1.0x scale. SCALES with position multiplier.
 # 1.0x scale → $10 loss limit
