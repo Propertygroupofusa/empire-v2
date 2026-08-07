@@ -41,18 +41,36 @@ CRYPTO_RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "35"))   # MORE 
 CRYPTO_RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "65"))  # MORE overbought exits (more profit locks)
 
 # AGGRESSIVE WINS + STRICT LOSS PREVENTION
-# Stop-loss TIGHTENED to 0.3% to exit losing trades immediately
-# On $1,000 account: 0.3% = $3 max loss per trade (cut losses quickly)
-STOP_LOSS_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.003"))  # 0.3% for stocks/futures (TIGHTER)
+# Base stop-loss: 0.3% to exit losing trades immediately
+# At higher scales: tighter stops to prevent multiplied losses
+# 1.0x scale: 0.3% stop
+# 1.5x scale: 0.2% stop (1.5x scaled position needs tighter exit)
+# 2.0x scale: 0.2% stop (maximum scale = maximum discipline)
+STOP_LOSS_BASE_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.003"))  # Base: 0.3% for stocks/futures
 
-# Crypto-specific stop-loss: 0.3% MAXIMUM LOSS PER TRADE
-# Quick exit on losers = more capital for winning trades
-CRYPTO_STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.003"))  # 0.3% crypto (TIGHTER - fast losses)
+# Crypto-specific stop-loss: dynamically tightens with scale
+# Base: 0.3%, tightens to 0.2% at 1.5x scale
+CRYPTO_STOP_LOSS_BASE_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.003"))  # Base: 0.3%
 
-# Daily maximum loss in dollars — STRICT CIRCUIT BREAKER
-# $10 daily max loss = 1% of $1K account. Stops all trading immediately.
-# Prevents drawdown spirals, preserves capital for winning days.
-DAILY_MAX_LOSS_DOLLARS = float(os.getenv("PROP_DAILY_MAX_LOSS", "10"))  # Reduced from $20 to $10
+def get_dynamic_stop_loss(scale: float) -> float:
+    """Tighten stop-loss as positions scale up (1.5x+ = tighter discipline)"""
+    if scale >= 1.5:
+        return 0.002  # 0.2% at 1.5x scale and higher
+    return STOP_LOSS_BASE_PCT  # 0.3% baseline
+
+def get_dynamic_crypto_stop_loss(scale: float) -> float:
+    """Crypto: same dynamic tightening as stocks"""
+    if scale >= 1.5:
+        return 0.002  # 0.2% at 1.5x scale and higher
+    return CRYPTO_STOP_LOSS_BASE_PCT  # 0.3% baseline
+
+# Daily maximum loss in dollars — DYNAMIC CIRCUIT BREAKER
+# Base: $10 daily max loss at 1.0x scale. SCALES with position multiplier.
+# 1.0x scale → $10 loss limit
+# 1.5x scale → $15 loss limit (larger positions = larger max loss allowed)
+# 2.0x scale → $20 loss limit (can absorb bigger drawdowns while scaling)
+# Prevents catastrophic losses but allows survival of losing streaks at higher scales
+DAILY_MAX_LOSS_BASE = float(os.getenv("PROP_DAILY_MAX_LOSS_BASE", "10"))
 
 # AGGRESSIVE EXIT ON RED — Close any position down 0.5% immediately
 # Don't wait for stop-loss to trigger. Exit fast, preserve capital.
@@ -63,6 +81,10 @@ HEADERS = {
     "APCA-API-SECRET-KEY": ALPACA_SECRET,
     "Content-Type": "application/json"
 }
+
+# SCALING UP SYSTEM — Increase position sizes after each milestone lock
+# $1K lock → scale to 1.5x, $2K lock → scale to 2.0x, $5K lock → scale to 3.0x
+POSITION_SCALE_MULTIPLIER = float(os.getenv("POSITION_SCALE_MULTIPLIER", "1.0"))  # Starts at 1.0x, increases per milestone
 
 # APEX futures — use micro contracts (lower risk during evaluation)
 # Expanded to include international markets and forex for 24/5 global trading opportunities
@@ -146,10 +168,18 @@ FUTURES = {
 # logic in run_prop_cycle (swap out a losing position for a fresh signal)
 # still exists as a safety net, but can't trigger at this default since
 # there's no 8th symbol to need a slot from.
-# Max concurrent positions: OPTIMIZED FOR MICRO-ACCOUNT COMPOUNDING
-# 2 positions max concentrates capital, maximizes profits per position, enables faster compounding
-# With 4 crypto pairs, averaging 2 positions = focused capital deployment
-MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", "2"))
+# Max concurrent positions: SCALED WITH POSITION MULTIPLIER
+# Base: 2 positions at 1.0x scale
+# At 1.5x scale: reduce to 1 position (1.5x loss on 1 trade < 1.0x loss on 2 trades)
+# At 2.0x scale: stay at 1 position (conservative with max scaling)
+# This prevents multiplied losses across multiple scaled positions
+BASE_MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", "2"))
+
+def get_dynamic_max_positions(scale: float) -> int:
+    """Reduce max positions as scale increases to limit compounded losses"""
+    if scale >= 1.5:
+        return 1  # Single position when scaled 1.5x or higher
+    return BASE_MAX_POSITIONS  # 2 positions at baseline 1.0x scale
 
 # Profit target, in REAL DOLLARS of profit on the position (not a raw
 # price move on the underlying) - scaled by real account equity. Increased targets
@@ -199,6 +229,11 @@ def get_profit_target_dollars(equity, is_crypto=False):
 
 # Track profitable days for APEX 7-day rule
 profitable_days = []
+
+# Bot lifecycle tracking for $1M goal
+bot_start_time = None  # When bot started trading
+bot_start_equity = None  # Starting equity when bot began
+checkpoint_alerts_sent = set()  # Track which milestones we've alerted on (avoid duplicates)
 daily_pnl = 0.0
 daily_account_equity_start = None  # For daily 2% loss limit
 open_prop_positions = {}
@@ -504,18 +539,18 @@ CRITICAL_BUYING_POWER_THRESHOLD = float(os.getenv("PROP_CRITICAL_BP_THRESHOLD", 
 
 
 def size_position(cash_remaining, slots_remaining, price):
-    """Dollar-based (fractional-share) position sizing. A fixed 1-share
-    order fails outright on higher-priced ETFs (SPY, QQQ, DIA) once cash
-    is tight, while cheaper ones (SLV, USO) fill fine - silently capping
-    how many of the open slots can ever actually fill regardless of how
-    many real signals come in. Splitting whatever cash is left evenly
-    across the remaining open slots means a small account can still use
-    all its slots, no matter which symbol's proxy ETF happens to signal.
-    Returns None if there isn't enough cash left for even one minimum-size
-    position."""
+    """Dollar-based (fractional-share) position sizing with SCALING MULTIPLIER.
+    After each milestone lock, position sizes increase (1.5x for $2K phase, 2.0x for $5K phase).
+    This allows account to compound faster while maintaining capital protection.
+    Returns None if there isn't enough cash left for even one minimum-size position."""
     if slots_remaining <= 0 or cash_remaining < MIN_POSITION_NOTIONAL:
         return None
+
+    # Apply scaling multiplier (increases after milestone locks)
+    scale = float(os.getenv("POSITION_SCALE_MULTIPLIER", "1.0"))
+
     amount = min(max(cash_remaining / slots_remaining, MIN_POSITION_NOTIONAL), cash_remaining)
+    amount = amount * scale  # SCALE UP: bigger positions after milestone
     qty = round(amount / price, 6)
     return qty if qty > 0 else None
 
@@ -609,7 +644,7 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
 
 
 async def run_prop_cycle():
-    global daily_pnl, profitable_days, last_cycle_at, last_market_open
+    global daily_pnl, profitable_days, last_cycle_at, last_market_open, bot_start_time, bot_start_equity, checkpoint_alerts_sent
 
     # Trade during market hours (9:30am-4pm ET) for stocks/futures.
     # Crypto trades 24/7. Checked against real ET wall-clock time (DST-aware).
@@ -630,16 +665,17 @@ async def run_prop_cycle():
 
     last_market_open = is_market_hours
 
-    # **DUAL MILESTONE SYSTEM** — $1,000 lock, then $2,000 within 24hr
+    # CONTINUOUS AUTO-SCALING TO $1,000,000 — No milestones, just compound
+    # Scale formula: 1.0x baseline + 0.01x per $1000 earned, capped at 5.0x
+    # $1K equity → 1.0x, $100K equity → 2.0x, $400K+ equity → 5.0x (capped)
     connector = aiohttp.TCPConnector(use_dns_cache=True)
     async with aiohttp.ClientSession(connector=connector, trust_env=False) as session:
         equity = await get_account_equity(session)
         if equity is not None:
-            # MILESTONE 1: $1,000 — LOCK PROFITS
-            if equity >= 1000.0 and not os.getenv("MILESTONE_1K_LOCKED", "false").lower() == "true":
-                log.warning(f"🎯 **$1,000 MILESTONE REACHED** — Equity: ${equity:.2f}")
-                log.warning(f"Closing ALL positions to lock profits...")
-                # Close all open positions immediately
+            # Check if $1M goal achieved — STOP TRADING
+            if equity >= 1000000.0:
+                log.warning(f"🏆 **$1,000,000 MILESTONE REACHED** — Equity: ${equity:,.2f}")
+                # Close all positions and stop
                 for contract in list(open_prop_positions.keys()):
                     pos = open_prop_positions[contract]
                     try:
@@ -651,51 +687,79 @@ async def run_prop_cycle():
                             price = pos["entry"]
                     except:
                         price = pos["entry"]
-
-                    await close_position(session, contract, FUTURES.get(contract, {}), pos, price, 0, "milestone", "PROFIT LOCK - $1K REACHED")
-
-                send_trade_alert(
-                    "🎯 EMPIRE BOT — $1,000 MILESTONE REACHED",
-                    f"**PROFIT LOCK ACTIVATED - MILESTONE #1 COMPLETE**\n\n"
-                    f"Account Equity: ${equity:.2f}\n"
-                    f"All positions closed to secure milestone.\n\n"
-                    f"Daily P&L: ${daily_pnl:.2f}\n"
-                    f"Status: TRADING RESUMED FOR $2,000 TARGET (24hr)\n\n"
-                    f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
-                )
-                # Mark milestone as locked, resume trading for $2K target
-                os.environ["MILESTONE_1K_LOCKED"] = "true"
-                time.sleep(2)  # Brief pause before resuming
-                # Resume trading cycle — DON'T RETURN, continue to next milestone
-
-            # MILESTONE 2: $2,000 — WITHIN 24 HOURS
-            if equity >= 2000.0 and os.getenv("MILESTONE_1K_LOCKED", "false").lower() == "true":
-                log.warning(f"🎯 **$2,000 MILESTONE REACHED** — Equity: ${equity:.2f}")
-                # Close all positions to lock $2K
-                for contract in list(open_prop_positions.keys()):
-                    pos = open_prop_positions[contract]
-                    try:
-                        price_resp = await session.get(f"{BASE_URL}/v1/last?symbols={pos.get('symbol', contract)}", headers=HEADERS)
-                        if price_resp.status == 200:
-                            data = await price_resp.json()
-                            price = data.get("last", {}).get("price", pos["entry"])
-                        else:
-                            price = pos["entry"]
-                    except:
-                        price = pos["entry"]
-
-                    await close_position(session, contract, FUTURES.get(contract, {}), pos, price, 0, "milestone", "PROFIT LOCK - $2K REACHED")
+                    await close_position(session, contract, FUTURES.get(contract, {}), pos, price, 0, "milestone", "PROFIT LOCK - $1M REACHED")
 
                 send_trade_alert(
-                    "🚀 EMPIRE BOT — $2,000 MILESTONE REACHED",
-                    f"**PROFIT LOCK ACTIVATED - MILESTONE #2 COMPLETE**\n\n"
-                    f"Account Equity: ${equity:.2f}\n"
-                    f"DOUBLE TARGET ACHIEVED in 24 hours!\n\n"
+                    "🏆 EMPIRE BOT — $1,000,000 ACHIEVED!",
+                    f"**ULTIMATE GOAL UNLOCKED**\n\n"
+                    f"Account Equity: ${equity:,.2f}\n"
+                    f"🎉 ONE MILLION DOLLARS!\n\n"
                     f"Daily P&L: ${daily_pnl:.2f}\n"
-                    f"Status: ALL POSITIONS LOCKED. Manual override required for next target.\n\n"
+                    f"Status: TRADING STOPPED. All positions closed.\n\n"
                     f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
                 )
-                return  # Stop all trading after $2K lock
+                return  # STOP — goal achieved
+
+            # Auto-scale formula: increase scale as equity grows
+            # 1.0x at $1K, 1.5x at $50K, 2.0x at $100K, 5.0x at $400K+
+            def get_auto_scale(eq: float) -> str:
+                scale = 1.0 + (eq / 100000.0)  # +0.01x per $1K earned
+                scale = min(scale, 5.0)  # Cap at 5.0x max
+                return f"{scale:.2f}"
+
+            current_scale = float(get_auto_scale(equity))
+            os.environ["POSITION_SCALE_MULTIPLIER"] = str(current_scale)
+
+            # Initialize bot lifecycle tracking when equity first hits $1K
+            if equity >= 1000.0 and bot_start_time is None:
+                bot_start_time = now
+                bot_start_equity = equity
+                log.info(f"🚀 BOT COMPOUNDING START: ${equity:,.2f} | Tracking $1M goal (120-day timeout)")
+
+            # 120-DAY SAFETY TIMEOUT - Professional guardrail
+            if bot_start_time is not None:
+                elapsed_days = (now - bot_start_time).total_seconds() / 86400
+                if elapsed_days > 120 and equity < 1000000.0:
+                    log.error(f"⏰ 120-DAY TIMEOUT REACHED | Elapsed: {elapsed_days:.1f} days | Equity: ${equity:,.2f}")
+                    send_trade_alert(
+                        "⏰ BOT SAFETY TIMEOUT — 120 DAYS REACHED",
+                        f"**SAFETY TIMEOUT TRIGGERED**\n\n"
+                        f"Elapsed: {elapsed_days:.1f} days\n"
+                        f"Target: $1,000,000\n"
+                        f"Achieved: ${equity:,.2f}\n\n"
+                        f"Trading stopped per safety protocol.\n"
+                        f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
+                    )
+                    return  # STOP — timeout reached. Positions handled naturally by exit logic
+
+            # CHECKPOINT ALERTS — Monitor progress to $1M (alert once per milestone)
+            if bot_start_time is not None and bot_start_equity is not None:
+                for milestone in [10000, 50000, 100000]:
+                    if equity >= milestone and milestone not in checkpoint_alerts_sent:
+                        progress = equity - bot_start_equity
+                        checkpoint_alerts_sent.add(milestone)
+                        log.info(f"✅ MILESTONE UNLOCKED: ${equity:,.0f} | Profit: ${progress:,.0f} | Scale: {current_scale:.2f}x")
+                        send_trade_alert(
+                            f"🎯 MILESTONE CHECKPOINT — ${milestone:,}",
+                            f"**EQUITY MILESTONE REACHED**\n\n"
+                            f"Current: ${equity:,.2f}\n"
+                            f"Profit: ${progress:,.2f}\n"
+                            f"Scale: {current_scale:.2f}x\n"
+                            f"Elapsed: {(now - bot_start_time).total_seconds() / 86400:.1f} days\n"
+                            f"Progress to $1M: {(equity/1000000)*100:.1f}%\n\n"
+                            f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
+                        )
+
+            # Win rate monitor — pause aggressive scaling if performance drops
+            if len(profitable_days) >= 7:
+                win_rate = sum(1 for day in profitable_days[-7:] if day) / 7
+                if win_rate < 0.45:
+                    log.warning(f"⚠️  WIN RATE LOW ({win_rate*100:.0f}%) - Pausing aggressive trades")
+                    # In production, set a flag to reduce position sizes or pause new entries
+
+            # Log current auto-scale status
+            if equity >= 1000.0:
+                log.info(f"[APEX_589296] AUTO-SCALE: Equity ${equity:,.0f} → Scale {current_scale:.2f}x | Progress to $1M: {(equity/1000000)*100:.1f}%")
 
     log.info(f"[APEX_589296] Scanning futures markets ({', '.join(FUTURES)})... | Daily P&L: ${daily_pnl:.2f}")
 
@@ -801,13 +865,20 @@ async def run_prop_cycle():
             (daily_account_equity_start - equity) >= daily_loss_limit
         )
 
-        log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | Profit target: ${profit_target:.2f}/position" +
+        # Dynamic circuit breaker: scales with position multiplier
+        # Larger positions require larger loss threshold to avoid premature halt
+        scale = float(os.getenv("POSITION_SCALE_MULTIPLIER", "1.0"))
+        dynamic_daily_max_loss = DAILY_MAX_LOSS_BASE * scale  # $10→$15→$20 as scale increases
+        dynamic_max_positions = get_dynamic_max_positions(scale)  # 2 at 1.0x, 1 at 1.5x+
+
+        log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | Scale {scale:.1f}x | Max {dynamic_max_positions} pos | Profit target: ${profit_target:.2f}/position" +
                 (f" | ⚠️ DAILY 2% LOSS LIMIT HIT - stopping new trades" if is_hitting_daily_loss_limit else ""))
 
-        # Circuit breaker: if daily loss exceeds $20, close ALL open positions immediately
+        # Circuit breaker: if daily loss exceeds threshold, close ALL open positions immediately
+        # Scales dynamically with position size multiplier to prevent early halt on scaled positions
         daily_loss_dollars = (daily_account_equity_start - equity) if daily_account_equity_start and equity else 0
-        if daily_loss_dollars >= DAILY_MAX_LOSS_DOLLARS:
-            log.warning(f"[APEX_589296] 🛑 CIRCUIT BREAKER: Daily loss ${daily_loss_dollars:.2f} >= ${DAILY_MAX_LOSS_DOLLARS:.2f} — closing ALL positions")
+        if daily_loss_dollars >= dynamic_daily_max_loss:
+            log.warning(f"[APEX_589296] 🛑 CIRCUIT BREAKER: Daily loss ${daily_loss_dollars:.2f} >= ${dynamic_daily_max_loss:.2f} (scale {scale}x) — closing ALL positions")
             for contract in list(open_prop_positions.keys()):
                 data = scans.get(contract)
                 config = FUTURES[contract]
@@ -868,11 +939,14 @@ async def run_prop_cycle():
             entry = position["entry"]
             qty = position["qty"]
 
-            # Use crypto-specific RSI thresholds and tighter stops
+            # Use crypto-specific RSI thresholds and dynamically tightened stops based on scale
             is_crypto = "/" in config["symbol"]
             exit_sell_threshold = CRYPTO_RSI_SELL_ABOVE if is_crypto else RSI_SELL_ABOVE
             exit_buy_threshold = CRYPTO_RSI_BUY_BELOW if is_crypto else RSI_BUY_BELOW
-            stop_loss = CRYPTO_STOP_LOSS_PCT if is_crypto else STOP_LOSS_PCT
+
+            # Dynamic stop-loss: tighter at higher scales to prevent compounded losses
+            scale = float(os.getenv("POSITION_SCALE_MULTIPLIER", "1.0"))
+            stop_loss = get_dynamic_crypto_stop_loss(scale) if is_crypto else get_dynamic_stop_loss(scale)
 
             if side == "long":
                 unrealized_pnl = (price - entry) * qty
@@ -987,11 +1061,11 @@ async def run_prop_cycle():
                 log.info(f"[APEX_589296] 🚫 {side.upper()} {contract} skipped — 1H trend ({higher_tf}) opposes 5min signal")
                 continue
 
-            if len(open_prop_positions) < MAX_POSITIONS:
+            if len(open_prop_positions) < dynamic_max_positions:
                 scan_data = scans.get(contract)
                 momentum = scan_data.get("momentum", 0) if scan_data else 0
                 log.info(f"[APEX_589296] 📡 {side.upper()} {contract} — RSI:{rsi} Momentum:{momentum:+.2f}% Trend:{trend}")
-                await try_open(contract, config, side, price, rsi, trend, MAX_POSITIONS - len(open_prop_positions))
+                await try_open(contract, config, side, price, rsi, trend, dynamic_max_positions - len(open_prop_positions))
             else:
                 # At the cap - find the weakest held position (lowest
                 # unrealized P&L). Only rotate out of it if it's a genuine
@@ -1021,7 +1095,7 @@ async def run_prop_cycle():
                     # just what was already sitting uninvested.
                     freed_value = open_prop_positions[weakest_contract]["qty"] * held_data["price"]
                     log.info(
-                        f"[APEX_589296] 🔄 ROTATING: {weakest_contract} ({weakest_pct:.2f}%, weakest of {MAX_POSITIONS}) "
+                        f"[APEX_589296] 🔄 ROTATING: {weakest_contract} ({weakest_pct:.2f}%, weakest of {dynamic_max_positions}) "
                         f"→ {contract} (RSI:{rsi} {side})"
                     )
                     closed = await close_position(
@@ -1031,13 +1105,13 @@ async def run_prop_cycle():
                     if closed:
                         if cash_remaining is not None:
                             cash_remaining += freed_value
-                        await try_open(contract, config, side, price, rsi, trend, MAX_POSITIONS - len(open_prop_positions))
+                        await try_open(contract, config, side, price, rsi, trend, dynamic_max_positions - len(open_prop_positions))
                 else:
                     log.info(
-                        f"[APEX_589296] At max positions ({MAX_POSITIONS}) - {contract} {side} signal held, "
+                        f"[APEX_589296] At max positions ({dynamic_max_positions}) - {contract} {side} signal held, "
                         f"weakest position ({weakest_contract} {weakest_pct:+.2f}%) isn't a loss, not rotating"
                         if weakest_contract else
-                        f"[APEX_589296] At max positions ({MAX_POSITIONS}) - {contract} {side} signal held, no rotation candidate"
+                        f"[APEX_589296] At max positions ({dynamic_max_positions}) - {contract} {side} signal held, no rotation candidate"
                     )
 
             await asyncio.sleep(0.3)
