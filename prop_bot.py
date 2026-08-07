@@ -34,11 +34,11 @@ LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "30"))
 RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "70"))
 
-# Crypto-specific thresholds: OPTIMIZED FOR SCALPING + HIGH FREQUENCY
-# Use standard RSI (30/70) not extreme (25/75) to MAXIMIZE entry frequency
-# More trades × smaller wins = faster compounding toward $1K milestone
-CRYPTO_RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "30"))   # Catch oversold bounces (more entries)
-CRYPTO_RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "70"))  # Exit overbought rallies (more exits)
+# Crypto-specific thresholds: AGGRESSIVE SCALPING FOR MILESTONE SPEED
+# Lowered from 30/70 to 35/65 to catch MORE entry/exit opportunities
+# Maximizes trade frequency to hit $1,000 ASAP, then $2,000 within 24hr
+CRYPTO_RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "35"))   # MORE oversold entries (faster compounding)
+CRYPTO_RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "65"))  # MORE overbought exits (more profit locks)
 
 # Real, enforced stop-loss — tighter than older versions to protect micro account
 STOP_LOSS_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.005"))  # 0.5% for stocks/futures
@@ -623,39 +623,72 @@ async def run_prop_cycle():
 
     last_market_open = is_market_hours
 
-    # **$1,000 MILESTONE LOCK** — Immediately close ALL positions to lock profit when target reached
+    # **DUAL MILESTONE SYSTEM** — $1,000 lock, then $2,000 within 24hr
     connector = aiohttp.TCPConnector(use_dns_cache=True)
     async with aiohttp.ClientSession(connector=connector, trust_env=False) as session:
         equity = await get_account_equity(session)
-        if equity is not None and equity >= 1000.0:
-            log.warning(f"🎯 **$1,000 MILESTONE REACHED** — Equity: ${equity:.2f}")
-            log.warning(f"Closing ALL positions to lock profits...")
-            # Close all open positions immediately
-            for contract in list(open_prop_positions.keys()):
-                pos = open_prop_positions[contract]
-                # Get current price to close at market
-                try:
-                    price_resp = await session.get(f"{BASE_URL}/v1/last?symbols={pos.get('symbol', contract)}", headers=HEADERS)
-                    if price_resp.status == 200:
-                        data = await price_resp.json()
-                        price = data.get("last", {}).get("price", pos["entry"])
-                    else:
+        if equity is not None:
+            # MILESTONE 1: $1,000 — LOCK PROFITS
+            if equity >= 1000.0 and not os.getenv("MILESTONE_1K_LOCKED", "false").lower() == "true":
+                log.warning(f"🎯 **$1,000 MILESTONE REACHED** — Equity: ${equity:.2f}")
+                log.warning(f"Closing ALL positions to lock profits...")
+                # Close all open positions immediately
+                for contract in list(open_prop_positions.keys()):
+                    pos = open_prop_positions[contract]
+                    try:
+                        price_resp = await session.get(f"{BASE_URL}/v1/last?symbols={pos.get('symbol', contract)}", headers=HEADERS)
+                        if price_resp.status == 200:
+                            data = await price_resp.json()
+                            price = data.get("last", {}).get("price", pos["entry"])
+                        else:
+                            price = pos["entry"]
+                    except:
                         price = pos["entry"]
-                except:
-                    price = pos["entry"]
 
-                await close_position(session, contract, FUTURES.get(contract, {}), pos, price, 0, "milestone", "PROFIT LOCK - $1K REACHED")
+                    await close_position(session, contract, FUTURES.get(contract, {}), pos, price, 0, "milestone", "PROFIT LOCK - $1K REACHED")
 
-            send_trade_alert(
-                "🎯 EMPIRE BOT — $1,000 MILESTONE REACHED",
-                f"**PROFIT LOCK ACTIVATED**\n\n"
-                f"Account Equity: ${equity:.2f}\n"
-                f"All positions closed to secure milestone.\n\n"
-                f"Daily P&L: ${daily_pnl:.2f}\n"
-                f"Status: HOLDING at $1,000+ — No new trades until further notice.\n\n"
-                f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
-            )
-            return  # Stop trading for this cycle
+                send_trade_alert(
+                    "🎯 EMPIRE BOT — $1,000 MILESTONE REACHED",
+                    f"**PROFIT LOCK ACTIVATED - MILESTONE #1 COMPLETE**\n\n"
+                    f"Account Equity: ${equity:.2f}\n"
+                    f"All positions closed to secure milestone.\n\n"
+                    f"Daily P&L: ${daily_pnl:.2f}\n"
+                    f"Status: TRADING RESUMED FOR $2,000 TARGET (24hr)\n\n"
+                    f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
+                )
+                # Mark milestone as locked, resume trading for $2K target
+                os.environ["MILESTONE_1K_LOCKED"] = "true"
+                time.sleep(2)  # Brief pause before resuming
+                # Resume trading cycle — DON'T RETURN, continue to next milestone
+
+            # MILESTONE 2: $2,000 — WITHIN 24 HOURS
+            if equity >= 2000.0 and os.getenv("MILESTONE_1K_LOCKED", "false").lower() == "true":
+                log.warning(f"🎯 **$2,000 MILESTONE REACHED** — Equity: ${equity:.2f}")
+                # Close all positions to lock $2K
+                for contract in list(open_prop_positions.keys()):
+                    pos = open_prop_positions[contract]
+                    try:
+                        price_resp = await session.get(f"{BASE_URL}/v1/last?symbols={pos.get('symbol', contract)}", headers=HEADERS)
+                        if price_resp.status == 200:
+                            data = await price_resp.json()
+                            price = data.get("last", {}).get("price", pos["entry"])
+                        else:
+                            price = pos["entry"]
+                    except:
+                        price = pos["entry"]
+
+                    await close_position(session, contract, FUTURES.get(contract, {}), pos, price, 0, "milestone", "PROFIT LOCK - $2K REACHED")
+
+                send_trade_alert(
+                    "🚀 EMPIRE BOT — $2,000 MILESTONE REACHED",
+                    f"**PROFIT LOCK ACTIVATED - MILESTONE #2 COMPLETE**\n\n"
+                    f"Account Equity: ${equity:.2f}\n"
+                    f"DOUBLE TARGET ACHIEVED in 24 hours!\n\n"
+                    f"Daily P&L: ${daily_pnl:.2f}\n"
+                    f"Status: ALL POSITIONS LOCKED. Manual override required for next target.\n\n"
+                    f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
+                )
+                return  # Stop all trading after $2K lock
 
     log.info(f"[APEX_589296] Scanning futures markets ({', '.join(FUTURES)})... | Daily P&L: ${daily_pnl:.2f}")
 
