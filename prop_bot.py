@@ -625,6 +625,40 @@ async def run_prop_cycle():
 
     last_market_open = is_market_hours
 
+    # **$1,000 MILESTONE LOCK** — Immediately close ALL positions to lock profit when target reached
+    connector = aiohttp.TCPConnector(use_dns_cache=True)
+    async with aiohttp.ClientSession(connector=connector, trust_env=False) as session:
+        equity = await get_account_equity(session)
+        if equity is not None and equity >= 1000.0:
+            log.warning(f"🎯 **$1,000 MILESTONE REACHED** — Equity: ${equity:.2f}")
+            log.warning(f"Closing ALL positions to lock profits...")
+            # Close all open positions immediately
+            for contract in list(open_prop_positions.keys()):
+                pos = open_prop_positions[contract]
+                # Get current price to close at market
+                try:
+                    price_resp = await session.get(f"{BASE_URL}/v1/last?symbols={pos.get('symbol', contract)}", headers=HEADERS)
+                    if price_resp.status == 200:
+                        data = await price_resp.json()
+                        price = data.get("last", {}).get("price", pos["entry"])
+                    else:
+                        price = pos["entry"]
+                except:
+                    price = pos["entry"]
+
+                await close_position(session, contract, FUTURES.get(contract, {}), pos, price, 0, "milestone", "PROFIT LOCK - $1K REACHED")
+
+            send_trade_alert(
+                "🎯 EMPIRE BOT — $1,000 MILESTONE REACHED",
+                f"**PROFIT LOCK ACTIVATED**\n\n"
+                f"Account Equity: ${equity:.2f}\n"
+                f"All positions closed to secure milestone.\n\n"
+                f"Daily P&L: ${daily_pnl:.2f}\n"
+                f"Status: HOLDING at $1,000+ — No new trades until further notice.\n\n"
+                f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
+            )
+            return  # Stop trading for this cycle
+
     log.info(f"[APEX_589296] Scanning futures markets ({', '.join(FUTURES)})... | Daily P&L: ${daily_pnl:.2f}")
 
     async def close_position(session, contract, config, position, price, rsi, trend, reason_label):
