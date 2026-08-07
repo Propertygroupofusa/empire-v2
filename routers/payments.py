@@ -86,7 +86,7 @@ async def bot_earnings(db: AsyncSession = Depends(get_db)):
                     "status": p.payout_status,
                     "created_at": p.created_at.isoformat() if p.created_at else None,
                     "paid_at": p.paid_at.isoformat() if p.paid_at else None,
-                    "stripe_payout_id": p.stripe_payout_id,
+                    "stripe_payout_id": p.stripe_transfer_id or p.stripe_payout_id,  # Transfer ID for Stripe Connect, Payout ID for bank transfers
                 }
                 for p in payments
             ]

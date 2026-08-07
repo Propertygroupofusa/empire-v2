@@ -30,16 +30,26 @@ ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 BASE_URL      = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 
-# RSI entry/exit thresholds. OPTIMIZED for stronger entry signals = higher win rate
-# Tightened to only EXTREME oversold/overbought for maximum quality trades.
-# Fewer but better trades. Configurable via env for tuning without code change.
-RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "25"))  # Tighter: only extreme oversold
-RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "75"))  # Tighter: only extreme overbought
+# RSI entry/exit thresholds
+RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "30"))
+RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "70"))
 
-# Micro-account stop-loss: 1% (not 2%) for $980 account
-# At 1%, max loss per trade = $10 (manageable for small account)
-# Prevents account blowup from single losing trade
-STOP_LOSS_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.01"))
+# Crypto-specific thresholds: OPTIMIZED FOR SCALPING + HIGH FREQUENCY
+# Use standard RSI (30/70) not extreme (25/75) to MAXIMIZE entry frequency
+# More trades × smaller wins = faster compounding toward $1K milestone
+CRYPTO_RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "30"))   # Catch oversold bounces (more entries)
+CRYPTO_RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "70"))  # Exit overbought rallies (more exits)
+
+# Real, enforced stop-loss — tighter than older versions to protect micro account
+STOP_LOSS_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.005"))  # 0.5% for stocks/futures
+
+# Crypto-specific stop-loss: BACK TO 0.5% FOR CAPITAL PRESERVATION
+# On $992 account: 0.5% = $5 max loss per trade. Protect capital, compound wins.
+CRYPTO_STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.005"))  # 0.5% for crypto (same as stocks)
+
+# Daily maximum loss in dollars — circuit breaker stops all trading when hit
+# Protects micro accounts from catastrophic streaks
+DAILY_MAX_LOSS_DOLLARS = float(os.getenv("PROP_DAILY_MAX_LOSS", "20"))
 
 HEADERS = {
     "APCA-API-KEY-ID": ALPACA_KEY,
@@ -59,23 +69,64 @@ FUTURES = {
     "MGC": {"name": "Micro Gold",           "qty": 1, "symbol": "GLD"},   # Use GLD as proxy
     "MCL": {"name": "Micro Crude Oil",      "qty": 1, "symbol": "USO"},   # Use USO as proxy
     "SIL": {"name": "Micro Silver",         "qty": 1, "symbol": "SLV"},   # Use SLV as proxy
-    # International stock indices
-    "EWJ": {"name": "Japan ETF",            "qty": 1, "symbol": "EWJ"},   # Japan stocks 24/5
-    "EWG": {"name": "Germany ETF",          "qty": 1, "symbol": "EWG"},   # Germany/Europe 24/5
-    "EWU": {"name": "UK ETF",               "qty": 1, "symbol": "EWU"},   # UK stocks 24/5
-    "EWA": {"name": "Australia ETF",        "qty": 1, "symbol": "EWA"},   # Australia 24/5
-    "IEMG": {"name": "Emerging Markets",    "qty": 1, "symbol": "IEMG"},  # Global emerging markets
-    # Forex pairs (as ETFs for 24/5 trading)
-    "FXE": {"name": "Euro/USD",             "qty": 1, "symbol": "FXE"},   # EUR/USD 24/5
-    "FXB": {"name": "British Pound",        "qty": 1, "symbol": "FXB"},   # GBP/USD 24/5
-    "FXY": {"name": "Japanese Yen",         "qty": 1, "symbol": "FXY"},   # JPY/USD 24/5
-    # Additional commodities and bonds
-    "DBC": {"name": "Commodities",          "qty": 1, "symbol": "DBC"},   # Broad commodities
-    "TLT": {"name": "Long Treasuries",      "qty": 1, "symbol": "TLT"},   # US bonds 24/5
-    # China stocks (direct exposure)
-    "FXI": {"name": "China Large-Cap ETF",  "qty": 1, "symbol": "FXI"},   # iShares China Large-Cap
-    "ASHR": {"name": "China A-Shares ETF",  "qty": 1, "symbol": "ASHR"},  # Xtrackers CSI 300 China
-    "CNE": {"name": "China ETF",            "qty": 1, "symbol": "CNE"},   # iShares MSCI China
+    # Cryptocurrencies (24/7 trading on Alpaca) — 50+ PAIRS FOR MAXIMUM OPPORTUNITIES
+    # Strategy: Scan all, trade best signals only. MAX_POSITIONS=2 keeps capital focused.
+    # Every signal = potential $2-3 win. More pairs = more winning chances per day.
+    # Mega cap tier (stable baseline):
+    "BTC": {"name": "Bitcoin",              "qty": 1, "symbol": "BTC/USD"},
+    "ETH": {"name": "Ethereum",             "qty": 1, "symbol": "ETH/USD"},
+    # Tier 1 - High liquidity altcoins (proven winners):
+    "SOL": {"name": "Solana",               "qty": 1, "symbol": "SOL/USD"},
+    "ADA": {"name": "Cardano",              "qty": 1, "symbol": "ADA/USD"},
+    "DOGE": {"name": "Dogecoin",            "qty": 1, "symbol": "DOGE/USD"},
+    "XRP": {"name": "Ripple",               "qty": 1, "symbol": "XRP/USD"},
+    "LINK": {"name": "Chainlink",           "qty": 1, "symbol": "LINK/USD"},
+    "AVAX": {"name": "Avalanche",           "qty": 1, "symbol": "AVAX/USD"},
+    "NEAR": {"name": "NEAR Protocol",       "qty": 1, "symbol": "NEAR/USD"},
+    "MATIC": {"name": "Polygon",            "qty": 1, "symbol": "MATIC/USD"},
+    # Tier 2 - Hot altcoins (emerging volume leaders):
+    "ARB": {"name": "Arbitrum",             "qty": 1, "symbol": "ARB/USD"},
+    "OP": {"name": "Optimism",              "qty": 1, "symbol": "OP/USD"},
+    "APT": {"name": "Aptos",                "qty": 1, "symbol": "APT/USD"},
+    "SEI": {"name": "Sei",                  "qty": 1, "symbol": "SEI/USD"},
+    "SUI": {"name": "Sui",                  "qty": 1, "symbol": "SUI/USD"},
+    "BLUR": {"name": "Blur",                "qty": 1, "symbol": "BLUR/USD"},
+    "LDO": {"name": "Lido DAO",             "qty": 1, "symbol": "LDO/USD"},
+    "MKR": {"name": "Maker",                "qty": 1, "symbol": "MKR/USD"},
+    "AAVE": {"name": "Aave",                "qty": 1, "symbol": "AAVE/USD"},
+    "UNI": {"name": "Uniswap",              "qty": 1, "symbol": "UNI/USD"},
+    # Tier 3 - Volume surge candidates:
+    "PEPE": {"name": "Pepe",                "qty": 1, "symbol": "PEPE/USD"},
+    "SHIB": {"name": "Shiba Inu",           "qty": 1, "symbol": "SHIB/USD"},
+    "FLOKI": {"name": "Floki",              "qty": 1, "symbol": "FLOKI/USD"},
+    "STX": {"name": "Stacks",               "qty": 1, "symbol": "STX/USD"},
+    "FIL": {"name": "Filecoin",             "qty": 1, "symbol": "FIL/USD"},
+    "ATOM": {"name": "Cosmos",              "qty": 1, "symbol": "ATOM/USD"},
+    "ALGO": {"name": "Algorand",            "qty": 1, "symbol": "ALGO/USD"},
+    "SAND": {"name": "Sandbox",             "qty": 1, "symbol": "SAND/USD"},
+    "MANA": {"name": "Decentraland",        "qty": 1, "symbol": "MANA/USD"},
+    "ENS": {"name": "ENS",                  "qty": 1, "symbol": "ENS/USD"},
+    "RNDR": {"name": "Render",              "qty": 1, "symbol": "RNDR/USD"},
+    "IMX": {"name": "Immutable",            "qty": 1, "symbol": "IMX/USD"},
+    "GALA": {"name": "Gala",                "qty": 1, "symbol": "GALA/USD"},
+    "BEAM": {"name": "Beam",                "qty": 1, "symbol": "BEAM/USD"},
+    # Tier 4 - Emerging micro-cap movers:
+    "WIF": {"name": "dogwifhat",            "qty": 1, "symbol": "WIF/USD"},
+    "POPCAT": {"name": "Popcat",            "qty": 1, "symbol": "POPCAT/USD"},
+    "MOO": {"name": "Moo Deng",             "qty": 1, "symbol": "MOO/USD"},
+    "BONK": {"name": "Bonk",                "qty": 1, "symbol": "BONK/USD"},
+    "RENDER": {"name": "Render",            "qty": 1, "symbol": "RENDER/USD"},
+    "JTO": {"name": "Jito",                 "qty": 1, "symbol": "JTO/USD"},
+    "ORCA": {"name": "Orca",                "qty": 1, "symbol": "ORCA/USD"},
+    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
+    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
+    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
+    # Add more as they become available on Alpaca
+    "WLD": {"name": "Worldcoin",            "qty": 1, "symbol": "WLD/USD"},
+    "INJ": {"name": "Injective",            "qty": 1, "symbol": "INJ/USD"},
+    "SUSHI": {"name": "Sushi",              "qty": 1, "symbol": "SUSHI/USD"},
+    "CURVE": {"name": "Curve",              "qty": 1, "symbol": "CURVE/USD"},
+    "CRV": {"name": "Curve DAO",            "qty": 1, "symbol": "CRV/USD"},
 }
 
 # Max concurrent open positions. Explicit request: don't cap this below
@@ -88,28 +139,53 @@ FUTURES = {
 # logic in run_prop_cycle (swap out a losing position for a fresh signal)
 # still exists as a safety net, but can't trigger at this default since
 # there's no 8th symbol to need a slot from.
-MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", str(len(FUTURES))))
+# Max concurrent positions: OPTIMIZED FOR MICRO-ACCOUNT COMPOUNDING
+# 2 positions max concentrates capital, maximizes profits per position, enables faster compounding
+# With 4 crypto pairs, averaging 2 positions = focused capital deployment
+MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", "2"))
 
-# SCALPING STRATEGY: Take small 1-2% profits and exit immediately
-# Profit targets in REAL DOLLARS - micro-account optimized for $980-$5k
+# Profit target, in REAL DOLLARS of profit on the position (not a raw
+# price move on the underlying) - scaled by real account equity. Increased targets
+# to let winners run instead of closing too early. With $1000+ positions, these
+# targets are achievable on 1%+ daily moves that we see in the market.
 PROFIT_TARGET_DOLLARS_MILESTONES = [
-    (0,     3.00),      # Micro ($980): $3.00 (0.3% profit target)
-    (500,   5.00),      # Small ($500-$1k): $5.00
-    (1000,  8.00),      # Medium ($1k+): $8.00
-    (5000,  12.00),     # Large ($5k+): $12.00
+    (0,     5.00),      # Micro: $5.00 (0.50% on $1000)
+    (500,   7.50),      # Small: $7.50
+    (1000,  10.00),     # Medium: $10.00 (1% on $1000)
+    (5000,  15.00),     # Large: $15.00 (0.30% on $5000)
+    (10000, 20.00),     # Huge: $20.00 (0.20% on $10000)
 ]
 
-# Scalping tier levels: Exit quickly at 1% and 2% profit targets
-# Tier 1: Exit 100% at 100% of target (take 1% profit and close)
-# NO multi-tier exits - scalp and exit immediately
-TIER_LEVELS = [1.00]  # Single exit level: 1-2% profit, close position
+# Crypto-specific LOWER profit targets for fast compounding & high frequency
+# On $992: aim for $2-3 per trade (hit more targets, reinvest faster)
+CRYPTO_PROFIT_TARGET_MILESTONES = [
+    (0,     2.50),      # Micro: $2.50 (0.25% on $1000) — fast wins
+    (500,   3.00),      # Small: $3.00
+    (1000,  3.50),      # Medium: $3.50
+    (5000,  5.00),      # Large: $5.00
+    (10000, 7.50),      # Huge: $7.50
+]
+
+# Crypto-specific AGGRESSIVE tiered exits — lock wins faster, reinvest sooner
+# Tier 1: Exit 50% at 50% of target (very early win lock)
+# Tier 2: Exit 25% at 75% of target (partial second exit)
+# Tier 3: Exit final 25% at 100% of target (close all, start fresh)
+CRYPTO_TIER_LEVELS = [0.50, 0.75, 1.00]  # multipliers of crypto profit target
+
+# Professional tiered exit levels for stocks - lock in profits at milestones, let winners run
+# Tier 1: Exit 1/3 at 50% of target (lock in early win)
+# Tier 2: Exit 1/3 at 100% of target (take second third)
+# Tier 3: Exit final 1/3 at 150% of target (let winners run to max)
+TIER_LEVELS = [0.50, 1.00, 1.50]  # multipliers of profit target
 
 
-def get_profit_target_dollars(equity):
+def get_profit_target_dollars(equity, is_crypto=False):
+    """Get profit target based on account equity. Crypto uses lower targets for fast compounding."""
+    milestones = CRYPTO_PROFIT_TARGET_MILESTONES if is_crypto else PROFIT_TARGET_DOLLARS_MILESTONES
     if equity is None:
-        return PROFIT_TARGET_DOLLARS_MILESTONES[0][1]
-    target = PROFIT_TARGET_DOLLARS_MILESTONES[0][1]
-    for threshold, t in PROFIT_TARGET_DOLLARS_MILESTONES:
+        return milestones[0][1]
+    target = milestones[0][1]
+    for threshold, t in milestones:
         if equity >= threshold:
             target = t
     return target
@@ -220,7 +296,10 @@ async def get_price_rsi(session, symbol):
             sma10 = sum(closes[-10:]) / 10
             trend = "bullish" if sma5 > sma10 else "bearish"
 
-            return {"price": price, "rsi": round(rsi, 1), "trend": trend}
+            # Momentum: price change over last 3 bars (shows direction/strength)
+            momentum = ((price - closes[-3]) / closes[-3]) * 100 if closes[-3] > 0 else 0
+
+            return {"price": price, "rsi": round(rsi, 1), "trend": trend, "momentum": round(momentum, 2)}
     except Exception as e:
         log.error(f"Price error {symbol}: {e}")
         return None
@@ -525,10 +604,8 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
 async def run_prop_cycle():
     global daily_pnl, profitable_days, last_cycle_at, last_market_open
 
-    # Only trade during market hours (9:30am-4pm ET). Checked against real
-    # ET wall-clock time (DST-aware) rather than a hardcoded UTC range -
-    # a fixed 14:30-21:00 UTC window is wrong by an hour for about 8
-    # months of the year whenever ET is in daylight time.
+    # Trade during market hours (9:30am-4pm ET) for stocks/futures.
+    # Crypto trades 24/7. Checked against real ET wall-clock time (DST-aware).
     now = datetime.now(ET)
     is_weekday = now.weekday() < 5
     market_open_t = now.replace(hour=9, minute=30, second=0, microsecond=0)
@@ -536,12 +613,15 @@ async def run_prop_cycle():
 
     last_cycle_at = now.isoformat()
 
-    if not (is_weekday and market_open_t <= now <= market_close_t):
+    # Check if it's market hours for stocks (9:30am-4pm ET weekdays) or if we're trading crypto (24/7)
+    is_market_hours = is_weekday and market_open_t <= now <= market_close_t
+    is_crypto_trading = True  # Crypto trades 24/7
+
+    if not (is_market_hours or is_crypto_trading):
         last_market_open = False
-        log.info(f"[APEX_589296] Market closed — waiting for 9:30am ET")
         return
 
-    last_market_open = True
+    last_market_open = is_market_hours
 
     log.info(f"[APEX_589296] Scanning futures markets ({', '.join(FUTURES)})... | Daily P&L: ${daily_pnl:.2f}")
 
@@ -649,6 +729,17 @@ async def run_prop_cycle():
         log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | Profit target: ${profit_target:.2f}/position" +
                 (f" | ⚠️ DAILY 2% LOSS LIMIT HIT - stopping new trades" if is_hitting_daily_loss_limit else ""))
 
+        # Circuit breaker: if daily loss exceeds $20, close ALL open positions immediately
+        daily_loss_dollars = (daily_account_equity_start - equity) if daily_account_equity_start and equity else 0
+        if daily_loss_dollars >= DAILY_MAX_LOSS_DOLLARS:
+            log.warning(f"[APEX_589296] 🛑 CIRCUIT BREAKER: Daily loss ${daily_loss_dollars:.2f} >= ${DAILY_MAX_LOSS_DOLLARS:.2f} — closing ALL positions")
+            for contract in list(open_prop_positions.keys()):
+                data = scans.get(contract)
+                config = FUTURES[contract]
+                if data:
+                    await close_position(session, contract, config, open_prop_positions[contract],
+                                       data["price"], data["rsi"], data["trend"], "CIRCUIT BREAKER - DAILY LOSS LIMIT")
+
         # Tracked and spent-down across this cycle's entries so dollar-based
         # sizing (see try_open/size_position) reflects money already
         # committed to earlier orders this same cycle, without an extra
@@ -668,10 +759,15 @@ async def run_prop_cycle():
 
         scans = {}
         for contract, config in FUTURES.items():
+            # Skip non-crypto symbols during after-hours (outside 9:30am-4pm ET weekdays)
+            is_crypto = "/" in config["symbol"]  # Crypto symbols have "/" like BTC/USD
+            if not is_market_hours and not is_crypto:
+                continue
+
             data = await get_price_rsi(session, config["symbol"])
             if data:
                 scans[contract] = data
-                log.info(f"[APEX_589296] {contract} ({config['symbol']}) | ${data['price']:.2f} | RSI:{data['rsi']} | {data['trend']}")
+                log.info(f"[APEX_589296] {contract} ({config['symbol']}) | ${data['price']:.2f} | RSI:{data['rsi']} | Momentum:{data.get('momentum', 0):+.2f}% | {data['trend']}")
             await asyncio.sleep(0.3)
 
         # ── Pass 1: manage exits for symbols already held ────────────────
@@ -696,26 +792,35 @@ async def run_prop_cycle():
             side = position["side"]
             entry = position["entry"]
             qty = position["qty"]
+
+            # Use crypto-specific RSI thresholds and tighter stops
+            is_crypto = "/" in config["symbol"]
+            exit_sell_threshold = CRYPTO_RSI_SELL_ABOVE if is_crypto else RSI_SELL_ABOVE
+            exit_buy_threshold = CRYPTO_RSI_BUY_BELOW if is_crypto else RSI_BUY_BELOW
+            stop_loss = CRYPTO_STOP_LOSS_PCT if is_crypto else STOP_LOSS_PCT
+
             if side == "long":
                 unrealized_pnl = (price - entry) * qty
-                rsi_signal = rsi > RSI_SELL_ABOVE or (trend == "bearish" and rsi > 50)
-                stop_hit = price <= entry * (1 - STOP_LOSS_PCT)
+                rsi_signal = rsi > exit_sell_threshold or (trend == "bearish" and rsi > 50)
+                stop_hit = price <= entry * (1 - stop_loss)
             else:
                 unrealized_pnl = (entry - price) * qty
-                rsi_signal = rsi < RSI_BUY_BELOW or (trend == "bullish" and rsi < 50)
-                stop_hit = price >= entry * (1 + STOP_LOSS_PCT)
+                rsi_signal = rsi < exit_buy_threshold or (trend == "bullish" and rsi < 50)
+                stop_hit = price >= entry * (1 + stop_loss)
 
-            # Professional tiered profit-taking: lock in gains at milestones
-            # - 50% target: exit 1/3 (secure early gain, let 2/3 ride)
-            # - 100% target: exit 2/3 total (lock another third)
-            # - 150% target: exit full position (maximize winner)
-            # Reduces risk while keeping upside, stops revenge trading
+            # Use crypto-specific profit targets for crypto positions
+            position_profit_target = get_profit_target_dollars(equity, is_crypto=is_crypto)
+            tier_levels = CRYPTO_TIER_LEVELS if is_crypto else TIER_LEVELS
+
+            # Tiered profit-taking: lock in gains at milestones
+            # CRYPTO: aggressive (50% exit, 75%, 100%) — reinvest faster
+            # STOCKS: professional (50%, 100%, 150%) — let winners run
             rsi_exit = rsi_signal and unrealized_pnl > 0
 
             # Check which profit tiers have been hit
-            tier1_hit = unrealized_pnl >= (profit_target * TIER_LEVELS[0])
-            tier2_hit = unrealized_pnl >= (profit_target * TIER_LEVELS[1])
-            tier3_hit = unrealized_pnl >= (profit_target * TIER_LEVELS[2])
+            tier1_hit = unrealized_pnl >= (position_profit_target * tier_levels[0])
+            tier2_hit = unrealized_pnl >= (position_profit_target * tier_levels[1])
+            tier3_hit = unrealized_pnl >= (position_profit_target * tier_levels[2])
 
             # Exit conditions: hard stop, RSI reversal on profit, or hit a tiered target
             if stop_hit:
@@ -725,17 +830,13 @@ async def run_prop_cycle():
                 reason = "RSI EXIT"
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
             elif tier3_hit:
-                # At 150% of target - exit final position, let no more gain escape
-                reason = f"TIER 3 EXIT (${unrealized_pnl:.2f} profit, {unrealized_pnl/profit_target:.1f}x target)"
+                reason = f"TIER 3 EXIT (${unrealized_pnl:.2f} profit, {unrealized_pnl/position_profit_target:.1f}x target)"
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
-            elif tier2_hit and unrealized_pnl >= profit_target:
-                # At 100% of target - full exit, professional take
+            elif tier2_hit and unrealized_pnl >= position_profit_target:
                 reason = f"TIER 2 EXIT (${unrealized_pnl:.2f} profit, reached target)"
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
-            elif tier1_hit and unrealized_pnl >= (profit_target * 0.5):
-                # At 50% of target - exit 1/3 to secure gains
-                # For now use simple exit (upgrade to partial exit later)
-                reason = f"TIER 1 EXIT (${unrealized_pnl:.2f} profit, 50% of target)"
+            elif tier1_hit and unrealized_pnl >= (position_profit_target * tier_levels[0]):
+                reason = f"TIER 1 EXIT (${unrealized_pnl:.2f} profit, {tier_levels[0]*100:.0f}% of target)"
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
 
             await asyncio.sleep(0.3)
@@ -743,28 +844,46 @@ async def run_prop_cycle():
         # ── Pass 2: new entries, with rotation if already at the cap ─────
         candidates = []
         for contract, config in FUTURES.items():
+            # Skip non-crypto symbols during after-hours
+            is_crypto = "/" in config["symbol"]
+            if not is_market_hours and not is_crypto:
+                continue
+
             if contract in open_prop_positions:
                 continue
             data = scans.get(contract)
             if not data:
                 continue
             price, rsi, trend = data["price"], data["rsi"], data["trend"]
+            momentum = data.get("momentum", 0)
 
-            if rsi < RSI_BUY_BELOW:
-                candidates.append((RSI_BUY_BELOW - rsi, contract, config, "long", price, rsi, trend))
-                status = "BUY_ZONE"
-            elif rsi > RSI_SELL_ABOVE:
-                # Signal is real either way - only gate acting on it. Still
-                # shown as SHORT_ZONE on the dashboard so it accurately
-                # reflects RSI conditions even while shorting is disabled.
+            # Use crypto-specific RSI thresholds if this is a crypto symbol (contains /)
+            is_crypto = "/" in config["symbol"]
+            buy_threshold = CRYPTO_RSI_BUY_BELOW if is_crypto else RSI_BUY_BELOW
+            sell_threshold = CRYPTO_RSI_SELL_ABOVE if is_crypto else RSI_SELL_ABOVE
+
+            if rsi < buy_threshold:
+                # Long entry: RSI oversold + positive momentum (price trending up, not just dipping down)
+                if momentum > 0:
+                    candidates.append((buy_threshold - rsi, contract, config, "long", price, rsi, trend))
+                    status = "BUY_ZONE"
+                else:
+                    status = "BUY_SIGNAL_BLOCKED (momentum negative)"
+            elif rsi > sell_threshold:
+                # Short entry: RSI overbought + negative momentum (price trending down)
                 if shorting_enabled:
-                    candidates.append((rsi - RSI_SELL_ABOVE, contract, config, "short", price, rsi, trend))
-                status = "SHORT_ZONE"
+                    if momentum < 0:
+                        candidates.append((rsi - sell_threshold, contract, config, "short", price, rsi, trend))
+                        status = "SHORT_ZONE"
+                    else:
+                        status = "SHORT_SIGNAL_BLOCKED (momentum positive)"
+                else:
+                    status = "SHORT_ZONE"
             else:
                 status = "NEUTRAL"
             latest_signals[contract] = {
                 "symbol": config["symbol"], "price": price, "rsi": rsi, "trend": trend,
-                "status": status, "has_position": False, "checked_at": now.isoformat(),
+                "momentum": momentum, "status": status, "has_position": False, "checked_at": now.isoformat(),
             }
 
         candidates.sort(key=lambda c: -c[0])  # strongest (furthest past threshold) first
@@ -784,7 +903,9 @@ async def run_prop_cycle():
                 continue
 
             if len(open_prop_positions) < MAX_POSITIONS:
-                log.info(f"[APEX_589296] 📡 {side.upper()} {contract} — RSI:{rsi} Trend:{trend}")
+                scan_data = scans.get(contract)
+                momentum = scan_data.get("momentum", 0) if scan_data else 0
+                log.info(f"[APEX_589296] 📡 {side.upper()} {contract} — RSI:{rsi} Momentum:{momentum:+.2f}% Trend:{trend}")
                 await try_open(contract, config, side, price, rsi, trend, MAX_POSITIONS - len(open_prop_positions))
             else:
                 # At the cap - find the weakest held position (lowest
