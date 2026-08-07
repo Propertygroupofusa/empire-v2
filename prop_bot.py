@@ -82,6 +82,10 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
+# SCALING UP SYSTEM — Increase position sizes after each milestone lock
+# $1K lock → scale to 1.5x, $2K lock → scale to 2.0x, $5K lock → scale to 3.0x
+POSITION_SCALE_MULTIPLIER = float(os.getenv("POSITION_SCALE_MULTIPLIER", "1.0"))  # Starts at 1.0x, increases per milestone
+
 # APEX futures — use micro contracts (lower risk during evaluation)
 # Expanded to include international markets and forex for 24/5 global trading opportunities
 FUTURES = {
@@ -530,18 +534,18 @@ CRITICAL_BUYING_POWER_THRESHOLD = float(os.getenv("PROP_CRITICAL_BP_THRESHOLD", 
 
 
 def size_position(cash_remaining, slots_remaining, price):
-    """Dollar-based (fractional-share) position sizing. A fixed 1-share
-    order fails outright on higher-priced ETFs (SPY, QQQ, DIA) once cash
-    is tight, while cheaper ones (SLV, USO) fill fine - silently capping
-    how many of the open slots can ever actually fill regardless of how
-    many real signals come in. Splitting whatever cash is left evenly
-    across the remaining open slots means a small account can still use
-    all its slots, no matter which symbol's proxy ETF happens to signal.
-    Returns None if there isn't enough cash left for even one minimum-size
-    position."""
+    """Dollar-based (fractional-share) position sizing with SCALING MULTIPLIER.
+    After each milestone lock, position sizes increase (1.5x for $2K phase, 2.0x for $5K phase).
+    This allows account to compound faster while maintaining capital protection.
+    Returns None if there isn't enough cash left for even one minimum-size position."""
     if slots_remaining <= 0 or cash_remaining < MIN_POSITION_NOTIONAL:
         return None
+
+    # Apply scaling multiplier (increases after milestone locks)
+    scale = float(os.getenv("POSITION_SCALE_MULTIPLIER", "1.0"))
+
     amount = min(max(cash_remaining / slots_remaining, MIN_POSITION_NOTIONAL), cash_remaining)
+    amount = amount * scale  # SCALE UP: bigger positions after milestone
     qty = round(amount / price, 6)
     return qty if qty > 0 else None
 
@@ -680,13 +684,16 @@ async def run_prop_cycle():
 
                     await close_position(session, contract, FUTURES.get(contract, {}), pos, price, 0, "milestone", "PROFIT LOCK - $1K REACHED")
 
+                # SCALE UP: Increase position sizes for next phase
+                os.environ["POSITION_SCALE_MULTIPLIER"] = "1.5"  # Scale to 1.5x for $2K phase
+
                 send_trade_alert(
                     "🎯 EMPIRE BOT — $1,000 MILESTONE REACHED",
                     f"**PROFIT LOCK ACTIVATED - MILESTONE #1 COMPLETE**\n\n"
                     f"Account Equity: ${equity:.2f}\n"
                     f"All positions closed to secure milestone.\n\n"
                     f"Daily P&L: ${daily_pnl:.2f}\n"
-                    f"Status: TRADING RESUMED FOR $2,000 TARGET (24hr)\n\n"
+                    f"Status: SCALING UP → 1.5x position sizes for $2,000 TARGET (24hr)\n\n"
                     f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
                 )
                 # Mark milestone as locked, resume trading for $2K target
@@ -712,13 +719,16 @@ async def run_prop_cycle():
 
                     await close_position(session, contract, FUTURES.get(contract, {}), pos, price, 0, "milestone", "PROFIT LOCK - $2K REACHED")
 
+                # SCALE UP: Prepare for next phase (can resume with 2.0x scaling if desired)
+                os.environ["POSITION_SCALE_MULTIPLIER"] = "2.0"  # Scale to 2.0x for next phase
+
                 send_trade_alert(
                     "🚀 EMPIRE BOT — $2,000 MILESTONE REACHED",
                     f"**PROFIT LOCK ACTIVATED - MILESTONE #2 COMPLETE**\n\n"
                     f"Account Equity: ${equity:.2f}\n"
                     f"DOUBLE TARGET ACHIEVED in 24 hours!\n\n"
                     f"Daily P&L: ${daily_pnl:.2f}\n"
-                    f"Status: ALL POSITIONS LOCKED. Manual override required for next target.\n\n"
+                    f"Status: Positions locked at $2K. Ready to scale to 2.0x for $5K target if continuing.\n\n"
                     f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
                 )
                 return  # Stop all trading after $2K lock
