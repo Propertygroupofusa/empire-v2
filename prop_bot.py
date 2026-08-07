@@ -710,7 +710,8 @@ async def run_prop_cycle():
             cash_remaining -= qty * price
         return opened
 
-    async with aiohttp.ClientSession() as session:
+    connector = aiohttp.TCPConnector(use_dns_cache=True)
+    async with aiohttp.ClientSession(connector=connector, trust_env=False) as session:
         await reconcile_positions_with_broker(session)
 
         equity = await get_account_equity(session)
