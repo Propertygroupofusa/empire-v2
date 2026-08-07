@@ -41,18 +41,36 @@ CRYPTO_RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "35"))   # MORE 
 CRYPTO_RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "65"))  # MORE overbought exits (more profit locks)
 
 # AGGRESSIVE WINS + STRICT LOSS PREVENTION
-# Stop-loss TIGHTENED to 0.3% to exit losing trades immediately
-# On $1,000 account: 0.3% = $3 max loss per trade (cut losses quickly)
-STOP_LOSS_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.003"))  # 0.3% for stocks/futures (TIGHTER)
+# Base stop-loss: 0.3% to exit losing trades immediately
+# At higher scales: tighter stops to prevent multiplied losses
+# 1.0x scale: 0.3% stop
+# 1.5x scale: 0.2% stop (1.5x scaled position needs tighter exit)
+# 2.0x scale: 0.2% stop (maximum scale = maximum discipline)
+STOP_LOSS_BASE_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.003"))  # Base: 0.3% for stocks/futures
 
-# Crypto-specific stop-loss: 0.3% MAXIMUM LOSS PER TRADE
-# Quick exit on losers = more capital for winning trades
-CRYPTO_STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.003"))  # 0.3% crypto (TIGHTER - fast losses)
+# Crypto-specific stop-loss: dynamically tightens with scale
+# Base: 0.3%, tightens to 0.2% at 1.5x scale
+CRYPTO_STOP_LOSS_BASE_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.003"))  # Base: 0.3%
 
-# Daily maximum loss in dollars — STRICT CIRCUIT BREAKER
-# $10 daily max loss = 1% of $1K account. Stops all trading immediately.
-# Prevents drawdown spirals, preserves capital for winning days.
-DAILY_MAX_LOSS_DOLLARS = float(os.getenv("PROP_DAILY_MAX_LOSS", "10"))  # Reduced from $20 to $10
+def get_dynamic_stop_loss(scale: float) -> float:
+    """Tighten stop-loss as positions scale up (1.5x+ = tighter discipline)"""
+    if scale >= 1.5:
+        return 0.002  # 0.2% at 1.5x scale and higher
+    return STOP_LOSS_BASE_PCT  # 0.3% baseline
+
+def get_dynamic_crypto_stop_loss(scale: float) -> float:
+    """Crypto: same dynamic tightening as stocks"""
+    if scale >= 1.5:
+        return 0.002  # 0.2% at 1.5x scale and higher
+    return CRYPTO_STOP_LOSS_BASE_PCT  # 0.3% baseline
+
+# Daily maximum loss in dollars — DYNAMIC CIRCUIT BREAKER
+# Base: $10 daily max loss at 1.0x scale. SCALES with position multiplier.
+# 1.0x scale → $10 loss limit
+# 1.5x scale → $15 loss limit (larger positions = larger max loss allowed)
+# 2.0x scale → $20 loss limit (can absorb bigger drawdowns while scaling)
+# Prevents catastrophic losses but allows survival of losing streaks at higher scales
+DAILY_MAX_LOSS_BASE = float(os.getenv("PROP_DAILY_MAX_LOSS_BASE", "10"))
 
 # AGGRESSIVE EXIT ON RED — Close any position down 0.5% immediately
 # Don't wait for stop-loss to trigger. Exit fast, preserve capital.
@@ -150,10 +168,18 @@ FUTURES = {
 # logic in run_prop_cycle (swap out a losing position for a fresh signal)
 # still exists as a safety net, but can't trigger at this default since
 # there's no 8th symbol to need a slot from.
-# Max concurrent positions: OPTIMIZED FOR MICRO-ACCOUNT COMPOUNDING
-# 2 positions max concentrates capital, maximizes profits per position, enables faster compounding
-# With 4 crypto pairs, averaging 2 positions = focused capital deployment
-MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", "2"))
+# Max concurrent positions: SCALED WITH POSITION MULTIPLIER
+# Base: 2 positions at 1.0x scale
+# At 1.5x scale: reduce to 1 position (1.5x loss on 1 trade < 1.0x loss on 2 trades)
+# At 2.0x scale: stay at 1 position (conservative with max scaling)
+# This prevents multiplied losses across multiple scaled positions
+BASE_MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", "2"))
+
+def get_dynamic_max_positions(scale: float) -> int:
+    """Reduce max positions as scale increases to limit compounded losses"""
+    if scale >= 1.5:
+        return 1  # Single position when scaled 1.5x or higher
+    return BASE_MAX_POSITIONS  # 2 positions at baseline 1.0x scale
 
 # Profit target, in REAL DOLLARS of profit on the position (not a raw
 # price move on the underlying) - scaled by real account equity. Increased targets
@@ -811,13 +837,20 @@ async def run_prop_cycle():
             (daily_account_equity_start - equity) >= daily_loss_limit
         )
 
-        log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | Profit target: ${profit_target:.2f}/position" +
+        # Dynamic circuit breaker: scales with position multiplier
+        # Larger positions require larger loss threshold to avoid premature halt
+        scale = float(os.getenv("POSITION_SCALE_MULTIPLIER", "1.0"))
+        dynamic_daily_max_loss = DAILY_MAX_LOSS_BASE * scale  # $10→$15→$20 as scale increases
+        dynamic_max_positions = get_dynamic_max_positions(scale)  # 2 at 1.0x, 1 at 1.5x+
+
+        log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | Scale {scale:.1f}x | Max {dynamic_max_positions} pos | Profit target: ${profit_target:.2f}/position" +
                 (f" | ⚠️ DAILY 2% LOSS LIMIT HIT - stopping new trades" if is_hitting_daily_loss_limit else ""))
 
-        # Circuit breaker: if daily loss exceeds $20, close ALL open positions immediately
+        # Circuit breaker: if daily loss exceeds threshold, close ALL open positions immediately
+        # Scales dynamically with position size multiplier to prevent early halt on scaled positions
         daily_loss_dollars = (daily_account_equity_start - equity) if daily_account_equity_start and equity else 0
-        if daily_loss_dollars >= DAILY_MAX_LOSS_DOLLARS:
-            log.warning(f"[APEX_589296] 🛑 CIRCUIT BREAKER: Daily loss ${daily_loss_dollars:.2f} >= ${DAILY_MAX_LOSS_DOLLARS:.2f} — closing ALL positions")
+        if daily_loss_dollars >= dynamic_daily_max_loss:
+            log.warning(f"[APEX_589296] 🛑 CIRCUIT BREAKER: Daily loss ${daily_loss_dollars:.2f} >= ${dynamic_daily_max_loss:.2f} (scale {scale}x) — closing ALL positions")
             for contract in list(open_prop_positions.keys()):
                 data = scans.get(contract)
                 config = FUTURES[contract]
@@ -878,11 +911,14 @@ async def run_prop_cycle():
             entry = position["entry"]
             qty = position["qty"]
 
-            # Use crypto-specific RSI thresholds and tighter stops
+            # Use crypto-specific RSI thresholds and dynamically tightened stops based on scale
             is_crypto = "/" in config["symbol"]
             exit_sell_threshold = CRYPTO_RSI_SELL_ABOVE if is_crypto else RSI_SELL_ABOVE
             exit_buy_threshold = CRYPTO_RSI_BUY_BELOW if is_crypto else RSI_BUY_BELOW
-            stop_loss = CRYPTO_STOP_LOSS_PCT if is_crypto else STOP_LOSS_PCT
+
+            # Dynamic stop-loss: tighter at higher scales to prevent compounded losses
+            scale = float(os.getenv("POSITION_SCALE_MULTIPLIER", "1.0"))
+            stop_loss = get_dynamic_crypto_stop_loss(scale) if is_crypto else get_dynamic_stop_loss(scale)
 
             if side == "long":
                 unrealized_pnl = (price - entry) * qty
@@ -997,11 +1033,11 @@ async def run_prop_cycle():
                 log.info(f"[APEX_589296] 🚫 {side.upper()} {contract} skipped — 1H trend ({higher_tf}) opposes 5min signal")
                 continue
 
-            if len(open_prop_positions) < MAX_POSITIONS:
+            if len(open_prop_positions) < dynamic_max_positions:
                 scan_data = scans.get(contract)
                 momentum = scan_data.get("momentum", 0) if scan_data else 0
                 log.info(f"[APEX_589296] 📡 {side.upper()} {contract} — RSI:{rsi} Momentum:{momentum:+.2f}% Trend:{trend}")
-                await try_open(contract, config, side, price, rsi, trend, MAX_POSITIONS - len(open_prop_positions))
+                await try_open(contract, config, side, price, rsi, trend, dynamic_max_positions - len(open_prop_positions))
             else:
                 # At the cap - find the weakest held position (lowest
                 # unrealized P&L). Only rotate out of it if it's a genuine
@@ -1031,7 +1067,7 @@ async def run_prop_cycle():
                     # just what was already sitting uninvested.
                     freed_value = open_prop_positions[weakest_contract]["qty"] * held_data["price"]
                     log.info(
-                        f"[APEX_589296] 🔄 ROTATING: {weakest_contract} ({weakest_pct:.2f}%, weakest of {MAX_POSITIONS}) "
+                        f"[APEX_589296] 🔄 ROTATING: {weakest_contract} ({weakest_pct:.2f}%, weakest of {dynamic_max_positions}) "
                         f"→ {contract} (RSI:{rsi} {side})"
                     )
                     closed = await close_position(
@@ -1041,13 +1077,13 @@ async def run_prop_cycle():
                     if closed:
                         if cash_remaining is not None:
                             cash_remaining += freed_value
-                        await try_open(contract, config, side, price, rsi, trend, MAX_POSITIONS - len(open_prop_positions))
+                        await try_open(contract, config, side, price, rsi, trend, dynamic_max_positions - len(open_prop_positions))
                 else:
                     log.info(
-                        f"[APEX_589296] At max positions ({MAX_POSITIONS}) - {contract} {side} signal held, "
+                        f"[APEX_589296] At max positions ({dynamic_max_positions}) - {contract} {side} signal held, "
                         f"weakest position ({weakest_contract} {weakest_pct:+.2f}%) isn't a loss, not rotating"
                         if weakest_contract else
-                        f"[APEX_589296] At max positions ({MAX_POSITIONS}) - {contract} {side} signal held, no rotation candidate"
+                        f"[APEX_589296] At max positions ({dynamic_max_positions}) - {contract} {side} signal held, no rotation candidate"
                     )
 
             await asyncio.sleep(0.3)
