@@ -476,6 +476,50 @@ async def run_migrations():
              f"failures={failed}")
 
 
+async def validate_foreign_keys():
+    """Validate that all required tables exist and have correct foreign key constraints.
+
+    NotaryPayout table in particular sometimes fails to create on PostgreSQL due to
+    foreign key constraint ordering issues. This function detects and repairs such issues.
+    """
+    from database import Base
+    import models  # noqa: F401
+
+    if engine.dialect.name != "postgresql":
+        return  # Foreign key checks are for PostgreSQL only
+
+    async with engine.begin() as conn:
+        inspector = inspect.__call__(conn.sync_conn)
+        existing_tables = {t.lower() for t in inspector.get_table_names()}
+
+        # Check each model's table exists
+        missing_tables = []
+        for table in Base.metadata.sorted_tables:
+            if table.name.lower() not in existing_tables:
+                missing_tables.append(table.name)
+
+        if missing_tables:
+            log.warning(f"Foreign key validation: Missing tables: {missing_tables}")
+            # Try to create missing tables explicitly
+            for table in Base.metadata.sorted_tables:
+                if table.name.lower() in {t.lower() for t in missing_tables}:
+                    try:
+                        await conn.run_sync(lambda sync_conn, t=table: t.create(sync_conn, checkfirst=True))
+                        log.info(f"Foreign key validation: Created table {table.name}")
+                    except Exception as e:
+                        log.warning(f"Foreign key validation: Could not create {table.name}: {e}")
+        else:
+            log.info(f"Foreign key validation: All {len(Base.metadata.sorted_tables)} tables exist")
+
+        # Verify NotaryPayout specifically
+        if "notary_payouts" in existing_tables:
+            constraints = inspector.get_foreign_keys("notary_payouts")
+            if constraints:
+                log.info(f"Foreign key validation: notary_payouts has {len(constraints)} FK constraints")
+            else:
+                log.warning("Foreign key validation: notary_payouts exists but has NO foreign key constraints - this is unexpected")
+
+
 # ── Bot Earnings System ──────────────────────────────────────
 
 async def initialize_bot():
@@ -858,6 +902,11 @@ async def lifespan(app: FastAPI):
         await run_migrations()
     except Exception as e:
         log.warning(f"Migrations failed: {e}")
+
+    try:
+        await validate_foreign_keys()
+    except Exception as e:
+        log.warning(f"Foreign key validation failed: {e}")
 
     try:
         await initialize_bot()
