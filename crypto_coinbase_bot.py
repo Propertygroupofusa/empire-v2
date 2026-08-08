@@ -585,7 +585,7 @@ async def run_crypto_cycle():
                             f"Reason: {reason}\n\nDashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
                         )
                         open_crypto_positions.pop(symbol, None)
-                        await _db_delete_open(symbol)
+                        await _db_delete_open(symbol, "long")
                 await asyncio.sleep(0.3)
             return
 
@@ -659,7 +659,7 @@ async def run_crypto_cycle():
                         f"Reason: {reason}\n\nDashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
                     )
                     open_crypto_positions.pop(symbol, None)
-                    await _db_delete_open(symbol)
+                    await _db_delete_open(symbol, "long")
 
             await asyncio.sleep(0.3)
 
