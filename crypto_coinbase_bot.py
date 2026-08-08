@@ -67,7 +67,15 @@ COINBASE_API_PRIVATE_KEY = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\
 COINBASE_HOST = "api.coinbase.com"
 COINBASE_BASE_URL = f"https://{COINBASE_HOST}"
 
-CRYPTO_PAIRS = ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "AVAX/USD", "LINK/USD"]  # 6 quality pairs, dropped weak alts (DOGE/SHIB)
+CRYPTO_PAIRS = [
+    "BTC/USD", "ETH/USD",  # Tier 1: Core stable cryptos
+    "SOL/USD", "XRP/USD", "AVAX/USD", "LINK/USD",  # Tier 2: Established mid-caps
+    "DOGE/USD", "SHIB/USD",  # Meme coins with strong volume
+    "NEAR/USD", "MATIC/USD",  # Layer 2 / scaling solutions
+    "ARB/USD", "OP/USD",  # Arbitrum & Optimism
+    "AAVE/USD", "UNI/USD",  # DeFi protocols
+    "STX/USD", "ATOM/USD",  # Bitcoin L2 & Cosmos
+]  # 16 pairs total - expanded for more entry opportunities
 
 
 def _to_product_id(symbol: str) -> str:
