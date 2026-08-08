@@ -1059,25 +1059,55 @@
 
             const metaEl = document.getElementById('cryptoCoinbaseMeta');
             const allocationText = data.max_allocation == null ? 'full balance (compounding)' : `$${data.max_allocation.toFixed(2)} cap`;
+            const openCount = Object.keys(data.open_positions || {}).length;
             metaEl.textContent = data.last_cycle_at
-                ? `Last scan: ${new Date(data.last_cycle_at).toLocaleTimeString()} | Buy below RSI ${data.rsi_buy_below} | Sell above RSI ${data.rsi_sell_above} | Today's crypto P&L: $${data.daily_pnl.toFixed(2)} | Allocation: ${allocationText}`
+                ? `Last scan: ${new Date(data.last_cycle_at).toLocaleTimeString()} | RSI: ${data.rsi_buy_below}/${data.rsi_sell_above} | Today's P&L: $${data.daily_pnl.toFixed(2)} | Open: ${openCount} | Allocation: ${allocationText}`
                 : 'Bot has not completed a scan cycle yet.';
 
             const listEl = document.getElementById('cryptoCoinbaseList');
-            const pairs = ['BTC/USD', 'ETH/USD'];
-            listEl.innerHTML = pairs.map(pair => {
+            const pairs = ['BTC/USD', 'ETH/USD', 'SOL/USD', 'XRP/USD', 'AVAX/USD', 'DOGE/USD', 'SHIB/USD', 'LINK/USD'];
+
+            let html = '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">';
+
+            pairs.forEach(pair => {
                 const sig = data.signals ? data.signals[pair] : null;
+                const pos = data.open_positions ? data.open_positions[pair] : null;
+
+                let statusColor = '#ffaa00';
+                let statusLabel = 'NEUTRAL';
+
                 if (!sig) {
-                    return `<div class="pair"><span class="pair-name">${pair}</span><span class="pair-status">Waiting for first scan...</span></div>`;
+                    html += `<div class="pair" style="border: 1px solid #666; padding: 10px; border-radius: 4px;"><strong>${pair}</strong><br><span style="color: #888;">Waiting...</span></div>`;
+                    return;
                 }
-                const statusLabel = {
-                    BUY_ZONE: '📈 BUY ZONE',
-                    HOLDING_LONG: '💼 LONG',
-                    NEUTRAL: 'neutral',
-                }[sig.status] || sig.status;
-                const statusClass = 'status-' + (sig.status || 'neutral').toLowerCase().replace('_', '-');
-                return `<div class="pair"><span class="pair-name">${pair}</span><span class="pair-status ${statusClass}">$${sig.price.toFixed(2)} | RSI ${sig.rsi} | ${statusLabel}</span></div>`;
-            }).join('');
+
+                if (sig.status === 'BUY_ZONE') {
+                    statusColor = '#00ff00';
+                    statusLabel = '📈 BUY';
+                } else if (sig.status === 'HOLDING_LONG') {
+                    statusColor = '#00ff00';
+                    statusLabel = '💼 LONG';
+                    if (pos) statusLabel += ` (${pos.qty.toFixed(4)})`;
+                } else if (sig.status === 'OVERSOLD_BUT_BELOW_MA') {
+                    statusColor = '#ffaa00';
+                    statusLabel = '⏳ OVERSOLD';
+                } else {
+                    statusColor = '#ffaa00';
+                    statusLabel = 'NEUTRAL';
+                }
+
+                const maIndicator = sig.above_ma ? '✓' : '✗';
+                html += `<div class="pair" style="border: 2px solid ${statusColor}; padding: 12px; border-radius: 4px; background: rgba(0,0,0,0.3);">
+                    <div style="font-weight: bold; color: #00ff00;">${pair}</div>
+                    <div style="font-size: 0.9em; color: #aaa; margin: 5px 0;">$${sig.price.toFixed(2)}</div>
+                    <div style="font-size: 0.85em; color: #00cc00;">RSI: ${sig.rsi}</div>
+                    <div style="font-size: 0.85em; color: #ffaa00;">MA14: ${sig.ma_14 ? sig.ma_14.toFixed(2) : 'N/A'} ${maIndicator}</div>
+                    <div style="margin-top: 8px; color: ${statusColor}; font-weight: bold; font-size: 0.9em;">${statusLabel}</div>
+                </div>`;
+            });
+
+            html += '</div>';
+            listEl.innerHTML = html;
         }
 
         async function refreshTrades() {
