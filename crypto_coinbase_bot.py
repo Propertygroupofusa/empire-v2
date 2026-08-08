@@ -67,7 +67,7 @@ COINBASE_API_PRIVATE_KEY = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\
 COINBASE_HOST = "api.coinbase.com"
 COINBASE_BASE_URL = f"https://{COINBASE_HOST}"
 
-CRYPTO_PAIRS = ["BTC/USD", "ETH/USD"]
+CRYPTO_PAIRS = ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "AVAX/USD", "DOGE/USD", "SHIB/USD", "LINK/USD"]
 
 
 def _to_product_id(symbol: str) -> str:
@@ -114,13 +114,14 @@ def _auth_headers(method: str, path: str) -> dict:
     return {"Authorization": f"Bearer {_build_jwt(method, path)}", "Content-Type": "application/json"}
 
 
-# Tightened to EXTREME RSI signals only - same fix as prop_bot.py.
-# Weak signals (45/50) lose money. Switch to standard oversold/overbought:
-# only trade RSI < 30 (longs) or > 70 (shorts). Fewer trades, higher win rate.
-RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "30"))
-RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "70"))
+# Optimized for 24/7 volume: slightly loosened thresholds (32/68 vs 30/70)
+# to catch more entry signals without sacrificing quality. Still conservative
+# enough to avoid false breakout noise, but flexible enough for volatile crypto.
+# 30/70 catches only extreme oversold/overbought; 32/68 catches 2% wider moves.
+RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "32"))
+RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "68"))
 
-MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", str(len(CRYPTO_PAIRS))))
+MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "4"))  # Allow up to 4 concurrent positions (was limited by 2 pairs, now we have 8)
 # Unset by default - no ceiling, so the full account balance (principal +
 # compounded profit) is always in play. Set CRYPTO_MAX_ALLOCATION to cap
 # it at a fixed dollar amount instead, if ever wanted.
@@ -382,8 +383,9 @@ async def _fetch_coinbase_closes(session, symbol):
 
 
 async def get_price_rsi(session, symbol):
-    """Price+RSI from Coinbase's public candles endpoint - the same
-    exchange orders execute on, so there's no cross-exchange price drift."""
+    """Price+RSI+breakout from Coinbase's public candles endpoint - the same
+    exchange orders execute on, so there's no cross-exchange price drift.
+    Also computes 14-bar MA for breakout confirmation (only buy above MA)."""
     try:
         closes = await _fetch_coinbase_closes(session, symbol)
     except Exception as e:
@@ -393,7 +395,9 @@ async def get_price_rsi(session, symbol):
     if closes and len(closes) >= 14:
         rsi = _compute_rsi(closes)
         price = closes[-1]
-        return {"price": price, "rsi": rsi}
+        ma_14 = sum(closes[-14:]) / 14  # 14-bar moving average
+        above_ma = price > ma_14  # Breakout confirmation: price above MA
+        return {"price": price, "rsi": rsi, "ma_14": ma_14, "above_ma": above_ma}
 
     log.error(f"❌ {symbol}: coinbase price fetch failed")
     return None
@@ -579,7 +583,9 @@ async def run_crypto_cycle():
             data = await get_price_rsi(session, symbol)
             if data:
                 scans[symbol] = data
-                log.info(f"[CRYPTO] {symbol} | ${data['price']:.2f} | RSI:{data['rsi']}")
+                ma = data.get('ma_14', 0)
+                above_ma = "✓" if data.get('above_ma') else "✗"
+                log.info(f"[CRYPTO] {symbol} | ${data['price']:.2f} | RSI:{data['rsi']} | MA14:${ma:.2f} {above_ma}")
             await asyncio.sleep(0.3)
 
         # ── Pass 1: manage exits (long only) ──────────────────────────
@@ -646,7 +652,7 @@ async def run_crypto_cycle():
 
             await asyncio.sleep(0.3)
 
-        # ── Pass 2: new entries (long only, RSI oversold) ─────────────
+        # ── Pass 2: new entries (long only, RSI oversold + breakout) ─────────────
         for symbol in CRYPTO_PAIRS:
             if symbol in open_crypto_positions:
                 continue
@@ -654,16 +660,26 @@ async def run_crypto_cycle():
             if not data:
                 continue
             price, rsi = data["price"], data["rsi"]
+            ma_14 = data.get("ma_14", 0)
+            above_ma = data.get("above_ma", False)
 
             if rsi >= RSI_BUY_BELOW:
                 latest_signals[symbol] = {
-                    "price": price, "rsi": rsi, "status": "NEUTRAL",
+                    "price": price, "rsi": rsi, "ma_14": ma_14, "status": "NEUTRAL",
+                    "has_position": False, "checked_at": now.isoformat(),
+                }
+                continue
+
+            # Entry confirmed only if: (1) RSI oversold AND (2) price above 14-bar MA
+            if not above_ma:
+                latest_signals[symbol] = {
+                    "price": price, "rsi": rsi, "ma_14": ma_14, "status": "OVERSOLD_BUT_BELOW_MA",
                     "has_position": False, "checked_at": now.isoformat(),
                 }
                 continue
 
             latest_signals[symbol] = {
-                "price": price, "rsi": rsi, "status": "BUY_ZONE",
+                "price": price, "rsi": rsi, "ma_14": ma_14, "status": "BUY_ZONE",
                 "has_position": False, "checked_at": now.isoformat(),
             }
 
@@ -738,7 +754,7 @@ def run():
             loop.run_until_complete(run_crypto_cycle())
         except Exception as e:
             log.error(f"Crypto cycle error: {e}")
-        time.sleep(60)
+        time.sleep(30)  # 30-sec cycle for 24/7 responsiveness (was 60s)
 
 
 if __name__ == "__main__":
