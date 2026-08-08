@@ -376,20 +376,28 @@ async def run_migrations():
                         continue
                     seq = f"{table_name}_{column.name}_seq"
                     try:
-                        await conn.execute(text(f'CREATE SEQUENCE IF NOT EXISTS "{seq}"'))
+                        # Force-create sequence, dropping if it exists in wrong state
+                        await conn.execute(text(f'DROP SEQUENCE IF EXISTS "{seq}" CASCADE'))
+                        await conn.execute(text(f'CREATE SEQUENCE "{seq}"'))
                         await conn.execute(text(
                             f'ALTER SEQUENCE "{seq}" OWNED BY "{table_name}"."{column.name}"'))
                         # Start above any rows already present, so the
                         # repair cannot collide with existing primary keys.
+                        max_val = 0
+                        try:
+                            result = await conn.execute(text(
+                                f'SELECT COALESCE(MAX("{column.name}"), 0) FROM "{table_name}"'
+                            ))
+                            max_val = result.scalar() or 0
+                        except:
+                            pass
                         await conn.execute(text(
-                            f'SELECT setval(\'"{seq}"\', '
-                            f'COALESCE((SELECT MAX("{column.name}") FROM "{table_name}"), 0) + 1, '
-                            f'false)'))
+                            f"SELECT setval('{seq}', {max_val + 1})"))
                         await conn.execute(text(
                             f'ALTER TABLE "{table_name}" ALTER COLUMN "{column.name}" '
-                            f'SET DEFAULT nextval(\'"{seq}"\')'))
+                            f'SET DEFAULT nextval(\'{seq}\')'))
                         log.info(f"Migration OK: {table_name}.{column.name} "
-                                 f"auto-increment restored via {seq}")
+                                 f"auto-increment restored via {seq} (starting at {max_val + 1})")
                         sequenced += 1
                     except Exception as e:
                         log.warning(f"Migration FAILED {table_name}.{column.name} "
