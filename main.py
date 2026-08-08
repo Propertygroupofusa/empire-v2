@@ -369,31 +369,51 @@ async def run_migrations():
                     info = by_name.get(column.name)
                     if info is None or not isinstance(column.type, Integer):
                         continue
-                    # a serial column has default nextval(...); an identity
-                    # column reports an identity dict. Neither => nothing
-                    # will ever populate it.
-                    if info.get("default") or info.get("identity"):
-                        continue
+                    # AGGRESSIVE: always try to fix Integer PKs on Postgres.
+                    # Don't skip even if info.get("default") exists - it might
+                    # be broken/malformed. Always rebuild from scratch.
                     seq = f"{table_name}_{column.name}_seq"
                     try:
-                        await conn.execute(text(f'CREATE SEQUENCE IF NOT EXISTS "{seq}"'))
+                        # Step 1: Kill any existing sequence (may be broken)
+                        await conn.execute(text(f'DROP SEQUENCE IF EXISTS "{seq}" CASCADE'))
+
+                        # Step 2: Find current max ID so we don't collide
+                        max_val = 0
+                        try:
+                            result = await conn.execute(text(
+                                f'SELECT COALESCE(MAX("{column.name}"), 0) FROM "{table_name}"'
+                            ))
+                            max_val = result.scalar() or 0
+                        except Exception as query_err:
+                            log.debug(f"Could not query max({column.name}) on {table_name}: {query_err}")
+
+                        # Step 3: Create fresh sequence
+                        await conn.execute(text(f'CREATE SEQUENCE "{seq}" START {max_val + 1}'))
+
+                        # Step 4: Own it
                         await conn.execute(text(
                             f'ALTER SEQUENCE "{seq}" OWNED BY "{table_name}"."{column.name}"'))
-                        # Start above any rows already present, so the
-                        # repair cannot collide with existing primary keys.
-                        await conn.execute(text(
-                            f'SELECT setval(\'"{seq}"\', '
-                            f'COALESCE((SELECT MAX("{column.name}") FROM "{table_name}"), 0) + 1, '
-                            f'false)'))
+
+                        # Step 5: Drop existing DEFAULT if present (replace it)
+                        try:
+                            await conn.execute(text(
+                                f'ALTER TABLE "{table_name}" ALTER COLUMN "{column.name}" '
+                                f'DROP DEFAULT'))
+                        except:
+                            pass  # OK if no DEFAULT existed yet
+
+                        # Step 6: Set new DEFAULT that uses the sequence
                         await conn.execute(text(
                             f'ALTER TABLE "{table_name}" ALTER COLUMN "{column.name}" '
-                            f'SET DEFAULT nextval(\'"{seq}"\')'))
+                            f'SET DEFAULT nextval(\'{seq}\')'))
+
                         log.info(f"Migration OK: {table_name}.{column.name} "
-                                 f"auto-increment restored via {seq}")
+                                 f"auto-increment repaired via {seq} (max existing: {max_val}, "
+                                 f"sequence starts: {max_val + 1})")
                         sequenced += 1
                     except Exception as e:
-                        log.warning(f"Migration FAILED {table_name}.{column.name} "
-                                    f"auto-increment: [{type(e).__name__}] {e}")
+                        log.error(f"Migration FAILED {table_name}.{column.name} "
+                                  f"auto-increment: [{type(e).__name__}] {e}", exc_info=True)
                         failed += 1
 
             for column in table.columns:
