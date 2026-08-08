@@ -854,6 +854,11 @@ async def run_crypto_cycle():
 
 
 def run():
+    # Emergency stop: disable bot if CRYPTO_BOT_DISABLED is set
+    if os.getenv("CRYPTO_BOT_DISABLED", "false").lower() == "true":
+        log.warning("🛑 CRYPTO BOT DISABLED — set via CRYPTO_BOT_DISABLED env var. Bot will not start.")
+        return
+
     log.info("=" * 60)
     log.info("CRYPTO TRADING BOT — Coinbase (separate account from Alpaca stocks)")
     alloc_desc = f"${MAX_ALLOCATION:.2f} cap" if MAX_ALLOCATION is not None else "full balance (compounding)"
