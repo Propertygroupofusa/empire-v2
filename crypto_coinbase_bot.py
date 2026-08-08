@@ -908,8 +908,8 @@ async def run_crypto_cycle():
 
 
 def run():
-    # Emergency stop: disable bot if CRYPTO_BOT_DISABLED is set (default: DISABLED for safety)
-    if os.getenv("CRYPTO_BOT_DISABLED", "true").lower() == "true":
+    # Emergency stop: disable bot if CRYPTO_BOT_DISABLED is set (default: ENABLED for trading)
+    if os.getenv("CRYPTO_BOT_DISABLED", "false").lower() == "true":
         log.warning("🛑 CRYPTO BOT DISABLED — set via CRYPTO_BOT_DISABLED env var. Bot will not start.")
         return
 
