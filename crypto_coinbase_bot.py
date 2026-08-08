@@ -923,7 +923,7 @@ def run():
             loop.run_until_complete(run_crypto_cycle())
         except Exception as e:
             log.error(f"Crypto cycle error: {e}")
-        time.sleep(30)  # 30-sec cycle for 24/7 responsiveness (was 60s)
+        time.sleep(10)  # 10-sec cycle for ultra-fast entry/exit (6 scans/min, matches manual trader speed)
 
 
 if __name__ == "__main__":
