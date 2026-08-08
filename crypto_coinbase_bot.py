@@ -131,6 +131,9 @@ MAX_ALLOCATION = float(_max_allocation_env) if _max_allocation_env else None
 # $100+ balance: trades full notional, beats fees, compounds faster.
 MIN_POSITION_NOTIONAL = float(os.getenv("CRYPTO_MIN_POSITION_NOTIONAL", "0.50"))
 
+# Minimum trade size guard: skip trading if cash pool is too small to be meaningful
+MIN_CRYPTO_TRADE_USD = float(os.getenv("MIN_CRYPTO_TRADE_USD", "5.00"))
+
 # Staged capital release, requested after watching the account get drawn
 # down to single-digit cents trading with 100% of the balance every cycle:
 # instead of always trading the full balance, only ever risk it in fixed
@@ -189,15 +192,14 @@ async def set_tier_highwater(value: float):
     except Exception as e:
         log.error(f"[CRYPTO] Failed to persist tier high-water mark: {e}")
 
-# Coinbase's real Advanced Trade taker fee for this account's volume tier -
-# used only to size the profit target sensibly, not charged/simulated here
+# Coinbase trading cost: 0.40% total round-trip assumption = 0.20% entry + 0.20% exit
+# This is used only to size the profit target sensibly, not charged/simulated here
 # (the real fee is already reflected in Coinbase's fill price/balance).
-TAKER_FEE_RATE = float(os.getenv("CRYPTO_TAKER_FEE_RATE", "0.006"))
-ROUND_TRIP_FEE_PCT = TAKER_FEE_RATE * 2
+CRYPTO_ROUND_TRIP_FEE_RATE = float(os.getenv("CRYPTO_ROUND_TRIP_FEE_RATE", "0.004"))
 
 # A flat dollar profit target (the original design) doesn't scale with
 # position size, so on a small position it can be - and was, at $0.50 on a
-# ~$100 position - smaller than the ~1.2% round-trip fee itself, meaning
+# ~$100 position - smaller than the round-trip fee itself, meaning
 # every "successful" exit still lost money net of fees. The target is a
 # percentage of the position's entry value instead, with a floor that
 # guarantees it clears the round-trip fee with real profit left over.
@@ -205,7 +207,7 @@ ROUND_TRIP_FEE_PCT = TAKER_FEE_RATE * 2
 # BTC/ETH see 1-5% daily moves - capture those instead of closing at first tick.
 PROFIT_TARGET_PCT = max(
     float(os.getenv("CRYPTO_PROFIT_TARGET_PCT", "0.05")),  # Increased from 3% to 5%
-    ROUND_TRIP_FEE_PCT * 1.5,
+    CRYPTO_ROUND_TRIP_FEE_RATE * 1.5,
 )
 
 # Previously there was no stop-loss at all - the only exits were the
@@ -506,7 +508,71 @@ async def run_crypto_cycle():
         else:
             tier_desc = "tiering off"
         status_suffix = " | ⚠️ DAILY 2% LOSS LIMIT HIT - stopping new trades" if is_hitting_daily_loss_limit else ""
-        log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} ({cap_desc}, {tier_desc}) | Target: +{PROFIT_TARGET_PCT*100:.2f}% | Stop: -{STOP_LOSS_PCT*100:.2f}% | Round-trip fee: {ROUND_TRIP_FEE_PCT*100:.2f}%{status_suffix}")
+        log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} ({cap_desc}, {tier_desc}) | Target: +{PROFIT_TARGET_PCT*100:.2f}% | Stop: -{STOP_LOSS_PCT*100:.2f}% | Round-trip fee: {CRYPTO_ROUND_TRIP_FEE_RATE*100:.2f}%{status_suffix}")
+
+        # Skip new entries entirely if cash pool is below meaningful trade size
+        if cash_pool < MIN_CRYPTO_TRADE_USD:
+            log.info(
+                f"[CRYPTO] Cash pool ${cash_pool:.2f} below minimum trade size ${MIN_CRYPTO_TRADE_USD:.2f}; "
+                "skipping new entries (exits on open positions still run)"
+            )
+            # Still manage exits on existing positions, then return
+            scans = {}
+            for symbol in CRYPTO_PAIRS:
+                data = await get_price_rsi(session, symbol)
+                if data:
+                    scans[symbol] = data
+                await asyncio.sleep(0.3)
+            # Run Pass 1 (exits) only
+            for symbol, position in list(open_crypto_positions.items()):
+                data = scans.get(symbol)
+                if not data:
+                    continue
+                price, rsi = data["price"], data["rsi"]
+                entry, qty = position["entry"], position["qty"]
+                unrealized_pnl = (price - entry) * qty
+                unrealized_pct = (price - entry) / entry
+                stop_hit = unrealized_pct <= -STOP_LOSS_PCT
+                rsi_exit = rsi > RSI_SELL_ABOVE and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE
+                tier1_hit = unrealized_pct >= CRYPTO_TIER_LEVELS[0]
+                tier2_hit = unrealized_pct >= CRYPTO_TIER_LEVELS[1]
+                tier3_hit = unrealized_pct >= CRYPTO_TIER_LEVELS[2]
+                latest_signals[symbol] = {
+                    "price": price, "rsi": rsi, "status": "HOLDING_LONG",
+                    "has_position": True, "checked_at": now.isoformat(),
+                }
+                should_exit = False
+                reason = None
+                if stop_hit:
+                    should_exit = True
+                    reason = f"STOP LOSS (-{unrealized_pct*100:.2f}%)"
+                elif rsi_exit:
+                    should_exit = True
+                    reason = "RSI EXIT"
+                elif tier3_hit:
+                    should_exit = True
+                    reason = f"TIER 3 (+{unrealized_pct*100:.2f}%, let winners run)"
+                elif tier2_hit and unrealized_pct >= PROFIT_TARGET_PCT:
+                    should_exit = True
+                    reason = f"TIER 2 (+{unrealized_pct*100:.2f}%, hit 3% target)"
+                elif tier1_hit:
+                    should_exit = True
+                    reason = f"TIER 1 (+{unrealized_pct*100:.2f}%, lock early gain)"
+                if should_exit:
+                    filled = await place_order(session, symbol, "sell", qty, price)
+                    if filled:
+                        daily_pnl += unrealized_pnl
+                        log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}")
+                        send_trade_alert(
+                            f"🤖 Crypto bot — {symbol} closed ({reason})",
+                            f"Position closed on your Coinbase account:\n\n"
+                            f"{symbol} | Entry: ${entry:.2f} | Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}\n"
+                            f"Reason: {reason}\n\nDashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
+                        )
+                        open_crypto_positions.pop(symbol, None)
+                        await _db_delete_open(symbol)
+                await asyncio.sleep(0.3)
+            return
 
         scans = {}
         for symbol in CRYPTO_PAIRS:
@@ -532,7 +598,7 @@ async def run_crypto_cycle():
             # source of the fee bleed a backtest caught: RSI_SELL_ABOVE=50
             # fires on almost every trade long before PROFIT_TARGET_PCT
             # ever does, and it used to have no profit floor at all).
-            rsi_exit = rsi > RSI_SELL_ABOVE and unrealized_pct > ROUND_TRIP_FEE_PCT
+            rsi_exit = rsi > RSI_SELL_ABOVE and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE
 
             # Professional tiered profit-taking: lock in gains at milestones
             tier1_hit = unrealized_pct >= CRYPTO_TIER_LEVELS[0]  # 1.5%
