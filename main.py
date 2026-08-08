@@ -20,6 +20,10 @@ import os
 import asyncio
 import uvicorn
 import logging
+from dotenv import load_dotenv
+
+# Load .env file to make credentials available to background bots
+load_dotenv(override=True)
 
 # CRITICAL: Ensure greenlet is available for SQLAlchemy async support
 try:
