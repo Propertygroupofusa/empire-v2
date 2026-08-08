@@ -779,18 +779,10 @@ async def run_crypto_cycle():
                 }
                 continue
 
-            # AGGRESSIVE: Removed MA14 filter — enter on oversold RSI alone, no price-stability check
-            # Entry requires: (1) RSI oversold. MA50 uptrend check still in place below.
-            if not in_uptrend:
-                latest_signals[symbol] = {
-                    "price": price, "rsi": rsi, "ma_50": ma_50, "status": "OVERSOLD_BELOW_MA50",
-                    "has_position": False, "checked_at": now.isoformat(),
-                }
-                continue
-
-            # AGGRESSIVE MODE: Removed 4h confirmation for faster entries
+            # MAXIMUM AGGRESSION: Removed MA14 AND MA50 filters — enter on oversold RSI alone
+            # Entry requires: (1) RSI oversold. No trend or stability checks. Pure mean-reversion.
             latest_signals[symbol] = {
-                "price": price, "rsi": rsi, "ma_14": ma_14, "ma_50": ma_50, "status": "BUY_CONFIRMED",
+                "price": price, "rsi": rsi, "status": "BUY_CONFIRMED",
                 "has_position": False, "checked_at": now.isoformat(),
             }
 
