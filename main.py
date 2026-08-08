@@ -54,6 +54,7 @@ routers_to_load = {
     'support': None,
     'sales': None,
     'alpaca_funding': None,
+    'sweep': None,
 }
 
 for router_name in routers_to_load:
@@ -85,6 +86,7 @@ trading_dashboard = routers_to_load['trading_dashboard']
 support = routers_to_load['support']
 sales = routers_to_load['sales']
 alpaca_funding = routers_to_load['alpaca_funding']
+sweep = routers_to_load['sweep']
 
 # Load remaining modules gracefully
 payee_router = None
@@ -1022,6 +1024,7 @@ routers_list = [
     (support, "/support", "AI Customer Support"),
     (sales, "/sales", "AI Sales Agent"),
     (alpaca_funding, "/funding", "Alpaca Broker Auto-Funding"),
+    (sweep, "/sweep", "Profit Sweep Engine"),
 ]
 
 for router_module, prefix, tag in routers_list:

@@ -989,3 +989,68 @@ class ClosedTrade(Base):
             "opened_at": self.opened_at.isoformat() if self.opened_at else None,
             "closed_at": self.closed_at.isoformat() if self.closed_at else None,
         }
+
+
+class SweepProposal(Base):
+    """Profit sweep proposal: sum of eligible payments (platform_amount).
+
+    Workflow:
+    1. profit_sweep_engine.py creates with status="proposed"
+    2. Manual approval or auto-approve if no manual_approval_required
+    3. User manually funds via ACH in Alpaca
+    4. API call to mark_funded → status="funded"
+    5. Next cycle applies to trading bot → status="applied"
+    """
+    __tablename__ = "sweep_proposals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    status = Column(String, default="proposed", index=True)  # proposed, approved, funded, applied, cancelled
+    eligible_amount = Column(Float)  # Sum of Payment.platform_amount for eligible payments
+    manual_approval_required = Column(Boolean, default=True)
+    notes = Column(Text, nullable=True)
+
+    # Which payments are included in this sweep
+    payment_ids = Column(JSON, nullable=True)  # list of payment IDs
+
+    # Funding confirmation
+    funded_at = Column(DateTime, nullable=True)
+    applied_at = Column(DateTime, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "status": self.status,
+            "eligible_amount": self.eligible_amount,
+            "manual_approval_required": self.manual_approval_required,
+            "notes": self.notes,
+            "payment_ids": self.payment_ids,
+            "funded_at": self.funded_at.isoformat() if self.funded_at else None,
+            "applied_at": self.applied_at.isoformat() if self.applied_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class SweepAuditLog(Base):
+    """Immutable record of each sweep action for compliance."""
+    __tablename__ = "sweep_audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sweep_proposal_id = Column(Integer, ForeignKey("sweep_proposals.id"), index=True)
+    action = Column(String, index=True)  # created, approved, funded, applied, cancelled
+    amount = Column(Float, nullable=True)
+    details = Column(JSON, nullable=True)  # Additional context
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "sweep_proposal_id": self.sweep_proposal_id,
+            "action": self.action,
+            "amount": self.amount,
+            "details": self.details,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
