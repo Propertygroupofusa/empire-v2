@@ -67,7 +67,7 @@ COINBASE_API_PRIVATE_KEY = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\
 COINBASE_HOST = "api.coinbase.com"
 COINBASE_BASE_URL = f"https://{COINBASE_HOST}"
 
-CRYPTO_PAIRS = ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "AVAX/USD", "DOGE/USD", "SHIB/USD", "LINK/USD"]
+CRYPTO_PAIRS = ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "AVAX/USD", "LINK/USD"]  # 6 quality pairs, dropped weak alts (DOGE/SHIB)
 
 
 def _to_product_id(symbol: str) -> str:
@@ -421,6 +421,26 @@ async def get_price_rsi(session, symbol):
     return None
 
 
+async def get_4h_rsi(session, symbol):
+    """Fetch 4-hour RSI for higher timeframe confirmation (reduces false signals)."""
+    try:
+        pair = _to_product_id(symbol)
+        # 4h = 14400 seconds; fetch last 20 candles = ~3.3 days
+        url = f"https://api.exchange.coinbase.com/products/{pair}/candles?granularity=14400"
+        async with session.get(url, headers={"Accept": "application/json"}) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+            if not data or len(data) < 14:
+                return None
+            closes = [float(row[4]) for row in reversed(data)][-14:]
+            rsi_4h = _compute_rsi(closes)
+            return rsi_4h
+    except Exception as e:
+        log.debug(f"4h RSI fetch failed for {symbol}: {e}")
+        return None
+
+
 def size_position(cash_pool_remaining, slots_remaining, price):
     """Same dollar-based fractional sizing as crypto_alpaca_bot.py's
     size_position() - splits whatever's left in the crypto cash pool
@@ -766,8 +786,17 @@ async def run_crypto_cycle():
                 }
                 continue
 
+            # 4h timeframe confirmation: only enter if 4h RSI also oversold (reduces false signals)
+            rsi_4h = await get_4h_rsi(session, symbol)
+            if rsi_4h is None or rsi_4h >= RSI_BUY_BELOW:
+                latest_signals[symbol] = {
+                    "price": price, "rsi": rsi, "rsi_4h": rsi_4h, "status": "4H_RSI_NOT_OVERSOLD",
+                    "has_position": False, "checked_at": now.isoformat(),
+                }
+                continue
+
             latest_signals[symbol] = {
-                "price": price, "rsi": rsi, "ma_14": ma_14, "ma_50": ma_50, "status": "BUY_CONFIRMED",
+                "price": price, "rsi": rsi, "rsi_4h": rsi_4h, "ma_14": ma_14, "ma_50": ma_50, "status": "BUY_CONFIRMED",
                 "has_position": False, "checked_at": now.isoformat(),
             }
 
@@ -923,7 +952,7 @@ def run():
             loop.run_until_complete(run_crypto_cycle())
         except Exception as e:
             log.error(f"Crypto cycle error: {e}")
-        time.sleep(10)  # 10-sec cycle for ultra-fast entry/exit (6 scans/min, matches manual trader speed)
+        time.sleep(60)  # 1-min cycle for quality entries + reduced fee bleed (1 scan/min, high-quality trades)
 
 
 if __name__ == "__main__":
