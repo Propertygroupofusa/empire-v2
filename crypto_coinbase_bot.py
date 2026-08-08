@@ -779,14 +779,8 @@ async def run_crypto_cycle():
                 }
                 continue
 
-            # Entry requires: (1) RSI oversold AND (2) price > MA14 AND (3) in uptrend (price > MA50)
-            if not above_ma:
-                latest_signals[symbol] = {
-                    "price": price, "rsi": rsi, "ma_14": ma_14, "status": "OVERSOLD_BELOW_MA14",
-                    "has_position": False, "checked_at": now.isoformat(),
-                }
-                continue
-
+            # AGGRESSIVE: Removed MA14 filter — enter on oversold RSI alone, no price-stability check
+            # Entry requires: (1) RSI oversold. MA50 uptrend check still in place below.
             if not in_uptrend:
                 latest_signals[symbol] = {
                     "price": price, "rsi": rsi, "ma_50": ma_50, "status": "OVERSOLD_BELOW_MA50",
