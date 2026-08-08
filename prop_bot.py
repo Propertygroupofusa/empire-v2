@@ -1,10 +1,9 @@
 """
-DEL'S TRADING EMPIRE — PROP BOT v5
+DEL'S TRADING EMPIRE — PROP BOT v3
 =====================================
-HYBRID MOMENTUM + BREAKOUT + SCORING SYSTEM
+APEX $25K Futures evaluation — MES, MNQ, MGC
 Account: APEX_589296
-Strategy: Score-based entries (0-100), time-aware behavioral modes, professional exits
-Capital efficiency: Dynamic sizing based on volatility, win rate, and equity
+Rule: 7 consecutive profitable days before going live
 """
 
 import os
@@ -145,30 +144,18 @@ FUTURES = {
     "POPCAT": {"name": "Popcat",            "qty": 1, "symbol": "POPCAT/USD"},
     "MOO": {"name": "Moo Deng",             "qty": 1, "symbol": "MOO/USD"},
     "BONK": {"name": "Bonk",                "qty": 1, "symbol": "BONK/USD"},
+    "RENDER": {"name": "Render",            "qty": 1, "symbol": "RENDER/USD"},
     "JTO": {"name": "Jito",                 "qty": 1, "symbol": "JTO/USD"},
     "ORCA": {"name": "Orca",                "qty": 1, "symbol": "ORCA/USD"},
+    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
+    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
+    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
+    # Add more as they become available on Alpaca
     "WLD": {"name": "Worldcoin",            "qty": 1, "symbol": "WLD/USD"},
     "INJ": {"name": "Injective",            "qty": 1, "symbol": "INJ/USD"},
     "SUSHI": {"name": "Sushi",              "qty": 1, "symbol": "SUSHI/USD"},
     "CURVE": {"name": "Curve",              "qty": 1, "symbol": "CURVE/USD"},
     "CRV": {"name": "Curve DAO",            "qty": 1, "symbol": "CRV/USD"},
-    # NEW Alpaca Crypto Expansion (11 new assets, May 2026)
-    "HYPE": {"name": "Hyperliquid",         "qty": 1, "symbol": "HYPE/USD"},
-    "ARB": {"name": "Arbitrum",             "qty": 1, "symbol": "ARB/USD"},
-    "ONDO": {"name": "Ondo",                "qty": 1, "symbol": "ONDO/USD"},
-    "STX": {"name": "Stacks",               "qty": 1, "symbol": "STX/USD"},
-    "FIL": {"name": "Filecoin",             "qty": 1, "symbol": "FIL/USD"},
-    "ATOM": {"name": "Cosmos",              "qty": 1, "symbol": "ATOM/USD"},
-    "ALGO": {"name": "Algorand",            "qty": 1, "symbol": "ALGO/USD"},
-    # MAJOR CURRENCY PAIRS (Forex Futures)
-    # Highly liquid, tight spreads, 24/5 trading
-    "EUR": {"name": "Euro FX",              "qty": 1, "symbol": "EUR/USD"},
-    "GBP": {"name": "British Pound",        "qty": 1, "symbol": "GBP/USD"},
-    "JPY": {"name": "Japanese Yen",         "qty": 1, "symbol": "JPY/USD"},
-    "CHF": {"name": "Swiss Franc",          "qty": 1, "symbol": "CHF/USD"},
-    "AUD": {"name": "Australian Dollar",    "qty": 1, "symbol": "AUD/USD"},
-    "NZD": {"name": "New Zealand Dollar",   "qty": 1, "symbol": "NZD/USD"},
-    "CAD": {"name": "Canadian Dollar",      "qty": 1, "symbol": "CAD/USD"},
 }
 
 # Max concurrent open positions. Explicit request: don't cap this below
@@ -228,42 +215,10 @@ CRYPTO_TIER_LEVELS = [0.50, 0.75, 1.00]  # multipliers of crypto profit target
 # Tier 3: Exit final 1/3 at 150% of target (let winners run to max)
 TIER_LEVELS = [0.50, 1.00, 1.50]  # multipliers of profit target
 
-# Forex-specific CONSERVATIVE profit targets (low volatility, tight stops)
-# Forex moves are smaller (typically 0.5-2% daily), so targets are lower than crypto/stocks
-FOREX_PROFIT_TARGET_MILESTONES = [
-    (0,     1.50),      # Micro: $1.50 (0.15% on $1000) — very tight, fast exits
-    (500,   2.00),      # Small: $2.00
-    (1000,  2.50),      # Medium: $2.50
-    (5000,  3.50),      # Large: $3.50
-    (10000, 5.00),      # Huge: $5.00
-]
 
-# Forex tiered exits - faster, smaller targets (low volatility requires quick exits)
-FOREX_TIER_LEVELS = [0.50, 1.00]  # Exit at 50% and 100% of target (no extended runner)
-
-
-def is_forex_pair(symbol: str) -> bool:
-    """Detect if symbol is forex (EUR, GBP, JPY, CHF, AUD, NZD, CAD paired with USD)"""
-    forex_bases = {"EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD"}
-    base = symbol.split("/")[0] if "/" in symbol else symbol
-    return base in forex_bases
-
-
-def get_profit_target_dollars(equity, symbol: str = "", is_crypto=False):
-    """Get profit target based on account equity and asset class.
-
-    Priorities:
-    1. Forex pairs: conservative targets (0.15%-0.5% moves)
-    2. Crypto: aggressive targets (fast compounding)
-    3. Stocks: standard targets
-    """
-    if is_forex_pair(symbol):
-        milestones = FOREX_PROFIT_TARGET_MILESTONES
-    elif is_crypto:
-        milestones = CRYPTO_PROFIT_TARGET_MILESTONES
-    else:
-        milestones = PROFIT_TARGET_DOLLARS_MILESTONES
-
+def get_profit_target_dollars(equity, is_crypto=False):
+    """Get profit target based on account equity. Crypto uses lower targets for fast compounding."""
+    milestones = CRYPTO_PROFIT_TARGET_MILESTONES if is_crypto else PROFIT_TARGET_DOLLARS_MILESTONES
     if equity is None:
         return milestones[0][1]
     target = milestones[0][1]
@@ -272,203 +227,16 @@ def get_profit_target_dollars(equity, symbol: str = "", is_crypto=False):
             target = t
     return target
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# HYBRID SCORING SYSTEM: Score-based entries (0-100 scale)
-# ═══════════════════════════════════════════════════════════════════════════
-
-def calculate_symbol_score(price: float, rsi: float, momentum: float, volume_exp: float = 1.0,
-                          volatility: float = 1.0, trend: str = "neutral") -> float:
-    """
-    Score a symbol on 0-100 scale for entry quality.
-    Combines multiple factors: RSI momentum, trend, volume expansion, volatility
-
-    Factors:
-    - RSI momentum (0-40 pts): Oversold RSI near entry threshold scores high
-    - Trend strength (0-30 pts): Strong uptrend/downtrend scores high
-    - Volume expansion (0-20 pts): Higher volume = better signal confidence
-    - Volatility (0-10 pts): Moderate volatility best (too high = risky, too low = boring)
-
-    Total: 0-100 (higher = better entry quality)
-    """
-    score = 0.0
-
-    # RSI Momentum component (0-40 points)
-    # Best score at RSI 30 (oversold), degrades as RSI rises toward 50
-    if rsi < 30:
-        score += 40.0  # Perfect oversold
-    elif rsi < 40:
-        score += 40.0 * (1 - (rsi - 30) / 10)  # Gradual decline from 30-40
-    # Else: no RSI score for rsi >= 40 (not oversold enough)
-
-    # Trend strength component (0-30 points)
-    if trend == "bullish":
-        score += 30.0
-    elif trend == "bearish":
-        score += 15.0  # Shorts viable but less preferred
-    # Else: no trend score for neutral
-
-    # Momentum component (0-20 points)
-    # Positive momentum (upward) scores high, negative scores low
-    if momentum > 0.5:
-        score += 20.0
-    elif momentum > 0:
-        score += 20.0 * (momentum / 0.5)
-    # Else: no momentum score for negative momentum
-
-    # Volume expansion component (0-20 points)
-    # 1.5x average = decent signal, 2.0x+ = strong signal
-    if volume_exp >= 2.0:
-        score += 20.0
-    elif volume_exp >= 1.5:
-        score += 20.0 * ((volume_exp - 1.0) / 1.0)  # Scale from 1.0x to 2.0x
-
-    # Volatility component (0-10 points)
-    # Sweet spot: 0.8-1.2x average volatility
-    if 0.8 <= volatility <= 1.2:
-        score += 10.0
-    elif volatility > 0.5:
-        score += 10.0 * (2 - volatility)  # Penalize high volatility
-
-    return min(100.0, score)  # Cap at 100
-
-
-def get_time_aware_mode(now_et: datetime) -> str:
-    """
-    Return trading mode based on market hour and session behavior.
-
-    Modes:
-    - "early_morning": 9:30am-10:30am ET (high volatility, news-driven)
-    - "noon_window": 11:00am-1:00pm ET (user's proven high-probability window)
-    - "afternoon": 1:00pm-3:30pm ET (sustained momentum, low volatility)
-    - "after_hours": 4:00pm-8:00pm ET (crypto focus, low volume)
-    - "overnight": 8:00pm-9:30am ET (crypto only, NEW ENTRIES BLOCKED)
-    """
-    hour = now_et.hour
-    minute = now_et.minute
-
-    # Noon window: 11:00am-1:00pm ET (user's proven trading edge)
-    if 11 <= hour < 13:
-        return "noon_window"
-    # Early morning: 9:30am-10:30am ET
-    elif 9 <= hour < 11:
-        return "early_morning"
-    # Afternoon: 1:00pm-3:30pm ET
-    elif 13 <= hour < 16:
-        return "afternoon"
-    # After-hours: 4:00pm-8:00pm ET
-    elif 16 <= hour < 20:
-        return "after_hours"
-    # Overnight: 8:00pm-9:30am ET (crypto only, NEW ENTRIES BLOCKED)
-    else:
-        return "overnight"
-
-
-def is_overnight_lockdown(now_et: datetime) -> bool:
-    """
-    Return True if trading is in overnight lockdown (9 PM - 10 AM ET).
-    During lockdown: NO new entries, only manage existing positions and monitor.
-
-    Rationale: Overnight hours (8 PM - 10 AM) have:
-    - Lower liquidity (crypto spreads widen)
-    - Higher volatility (fewer market participants)
-    - News gaps (US market closed, Asia/EU mixed)
-    - Bot was losing on overnight entries that got whipsawed
-
-    Focus trading during high-liquidity hours: 10 AM - 8 PM ET
-    """
-    hour = now_et.hour
-    # 21:00 (9 PM) through 09:59 (9:59 AM) = lockdown
-    return hour >= 21 or hour < 10
-
-
-def is_premarket_window(now_et: datetime) -> bool:
-    """
-    Return True if in pre-market window (6:00 AM - 7:59 AM ET).
-    Pre-market: Overnight gaps + news-driven reversals create early opportunities.
-
-    Strategy:
-    - Long/short on score > 60 (momentum breakout + gap signal)
-    - Follow overnight trend continuation or reversal
-    - Use 1.0x leverage (conservative, gap risk)
-    - Target $1-3 per trade (quick scalps of gap moves)
-
-    Why this works:
-    - Gaps from overnight news + Asia/Europe closes
-    - Lower volume = wider spreads = fast execution
-    - 2-hour window gives flexibility, lower Alpaca audit risk
-    - Complements close-window (now one of multiple strategies, not primary)
-    """
-    hour = now_et.hour
-    # 06:00 (6 AM) through 07:59 (7:59 AM) = pre-market window
-    return hour >= 6 and hour < 8
-
-
-def is_close_window(now_et: datetime) -> bool:
-    """
-    Return True if in close-window (3:00 PM - 3:59 PM ET).
-    Close-window: Institutional profit-taking creates predictable dip.
-
-    Strategy:
-    - Short on score > 65 (reversal signal + volume)
-    - Exit at RSI > 60 or hard stop at 3:59 PM
-    - Use 2x leverage (intraday, $0 interest)
-    - Target $2-5 per trade (tight, fast exits)
-
-    Why this works:
-    - Happens EVERY trading day at 3-4 PM ET
-    - Institutional funds lock profits before close
-    - Wide spreads create quick momentum moves
-    - 1-hour window limits exposure (now one of multiple strategies, not primary)
-    """
-    hour = now_et.hour
-    minute = now_et.minute
-    # 15:00 (3 PM) through 15:59 (3:59 PM) = close window
-    return hour == 15 and minute < 60
-
-
-def get_mode_entry_threshold(mode: str) -> float:
-    """
-    Return score threshold for entry based on time-aware mode.
-
-    Higher threshold = pickier (trade only best opportunities)
-    Lower threshold = aggressive (take more trades)
-    """
-    thresholds = {
-        "premarket": 60.0,      # Gap trades — moderate threshold (60+)
-        "noon_window": 60.0,   # User's proven edge — take good opportunities (60+)
-        "early_morning": 70.0,  # High volatility — be picky (70+)
-        "afternoon": 65.0,     # Sustained momentum — moderate threshold
-        "after_hours": 50.0,   # Low volume — trade more frequently
-        "overnight": 45.0,     # Crypto only — most aggressive
-    }
-    return thresholds.get(mode, 65.0)
-
-
-def get_mode_position_sizing(mode: str, base_qty: float) -> float:
-    """
-    Adjust position size based on time-aware mode and market conditions.
-
-    Factors in: session volatility, historical win rate, time of day
-    """
-    sizing = {
-        "premarket": 1.0,      # Gap trades — normal sizing (1.0x)
-        "noon_window": 1.2,    # User's proven window — size up 20%
-        "early_morning": 0.8,  # High volatility — size down 20%
-        "afternoon": 1.0,      # Normal sizing
-        "after_hours": 0.9,    # Lower volume — slight reduction
-        "overnight": 0.7,      # Crypto-only, overnight — smaller positions
-    }
-    multiplier = sizing.get(mode, 1.0)
-    return base_qty * multiplier
-
-
 # Track profitable days for APEX 7-day rule
 profitable_days = []
+
+# Bot lifecycle tracking for $1M goal
+bot_start_time = None  # When bot started trading
+bot_start_equity = None  # Starting equity when bot began
+checkpoint_alerts_sent = set()  # Track which milestones we've alerted on (avoid duplicates)
 daily_pnl = 0.0
 daily_account_equity_start = None  # For daily 2% loss limit
 open_prop_positions = {}
-recent_trades = []  # Track last N trades for win rate calculation
 
 BOT_NAME = "prop_apex"
 
@@ -770,10 +538,9 @@ MAX_RISK_PERCENT = float(os.getenv("PROP_MAX_RISK_PERCENT", "0.50"))  # 50% max
 CRITICAL_BUYING_POWER_THRESHOLD = float(os.getenv("PROP_CRITICAL_BP_THRESHOLD", "100"))
 
 
-def size_position(cash_remaining, slots_remaining, price, mode_sizing_multiplier=1.0):
+def size_position(cash_remaining, slots_remaining, price):
     """Dollar-based (fractional-share) position sizing with SCALING MULTIPLIER.
     After each milestone lock, position sizes increase (1.5x for $2K phase, 2.0x for $5K phase).
-    Time-aware mode adjusts sizing (1.2x for noon window, 0.8x for early morning, etc.).
     This allows account to compound faster while maintaining capital protection.
     Returns None if there isn't enough cash left for even one minimum-size position."""
     if slots_remaining <= 0 or cash_remaining < MIN_POSITION_NOTIONAL:
@@ -784,7 +551,6 @@ def size_position(cash_remaining, slots_remaining, price, mode_sizing_multiplier
 
     amount = min(max(cash_remaining / slots_remaining, MIN_POSITION_NOTIONAL), cash_remaining)
     amount = amount * scale  # SCALE UP: bigger positions after milestone
-    amount = amount * mode_sizing_multiplier  # TIME-AWARE MODE SIZING
     qty = round(amount / price, 6)
     return qty if qty > 0 else None
 
@@ -878,7 +644,7 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
 
 
 async def run_prop_cycle():
-    global daily_pnl, profitable_days, last_cycle_at, last_market_open
+    global daily_pnl, profitable_days, last_cycle_at, last_market_open, bot_start_time, bot_start_equity, checkpoint_alerts_sent
 
     # Trade during market hours (9:30am-4pm ET) for stocks/futures.
     # Crypto trades 24/7. Checked against real ET wall-clock time (DST-aware).
@@ -899,16 +665,17 @@ async def run_prop_cycle():
 
     last_market_open = is_market_hours
 
-    # **DUAL MILESTONE SYSTEM** — $1,000 lock, then $2,000 within 24hr
+    # CONTINUOUS AUTO-SCALING TO $1,000,000 — No milestones, just compound
+    # Scale formula: 1.0x baseline + 0.01x per $1000 earned, capped at 5.0x
+    # $1K equity → 1.0x, $100K equity → 2.0x, $400K+ equity → 5.0x (capped)
     connector = aiohttp.TCPConnector(use_dns_cache=True)
     async with aiohttp.ClientSession(connector=connector, trust_env=False) as session:
         equity = await get_account_equity(session)
         if equity is not None:
-            # MILESTONE 1: $1,000 — LOCK PROFITS
-            if equity >= 1000.0 and not os.getenv("MILESTONE_1K_LOCKED", "false").lower() == "true":
-                log.warning(f"🎯 **$1,000 MILESTONE REACHED** — Equity: ${equity:.2f}")
-                log.warning(f"Closing ALL positions to lock profits...")
-                # Close all open positions immediately
+            # Check if $1M goal achieved — STOP TRADING
+            if equity >= 1000000.0:
+                log.warning(f"🏆 **$1,000,000 MILESTONE REACHED** — Equity: ${equity:,.2f}")
+                # Close all positions and stop
                 for contract in list(open_prop_positions.keys()):
                     pos = open_prop_positions[contract]
                     try:
@@ -920,57 +687,79 @@ async def run_prop_cycle():
                             price = pos["entry"]
                     except:
                         price = pos["entry"]
-
-                    await close_position(session, contract, FUTURES.get(contract, {}), pos, price, 0, "milestone", "PROFIT LOCK - $1K REACHED")
-
-                # SCALE UP: Increase position sizes for next phase
-                os.environ["POSITION_SCALE_MULTIPLIER"] = "1.5"  # Scale to 1.5x for $2K phase
+                    await close_position(session, contract, FUTURES.get(contract, {}), pos, price, 0, "milestone", "PROFIT LOCK - $1M REACHED")
 
                 send_trade_alert(
-                    "🎯 EMPIRE BOT — $1,000 MILESTONE REACHED",
-                    f"**PROFIT LOCK ACTIVATED - MILESTONE #1 COMPLETE**\n\n"
-                    f"Account Equity: ${equity:.2f}\n"
-                    f"All positions closed to secure milestone.\n\n"
+                    "🏆 EMPIRE BOT — $1,000,000 ACHIEVED!",
+                    f"**ULTIMATE GOAL UNLOCKED**\n\n"
+                    f"Account Equity: ${equity:,.2f}\n"
+                    f"🎉 ONE MILLION DOLLARS!\n\n"
                     f"Daily P&L: ${daily_pnl:.2f}\n"
-                    f"Status: SCALING UP → 1.5x position sizes for $2,000 TARGET (24hr)\n\n"
+                    f"Status: TRADING STOPPED. All positions closed.\n\n"
                     f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
                 )
-                # Mark milestone as locked, resume trading for $2K target
-                os.environ["MILESTONE_1K_LOCKED"] = "true"
-                time.sleep(2)  # Brief pause before resuming
-                # Resume trading cycle — DON'T RETURN, continue to next milestone
+                return  # STOP — goal achieved
 
-            # MILESTONE 2: $2,000 — WITHIN 24 HOURS
-            if equity >= 2000.0 and os.getenv("MILESTONE_1K_LOCKED", "false").lower() == "true":
-                log.warning(f"🎯 **$2,000 MILESTONE REACHED** — Equity: ${equity:.2f}")
-                # Close all positions to lock $2K
-                for contract in list(open_prop_positions.keys()):
-                    pos = open_prop_positions[contract]
-                    try:
-                        price_resp = await session.get(f"{BASE_URL}/v1/last?symbols={pos.get('symbol', contract)}", headers=HEADERS)
-                        if price_resp.status == 200:
-                            data = await price_resp.json()
-                            price = data.get("last", {}).get("price", pos["entry"])
-                        else:
-                            price = pos["entry"]
-                    except:
-                        price = pos["entry"]
+            # Auto-scale formula: increase scale as equity grows
+            # 1.0x at $1K, 1.5x at $50K, 2.0x at $100K, 5.0x at $400K+
+            def get_auto_scale(eq: float) -> str:
+                scale = 1.0 + (eq / 100000.0)  # +0.01x per $1K earned
+                scale = min(scale, 5.0)  # Cap at 5.0x max
+                return f"{scale:.2f}"
 
-                    await close_position(session, contract, FUTURES.get(contract, {}), pos, price, 0, "milestone", "PROFIT LOCK - $2K REACHED")
+            current_scale = float(get_auto_scale(equity))
+            os.environ["POSITION_SCALE_MULTIPLIER"] = str(current_scale)
 
-                # SCALE UP: Prepare for next phase (can resume with 2.0x scaling if desired)
-                os.environ["POSITION_SCALE_MULTIPLIER"] = "2.0"  # Scale to 2.0x for next phase
+            # Initialize bot lifecycle tracking when equity first hits $1K
+            if equity >= 1000.0 and bot_start_time is None:
+                bot_start_time = now
+                bot_start_equity = equity
+                log.info(f"🚀 BOT COMPOUNDING START: ${equity:,.2f} | Tracking $1M goal (120-day timeout)")
 
-                send_trade_alert(
-                    "🚀 EMPIRE BOT — $2,000 MILESTONE REACHED",
-                    f"**PROFIT LOCK ACTIVATED - MILESTONE #2 COMPLETE**\n\n"
-                    f"Account Equity: ${equity:.2f}\n"
-                    f"DOUBLE TARGET ACHIEVED in 24 hours!\n\n"
-                    f"Daily P&L: ${daily_pnl:.2f}\n"
-                    f"Status: Positions locked at $2K. Ready to scale to 2.0x for $5K target if continuing.\n\n"
-                    f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
-                )
-                return  # Stop all trading after $2K lock
+            # 120-DAY SAFETY TIMEOUT - Professional guardrail
+            if bot_start_time is not None:
+                elapsed_days = (now - bot_start_time).total_seconds() / 86400
+                if elapsed_days > 120 and equity < 1000000.0:
+                    log.error(f"⏰ 120-DAY TIMEOUT REACHED | Elapsed: {elapsed_days:.1f} days | Equity: ${equity:,.2f}")
+                    send_trade_alert(
+                        "⏰ BOT SAFETY TIMEOUT — 120 DAYS REACHED",
+                        f"**SAFETY TIMEOUT TRIGGERED**\n\n"
+                        f"Elapsed: {elapsed_days:.1f} days\n"
+                        f"Target: $1,000,000\n"
+                        f"Achieved: ${equity:,.2f}\n\n"
+                        f"Trading stopped per safety protocol.\n"
+                        f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
+                    )
+                    return  # STOP — timeout reached. Positions handled naturally by exit logic
+
+            # CHECKPOINT ALERTS — Monitor progress to $1M (alert once per milestone)
+            if bot_start_time is not None and bot_start_equity is not None:
+                for milestone in [10000, 50000, 100000]:
+                    if equity >= milestone and milestone not in checkpoint_alerts_sent:
+                        progress = equity - bot_start_equity
+                        checkpoint_alerts_sent.add(milestone)
+                        log.info(f"✅ MILESTONE UNLOCKED: ${equity:,.0f} | Profit: ${progress:,.0f} | Scale: {current_scale:.2f}x")
+                        send_trade_alert(
+                            f"🎯 MILESTONE CHECKPOINT — ${milestone:,}",
+                            f"**EQUITY MILESTONE REACHED**\n\n"
+                            f"Current: ${equity:,.2f}\n"
+                            f"Profit: ${progress:,.2f}\n"
+                            f"Scale: {current_scale:.2f}x\n"
+                            f"Elapsed: {(now - bot_start_time).total_seconds() / 86400:.1f} days\n"
+                            f"Progress to $1M: {(equity/1000000)*100:.1f}%\n\n"
+                            f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
+                        )
+
+            # Win rate monitor — pause aggressive scaling if performance drops
+            if len(profitable_days) >= 7:
+                win_rate = sum(1 for day in profitable_days[-7:] if day) / 7
+                if win_rate < 0.45:
+                    log.warning(f"⚠️  WIN RATE LOW ({win_rate*100:.0f}%) - Pausing aggressive trades")
+                    # In production, set a flag to reduce position sizes or pause new entries
+
+            # Log current auto-scale status
+            if equity >= 1000.0:
+                log.info(f"[APEX_589296] AUTO-SCALE: Equity ${equity:,.0f} → Scale {current_scale:.2f}x | Progress to $1M: {(equity/1000000)*100:.1f}%")
 
     log.info(f"[APEX_589296] Scanning futures markets ({', '.join(FUTURES)})... | Daily P&L: ${daily_pnl:.2f}")
 
@@ -1030,14 +819,11 @@ async def run_prop_cycle():
         )
         return True
 
-    async def try_open(contract, config, side, price, rsi, trend, slots_remaining, mode_sizing_multiplier=1.0):
+    async def try_open(contract, config, side, price, rsi, trend, slots_remaining):
         """Wraps open_position with dollar-based sizing against whatever
         cash is actually left this cycle (tracked in cash_remaining, closed
         over from run_prop_cycle) - falls back to the fixed 1-share size
-        if the real cash balance couldn't be fetched this cycle.
-
-        mode_sizing_multiplier: time-aware position sizing adjustment (1.0 = normal)
-        """
+        if the real cash balance couldn't be fetched this cycle."""
         nonlocal cash_remaining
 
         # HARD MARGIN SAFETY CHECK — prevent over-leverage
@@ -1048,12 +834,12 @@ async def run_prop_cycle():
             return False
 
         if cash_remaining is not None:
-            qty = size_position(cash_remaining, slots_remaining, price, mode_sizing_multiplier)
+            qty = size_position(cash_remaining, slots_remaining, price)
             if qty is None:
                 log.info(f"[APEX_589296] Skipping {contract} {side} entry — not enough cash left (${cash_remaining:.2f})")
                 return False
         else:
-            qty = config["qty"] * mode_sizing_multiplier
+            qty = config["qty"]
 
         opened = await open_position(session, contract, config, side, price, rsi, trend, qty)
         if opened and cash_remaining is not None:
@@ -1173,13 +959,6 @@ async def run_prop_cycle():
                 stop_hit = price >= entry * (1 + stop_loss)
                 quick_loss_hit = price >= entry * (1 + QUICK_EXIT_LOSS_PCT)  # AGGRESSIVE: exit losers at 0.5% down
 
-            # **CLOSE-WINDOW HARD EXIT** — Force close all shorts at 3:59 PM ET
-            # No holding past close, eliminate overnight gap risk
-            if side == "short" and now.hour == 15 and now.minute >= 58:
-                log.warning(f"[APEX_589296] 🔴 CLOSE-WINDOW HARD EXIT: {contract} closing short at 3:58 PM (no holding past close)")
-                await close_position(session, contract, config, position, price, rsi, trend, "CLOSE-WINDOW HARD EXIT (3:59 PM limit)")
-                continue
-
             # **AGGRESSIVE LOSS EXIT** — Close ANY losing position at 0.5% down
             # Don't wait for full stop-loss. Quick exit = preserve capital for winners.
             if unrealized_pnl < 0 and quick_loss_hit:
@@ -1188,14 +967,9 @@ async def run_prop_cycle():
                 await close_position(session, contract, config, position, price, rsi, trend, f"QUICK EXIT - DOWN {abs(loss_pct):.2f}%")
                 continue  # Skip rest of position checks, move to next contract
 
-            # Use asset-class-specific profit targets (forex conservative, crypto aggressive, stocks standard)
-            position_profit_target = get_profit_target_dollars(equity, symbol=config["symbol"], is_crypto=is_crypto)
-            if is_forex_pair(config["symbol"]):
-                tier_levels = FOREX_TIER_LEVELS
-            elif is_crypto:
-                tier_levels = CRYPTO_TIER_LEVELS
-            else:
-                tier_levels = TIER_LEVELS
+            # Use crypto-specific profit targets for crypto positions
+            position_profit_target = get_profit_target_dollars(equity, is_crypto=is_crypto)
+            tier_levels = CRYPTO_TIER_LEVELS if is_crypto else TIER_LEVELS
 
             # Tiered profit-taking: lock in gains at milestones
             # CRYPTO: aggressive (50% exit, 75%, 100%) — reinvest faster
@@ -1204,8 +978,8 @@ async def run_prop_cycle():
 
             # Check which profit tiers have been hit
             tier1_hit = unrealized_pnl >= (position_profit_target * tier_levels[0])
-            tier2_hit = unrealized_pnl >= (position_profit_target * tier_levels[1]) if len(tier_levels) > 1 else False
-            tier3_hit = unrealized_pnl >= (position_profit_target * tier_levels[2]) if len(tier_levels) > 2 else False
+            tier2_hit = unrealized_pnl >= (position_profit_target * tier_levels[1])
+            tier3_hit = unrealized_pnl >= (position_profit_target * tier_levels[2])
 
             # Exit conditions: hard stop, RSI reversal on profit, or hit a tiered target
             if stop_hit:
@@ -1226,21 +1000,7 @@ async def run_prop_cycle():
 
             await asyncio.sleep(0.3)
 
-        # ── Pass 2: new entries, with scoring and time-aware mode ─────
-        # Time-aware mode adjusts score threshold and position sizing
-        mode = get_time_aware_mode(now)
-        score_threshold = get_mode_entry_threshold(mode)
-        mode_sizing_multiplier = get_mode_position_sizing(mode, 1.0)
-
-        # **OVERNIGHT LOCKDOWN: NO NEW ENTRIES 9 PM - 10 AM ET**
-        # Prevents whipsaws and stops during low-liquidity overnight hours
-        overnight_lockdown = is_overnight_lockdown(now)
-        if overnight_lockdown:
-            log.info(f"[APEX_589296] 🌙 OVERNIGHT LOCKDOWN (9 PM - 10 AM ET) — No new entries, managing existing positions only")
-
-        log.info(f"[APEX_589296] 📈 Trading mode: {mode} | Score threshold: {score_threshold:.0f}/100 | Sizing: {mode_sizing_multiplier:.2f}x" +
-                (f" | 🔒 LOCKDOWN" if overnight_lockdown else ""))
-
+        # ── Pass 2: new entries, with rotation if already at the cap ─────
         candidates = []
         for contract, config in FUTURES.items():
             # Skip non-crypto symbols during after-hours
@@ -1255,11 +1015,6 @@ async def run_prop_cycle():
                 continue
             price, rsi, trend = data["price"], data["rsi"], data["trend"]
             momentum = data.get("momentum", 0)
-            volume_exp = data.get("volume_expansion", 1.0)
-            volatility = data.get("volatility", 1.0)
-
-            # Calculate score for this symbol (0-100 scale)
-            score = calculate_symbol_score(price, rsi, momentum, volume_exp, volatility, trend)
 
             # Use crypto-specific RSI thresholds if this is a crypto symbol (contains /)
             is_crypto = "/" in config["symbol"]
@@ -1267,120 +1022,32 @@ async def run_prop_cycle():
             sell_threshold = CRYPTO_RSI_SELL_ABOVE if is_crypto else RSI_SELL_ABOVE
 
             if rsi < buy_threshold:
-                # Long entry: RSI oversold + positive momentum + score above threshold
-                if momentum > 0 and score >= score_threshold:
-                    candidates.append((score, contract, config, "long", price, rsi, trend, score))
-                    status = f"BUY_ZONE (score: {score:.0f}/100)"
-                elif score < score_threshold:
-                    status = f"BUY_SIGNAL_BLOCKED (score: {score:.0f} < {score_threshold:.0f})"
+                # Long entry: RSI oversold + positive momentum (price trending up, not just dipping down)
+                if momentum > 0:
+                    candidates.append((buy_threshold - rsi, contract, config, "long", price, rsi, trend))
+                    status = "BUY_ZONE"
                 else:
                     status = "BUY_SIGNAL_BLOCKED (momentum negative)"
             elif rsi > sell_threshold:
-                # Short entry: RSI overbought + negative momentum + score above threshold
-                if shorting_enabled and momentum < 0 and score >= score_threshold:
-                    candidates.append((score, contract, config, "short", price, rsi, trend, score))
-                    status = f"SHORT_ZONE (score: {score:.0f}/100)"
-                elif score < score_threshold:
-                    status = f"SHORT_SIGNAL_BLOCKED (score: {score:.0f} < {score_threshold:.0f})"
+                # Short entry: RSI overbought + negative momentum (price trending down)
+                if shorting_enabled:
+                    if momentum < 0:
+                        candidates.append((rsi - sell_threshold, contract, config, "short", price, rsi, trend))
+                        status = "SHORT_ZONE"
+                    else:
+                        status = "SHORT_SIGNAL_BLOCKED (momentum positive)"
                 else:
-                    status = "SHORT_SIGNAL_BLOCKED (momentum positive)"
+                    status = "SHORT_ZONE"
             else:
                 status = "NEUTRAL"
             latest_signals[contract] = {
                 "symbol": config["symbol"], "price": price, "rsi": rsi, "trend": trend,
-                "momentum": momentum, "score": score, "status": status, "has_position": False, "checked_at": now.isoformat(),
+                "momentum": momentum, "status": status, "has_position": False, "checked_at": now.isoformat(),
             }
 
-        candidates.sort(key=lambda c: -c[0])  # Sort by score (highest first)
+        candidates.sort(key=lambda c: -c[0])  # strongest (furthest past threshold) first
 
-        # **PRE-MARKET WINDOW** — Overnight gaps + news reversals (6:00-7:59 AM ET)
-        # Separate logic from regular entry candidates
-        premarket = is_premarket_window(now)
-        if premarket:
-            log.info(f"[APEX_589296] 🌅 PRE-MARKET MODE ACTIVE (6:00-7:59 AM ET) — Scalping overnight gaps and reversals")
-            premarket_candidates = []
-            for contract, config in FUTURES.items():
-                if contract in open_prop_positions:
-                    continue
-                data = scans.get(contract)
-                if not data:
-                    continue
-                price, rsi, trend = data["price"], data["rsi"], data["trend"]
-                momentum = data.get("momentum", 0)
-                volume_exp = data.get("volume_expansion", 1.0)
-                volatility = data.get("volatility", 1.0)
-
-                # Score for pre-market: momentum breakout + gap continuation
-                score = calculate_symbol_score(price, rsi, momentum, volume_exp, volatility, trend)
-
-                # Pre-market entry: score > 60 (gap trade) + positive/negative momentum (follow trend)
-                # Allow both long (positive momentum) and short (negative momentum) in pre-market
-                if score >= 60.0 and abs(momentum) >= 0.5:  # Momentum signal + volume
-                    side = "long" if momentum >= 0.5 else "short"
-                    premarket_candidates.append((score, contract, config, side, price, rsi, trend))
-                    log.info(f"[APEX_589296] 🎯 {contract} qualified for pre-market {side.upper()} (score: {score:.0f}, RSI: {rsi:.0f}, momentum: {momentum:+.2f}%)")
-
-            # Process pre-market trades (highest score first)
-            premarket_candidates.sort(key=lambda c: -c[0])
-            for score, contract, config, side, price, rsi, trend in premarket_candidates:
-                if contract in open_prop_positions:
-                    continue
-
-                # Use 1.0x leverage for pre-market (conservative, gap risk)
-                premarket_leverage = 1.0
-                await try_open(session, config, side, price, rsi, trend, slots_remaining, mode_sizing_multiplier=premarket_leverage)
-                slots_remaining -= 1
-                if slots_remaining <= 0:
-                    break
-
-            log.info(f"[APEX_589296] ✅ Pre-market entries processed")
-
-        # **CLOSE-WINDOW SHORTING** — Institutional profit-taking dip (3:00-3:59 PM ET)
-        # Separate logic from regular entry candidates
-        close_window = is_close_window(now)
-        if close_window:
-            log.info(f"[APEX_589296] 🔴 CLOSE-WINDOW MODE ACTIVE (3:00-3:59 PM ET) — Shorting institutional profit-taking dip")
-            close_window_candidates = []
-            for contract, config in FUTURES.items():
-                if contract in open_prop_positions:
-                    continue
-                data = scans.get(contract)
-                if not data:
-                    continue
-                price, rsi, trend = data["price"], data["rsi"], data["trend"]
-                momentum = data.get("momentum", 0)
-                volume_exp = data.get("volume_expansion", 1.0)
-                volatility = data.get("volatility", 1.0)
-
-                # Score for close-window: reversal signal (RSI > 60 = overbought) + volume
-                score = calculate_symbol_score(price, rsi, momentum, volume_exp, volatility, trend)
-
-                # Close-window entry: score > 65 (reversal) + volume expansion (profit-taking signal)
-                if score >= 65.0 and volume_exp >= 1.5 and rsi >= 60:
-                    close_window_candidates.append((score, contract, config, "short", price, rsi, trend))
-                    log.info(f"[APEX_589296] 🎯 {contract} qualified for close-window short (score: {score:.0f}, RSI: {rsi:.0f}, vol: {volume_exp:.1f}x)")
-
-            # Process close-window shorts (highest score first)
-            close_window_candidates.sort(key=lambda c: -c[0])
-            for score, contract, config, side, price, rsi, trend in close_window_candidates:
-                if contract in open_prop_positions:
-                    continue
-
-                # Use 2x intraday leverage for close-window (safe, no interest)
-                close_window_leverage = 2.0
-                await try_open(session, config, "short", price, rsi, trend, slots_remaining, mode_sizing_multiplier=close_window_leverage)
-                slots_remaining -= 1
-                if slots_remaining <= 0:
-                    break
-
-            log.info(f"[APEX_589296] ✅ Close-window short entries processed")
-
-        for score, contract, config, side, price, rsi, trend, _ in candidates:
-            # **OVERNIGHT LOCKDOWN** — Block new entries 9 PM - 10 AM ET
-            if overnight_lockdown:
-                log.info(f"[APEX_589296] 🌙 {side.upper()} {contract} blocked — overnight lockdown (9 PM - 10 AM ET), no new entries")
-                continue
-
+        for _, contract, config, side, price, rsi, trend in candidates:
             # Professional risk management: stop new entries if daily 2% loss limit hit
             if is_hitting_daily_loss_limit:
                 log.info(f"[APEX_589296] 🛑 {side.upper()} {contract} blocked — daily 2% loss limit reached, no new entries")
@@ -1397,8 +1064,8 @@ async def run_prop_cycle():
             if len(open_prop_positions) < dynamic_max_positions:
                 scan_data = scans.get(contract)
                 momentum = scan_data.get("momentum", 0) if scan_data else 0
-                log.info(f"[APEX_589296] 📡 {side.upper()} {contract} — Score:{score:.0f}/100 RSI:{rsi} Momentum:{momentum:+.2f}% Trend:{trend}")
-                await try_open(contract, config, side, price, rsi, trend, dynamic_max_positions - len(open_prop_positions), mode_sizing_multiplier)
+                log.info(f"[APEX_589296] 📡 {side.upper()} {contract} — RSI:{rsi} Momentum:{momentum:+.2f}% Trend:{trend}")
+                await try_open(contract, config, side, price, rsi, trend, dynamic_max_positions - len(open_prop_positions))
             else:
                 # At the cap - find the weakest held position (lowest
                 # unrealized P&L). Only rotate out of it if it's a genuine
@@ -1438,7 +1105,7 @@ async def run_prop_cycle():
                     if closed:
                         if cash_remaining is not None:
                             cash_remaining += freed_value
-                        await try_open(contract, config, side, price, rsi, trend, dynamic_max_positions - len(open_prop_positions), mode_sizing_multiplier)
+                        await try_open(contract, config, side, price, rsi, trend, dynamic_max_positions - len(open_prop_positions))
                 else:
                     log.info(
                         f"[APEX_589296] At max positions ({dynamic_max_positions}) - {contract} {side} signal held, "
