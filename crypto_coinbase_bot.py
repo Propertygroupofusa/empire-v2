@@ -118,10 +118,12 @@ def _auth_headers(method: str, path: str) -> dict:
 # to catch more entry signals without sacrificing quality. Still conservative
 # enough to avoid false breakout noise, but flexible enough for volatile crypto.
 # 30/70 catches only extreme oversold/overbought; 32/68 catches 2% wider moves.
-RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "32"))
-RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "68"))
+RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "32"))      # Entry threshold for LONG positions
+RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "68"))    # Exit threshold for LONG / Entry for SHORT
+RSI_SHORT_ABOVE = float(os.getenv("CRYPTO_RSI_SHORT_ABOVE", "68"))  # Entry threshold for SHORT positions
+RSI_SHORT_BELOW = float(os.getenv("CRYPTO_RSI_SHORT_BELOW", "32"))  # Exit threshold for SHORT positions
 
-MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "4"))  # Allow up to 4 concurrent positions (was limited by 2 pairs, now we have 8)
+MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "8"))  # Allow up to 8 concurrent positions (4 long + 4 short, or 8 long, or 8 short)
 # Unset by default - no ceiling, so the full account balance (principal +
 # compounded profit) is always in play. Set CRYPTO_MAX_ALLOCATION to cap
 # it at a fixed dollar amount instead, if ever wanted.
@@ -241,7 +243,8 @@ STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.05"))
 # Tier 3: Exit final 1/3 at 5% (let winners run 2x the target)
 CRYPTO_TIER_LEVELS = [0.02, 0.05, 0.10]  # OPTIMIZED: Exit at 2%, 5%, 10% for max profit
 
-open_crypto_positions = {}
+open_crypto_positions = {}  # Long positions: {symbol: {"entry": price, "qty": qty}}
+open_crypto_shorts = {}      # Short positions: {symbol: {"entry": price, "qty": qty}}
 daily_pnl = 0.0
 daily_usd_balance_start = None  # For daily 2% loss limit
 latest_signals = {}
@@ -251,18 +254,23 @@ BOT_NAME = "crypto_coinbase"
 
 
 async def load_open_positions():
-    """Reload open_crypto_positions from the DB once at startup, before
-    the first cycle runs - otherwise a Railway restart wipes this dict
-    while the position is still open for real on Coinbase, and the bot
-    can never take profit or cut losses on it again (see BotPosition)."""
+    """Reload open_crypto_positions and open_crypto_shorts from the DB once at startup, before
+    the first cycle runs - otherwise a Railway restart wipes these dicts
+    while the positions are still open for real on Coinbase, and the bot
+    can never take profit or cut losses on them again (see BotPosition)."""
     try:
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
             rows = result.scalars().all()
             for row in rows:
-                open_crypto_positions[row.symbol] = {"entry": row.entry_price, "qty": row.qty}
+                position_data = {"entry": row.entry_price, "qty": row.qty}
+                if row.side == "short":
+                    open_crypto_shorts[row.symbol] = position_data
+                else:
+                    open_crypto_positions[row.symbol] = position_data
+            total = len(open_crypto_positions) + len(open_crypto_shorts)
             if rows:
-                log.info(f"[CRYPTO] Reloaded {len(rows)} open position(s) from DB: {list(open_crypto_positions.keys())}")
+                log.info(f"[CRYPTO] Reloaded {total} open position(s) from DB: {len(open_crypto_positions)} long, {len(open_crypto_shorts)} short")
     except Exception as e:
         log.error(f"[CRYPTO] Failed to reload open positions from DB: {e}")
 
@@ -276,15 +284,18 @@ async def _db_save_open(symbol: str, side: str, entry: float, qty: float):
         log.error(f"[CRYPTO] Failed to persist opened position {symbol}: {e}")
 
 
-async def _db_delete_open(symbol: str):
+async def _db_delete_open(symbol: str, side: str = None):
     try:
         async with AsyncSessionLocal() as db:
-            result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME, BotPosition.symbol == symbol))
+            query = select(BotPosition).where(BotPosition.bot == BOT_NAME, BotPosition.symbol == symbol)
+            if side:
+                query = query.where(BotPosition.side == side)
+            result = await db.execute(query)
             for row in result.scalars().all():
                 await db.delete(row)
             await db.commit()
     except Exception as e:
-        log.error(f"[CRYPTO] Failed to remove closed position {symbol} from DB: {e}")
+        log.error(f"[CRYPTO] Failed to remove closed position {symbol} {side or ''} from DB: {e}")
 
 
 TRADE_ALERT_EMAIL = os.getenv("TRADE_ALERT_EMAIL", "")
@@ -652,6 +663,67 @@ async def run_crypto_cycle():
 
             await asyncio.sleep(0.3)
 
+        # ── Pass 1b: manage short exits ──────────────────────────────────────
+        for symbol, position in list(open_crypto_shorts.items()):
+            data = scans.get(symbol)
+            if not data:
+                continue
+            price, rsi = data["price"], data["rsi"]
+            entry, qty = position["entry"], position["qty"]
+            # For shorts: profit when price drops (entry > price)
+            unrealized_pnl = (entry - price) * qty
+            unrealized_pct = (entry - price) / entry
+            # Short stop loss: when price goes too high (entry - price becomes negative)
+            stop_hit = unrealized_pct <= -STOP_LOSS_PCT
+            # Short exit on RSI recovery to oversold: when RSI drops back below 32
+            rsi_exit = rsi < RSI_SHORT_BELOW and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE
+
+            # Tiered profit-taking
+            tier1_hit = unrealized_pct >= CRYPTO_TIER_LEVELS[0]
+            tier2_hit = unrealized_pct >= CRYPTO_TIER_LEVELS[1]
+            tier3_hit = unrealized_pct >= CRYPTO_TIER_LEVELS[2]
+
+            latest_signals[symbol] = {
+                "price": price, "rsi": rsi, "status": "HOLDING_SHORT",
+                "has_position": True, "checked_at": now.isoformat(),
+            }
+
+            should_exit = False
+            reason = None
+
+            if stop_hit:
+                should_exit = True
+                reason = f"STOP LOSS (-{unrealized_pct*100:.2f}%)"
+            elif rsi_exit:
+                should_exit = True
+                reason = "RSI EXIT (SHORT)"
+            elif tier3_hit:
+                should_exit = True
+                reason = f"TIER 3 (+{unrealized_pct*100:.2f}%, let winners run)"
+            elif tier2_hit and unrealized_pct >= PROFIT_TARGET_PCT:
+                should_exit = True
+                reason = f"TIER 2 (+{unrealized_pct*100:.2f}%, hit 3% target)"
+            elif tier1_hit:
+                should_exit = True
+                reason = f"TIER 1 (+{unrealized_pct*100:.2f}%, lock early gain)"
+
+            if should_exit:
+                # Buy to close short position at current price
+                filled = await place_order(session, symbol, "buy", qty, price)
+                if filled:
+                    daily_pnl += unrealized_pnl
+                    log.info(f"[CRYPTO] 📤 CLOSE SHORT {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}")
+                    send_trade_alert(
+                        f"🤖 Crypto bot — {symbol} SHORT closed ({reason})",
+                        f"Short position closed on your Coinbase account:\n\n"
+                        f"SELL {qty} {symbol} @ ${entry:.2f} → BUY @ ${price:.2f} | P&L: ${unrealized_pnl:.2f}\n"
+                        f"Reason: {reason}\n\nDashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
+                    )
+                    open_crypto_shorts.pop(symbol, None)
+                    await _db_delete_open(symbol, "short")
+
+            await asyncio.sleep(0.3)
+
         # ── Pass 2: new entries (long only, RSI oversold + breakout) ─────────────
         for symbol in CRYPTO_PAIRS:
             if symbol in open_crypto_positions:
@@ -708,6 +780,73 @@ async def run_crypto_cycle():
                     f"🤖 Crypto bot — BUY {symbol} opened",
                     f"Long opened on your Coinbase account:\n\n"
                     f"BUY {qty} {symbol} @ ${price:.2f} | RSI: {rsi}\n\n"
+                    f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
+                )
+
+            await asyncio.sleep(0.3)
+
+        # ── Pass 3: new short entries (RSI overbought + below MA for confirmation) ────
+        total_positions = len(open_crypto_positions) + len(open_crypto_shorts)
+        for symbol in CRYPTO_PAIRS:
+            # Don't short if already long on this pair
+            if symbol in open_crypto_positions:
+                continue
+            # Don't open multiple shorts on same pair
+            if symbol in open_crypto_shorts:
+                continue
+
+            data = scans.get(symbol)
+            if not data:
+                continue
+            price, rsi = data["price"], data["rsi"]
+            ma_14 = data.get("ma_14", 0)
+            above_ma = data.get("above_ma", False)
+
+            if rsi <= RSI_SHORT_ABOVE:
+                latest_signals[symbol] = {
+                    "price": price, "rsi": rsi, "ma_14": ma_14, "status": "NEUTRAL",
+                    "has_position": False, "checked_at": now.isoformat(),
+                }
+                continue
+
+            # Short entry confirmed only if: (1) RSI overbought AND (2) price below 14-bar MA
+            if above_ma:
+                latest_signals[symbol] = {
+                    "price": price, "rsi": rsi, "ma_14": ma_14, "status": "OVERBOUGHT_ABOVE_MA",
+                    "has_position": False, "checked_at": now.isoformat(),
+                }
+                continue
+
+            latest_signals[symbol] = {
+                "price": price, "rsi": rsi, "ma_14": ma_14, "status": "SHORT_ZONE",
+                "has_position": False, "checked_at": now.isoformat(),
+            }
+
+            # Stop new entries if daily 2% loss limit hit
+            if is_hitting_daily_loss_limit:
+                log.info(f"[CRYPTO] 🛑 {symbol} SHORT blocked — daily 2% loss limit reached, no new entries")
+                continue
+
+            if total_positions >= MAX_POSITIONS:
+                log.info(f"[CRYPTO] At max positions ({MAX_POSITIONS}) - {symbol} SHORT signal held, not entering")
+                continue
+
+            slots_remaining = MAX_POSITIONS - total_positions
+            qty = size_position(cash_pool, slots_remaining, price)
+            if qty is None:
+                log.info(f"[CRYPTO] Skipping {symbol} SHORT entry — not enough allocated cash (${cash_pool:.2f})")
+                continue
+
+            log.info(f"[CRYPTO] 📡 SHORT {symbol} — RSI:{rsi}")
+            filled = await place_order(session, symbol, "sell", qty, price)
+            if filled:
+                open_crypto_shorts[symbol] = {"entry": price, "qty": qty}
+                await _db_save_open(symbol, "short", price, qty)
+                cash_pool -= qty * price
+                send_trade_alert(
+                    f"🤖 Crypto bot — SHORT {symbol} opened",
+                    f"Short opened on your Coinbase account:\n\n"
+                    f"SELL {qty} {symbol} @ ${price:.2f} | RSI: {rsi}\n\n"
                     f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
                 )
 
