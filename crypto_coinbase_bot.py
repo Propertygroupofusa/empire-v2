@@ -118,12 +118,12 @@ def _auth_headers(method: str, path: str) -> dict:
 # to catch more entry signals without sacrificing quality. Still conservative
 # enough to avoid false breakout noise, but flexible enough for volatile crypto.
 # 30/70 catches only extreme oversold/overbought; 32/68 catches 2% wider moves.
-RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "32"))      # Entry threshold for LONG positions
-RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "68"))    # Exit threshold for LONG / Entry for SHORT
-RSI_SHORT_ABOVE = float(os.getenv("CRYPTO_RSI_SHORT_ABOVE", "68"))  # Entry threshold for SHORT positions
-RSI_SHORT_BELOW = float(os.getenv("CRYPTO_RSI_SHORT_BELOW", "32"))  # Exit threshold for SHORT positions
+RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "30"))      # Entry threshold for LONG positions (tighter)
+RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "70"))    # Exit threshold for LONG / Entry for SHORT (stricter)
+RSI_SHORT_ABOVE = float(os.getenv("CRYPTO_RSI_SHORT_ABOVE", "70"))  # Entry threshold for SHORT positions (stricter)
+RSI_SHORT_BELOW = float(os.getenv("CRYPTO_RSI_SHORT_BELOW", "30"))  # Exit threshold for SHORT positions (stricter)
 
-MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "8"))  # Allow up to 8 concurrent positions (4 long + 4 short, or 8 long, or 8 short)
+MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "4"))  # Reduced from 8 to 4 (more selective, less correlated risk)
 # Unset by default - no ceiling, so the full account balance (principal +
 # compounded profit) is always in play. Set CRYPTO_MAX_ALLOCATION to cap
 # it at a fixed dollar amount instead, if ever wanted.
@@ -379,38 +379,45 @@ def _compute_rsi(closes: list) -> float:
 
 async def _fetch_coinbase_closes(session, symbol):
     """Free, no-auth public endpoint - BTC/USD -> BTC-USD. This is the
-    primary price source since it's the same exchange orders execute on."""
+    primary price source since it's the same exchange orders execute on.
+    Fetches 50+ candles for MA50 calculation (directional bias filter)."""
     pair = _to_product_id(symbol)
     url = f"https://api.exchange.coinbase.com/products/{pair}/candles?granularity=300"
     async with session.get(url, headers={"Accept": "application/json"}) as r:
         if r.status != 200:
             return None
         data = await r.json()
-        if not data or len(data) < 14:
+        if not data or len(data) < 50:
             return None
         # Coinbase returns newest-first; each row is [time, low, high, open, close, volume]
-        rows = list(reversed(data))[-20:]
+        rows = list(reversed(data))[-50:]
         return [float(row[4]) for row in rows]
 
 
 async def get_price_rsi(session, symbol):
-    """Price+RSI+breakout from Coinbase's public candles endpoint - the same
-    exchange orders execute on, so there's no cross-exchange price drift.
-    Also computes 14-bar MA for breakout confirmation (only buy above MA)."""
+    """Price+RSI+directional bias from Coinbase's public candles endpoint.
+    Returns price, RSI, 14-bar MA (short-term), 50-bar MA (trend filter).
+    Uses MA50 to determine directional bias: only long above MA50, only short below MA50."""
     try:
         closes = await _fetch_coinbase_closes(session, symbol)
     except Exception as e:
         log.debug(f"coinbase price fetch failed for {symbol}: {e}")
         closes = None
 
-    if closes and len(closes) >= 14:
+    if closes and len(closes) >= 50:
         rsi = _compute_rsi(closes)
         price = closes[-1]
-        ma_14 = sum(closes[-14:]) / 14  # 14-bar moving average
-        above_ma = price > ma_14  # Breakout confirmation: price above MA
-        return {"price": price, "rsi": rsi, "ma_14": ma_14, "above_ma": above_ma}
+        ma_14 = sum(closes[-14:]) / 14   # Short-term MA for breakout
+        ma_50 = sum(closes[-50:]) / 50   # Long-term MA for directional bias
+        above_ma14 = price > ma_14       # Short-term above average
+        above_ma50 = price > ma_50       # Long-term trend: uptrend if above
+        return {
+            "price": price, "rsi": rsi,
+            "ma_14": ma_14, "above_ma": above_ma14,
+            "ma_50": ma_50, "in_uptrend": above_ma50
+        }
 
-    log.error(f"❌ {symbol}: coinbase price fetch failed")
+    log.error(f"❌ {symbol}: coinbase price fetch failed (need 50+ candles)")
     return None
 
 
@@ -724,7 +731,7 @@ async def run_crypto_cycle():
 
             await asyncio.sleep(0.3)
 
-        # ── Pass 2: new entries (long only, RSI oversold + breakout) ─────────────
+        # ── Pass 2: new entries (long only, RSI oversold + breakout + uptrend) ────
         for symbol in CRYPTO_PAIRS:
             if symbol in open_crypto_positions:
                 continue
@@ -733,7 +740,9 @@ async def run_crypto_cycle():
                 continue
             price, rsi = data["price"], data["rsi"]
             ma_14 = data.get("ma_14", 0)
+            ma_50 = data.get("ma_50", 0)
             above_ma = data.get("above_ma", False)
+            in_uptrend = data.get("in_uptrend", False)
 
             if rsi >= RSI_BUY_BELOW:
                 latest_signals[symbol] = {
@@ -742,16 +751,23 @@ async def run_crypto_cycle():
                 }
                 continue
 
-            # Entry confirmed only if: (1) RSI oversold AND (2) price above 14-bar MA
+            # Entry requires: (1) RSI oversold AND (2) price > MA14 AND (3) in uptrend (price > MA50)
             if not above_ma:
                 latest_signals[symbol] = {
-                    "price": price, "rsi": rsi, "ma_14": ma_14, "status": "OVERSOLD_BUT_BELOW_MA",
+                    "price": price, "rsi": rsi, "ma_14": ma_14, "status": "OVERSOLD_BELOW_MA14",
+                    "has_position": False, "checked_at": now.isoformat(),
+                }
+                continue
+
+            if not in_uptrend:
+                latest_signals[symbol] = {
+                    "price": price, "rsi": rsi, "ma_50": ma_50, "status": "OVERSOLD_BELOW_MA50",
                     "has_position": False, "checked_at": now.isoformat(),
                 }
                 continue
 
             latest_signals[symbol] = {
-                "price": price, "rsi": rsi, "ma_14": ma_14, "status": "BUY_ZONE",
+                "price": price, "rsi": rsi, "ma_14": ma_14, "ma_50": ma_50, "status": "BUY_CONFIRMED",
                 "has_position": False, "checked_at": now.isoformat(),
             }
 
@@ -800,7 +816,9 @@ async def run_crypto_cycle():
                 continue
             price, rsi = data["price"], data["rsi"]
             ma_14 = data.get("ma_14", 0)
+            ma_50 = data.get("ma_50", 0)
             above_ma = data.get("above_ma", False)
+            in_uptrend = data.get("in_uptrend", False)
 
             if rsi <= RSI_SHORT_ABOVE:
                 latest_signals[symbol] = {
@@ -809,16 +827,23 @@ async def run_crypto_cycle():
                 }
                 continue
 
-            # Short entry confirmed only if: (1) RSI overbought AND (2) price below 14-bar MA
+            # Short entry requires: (1) RSI overbought AND (2) price < MA14 AND (3) in downtrend (price < MA50)
             if above_ma:
                 latest_signals[symbol] = {
-                    "price": price, "rsi": rsi, "ma_14": ma_14, "status": "OVERBOUGHT_ABOVE_MA",
+                    "price": price, "rsi": rsi, "ma_14": ma_14, "status": "OVERBOUGHT_ABOVE_MA14",
+                    "has_position": False, "checked_at": now.isoformat(),
+                }
+                continue
+
+            if in_uptrend:
+                latest_signals[symbol] = {
+                    "price": price, "rsi": rsi, "ma_50": ma_50, "status": "OVERBOUGHT_ABOVE_MA50",
                     "has_position": False, "checked_at": now.isoformat(),
                 }
                 continue
 
             latest_signals[symbol] = {
-                "price": price, "rsi": rsi, "ma_14": ma_14, "status": "SHORT_ZONE",
+                "price": price, "rsi": rsi, "ma_14": ma_14, "ma_50": ma_50, "status": "SHORT_CONFIRMED",
                 "has_position": False, "checked_at": now.isoformat(),
             }
 
