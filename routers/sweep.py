@@ -1,164 +1,240 @@
-"""Profit sweep endpoint: manage sweep proposals, funding, and capital injection."""
+"""Profit sweep API: managed capital injection from platform earnings with rules and audit."""
 
 import logging
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
 from profit_sweep_engine import (
-    create_sweep_proposal,
+    calculate_eligible_amount,
+    propose_sweep,
+    approve_sweep,
     mark_sweep_funded,
     apply_sweep_to_bot,
-    get_sweep_status,
-    get_pending_sweeps,
+    reject_sweep,
+    get_sweep_history,
+    get_proposal_status,
+    list_pending_proposals,
 )
 
 router = APIRouter(tags=["sweep"])
 logger = logging.getLogger(__name__)
 
 
-@router.post("/create")
-async def create_sweep(
-    manual_approval_required: bool = True,
-    db: AsyncSession = Depends(get_db),
-):
+@router.get("/eligible")
+async def get_eligible(db: AsyncSession = Depends(get_db)):
     """
-    Create a new sweep proposal from eligible earnings.
+    Run the sweep calculator without writing to database.
 
-    Triggers profit_sweep_engine to:
-    1. Sum platform_amount from eligible payments
-    2. Create SweepProposal (status=proposed)
-    3. Log audit trail
-    4. Return proposal details
+    Returns breakdown of:
+    - gross_platform: Sum of all platform earnings
+    - tax_reserve: Amount held for taxes
+    - business_reserve: Operating buffer
+    - already_swept: Previously funded proposals
+    - free_cash: Available for sweep
+    - daily_remaining: Budget left today
+    - eligible_amount: Amount that can be swept right now
+    - reason: Why eligible_amount is what it is
 
-    Args:
-        manual_approval_required: If True, sweep waits for manual approval before marking funded
-
-    Returns:
-        Sweep proposal details {id, status, eligible_amount, payment_ids, ...}
+    No side effects; read-only.
     """
     try:
-        sweep = await create_sweep_proposal(manual_approval_required=manual_approval_required)
-        if not sweep:
-            raise HTTPException(
-                status_code=400,
-                detail="No eligible payments for sweep",
-            )
-        return {"status": "success", "sweep": sweep}
+        calc = await calculate_eligible_amount(db)
+        return {
+            "status": "success",
+            "calculator": calc,
+        }
 
     except Exception as e:
-        logger.error(f"Error creating sweep: {e}")
+        logger.error(f"Error calculating eligible amount: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{sweep_id}/mark-funded")
-async def mark_funded(
-    sweep_id: int,
-    db: AsyncSession = Depends(get_db),
-):
+@router.post("/propose")
+async def propose(target_bot_name: str = "prop_bot", db: AsyncSession = Depends(get_db)):
     """
-    Mark a sweep proposal as funded (user has ACH'd capital into account).
+    Create a sweep proposal if eligible ≥ min_transfer.
 
-    Updates SweepProposal.status -> "funded" and creates audit log entry.
-    Next step: call /sweep/{sweep_id}/apply-to-bot to inject capital.
+    If manual_approval_required (default), status="proposed" (awaiting approval).
+    If auto_propose, still creates the proposal.
 
-    Args:
-        sweep_id: ID of the sweep proposal
+    Triggers SweepAuditLog events: "calculated" + "proposed".
 
     Returns:
-        Updated sweep proposal details
+        Sweep proposal details {id, amount, status, snapshots...}
+        or error if not eligible.
     """
     try:
-        sweep = await mark_sweep_funded(sweep_id)
-        if not sweep:
+        proposal = await propose_sweep(target_bot_name=target_bot_name)
+        if not proposal:
+            raise HTTPException(
+                status_code=400,
+                detail="No eligible amount for sweep (see /sweep/eligible for breakdown)",
+            )
+        return {"status": "success", "proposal": proposal}
+
+    except Exception as e:
+        logger.error(f"Error proposing sweep: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{proposal_id}/approve")
+async def approve(proposal_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Human approve a proposed sweep (status: proposed → approved).
+
+    Approval is a checkpoint; it does NOT move money.
+    Next: user funds via ACH in Alpaca, then call /mark-funded.
+    """
+    try:
+        proposal = await approve_sweep(proposal_id)
+        if not proposal:
             raise HTTPException(
                 status_code=404,
-                detail=f"Sweep #{sweep_id} not found",
+                detail=f"Sweep #{proposal_id} not found or not in proposed state",
             )
-        return {"status": "success", "sweep": sweep}
+        return {"status": "success", "proposal": proposal}
+
+    except Exception as e:
+        logger.error(f"Error approving sweep: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{proposal_id}/mark-funded")
+async def mark_funded(proposal_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Mark a sweep as funded (user has ACH'd capital into Alpaca account).
+
+    Updates status: approved/proposed → funded.
+    Audit logs the funding event.
+
+    Next: call /apply-to-bot to inject into trading capital.
+    """
+    try:
+        proposal = await mark_sweep_funded(proposal_id)
+        if not proposal:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Sweep #{proposal_id} not found or cannot be marked funded",
+            )
+        return {"status": "success", "proposal": proposal}
 
     except Exception as e:
         logger.error(f"Error marking sweep funded: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{sweep_id}/apply-to-bot")
-async def apply_to_bot(
-    sweep_id: int,
-    bot_name: str = "prop_bot",
-    db: AsyncSession = Depends(get_db),
-):
+@router.post("/{proposal_id}/apply-to-bot")
+async def apply_to_bot(proposal_id: int, db: AsyncSession = Depends(get_db)):
     """
-    Apply a funded sweep to a trading bot (inject capital into base_capital).
+    Apply a funded sweep: inject capital into TradingBotState.base_capital.
+
+    Preconditions:
+    - Sweep must be status="funded"
+    - Target bot must exist in TradingBotState
 
     Updates:
-    - SweepProposal.status -> "applied"
-    - TradingBotState.base_capital += sweep.eligible_amount
+    - SweepProposal.status → "applied"
+    - TradingBotState.base_capital += sweep.amount
+    - Audit logs the capital injection
 
-    Args:
-        sweep_id: ID of the sweep (must be status="funded")
-        bot_name: Name of bot to inject capital into
-
-    Returns:
-        Sweep details and updated bot state
+    After this, the bot will see the higher capital balance on next /v2/account check.
     """
     try:
-        result = await apply_sweep_to_bot(sweep_id, bot_name=bot_name)
+        result = await apply_sweep_to_bot(proposal_id)
         if not result:
             raise HTTPException(
                 status_code=404,
-                detail=f"Sweep #{sweep_id} not found or not funded",
+                detail=f"Sweep #{proposal_id} not found, not funded, or bot not found",
             )
         return {"status": "success", "data": result}
 
     except Exception as e:
-        logger.error(f"Error applying sweep to bot: {e}")
+        logger.error(f"Error applying sweep: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/{sweep_id}/status")
-async def get_status(
-    sweep_id: int,
-    db: AsyncSession = Depends(get_db),
-):
+@router.post("/{proposal_id}/reject")
+async def reject(proposal_id: int, reason: str = "", db: AsyncSession = Depends(get_db)):
     """
-    Get current status and audit trail of a sweep proposal.
+    Reject/cancel a sweep proposal.
 
-    Returns sweep proposal details plus all audit log entries (creation, funding, application).
-
-    Args:
-        sweep_id: ID of the sweep
-
-    Returns:
-        {sweep: {...}, audit_trail: [{action, amount, timestamp, ...}]}
+    Updates status → "cancelled" and logs the cancellation event.
     """
     try:
-        result = await get_sweep_status(sweep_id)
+        proposal = await reject_sweep(proposal_id, reason=reason)
+        if not proposal:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Sweep #{proposal_id} not found",
+            )
+        return {"status": "success", "proposal": proposal}
+
+    except Exception as e:
+        logger.error(f"Error rejecting sweep: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{proposal_id}/status")
+async def get_status(proposal_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Fetch a specific proposal with its full audit trail.
+
+    Returns:
+        {
+            "proposal": {...full proposal object...},
+            "audit_trail": [{event, proposal_id, detail, created_at}, ...]
+        }
+    """
+    try:
+        result = await get_proposal_status(proposal_id)
         if not result:
             raise HTTPException(
                 status_code=404,
-                detail=f"Sweep #{sweep_id} not found",
+                detail=f"Sweep #{proposal_id} not found",
             )
         return result
 
     except Exception as e:
-        logger.error(f"Error fetching sweep status: {e}")
+        logger.error(f"Error fetching proposal status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/pending/list")
 async def list_pending(db: AsyncSession = Depends(get_db)):
     """
-    List all pending sweeps (proposed or approved, not yet funded or applied).
+    List all pending proposals (proposed/approved, not yet funded/applied).
 
-    Returns list of sweep proposals waiting for action.
-
-    Returns:
-        {sweeps: [{id, status, eligible_amount, created_at, ...}]}
+    Returns proposals waiting for action:
+    - proposed: awaiting human approval
+    - approved: approved but not yet funded
     """
     try:
-        sweeps = await get_pending_sweeps()
-        return {"sweeps": sweeps}
+        proposals = await list_pending_proposals()
+        return {"proposals": proposals}
 
     except Exception as e:
-        logger.error(f"Error fetching pending sweeps: {e}")
+        logger.error(f"Error listing pending proposals: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/history")
+async def get_history(limit: int = 50, db: AsyncSession = Depends(get_db)):
+    """
+    Fetch the append-only audit trail of all sweep events.
+
+    Events include: calculated, proposed, approved, funded, applied, cancelled.
+    Sorted newest first.
+
+    Args:
+        limit: Max events to return (default 50)
+
+    Returns:
+        {audit_trail: [{event, proposal_id, detail, created_at}, ...]}
+    """
+    try:
+        logs = await get_sweep_history(limit=limit)
+        return {"audit_trail": logs}
+
+    except Exception as e:
+        logger.error(f"Error fetching sweep history: {e}")
         raise HTTPException(status_code=500, detail=str(e))
