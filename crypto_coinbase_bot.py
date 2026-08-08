@@ -118,12 +118,12 @@ def _auth_headers(method: str, path: str) -> dict:
 # to catch more entry signals without sacrificing quality. Still conservative
 # enough to avoid false breakout noise, but flexible enough for volatile crypto.
 # 30/70 catches only extreme oversold/overbought; 32/68 catches 2% wider moves.
-RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "30"))      # Entry threshold for LONG positions (tighter)
+RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "40"))      # Entry threshold for LONG positions (aggressive)
 RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "70"))    # Exit threshold for LONG / Entry for SHORT (stricter)
 RSI_SHORT_ABOVE = float(os.getenv("CRYPTO_RSI_SHORT_ABOVE", "70"))  # Entry threshold for SHORT positions (stricter)
 RSI_SHORT_BELOW = float(os.getenv("CRYPTO_RSI_SHORT_BELOW", "30"))  # Exit threshold for SHORT positions (stricter)
 
-MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "4"))  # Reduced from 8 to 4 (more selective, less correlated risk)
+MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "8"))  # Aggressive - capture more simultaneous opportunities
 # Unset by default - no ceiling, so the full account balance (principal +
 # compounded profit) is always in play. Set CRYPTO_MAX_ALLOCATION to cap
 # it at a fixed dollar amount instead, if ever wanted.
@@ -786,17 +786,9 @@ async def run_crypto_cycle():
                 }
                 continue
 
-            # 4h timeframe confirmation: only enter if 4h RSI also oversold (reduces false signals)
-            rsi_4h = await get_4h_rsi(session, symbol)
-            if rsi_4h is None or rsi_4h >= RSI_BUY_BELOW:
-                latest_signals[symbol] = {
-                    "price": price, "rsi": rsi, "rsi_4h": rsi_4h, "status": "4H_RSI_NOT_OVERSOLD",
-                    "has_position": False, "checked_at": now.isoformat(),
-                }
-                continue
-
+            # AGGRESSIVE MODE: Removed 4h confirmation for faster entries
             latest_signals[symbol] = {
-                "price": price, "rsi": rsi, "rsi_4h": rsi_4h, "ma_14": ma_14, "ma_50": ma_50, "status": "BUY_CONFIRMED",
+                "price": price, "rsi": rsi, "ma_14": ma_14, "ma_50": ma_50, "status": "BUY_CONFIRMED",
                 "has_position": False, "checked_at": now.isoformat(),
             }
 
