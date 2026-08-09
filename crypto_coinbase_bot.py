@@ -256,7 +256,7 @@ TAKER_FEE_RATE = 0.006
 # Tier 1: Exit 1/3 at 1.5% (half profit target, lock early gain)
 # Tier 2: Exit 1/3 at 3% (full profit target)
 # Tier 3: Exit final 1/3 at 5% (let winners run 2x the target)
-CRYPTO_TIER_LEVELS = [0.02, 0.05, 0.10]  # OPTIMIZED: Exit at 2%, 5%, 10% for max profit
+CRYPTO_TIER_LEVELS = [0.01, 0.02, 0.05, 0.10]  # 4-tier exit: 1% (lock), 2%, 5%, 10% (winners run)
 
 open_crypto_positions = {}  # Long positions: {symbol: {"entry": price, "qty": qty}}
 open_crypto_shorts = {}      # Short positions: {symbol: {"entry": price, "qty": qty}}
