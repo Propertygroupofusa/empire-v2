@@ -956,8 +956,15 @@ def run():
     log.info("🔴 LIVE TRADING - Coinbase has no free paper-trading sandbox for Advanced Trade")
     log.info("=" * 60)
 
+    # Diagnostic: check credential availability
+    key_name_present = bool(COINBASE_API_KEY_NAME)
+    key_secret_present = bool(COINBASE_API_PRIVATE_KEY)
+    log.info(f"[STARTUP] COINBASE_API_KEY_NAME: {'✓ configured' if key_name_present else '❌ MISSING'}")
+    log.info(f"[STARTUP] COINBASE_API_PRIVATE_KEY: {'✓ configured' if key_secret_present else '❌ MISSING'}")
+
     if not (COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY):
-        log.warning("COINBASE_API_KEY_NAME/COINBASE_API_PRIVATE_KEY not configured - crypto_coinbase_bot will not start")
+        log.error("🛑 CRYPTO BOT STARTUP FAILED: Missing Coinbase API credentials (COINBASE_API_KEY_NAME and/or COINBASE_API_PRIVATE_KEY)")
+        log.error("   Set these environment variables in Railway to enable crypto trading bot")
         return
 
     # One event loop for this thread's entire life, not a fresh one every

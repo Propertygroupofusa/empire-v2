@@ -1021,10 +1021,14 @@ async def lifespan(app: FastAPI):
     try:
         if crypto_coinbase_bot_module is not None:
             import threading
-            threading.Thread(target=crypto_coinbase_bot_module.run, daemon=True).start()
-            log.info("₿ Crypto (Coinbase) bot started (background thread) | Pairs: BTC/USD, ETH/USD | Runs 24/7")
+            log.info("📡 Starting Crypto (Coinbase) bot daemon thread...")
+            bot_thread = threading.Thread(target=crypto_coinbase_bot_module.run, daemon=True)
+            bot_thread.start()
+            log.info("✓ Crypto (Coinbase) bot thread started | 28 pairs × 12 positions | 24/7 trading | Capital: $700 USD")
+        else:
+            log.warning("⚠️ crypto_coinbase_bot module failed to import - bot will not run")
     except Exception as e:
-        log.warning(f"Crypto (Coinbase) bot failed to start: {e}")
+        log.error(f"🛑 Crypto (Coinbase) bot thread startup failed: {e}")
 
     # bot_2_crypto_scalper.py retired: it traded crypto (BTC/ETH/SOL/AVAX/
     # DOGE/LINK) through Alpaca using the same ALPACA_API_KEY as prop_bot.py
