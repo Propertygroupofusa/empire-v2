@@ -243,7 +243,7 @@ PROFIT_TARGET_PCT = max(
 # every configuration tested landed at "roughly breakeven to slightly
 # negative," never a clear, robust win. Start with MAX_ALLOCATION kept
 # low and watch real results before trusting this with more capital.
-STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.05"))
+STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.07"))
 
 # Professional tiered exit levels for crypto - secure profits at milestones
 # Tier 1: Exit 1/3 at 1.5% (half profit target, lock early gain)
