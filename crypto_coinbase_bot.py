@@ -75,7 +75,11 @@ CRYPTO_PAIRS = [
     "ARB/USD", "OP/USD",  # Arbitrum & Optimism
     "AAVE/USD", "UNI/USD",  # DeFi protocols
     "STX/USD", "ATOM/USD",  # Bitcoin L2 & Cosmos
-]  # 16 pairs total - expanded for more entry opportunities
+    "LTC/USD", "ADA/USD", "DOT/USD",  # Established alts with high volume
+    "APT/USD", "SUI/USD", "JUP/USD",  # High-velocity newer pairs
+    "LDO/USD", "RNDR/USD", "ICP/USD",  # Staking & compute protocols
+    "BLUR/USD", "FLOKI/USD", "BONK/USD",  # Additional meme/community coins
+]  # 28 pairs total - aggressive expansion for 4x entry frequency
 
 
 def _to_product_id(symbol: str) -> str:
@@ -131,7 +135,7 @@ RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "70"))    # Exit thres
 RSI_SHORT_ABOVE = float(os.getenv("CRYPTO_RSI_SHORT_ABOVE", "70"))  # Entry threshold for SHORT positions (stricter)
 RSI_SHORT_BELOW = float(os.getenv("CRYPTO_RSI_SHORT_BELOW", "30"))  # Exit threshold for SHORT positions (stricter)
 
-MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "8"))  # Aggressive - capture more simultaneous opportunities
+MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "12"))  # Expanded: 12 concurrent positions for faster capital deployment
 # Unset by default - no ceiling, so the full account balance (principal +
 # compounded profit) is always in play. Set CRYPTO_MAX_ALLOCATION to cap
 # it at a fixed dollar amount instead, if ever wanted.
