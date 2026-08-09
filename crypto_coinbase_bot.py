@@ -992,6 +992,13 @@ def run():
             continue
         try:
             loop.run_until_complete(run_crypto_cycle())
+        except RuntimeError as e:
+            if "attached to a different loop" in str(e):
+                log.warning(f"[CRYPTO] Event loop mismatch detected: {e} - recreating event loop")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            else:
+                log.error(f"Crypto cycle error: {e}")
         except Exception as e:
             log.error(f"Crypto cycle error: {e}")
         time.sleep(60)  # 1-min cycle for quality entries + reduced fee bleed (1 scan/min, high-quality trades)
