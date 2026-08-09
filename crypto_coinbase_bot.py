@@ -415,13 +415,10 @@ async def get_price_rsi(session, symbol):
     if closes and len(closes) >= 50:
         rsi = _compute_rsi(closes)
         price = closes[-1]
-        ma_14 = sum(closes[-14:]) / 14   # Short-term MA for breakout
         ma_50 = sum(closes[-50:]) / 50   # Long-term MA for directional bias
-        above_ma14 = price > ma_14       # Short-term above average
         above_ma50 = price > ma_50       # Long-term trend: uptrend if above
         return {
             "price": price, "rsi": rsi,
-            "ma_14": ma_14, "above_ma": above_ma14,
             "ma_50": ma_50, "in_uptrend": above_ma50
         }
 
@@ -629,9 +626,7 @@ async def run_crypto_cycle():
             data = await get_price_rsi(session, symbol)
             if data:
                 scans[symbol] = data
-                ma = data.get('ma_14', 0)
-                above_ma = "✓" if data.get('above_ma') else "✗"
-                log.info(f"[CRYPTO] {symbol} | ${data['price']:.2f} | RSI:{data['rsi']} | MA14:${ma:.2f} {above_ma}")
+                log.info(f"[CRYPTO] {symbol} | ${data['price']:.2f} | RSI:{data['rsi']}")
             await asyncio.sleep(0.3)
 
         # ── Pass 1: manage exits (long only) ──────────────────────────
@@ -767,14 +762,12 @@ async def run_crypto_cycle():
             if not data:
                 continue
             price, rsi = data["price"], data["rsi"]
-            ma_14 = data.get("ma_14", 0)
             ma_50 = data.get("ma_50", 0)
-            above_ma = data.get("above_ma", False)
             in_uptrend = data.get("in_uptrend", False)
 
             if rsi >= RSI_BUY_BELOW:
                 latest_signals[symbol] = {
-                    "price": price, "rsi": rsi, "ma_14": ma_14, "status": "NEUTRAL",
+                    "price": price, "rsi": rsi, "status": "NEUTRAL",
                     "has_position": False, "checked_at": now.isoformat(),
                 }
                 continue
@@ -830,26 +823,17 @@ async def run_crypto_cycle():
             if not data:
                 continue
             price, rsi = data["price"], data["rsi"]
-            ma_14 = data.get("ma_14", 0)
             ma_50 = data.get("ma_50", 0)
-            above_ma = data.get("above_ma", False)
             in_uptrend = data.get("in_uptrend", False)
 
             if rsi <= RSI_SHORT_ABOVE:
                 latest_signals[symbol] = {
-                    "price": price, "rsi": rsi, "ma_14": ma_14, "status": "NEUTRAL",
+                    "price": price, "rsi": rsi, "status": "NEUTRAL",
                     "has_position": False, "checked_at": now.isoformat(),
                 }
                 continue
 
-            # Short entry requires: (1) RSI overbought AND (2) price < MA14 AND (3) in downtrend (price < MA50)
-            if above_ma:
-                latest_signals[symbol] = {
-                    "price": price, "rsi": rsi, "ma_14": ma_14, "status": "OVERBOUGHT_ABOVE_MA14",
-                    "has_position": False, "checked_at": now.isoformat(),
-                }
-                continue
-
+            # Short entry requires: RSI overbought AND in downtrend (price < MA50)
             if in_uptrend:
                 latest_signals[symbol] = {
                     "price": price, "rsi": rsi, "ma_50": ma_50, "status": "OVERBOUGHT_ABOVE_MA50",
@@ -858,7 +842,7 @@ async def run_crypto_cycle():
                 continue
 
             latest_signals[symbol] = {
-                "price": price, "rsi": rsi, "ma_14": ma_14, "ma_50": ma_50, "status": "SHORT_CONFIRMED",
+                "price": price, "rsi": rsi, "ma_50": ma_50, "status": "SHORT_CONFIRMED",
                 "has_position": False, "checked_at": now.isoformat(),
             }
 
