@@ -217,7 +217,7 @@ CRYPTO_ROUND_TRIP_FEE_RATE = float(os.getenv("CRYPTO_ROUND_TRIP_FEE_RATE", "0.00
 # Increased from 1.5% to 3% to let winners run and match crypto volatility.
 # BTC/ETH see 1-5% daily moves - capture those instead of closing at first tick.
 PROFIT_TARGET_PCT = max(
-    float(os.getenv("CRYPTO_PROFIT_TARGET_PCT", "0.05")),  # Increased from 3% to 5%
+    float(os.getenv("CRYPTO_PROFIT_TARGET_PCT", "0.37")),  # $55 profit on $150 entry = 37% target
     CRYPTO_ROUND_TRIP_FEE_RATE * 1.5,
 )
 
@@ -243,7 +243,7 @@ PROFIT_TARGET_PCT = max(
 # every configuration tested landed at "roughly breakeven to slightly
 # negative," never a clear, robust win. Start with MAX_ALLOCATION kept
 # low and watch real results before trusting this with more capital.
-STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.07"))
+STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.02"))  # 2% tight stop for capital preservation
 
 # Coinbase Advanced Trade API taker fee (0.6% standard rate for crypto)
 TAKER_FEE_RATE = 0.006
@@ -406,23 +406,26 @@ async def _fetch_coinbase_closes(session, symbol):
 
 
 async def _fetch_latest_candle(session, symbol):
-    """Fetch latest 5-minute candle OHLC data for momentum confirmation on entry.
-    Returns (open, close, high, low) or None if fetch fails."""
+    """Fetch latest 5-minute candle OHLC data + volume for momentum & volume confirmation.
+    Returns candle dict with open, close, high, low, volume, and prior candle volume or None if fetch fails."""
     pair = _to_product_id(symbol)
     url = f"https://api.exchange.coinbase.com/products/{pair}/candles?granularity=300"
     async with session.get(url, headers={"Accept": "application/json"}) as r:
         if r.status != 200:
             return None
         data = await r.json()
-        if not data or len(data) < 1:
+        if not data or len(data) < 2:
             return None
         # Latest candle is first in response; each row is [time, low, high, open, close, volume]
         latest = data[0]
+        prior = data[1] if len(data) > 1 else None
         return {
             "open": float(latest[3]),
             "close": float(latest[4]),
             "high": float(latest[2]),
             "low": float(latest[1]),
+            "volume": float(latest[5]),
+            "prior_volume": float(prior[5]) if prior else 0,
         }
 
 
@@ -474,25 +477,16 @@ async def get_4h_rsi(session, symbol):
 
 
 def size_position(cash_pool_remaining, slots_remaining, price):
-    """Same dollar-based fractional sizing as crypto_alpaca_bot.py's
-    size_position() - splits whatever's left in the crypto cash pool
-    evenly across remaining open slots. That pool is the full account
-    balance by default (compounding), so a bigger balance means bigger
-    positions here automatically, with no other code change needed.
+    """Fixed $150 per trade for aggressive $255.25/20hr target.
+    Conservative sizing: leaves buffer for Coinbase fees + multiple trades."""
+    FIXED_POSITION_SIZE = 150.0  # $150 per entry to hit $255.25 in 4 wins
 
-    Caps the order at a fraction of the pool (not 100% of it) - a market
-    BUY's quote_size is the dollar amount handed to Coinbase, and Coinbase
-    charges the taker fee on top of that from the same source account.
-    Requesting the literal full balance as quote_size leaves zero room for
-    that fee and Coinbase bounces the whole order as INSUFFICIENT_FUND
-    (seen in production with a single open slot sizing to 100% of a $49
-    balance). Reserving a couple points above the real taker fee covers
-    that with margin to spare."""
-    if slots_remaining <= 0 or cash_pool_remaining < MIN_POSITION_NOTIONAL:
+    if cash_pool_remaining < FIXED_POSITION_SIZE * 1.05:  # Need 5% buffer for fees
         return None
-    fee_safe_pool = cash_pool_remaining * (1 - max(TAKER_FEE_RATE * 2, 0.01))
-    amount = min(max(fee_safe_pool / slots_remaining, MIN_POSITION_NOTIONAL), fee_safe_pool)
-    qty = round(amount / price, 8)
+
+    # Calculate qty based on fixed dollar amount
+    quote_size = FIXED_POSITION_SIZE * (1 - TAKER_FEE_RATE)  # Account for taker fee
+    qty = round(quote_size / price, 8)
     return qty if qty > 0 else None
 
 
@@ -800,20 +794,33 @@ async def run_crypto_cycle():
                 }
                 continue
 
-            # MOMENTUM CONFIRMATION: RSI oversold + candle closing in upper half (buyers showing up)
-            # Filters out "still falling" situations; only enters when price is low AND momentum is positive
+            # AGGRESSIVE ENTRY FILTER: RSI < 10 + momentum + volume spike confirmation
+            # Only enter on highest-confidence reversals to achieve near-100% win rate
             if candle:
                 candle_range = candle["high"] - candle["low"]
                 if candle_range > 0:
                     close_position = (candle["close"] - candle["low"]) / candle_range
+
+                    # Filter 1: Candle must close in upper half (momentum upward)
                     if close_position < 0.5:
-                        # Candle closed in lower half - momentum is still down, skip entry
                         latest_signals[symbol] = {
                             "price": price, "rsi": rsi, "status": "OVERSOLD_NO_MOMENTUM",
                             "has_position": False, "checked_at": now.isoformat(),
                         }
                         continue
-                    # Entry confirmed: RSI oversold + candle closing in upper half
+
+                    # Filter 2: Volume spike confirmation (current vol > 1.5x prior vol)
+                    # High volume on reversal candle = institutional buying, strong reversal
+                    volume_spike_ratio = candle["volume"] / max(candle["prior_volume"], 1)
+                    if volume_spike_ratio < 1.5:
+                        # Insufficient volume - possible pump/fake move, skip
+                        latest_signals[symbol] = {
+                            "price": price, "rsi": rsi, "status": "OVERSOLD_LOW_VOLUME",
+                            "has_position": False, "checked_at": now.isoformat(),
+                        }
+                        continue
+
+                    # All filters passed: RSI oversold + momentum + volume spike
                     latest_signals[symbol] = {
                         "price": price, "rsi": rsi, "status": "BUY_CONFIRMED",
                         "has_position": False, "checked_at": now.isoformat(),
@@ -826,11 +833,12 @@ async def run_crypto_cycle():
                     }
                     continue
             else:
-                # Candle data unavailable, fall back to RSI-only entry
+                # Candle data unavailable, skip entry (don't fall back to RSI-only)
                 latest_signals[symbol] = {
-                    "price": price, "rsi": rsi, "status": "BUY_CONFIRMED",
+                    "price": price, "rsi": rsi, "status": "CANDLE_DATA_MISSING",
                     "has_position": False, "checked_at": now.isoformat(),
                 }
+                continue
 
             # Professional risk management: stop new entries if daily 2% loss limit hit
             if is_hitting_daily_loss_limit:
