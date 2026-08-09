@@ -245,6 +245,9 @@ PROFIT_TARGET_PCT = max(
 # low and watch real results before trusting this with more capital.
 STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.07"))
 
+# Coinbase Advanced Trade API taker fee (0.6% standard rate for crypto)
+TAKER_FEE_RATE = 0.006
+
 # Professional tiered exit levels for crypto - secure profits at milestones
 # Tier 1: Exit 1/3 at 1.5% (half profit target, lock early gain)
 # Tier 2: Exit 1/3 at 3% (full profit target)
