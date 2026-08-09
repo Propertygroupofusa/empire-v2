@@ -405,15 +405,38 @@ async def _fetch_coinbase_closes(session, symbol):
         return [float(row[4]) for row in rows]
 
 
+async def _fetch_latest_candle(session, symbol):
+    """Fetch latest 5-minute candle OHLC data for momentum confirmation on entry.
+    Returns (open, close, high, low) or None if fetch fails."""
+    pair = _to_product_id(symbol)
+    url = f"https://api.exchange.coinbase.com/products/{pair}/candles?granularity=300"
+    async with session.get(url, headers={"Accept": "application/json"}) as r:
+        if r.status != 200:
+            return None
+        data = await r.json()
+        if not data or len(data) < 1:
+            return None
+        # Latest candle is first in response; each row is [time, low, high, open, close, volume]
+        latest = data[0]
+        return {
+            "open": float(latest[3]),
+            "close": float(latest[4]),
+            "high": float(latest[2]),
+            "low": float(latest[1]),
+        }
+
+
 async def get_price_rsi(session, symbol):
     """Price+RSI+directional bias from Coinbase's public candles endpoint.
-    Returns price, RSI, 14-bar MA (short-term), 50-bar MA (trend filter).
+    Returns price, RSI, 14-bar MA (short-term), 50-bar MA (trend filter), latest candle OHLC.
     Uses MA50 to determine directional bias: only long above MA50, only short below MA50."""
     try:
         closes = await _fetch_coinbase_closes(session, symbol)
+        candle = await _fetch_latest_candle(session, symbol)
     except Exception as e:
         log.debug(f"coinbase price fetch failed for {symbol}: {e}")
         closes = None
+        candle = None
 
     if closes and len(closes) >= 50:
         rsi = _compute_rsi(closes)
@@ -422,7 +445,8 @@ async def get_price_rsi(session, symbol):
         above_ma50 = price > ma_50       # Long-term trend: uptrend if above
         return {
             "price": price, "rsi": rsi,
-            "ma_50": ma_50, "in_uptrend": above_ma50
+            "ma_50": ma_50, "in_uptrend": above_ma50,
+            "candle": candle,
         }
 
     log.error(f"❌ {symbol}: coinbase price fetch failed (need 50+ candles)")
@@ -757,7 +781,7 @@ async def run_crypto_cycle():
 
             await asyncio.sleep(0.3)
 
-        # ── Pass 2: new entries (long only, RSI oversold + breakout + uptrend) ────
+        # ── Pass 2: new entries (long only, RSI oversold + momentum confirmation) ────
         for symbol in CRYPTO_PAIRS:
             if symbol in open_crypto_positions:
                 continue
@@ -767,6 +791,7 @@ async def run_crypto_cycle():
             price, rsi = data["price"], data["rsi"]
             ma_50 = data.get("ma_50", 0)
             in_uptrend = data.get("in_uptrend", False)
+            candle = data.get("candle")
 
             if rsi >= RSI_BUY_BELOW:
                 latest_signals[symbol] = {
@@ -775,12 +800,37 @@ async def run_crypto_cycle():
                 }
                 continue
 
-            # MAXIMUM AGGRESSION: Removed MA14 AND MA50 filters — enter on oversold RSI alone
-            # Entry requires: (1) RSI oversold. No trend or stability checks. Pure mean-reversion.
-            latest_signals[symbol] = {
-                "price": price, "rsi": rsi, "status": "BUY_CONFIRMED",
-                "has_position": False, "checked_at": now.isoformat(),
-            }
+            # MOMENTUM CONFIRMATION: RSI oversold + candle closing in upper half (buyers showing up)
+            # Filters out "still falling" situations; only enters when price is low AND momentum is positive
+            if candle:
+                candle_range = candle["high"] - candle["low"]
+                if candle_range > 0:
+                    close_position = (candle["close"] - candle["low"]) / candle_range
+                    if close_position < 0.5:
+                        # Candle closed in lower half - momentum is still down, skip entry
+                        latest_signals[symbol] = {
+                            "price": price, "rsi": rsi, "status": "OVERSOLD_NO_MOMENTUM",
+                            "has_position": False, "checked_at": now.isoformat(),
+                        }
+                        continue
+                    # Entry confirmed: RSI oversold + candle closing in upper half
+                    latest_signals[symbol] = {
+                        "price": price, "rsi": rsi, "status": "BUY_CONFIRMED",
+                        "has_position": False, "checked_at": now.isoformat(),
+                    }
+                else:
+                    # No range on candle (doji-like), skip as unclear momentum
+                    latest_signals[symbol] = {
+                        "price": price, "rsi": rsi, "status": "OVERSOLD_DOJI",
+                        "has_position": False, "checked_at": now.isoformat(),
+                    }
+                    continue
+            else:
+                # Candle data unavailable, fall back to RSI-only entry
+                latest_signals[symbol] = {
+                    "price": price, "rsi": rsi, "status": "BUY_CONFIRMED",
+                    "has_position": False, "checked_at": now.isoformat(),
+                }
 
             # Professional risk management: stop new entries if daily 2% loss limit hit
             if is_hitting_daily_loss_limit:
