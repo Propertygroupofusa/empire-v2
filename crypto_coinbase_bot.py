@@ -57,7 +57,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select
 from database import AsyncSessionLocal
-from models import BotPosition, TradingBotState, CryptoRSIState
+from models import BotPosition, TradingBotState, CryptoRSIState, CryptoTradeLog
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("crypto_coinbase_bot")
@@ -705,6 +705,61 @@ async def update_rsi_state(symbol: str, rsi: float, entered_oversold: bool, arme
         log.warning(f"RSI state update error for {symbol}: {e}")
 
 
+async def log_trade_entry(symbol: str, entry_rsi: float, entry_price: float, qty: float,
+                          arm_rsi: float, volume_ratio: float, candle_close_position: float):
+    """Log when a trade enters (ENTER → ENTER)."""
+    try:
+        async with AsyncSessionLocal() as session:
+            trade = CryptoTradeLog(
+                symbol=symbol,
+                armed_at=datetime.now(timezone.utc),  # Timestamp trade was armed
+                arm_rsi=arm_rsi,
+                entered_at=datetime.now(timezone.utc),
+                entry_rsi=entry_rsi,
+                entry_price=entry_price,
+                quantity=qty,
+                volume_ratio=volume_ratio,
+                candle_close_position=candle_close_position,
+            )
+            session.add(trade)
+            await session.commit()
+            log.info(f"[CRYPTO-LOG] {symbol} ENTRY logged: RSI {entry_rsi:.1f} @ ${entry_price:.2f} vol_ratio {volume_ratio:.2f}x")
+    except Exception as e:
+        log.warning(f"Trade entry logging error for {symbol}: {e}")
+
+
+async def log_trade_exit(symbol: str, exit_price: float, exit_reason: str, realized_pnl: float,
+                        realized_pnl_pct: float, time_held_minutes: int,
+                        max_adverse_excursion: float = None, max_favorable_excursion: float = None,
+                        partial_exit_count: int = 0, trailing_stop_triggered: bool = False):
+    """Log when a trade exits (EXIT)."""
+    try:
+        async with AsyncSessionLocal() as session:
+            # Find the most recent unclosed trade for this symbol
+            stmt = select(CryptoTradeLog).where(
+                CryptoTradeLog.symbol == symbol,
+                CryptoTradeLog.exit_at == None
+            ).order_by(CryptoTradeLog.entered_at.desc())
+            result = await session.execute(stmt)
+            trade = result.scalars().first()
+
+            if trade:
+                trade.exit_at = datetime.now(timezone.utc)
+                trade.exit_price = exit_price
+                trade.exit_reason = exit_reason
+                trade.realized_pnl = realized_pnl
+                trade.realized_pnl_pct = realized_pnl_pct
+                trade.time_held_minutes = time_held_minutes
+                trade.max_adverse_excursion = max_adverse_excursion
+                trade.max_favorable_excursion = max_favorable_excursion
+                trade.partial_exit_count = partial_exit_count
+                trade.trailing_stop_triggered = trailing_stop_triggered
+                await session.commit()
+                log.info(f"[CRYPTO-LOG] {symbol} EXIT logged: {exit_reason} @ ${exit_price:.2f} P&L ${realized_pnl:.2f} ({realized_pnl_pct*100:.2f}%)")
+    except Exception as e:
+        log.warning(f"Trade exit logging error for {symbol}: {e}")
+
+
 async def run_crypto_cycle():
     """
     IMPROVED STRATEGY (replaces RSI < 10 + fixed 37% target):
@@ -904,6 +959,13 @@ async def run_crypto_cycle():
                 if filled:
                     daily_pnl += unrealized_pnl
                     log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}")
+                    # Log trade exit for analytics
+                    time_held = (now - position.get("opened_at", now)).total_seconds() // 60 if "opened_at" in position else 0
+                    await log_trade_exit(
+                        symbol, exit_price=price, exit_reason=reason,
+                        realized_pnl=unrealized_pnl, realized_pnl_pct=unrealized_pct,
+                        time_held_minutes=int(time_held)
+                    )
                     send_trade_alert(
                         f"🤖 Crypto bot — {symbol} closed ({reason})",
                         f"Position closed on your Coinbase account:\n\n"
@@ -1097,8 +1159,14 @@ async def run_crypto_cycle():
             log.info(f"[CRYPTO] 📡 BUY {symbol} — RSI:{rsi}")
             filled = await place_order(session, symbol, "buy", qty, price)
             if filled:
-                open_crypto_positions[symbol] = {"entry": price, "qty": qty}
+                open_crypto_positions[symbol] = {"entry": price, "qty": qty, "opened_at": now}
                 await _db_save_open(symbol, "long", price, qty)
+                # Log trade entry for analytics (ARM → ENTER transition)
+                await log_trade_entry(
+                    symbol, entry_rsi=rsi, entry_price=price, qty=qty,
+                    arm_rsi=armed_rsi or rsi, volume_ratio=volume_spike_ratio,
+                    candle_close_position=close_position
+                )
                 cash_pool -= qty * price
                 send_trade_alert(
                     f"🤖 Crypto bot — BUY {symbol} opened",

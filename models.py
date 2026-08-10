@@ -1093,3 +1093,81 @@ class CryptoRSIState(Base):
             "last_rsi": self.last_rsi,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class CryptoTradeLog(Base):
+    """Comprehensive trade instrumentation for validating state machine effectiveness.
+
+    Captures full lifecycle: ARM → ENTER → EXIT with all metrics needed to measure
+    if the new event-driven entry logic improves expectancy vs. old threshold-based approach.
+
+    Metrics tracked:
+    - ARM state: RSI at ARM, timestamp
+    - ENTRY: RSI at entry, volume ratio, candle position, entry price
+    - EXIT: reason, exit price, P&L, time held
+    - Risk metrics: MAE (max adverse excursion), MFE (max favorable excursion)
+    - Exit performance: partial-exit fills, trailing-stop effectiveness
+    """
+    __tablename__ = "crypto_trade_log"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True)  # "BTC/USD", "ETH/USD", etc.
+
+    # ARM state (when oversold zone entered)
+    armed_at = Column(DateTime, index=True)  # Timestamp when RSI entered 10-30
+    arm_rsi = Column(Float)  # RSI value when armed
+
+    # ENTRY state
+    entered_at = Column(DateTime, index=True)  # Timestamp when trade opened
+    entry_rsi = Column(Float)  # RSI at entry
+    entry_price = Column(Float)  # Actual entry price (filled)
+    quantity = Column(Float)  # Position size
+    volume_ratio = Column(Float)  # Volume spike ratio at entry (vs prior)
+    candle_close_position = Column(Float)  # Candle close in upper half (0-1)
+
+    # EXIT state
+    exit_at = Column(DateTime, nullable=True, index=True)  # Timestamp when position closed
+    exit_price = Column(Float, nullable=True)  # Exit price (first tier or final)
+    exit_reason = Column(String, nullable=True)  # "TIER1", "TIER2", "TIER3", "STOP_LOSS", "RSI_EXIT", etc.
+
+    # Performance metrics
+    realized_pnl = Column(Float, nullable=True)  # Actual P&L in dollars
+    realized_pnl_pct = Column(Float, nullable=True)  # Actual P&L as percentage
+    max_adverse_excursion = Column(Float, nullable=True)  # Maximum drawdown during hold
+    max_favorable_excursion = Column(Float, nullable=True)  # Maximum profit during hold
+    time_held_minutes = Column(Integer, nullable=True)  # Time from entry to exit
+
+    # Partial exit tracking (tiered exits)
+    partial_exit_count = Column(Integer, default=0)  # How many partial exits?
+    partial_exit_prices = Column(JSON, nullable=True)  # [price1, price2, ...] of partial exits
+    partial_exit_quantities = Column(JSON, nullable=True)  # Qty exited at each tier
+
+    # Trailing stop performance
+    trailing_stop_triggered = Column(Boolean, default=False)  # Was trailing stop the final exit?
+    trailing_stop_price = Column(Float, nullable=True)  # Price when trailing stop hit
+
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "symbol": self.symbol,
+            "arm_rsi": self.arm_rsi,
+            "armed_at": self.armed_at.isoformat() if self.armed_at else None,
+            "entry_rsi": self.entry_rsi,
+            "entry_price": self.entry_price,
+            "quantity": self.quantity,
+            "volume_ratio": self.volume_ratio,
+            "candle_close_position": self.candle_close_position,
+            "entered_at": self.entered_at.isoformat() if self.entered_at else None,
+            "exit_price": self.exit_price,
+            "exit_at": self.exit_at.isoformat() if self.exit_at else None,
+            "exit_reason": self.exit_reason,
+            "realized_pnl": self.realized_pnl,
+            "realized_pnl_pct": self.realized_pnl_pct,
+            "max_adverse_excursion": self.max_adverse_excursion,
+            "max_favorable_excursion": self.max_favorable_excursion,
+            "time_held_minutes": self.time_held_minutes,
+            "partial_exit_count": self.partial_exit_count,
+            "trailing_stop_triggered": self.trailing_stop_triggered,
+        }
