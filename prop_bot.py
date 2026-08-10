@@ -180,13 +180,13 @@ FUTURES = {
 # At 1.5x scale: reduce to 1 position (1.5x loss on 1 trade < 1.0x loss on 2 trades)
 # At 2.0x scale: stay at 1 position (conservative with max scaling)
 # This prevents multiplied losses across multiple scaled positions
-BASE_MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", "2"))
+BASE_MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", "3"))  # Long-only: 3 concurrent positions
 
 def get_dynamic_max_positions(scale: float) -> int:
     """Reduce max positions as scale increases to limit compounded losses"""
     if scale >= 1.5:
         return 1  # Single position when scaled 1.5x or higher
-    return BASE_MAX_POSITIONS  # 2 positions at baseline 1.0x scale
+    return BASE_MAX_POSITIONS  # 3 positions (longs only) at baseline 1.0x scale
 
 # Profit target, in REAL DOLLARS of profit on the position (not a raw
 # price move on the underlying) - scaled by real account equity. Increased targets
@@ -1024,15 +1024,13 @@ async def run_prop_cycle():
         cash_remaining = await get_account_cash(session)
         log.info(f"[APEX_589296] Cash available: {'$%.2f' % cash_remaining if cash_remaining is not None else 'unknown'}")
 
-        # Discovered in production: every short entry was failing with a
-        # real Alpaca error ("account is not allowed to short") - checked
-        # once per cycle so new shorts are skipped cleanly instead of
-        # repeatedly attempting (and failing) orders. Existing short
-        # positions can still be covered either way (that's a BUY order,
-        # not a new short) - this only gates opening NEW shorts.
+        # Long-only strategy: Shorting not available on this account.
+        # Running 3 concurrent longs with mean reversion discipline:
+        # - Entry: RSI < 30 (oversold)
+        # - Exit: 2%+ profit target, -1.5% hard stop, RSI > 70, or 2-hour timeout
         shorting_enabled = await get_account_shorting_enabled(session)
         if not shorting_enabled:
-            log.info("[APEX_589296] ⚠️ Shorting not enabled on this account - skipping new SHORT entries this cycle (longs unaffected)")
+            log.info("[APEX_589296] 📈 LONG-ONLY MODE: 3 concurrent long positions | RSI < 30 entry, 2% profit target, -1.5% stop")
 
         scans = {}
         for contract, config in FUTURES.items():
