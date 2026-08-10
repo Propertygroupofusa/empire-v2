@@ -750,6 +750,7 @@ async def log_trade_entry(symbol: str, entry_rsi: float, entry_price: float, qty
         async with AsyncSessionLocal() as session:
             trade = CryptoTradeLog(
                 symbol=symbol,
+                strategy_version="RSI_RECOVERY_ATR_V1",  # ATR-based exits, RSI recovery entry
                 armed_at=datetime.now(timezone.utc),  # Timestamp trade was armed
                 arm_rsi=arm_rsi,
                 entered_at=datetime.now(timezone.utc),
@@ -761,7 +762,7 @@ async def log_trade_entry(symbol: str, entry_rsi: float, entry_price: float, qty
             )
             session.add(trade)
             await session.commit()
-            log.info(f"[CRYPTO-LOG] {symbol} ENTRY logged: RSI {entry_rsi:.1f} @ ${entry_price:.2f} vol_ratio {volume_ratio:.2f}x")
+            log.info(f"[CRYPTO-LOG] {symbol} ENTRY logged: RSI {entry_rsi:.1f} @ ${entry_price:.2f} vol_ratio {volume_ratio:.2f}x (strategy: RSI_RECOVERY_ATR_V1)")
     except Exception as e:
         log.warning(f"Trade entry logging error for {symbol}: {e}")
 
@@ -982,32 +983,46 @@ async def run_crypto_cycle():
                 entry, qty = position["entry"], position["qty"]
                 unrealized_pnl = (price - entry) * qty
                 unrealized_pct = (price - entry) / entry
-                stop_hit = unrealized_pct <= -STOP_LOSS_PCT
+
+                # ATR-based exit levels (volatility-adjusted, stored at entry time)
+                stop_price = position.get("stop_price", entry * 0.98)  # Fallback to -2% if missing
+                tier1_price = position.get("tier1_price", entry * 1.03)
+                tier2_price = position.get("tier2_price", entry * 1.05)
+                tier3_price = position.get("tier3_price", entry * 1.10)
+
+                stop_hit = price <= stop_price
+                tier1_hit = price >= tier1_price
+                tier2_hit = price >= tier2_price
+                tier3_hit = price >= tier3_price
                 rsi_exit = rsi > RSI_SELL_ABOVE and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE
-                tier1_hit = unrealized_pct >= CRYPTO_TIER_LEVELS[0]
-                tier2_hit = unrealized_pct >= CRYPTO_TIER_LEVELS[1]
-                tier3_hit = unrealized_pct >= CRYPTO_TIER_LEVELS[2]
+
                 latest_signals[symbol] = {
                     "price": price, "rsi": rsi, "status": "HOLDING_LONG",
                     "has_position": True, "checked_at": now.isoformat(),
+                    "targets": {
+                        "stop": stop_price,
+                        "tier1": tier1_price,
+                        "tier2": tier2_price,
+                        "tier3": tier3_price,
+                    }
                 }
                 should_exit = False
                 reason = None
                 if stop_hit:
                     should_exit = True
-                    reason = f"STOP LOSS (-{unrealized_pct*100:.2f}%)"
+                    reason = f"STOP LOSS @ ${stop_price:.2f} (-{(1 - price/entry)*100:.2f}%)"
                 elif rsi_exit:
                     should_exit = True
                     reason = "RSI EXIT"
                 elif tier3_hit:
                     should_exit = True
-                    reason = f"TIER 3 (+{unrealized_pct*100:.2f}%, let winners run)"
+                    reason = f"TIER 3 @ ${tier3_price:.2f} (+{(price/entry - 1)*100:.2f}%, let winners run)"
                 elif tier2_hit and unrealized_pct >= PROFIT_TARGET_PCT:
                     should_exit = True
-                    reason = f"TIER 2 (+{unrealized_pct*100:.2f}%, hit 3% target)"
+                    reason = f"TIER 2 @ ${tier2_price:.2f} (+{(price/entry - 1)*100:.2f}%, hit 3% target)"
                 elif tier1_hit:
                     should_exit = True
-                    reason = f"TIER 1 (+{unrealized_pct*100:.2f}%, lock early gain)"
+                    reason = f"TIER 1 @ ${tier1_price:.2f} (+{(price/entry - 1)*100:.2f}%, lock early gain)"
                 if should_exit:
                     filled = await place_order(session, symbol, "sell", qty, price)
                     if filled:
@@ -1041,7 +1056,17 @@ async def run_crypto_cycle():
             entry, qty = position["entry"], position["qty"]
             unrealized_pnl = (price - entry) * qty
             unrealized_pct = (price - entry) / entry
-            stop_hit = unrealized_pct <= -STOP_LOSS_PCT
+
+            # ATR-based exit levels (volatility-adjusted, stored at entry time)
+            stop_price = position.get("stop_price", entry * 0.98)  # Fallback to -2% if missing
+            tier1_price = position.get("tier1_price", entry * 1.03)
+            tier2_price = position.get("tier2_price", entry * 1.05)
+            tier3_price = position.get("tier3_price", entry * 1.10)
+
+            stop_hit = price <= stop_price
+            tier1_hit = price >= tier1_price
+            tier2_hit = price >= tier2_price
+            tier3_hit = price >= tier3_price
             # RSI recovering to neutral is only a real exit if it's already
             # cleared the round-trip fee - otherwise this "safe-looking"
             # exit is actually a guaranteed net loss (this was the actual
@@ -1050,14 +1075,15 @@ async def run_crypto_cycle():
             # ever does, and it used to have no profit floor at all).
             rsi_exit = rsi > RSI_SELL_ABOVE and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE
 
-            # Professional tiered profit-taking: lock in gains at milestones
-            tier1_hit = unrealized_pct >= CRYPTO_TIER_LEVELS[0]  # 1.5%
-            tier2_hit = unrealized_pct >= CRYPTO_TIER_LEVELS[1]  # 3%
-            tier3_hit = unrealized_pct >= CRYPTO_TIER_LEVELS[2]  # 5%
-
             latest_signals[symbol] = {
                 "price": price, "rsi": rsi, "status": "HOLDING_LONG",
                 "has_position": True, "checked_at": now.isoformat(),
+                "targets": {
+                    "stop": stop_price,
+                    "tier1": tier1_price,
+                    "tier2": tier2_price,
+                    "tier3": tier3_price,
+                }
             }
 
             # Exit conditions: stop loss, profit-taking above $1,001, RSI reversal, or tiered profit target
@@ -1070,7 +1096,7 @@ async def run_crypto_cycle():
 
             if stop_hit:
                 should_exit = True
-                reason = f"STOP LOSS (-{unrealized_pct*100:.2f}%)"
+                reason = f"STOP LOSS @ ${stop_price:.2f} (-{(1 - price/entry)*100:.2f}%)"
             elif profit_take_exit:
                 should_exit = True
                 reason = f"💰 PROFIT TAKEN (+${dollar_profit:.2f}, balance above $1,001)"
@@ -1079,13 +1105,13 @@ async def run_crypto_cycle():
                 reason = "RSI EXIT"
             elif tier3_hit:
                 should_exit = True
-                reason = f"TIER 3 (+{unrealized_pct*100:.2f}%, let winners run)"
+                reason = f"TIER 3 @ ${tier3_price:.2f} (+{(price/entry - 1)*100:.2f}%, let winners run)"
             elif tier2_hit and unrealized_pct >= PROFIT_TARGET_PCT:
                 should_exit = True
-                reason = f"TIER 2 (+{unrealized_pct*100:.2f}%, hit 3% target)"
+                reason = f"TIER 2 @ ${tier2_price:.2f} (+{(price/entry - 1)*100:.2f}%, hit 3% target)"
             elif tier1_hit:
                 should_exit = True
-                reason = f"TIER 1 (+{unrealized_pct*100:.2f}%, lock early gain)"
+                reason = f"TIER 1 @ ${tier1_price:.2f} (+{(price/entry - 1)*100:.2f}%, lock early gain)"
 
             if should_exit:
                 filled = await place_order(session, symbol, "sell", qty, price)
@@ -1234,7 +1260,19 @@ async def run_crypto_cycle():
             log.info(f"[CRYPTO] 📡 BUY {symbol} — RSI:{rsi}")
             filled = await place_order(session, symbol, "buy", qty, price)
             if filled:
-                open_crypto_positions[symbol] = {"entry": price, "qty": qty, "opened_at": now}
+                # Store ATR-based exit targets with position (for volatility-adjusted exits)
+                targets = _calculate_atr_targets(price, atr)
+                open_crypto_positions[symbol] = {
+                    "entry": price,
+                    "qty": qty,
+                    "opened_at": now,
+                    "atr": atr,
+                    "stop_price": targets["stop_price"],
+                    "tier1_price": targets["tier1_price"],
+                    "tier2_price": targets["tier2_price"],
+                    "tier3_price": targets["tier3_price"],
+                    "trailing_stop_pct": targets["trailing_stop_pct"],
+                }
                 await _db_save_open(symbol, "long", price, qty)
                 # Log trade entry for analytics (ARM → ENTER transition)
                 await log_trade_entry(
@@ -1274,6 +1312,7 @@ def run():
     log.info(f"Pairs: {', '.join(CRYPTO_PAIRS)} | Allocation: {alloc_desc} | Max positions: {MAX_POSITIONS}")
     log.info("Runs 24/7 - crypto has no market close, unlike prop_bot.py's stock/ETF trading")
     log.info("🔴 LIVE TRADING - Coinbase has no free paper-trading sandbox for Advanced Trade")
+    log.info("Strategy: RSI_RECOVERY_ATR_V1 (state machine entry + volatility-based exits)")
     log.info("=" * 60)
 
     # Diagnostic: check credential availability
