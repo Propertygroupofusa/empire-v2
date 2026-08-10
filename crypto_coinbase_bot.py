@@ -391,8 +391,12 @@ async def get_usd_balance(session):
                     break
                 cursor = data.get("cursor")
         return None, f"no USD account found across {len(all_currencies)} accounts on this key: {all_currencies}"
+    except asyncio.TimeoutError:
+        return None, "Coinbase API timeout (network slow or API unresponsive)"
+    except aiohttp.ClientError as e:
+        return None, f"Coinbase API connection failed: {type(e).__name__}"
     except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
+        return None, f"{type(e).__name__}: {str(e)[:100]}"
 
 
 def _compute_rsi(closes: list) -> float:
@@ -791,7 +795,8 @@ async def run_crypto_cycle():
     log.info(f"[CRYPTO] Scanning {', '.join(CRYPTO_PAIRS)} (24/7, no market-hours gate) | Daily P&L: ${daily_pnl:.2f}")
 
     connector = aiohttp.TCPConnector(use_dns_cache=True)
-    async with aiohttp.ClientSession(connector=connector, trust_env=False) as session:
+    timeout = aiohttp.ClientTimeout(total=15, connect=5, sock_read=5)
+    async with aiohttp.ClientSession(connector=connector, trust_env=False, timeout=timeout) as session:
         cash, balance_error = await get_usd_balance(session)
         unlocked = 0.0
         if cash is None:
