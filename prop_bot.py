@@ -27,10 +27,18 @@ ET = ZoneInfo("America/New_York")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("prop_bot")
 
-ALPACA_KEY    = os.getenv("ALPACA_API_KEY", "")
-ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
-BASE_URL      = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
-LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
+def get_headers():
+    """Dynamically read Alpaca API credentials from env vars on every call.
+    This ensures fresh credentials even if env vars are set after module load."""
+    return {
+        "APCA-API-KEY-ID": os.getenv("ALPACA_API_KEY", ""),
+        "APCA-API-SECRET-KEY": os.getenv("ALPACA_SECRET_KEY", ""),
+        "Content-Type": "application/json"
+    }
+
+def get_base_url():
+    """Dynamically read Alpaca base URL from env var."""
+    return os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 
 # RSI entry/exit thresholds
 RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "30"))
@@ -77,12 +85,6 @@ DAILY_MAX_LOSS_BASE = float(os.getenv("PROP_DAILY_MAX_LOSS_BASE", "10"))
 # AGGRESSIVE EXIT ON RED — Close any position down 0.5% immediately
 # Don't wait for stop-loss to trigger. Exit fast, preserve capital.
 QUICK_EXIT_LOSS_PCT = float(os.getenv("QUICK_EXIT_LOSS_PCT", "0.005"))  # Exit any loser at 0.5% down
-
-HEADERS = {
-    "APCA-API-KEY-ID": ALPACA_KEY,
-    "APCA-API-SECRET-KEY": ALPACA_SECRET,
-    "Content-Type": "application/json"
-}
 
 # SCALING UP SYSTEM — Increase position sizes after each milestone lock
 # $1K lock → scale to 1.5x, $2K lock → scale to 2.0x, $5K lock → scale to 3.0x
@@ -343,7 +345,7 @@ async def get_price_rsi(session, symbol):
     """Get price and RSI for futures proxy symbol, including SMA50 for mean reversion validation"""
     try:
         url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=5Min&limit=50"
-        async with session.get(url, headers=HEADERS) as r:
+        async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
                 return None
             data = await r.json()
@@ -390,7 +392,7 @@ async def get_higher_tf_trend(session, symbol):
     a genuinely confirmed opposing trend does."""
     try:
         url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=1Hour&limit=50&feed=iex"
-        async with session.get(url, headers=HEADERS) as r:
+        async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
                 return "UNKNOWN"
             data = await r.json()
@@ -420,7 +422,7 @@ async def get_account_equity(session):
     increment (see PROFIT_INCREMENT_MILESTONES). Falls back to None (base
     tier) on any failure - a scaling hiccup shouldn't block trading."""
     try:
-        async with session.get(f"{BASE_URL}/v2/account", headers=HEADERS) as r:
+        async with session.get(f"{get_base_url()}/v2/account", headers=get_headers()) as r:
             if r.status != 200:
                 return None
             data = await r.json()
@@ -435,7 +437,7 @@ async def get_account_cash(session):
     rather than a fixed share count (see size_position). Falls back to
     None on any failure - callers fall back to the fixed 1-share size."""
     try:
-        async with session.get(f"{BASE_URL}/v2/account", headers=HEADERS) as r:
+        async with session.get(f"{get_base_url()}/v2/account", headers=get_headers()) as r:
             if r.status != 200:
                 return None
             data = await r.json()
@@ -449,7 +451,7 @@ async def get_account_buying_power(session):
     """Real Alpaca buying power. Returns buying power or None on failure.
     Used for hard margin safety checks to prevent over-leverage."""
     try:
-        async with session.get(f"{BASE_URL}/v2/account", headers=HEADERS) as r:
+        async with session.get(f"{get_base_url()}/v2/account", headers=get_headers()) as r:
             if r.status != 200:
                 return None
             data = await r.json()
@@ -472,7 +474,7 @@ async def get_account_shorting_enabled(session):
     so a transient API hiccup doesn't silently disable a feature that may
     actually be working."""
     try:
-        async with session.get(f"{BASE_URL}/v2/account", headers=HEADERS) as r:
+        async with session.get(f"{get_base_url()}/v2/account", headers=get_headers()) as r:
             if r.status != 200:
                 return True
             data = await r.json()
@@ -515,7 +517,7 @@ async def reconcile_positions_with_broker(session):
     position on a symbol this bot doesn't trade (e.g. a manual purchase
     unrelated to this bot) is left completely alone, adopted or not."""
     try:
-        async with session.get(f"{BASE_URL}/v2/positions", headers=HEADERS) as r:
+        async with session.get(f"{get_base_url()}/v2/positions", headers=get_headers()) as r:
             if r.status != 200:
                 return
             broker_positions = await r.json()
@@ -659,7 +661,7 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
     mode = "LIVE" if LIVE_TRADE else "PAPER"
 
     try:
-        async with session.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=order) as r:
+        async with session.post(f"{get_base_url()}/v2/orders", headers=get_headers(), json=order) as r:
             result = await r.json()
             if r.status in (200, 201):
                 log.info(f"✅ FUTURES TRADE | {mode} | {action} {qty} {contract} ({symbol}) @ ${price:.2f} | APEX_589296")
@@ -757,7 +759,7 @@ async def run_prop_cycle():
                 for contract in list(open_prop_positions.keys()):
                     pos = open_prop_positions[contract]
                     try:
-                        price_resp = await session.get(f"{BASE_URL}/v1/last?symbols={pos.get('symbol', contract)}", headers=HEADERS)
+                        price_resp = await session.get(f"{get_base_url()}/v1/last?symbols={pos.get('symbol', contract)}", headers=get_headers())
                         if price_resp.status == 200:
                             data = await price_resp.json()
                             price = data.get("last", {}).get("price", pos["entry"])
