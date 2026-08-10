@@ -814,13 +814,15 @@ async def run_crypto_cycle():
             # cash sitting there - can never trade more than what's real.
             cash_pool = min(cash, unlocked, MAX_ALLOCATION) if MAX_ALLOCATION is not None else min(cash, unlocked)
 
-        # CRITICAL: Floor & profit-locking strategy
-        BALANCE_FLOOR = 700.00  # Minimum $700 - don't trade if below
-        PROFIT_LOCK_TARGET = 990.00  # Lock profits at $990 (before $1,000)
-        PROFIT_LOCK_CEILING = 1000.00  # $1,000 is the goal
+        # CRITICAL: Dynamic floor & aggressive growth strategy
+        BALANCE_FLOOR = 990.00  # If drops to $990, resume aggressive trading
+        PROFIT_LOCK_ACTIVATION = 1001.00  # When balance hits $1,001+, take profits
+        TARGET_TRADE_PROFIT = 10.00  # Close trades with $10+ profit when activated
+        GROWTH_TARGET = 1000.00  # Seek to go above and beyond $1,000
 
-        is_hitting_floor = cash is not None and cash < BALANCE_FLOOR
-        is_near_profit_target = cash is not None and PROFIT_LOCK_TARGET <= cash < PROFIT_LOCK_CEILING
+        is_at_floor = cash is not None and cash <= BALANCE_FLOOR
+        should_take_profits = cash is not None and cash >= PROFIT_LOCK_ACTIVATION
+        is_aggressive_mode = cash is not None and cash < PROFIT_LOCK_ACTIVATION  # Seek to climb
 
         # Professional daily loss limit: stop new entries after losing 2% of account in a day
         global daily_usd_balance_start
@@ -841,22 +843,24 @@ async def run_crypto_cycle():
             tier_desc = "tiering off"
 
         status_suffix = ""
-        if is_hitting_floor:
-            status_suffix += f" | 🚨 FLOOR HIT (${BALANCE_FLOOR:.2f}) - STOPPING ALL NEW TRADES"
-        if is_near_profit_target:
-            status_suffix += f" | 🎯 PROFIT LOCK ZONE (${PROFIT_LOCK_TARGET:.2f}-${PROFIT_LOCK_CEILING:.2f}) - CLOSING POSITIONS TO LOCK GAINS"
+        if is_at_floor:
+            status_suffix += f" | 🚀 AT FLOOR (${BALANCE_FLOOR:.2f}) - AGGRESSIVE MODE: ALL-IN TO CLIMB"
+        if should_take_profits:
+            status_suffix += f" | 💰 ABOVE $1,001 - TAKING PROFITS: Close trades with ${TARGET_TRADE_PROFIT:.2f}+ gains"
+        if is_aggressive_mode:
+            status_suffix += f" | 📈 GROWTH MODE: Seeking to exceed $1,000"
         if is_hitting_daily_loss_limit:
             status_suffix += " | ⚠️ DAILY 2% LOSS LIMIT HIT - stopping new trades"
 
         log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} ({cap_desc}, {tier_desc}) | Target: +{PROFIT_TARGET_PCT*100:.2f}% | Stop: -{STOP_LOSS_PCT*100:.2f}% | Round-trip fee: {CRYPTO_ROUND_TRIP_FEE_RATE*100:.2f}%{status_suffix}")
 
-        # FLOOR PROTECTION: Skip new entries if at floor ($700 minimum)
-        if is_hitting_floor:
-            log.warning(
-                f"[CRYPTO] 🚨 BALANCE AT FLOOR (${cash:.2f} < ${BALANCE_FLOOR:.2f}); "
-                "stopping all new trades to protect capital"
+        # AGGRESSIVE GROWTH MODE: If at floor ($990), maximize position sizing
+        if is_at_floor and not is_hitting_daily_loss_limit:
+            log.info(
+                f"[CRYPTO] 🚀 AGGRESSIVE MODE ACTIVATED (${cash:.2f} ≤ ${BALANCE_FLOOR:.2f}); "
+                "using FULL balance to climb above $1,000"
             )
-            cash_pool = 0.0  # Force no new entries
+            # Full position sizing in aggressive mode - don't hold back
 
         # Skip new entries entirely if cash pool is below meaningful trade size
         if cash_pool < MIN_CRYPTO_TRADE_USD:
@@ -958,19 +962,20 @@ async def run_crypto_cycle():
                 "has_position": True, "checked_at": now.isoformat(),
             }
 
-            # Exit conditions: stop loss, RSI reversal, profit-lock zone, or tiered profit target
+            # Exit conditions: stop loss, profit-taking above $1,001, RSI reversal, or tiered profit target
             should_exit = False
             reason = None
 
-            # PROFIT LOCKING: Force close any profitable position if in $990-$1000 zone
-            profit_lock_exit = is_near_profit_target and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE
+            # PROFIT TAKING: Close trades with $10+ profit when balance > $1,001
+            dollar_profit = unrealized_pnl
+            profit_take_exit = should_take_profits and dollar_profit >= TARGET_TRADE_PROFIT
 
             if stop_hit:
                 should_exit = True
                 reason = f"STOP LOSS (-{unrealized_pct*100:.2f}%)"
-            elif profit_lock_exit:
+            elif profit_take_exit:
                 should_exit = True
-                reason = f"🎯 PROFIT LOCK (+{unrealized_pct*100:.2f}%, zone ${PROFIT_LOCK_TARGET:.2f}-${PROFIT_LOCK_CEILING:.2f})"
+                reason = f"💰 PROFIT TAKEN (+${dollar_profit:.2f}, balance above $1,001)"
             elif rsi_exit:
                 should_exit = True
                 reason = "RSI EXIT"
