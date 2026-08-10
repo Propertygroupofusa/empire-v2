@@ -369,18 +369,61 @@
     <script>
         const API_URL = '/api/bot-race/race-data';
         const REFRESH_INTERVAL = 10000; // 10 seconds
+        const MAX_HISTORY = 360; // Keep last hour (36 * 10s = 360s)
+
+        // Local history storage
+        let balanceHistory = {
+            alpaca: [],
+            crypto: [],
+            timestamps: []
+        };
 
         async function fetchRaceData() {
             try {
                 const response = await fetch(API_URL);
                 if (!response.ok) throw new Error('API error: ' + response.status);
                 const data = await response.json();
+
+                // Store historical data
+                storeHistoricalData(data);
                 updateDashboard(data);
                 document.getElementById('error-container').innerHTML = '';
             } catch (error) {
                 console.error('Error fetching race data:', error);
                 showError('Failed to fetch bot race data: ' + error.message);
             }
+        }
+
+        function storeHistoricalData(data) {
+            const now = new Date();
+            balanceHistory.alpaca.push(data.alpaca.balance);
+            balanceHistory.crypto.push(data.crypto.balance);
+            balanceHistory.timestamps.push(now.toLocaleTimeString());
+
+            // Keep only last hour of data
+            if (balanceHistory.alpaca.length > MAX_HISTORY) {
+                balanceHistory.alpaca.shift();
+                balanceHistory.crypto.shift();
+                balanceHistory.timestamps.shift();
+            }
+        }
+
+        function calculateTrend(values) {
+            if (values.length < 2) return 0;
+            const recent = values.slice(-10);
+            const avg = recent.reduce((a, b) => a + b) / recent.length;
+            const first = recent[0];
+            const last = recent[recent.length - 1];
+            return last > first ? ((last - first) / first * 100) : ((last - first) / first * 100);
+        }
+
+        function estimateTimeToTarget(currentBalance, dailyROI, target) {
+            if (dailyROI <= 0) return '∞';
+            const remaining = target - currentBalance;
+            if (remaining <= 0) return 'REACHED';
+            const daysNeeded = remaining / (currentBalance * dailyROI / 100);
+            if (daysNeeded > 100) return '100+ days';
+            return Math.ceil(daysNeeded) + ' days';
         }
 
         function updateDashboard(data) {
@@ -424,8 +467,8 @@
                             <div class="stat-label">Win Rate</div>
                         </div>
                         <div class="stat-box">
-                            <div class="stat-value">$${alpaca.gap_to_target.toFixed(2)}</div>
-                            <div class="stat-label">Gap to Target</div>
+                            <div class="stat-value">${estimateTimeToTarget(alpaca.balance, alpaca.daily_roi_pct, 2000)}</div>
+                            <div class="stat-label">ETA to $2K</div>
                         </div>
                     </div>
                 </div>
@@ -463,8 +506,8 @@
                             <div class="stat-label">Win Rate</div>
                         </div>
                         <div class="stat-box">
-                            <div class="stat-value">$${crypto.gap_to_target.toFixed(2)}</div>
-                            <div class="stat-label">Gap to Target</div>
+                            <div class="stat-value">${estimateTimeToTarget(crypto.balance, crypto.daily_roi_pct, 2000)}</div>
+                            <div class="stat-label">ETA to $2K</div>
                         </div>
                     </div>
                 </div>
