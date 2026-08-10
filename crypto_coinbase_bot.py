@@ -137,17 +137,14 @@ def _auth_headers(method: str, path: str) -> dict:
 
 
 # AGGRESSIVE THRESHOLDS for high-velocity trading in overbought/oversold markets
-# Widened entry zones to catch more signals: RSI 25-40 for longs, 60-75 for shorts
-# This allows trading in currently overbought conditions while maintaining discipline
+# Long-only: Coinbase SPOT has no shorting support
 RSI_STRONG_BUY = 25   # RSI < 25 = oversold, strong reversal signal (lowered from 20)
 RSI_BUY = 40          # RSI < 40 = oversold/neutral zone, normal entry signal (lowered from 30)
 RSI_NO_ENTRY = 60     # RSI >= 60 = overbought, skip LONG entries only (lowered from 50, allows 40-60 zone)
 RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "75"))    # Exit threshold for LONG (raised from 70)
-RSI_SHORT_ABOVE = float(os.getenv("CRYPTO_RSI_SHORT_ABOVE", "60"))  # Entry threshold for SHORT positions (lowered from 70)
-RSI_SHORT_BELOW = float(os.getenv("CRYPTO_RSI_SHORT_BELOW", "35"))  # Exit threshold for SHORT positions (raised from 30)
 RSI_BUY_BELOW = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "10"))      # Fallback for legacy env var (deprecated)
 
-MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "18"))  # Expanded to 18: allows more concurrent longs + shorts in high-velocity markets
+MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "18"))  # Expanded to 18: more concurrent longs in high-velocity markets
 # Unset by default - no ceiling, so the full account balance (principal +
 # compounded profit) is always in play. Set CRYPTO_MAX_ALLOCATION to cap
 # it at a fixed dollar amount instead, if ever wanted.
@@ -272,7 +269,6 @@ CRYPTO_TIER_FRACTIONS = [1/3, 1/3, 1/3]   # Exit 1/3 of position at each tier
 CRYPTO_TRAILING_STOP_PCT = 0.05  # Trail final position by 5% from recent high (protection while letting winners run)
 
 open_crypto_positions = {}  # Long positions: {symbol: {"entry": price, "qty": qty}}
-open_crypto_shorts = {}      # Short positions: {symbol: {"entry": price, "qty": qty}}
 daily_pnl = 0.0
 daily_usd_balance_start = None  # For daily 2% loss limit
 latest_signals = {}
@@ -292,17 +288,13 @@ async def load_open_positions():
     can never take profit or cut losses on them again (see BotPosition)."""
     try:
         async with AsyncSessionLocal() as db:
-            result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
+            result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME, BotPosition.side == "long"))
             rows = result.scalars().all()
             for row in rows:
                 position_data = {"entry": row.entry_price, "qty": row.qty}
-                if row.side == "short":
-                    open_crypto_shorts[row.symbol] = position_data
-                else:
-                    open_crypto_positions[row.symbol] = position_data
-            total = len(open_crypto_positions) + len(open_crypto_shorts)
+                open_crypto_positions[row.symbol] = position_data
             if rows:
-                log.info(f"[CRYPTO] Reloaded {total} open position(s) from DB: {len(open_crypto_positions)} long, {len(open_crypto_shorts)} short")
+                log.info(f"[CRYPTO] Reloaded {len(open_crypto_positions)} long position(s) from DB")
     except Exception as e:
         log.error(f"[CRYPTO] Failed to reload open positions from DB: {e}")
 
@@ -682,7 +674,7 @@ async def place_order(session, symbol, side, qty, price):
     else:
         # Limit order: exit at specific price (GTC = Good Until Cancelled)
         order_config = {
-            "limit_gtc": {
+            "limit_limit_gtc": {
                 "base_size": f"{qty:.8f}",
                 "limit_price": f"{price:.2f}"
             }
