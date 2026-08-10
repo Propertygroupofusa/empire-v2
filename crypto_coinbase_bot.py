@@ -424,13 +424,16 @@ def _compute_atr(closes: list, highs: list, lows: list, period: int = 14) -> flo
     return atr
 
 
-def _crypto_buy_signal_improved(rsi: float, volume_ratio: float, close_position: float) -> str:
-    """Improved entry signal: tiered RSI with momentum/volume confirmation.
-    Returns: "STRONG_BUY" (RSI < 20), "BUY" (20-30), or "NO_ACTION"
+def _crypto_buy_signal_improved(rsi: float, rsi_recovery: bool, volume_ratio: float, close_position: float) -> str:
+    """Improved entry signal: tiered RSI + recovery trigger + momentum/volume confirmation.
+    Returns: "STRONG_BUY" (RSI < 20 + bounce), "BUY" (20-30 + bounce), or "NO_ACTION"
 
-    Replaces the hard RSI < 10 requirement which produces too few signals and
-    causes the bot to sit idle. This tiered system catches more reversals while
-    maintaining quality through volume + candle confirmation."""
+    Key improvement: Only enter when RSI is BOUNCING from oversold (rsi_recovery=True),
+    not just when it enters oversold. This avoids catching falling knives."""
+
+    # Don't enter if RSI isn't recovering (still falling) - wait for bounce
+    if not rsi_recovery:
+        return "NO_ACTION"
 
     # Extreme oversold: strong reversal signal
     if rsi < RSI_STRONG_BUY:  # RSI < 20
@@ -445,21 +448,60 @@ def _crypto_buy_signal_improved(rsi: float, volume_ratio: float, close_position:
     return "NO_ACTION"
 
 
-async def _fetch_coinbase_closes(session, symbol):
-    """Free, no-auth public endpoint - BTC/USD -> BTC-USD. This is the
-    primary price source since it's the same exchange orders execute on.
-    Fetches 50+ candles for MA50 calculation (directional bias filter)."""
+def _calculate_atr_targets(entry_price: float, atr: float) -> dict:
+    """Calculate tiered profit targets from ATR (volatility-based).
+    Returns: {tier1: price, tier2: price, tier3: price, stop: price}
+
+    ATR typically represents 14-period average true range. Scale it for realistic targets:
+    - Tier 1: Entry + 2×ATR (lock early profit)
+    - Tier 2: Entry + 3.5×ATR (second profit zone)
+    - Tier 3: Entry + 6×ATR (let winners run with trailing stop)
+    - Stop: Entry - ATR (emergency protection)
+    """
+    if atr <= 0:
+        # Fallback to percentage-based if ATR unavailable
+        return {
+            "tier1_price": entry_price * 1.03,   # 3%
+            "tier2_price": entry_price * 1.05,   # 5%
+            "tier3_price": entry_price * 1.10,   # 10%
+            "stop_price": entry_price * 0.98,    # -2%
+            "trailing_stop_pct": 0.05,            # 5% trail
+        }
+    # ATR-based targets (ATR is typically 0.5-2% of price for crypto)
+    return {
+        "tier1_price": entry_price + (2.0 * atr),    # First profit zone
+        "tier2_price": entry_price + (3.5 * atr),    # Second profit zone
+        "tier3_price": entry_price + (6.0 * atr),    # Let winners run
+        "stop_price": entry_price - atr,              # Emergency stop
+        "trailing_stop_pct": 0.05,                    # 5% trailing stop on final position
+    }
+
+
+async def _fetch_coinbase_candles(session, symbol, limit=50):
+    """Fetch OHLCV candles for RSI, ATR, and directional bias calculation.
+    Returns list of candles (newest first in API, reversed to chronological for analysis).
+    Each candle: [time, low, high, open, close, volume]"""
     pair = _to_product_id(symbol)
     url = f"https://api.exchange.coinbase.com/products/{pair}/candles?granularity=300"
-    async with session.get(url, headers={"Accept": "application/json"}) as r:
-        if r.status != 200:
-            return None
-        data = await r.json()
-        if not data or len(data) < 50:
-            return None
-        # Coinbase returns newest-first; each row is [time, low, high, open, close, volume]
-        rows = list(reversed(data))[-50:]
-        return [float(row[4]) for row in rows]
+    try:
+        async with session.get(url, headers={"Accept": "application/json"}) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+            if not data or len(data) < limit:
+                return None
+            # Coinbase returns newest-first; reverse to chronological order
+            return list(reversed(data))[-limit:]
+    except Exception:
+        return None
+
+
+async def _fetch_coinbase_closes(session, symbol):
+    """Legacy: fetch just closes for RSI calculation. Uses _fetch_coinbase_candles internally."""
+    candles = await _fetch_coinbase_candles(session, symbol, limit=50)
+    if not candles:
+        return None
+    return [float(row[4]) for row in candles]
 
 
 async def _fetch_latest_candle(session, symbol):
@@ -487,26 +529,43 @@ async def _fetch_latest_candle(session, symbol):
 
 
 async def get_price_rsi(session, symbol):
-    """Price+RSI+directional bias from Coinbase's public candles endpoint.
-    Returns price, RSI, 14-bar MA (short-term), 50-bar MA (trend filter), latest candle OHLC.
-    Uses MA50 to determine directional bias: only long above MA50, only short below MA50."""
+    """Price+RSI+ATR+directional bias from Coinbase's public candles endpoint.
+    Returns price, RSI, ATR (volatility), 50-bar MA (trend filter), latest candle OHLC, RSI recovery status.
+    Uses MA50 to determine directional bias: only long above MA50, only short below MA50.
+
+    RSI recovery: True if RSI is bouncing UP from oversold (useful for entry timing)."""
     try:
-        closes = await _fetch_coinbase_closes(session, symbol)
+        candles = await _fetch_coinbase_candles(session, symbol, limit=50)
         candle = await _fetch_latest_candle(session, symbol)
     except Exception as e:
         log.debug(f"coinbase price fetch failed for {symbol}: {e}")
-        closes = None
+        candles = None
         candle = None
 
-    if closes and len(closes) >= 50:
+    if candles and len(candles) >= 50:
+        closes = [float(row[4]) for row in candles]
+        highs = [float(row[2]) for row in candles]
+        lows = [float(row[1]) for row in candles]
+
         rsi = _compute_rsi(closes)
+        atr = _compute_atr(closes, highs, lows, period=14)
         price = closes[-1]
-        ma_50 = sum(closes[-50:]) / 50   # Long-term MA for directional bias
-        above_ma50 = price > ma_50       # Long-term trend: uptrend if above
+        ma_50 = sum(closes[-50:]) / 50
+        above_ma50 = price > ma_50
+
+        # RSI recovery: detect if RSI is bouncing UP from oversold zone
+        # True if: current RSI < 30 AND prior RSI < current RSI (upward momentum)
+        rsi_recovery = False
+        if len(closes) >= 2:
+            prior_closes = closes[:-1]
+            prior_rsi = _compute_rsi(prior_closes) if len(prior_closes) >= 14 else 0
+            rsi_recovery = (rsi < 30 and rsi > prior_rsi)  # In oversold and bouncing up
+
         return {
-            "price": price, "rsi": rsi,
+            "price": price, "rsi": rsi, "atr": atr,
             "ma_50": ma_50, "in_uptrend": above_ma50,
             "candle": candle,
+            "rsi_recovery": rsi_recovery,  # True if RSI bouncing from oversold
         }
 
     log.error(f"❌ {symbol}: coinbase price fetch failed (need 50+ candles)")
@@ -865,15 +924,26 @@ async def run_crypto_cycle():
             if not data:
                 continue
             price, rsi = data["price"], data["rsi"]
+            atr = data.get("atr", 0)
             ma_50 = data.get("ma_50", 0)
             in_uptrend = data.get("in_uptrend", False)
+            rsi_recovery = data.get("rsi_recovery", False)
             candle = data.get("candle")
 
-            # IMPROVED ENTRY LOGIC: Tiered RSI system (20/30 instead of hard < 10)
-            # This produces more entry signals while maintaining quality through volume/candle confirmation
+            # IMPROVED ENTRY LOGIC: Tiered RSI + RSI recovery trigger
+            # Requires: RSI < 30 (oversold) AND RSI bouncing upward (recovery) + volume + momentum
+            # This avoids catching falling knives and waits for actual reversal
             if rsi >= RSI_NO_ENTRY:  # RSI >= 50: neutral/bullish, don't enter new positions
                 latest_signals[symbol] = {
                     "price": price, "rsi": rsi, "status": "NEUTRAL",
+                    "has_position": False, "checked_at": now.isoformat(),
+                }
+                continue
+
+            if not rsi_recovery:
+                # RSI oversold but not bouncing - wait for recovery signal
+                latest_signals[symbol] = {
+                    "price": price, "rsi": rsi, "status": "OVERSOLD_WAITING_BOUNCE",
                     "has_position": False, "checked_at": now.isoformat(),
                 }
                 continue
@@ -884,8 +954,8 @@ async def run_crypto_cycle():
                     close_position = (candle["close"] - candle["low"]) / candle_range
                     volume_spike_ratio = candle["volume"] / max(candle["prior_volume"], 1)
 
-                    # Tiered buy signal: STRONG_BUY (RSI < 20) or BUY (20-30)
-                    signal = _crypto_buy_signal_improved(rsi, volume_spike_ratio, close_position)
+                    # Tiered buy signal: STRONG_BUY (RSI < 20 + bounce) or BUY (20-30 + bounce)
+                    signal = _crypto_buy_signal_improved(rsi, rsi_recovery, volume_spike_ratio, close_position)
 
                     if signal == "NO_ACTION":
                         # No signal - log why
@@ -903,9 +973,12 @@ async def run_crypto_cycle():
                         }
                         continue
 
-                    # Signal received (STRONG_BUY or BUY)
+                    # Signal received (STRONG_BUY or BUY) - calculate ATR-based exits
+                    targets = _calculate_atr_targets(price, atr)
                     latest_signals[symbol] = {
-                        "price": price, "rsi": rsi, "status": f"{signal}_CONFIRMED",
+                        "price": price, "rsi": rsi, "atr": atr,
+                        "status": f"{signal}_CONFIRMED",
+                        "targets": targets,  # Store targets for position tracking
                         "has_position": False, "checked_at": now.isoformat(),
                     }
                 else:
