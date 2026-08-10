@@ -250,7 +250,7 @@ ALPACA_MANDATE = {
     # Capital
     "capital": {
         "max_per_position": 200,
-        "max_open_positions": 3,
+        "max_open_positions": 6,  # 3 longs + 3 shorts (matches entry)
         "max_total_notional_pct": 0.60,
         "critical_cash_balance": 50,
         "max_daily_loss_pct": 0.03,  # 3%
