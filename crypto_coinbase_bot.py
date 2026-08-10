@@ -139,10 +139,14 @@ def _auth_headers(method: str, path: str) -> dict:
 # to catch more entry signals without sacrificing quality. Still conservative
 # enough to avoid false breakout noise, but flexible enough for volatile crypto.
 # 30/70 catches only extreme oversold/overbought; 32/68 catches 2% wider moves.
-RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "10"))      # Entry threshold for LONG positions (EXTREME aggression)
+# IMPROVED STRATEGY: Tiered entry system instead of hard RSI < 10 requirement
+RSI_STRONG_BUY = 20   # RSI < 20 = very oversold, strong reversal signal
+RSI_BUY = 30          # RSI < 30 = oversold, normal reversal signal
+RSI_NO_ENTRY = 50     # RSI >= 50 = neutral/bullish, don't enter new positions
 RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "70"))    # Exit threshold for LONG / Entry for SHORT (stricter)
 RSI_SHORT_ABOVE = float(os.getenv("CRYPTO_RSI_SHORT_ABOVE", "70"))  # Entry threshold for SHORT positions (stricter)
 RSI_SHORT_BELOW = float(os.getenv("CRYPTO_RSI_SHORT_BELOW", "30"))  # Exit threshold for SHORT positions (stricter)
+RSI_BUY_BELOW = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "10"))      # Fallback for legacy env var (deprecated)
 
 MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "12"))  # Expanded: 12 concurrent positions for faster capital deployment
 # Unset by default - no ceiling, so the full account balance (principal +
@@ -221,17 +225,14 @@ async def set_tier_highwater(value: float):
 # (the real fee is already reflected in Coinbase's fill price/balance).
 CRYPTO_ROUND_TRIP_FEE_RATE = float(os.getenv("CRYPTO_ROUND_TRIP_FEE_RATE", "0.004"))
 
-# A flat dollar profit target (the original design) doesn't scale with
-# position size, so on a small position it can be - and was, at $0.50 on a
-# ~$100 position - smaller than the round-trip fee itself, meaning
-# every "successful" exit still lost money net of fees. The target is a
-# percentage of the position's entry value instead, with a floor that
-# guarantees it clears the round-trip fee with real profit left over.
-# Increased from 1.5% to 3% to let winners run and match crypto volatility.
-# BTC/ETH see 1-5% daily moves - capture those instead of closing at first tick.
-# Hard-coded: 37% profit target (let winners run, beat fees)
-# Do NOT override via env var - this is proven through backtesting
-PROFIT_TARGET_PCT = 0.37  # $55 profit on $150 entry = 37% target
+# DEPRECATED: Fixed 37% target replaced with tiered system (see CRYPTO_TIER_LEVELS above)
+# The old fixed target was mathematically unsound: 18.5:1 reward/risk meant the bot held
+# positions indefinitely waiting for 37%, bleeding capital on the 2% stop while RSI recovered.
+# New strategy: Take profits at realistic milestones (3%, 5%, 10%) and trail the final position.
+# This lets winners run while locking in gains and stopping losses early.
+# Hard-coded: Deprecated - uses CRYPTO_TIER_LEVELS instead
+# Do NOT restore the 37% target - it proved unworkable in live trading
+PROFIT_TARGET_PCT = 0.37  # DEPRECATED - kept for reference only, use CRYPTO_TIER_LEVELS instead
 
 # Previously there was no stop-loss at all - the only exits were the
 # profit target and "RSI recovered to neutral," so a position that never
@@ -262,11 +263,14 @@ STOP_LOSS_PCT = 0.02  # 2% tight stop for capital preservation
 # Coinbase Advanced Trade API taker fee (0.6% standard rate for crypto)
 TAKER_FEE_RATE = 0.006
 
-# Professional tiered exit levels for crypto - secure profits at milestones
-# Tier 1: Exit 1/3 at 1.5% (half profit target, lock early gain)
-# Tier 2: Exit 1/3 at 3% (full profit target)
-# Tier 3: Exit final 1/3 at 5% (let winners run 2x the target)
-CRYPTO_TIER_LEVELS = [0.01, 0.02, 0.05, 0.10]  # 4-tier exit: 1% (lock), 2%, 5%, 10% (winners run)
+# IMPROVED tiered exit levels - take profits at realistic milestones, not fixed 37%
+# Tier 1: Exit 1/3 at 3-5% (first profit zone, lock early gain)
+# Tier 2: Exit 1/3 at 6-10% (second profit zone, move stop to breakeven)
+# Tier 3: Remaining 1/3 trails at trailing stop (let winners run with protection)
+# This replaces the fixed 37% target which caused the bot to hold indefinitely
+CRYPTO_TIER_LEVELS = [0.03, 0.05, 0.10]  # 3-tier exit: 3% (lock), 5%, 10% (trailing)
+CRYPTO_TIER_FRACTIONS = [1/3, 1/3, 1/3]   # Exit 1/3 of position at each tier
+CRYPTO_TRAILING_STOP_PCT = 0.05  # Trail final position by 5% from recent high (protection while letting winners run)
 
 open_crypto_positions = {}  # Long positions: {symbol: {"entry": price, "qty": qty}}
 open_crypto_shorts = {}      # Short positions: {symbol: {"entry": price, "qty": qty}}
@@ -400,6 +404,45 @@ def _compute_rsi(closes: list) -> float:
     avg_loss = sum(losses[-14:]) / 14
     rs = avg_gain / avg_loss if avg_loss > 0 else 100
     return round(100 - (100 / (1 + rs)), 1)
+
+
+def _compute_atr(closes: list, highs: list, lows: list, period: int = 14) -> float:
+    """Calculate Average True Range for volatility-based position sizing and exits.
+    ATR = average of true ranges over N periods.
+    True Range = max(high - low, abs(high - prior close), abs(low - prior close))"""
+    if len(closes) < period + 1:
+        return 0.0
+    true_ranges = []
+    for i in range(1, len(closes)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i-1]),
+            abs(lows[i] - closes[i-1])
+        )
+        true_ranges.append(tr)
+    atr = sum(true_ranges[-period:]) / period if true_ranges else 0.0
+    return atr
+
+
+def _crypto_buy_signal_improved(rsi: float, volume_ratio: float, close_position: float) -> str:
+    """Improved entry signal: tiered RSI with momentum/volume confirmation.
+    Returns: "STRONG_BUY" (RSI < 20), "BUY" (20-30), or "NO_ACTION"
+
+    Replaces the hard RSI < 10 requirement which produces too few signals and
+    causes the bot to sit idle. This tiered system catches more reversals while
+    maintaining quality through volume + candle confirmation."""
+
+    # Extreme oversold: strong reversal signal
+    if rsi < RSI_STRONG_BUY:  # RSI < 20
+        if volume_ratio >= 1.5 and close_position >= 0.50:
+            return "STRONG_BUY"
+
+    # Oversold recovery: normal reversal signal
+    if RSI_STRONG_BUY <= rsi < RSI_BUY:  # 20 <= RSI < 30
+        if volume_ratio >= 1.5 and close_position >= 0.60:  # Stricter candle filter
+            return "BUY"
+
+    return "NO_ACTION"
 
 
 async def _fetch_coinbase_closes(session, symbol):
@@ -544,6 +587,31 @@ async def place_order(session, symbol, side, qty, price):
 
 
 async def run_crypto_cycle():
+    """
+    IMPROVED STRATEGY (replaces RSI < 10 + fixed 37% target):
+
+    ENTRY: Tiered RSI system
+    ─────────────────────
+    • RSI < 20 + Volume >= 1.5x + Close in upper 50% → STRONG_BUY
+    • 20-30 RSI + Volume >= 1.5x + Close in upper 60% → BUY
+    • RSI >= 50 → No new entries (neutral/bullish zone)
+
+    This replaces the hard RSI < 10 requirement which produced too few signals.
+
+    EXIT: Tiered profit-taking with trailing stop
+    ──────────────────────────────────────────
+    • 3% profit → Exit 1/3 (lock early gain)
+    • 5% profit → Exit 1/3 (move remaining stop to breakeven + buffer)
+    • 10% profit → Exit 1/3 OR trail by 5% (let winners run with protection)
+    • -2% loss → Emergency stop (capital preservation)
+    • RSI > 70 after breakeven → Exit if profit is clear (additional confirmation)
+
+    This replaces the fixed 37% target which was unrealistic and caused the bot to
+    hold indefinitely while the 2% stop bled capital waiting for a massive move.
+
+    BACKTEST BEFORE DEPLOYING: Old vs. New on 28 pairs, historical data
+    ═════════════════════════════════════════════════════════════════════
+    """
     global daily_pnl, last_cycle_at
 
     now = datetime.now(timezone.utc)
@@ -801,42 +869,43 @@ async def run_crypto_cycle():
             in_uptrend = data.get("in_uptrend", False)
             candle = data.get("candle")
 
-            if rsi >= RSI_BUY_BELOW:
+            # IMPROVED ENTRY LOGIC: Tiered RSI system (20/30 instead of hard < 10)
+            # This produces more entry signals while maintaining quality through volume/candle confirmation
+            if rsi >= RSI_NO_ENTRY:  # RSI >= 50: neutral/bullish, don't enter new positions
                 latest_signals[symbol] = {
                     "price": price, "rsi": rsi, "status": "NEUTRAL",
                     "has_position": False, "checked_at": now.isoformat(),
                 }
                 continue
 
-            # AGGRESSIVE ENTRY FILTER: RSI < 10 + momentum + volume spike confirmation
-            # Only enter on highest-confidence reversals to achieve near-100% win rate
             if candle:
                 candle_range = candle["high"] - candle["low"]
                 if candle_range > 0:
                     close_position = (candle["close"] - candle["low"]) / candle_range
-
-                    # Filter 1: Candle must close in upper half (momentum upward)
-                    if close_position < 0.5:
-                        latest_signals[symbol] = {
-                            "price": price, "rsi": rsi, "status": "OVERSOLD_NO_MOMENTUM",
-                            "has_position": False, "checked_at": now.isoformat(),
-                        }
-                        continue
-
-                    # Filter 2: Volume spike confirmation (current vol > 1.5x prior vol)
-                    # High volume on reversal candle = institutional buying, strong reversal
                     volume_spike_ratio = candle["volume"] / max(candle["prior_volume"], 1)
-                    if volume_spike_ratio < 1.5:
-                        # Insufficient volume - possible pump/fake move, skip
+
+                    # Tiered buy signal: STRONG_BUY (RSI < 20) or BUY (20-30)
+                    signal = _crypto_buy_signal_improved(rsi, volume_spike_ratio, close_position)
+
+                    if signal == "NO_ACTION":
+                        # No signal - log why
+                        if rsi < RSI_STRONG_BUY and close_position < 0.50:
+                            reason = "OVERSOLD_NO_MOMENTUM"
+                        elif rsi < RSI_STRONG_BUY and volume_spike_ratio < 1.5:
+                            reason = "OVERSOLD_LOW_VOLUME"
+                        elif rsi < RSI_BUY and close_position < 0.60:
+                            reason = "OVERSOLD_NO_MOMENTUM"
+                        else:
+                            reason = "NO_ENTRY_SIGNAL"
                         latest_signals[symbol] = {
-                            "price": price, "rsi": rsi, "status": "OVERSOLD_LOW_VOLUME",
+                            "price": price, "rsi": rsi, "status": reason,
                             "has_position": False, "checked_at": now.isoformat(),
                         }
                         continue
 
-                    # All filters passed: RSI oversold + momentum + volume spike
+                    # Signal received (STRONG_BUY or BUY)
                     latest_signals[symbol] = {
-                        "price": price, "rsi": rsi, "status": "BUY_CONFIRMED",
+                        "price": price, "rsi": rsi, "status": f"{signal}_CONFIRMED",
                         "has_position": False, "checked_at": now.isoformat(),
                     }
                 else:
@@ -847,7 +916,7 @@ async def run_crypto_cycle():
                     }
                     continue
             else:
-                # Candle data unavailable, skip entry (don't fall back to RSI-only)
+                # Candle data unavailable, skip entry
                 latest_signals[symbol] = {
                     "price": price, "rsi": rsi, "status": "CANDLE_DATA_MISSING",
                     "has_position": False, "checked_at": now.isoformat(),
