@@ -1061,3 +1061,35 @@ class SweepAuditLog(Base):
             "detail": self.detail,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class CryptoRSIState(Base):
+    """Track RSI state machine per symbol for tiered entry discipline.
+
+    Replaces static RSI thresholds with event-driven entry: only enter when RSI
+    has ENTERED the oversold zone (10-30), then bounces upward.
+
+    States:
+    - entered_oversold=False, armed_rsi=None: WATCH (RSI > 30 or never entered)
+    - entered_oversold=True, armed_rsi!=None: ARM (in 10-30, waiting for bounce)
+    - Entry triggers when: entered_oversold=True + RSI > armed_rsi + vol + candle
+    - Reset when: RSI > 50 (forces fresh cycle)
+    """
+    __tablename__ = "crypto_rsi_state"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, unique=True, index=True)  # "BTC/USD", "ETH/USD", etc.
+    entered_oversold = Column(Boolean, default=False)  # Has RSI dipped to 10-30?
+    armed_rsi = Column(Float, nullable=True)  # RSI value when entered oversold
+    last_rsi = Column(Float, nullable=True)  # Previous cycle RSI (for recovery check)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "symbol": self.symbol,
+            "entered_oversold": self.entered_oversold,
+            "armed_rsi": self.armed_rsi,
+            "last_rsi": self.last_rsi,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
