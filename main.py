@@ -1027,12 +1027,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Payout processor startup failed: {e}")
 
-    try:
-        from bot_autoscaler import auto_scale_bots
-        asyncio.create_task(auto_scale_bots())
-        log.info("📈 Bot auto-scaler started - will create bots based on demand")
-    except Exception as e:
-        log.warning(f"Bot auto-scaler startup failed: {e}")
+    # DISABLED: bot_autoscaler has NULL id constraint errors on Worker creation
+    # (not critical for trading bot revenue - crypto/alpaca bots work independently)
+    # TODO: Fix Worker ORM auto-increment flushing if job scaling becomes priority
+    # try:
+    #     from bot_autoscaler import auto_scale_bots
+    #     asyncio.create_task(auto_scale_bots())
+    #     log.info("📈 Bot auto-scaler started - will create bots based on demand")
+    # except Exception as e:
+    #     log.warning(f"Bot auto-scaler startup failed: {e}")
 
     try:
         if payee_worker is not None:
