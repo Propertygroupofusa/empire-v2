@@ -57,7 +57,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select
 from database import AsyncSessionLocal
-from models import BotPosition, TradingBotState
+from models import BotPosition, TradingBotState, CryptoRSIState
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("crypto_coinbase_bot")
@@ -424,12 +424,17 @@ def _compute_atr(closes: list, highs: list, lows: list, period: int = 14) -> flo
     return atr
 
 
-def _crypto_buy_signal_improved(rsi: float, rsi_recovery: bool, volume_ratio: float, close_position: float) -> str:
+def _crypto_buy_signal_improved(rsi: float, rsi_recovery: bool, volume_ratio: float, close_position: float, entered_oversold: bool) -> str:
     """Improved entry signal: tiered RSI + recovery trigger + momentum/volume confirmation.
     Returns: "STRONG_BUY" (RSI < 20 + bounce), "BUY" (20-30 + bounce), or "NO_ACTION"
 
-    Key improvement: Only enter when RSI is BOUNCING from oversold (rsi_recovery=True),
-    not just when it enters oversold. This avoids catching falling knives."""
+    Key improvement: Only enter when RSI has ENTERED the oversold zone (10-30) AND
+    is BOUNCING upward (rsi_recovery=True), not just when it enters oversold.
+    This avoids catching falling knives and ensures we capture real reversals."""
+
+    # Must have entered oversold zone before we can enter
+    if not entered_oversold:
+        return "NO_ACTION"
 
     # Don't enter if RSI isn't recovering (still falling) - wait for bounce
     if not rsi_recovery:
@@ -643,6 +648,61 @@ async def place_order(session, symbol, side, qty, price):
     except Exception as e:
         log.error(f"Crypto order error: {e}")
         return False
+
+
+async def load_rsi_state(symbol: str) -> dict:
+    """Load RSI state for a symbol from database. Returns state dict."""
+    try:
+        async with AsyncSessionLocal() as session:
+            stmt = select(CryptoRSIState).where(CryptoRSIState.symbol == symbol)
+            result = await session.execute(stmt)
+            state = result.scalars().first()
+            if state:
+                return {
+                    "entered_oversold": state.entered_oversold,
+                    "armed_rsi": state.armed_rsi,
+                    "last_rsi": state.last_rsi,
+                }
+            # First time seeing this symbol
+            return {"entered_oversold": False, "armed_rsi": None, "last_rsi": None}
+    except Exception as e:
+        log.warning(f"RSI state load error for {symbol}: {e}")
+        return {"entered_oversold": False, "armed_rsi": None, "last_rsi": None}
+
+
+async def update_rsi_state(symbol: str, rsi: float, entered_oversold: bool, armed_rsi: float = None):
+    """Update RSI state for a symbol in database.
+
+    State transitions:
+    - RSI > 50: RESET (entered_oversold=False, armed_rsi=None)
+    - RSI 10-30: ARM (entered_oversold=True, record armed_rsi)
+    - Otherwise: maintain current state
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            stmt = select(CryptoRSIState).where(CryptoRSIState.symbol == symbol)
+            result = await session.execute(stmt)
+            state = result.scalars().first()
+
+            if not state:
+                # Create new state record
+                state = CryptoRSIState(
+                    symbol=symbol,
+                    entered_oversold=entered_oversold,
+                    armed_rsi=armed_rsi,
+                    last_rsi=rsi,
+                )
+                session.add(state)
+            else:
+                # Update existing
+                state.entered_oversold = entered_oversold
+                state.armed_rsi = armed_rsi
+                state.last_rsi = rsi
+                state.updated_at = datetime.now(timezone.utc)
+
+            await session.commit()
+    except Exception as e:
+        log.warning(f"RSI state update error for {symbol}: {e}")
 
 
 async def run_crypto_cycle():
@@ -930,6 +990,28 @@ async def run_crypto_cycle():
             rsi_recovery = data.get("rsi_recovery", False)
             candle = data.get("candle")
 
+            # ─ RSI STATE MACHINE: Load and update per-symbol entry state ─
+            rsi_state = await load_rsi_state(symbol)
+            entered_oversold = rsi_state["entered_oversold"]
+            armed_rsi = rsi_state.get("armed_rsi")
+
+            # State transitions:
+            # 1. RSI > 50: Reset state (new oversold cycle required)
+            if rsi > 50:
+                if entered_oversold:
+                    log.info(f"[CRYPTO] {symbol} RSI {rsi:.1f} → RESET (>50, new cycle needed)")
+                entered_oversold = False
+                armed_rsi = None
+            # 2. RSI enters 10-30 zone: Arm the setup
+            elif 10 <= rsi < 30 and not entered_oversold:
+                log.info(f"[CRYPTO] {symbol} RSI {rsi:.1f} → ARM oversold zone")
+                entered_oversold = True
+                armed_rsi = rsi
+            # 3. Otherwise: Maintain current state
+
+            # Persist state changes to database
+            await update_rsi_state(symbol, rsi, entered_oversold, armed_rsi)
+
             # IMPROVED ENTRY LOGIC: Tiered RSI + RSI recovery trigger
             # Requires: RSI < 30 (oversold) AND RSI bouncing upward (recovery) + volume + momentum
             # This avoids catching falling knives and waits for actual reversal
@@ -955,7 +1037,8 @@ async def run_crypto_cycle():
                     volume_spike_ratio = candle["volume"] / max(candle["prior_volume"], 1)
 
                     # Tiered buy signal: STRONG_BUY (RSI < 20 + bounce) or BUY (20-30 + bounce)
-                    signal = _crypto_buy_signal_improved(rsi, rsi_recovery, volume_spike_ratio, close_position)
+                    # Pass entered_oversold to enforce state-machine discipline
+                    signal = _crypto_buy_signal_improved(rsi, rsi_recovery, volume_spike_ratio, close_position, entered_oversold)
 
                     if signal == "NO_ACTION":
                         # No signal - log why
