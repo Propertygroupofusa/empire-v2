@@ -43,6 +43,22 @@ except Exception as e:
     generate_video = None
     get_video_url = None
 
+# Try to import Stripe
+try:
+    import stripe
+    STRIPE_AVAILABLE = True
+    STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
+    STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY")
+    STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+    if STRIPE_SECRET_KEY:
+        stripe.api_key = STRIPE_SECRET_KEY
+except Exception as e:
+    log.warning(f"Stripe not available: {e}")
+    STRIPE_AVAILABLE = False
+    STRIPE_SECRET_KEY = None
+    STRIPE_PUBLISHABLE_KEY = None
+    STRIPE_WEBHOOK_SECRET = None
+
 router = APIRouter()
 
 
@@ -139,6 +155,106 @@ async def request_quote(
         "quote_price": quote_price,
         "customer_email": customer_email,
     }
+
+
+# ============================================================
+# Stripe Payment Endpoints
+# ============================================================
+
+@router.get("/stripe-key")
+async def get_stripe_key():
+    """Return Stripe publishable key for frontend Stripe.js initialization"""
+    if not STRIPE_AVAILABLE or not STRIPE_PUBLISHABLE_KEY:
+        log.warning("Stripe not configured - payment unavailable")
+        return {"publishable_key": None}
+    return {"publishable_key": STRIPE_PUBLISHABLE_KEY}
+
+
+@router.post("/{order_id}/create-checkout")
+async def create_checkout(order_id: int, db: AsyncSession = Depends(get_db)):
+    """Create Stripe checkout session for video order payment"""
+    if not STRIPE_AVAILABLE or not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="Payment system not available")
+
+    order = await db.get(VideoQuoteOrder, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if order.paid:
+        raise HTTPException(status_code=400, detail="Order already paid")
+
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[
+                {
+                    "price_data": {
+                        "currency": "usd",
+                        "unit_amount": order.quote_price,
+                        "product_data": {
+                            "name": f"Video Production - {order.video_type}",
+                            "description": f"Custom {order.video_type} video for {order.customer_name}",
+                        },
+                    },
+                    "quantity": 1,
+                }
+            ],
+            mode="payment",
+            success_url=f"https://empire-v2-production.up.railway.app/order-success?order_id={order_id}",
+            cancel_url=f"https://empire-v2-production.up.railway.app/quote",
+            customer_email=order.customer_email,
+            metadata={
+                "order_id": str(order_id),
+                "customer_email": order.customer_email,
+                "customer_name": order.customer_name,
+            },
+        )
+
+        # Store session ID for webhook verification
+        order.stripe_session_id = session.id
+        await db.commit()
+
+        return {"session_id": session.id}
+    except Exception as e:
+        log.error(f"Stripe checkout creation failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create checkout session")
+
+
+@router.post("/webhook/stripe")
+async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
+    """Handle Stripe webhook events - marks order as paid when checkout completes"""
+    if not STRIPE_WEBHOOK_SECRET:
+        log.warning("Stripe webhook secret not configured")
+        return {"status": "webhook_secret_not_configured"}
+
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except ValueError as e:
+        log.error(f"Stripe webhook invalid payload: {e}")
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError as e:
+        log.error(f"Stripe webhook signature verification failed: {e}")
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        order_id = session["metadata"].get("order_id")
+
+        if order_id:
+            order = await db.get(VideoQuoteOrder, int(order_id))
+            if order:
+                order.paid = True
+                order.stripe_session_id = session["id"]
+                await db.commit()
+                log.info(f"Order {order_id} marked as paid via Stripe webhook")
+
+                # Trigger video generation in background
+                asyncio.create_task(generate_video_for_order(order.id))
+
+    return {"status": "success"}
 
 
 async def send_video_ready_email(customer_email: str, customer_name: str, order_id: int, video_url: str):
