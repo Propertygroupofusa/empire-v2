@@ -673,11 +673,11 @@ async def place_order(session, symbol, side, qty, price):
 
     if side == "buy":
         # Use IOC market for immediate entry
-        order_config = {"market_ioc": {"quote_size": f"{qty * price:.2f}"}}
+        order_config = {"market_market_ioc": {"quote_size": f"{qty * price:.2f}"}}
     else:
         # Use GTC limit for profit-taking - order persists until target price hit
         order_config = {
-            "limit_gtc": {
+            "limit_limit_gtc": {
                 "base_size": f"{qty:.8f}",
                 "limit_price": f"{price:.2f}"
             }
