@@ -348,15 +348,15 @@
         <div class="summary">
             <div class="summary-grid">
                 <div class="summary-box">
-                    <div class="summary-label">Combined Balance</div>
+                    <div class="summary-label">Total Capital (Both)</div>
                     <div class="summary-value" id="combined-balance">$1,700.81</div>
                 </div>
                 <div class="summary-box">
-                    <div class="summary-label">Combined Progress</div>
+                    <div class="summary-label">Average Progress to $2K</div>
                     <div class="summary-value" id="combined-progress">42.5%</div>
                 </div>
                 <div class="summary-box">
-                    <div class="summary-label">Gap Between Bots</div>
+                    <div class="summary-label">Alpaca vs Crypto Lead</div>
                     <div class="summary-value" id="gap">$300.79</div>
                 </div>
             </div>
@@ -550,7 +550,9 @@
 
             // Update summary
             document.getElementById('combined-balance').textContent = `$${data.combined_balance.toFixed(2)}`;
-            document.getElementById('combined-progress').textContent = `${((data.combined_balance / 4000) * 100).toFixed(1)}%`;
+            // Each bot racing to $2,000 separately, not combined
+            const avgProgress = ((alpaca.progress_pct + crypto.progress_pct) / 2);
+            document.getElementById('combined-progress').textContent = `${avgProgress.toFixed(1)}% avg`;
             document.getElementById('gap').textContent = `$${data.spread.toFixed(2)}`;
             document.getElementById('update-time').textContent = new Date().toLocaleTimeString() + ' UTC';
         }
