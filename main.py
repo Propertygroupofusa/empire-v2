@@ -4,8 +4,8 @@ PROPERTY GROUP USA — DOCUMENTS PLATFORM BACKEND
 Full SaaS backend with worker management, client booking,
 job matching, payments, admin dashboard, and white label API.
 
-VERSION: v2.2-crypto-short-fix-stripe
-Deployed: 2026-08-10 21:57 UTC | Crypto bot SHORT fixes + Stripe revenue + Alpaca long-only
+VERSION: v2.2-force-redeploy-bots
+Deployed: 2026-08-10 22:34 UTC | URGENT: Force immediate bot restart (crypto SHORT fixes verified)
 """
 
 from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks
