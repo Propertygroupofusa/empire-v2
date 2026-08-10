@@ -1126,6 +1126,20 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Stripe setup failed: {e}")
 
+    # Check video payment system
+    stripe_secret = os.getenv("STRIPE_SECRET_KEY")
+    stripe_publishable = os.getenv("STRIPE_PUBLISHABLE_KEY")
+    stripe_webhook = os.getenv("STRIPE_WEBHOOK_SECRET")
+    if not (stripe_secret and stripe_publishable and stripe_webhook):
+        log.error("🔴 CRITICAL: Video payment system blocked - Stripe env vars missing!")
+        log.error("   Required in Railway Variables:")
+        log.error("   • STRIPE_SECRET_KEY (sk_...)")
+        log.error("   • STRIPE_PUBLISHABLE_KEY (pk_...)")
+        log.error("   • STRIPE_WEBHOOK_SECRET (whsec_...)")
+        log.error("   11 video orders ($82.50 revenue) are waiting for payment - add keys and redeploy")
+    else:
+        log.info("✅ Stripe payment system configured - video orders ready for payment")
+
     log.info("Platform startup complete")
     yield
     log.info("PGUSA Platform shutting down")
