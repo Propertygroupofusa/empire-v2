@@ -243,7 +243,7 @@ Add this host to your network egress settings to allow access
 
 This happens because Railway blocks outbound connections by default for security. Brokers (Coinbase, Alpaca) need explicit whitelist entries.
 
-### Solution: Configure Egress Allowlist
+### Solution A: Configure Egress Allowlist (Permanent)
 
 1. **Go to Railway Dashboard:**
    - https://railway.app/dashboard
@@ -260,6 +260,7 @@ This happens because Railway blocks outbound connections by default for security
      alpaca.com
      api.polygon.io
      data.alpaca.markets
+     stripe.com
      ```
 
 3. **Save and Redeploy:**
@@ -280,6 +281,35 @@ This happens because Railway blocks outbound connections by default for security
      ```
      WARNING:crypto_coinbase_bot:HTTP 403: Host not in allowlist
      ```
+
+### Solution B: Deploy Network Workaround (Temporary)
+
+**While waiting for Railway egress whitelist,** use the built-in retry/cache layer.
+
+See **NETWORK_WORKAROUND.md** for:
+- Step-by-step setup (5 minutes)
+- Environment variable configuration
+- How retry logic + caching work
+- Fallback behavior when API unavailable
+- Troubleshooting guide
+
+Quick start:
+```bash
+# Set these env vars on Railway:
+NETWORK_RETRY_ATTEMPTS=5
+NETWORK_CACHE_TTL=600
+CRYPTO_BOT_SKIP_ENTRIES_ON_API_FAILURE=true
+FALLBACK_PRICE_MODE=skip
+
+# Then redeploy
+git push -u origin claude/usa-empire-v2-setup-01hmw8
+```
+
+Bot will then:
+- ✓ Use cached API responses (5-10 min TTL)
+- ✓ Retry connection errors with backoff
+- ✓ Skip entries if price data unavailable
+- ✓ Continue closing open positions normally
 
 ### Affected Bots
 
