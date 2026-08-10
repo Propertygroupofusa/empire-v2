@@ -135,20 +135,18 @@ def _auth_headers(method: str, path: str) -> dict:
     return {"Authorization": f"Bearer {_build_jwt(method, path)}", "Content-Type": "application/json"}
 
 
-# Optimized for 24/7 volume: slightly loosened thresholds (32/68 vs 30/70)
-# to catch more entry signals without sacrificing quality. Still conservative
-# enough to avoid false breakout noise, but flexible enough for volatile crypto.
-# 30/70 catches only extreme oversold/overbought; 32/68 catches 2% wider moves.
-# IMPROVED STRATEGY: Tiered entry system instead of hard RSI < 10 requirement
-RSI_STRONG_BUY = 20   # RSI < 20 = very oversold, strong reversal signal
-RSI_BUY = 30          # RSI < 30 = oversold, normal reversal signal
-RSI_NO_ENTRY = 50     # RSI >= 50 = neutral/bullish, don't enter new positions
-RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "70"))    # Exit threshold for LONG / Entry for SHORT (stricter)
-RSI_SHORT_ABOVE = float(os.getenv("CRYPTO_RSI_SHORT_ABOVE", "70"))  # Entry threshold for SHORT positions (stricter)
-RSI_SHORT_BELOW = float(os.getenv("CRYPTO_RSI_SHORT_BELOW", "30"))  # Exit threshold for SHORT positions (stricter)
+# AGGRESSIVE THRESHOLDS for high-velocity trading in overbought/oversold markets
+# Widened entry zones to catch more signals: RSI 25-40 for longs, 60-75 for shorts
+# This allows trading in currently overbought conditions while maintaining discipline
+RSI_STRONG_BUY = 25   # RSI < 25 = oversold, strong reversal signal (lowered from 20)
+RSI_BUY = 40          # RSI < 40 = oversold/neutral zone, normal entry signal (lowered from 30)
+RSI_NO_ENTRY = 60     # RSI >= 60 = overbought, skip LONG entries only (lowered from 50, allows 40-60 zone)
+RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "75"))    # Exit threshold for LONG (raised from 70)
+RSI_SHORT_ABOVE = float(os.getenv("CRYPTO_RSI_SHORT_ABOVE", "60"))  # Entry threshold for SHORT positions (lowered from 70)
+RSI_SHORT_BELOW = float(os.getenv("CRYPTO_RSI_SHORT_BELOW", "35"))  # Exit threshold for SHORT positions (raised from 30)
 RSI_BUY_BELOW = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "10"))      # Fallback for legacy env var (deprecated)
 
-MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "12"))  # Expanded: 12 concurrent positions for faster capital deployment
+MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "18"))  # Expanded to 18: allows more concurrent longs + shorts in high-velocity markets
 # Unset by default - no ceiling, so the full account balance (principal +
 # compounded profit) is always in play. Set CRYPTO_MAX_ALLOCATION to cap
 # it at a fixed dollar amount instead, if ever wanted.
@@ -598,9 +596,9 @@ async def get_4h_rsi(session, symbol):
 
 
 def size_position(cash_pool_remaining, slots_remaining, price):
-    """Fixed $150 per trade for aggressive $255.25/20hr target.
-    Conservative sizing: leaves buffer for Coinbase fees + multiple trades."""
-    FIXED_POSITION_SIZE = 150.0  # $150 per entry to hit $255.25 in 4 wins
+    """Fixed $250 per trade for maximum capital deployment.
+    Aggressive sizing: maximizes gains while maintaining 3-position minimum buffer."""
+    FIXED_POSITION_SIZE = 250.0  # $250 per entry — with $700 pool, allows 2-3 concurrent positions
 
     if cash_pool_remaining < FIXED_POSITION_SIZE * 1.05:  # Need 5% buffer for fees
         return None
@@ -1092,16 +1090,16 @@ async def run_crypto_cycle():
             entered_oversold = rsi_state["entered_oversold"]
             armed_rsi = rsi_state.get("armed_rsi")
 
-            # State transitions:
-            # 1. RSI > 50: Reset state (new oversold cycle required)
-            if rsi > 50:
+            # State transitions (AGGRESSIVE):
+            # 1. RSI >= 60: Reset state (overbought, need pullback to entry zone)
+            if rsi >= 60:
                 if entered_oversold:
-                    log.info(f"[CRYPTO] {symbol} RSI {rsi:.1f} → RESET (>50, new cycle needed)")
+                    log.info(f"[CRYPTO] {symbol} RSI {rsi:.1f} → RESET (>=60, overbought, waiting for pullback)")
                 entered_oversold = False
                 armed_rsi = None
-            # 2. RSI enters 10-30 zone: Arm the setup
-            elif 10 <= rsi < 30 and not entered_oversold:
-                log.info(f"[CRYPTO] {symbol} RSI {rsi:.1f} → ARM oversold zone")
+            # 2. RSI enters 10-40 zone: Arm the setup (widened from 10-30 for aggressive trading)
+            elif 10 <= rsi < 40 and not entered_oversold:
+                log.info(f"[CRYPTO] {symbol} RSI {rsi:.1f} → ARM oversold/neutral entry zone")
                 entered_oversold = True
                 armed_rsi = rsi
             # 3. Otherwise: Maintain current state
@@ -1229,21 +1227,16 @@ async def run_crypto_cycle():
             ma_50 = data.get("ma_50", 0)
             in_uptrend = data.get("in_uptrend", False)
 
-            if rsi <= RSI_SHORT_ABOVE:
+            # AGGRESSIVE: Allow shorts whenever RSI > 60 (overbought) - no MA50 filter needed
+            if rsi < RSI_SHORT_ABOVE:
                 latest_signals[symbol] = {
                     "price": price, "rsi": rsi, "status": "NEUTRAL",
                     "has_position": False, "checked_at": now.isoformat(),
                 }
                 continue
 
-            # Short entry requires: RSI overbought AND in downtrend (price < MA50)
-            if in_uptrend:
-                latest_signals[symbol] = {
-                    "price": price, "rsi": rsi, "ma_50": ma_50, "status": "OVERBOUGHT_ABOVE_MA50",
-                    "has_position": False, "checked_at": now.isoformat(),
-                }
-                continue
-
+            # SHORT entry: RSI overbought (>60) enables shorts regardless of trend
+            # (removed MA50 downtrend requirement for more aggressive shorting in high RSI markets)
             latest_signals[symbol] = {
                 "price": price, "rsi": rsi, "ma_50": ma_50, "status": "SHORT_CONFIRMED",
                 "has_position": False, "checked_at": now.isoformat(),
