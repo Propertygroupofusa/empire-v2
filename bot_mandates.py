@@ -203,7 +203,7 @@ CRYPTO_MANDATE = {
 ALPACA_MANDATE = {
     "role": BotRole.ALPACA_GROWTH,
     "name": "alpaca_bot",
-    "description": "Short-term stock/ETF trading growth with capital availability",
+    "description": "Dual-direction mean reversion: long on oversold (RSI<30), short on overbought (RSI>70)",
 
     # Universe
     "universe": {
@@ -215,22 +215,36 @@ ALPACA_MANDATE = {
         }
     },
 
-    # Entry
+    # Entry: DUAL DIRECTION - Long on oversold, Short on overbought
     "entry": {
-        "rsi_threshold_long": [25, 35],  # Oversold for longs
-        "rsi_threshold_short": [65, 75],  # Overbought for shorts
-        "volume_ratio_min": 1.5,
-        "min_buying_power": 100,
-        "min_position_size": 30,
-        "max_open_positions": 3,
-        "max_total_notional_pct": 0.60,
+        "long": {
+            "rsi_threshold_oversold": 30,  # RSI < 30 = buy signal
+            "volume_ratio_min": 1.5,
+            "min_buying_power": 100,
+            "min_position_size": 30,
+        },
+        "short": {
+            "rsi_threshold_overbought": 70,  # RSI > 70 = sell/short signal
+            "volume_ratio_min": 1.5,
+            "min_buying_power": 100,
+            "min_position_size": 30,
+        },
+        "shared": {
+            "max_open_positions": 6,  # 3 longs + 3 shorts
+            "max_total_notional_pct": 0.60,
+        }
     },
 
-    # Exit
+    # Exit: Mean reversion with MINIMUM 2% profit targets
     "exit": {
-        "profit_target_pct": [0.02, 0.05],  # 2-5%
-        "stop_loss_pct": 0.015,  # 1.5%
+        "min_profit_target_pct": 0.02,  # MUST profit at least 2% or exit at loss
+        "profit_tiers_pct": [0.02, 0.05, 0.10],  # 2%, 5%, 10% targets
+        "tier_exit_pct": [0.33, 0.33, 0.34],  # Exit 1/3 at each level
+        "stop_loss_pct": 0.015,  # 1.5% max loss (wider for stocks)
+        "aggressive_loss_pct": 0.03,  # 3% loss = full exit
         "max_hold_time_sec": 7200,  # 2 hours
+        "mean_reversion_exit": True,  # Exit when price hits 50% retracement
+        "risk_reward_ratio_min": 1.0,  # Risk $1 to make $2 minimum
     },
 
     # Capital
