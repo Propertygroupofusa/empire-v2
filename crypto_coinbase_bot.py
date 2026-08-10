@@ -94,15 +94,24 @@ def _load_signing_key():
     seed followed by the 32-byte public key), of which only the seed is
     the actual private key."""
     raw = COINBASE_API_PRIVATE_KEY.strip()
+    if not raw:
+        log.error("COINBASE_API_PRIVATE_KEY environment variable is empty or missing")
+        raise ValueError("COINBASE_API_PRIVATE_KEY not set")
     try:
         if raw.startswith("-----BEGIN"):
             return serialization.load_pem_private_key(raw.encode(), password=None), "ES256"
-        decoded = base64.b64decode(raw)
+        # Ed25519 key: base64 string → 64 bytes (32 seed + 32 public key)
+        try:
+            decoded = base64.b64decode(raw, validate=True)
+        except Exception as e:
+            log.error(f"COINBASE_API_PRIVATE_KEY is not valid base64: {e}")
+            raise
         if len(decoded) != 64:
-            log.error(f"Coinbase private key decoded to {len(decoded)} bytes, expected 64 - key may be corrupted")
+            log.error(f"COINBASE_API_PRIVATE_KEY decoded to {len(decoded)} bytes, expected 64. Is this the correct key from Coinbase CDP?")
+            raise ValueError(f"Ed25519 key must be 64 bytes when decoded, got {len(decoded)}")
         return Ed25519PrivateKey.from_private_bytes(decoded[:32]), "EdDSA"
     except Exception as e:
-        log.error(f"Failed to load Coinbase signing key: {type(e).__name__}: {e} - key={raw[:40]}...")
+        log.error(f"Failed to load Coinbase signing key: {type(e).__name__}: {e} - key starts with: {raw[:20]}...")
         raise
 
 
