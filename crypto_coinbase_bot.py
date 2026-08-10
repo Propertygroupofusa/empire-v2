@@ -58,6 +58,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select
 from database import AsyncSessionLocal
 from models import BotPosition, TradingBotState, CryptoRSIState, CryptoTradeLog
+from bot_mandates import CRYPTO_MANDATE
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("crypto_coinbase_bot")
