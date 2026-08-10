@@ -322,54 +322,65 @@ async def run_migrations():
     from database import Base
 
     # CRITICAL: Ensure crypto_rsi_state table exists for bot RSI state machine
-    # Direct SQL approach (more reliable than SQLAlchemy table.create)
     async with engine.begin() as conn:
         try:
-            # Check if table exists
             existing_tables = await conn.run_sync(lambda c: inspect(c).get_table_names())
             if "crypto_rsi_state" not in existing_tables:
-                log.info("Migration: Creating missing crypto_rsi_state table with raw SQL...")
-
-                # Dialect-specific table creation
-                if conn.dialect.name == "postgresql":
-                    sql = """
-                    CREATE TABLE crypto_rsi_state (
-                        id SERIAL PRIMARY KEY,
-                        symbol VARCHAR(50) UNIQUE NOT NULL,
-                        entered_oversold BOOLEAN DEFAULT FALSE,
-                        armed_rsi FLOAT,
-                        last_rsi FLOAT,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                    CREATE INDEX idx_crypto_rsi_state_symbol ON crypto_rsi_state(symbol);
-                    CREATE INDEX idx_crypto_rsi_state_updated_at ON crypto_rsi_state(updated_at);
-                    """
-                else:  # SQLite
-                    sql = """
-                    CREATE TABLE crypto_rsi_state (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        symbol TEXT UNIQUE NOT NULL,
-                        entered_oversold INTEGER DEFAULT 0,
-                        armed_rsi REAL,
-                        last_rsi REAL,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                    CREATE INDEX idx_crypto_rsi_state_symbol ON crypto_rsi_state(symbol);
-                    CREATE INDEX idx_crypto_rsi_state_updated_at ON crypto_rsi_state(updated_at);
-                    """
-
-                # Execute SQL with error handling
-                for statement in sql.strip().split(';'):
-                    if statement.strip():
-                        try:
-                            await conn.execute(text(statement.strip()))
-                        except Exception as stmt_err:
-                            log.debug(f"Statement ignored (may already exist): {stmt_err}")
-
+                log.info("Migration: Creating missing crypto_rsi_state table...")
+                if engine.dialect.name == "postgresql":
+                    await conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS crypto_rsi_state (
+                            id SERIAL PRIMARY KEY,
+                            symbol VARCHAR(50) UNIQUE NOT NULL,
+                            entered_oversold BOOLEAN DEFAULT FALSE,
+                            armed_rsi FLOAT,
+                            last_rsi FLOAT,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """))
+                    try:
+                        await conn.execute(text("CREATE INDEX idx_crypto_rsi_state_symbol ON crypto_rsi_state(symbol)"))
+                    except:
+                        pass
+                    try:
+                        await conn.execute(text("CREATE INDEX idx_crypto_rsi_state_updated_at ON crypto_rsi_state(updated_at)"))
+                    except:
+                        pass
+                else:
+                    await conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS crypto_rsi_state (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            symbol TEXT UNIQUE NOT NULL,
+                            entered_oversold INTEGER DEFAULT 0,
+                            armed_rsi REAL,
+                            last_rsi REAL,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """))
                 await conn.commit()
                 log.info("✅ crypto_rsi_state table created successfully")
+            else:
+                log.info("✅ crypto_rsi_state table already exists")
+
+            # CRITICAL: Fix workers table auto-increment on PostgreSQL (bot_autoscaler needs this)
+            if engine.dialect.name == "postgresql":
+                try:
+                    max_id_result = await conn.execute(text("SELECT COALESCE(MAX(id), 0) FROM workers"))
+                    max_id = max_id_result.scalar() or 0
+                    await conn.execute(text("DROP SEQUENCE IF EXISTS workers_id_seq CASCADE"))
+                    await conn.execute(text(f"CREATE SEQUENCE workers_id_seq START {max_id + 1}"))
+                    await conn.execute(text("ALTER SEQUENCE workers_id_seq OWNED BY workers.id"))
+                    try:
+                        await conn.execute(text("ALTER TABLE workers ALTER COLUMN id DROP DEFAULT"))
+                    except:
+                        pass
+                    await conn.execute(text("ALTER TABLE workers ALTER COLUMN id SET DEFAULT nextval('workers_id_seq')"))
+                    log.info(f"✅ workers table auto-increment fixed (max_id: {max_id}, starts: {max_id + 1})")
+                except Exception as e:
+                    log.debug(f"Workers auto-increment (may already exist): {e}")
         except Exception as e:
-            log.error(f"Migration FAILED - crypto_rsi_state table: {type(e).__name__}: {e}", exc_info=True)
+            log.error(f"❌ Migration FAILED - crypto_rsi_state: {type(e).__name__}: {e}", exc_info=True)
+            raise
 
     # Counters exist so the run reports what it DID, not just that it ran.
     # Both outages so far were invisible in the logs: nothing announced that
