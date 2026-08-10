@@ -672,12 +672,16 @@ async def place_order(session, symbol, side, qty, price):
     path = "/api/v3/brokerage/orders"
 
     if side == "buy":
-        # Use IOC market for immediate entry
-        order_config = {"market_market_ioc": {"quote_size": f"{qty * price:.2f}"}}
-    else:
-        # Use GTC limit for profit-taking - order persists until target price hit
+        # Market order: immediate entry at market price (IOC = Immediate or Cancel)
         order_config = {
-            "limit_limit_gtc": {
+            "market_ioc": {
+                "quote_size": f"{qty * price:.2f}"
+            }
+        }
+    else:
+        # Limit order: exit at specific price (GTC = Good Until Cancelled)
+        order_config = {
+            "limit_gtc": {
                 "base_size": f"{qty:.8f}",
                 "limit_price": f"{price:.2f}"
             }
