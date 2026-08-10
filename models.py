@@ -1093,3 +1093,127 @@ class CryptoRSIState(Base):
             "last_rsi": self.last_rsi,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class CryptoTradeLog(Base):
+    """Comprehensive trade instrumentation for validating state machine effectiveness.
+
+    Captures full lifecycle: ARM → ENTER → EXIT with all metrics needed to measure
+    if the new event-driven entry logic improves expectancy vs. old threshold-based approach.
+
+    Strategy version protection: every entry is tagged with strategy_version to prevent
+    accidentally mixing old threshold-based data with new RSI state machine data.
+
+    Metrics tracked:
+    - ARM state: RSI progression, entered_oversold flag
+    - ENTRY: RSI, volume ratio, candle confirmation, position size
+    - EXIT: reason, P&L (gross/fees/net), time held
+    - Risk metrics: MAE (max adverse excursion), MFE (max favorable excursion)
+    - Exit performance: partial-exit fills, trailing-stop effectiveness
+    - Non-trades: WATCH, ARM with no recovery, rejected entries (for state machine validation)
+    """
+    __tablename__ = "crypto_trade_log"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True)  # "BTC/USD", "ETH/USD", etc.
+    strategy_version = Column(String, default="RSI_STATE_MACHINE_V1", index=True)  # Prevents data mixing
+    trade_id = Column(String, unique=True, index=True)  # UUID for deduplication
+    event_type = Column(String, index=True)  # "WATCH", "ARM", "RECOVERY_REJECTED", "ENTER", "EXIT"
+
+    # Timeline
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    armed_at = Column(DateTime, nullable=True, index=True)  # When RSI entered 10-30
+    entered_at = Column(DateTime, nullable=True, index=True)  # When trade opened
+    exit_at = Column(DateTime, nullable=True, index=True)  # When position closed
+
+    # RSI progression (critical for state machine validation)
+    rsi_before_arm = Column(Float, nullable=True)  # RSI before oversold zone
+    rsi_arm = Column(Float, nullable=True)  # RSI when armed (entered 10-30)
+    rsi_low = Column(Float, nullable=True)  # Lowest RSI during hold
+    rsi_at_recovery = Column(Float, nullable=True)  # RSI when recovery started
+    rsi_at_entry = Column(Float, nullable=True)  # RSI at actual entry
+    entered_oversold = Column(Boolean, default=False)  # Did RSI genuinely enter 10-30?
+
+    # Entry confirmation metrics
+    volume_ratio_at_entry = Column(Float, nullable=True)  # Volume spike ratio
+    candle_confirmation = Column(Float, nullable=True)  # Close position in upper half (0-1)
+
+    # Position details
+    entry_price = Column(Float, nullable=True)
+    position_size = Column(Float, nullable=True)
+    atr_at_entry = Column(Float, nullable=True)  # Volatility at entry
+    atr_stop = Column(Float, nullable=True)  # Stop price derived from ATR
+    atr_target_1 = Column(Float, nullable=True)  # 1st target (ATR-based)
+    atr_target_2 = Column(Float, nullable=True)  # 2nd target (ATR-based)
+    atr_target_3 = Column(Float, nullable=True)  # 3rd target (ATR-based)
+
+    # Exit details
+    exit_price = Column(Float, nullable=True)
+    exit_reason = Column(String, nullable=True)  # "TIER1", "TIER2", "TIER3", "STOP_LOSS", "RSI_EXIT", "POSITION_ALREADY_EXISTS", "VOLUME_INSUFFICIENT", "CANDLE_FAILED", etc.
+    rejection_reason = Column(String, nullable=True)  # For non-entry events: why was entry rejected
+
+    # P&L accounting (gross → fees → net)
+    gross_pnl = Column(Float, nullable=True)  # Price difference × quantity
+    fees_usd = Column(Float, nullable=True)  # Transaction fees
+    net_pnl = Column(Float, nullable=True)  # Gross P&L - fees
+    net_pnl_pct = Column(Float, nullable=True)  # Net P&L as percentage
+
+    # Risk metrics
+    max_adverse_excursion = Column(Float, nullable=True)  # Worst drawdown during hold
+    max_favorable_excursion = Column(Float, nullable=True)  # Best profit during hold
+    time_held_minutes = Column(Integer, nullable=True)
+
+    # Exit performance details
+    partial_exit_count = Column(Integer, default=0)
+    partial_exit_prices = Column(JSON, nullable=True)  # List of partial exit prices
+    partial_exit_quantities = Column(JSON, nullable=True)  # Quantities exited at each tier
+    trailing_stop_triggered = Column(Boolean, default=False)
+    trailing_stop_price = Column(Float, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "trade_id": self.trade_id,
+            "symbol": self.symbol,
+            "strategy_version": self.strategy_version,
+            "event_type": self.event_type,
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "rsi_progression": {
+                "before_arm": self.rsi_before_arm,
+                "at_arm": self.rsi_arm,
+                "low": self.rsi_low,
+                "at_recovery": self.rsi_at_recovery,
+                "at_entry": self.rsi_at_entry,
+                "entered_oversold": self.entered_oversold,
+            },
+            "entry_confirmation": {
+                "volume_ratio": self.volume_ratio_at_entry,
+                "candle_position": self.candle_confirmation,
+            },
+            "position": {
+                "entry_price": self.entry_price,
+                "size": self.position_size,
+                "atr_at_entry": self.atr_at_entry,
+                "stop": self.atr_stop,
+                "targets": [self.atr_target_1, self.atr_target_2, self.atr_target_3],
+            },
+            "exit": {
+                "price": self.exit_price,
+                "reason": self.exit_reason,
+                "timestamp": self.exit_at.isoformat() if self.exit_at else None,
+            },
+            "pnl": {
+                "gross": self.gross_pnl,
+                "fees": self.fees_usd,
+                "net": self.net_pnl,
+                "net_pct": self.net_pnl_pct,
+            },
+            "risk_metrics": {
+                "max_adverse_excursion": self.max_adverse_excursion,
+                "max_favorable_excursion": self.max_favorable_excursion,
+                "time_held_minutes": self.time_held_minutes,
+            },
+            "rejection_reason": self.rejection_reason,
+        }

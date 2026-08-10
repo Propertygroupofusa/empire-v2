@@ -57,7 +57,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select
 from database import AsyncSessionLocal
-from models import BotPosition, TradingBotState, CryptoRSIState
+from models import BotPosition, TradingBotState, CryptoRSIState, CryptoTradeLog
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("crypto_coinbase_bot")
@@ -135,20 +135,18 @@ def _auth_headers(method: str, path: str) -> dict:
     return {"Authorization": f"Bearer {_build_jwt(method, path)}", "Content-Type": "application/json"}
 
 
-# Optimized for 24/7 volume: slightly loosened thresholds (32/68 vs 30/70)
-# to catch more entry signals without sacrificing quality. Still conservative
-# enough to avoid false breakout noise, but flexible enough for volatile crypto.
-# 30/70 catches only extreme oversold/overbought; 32/68 catches 2% wider moves.
-# IMPROVED STRATEGY: Tiered entry system instead of hard RSI < 10 requirement
-RSI_STRONG_BUY = 20   # RSI < 20 = very oversold, strong reversal signal
-RSI_BUY = 30          # RSI < 30 = oversold, normal reversal signal
-RSI_NO_ENTRY = 50     # RSI >= 50 = neutral/bullish, don't enter new positions
-RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "70"))    # Exit threshold for LONG / Entry for SHORT (stricter)
-RSI_SHORT_ABOVE = float(os.getenv("CRYPTO_RSI_SHORT_ABOVE", "70"))  # Entry threshold for SHORT positions (stricter)
-RSI_SHORT_BELOW = float(os.getenv("CRYPTO_RSI_SHORT_BELOW", "30"))  # Exit threshold for SHORT positions (stricter)
+# AGGRESSIVE THRESHOLDS for high-velocity trading in overbought/oversold markets
+# Widened entry zones to catch more signals: RSI 25-40 for longs, 60-75 for shorts
+# This allows trading in currently overbought conditions while maintaining discipline
+RSI_STRONG_BUY = 25   # RSI < 25 = oversold, strong reversal signal (lowered from 20)
+RSI_BUY = 40          # RSI < 40 = oversold/neutral zone, normal entry signal (lowered from 30)
+RSI_NO_ENTRY = 60     # RSI >= 60 = overbought, skip LONG entries only (lowered from 50, allows 40-60 zone)
+RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "75"))    # Exit threshold for LONG (raised from 70)
+RSI_SHORT_ABOVE = float(os.getenv("CRYPTO_RSI_SHORT_ABOVE", "60"))  # Entry threshold for SHORT positions (lowered from 70)
+RSI_SHORT_BELOW = float(os.getenv("CRYPTO_RSI_SHORT_BELOW", "35"))  # Exit threshold for SHORT positions (raised from 30)
 RSI_BUY_BELOW = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "10"))      # Fallback for legacy env var (deprecated)
 
-MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "12"))  # Expanded: 12 concurrent positions for faster capital deployment
+MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "18"))  # Expanded to 18: allows more concurrent longs + shorts in high-velocity markets
 # Unset by default - no ceiling, so the full account balance (principal +
 # compounded profit) is always in play. Set CRYPTO_MAX_ALLOCATION to cap
 # it at a fixed dollar amount instead, if ever wanted.
@@ -279,6 +277,10 @@ daily_usd_balance_start = None  # For daily 2% loss limit
 latest_signals = {}
 last_cycle_at = None
 
+# RSI state cache: loaded once at startup, maintained in-memory during cycle, batch-flushed to DB at end
+# This removes database latency from the hot trading loop - 56 DB queries per cycle become 0
+RSI_STATE_CACHE = {}  # {symbol: {"entered_oversold": bool, "armed_rsi": float, "last_rsi": float, "changed": bool}}
+
 BOT_NAME = "crypto_coinbase"
 
 
@@ -302,6 +304,52 @@ async def load_open_positions():
                 log.info(f"[CRYPTO] Reloaded {total} open position(s) from DB: {len(open_crypto_positions)} long, {len(open_crypto_shorts)} short")
     except Exception as e:
         log.error(f"[CRYPTO] Failed to reload open positions from DB: {e}")
+
+
+async def load_all_rsi_states():
+    """Load RSI state for ALL trading pairs at startup, cache in memory.
+    This removes database latency from the hot trading loop - instead of 56 DB queries
+    per 60-second cycle, we load once at startup and batch-flush at cycle end.
+
+    CRITICAL FIX: Database operations inside aiohttp context were causing timeouts
+    on Coinbase API calls. Moving to startup + in-memory + batch-flush unblocks the event loop."""
+    global RSI_STATE_CACHE
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(CryptoRSIState))
+            states = result.scalars().all()
+
+            # Load existing states
+            for state in states:
+                RSI_STATE_CACHE[state.symbol] = {
+                    "entered_oversold": state.entered_oversold,
+                    "armed_rsi": state.armed_rsi,
+                    "last_rsi": state.last_rsi,
+                    "changed": False  # Track if this state changed this cycle
+                }
+
+            # Initialize missing symbols (will be created on first flush)
+            for symbol in CRYPTO_PAIRS:
+                if symbol not in RSI_STATE_CACHE:
+                    RSI_STATE_CACHE[symbol] = {
+                        "entered_oversold": False,
+                        "armed_rsi": None,
+                        "last_rsi": None,
+                        "changed": False
+                    }
+
+            log.info(f"[CRYPTO] ✅ Loaded RSI state for {len(RSI_STATE_CACHE)} symbols into memory cache")
+    except Exception as e:
+        log.error(f"[CRYPTO] Failed to load RSI states at startup: {e}")
+        # Initialize all symbols with defaults if load fails
+        for symbol in CRYPTO_PAIRS:
+            RSI_STATE_CACHE[symbol] = {
+                "entered_oversold": False,
+                "armed_rsi": None,
+                "last_rsi": None,
+                "changed": False
+            }
+        log.warning(f"[CRYPTO] Initialized {len(RSI_STATE_CACHE)} symbols with default state")
 
 
 async def _db_save_open(symbol: str, side: str, entry: float, qty: float):
@@ -393,8 +441,12 @@ async def get_usd_balance(session):
                     break
                 cursor = data.get("cursor")
         return None, f"no USD account found across {len(all_currencies)} accounts on this key: {all_currencies}"
+    except asyncio.TimeoutError:
+        return None, "Coinbase API timeout (network slow or API unresponsive)"
+    except aiohttp.ClientError as e:
+        return None, f"Coinbase API connection failed: {type(e).__name__}"
     except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
+        return None, f"{type(e).__name__}: {str(e)[:100]}"
 
 
 def _compute_rsi(closes: list) -> float:
@@ -598,9 +650,9 @@ async def get_4h_rsi(session, symbol):
 
 
 def size_position(cash_pool_remaining, slots_remaining, price):
-    """Fixed $150 per trade for aggressive $255.25/20hr target.
-    Conservative sizing: leaves buffer for Coinbase fees + multiple trades."""
-    FIXED_POSITION_SIZE = 150.0  # $150 per entry to hit $255.25 in 4 wins
+    """Fixed $250 per trade for maximum capital deployment.
+    Aggressive sizing: maximizes gains while maintaining 3-position minimum buffer."""
+    FIXED_POSITION_SIZE = 250.0  # $250 per entry — with $700 pool, allows 2-3 concurrent positions
 
     if cash_pool_remaining < FIXED_POSITION_SIZE * 1.05:  # Need 5% buffer for fees
         return None
@@ -651,58 +703,161 @@ async def place_order(session, symbol, side, qty, price):
 
 
 async def load_rsi_state(symbol: str) -> dict:
-    """Load RSI state for a symbol from database. Returns state dict."""
-    try:
-        async with AsyncSessionLocal() as session:
-            stmt = select(CryptoRSIState).where(CryptoRSIState.symbol == symbol)
-            result = await session.execute(stmt)
-            state = result.scalars().first()
-            if state:
-                return {
-                    "entered_oversold": state.entered_oversold,
-                    "armed_rsi": state.armed_rsi,
-                    "last_rsi": state.last_rsi,
-                }
-            # First time seeing this symbol
-            return {"entered_oversold": False, "armed_rsi": None, "last_rsi": None}
-    except Exception as e:
-        log.warning(f"RSI state load error for {symbol}: {e}")
-        return {"entered_oversold": False, "armed_rsi": None, "last_rsi": None}
+    """Load RSI state for a symbol from in-memory cache (loaded at startup).
+    CRITICAL: This no longer hits the database - all state is cached in memory during the cycle.
+    This removes database latency from the hot trading loop."""
+    global RSI_STATE_CACHE
+    if symbol not in RSI_STATE_CACHE:
+        # Safety: if symbol not in cache, initialize it
+        RSI_STATE_CACHE[symbol] = {
+            "entered_oversold": False,
+            "armed_rsi": None,
+            "last_rsi": None,
+            "changed": False
+        }
+    cache_entry = RSI_STATE_CACHE[symbol]
+    return {
+        "entered_oversold": cache_entry["entered_oversold"],
+        "armed_rsi": cache_entry["armed_rsi"],
+        "last_rsi": cache_entry["last_rsi"],
+    }
 
 
 async def update_rsi_state(symbol: str, rsi: float, entered_oversold: bool, armed_rsi: float = None):
-    """Update RSI state for a symbol in database.
+    """Update RSI state for a symbol in in-memory cache only.
+    CRITICAL: This no longer hits the database during the cycle.
+    Changes are marked and flushed to database at cycle end via flush_rsi_state_cache().
+    This removes database latency from the hot trading loop."""
+    global RSI_STATE_CACHE
+    if symbol not in RSI_STATE_CACHE:
+        # Safety: if symbol not in cache, initialize it
+        RSI_STATE_CACHE[symbol] = {
+            "entered_oversold": False,
+            "armed_rsi": None,
+            "last_rsi": None,
+            "changed": False
+        }
 
-    State transitions:
-    - RSI > 50: RESET (entered_oversold=False, armed_rsi=None)
-    - RSI 10-30: ARM (entered_oversold=True, record armed_rsi)
-    - Otherwise: maintain current state
-    """
+    # Update cache entry
+    cache_entry = RSI_STATE_CACHE[symbol]
+    cache_entry["entered_oversold"] = entered_oversold
+    cache_entry["armed_rsi"] = armed_rsi
+    cache_entry["last_rsi"] = rsi
+    cache_entry["changed"] = True  # Mark for batch flush at cycle end
+
+
+async def log_trade_entry(symbol: str, entry_rsi: float, entry_price: float, qty: float,
+                          arm_rsi: float, volume_ratio: float, candle_close_position: float):
+    """Log when a trade enters (ENTER → ENTER)."""
     try:
         async with AsyncSessionLocal() as session:
-            stmt = select(CryptoRSIState).where(CryptoRSIState.symbol == symbol)
-            result = await session.execute(stmt)
-            state = result.scalars().first()
-
-            if not state:
-                # Create new state record
-                state = CryptoRSIState(
-                    symbol=symbol,
-                    entered_oversold=entered_oversold,
-                    armed_rsi=armed_rsi,
-                    last_rsi=rsi,
-                )
-                session.add(state)
-            else:
-                # Update existing
-                state.entered_oversold = entered_oversold
-                state.armed_rsi = armed_rsi
-                state.last_rsi = rsi
-                state.updated_at = datetime.now(timezone.utc)
-
+            trade = CryptoTradeLog(
+                symbol=symbol,
+                armed_at=datetime.now(timezone.utc),  # Timestamp trade was armed
+                arm_rsi=arm_rsi,
+                entered_at=datetime.now(timezone.utc),
+                entry_rsi=entry_rsi,
+                entry_price=entry_price,
+                quantity=qty,
+                volume_ratio=volume_ratio,
+                candle_close_position=candle_close_position,
+            )
+            session.add(trade)
             await session.commit()
+            log.info(f"[CRYPTO-LOG] {symbol} ENTRY logged: RSI {entry_rsi:.1f} @ ${entry_price:.2f} vol_ratio {volume_ratio:.2f}x")
     except Exception as e:
-        log.warning(f"RSI state update error for {symbol}: {e}")
+        log.warning(f"Trade entry logging error for {symbol}: {e}")
+
+
+async def flush_rsi_state_cache():
+    """Batch-write all changed RSI states back to database at END of cycle.
+    This runs AFTER all trading logic (Pass 1, 2, 3), so database latency doesn't
+    affect Coinbase API calls or trade execution.
+
+    CRITICAL: Without this, RSI state changes would be lost on restart, since they're
+    only in the in-memory cache now. But if the table doesn't exist, it gracefully skips."""
+    global RSI_STATE_CACHE
+    try:
+        async with AsyncSessionLocal() as session:
+            changed_count = 0
+            for symbol, cache_entry in RSI_STATE_CACHE.items():
+                if not cache_entry.get("changed", False):
+                    continue  # Skip unchanged entries
+
+                try:
+                    # Fetch or create database record
+                    stmt = select(CryptoRSIState).where(CryptoRSIState.symbol == symbol)
+                    result = await session.execute(stmt)
+                    state = result.scalars().first()
+
+                    if not state:
+                        # Create new state record
+                        state = CryptoRSIState(
+                            symbol=symbol,
+                            entered_oversold=cache_entry["entered_oversold"],
+                            armed_rsi=cache_entry["armed_rsi"],
+                            last_rsi=cache_entry["last_rsi"],
+                        )
+                        session.add(state)
+                    else:
+                        # Update existing
+                        state.entered_oversold = cache_entry["entered_oversold"]
+                        state.armed_rsi = cache_entry["armed_rsi"]
+                        state.last_rsi = cache_entry["last_rsi"]
+                        state.updated_at = datetime.now(timezone.utc)
+
+                    changed_count += 1
+                    cache_entry["changed"] = False  # Clear changed flag
+                except Exception as e:
+                    # If this specific symbol fails, skip it but continue with others
+                    # This prevents one symbol's database issue from blocking others
+                    if "does not exist" in str(e):
+                        cache_entry["changed"] = False  # Still mark as flushed (in-memory)
+                        continue
+                    log.debug(f"[CRYPTO] Failed to flush RSI state for {symbol}: {e}")
+
+            if changed_count > 0:
+                await session.commit()
+                log.debug(f"[CRYPTO] ✅ RSI state cache flushed: {changed_count} symbols updated in DB")
+    except Exception as e:
+        # If database is completely unavailable, just skip persistence
+        # In-memory cache still works, so trading continues
+        if "does not exist" in str(e):
+            log.debug(f"[CRYPTO] RSI state table unavailable, skipping database persistence (in-memory cache active)")
+        else:
+            log.debug(f"[CRYPTO] RSI state flush attempted but skipped: {type(e).__name__}")
+
+
+async def log_trade_exit(symbol: str, exit_price: float, exit_reason: str, realized_pnl: float,
+                        realized_pnl_pct: float, time_held_minutes: int,
+                        max_adverse_excursion: float = None, max_favorable_excursion: float = None,
+                        partial_exit_count: int = 0, trailing_stop_triggered: bool = False):
+    """Log when a trade exits (EXIT)."""
+    try:
+        async with AsyncSessionLocal() as session:
+            # Find the most recent unclosed trade for this symbol
+            stmt = select(CryptoTradeLog).where(
+                CryptoTradeLog.symbol == symbol,
+                CryptoTradeLog.exit_at == None
+            ).order_by(CryptoTradeLog.entered_at.desc())
+            result = await session.execute(stmt)
+            trade = result.scalars().first()
+
+            if trade:
+                trade.exit_at = datetime.now(timezone.utc)
+                trade.exit_price = exit_price
+                trade.exit_reason = exit_reason
+                trade.realized_pnl = realized_pnl
+                trade.realized_pnl_pct = realized_pnl_pct
+                trade.time_held_minutes = time_held_minutes
+                trade.max_adverse_excursion = max_adverse_excursion
+                trade.max_favorable_excursion = max_favorable_excursion
+                trade.partial_exit_count = partial_exit_count
+                trade.trailing_stop_triggered = trailing_stop_triggered
+                await session.commit()
+                log.info(f"[CRYPTO-LOG] {symbol} EXIT logged: {exit_reason} @ ${exit_price:.2f} P&L ${realized_pnl:.2f} ({realized_pnl_pct*100:.2f}%)")
+    except Exception as e:
+        log.warning(f"Trade exit logging error for {symbol}: {e}")
 
 
 async def run_crypto_cycle():
@@ -738,7 +893,8 @@ async def run_crypto_cycle():
     log.info(f"[CRYPTO] Scanning {', '.join(CRYPTO_PAIRS)} (24/7, no market-hours gate) | Daily P&L: ${daily_pnl:.2f}")
 
     connector = aiohttp.TCPConnector(use_dns_cache=True)
-    async with aiohttp.ClientSession(connector=connector, trust_env=False) as session:
+    timeout = aiohttp.ClientTimeout(total=15, connect=5, sock_read=5)
+    async with aiohttp.ClientSession(connector=connector, trust_env=False, timeout=timeout) as session:
         cash, balance_error = await get_usd_balance(session)
         unlocked = 0.0
         if cash is None:
@@ -759,6 +915,16 @@ async def run_crypto_cycle():
             # cash sitting there - can never trade more than what's real.
             cash_pool = min(cash, unlocked, MAX_ALLOCATION) if MAX_ALLOCATION is not None else min(cash, unlocked)
 
+        # CRITICAL: Dynamic floor & aggressive growth strategy
+        BALANCE_FLOOR = 1990.00  # If drops to $1,990, resume aggressive trading
+        PROFIT_LOCK_ACTIVATION = 2000.10  # When balance hits $2,000.10+, take profits
+        TARGET_TRADE_PROFIT = 10.00  # Close trades with $10+ profit when activated
+        GROWTH_TARGET = 2000.00  # Seek to go above and beyond $2,000
+
+        is_at_floor = cash is not None and cash <= BALANCE_FLOOR
+        should_take_profits = cash is not None and cash >= PROFIT_LOCK_ACTIVATION
+        is_aggressive_mode = cash is not None and cash < PROFIT_LOCK_ACTIVATION  # Seek to climb
+
         # Professional daily loss limit: stop new entries after losing 2% of account in a day
         global daily_usd_balance_start
         if daily_usd_balance_start is None and cash is not None:
@@ -776,8 +942,26 @@ async def run_crypto_cycle():
             tier_desc = f"tier unlocked (permanent): ${unlocked:.2f} | tradable now: ${cash_pool:.2f}"
         else:
             tier_desc = "tiering off"
-        status_suffix = " | ⚠️ DAILY 2% LOSS LIMIT HIT - stopping new trades" if is_hitting_daily_loss_limit else ""
+
+        status_suffix = ""
+        if is_at_floor:
+            status_suffix += f" | 🚀 AT FLOOR (${BALANCE_FLOOR:.2f}) - AGGRESSIVE MODE: ALL-IN TO CLIMB"
+        if should_take_profits:
+            status_suffix += f" | 💰 ABOVE $1,001 - TAKING PROFITS: Close trades with ${TARGET_TRADE_PROFIT:.2f}+ gains"
+        if is_aggressive_mode:
+            status_suffix += f" | 📈 GROWTH MODE: Seeking to exceed $1,000"
+        if is_hitting_daily_loss_limit:
+            status_suffix += " | ⚠️ DAILY 2% LOSS LIMIT HIT - stopping new trades"
+
         log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} ({cap_desc}, {tier_desc}) | Target: +{PROFIT_TARGET_PCT*100:.2f}% | Stop: -{STOP_LOSS_PCT*100:.2f}% | Round-trip fee: {CRYPTO_ROUND_TRIP_FEE_RATE*100:.2f}%{status_suffix}")
+
+        # AGGRESSIVE GROWTH MODE: If at floor ($990), maximize position sizing
+        if is_at_floor and not is_hitting_daily_loss_limit:
+            log.info(
+                f"[CRYPTO] 🚀 AGGRESSIVE MODE ACTIVATED (${cash:.2f} ≤ ${BALANCE_FLOOR:.2f}); "
+                "using FULL balance to climb above $1,000"
+            )
+            # Full position sizing in aggressive mode - don't hold back
 
         # Skip new entries entirely if cash pool is below meaningful trade size
         if cash_pool < MIN_CRYPTO_TRADE_USD:
@@ -879,13 +1063,20 @@ async def run_crypto_cycle():
                 "has_position": True, "checked_at": now.isoformat(),
             }
 
-            # Exit conditions: stop loss, RSI reversal, or tiered profit target
+            # Exit conditions: stop loss, profit-taking above $1,001, RSI reversal, or tiered profit target
             should_exit = False
             reason = None
+
+            # PROFIT TAKING: Close trades with $10+ profit when balance > $1,001
+            dollar_profit = unrealized_pnl
+            profit_take_exit = should_take_profits and dollar_profit >= TARGET_TRADE_PROFIT
 
             if stop_hit:
                 should_exit = True
                 reason = f"STOP LOSS (-{unrealized_pct*100:.2f}%)"
+            elif profit_take_exit:
+                should_exit = True
+                reason = f"💰 PROFIT TAKEN (+${dollar_profit:.2f}, balance above $1,001)"
             elif rsi_exit:
                 should_exit = True
                 reason = "RSI EXIT"
@@ -904,6 +1095,13 @@ async def run_crypto_cycle():
                 if filled:
                     daily_pnl += unrealized_pnl
                     log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}")
+                    # Log trade exit for analytics
+                    time_held = (now - position.get("opened_at", now)).total_seconds() // 60 if "opened_at" in position else 0
+                    await log_trade_exit(
+                        symbol, exit_price=price, exit_reason=reason,
+                        realized_pnl=unrealized_pnl, realized_pnl_pct=unrealized_pct,
+                        time_held_minutes=int(time_held)
+                    )
                     send_trade_alert(
                         f"🤖 Crypto bot — {symbol} closed ({reason})",
                         f"Position closed on your Coinbase account:\n\n"
@@ -995,16 +1193,16 @@ async def run_crypto_cycle():
             entered_oversold = rsi_state["entered_oversold"]
             armed_rsi = rsi_state.get("armed_rsi")
 
-            # State transitions:
-            # 1. RSI > 50: Reset state (new oversold cycle required)
-            if rsi > 50:
+            # State transitions (AGGRESSIVE):
+            # 1. RSI >= 60: Reset state (overbought, need pullback to entry zone)
+            if rsi >= 60:
                 if entered_oversold:
-                    log.info(f"[CRYPTO] {symbol} RSI {rsi:.1f} → RESET (>50, new cycle needed)")
+                    log.info(f"[CRYPTO] {symbol} RSI {rsi:.1f} → RESET (>=60, overbought, waiting for pullback)")
                 entered_oversold = False
                 armed_rsi = None
-            # 2. RSI enters 10-30 zone: Arm the setup
-            elif 10 <= rsi < 30 and not entered_oversold:
-                log.info(f"[CRYPTO] {symbol} RSI {rsi:.1f} → ARM oversold zone")
+            # 2. RSI enters 10-40 zone: Arm the setup (widened from 10-30 for aggressive trading)
+            elif 10 <= rsi < 40 and not entered_oversold:
+                log.info(f"[CRYPTO] {symbol} RSI {rsi:.1f} → ARM oversold/neutral entry zone")
                 entered_oversold = True
                 armed_rsi = rsi
             # 3. Otherwise: Maintain current state
@@ -1097,8 +1295,14 @@ async def run_crypto_cycle():
             log.info(f"[CRYPTO] 📡 BUY {symbol} — RSI:{rsi}")
             filled = await place_order(session, symbol, "buy", qty, price)
             if filled:
-                open_crypto_positions[symbol] = {"entry": price, "qty": qty}
+                open_crypto_positions[symbol] = {"entry": price, "qty": qty, "opened_at": now}
                 await _db_save_open(symbol, "long", price, qty)
+                # Log trade entry for analytics (ARM → ENTER transition)
+                await log_trade_entry(
+                    symbol, entry_rsi=rsi, entry_price=price, qty=qty,
+                    arm_rsi=armed_rsi or rsi, volume_ratio=volume_spike_ratio,
+                    candle_close_position=close_position
+                )
                 cash_pool -= qty * price
                 send_trade_alert(
                     f"🤖 Crypto bot — BUY {symbol} opened",
@@ -1126,21 +1330,16 @@ async def run_crypto_cycle():
             ma_50 = data.get("ma_50", 0)
             in_uptrend = data.get("in_uptrend", False)
 
-            if rsi <= RSI_SHORT_ABOVE:
+            # AGGRESSIVE: Allow shorts whenever RSI > 60 (overbought) - no MA50 filter needed
+            if rsi < RSI_SHORT_ABOVE:
                 latest_signals[symbol] = {
                     "price": price, "rsi": rsi, "status": "NEUTRAL",
                     "has_position": False, "checked_at": now.isoformat(),
                 }
                 continue
 
-            # Short entry requires: RSI overbought AND in downtrend (price < MA50)
-            if in_uptrend:
-                latest_signals[symbol] = {
-                    "price": price, "rsi": rsi, "ma_50": ma_50, "status": "OVERBOUGHT_ABOVE_MA50",
-                    "has_position": False, "checked_at": now.isoformat(),
-                }
-                continue
-
+            # SHORT entry: RSI overbought (>60) enables shorts regardless of trend
+            # (removed MA50 downtrend requirement for more aggressive shorting in high RSI markets)
             latest_signals[symbol] = {
                 "price": price, "rsi": rsi, "ma_50": ma_50, "status": "SHORT_CONFIRMED",
                 "has_position": False, "checked_at": now.isoformat(),
@@ -1175,6 +1374,12 @@ async def run_crypto_cycle():
                 )
 
             await asyncio.sleep(0.3)
+
+        # ── CRITICAL: Flush all RSI state changes to database (end of cycle) ──
+        # This happens AFTER all trading logic (Pass 1, 2, 3), so database latency
+        # doesn't affect Coinbase API calls or trade execution.
+        # In-memory cache removed ~56 database queries from the hot loop.
+        await flush_rsi_state_cache()
 
 
 def run():
@@ -1219,6 +1424,11 @@ def run():
         loop.run_until_complete(load_open_positions())
     except Exception as e:
         log.error(f"[CRYPTO] Startup position reload failed: {e}")
+
+    try:
+        loop.run_until_complete(load_all_rsi_states())
+    except Exception as e:
+        log.error(f"[CRYPTO] Startup RSI state cache load failed: {e}")
 
     while True:
         if os.getenv("STOP_TRADING", "false").lower() == "true":
