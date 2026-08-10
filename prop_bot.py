@@ -40,6 +40,9 @@ def get_base_url():
     """Dynamically read Alpaca base URL from env var."""
     return os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 
+# Live trading mode
+LIVE_TRADE = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
+
 # RSI entry/exit thresholds
 RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "30"))
 RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "70"))
