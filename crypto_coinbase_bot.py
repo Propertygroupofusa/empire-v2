@@ -814,6 +814,14 @@ async def run_crypto_cycle():
             # cash sitting there - can never trade more than what's real.
             cash_pool = min(cash, unlocked, MAX_ALLOCATION) if MAX_ALLOCATION is not None else min(cash, unlocked)
 
+        # CRITICAL: Floor & profit-locking strategy
+        BALANCE_FLOOR = 700.00  # Minimum $700 - don't trade if below
+        PROFIT_LOCK_TARGET = 990.00  # Lock profits at $990 (before $1,000)
+        PROFIT_LOCK_CEILING = 1000.00  # $1,000 is the goal
+
+        is_hitting_floor = cash is not None and cash < BALANCE_FLOOR
+        is_near_profit_target = cash is not None and PROFIT_LOCK_TARGET <= cash < PROFIT_LOCK_CEILING
+
         # Professional daily loss limit: stop new entries after losing 2% of account in a day
         global daily_usd_balance_start
         if daily_usd_balance_start is None and cash is not None:
@@ -831,8 +839,24 @@ async def run_crypto_cycle():
             tier_desc = f"tier unlocked (permanent): ${unlocked:.2f} | tradable now: ${cash_pool:.2f}"
         else:
             tier_desc = "tiering off"
-        status_suffix = " | ⚠️ DAILY 2% LOSS LIMIT HIT - stopping new trades" if is_hitting_daily_loss_limit else ""
+
+        status_suffix = ""
+        if is_hitting_floor:
+            status_suffix += f" | 🚨 FLOOR HIT (${BALANCE_FLOOR:.2f}) - STOPPING ALL NEW TRADES"
+        if is_near_profit_target:
+            status_suffix += f" | 🎯 PROFIT LOCK ZONE (${PROFIT_LOCK_TARGET:.2f}-${PROFIT_LOCK_CEILING:.2f}) - CLOSING POSITIONS TO LOCK GAINS"
+        if is_hitting_daily_loss_limit:
+            status_suffix += " | ⚠️ DAILY 2% LOSS LIMIT HIT - stopping new trades"
+
         log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} ({cap_desc}, {tier_desc}) | Target: +{PROFIT_TARGET_PCT*100:.2f}% | Stop: -{STOP_LOSS_PCT*100:.2f}% | Round-trip fee: {CRYPTO_ROUND_TRIP_FEE_RATE*100:.2f}%{status_suffix}")
+
+        # FLOOR PROTECTION: Skip new entries if at floor ($700 minimum)
+        if is_hitting_floor:
+            log.warning(
+                f"[CRYPTO] 🚨 BALANCE AT FLOOR (${cash:.2f} < ${BALANCE_FLOOR:.2f}); "
+                "stopping all new trades to protect capital"
+            )
+            cash_pool = 0.0  # Force no new entries
 
         # Skip new entries entirely if cash pool is below meaningful trade size
         if cash_pool < MIN_CRYPTO_TRADE_USD:
@@ -934,13 +958,19 @@ async def run_crypto_cycle():
                 "has_position": True, "checked_at": now.isoformat(),
             }
 
-            # Exit conditions: stop loss, RSI reversal, or tiered profit target
+            # Exit conditions: stop loss, RSI reversal, profit-lock zone, or tiered profit target
             should_exit = False
             reason = None
+
+            # PROFIT LOCKING: Force close any profitable position if in $990-$1000 zone
+            profit_lock_exit = is_near_profit_target and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE
 
             if stop_hit:
                 should_exit = True
                 reason = f"STOP LOSS (-{unrealized_pct*100:.2f}%)"
+            elif profit_lock_exit:
+                should_exit = True
+                reason = f"🎯 PROFIT LOCK (+{unrealized_pct*100:.2f}%, zone ${PROFIT_LOCK_TARGET:.2f}-${PROFIT_LOCK_CEILING:.2f})"
             elif rsi_exit:
                 should_exit = True
                 reason = "RSI EXIT"
