@@ -322,21 +322,54 @@ async def run_migrations():
     from database import Base
 
     # CRITICAL: Ensure crypto_rsi_state table exists for bot RSI state machine
-    # (this table may have been missed if init_db() failed to run)
+    # Direct SQL approach (more reliable than SQLAlchemy table.create)
     async with engine.begin() as conn:
         try:
+            # Check if table exists
             existing_tables = await conn.run_sync(lambda c: inspect(c).get_table_names())
             if "crypto_rsi_state" not in existing_tables:
-                log.info("Migration: Creating missing crypto_rsi_state table...")
-                # Get column definitions from the model
-                from models import CryptoRSIState
-                for table in Base.metadata.sorted_tables:
-                    if table.name == "crypto_rsi_state":
-                        await conn.run_sync(lambda c, t=table: t.create(c, checkfirst=True))
-                        log.info("✅ crypto_rsi_state table created")
-                        break
+                log.info("Migration: Creating missing crypto_rsi_state table with raw SQL...")
+
+                # Dialect-specific table creation
+                if conn.dialect.name == "postgresql":
+                    sql = """
+                    CREATE TABLE crypto_rsi_state (
+                        id SERIAL PRIMARY KEY,
+                        symbol VARCHAR(50) UNIQUE NOT NULL,
+                        entered_oversold BOOLEAN DEFAULT FALSE,
+                        armed_rsi FLOAT,
+                        last_rsi FLOAT,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE INDEX idx_crypto_rsi_state_symbol ON crypto_rsi_state(symbol);
+                    CREATE INDEX idx_crypto_rsi_state_updated_at ON crypto_rsi_state(updated_at);
+                    """
+                else:  # SQLite
+                    sql = """
+                    CREATE TABLE crypto_rsi_state (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        symbol TEXT UNIQUE NOT NULL,
+                        entered_oversold INTEGER DEFAULT 0,
+                        armed_rsi REAL,
+                        last_rsi REAL,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE INDEX idx_crypto_rsi_state_symbol ON crypto_rsi_state(symbol);
+                    CREATE INDEX idx_crypto_rsi_state_updated_at ON crypto_rsi_state(updated_at);
+                    """
+
+                # Execute SQL with error handling
+                for statement in sql.strip().split(';'):
+                    if statement.strip():
+                        try:
+                            await conn.execute(text(statement.strip()))
+                        except Exception as stmt_err:
+                            log.debug(f"Statement ignored (may already exist): {stmt_err}")
+
+                await conn.commit()
+                log.info("✅ crypto_rsi_state table created successfully")
         except Exception as e:
-            log.warning(f"Could not ensure crypto_rsi_state exists: {e}")
+            log.error(f"Migration FAILED - crypto_rsi_state table: {type(e).__name__}: {e}", exc_info=True)
 
     # Counters exist so the run reports what it DID, not just that it ran.
     # Both outages so far were invisible in the logs: nothing announced that
