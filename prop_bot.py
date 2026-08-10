@@ -19,6 +19,7 @@ import uuid
 from sqlalchemy import select
 from database import AsyncSessionLocal
 from models import BotPosition, Payment
+from bot_mandates import APEX_MANDATE, validate_entry
 
 ET = ZoneInfo("America/New_York")
 
@@ -670,6 +671,29 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
         return False
 
 
+def check_kill_conditions(buying_power, equity, daily_loss, open_position_count):
+    """Check if any kill conditions have been triggered. Return (should_halt, reason)"""
+    mandate = APEX_MANDATE
+    capital = mandate["capital"]
+
+    # Kill condition 1: Daily loss limit hit
+    if daily_loss < -capital["max_daily_loss"]:
+        return True, f"Daily loss limit hit: ${daily_loss:.2f} <= -${capital['max_daily_loss']}"
+
+    # Kill condition 2: Buying power below critical threshold
+    if buying_power < capital["critical_buying_power"]:
+        return True, f"Buying power critical: ${buying_power:.2f} < ${capital['critical_buying_power']}"
+
+    # Kill condition 3: Equity fallen below survival level (80% of starting)
+    if equity < 800:
+        return True, f"Equity below survival level: ${equity:.2f} < $800"
+
+    # Kill condition 4: Too many open positions (shouldn't happen, but check)
+    if open_position_count > capital["max_open_positions"]:
+        return True, f"Too many open positions: {open_position_count} > {capital['max_open_positions']}"
+
+    return False, None
+
 async def run_prop_cycle():
     global daily_pnl, profitable_days, last_cycle_at, last_market_open, bot_start_time, bot_start_equity, checkpoint_alerts_sent
 
@@ -698,6 +722,20 @@ async def run_prop_cycle():
     connector = aiohttp.TCPConnector(use_dns_cache=True)
     async with aiohttp.ClientSession(connector=connector, trust_env=False) as session:
         equity = await get_account_equity(session)
+
+        # MANDATE: Check kill conditions before trading
+        if equity is not None:
+            buying_power = await get_account_buying_power(session)
+            should_halt, halt_reason = check_kill_conditions(
+                buying_power=buying_power,
+                equity=equity,
+                daily_loss=daily_pnl,
+                open_position_count=len(open_prop_positions)
+            )
+            if should_halt:
+                log.critical(f"[KILL CONDITION] Halting bot: {halt_reason}")
+                return
+
         if equity is not None:
             # AGGRESSIVE GROWTH STRATEGY for $1,000 threshold
             ALPACA_FLOOR = 990.00  # If drops to $990, aggressive mode
@@ -867,6 +905,32 @@ async def run_prop_cycle():
         over from run_prop_cycle) - falls back to the fixed 1-share size
         if the real cash balance couldn't be fetched this cycle."""
         nonlocal cash_remaining
+
+        # MANDATE CHECK 1: Universe enforcement (only approved symbols)
+        approved_universe = (
+            APEX_MANDATE["universe"]["futures"] +
+            APEX_MANDATE["universe"]["crypto"] +
+            APEX_MANDATE["universe"]["commodities"]
+        )
+        if contract not in approved_universe:
+            log.warning(f"[MANDATE] {contract} NOT in approved universe - SKIPPING")
+            return False
+
+        # MANDATE CHECK 2: Entry conditions validation
+        total_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in open_prop_positions.values())
+        is_valid, mandate_reason = validate_entry(
+            bot_name="prop_bot",
+            symbol=contract,
+            rsi=rsi,
+            volume_ratio=1.0,  # TODO: calculate from bars
+            buying_power=await get_account_buying_power(session),
+            open_positions=len(open_prop_positions),
+            total_notional=total_notional,
+            equity=equity
+        )
+        if not is_valid:
+            log.info(f"[MANDATE] Entry blocked for {contract}: {mandate_reason}")
+            return False
 
         # HARD MARGIN SAFETY CHECK — prevent over-leverage
         buying_power = await get_account_buying_power(session)
