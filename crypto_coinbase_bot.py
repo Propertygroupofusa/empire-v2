@@ -816,7 +816,7 @@ async def run_crypto_cycle():
 
         # CRITICAL: Dynamic floor & aggressive growth strategy
         BALANCE_FLOOR = 990.00  # If drops to $990, resume aggressive trading
-        PROFIT_LOCK_ACTIVATION = 1000.015  # When balance hits $1,000.015+, take profits
+        PROFIT_LOCK_ACTIVATION = 1000.15  # When balance hits $1,000.15+, take profits
         TARGET_TRADE_PROFIT = 10.00  # Close trades with $10+ profit when activated
         GROWTH_TARGET = 1000.00  # Seek to go above and beyond $1,000
 

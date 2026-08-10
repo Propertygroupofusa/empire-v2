@@ -674,7 +674,7 @@ async def run_prop_cycle():
         if equity is not None:
             # AGGRESSIVE GROWTH STRATEGY for $1,000 threshold
             ALPACA_FLOOR = 990.00  # If drops to $990, aggressive mode
-            ALPACA_PROFIT_ACTIVATION = 1000.015  # When hits $1,000.015+, take $10 profits
+            ALPACA_PROFIT_ACTIVATION = 1000.15  # When hits $1,000.15+, take $10 profits
             is_alpaca_at_floor = equity <= ALPACA_FLOOR
             should_alpaca_take_profits = equity >= ALPACA_PROFIT_ACTIVATION
 
