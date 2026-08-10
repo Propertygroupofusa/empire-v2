@@ -425,8 +425,14 @@ async def get_account_equity(session):
     increment (see PROFIT_INCREMENT_MILESTONES). Falls back to None (base
     tier) on any failure - a scaling hiccup shouldn't block trading."""
     try:
-        async with session.get(f"{get_base_url()}/v2/account", headers=get_headers()) as r:
+        url = f"{get_base_url()}/v2/account"
+        async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
+                try:
+                    error_text = await r.text()
+                except:
+                    error_text = "(could not read response)"
+                log.warning(f"Alpaca /v2/account returned HTTP {r.status}: {error_text[:200]}")
                 return None
             data = await r.json()
             return float(data.get("equity", 0))
@@ -440,8 +446,14 @@ async def get_account_cash(session):
     rather than a fixed share count (see size_position). Falls back to
     None on any failure - callers fall back to the fixed 1-share size."""
     try:
-        async with session.get(f"{get_base_url()}/v2/account", headers=get_headers()) as r:
+        url = f"{get_base_url()}/v2/account"
+        async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
+                try:
+                    error_text = await r.text()
+                except:
+                    error_text = "(could not read response)"
+                log.warning(f"Alpaca /v2/account (cash) returned HTTP {r.status}: {error_text[:200]}")
                 return None
             data = await r.json()
             return float(data.get("cash", 0))
@@ -454,8 +466,14 @@ async def get_account_buying_power(session):
     """Real Alpaca buying power. Returns buying power or None on failure.
     Used for hard margin safety checks to prevent over-leverage."""
     try:
-        async with session.get(f"{get_base_url()}/v2/account", headers=get_headers()) as r:
+        url = f"{get_base_url()}/v2/account"
+        async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
+                try:
+                    error_text = await r.text()
+                except:
+                    error_text = "(could not read response)"
+                log.warning(f"Alpaca /v2/account (buying_power) returned HTTP {r.status}: {error_text[:200]}")
                 return None
             data = await r.json()
             bp = float(data.get("buying_power", 0))
