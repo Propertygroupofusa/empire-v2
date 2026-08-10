@@ -1159,6 +1159,14 @@ try:
 except Exception as e:
     log.warning(f"Failed to load bot dashboard router: {e}")
 
+# Crypto bot analytics and trade instrumentation
+try:
+    from routers import crypto_analytics
+    app.include_router(crypto_analytics.router, tags=["Crypto Analytics"])
+    log.info("✅ Router loaded: /crypto/analytics (state machine instrumentation)")
+except Exception as e:
+    log.warning(f"Failed to load crypto analytics router: {e}")
+
 
 @app.get("/dashboard")
 async def serve_dashboard():
