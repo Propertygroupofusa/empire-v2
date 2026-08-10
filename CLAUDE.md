@@ -231,6 +231,74 @@ Before pushing changes to Railway, verify:
 
 ---
 
+## Railway Network Configuration (Broker API Access)
+
+### Problem: Broker APIs Blocked (403 Forbidden)
+
+When trading bots run on Railway, external API calls may fail with:
+```
+HTTP 403: Host not in allowlist: api.coinbase.com
+Add this host to your network egress settings to allow access
+```
+
+This happens because Railway blocks outbound connections by default for security. Brokers (Coinbase, Alpaca) need explicit whitelist entries.
+
+### Solution: Configure Egress Allowlist
+
+1. **Go to Railway Dashboard:**
+   - https://railway.app/dashboard
+   - Select `empire-v2` project
+   - Click `main-app` service
+
+2. **Add Network Egress Rules:**
+   - Find **Settings** → **Network** (or **Policies** section)
+   - Add these hosts to the **Egress Allowlist:**
+     ```
+     api.coinbase.com
+     *.coinbase.com
+     api.alpaca.markets
+     alpaca.com
+     api.polygon.io
+     data.alpaca.markets
+     ```
+
+3. **Save and Redeploy:**
+   - Apply changes
+   - Push code or click "Redeploy" in Railway dashboard
+   - Wait 2-3 minutes for container restart
+
+4. **Verify in Logs:**
+   ```
+   tail -f /tmp/empire-server.log | grep -E "COINBASE|ALPACA|balance|price fetch"
+   ```
+   - ✓ If successful, you'll see:
+     ```
+     INFO:crypto_coinbase_bot:Coinbase USD balance: $700.00
+     INFO:crypto_coinbase_bot:[CRYPTO] Scanning BTC/USD, ETH/USD...
+     ```
+   - ✗ If still blocked, you'll see:
+     ```
+     WARNING:crypto_coinbase_bot:HTTP 403: Host not in allowlist
+     ```
+
+### Affected Bots
+
+| Bot | Broker | Endpoints | Status |
+|-----|--------|-----------|--------|
+| `crypto_coinbase_bot.py` | Coinbase Advanced Trade | `api.coinbase.com` | Needs egress whitelist |
+| `prop_bot.py` | Apex Futures (Prop Trading) | `api.alpaca.markets`, `data.alpaca.markets` | Needs egress whitelist |
+
+### Environment Variables (Optional)
+
+If Railway uses environment-based policy, set:
+```
+ALLOWED_EGRESS_HOSTS=api.coinbase.com,api.alpaca.markets,stripe.com,polygon.io
+```
+
+But the dashboard Settings approach (step 1-2 above) is the primary mechanism.
+
+---
+
 ## Common Tasks
 
 **Add new video type:**
@@ -269,6 +337,158 @@ Before pushing changes to Railway, verify:
 - **Video editing:** HeyGen only generates new videos; can't modify existing videos per user request
 - **Admin auth:** No authentication on admin endpoints yet (add before production)
 - **Database:** PostgreSQL recommended for production (Railway plugin auto-configures with asyncpg driver)
+
+---
+
+## Troubleshooting
+
+### Trading Bot Issues
+
+**Symptom:** Crypto/Alpaca bot shows "Equity: unknown" or "Cash available: unknown"
+
+**Causes:**
+1. Broker API credentials not configured (check env vars)
+2. Network egress blocked (see Railway Network Configuration above)
+3. API key has wrong permissions/scope
+4. Broker account not in live/paper mode
+
+**Solution:**
+```bash
+# Check env vars are set
+echo "COINBASE_API_KEY_NAME: ${COINBASE_API_KEY_NAME:-NOT SET}"
+echo "COINBASE_API_PRIVATE_KEY: ${COINBASE_API_PRIVATE_KEY:-NOT SET}"
+echo "ALPACA_API_KEY: ${ALPACA_API_KEY:-NOT SET}"
+echo "ALPACA_BASE_URL: ${ALPACA_BASE_URL:-NOT SET}"
+
+# Check logs for connectivity errors
+curl http://localhost:8000/health  # Should return {"status": "ok"}
+tail -50 /tmp/empire-server.log | grep -i "error\|failed\|403"
+```
+
+---
+
+**Symptom:** "coinbase price fetch failed (need 50+ candles)" for all symbols
+
+**Cause:** Price feed not accumulating history (bot just started, or data stale)
+
+**Solution:**
+- Bot needs ~50 15-minute candles per symbol (≈12 hours of data)
+- Wait for candles to accumulate, then entries resume
+- Or verify `/crypto/analytics/health` endpoint shows instrumentation active
+
+---
+
+**Symptom:** "Cash pool $0.00 below minimum trade size" for crypto bot
+
+**Cause:** Coinbase USD balance read failed, so cash = $0 → no trades allowed
+
+**Solution:**
+1. Verify Coinbase account has USD balance > $5
+2. Check API credentials have "read" permission on balances
+3. Confirm network egress allows `api.coinbase.com`
+4. Restart bot: `pkill -f "python main.py"` then restart
+
+---
+
+### Payment/Revenue System Issues
+
+**Symptom:** Bot earnings showing `total_earned: 0.0` but jobs completed
+
+**Cause:** Payment records not created, or Payment table out of sync with Job table
+
+**Solution:**
+```python
+# Check if bot worker exists
+python3 << 'EOF'
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker
+from models import Worker, Payment, Job
+import asyncio
+
+async def check():
+    engine = create_async_engine("sqlite+aiosqlite:///empire.db")
+    async_session = sessionmaker(engine, class_=AsyncSession)
+    async with async_session() as session:
+        result = await session.execute(select(Worker).where(Worker.email == "bot@pgusa.local"))
+        bot = result.scalar_one_or_none()
+        if not bot:
+            print("❌ Bot worker not found - create it first")
+            return
+        print(f"✓ Bot worker ID: {bot.id}")
+        
+        # Check payments
+        p_result = await session.execute(select(Payment).where(Payment.worker_id == str(bot.id)))
+        payments = p_result.scalars().all()
+        print(f"✓ Payments for bot: {len(payments)}")
+    await engine.dispose()
+
+asyncio.run(check())
+EOF
+```
+
+---
+
+**Symptom:** Payments stuck in "processing" status for >24 hours
+
+**Cause:** Payout system encountered an error; manual intervention needed
+
+**Solution:**
+1. Check `/payments/bot/earnings` → look for `payout_status: "processing"`
+2. Verify Stripe payout was actually initiated: `stripe_payout_id` should be non-null
+3. If stuck, manually mark as paid in database (admin endpoint):
+   ```python
+   # In database console:
+   UPDATE payments SET payout_status = 'paid', paid_at = datetime('now') 
+   WHERE id = '<payment_id>' AND payout_status = 'processing';
+   ```
+4. Check Stripe dashboard for failed payouts (may need manual retry)
+
+---
+
+### Database & Deployment Issues
+
+**Symptom:** SQLite database locked: "database is locked"
+
+**Cause:** Multiple processes writing simultaneously (Railway restart while bot still running)
+
+**Solution:**
+- This is rare with async SQLAlchemy, but if it happens:
+  1. Kill all Python processes: `pkill -f python`
+  2. Delete lock files: `rm -f empire.db-*`
+  3. Restart: `python main.py`
+
+---
+
+**Symptom:** On Railway: Quote form returns 404 for `/quote`
+
+**Cause:** `quote_request.html` file path not found (working directory mismatch)
+
+**Solution:**
+- Already fixed in `/quote` endpoint with fallback paths:
+  1. `/app/quote_request.html` (Railway container root)
+  2. `quote_request.html` (repo root)
+  3. `os.path.dirname(__file__)/quote_request.html` (module-relative)
+- If still fails: Check Railway logs for which path was attempted
+
+---
+
+### Monitoring & Analytics
+
+**Symptom:** `/crypto/analytics/metrics/summary` returns all zeros for metrics
+
+**Cause:** No trade logs created yet, or wrong `strategy_version` filter
+
+**Solution:**
+```bash
+# Check trade log records exist
+curl http://localhost:8000/crypto/analytics/health
+# Should show instrumentation list
+
+# Check raw logs
+curl http://localhost:8000/crypto/analytics/trades/recent
+# Should show trade entries if any exist
+```
 
 ---
 
