@@ -8,6 +8,24 @@
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   },
+  "network": {
+    "egress": {
+      "allowlist": [
+        "api.coinbase.com",
+        "*.coinbase.com",
+        "api.alpaca.markets",
+        "data.alpaca.markets",
+        "alpaca.markets",
+        "api.polygon.io",
+        "polygon.io",
+        "stripe.com",
+        "*.stripe.com",
+        "github.com",
+        "raw.githubusercontent.com",
+        "smtp.gmail.com"
+      ]
+    }
+  },
   "services": {
     "main-app": {
       "build": {
