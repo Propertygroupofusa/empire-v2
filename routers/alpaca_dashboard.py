@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from database import get_db
 from models import TradingBotState
 
-router = APIRouter(prefix="/alpaca", tags=["alpaca-trading"])
+router = APIRouter(tags=["alpaca-trading"])
 
 
 @router.get("/dashboard")
