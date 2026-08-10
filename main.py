@@ -327,40 +327,44 @@ async def run_migrations():
             existing_tables = await conn.run_sync(lambda c: inspect(c).get_table_names())
             if "crypto_rsi_state" not in existing_tables:
                 log.info("Migration: Creating missing crypto_rsi_state table...")
-                if engine.dialect.name == "postgresql":
-                    await conn.execute(text("""
-                        CREATE TABLE IF NOT EXISTS crypto_rsi_state (
-                            id SERIAL PRIMARY KEY,
-                            symbol VARCHAR(50) UNIQUE NOT NULL,
-                            entered_oversold BOOLEAN DEFAULT FALSE,
-                            armed_rsi FLOAT,
-                            last_rsi FLOAT,
-                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                    """))
-                    try:
-                        await conn.execute(text("CREATE INDEX idx_crypto_rsi_state_symbol ON crypto_rsi_state(symbol)"))
-                    except:
-                        pass
-                    try:
-                        await conn.execute(text("CREATE INDEX idx_crypto_rsi_state_updated_at ON crypto_rsi_state(updated_at)"))
-                    except:
-                        pass
-                else:
-                    await conn.execute(text("""
-                        CREATE TABLE IF NOT EXISTS crypto_rsi_state (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            symbol TEXT UNIQUE NOT NULL,
-                            entered_oversold INTEGER DEFAULT 0,
-                            armed_rsi REAL,
-                            last_rsi REAL,
-                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                    """))
-                await conn.commit()
-                log.info("✅ crypto_rsi_state table created successfully")
+                try:
+                    if engine.dialect.name == "postgresql":
+                        await conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS crypto_rsi_state (
+                                id SERIAL PRIMARY KEY,
+                                symbol VARCHAR(50) UNIQUE NOT NULL,
+                                entered_oversold BOOLEAN DEFAULT FALSE,
+                                armed_rsi FLOAT,
+                                last_rsi FLOAT,
+                                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            )
+                        """))
+                        try:
+                            await conn.execute(text("CREATE INDEX idx_crypto_rsi_state_symbol ON crypto_rsi_state(symbol)"))
+                        except:
+                            pass
+                        try:
+                            await conn.execute(text("CREATE INDEX idx_crypto_rsi_state_updated_at ON crypto_rsi_state(updated_at)"))
+                        except:
+                            pass
+                    else:
+                        await conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS crypto_rsi_state (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                symbol TEXT UNIQUE NOT NULL,
+                                entered_oversold INTEGER DEFAULT 0,
+                                armed_rsi REAL,
+                                last_rsi REAL,
+                                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            )
+                        """))
+                    await conn.commit()
+                    log.info("✅ Migration OK: crypto_rsi_state table created")
+                except Exception as migration_err:
+                    log.error(f"❌ Migration FAILED - crypto_rsi_state creation: {type(migration_err).__name__}: {migration_err}")
+                    # Don't raise - bot can work without persistence, just won't save RSI state across restarts
             else:
-                log.info("✅ crypto_rsi_state table already exists")
+                log.info("✅ Migration OK: crypto_rsi_state table already exists")
 
             # CRITICAL: Fix workers table auto-increment on PostgreSQL (bot_autoscaler needs this)
             if engine.dialect.name == "postgresql":

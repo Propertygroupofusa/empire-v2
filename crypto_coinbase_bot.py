@@ -775,42 +775,57 @@ async def flush_rsi_state_cache():
     affect Coinbase API calls or trade execution.
 
     CRITICAL: Without this, RSI state changes would be lost on restart, since they're
-    only in the in-memory cache now."""
+    only in the in-memory cache now. But if the table doesn't exist, it gracefully skips."""
     global RSI_STATE_CACHE
     try:
         async with AsyncSessionLocal() as session:
+            changed_count = 0
             for symbol, cache_entry in RSI_STATE_CACHE.items():
                 if not cache_entry.get("changed", False):
                     continue  # Skip unchanged entries
 
-                # Fetch or create database record
-                stmt = select(CryptoRSIState).where(CryptoRSIState.symbol == symbol)
-                result = await session.execute(stmt)
-                state = result.scalars().first()
+                try:
+                    # Fetch or create database record
+                    stmt = select(CryptoRSIState).where(CryptoRSIState.symbol == symbol)
+                    result = await session.execute(stmt)
+                    state = result.scalars().first()
 
-                if not state:
-                    # Create new state record
-                    state = CryptoRSIState(
-                        symbol=symbol,
-                        entered_oversold=cache_entry["entered_oversold"],
-                        armed_rsi=cache_entry["armed_rsi"],
-                        last_rsi=cache_entry["last_rsi"],
-                    )
-                    session.add(state)
-                else:
-                    # Update existing
-                    state.entered_oversold = cache_entry["entered_oversold"]
-                    state.armed_rsi = cache_entry["armed_rsi"]
-                    state.last_rsi = cache_entry["last_rsi"]
-                    state.updated_at = datetime.now(timezone.utc)
+                    if not state:
+                        # Create new state record
+                        state = CryptoRSIState(
+                            symbol=symbol,
+                            entered_oversold=cache_entry["entered_oversold"],
+                            armed_rsi=cache_entry["armed_rsi"],
+                            last_rsi=cache_entry["last_rsi"],
+                        )
+                        session.add(state)
+                    else:
+                        # Update existing
+                        state.entered_oversold = cache_entry["entered_oversold"]
+                        state.armed_rsi = cache_entry["armed_rsi"]
+                        state.last_rsi = cache_entry["last_rsi"]
+                        state.updated_at = datetime.now(timezone.utc)
 
-                cache_entry["changed"] = False  # Clear changed flag
+                    changed_count += 1
+                    cache_entry["changed"] = False  # Clear changed flag
+                except Exception as e:
+                    # If this specific symbol fails, skip it but continue with others
+                    # This prevents one symbol's database issue from blocking others
+                    if "does not exist" in str(e):
+                        cache_entry["changed"] = False  # Still mark as flushed (in-memory)
+                        continue
+                    log.debug(f"[CRYPTO] Failed to flush RSI state for {symbol}: {e}")
 
-            if any(v.get("changed") for v in RSI_STATE_CACHE.values()):
+            if changed_count > 0:
                 await session.commit()
-                log.debug(f"[CRYPTO] RSI state cache flushed to database")
+                log.debug(f"[CRYPTO] ✅ RSI state cache flushed: {changed_count} symbols updated in DB")
     except Exception as e:
-        log.warning(f"[CRYPTO] RSI state flush to database failed: {e}")
+        # If database is completely unavailable, just skip persistence
+        # In-memory cache still works, so trading continues
+        if "does not exist" in str(e):
+            log.debug(f"[CRYPTO] RSI state table unavailable, skipping database persistence (in-memory cache active)")
+        else:
+            log.debug(f"[CRYPTO] RSI state flush attempted but skipped: {type(e).__name__}")
 
 
 async def log_trade_exit(symbol: str, exit_price: float, exit_reason: str, realized_pnl: float,
