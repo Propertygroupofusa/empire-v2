@@ -69,15 +69,17 @@ async def init_db():
     try:
         import models  # noqa: F401  (registers model classes on Base.metadata)
 
-        log.info("Starting database initialization...")
-        log.info("Calling Base.metadata.create_all()...")
+        print("[DB] Starting database initialization...")
+        print("[DB] Calling Base.metadata.create_all()...")
 
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
-        log.info("✅ Base.metadata.create_all() completed successfully")
-    except Exception:
-        log.exception("❌ Base.metadata.create_all() failed")
+        print("[DB] ✅ Base.metadata.create_all() completed successfully")
+    except Exception as e:
+        print(f"[DB] ❌ Base.metadata.create_all() failed: {e}")
+        import traceback
+        traceback.print_exc()
 
 async def get_db():
     """Get database session"""
