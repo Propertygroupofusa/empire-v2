@@ -6,6 +6,9 @@ from sqlalchemy.pool import NullPool
 from sqlalchemy import event
 import os
 import traceback
+import logging
+
+log = logging.getLogger(__name__)
 
 # Try to import greenlet, but don't fail if unavailable
 # Use sync_engine_mode as fallback if greenlet isn't available
@@ -65,14 +68,16 @@ async def init_db():
     """Initialize database - create tables if needed"""
     try:
         import models  # noqa: F401  (registers model classes on Base.metadata)
+
+        log.info("Starting database initialization...")
+        log.info("Calling Base.metadata.create_all()...")
+
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-    except Exception as e:
-        # str(e) has been coming back empty in production for whatever's
-        # failing here, making this warning useless — log the exception
-        # type and full traceback instead of guessing blind.
-        print(f"Database init warning [{type(e).__name__}]: {e}")
-        traceback.print_exc()
+
+        log.info("✅ Base.metadata.create_all() completed successfully")
+    except Exception:
+        log.exception("❌ Base.metadata.create_all() failed")
 
 async def get_db():
     """Get database session"""
