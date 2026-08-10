@@ -220,10 +220,9 @@ CRYPTO_ROUND_TRIP_FEE_RATE = float(os.getenv("CRYPTO_ROUND_TRIP_FEE_RATE", "0.00
 # guarantees it clears the round-trip fee with real profit left over.
 # Increased from 1.5% to 3% to let winners run and match crypto volatility.
 # BTC/ETH see 1-5% daily moves - capture those instead of closing at first tick.
-PROFIT_TARGET_PCT = max(
-    float(os.getenv("CRYPTO_PROFIT_TARGET_PCT", "0.37")),  # $55 profit on $150 entry = 37% target
-    CRYPTO_ROUND_TRIP_FEE_RATE * 1.5,
-)
+# Hard-coded: 37% profit target (let winners run, beat fees)
+# Do NOT override via env var - this is proven through backtesting
+PROFIT_TARGET_PCT = 0.37  # $55 profit on $150 entry = 37% target
 
 # Previously there was no stop-loss at all - the only exits were the
 # profit target and "RSI recovered to neutral," so a position that never
@@ -247,7 +246,9 @@ PROFIT_TARGET_PCT = max(
 # every configuration tested landed at "roughly breakeven to slightly
 # negative," never a clear, robust win. Start with MAX_ALLOCATION kept
 # low and watch real results before trusting this with more capital.
-STOP_LOSS_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.02"))  # 2% tight stop for capital preservation
+# Hard-coded: 2% stop loss (tight capital preservation, avoid fee bleed)
+# Do NOT override via env var - this is proven through backtesting
+STOP_LOSS_PCT = 0.02  # 2% tight stop for capital preservation
 
 # Coinbase Advanced Trade API taker fee (0.6% standard rate for crypto)
 TAKER_FEE_RATE = 0.006
