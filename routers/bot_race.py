@@ -3,12 +3,14 @@ BOT RACE DASHBOARD — Live competitive tracking for Alpaca vs Coinbase trading 
 Real-time leaderboard showing balance, ROI, trades, and performance metrics.
 """
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse
 from datetime import datetime, timedelta
 from sqlalchemy import select, func, desc
 from database import AsyncSessionLocal
 from models import BotPosition, CryptoTradeLog, TradingBotState
 import json
 import logging
+import os
 
 log = logging.getLogger("bot_race")
 router = APIRouter(prefix="/bot-race", tags=["Bot Race"])
@@ -173,3 +175,34 @@ async def get_leaderboard():
         "leaderboard": leaderboard,
         "combined_balance": race["combined_balance"],
     }
+
+
+@router.get("/dashboard")
+async def get_dashboard():
+    """Serve the bot race dashboard HTML."""
+    possible_paths = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bot_race_dashboard.html"),
+        "/app/bot_race_dashboard.html",
+        "bot_race_dashboard.html",
+    ]
+
+    for path in possible_paths:
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    return HTMLResponse(content=f.read())
+            except Exception as e:
+                log.debug(f"Failed to read dashboard from {path}: {e}")
+
+    log.warning("bot_race_dashboard.html not found in any expected location")
+    return HTMLResponse(content="""
+    <html>
+        <body style="font-family: sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; background: #f5f5f5;">
+            <div style="text-align: center;">
+                <h1>🏁 Bot Race Dashboard</h1>
+                <p>Dashboard file not found. Please check deployment.</p>
+                <p><a href="/api/bot-race/race-data">View Race Data API →</a></p>
+            </div>
+        </body>
+    </html>
+    """, status_code=200)
