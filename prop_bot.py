@@ -672,6 +672,17 @@ async def run_prop_cycle():
     async with aiohttp.ClientSession(connector=connector, trust_env=False) as session:
         equity = await get_account_equity(session)
         if equity is not None:
+            # AGGRESSIVE GROWTH STRATEGY for $1,000 threshold
+            ALPACA_FLOOR = 990.00  # If drops to $990, aggressive mode
+            ALPACA_PROFIT_ACTIVATION = 1001.00  # When hits $1,001+, take $10 profits
+            is_alpaca_at_floor = equity <= ALPACA_FLOOR
+            should_alpaca_take_profits = equity >= ALPACA_PROFIT_ACTIVATION
+
+            if is_alpaca_at_floor:
+                log.info(f"🚀 ALPACA AGGRESSIVE MODE: ${equity:.2f} ≤ ${ALPACA_FLOOR:.2f} | Climbing to $1,000+")
+            if should_alpaca_take_profits:
+                log.info(f"💰 ALPACA PROFIT TAKING: ${equity:.2f} ≥ ${ALPACA_PROFIT_ACTIVATION:.2f} | Close $10 trades")
+
             # Check if $1M goal achieved — STOP TRADING
             if equity >= 1000000.0:
                 log.warning(f"🏆 **$1,000,000 MILESTONE REACHED** — Equity: ${equity:,.2f}")
@@ -981,8 +992,14 @@ async def run_prop_cycle():
             tier2_hit = unrealized_pnl >= (position_profit_target * tier_levels[1])
             tier3_hit = unrealized_pnl >= (position_profit_target * tier_levels[2])
 
-            # Exit conditions: hard stop, RSI reversal on profit, or hit a tiered target
-            if stop_hit:
+            # AGGRESSIVE GROWTH: Take $10 profits when equity > $1,001 to sustain growth
+            aggressive_profit_exit = should_alpaca_take_profits and unrealized_pnl >= 10.00
+
+            # Exit conditions: aggressive profits, hard stop, RSI reversal on profit, or hit a tiered target
+            if aggressive_profit_exit:
+                reason = f"💰 AGGRESSIVE PROFIT (${unrealized_pnl:.2f}, equity >${ALPACA_PROFIT_ACTIVATION:.2f})"
+                await close_position(session, contract, config, position, price, rsi, trend, reason)
+            elif stop_hit:
                 reason = "STOP LOSS"
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
             elif rsi_exit:
