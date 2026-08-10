@@ -277,6 +277,31 @@ async def _db_delete_open(contract: str):
     except Exception as e:
         log.error(f"[APEX_589296] Failed to remove closed position {contract} from DB: {e}")
 
+
+async def _db_save_closed_trade(contract: str, side: str, entry_price: float, exit_price: float, qty: float, profit_loss: float, reason: str):
+    """Record a completed trade to closed_trades table for historical audit trail."""
+    try:
+        from models import ClosedTrade
+        pnl_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+        async with AsyncSessionLocal() as db:
+            trade = ClosedTrade(
+                bot=BOT_NAME,
+                symbol=contract,
+                side=side,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                qty=qty,
+                pnl=profit_loss,
+                pnl_pct=pnl_pct,
+                exit_reason=reason,
+                closed_at=datetime.now(timezone.utc)
+            )
+            db.add(trade)
+            await db.commit()
+            log.info(f"[AUDIT] Closed trade recorded: {contract} {side} | Entry ${entry_price:.2f} → Exit ${exit_price:.2f} | P&L: ${profit_loss:.2f}")
+    except Exception as e:
+        log.error(f"[APEX_589296] Failed to log closed trade {contract}: {e}")
+
 # Latest per-symbol scan snapshot, read by routers/trading_dashboard.py's
 # GET /signals so the dashboard can show live price/RSI/trend instead of
 # that only being visible in Railway logs. Written once per symbol per
@@ -567,7 +592,7 @@ def check_margin_safety(buying_power, equity, open_positions_count):
         return False, f"CRITICAL: Buying power ${buying_power:.2f} near zero — halting new positions"
 
     # Total open position risk can't exceed max % of equity
-    total_open_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in open_positions.values())
+    total_open_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in open_prop_positions.values())
     if equity > 0 and total_open_notional > (equity * MAX_RISK_PERCENT):
         return False, f"Risk limit exceeded: ${total_open_notional:.2f} > {MAX_RISK_PERCENT*100:.0f}% of ${equity:.2f} equity"
 
@@ -797,6 +822,10 @@ async def run_prop_cycle():
         global daily_pnl
         daily_pnl += pnl
         log.info(f"[APEX_589296] 📤 CLOSE {side.upper()} {contract} ({reason_label}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${pnl:.2f} ({profit_pct:.2f}%)")
+
+        # CRITICAL: Log closed trade to database for audit trail
+        await _db_save_closed_trade(contract, side, entry, price, qty, pnl, reason_label)
+
         send_trade_alert(
             f"🤖 Bare Metal Builders — {contract} {side} closed ({reason_label})",
             f"{side.capitalize()} position closed on APEX_589296:\n\n"

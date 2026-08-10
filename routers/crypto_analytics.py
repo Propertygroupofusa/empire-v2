@@ -143,6 +143,53 @@ async def get_metrics_by_symbol(hours: int = 24, db: Session = Depends(get_db)):
     }
 
 
+@router.get("/trading-summary")
+async def get_trading_summary(db: Session = Depends(get_db)):
+    """One-page summary: All coins traded, open positions, P&L status."""
+    stmt = select(CryptoTradeLog).order_by(CryptoTradeLog.entered_at.desc())
+    all_trades = db.execute(stmt).scalars().all()
+
+    # Get unique symbols
+    symbols = sorted(set(t.symbol for t in all_trades))
+
+    # Build summary by symbol
+    summary = {}
+    for symbol in symbols:
+        symbol_trades = [t for t in all_trades if t.symbol == symbol]
+        open_trades = [t for t in symbol_trades if not t.exit_at]
+        closed_trades = [t for t in symbol_trades if t.exit_at]
+
+        total_pnl = sum(t.net_pnl for t in closed_trades if t.net_pnl) or 0
+        win_count = len([t for t in closed_trades if t.net_pnl and t.net_pnl > 0])
+
+        summary[symbol] = {
+            "total_trades": len(symbol_trades),
+            "open_positions": len(open_trades),
+            "closed_trades": len(closed_trades),
+            "total_pnl": round(total_pnl, 2),
+            "win_rate": round(win_count / len(closed_trades) * 100, 1) if closed_trades else 0,
+            "last_trade": symbol_trades[0].entered_at.isoformat() if symbol_trades else None,
+        }
+
+    # Overall stats
+    total_trades_all = len(all_trades)
+    open_all = [t for t in all_trades if not t.exit_at]
+    closed_all = [t for t in all_trades if t.exit_at]
+    total_pnl_all = sum(t.net_pnl for t in closed_all if t.net_pnl) or 0
+
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "overall": {
+            "coins_traded": len(symbols),
+            "total_trades": total_trades_all,
+            "open_positions": len(open_all),
+            "closed_trades": len(closed_all),
+            "total_pnl": round(total_pnl_all, 2),
+        },
+        "by_coin": summary,
+    }
+
+
 @router.get("/health")
 async def analytics_health():
     """Health check for analytics system."""
@@ -153,6 +200,6 @@ async def analytics_health():
             "CryptoTradeLog: full trade lifecycle tracking",
             "Entry: ARM RSI, volume ratio, candle position",
             "Exit: reason, P&L, time held, MAE/MFE",
-            "Endpoints: /trades/recent, /trades/by-symbol, /metrics/summary, /metrics/by-symbol",
+            "Endpoints: /trades/recent, /trades/by-symbol, /metrics/summary, /metrics/by-symbol, /trading-summary",
         ],
     }
