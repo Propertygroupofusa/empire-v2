@@ -901,10 +901,10 @@ async def run_crypto_cycle():
             cash_pool = min(cash, unlocked, MAX_ALLOCATION) if MAX_ALLOCATION is not None else min(cash, unlocked)
 
         # CRITICAL: Dynamic floor & aggressive growth strategy
-        BALANCE_FLOOR = 990.00  # If drops to $990, resume aggressive trading
-        PROFIT_LOCK_ACTIVATION = 1000.15  # When balance hits $1,000.15+, take profits
+        BALANCE_FLOOR = 1990.00  # If drops to $1,990, resume aggressive trading
+        PROFIT_LOCK_ACTIVATION = 2000.10  # When balance hits $2,000.10+, take profits
         TARGET_TRADE_PROFIT = 10.00  # Close trades with $10+ profit when activated
-        GROWTH_TARGET = 1000.00  # Seek to go above and beyond $1,000
+        GROWTH_TARGET = 2000.00  # Seek to go above and beyond $2,000
 
         is_at_floor = cash is not None and cash <= BALANCE_FLOOR
         should_take_profits = cash is not None and cash >= PROFIT_LOCK_ACTIVATION
