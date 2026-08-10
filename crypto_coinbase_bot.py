@@ -1118,66 +1118,8 @@ async def run_crypto_cycle():
 
             await asyncio.sleep(0.3)
 
-        # ── Pass 1b: manage short exits ──────────────────────────────────────
-        for symbol, position in list(open_crypto_shorts.items()):
-            data = scans.get(symbol)
-            if not data:
-                continue
-            price, rsi = data["price"], data["rsi"]
-            entry, qty = position["entry"], position["qty"]
-            # For shorts: profit when price drops (entry > price)
-            unrealized_pnl = (entry - price) * qty
-            unrealized_pct = (entry - price) / entry
-            # Short stop loss: when price goes too high (entry - price becomes negative)
-            stop_hit = unrealized_pct <= -STOP_LOSS_PCT
-            # Short exit on RSI recovery to oversold: when RSI drops back below 32
-            rsi_exit = rsi < RSI_SHORT_BELOW and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE
-
-            # Tiered profit-taking
-            tier1_hit = unrealized_pct >= CRYPTO_TIER_LEVELS[0]
-            tier2_hit = unrealized_pct >= CRYPTO_TIER_LEVELS[1]
-            tier3_hit = unrealized_pct >= CRYPTO_TIER_LEVELS[2]
-
-            latest_signals[symbol] = {
-                "price": price, "rsi": rsi, "status": "HOLDING_SHORT",
-                "has_position": True, "checked_at": now.isoformat(),
-            }
-
-            should_exit = False
-            reason = None
-
-            if stop_hit:
-                should_exit = True
-                reason = f"STOP LOSS (-{unrealized_pct*100:.2f}%)"
-            elif rsi_exit:
-                should_exit = True
-                reason = "RSI EXIT (SHORT)"
-            elif tier3_hit:
-                should_exit = True
-                reason = f"TIER 3 (+{unrealized_pct*100:.2f}%, let winners run)"
-            elif tier2_hit and unrealized_pct >= PROFIT_TARGET_PCT:
-                should_exit = True
-                reason = f"TIER 2 (+{unrealized_pct*100:.2f}%, hit 3% target)"
-            elif tier1_hit:
-                should_exit = True
-                reason = f"TIER 1 (+{unrealized_pct*100:.2f}%, lock early gain)"
-
-            if should_exit:
-                # Buy to close short position at current price
-                filled = await place_order(session, symbol, "buy", qty, price)
-                if filled:
-                    daily_pnl += unrealized_pnl
-                    log.info(f"[CRYPTO] 📤 CLOSE SHORT {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}")
-                    send_trade_alert(
-                        f"🤖 Crypto bot — {symbol} SHORT closed ({reason})",
-                        f"Short position closed on your Coinbase account:\n\n"
-                        f"SELL {qty} {symbol} @ ${entry:.2f} → BUY @ ${price:.2f} | P&L: ${unrealized_pnl:.2f}\n"
-                        f"Reason: {reason}\n\nDashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
-                    )
-                    open_crypto_shorts.pop(symbol, None)
-                    await _db_delete_open(symbol, "short")
-
-            await asyncio.sleep(0.3)
+        # ── Pass 1b: DISABLED (Coinbase SPOT does not support shorting) ──────────────────────────────────────
+        # Short exit logic removed: Coinbase spot only supports long positions.
 
         # ── Pass 2: new entries (long only, RSI oversold + momentum confirmation) ────
         for symbol in CRYPTO_PAIRS:
@@ -1318,67 +1260,8 @@ async def run_crypto_cycle():
 
             await asyncio.sleep(0.3)
 
-        # ── Pass 3: new short entries (RSI overbought + below MA for confirmation) ────
-        total_positions = len(open_crypto_positions) + len(open_crypto_shorts)
-        for symbol in CRYPTO_PAIRS:
-            # Don't short if already long on this pair
-            if symbol in open_crypto_positions:
-                continue
-            # Don't open multiple shorts on same pair
-            if symbol in open_crypto_shorts:
-                continue
-
-            data = scans.get(symbol)
-            if not data:
-                continue
-            price, rsi = data["price"], data["rsi"]
-            ma_50 = data.get("ma_50", 0)
-            in_uptrend = data.get("in_uptrend", False)
-
-            # AGGRESSIVE: Allow shorts whenever RSI > 60 (overbought) - no MA50 filter needed
-            if rsi < RSI_SHORT_ABOVE:
-                latest_signals[symbol] = {
-                    "price": price, "rsi": rsi, "status": "NEUTRAL",
-                    "has_position": False, "checked_at": now.isoformat(),
-                }
-                continue
-
-            # SHORT entry: RSI overbought (>60) enables shorts regardless of trend
-            # (removed MA50 downtrend requirement for more aggressive shorting in high RSI markets)
-            latest_signals[symbol] = {
-                "price": price, "rsi": rsi, "ma_50": ma_50, "status": "SHORT_CONFIRMED",
-                "has_position": False, "checked_at": now.isoformat(),
-            }
-
-            # Stop new entries if daily 2% loss limit hit
-            if is_hitting_daily_loss_limit:
-                log.info(f"[CRYPTO] 🛑 {symbol} SHORT blocked — daily 2% loss limit reached, no new entries")
-                continue
-
-            if total_positions >= MAX_POSITIONS:
-                log.info(f"[CRYPTO] At max positions ({MAX_POSITIONS}) - {symbol} SHORT signal held, not entering")
-                continue
-
-            slots_remaining = MAX_POSITIONS - total_positions
-            qty = size_position(cash_pool, slots_remaining, price)
-            if qty is None:
-                log.info(f"[CRYPTO] Skipping {symbol} SHORT entry — not enough allocated cash (${cash_pool:.2f})")
-                continue
-
-            log.info(f"[CRYPTO] 📡 SHORT {symbol} — RSI:{rsi}")
-            filled = await place_order(session, symbol, "sell", qty, price)
-            if filled:
-                open_crypto_shorts[symbol] = {"entry": price, "qty": qty}
-                await _db_save_open(symbol, "short", price, qty)
-                cash_pool -= qty * price
-                send_trade_alert(
-                    f"🤖 Crypto bot — SHORT {symbol} opened",
-                    f"Short opened on your Coinbase account:\n\n"
-                    f"SELL {qty} {symbol} @ ${price:.2f} | RSI: {rsi}\n\n"
-                    f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
-                )
-
-            await asyncio.sleep(0.3)
+        # ── Pass 3: DISABLED (Coinbase SPOT does not support shorting) ────
+        # Long-only mode: only BUY entries and SELL exits for closing longs.
 
         # ── CRITICAL: Flush all RSI state changes to database (end of cycle) ──
         # This happens AFTER all trading logic (Pass 1, 2, 3), so database latency
