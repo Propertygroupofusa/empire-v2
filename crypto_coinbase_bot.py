@@ -277,6 +277,10 @@ daily_usd_balance_start = None  # For daily 2% loss limit
 latest_signals = {}
 last_cycle_at = None
 
+# RSI state cache: loaded once at startup, maintained in-memory during cycle, batch-flushed to DB at end
+# This removes database latency from the hot trading loop - 56 DB queries per cycle become 0
+RSI_STATE_CACHE = {}  # {symbol: {"entered_oversold": bool, "armed_rsi": float, "last_rsi": float, "changed": bool}}
+
 BOT_NAME = "crypto_coinbase"
 
 
@@ -300,6 +304,52 @@ async def load_open_positions():
                 log.info(f"[CRYPTO] Reloaded {total} open position(s) from DB: {len(open_crypto_positions)} long, {len(open_crypto_shorts)} short")
     except Exception as e:
         log.error(f"[CRYPTO] Failed to reload open positions from DB: {e}")
+
+
+async def load_all_rsi_states():
+    """Load RSI state for ALL trading pairs at startup, cache in memory.
+    This removes database latency from the hot trading loop - instead of 56 DB queries
+    per 60-second cycle, we load once at startup and batch-flush at cycle end.
+
+    CRITICAL FIX: Database operations inside aiohttp context were causing timeouts
+    on Coinbase API calls. Moving to startup + in-memory + batch-flush unblocks the event loop."""
+    global RSI_STATE_CACHE
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(CryptoRSIState))
+            states = result.scalars().all()
+
+            # Load existing states
+            for state in states:
+                RSI_STATE_CACHE[state.symbol] = {
+                    "entered_oversold": state.entered_oversold,
+                    "armed_rsi": state.armed_rsi,
+                    "last_rsi": state.last_rsi,
+                    "changed": False  # Track if this state changed this cycle
+                }
+
+            # Initialize missing symbols (will be created on first flush)
+            for symbol in CRYPTO_PAIRS:
+                if symbol not in RSI_STATE_CACHE:
+                    RSI_STATE_CACHE[symbol] = {
+                        "entered_oversold": False,
+                        "armed_rsi": None,
+                        "last_rsi": None,
+                        "changed": False
+                    }
+
+            log.info(f"[CRYPTO] ✅ Loaded RSI state for {len(RSI_STATE_CACHE)} symbols into memory cache")
+    except Exception as e:
+        log.error(f"[CRYPTO] Failed to load RSI states at startup: {e}")
+        # Initialize all symbols with defaults if load fails
+        for symbol in CRYPTO_PAIRS:
+            RSI_STATE_CACHE[symbol] = {
+                "entered_oversold": False,
+                "armed_rsi": None,
+                "last_rsi": None,
+                "changed": False
+            }
+        log.warning(f"[CRYPTO] Initialized {len(RSI_STATE_CACHE)} symbols with default state")
 
 
 async def _db_save_open(symbol: str, side: str, entry: float, qty: float):
@@ -653,58 +703,47 @@ async def place_order(session, symbol, side, qty, price):
 
 
 async def load_rsi_state(symbol: str) -> dict:
-    """Load RSI state for a symbol from database. Returns state dict."""
-    try:
-        async with AsyncSessionLocal() as session:
-            stmt = select(CryptoRSIState).where(CryptoRSIState.symbol == symbol)
-            result = await session.execute(stmt)
-            state = result.scalars().first()
-            if state:
-                return {
-                    "entered_oversold": state.entered_oversold,
-                    "armed_rsi": state.armed_rsi,
-                    "last_rsi": state.last_rsi,
-                }
-            # First time seeing this symbol
-            return {"entered_oversold": False, "armed_rsi": None, "last_rsi": None}
-    except Exception as e:
-        log.warning(f"RSI state load error for {symbol}: {e}")
-        return {"entered_oversold": False, "armed_rsi": None, "last_rsi": None}
+    """Load RSI state for a symbol from in-memory cache (loaded at startup).
+    CRITICAL: This no longer hits the database - all state is cached in memory during the cycle.
+    This removes database latency from the hot trading loop."""
+    global RSI_STATE_CACHE
+    if symbol not in RSI_STATE_CACHE:
+        # Safety: if symbol not in cache, initialize it
+        RSI_STATE_CACHE[symbol] = {
+            "entered_oversold": False,
+            "armed_rsi": None,
+            "last_rsi": None,
+            "changed": False
+        }
+    cache_entry = RSI_STATE_CACHE[symbol]
+    return {
+        "entered_oversold": cache_entry["entered_oversold"],
+        "armed_rsi": cache_entry["armed_rsi"],
+        "last_rsi": cache_entry["last_rsi"],
+    }
 
 
 async def update_rsi_state(symbol: str, rsi: float, entered_oversold: bool, armed_rsi: float = None):
-    """Update RSI state for a symbol in database.
+    """Update RSI state for a symbol in in-memory cache only.
+    CRITICAL: This no longer hits the database during the cycle.
+    Changes are marked and flushed to database at cycle end via flush_rsi_state_cache().
+    This removes database latency from the hot trading loop."""
+    global RSI_STATE_CACHE
+    if symbol not in RSI_STATE_CACHE:
+        # Safety: if symbol not in cache, initialize it
+        RSI_STATE_CACHE[symbol] = {
+            "entered_oversold": False,
+            "armed_rsi": None,
+            "last_rsi": None,
+            "changed": False
+        }
 
-    State transitions:
-    - RSI > 50: RESET (entered_oversold=False, armed_rsi=None)
-    - RSI 10-30: ARM (entered_oversold=True, record armed_rsi)
-    - Otherwise: maintain current state
-    """
-    try:
-        async with AsyncSessionLocal() as session:
-            stmt = select(CryptoRSIState).where(CryptoRSIState.symbol == symbol)
-            result = await session.execute(stmt)
-            state = result.scalars().first()
-
-            if not state:
-                # Create new state record
-                state = CryptoRSIState(
-                    symbol=symbol,
-                    entered_oversold=entered_oversold,
-                    armed_rsi=armed_rsi,
-                    last_rsi=rsi,
-                )
-                session.add(state)
-            else:
-                # Update existing
-                state.entered_oversold = entered_oversold
-                state.armed_rsi = armed_rsi
-                state.last_rsi = rsi
-                state.updated_at = datetime.now(timezone.utc)
-
-            await session.commit()
-    except Exception as e:
-        log.warning(f"RSI state update error for {symbol}: {e}")
+    # Update cache entry
+    cache_entry = RSI_STATE_CACHE[symbol]
+    cache_entry["entered_oversold"] = entered_oversold
+    cache_entry["armed_rsi"] = armed_rsi
+    cache_entry["last_rsi"] = rsi
+    cache_entry["changed"] = True  # Mark for batch flush at cycle end
 
 
 async def log_trade_entry(symbol: str, entry_rsi: float, entry_price: float, qty: float,
@@ -728,6 +767,50 @@ async def log_trade_entry(symbol: str, entry_rsi: float, entry_price: float, qty
             log.info(f"[CRYPTO-LOG] {symbol} ENTRY logged: RSI {entry_rsi:.1f} @ ${entry_price:.2f} vol_ratio {volume_ratio:.2f}x")
     except Exception as e:
         log.warning(f"Trade entry logging error for {symbol}: {e}")
+
+
+async def flush_rsi_state_cache():
+    """Batch-write all changed RSI states back to database at END of cycle.
+    This runs AFTER all trading logic (Pass 1, 2, 3), so database latency doesn't
+    affect Coinbase API calls or trade execution.
+
+    CRITICAL: Without this, RSI state changes would be lost on restart, since they're
+    only in the in-memory cache now."""
+    global RSI_STATE_CACHE
+    try:
+        async with AsyncSessionLocal() as session:
+            for symbol, cache_entry in RSI_STATE_CACHE.items():
+                if not cache_entry.get("changed", False):
+                    continue  # Skip unchanged entries
+
+                # Fetch or create database record
+                stmt = select(CryptoRSIState).where(CryptoRSIState.symbol == symbol)
+                result = await session.execute(stmt)
+                state = result.scalars().first()
+
+                if not state:
+                    # Create new state record
+                    state = CryptoRSIState(
+                        symbol=symbol,
+                        entered_oversold=cache_entry["entered_oversold"],
+                        armed_rsi=cache_entry["armed_rsi"],
+                        last_rsi=cache_entry["last_rsi"],
+                    )
+                    session.add(state)
+                else:
+                    # Update existing
+                    state.entered_oversold = cache_entry["entered_oversold"]
+                    state.armed_rsi = cache_entry["armed_rsi"]
+                    state.last_rsi = cache_entry["last_rsi"]
+                    state.updated_at = datetime.now(timezone.utc)
+
+                cache_entry["changed"] = False  # Clear changed flag
+
+            if any(v.get("changed") for v in RSI_STATE_CACHE.values()):
+                await session.commit()
+                log.debug(f"[CRYPTO] RSI state cache flushed to database")
+    except Exception as e:
+        log.warning(f"[CRYPTO] RSI state flush to database failed: {e}")
 
 
 async def log_trade_exit(symbol: str, exit_price: float, exit_reason: str, realized_pnl: float,
@@ -1277,6 +1360,12 @@ async def run_crypto_cycle():
 
             await asyncio.sleep(0.3)
 
+        # ── CRITICAL: Flush all RSI state changes to database (end of cycle) ──
+        # This happens AFTER all trading logic (Pass 1, 2, 3), so database latency
+        # doesn't affect Coinbase API calls or trade execution.
+        # In-memory cache removed ~56 database queries from the hot loop.
+        await flush_rsi_state_cache()
+
 
 def run():
     # Emergency stop: disable bot if CRYPTO_BOT_DISABLED is set (default: ENABLED for trading)
@@ -1320,6 +1409,11 @@ def run():
         loop.run_until_complete(load_open_positions())
     except Exception as e:
         log.error(f"[CRYPTO] Startup position reload failed: {e}")
+
+    try:
+        loop.run_until_complete(load_all_rsi_states())
+    except Exception as e:
+        log.error(f"[CRYPTO] Startup RSI state cache load failed: {e}")
 
     while True:
         if os.getenv("STOP_TRADING", "false").lower() == "true":
