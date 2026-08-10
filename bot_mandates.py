@@ -64,7 +64,7 @@ APEX_MANDATE = {
         "locked_reserve": 150,
         "deployable": 830,
         "max_per_position": 240,
-        "max_open_positions": 2,
+        "max_open_positions": 6,  # 3 longs + 3 shorts for dual-direction mean reversion
         "max_total_notional": 490,  # 50% of 980
         "critical_buying_power": 100,  # Halt at this level
         "max_daily_loss": 10,  # $ per day
