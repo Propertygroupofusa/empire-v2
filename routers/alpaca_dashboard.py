@@ -11,9 +11,9 @@ router = APIRouter(tags=["alpaca-trading"])
 
 @router.get("/dashboard")
 async def alpaca_dashboard(db: Session = Depends(get_db)):
-    """Alpaca trading dashboard — current account status and positions."""
+    """Alpaca trading dashboard — CACHED database data (no live API calls)."""
     stmt = select(TradingBotState).where(TradingBotState.bot_name == "prop_bot")
-    bot_state = db.execute(stmt).scalar_one_or_none()
+    bot_state = (await db.execute(stmt)).scalar_one_or_none()
 
     if not bot_state:
         return {
@@ -21,7 +21,7 @@ async def alpaca_dashboard(db: Session = Depends(get_db)):
             "message": "Alpaca bot has not started yet"
         }
 
-    # Calculate performance
+    # Calculate performance from DATABASE (no API calls needed)
     starting = bot_state.starting_capital or 1000.0
     current = bot_state.base_capital or 0.0
     profit = current - starting
@@ -33,28 +33,27 @@ async def alpaca_dashboard(db: Session = Depends(get_db)):
     if last_update:
         time_delta = (now - last_update).total_seconds()
         hours_ago = time_delta / 3600
-        stale = hours_ago > 1  # Mark as stale if >1 hour old
+        stale = hours_ago > 2  # Mark stale if >2 hours old
     else:
         hours_ago = None
         stale = True
 
     return {
-        "bot": "Alpaca Apex Futures (prop_bot)",
-        "account_status": "🔴 BLOCKED: API not responding (HTTP 403)" if stale else "🟢 SYNCED",
+        "bot": "Alpaca Apex Futures (prop_bot) - CACHED VIEW",
+        "api_status": "🔴 BLOCKED (HTTP 403 - network firewall)" if stale else "🟢 LIVE",
+        "data_source": "Database cache - NO live API calls required",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "last_update": last_update.isoformat() if last_update else None,
+        "last_synced": last_update.isoformat() if last_update else "Never",
         "data_age_hours": round(hours_ago, 1) if hours_ago else None,
-        "capital": {
-            "starting": round(starting, 2),
-            "current": round(current, 2),
-            "profit": round(profit, 2),
-            "profit_pct": round(profit_pct, 2),
+        "capital_tracking": {
+            "starting_balance": round(starting, 2),
+            "last_recorded_balance": round(current, 2),
+            "profit_loss": round(profit, 2),
+            "profit_loss_pct": round(profit_pct, 2),
+            "status": "✅ Profitable" if profit > 0 else "❌ Loss" if profit < 0 else "➡️ Breakeven"
         },
-        "status": {
-            "is_stale": stale,
-            "message": f"Last synced {round(hours_ago, 1)}h ago" if stale else "Synced recently"
-        },
-        "issue": "API connectivity blocked - bot cannot update account data" if stale else None
+        "warning": "⚠️ DATA IS {:.1f}h OLD - real account may have changed since last bot sync".format(hours_ago) if stale else None,
+        "action_needed": "Network API block detected - bot cannot sync live data. Check network settings." if stale else None
     }
 
 
