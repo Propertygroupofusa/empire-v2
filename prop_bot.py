@@ -20,6 +20,7 @@ from sqlalchemy import select
 from database import AsyncSessionLocal
 from models import BotPosition, Payment
 from bot_mandates import APEX_MANDATE, validate_entry
+from alpaca_mean_reversion import should_exit_position as mr_should_exit, validate_dual_direction
 
 ET = ZoneInfo("America/New_York")
 
@@ -252,7 +253,7 @@ async def load_open_positions():
             result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
             rows = result.scalars().all()
             for row in rows:
-                open_prop_positions[row.symbol] = {"side": row.side, "entry": row.entry_price, "qty": row.qty}
+                open_prop_positions[row.symbol] = {"side": row.side, "entry": row.entry_price, "qty": row.qty, "open_time": row.opened_at}
             if rows:
                 log.info(f"[APEX_589296] Reloaded {len(rows)} open position(s) from DB: {list(open_prop_positions.keys())}")
     except Exception as e:
@@ -339,15 +340,15 @@ def send_trade_alert(subject: str, body: str):
 
 
 async def get_price_rsi(session, symbol):
-    """Get price and RSI for futures proxy symbol"""
+    """Get price and RSI for futures proxy symbol, including SMA50 for mean reversion validation"""
     try:
-        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=5Min&limit=20"
+        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=5Min&limit=50"
         async with session.get(url, headers=HEADERS) as r:
             if r.status != 200:
                 return None
             data = await r.json()
             bars = data.get("bars", [])
-            if len(bars) < 14:
+            if len(bars) < 50:
                 return None
 
             closes = [b["c"] for b in bars]
@@ -362,12 +363,13 @@ async def get_price_rsi(session, symbol):
 
             sma5 = sum(closes[-5:]) / 5
             sma10 = sum(closes[-10:]) / 10
+            sma50 = sum(closes[-50:]) / 50
             trend = "bullish" if sma5 > sma10 else "bearish"
 
             # Momentum: price change over last 3 bars (shows direction/strength)
             momentum = ((price - closes[-3]) / closes[-3]) * 100 if closes[-3] > 0 else 0
 
-            return {"price": price, "rsi": round(rsi, 1), "trend": trend, "momentum": round(momentum, 2)}
+            return {"price": price, "rsi": round(rsi, 1), "trend": trend, "momentum": round(momentum, 2), "sma50": sma50}
     except Exception as e:
         log.error(f"Price error {symbol}: {e}")
         return None
@@ -888,7 +890,7 @@ async def run_prop_cycle():
         if not filled:
             return False
 
-        open_prop_positions[contract] = {"side": side, "entry": price, "qty": qty}
+        open_prop_positions[contract] = {"side": side, "entry": price, "qty": qty, "open_time": now}
         await _db_save_open(contract, side, price, qty)
         send_trade_alert(
             f"🤖 Bare Metal Builders — {side.upper()} {contract} opened",
@@ -1045,69 +1047,26 @@ async def run_prop_cycle():
             entry = position["entry"]
             qty = position["qty"]
 
-            # Use crypto-specific RSI thresholds and dynamically tightened stops based on scale
-            is_crypto = "/" in config["symbol"]
-            exit_sell_threshold = CRYPTO_RSI_SELL_ABOVE if is_crypto else RSI_SELL_ABOVE
-            exit_buy_threshold = CRYPTO_RSI_BUY_BELOW if is_crypto else RSI_BUY_BELOW
+            # Calculate position age in seconds (track when position opened)
+            position_open_time = position.get("open_time", now)
+            position_age_seconds = int((now - position_open_time).total_seconds())
 
-            # Dynamic stop-loss: tighter at higher scales to prevent compounded losses
-            scale = float(os.getenv("POSITION_SCALE_MULTIPLIER", "1.0"))
-            stop_loss = get_dynamic_crypto_stop_loss(scale) if is_crypto else get_dynamic_stop_loss(scale)
+            # Mean Reversion Exit Decision — enforces 4 rules: stop loss, min profit, RSI exit, timeout
+            should_exit, reason, exit_type = mr_should_exit(
+                symbol=contract,
+                entry_price=entry,
+                current_price=price,
+                current_rsi=rsi,
+                position_age_seconds=position_age_seconds,
+                direction=side,
+                max_hold_seconds=7200,  # 2 hours max
+                stop_loss_pct=0.015,  # 1.5% hard stop for stocks
+                min_profit_target_pct=0.02,  # 2% minimum profit (KEY: prevents breakeven exits)
+                rsi_profit_threshold_long=60,  # Sell longs when RSI >= 60 (overbought)
+                rsi_profit_threshold_short=40,  # Cover shorts when RSI <= 40 (oversold)
+            )
 
-            if side == "long":
-                unrealized_pnl = (price - entry) * qty
-                rsi_signal = rsi > exit_sell_threshold or (trend == "bearish" and rsi > 50)
-                stop_hit = price <= entry * (1 - stop_loss)
-                quick_loss_hit = price <= entry * (1 - QUICK_EXIT_LOSS_PCT)  # AGGRESSIVE: exit losers at 0.5% down
-            else:
-                unrealized_pnl = (entry - price) * qty
-                rsi_signal = rsi < exit_buy_threshold or (trend == "bullish" and rsi < 50)
-                stop_hit = price >= entry * (1 + stop_loss)
-                quick_loss_hit = price >= entry * (1 + QUICK_EXIT_LOSS_PCT)  # AGGRESSIVE: exit losers at 0.5% down
-
-            # **AGGRESSIVE LOSS EXIT** — Close ANY losing position at 0.5% down
-            # Don't wait for full stop-loss. Quick exit = preserve capital for winners.
-            if unrealized_pnl < 0 and quick_loss_hit:
-                loss_pct = (unrealized_pnl / (entry * qty)) * 100 if entry * qty > 0 else 0
-                log.warning(f"[APEX_589296] 🚨 AGGRESSIVE LOSS EXIT: {contract} down {abs(loss_pct):.2f}% (${abs(unrealized_pnl):.2f}) — exiting immediately")
-                await close_position(session, contract, config, position, price, rsi, trend, f"QUICK EXIT - DOWN {abs(loss_pct):.2f}%")
-                continue  # Skip rest of position checks, move to next contract
-
-            # Use crypto-specific profit targets for crypto positions
-            position_profit_target = get_profit_target_dollars(equity, is_crypto=is_crypto)
-            tier_levels = CRYPTO_TIER_LEVELS if is_crypto else TIER_LEVELS
-
-            # Tiered profit-taking: lock in gains at milestones
-            # CRYPTO: aggressive (50% exit, 75%, 100%) — reinvest faster
-            # STOCKS: professional (50%, 100%, 150%) — let winners run
-            rsi_exit = rsi_signal and unrealized_pnl > 0
-
-            # Check which profit tiers have been hit
-            tier1_hit = unrealized_pnl >= (position_profit_target * tier_levels[0])
-            tier2_hit = unrealized_pnl >= (position_profit_target * tier_levels[1])
-            tier3_hit = unrealized_pnl >= (position_profit_target * tier_levels[2])
-
-            # AGGRESSIVE GROWTH: Take $10 profits when equity > $1,001 to sustain growth
-            aggressive_profit_exit = should_alpaca_take_profits and unrealized_pnl >= 10.00
-
-            # Exit conditions: aggressive profits, hard stop, RSI reversal on profit, or hit a tiered target
-            if aggressive_profit_exit:
-                reason = f"💰 AGGRESSIVE PROFIT (${unrealized_pnl:.2f}, equity >${ALPACA_PROFIT_ACTIVATION:.2f})"
-                await close_position(session, contract, config, position, price, rsi, trend, reason)
-            elif stop_hit:
-                reason = "STOP LOSS"
-                await close_position(session, contract, config, position, price, rsi, trend, reason)
-            elif rsi_exit:
-                reason = "RSI EXIT"
-                await close_position(session, contract, config, position, price, rsi, trend, reason)
-            elif tier3_hit:
-                reason = f"TIER 3 EXIT (${unrealized_pnl:.2f} profit, {unrealized_pnl/position_profit_target:.1f}x target)"
-                await close_position(session, contract, config, position, price, rsi, trend, reason)
-            elif tier2_hit and unrealized_pnl >= position_profit_target:
-                reason = f"TIER 2 EXIT (${unrealized_pnl:.2f} profit, reached target)"
-                await close_position(session, contract, config, position, price, rsi, trend, reason)
-            elif tier1_hit and unrealized_pnl >= (position_profit_target * tier_levels[0]):
-                reason = f"TIER 1 EXIT (${unrealized_pnl:.2f} profit, {tier_levels[0]*100:.0f}% of target)"
+            if should_exit:
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
 
             await asyncio.sleep(0.3)
@@ -1128,30 +1087,27 @@ async def run_prop_cycle():
             price, rsi, trend = data["price"], data["rsi"], data["trend"]
             momentum = data.get("momentum", 0)
 
-            # Use crypto-specific RSI thresholds if this is a crypto symbol (contains /)
-            is_crypto = "/" in config["symbol"]
-            buy_threshold = CRYPTO_RSI_BUY_BELOW if is_crypto else RSI_BUY_BELOW
-            sell_threshold = CRYPTO_RSI_SELL_ABOVE if is_crypto else RSI_SELL_ABOVE
+            # Mean Reversion Entry Validation — check both long and short directions
+            sma50 = data.get("sma50", price)  # fallback to price if SMA50 unavailable
 
-            if rsi < buy_threshold:
-                # Long entry: RSI oversold + positive momentum (price trending up, not just dipping down)
-                if momentum > 0:
-                    candidates.append((buy_threshold - rsi, contract, config, "long", price, rsi, trend))
-                    status = "BUY_ZONE"
-                else:
-                    status = "BUY_SIGNAL_BLOCKED (momentum negative)"
-            elif rsi > sell_threshold:
-                # Short entry: RSI overbought + negative momentum (price trending down)
-                if shorting_enabled:
-                    if momentum < 0:
-                        candidates.append((rsi - sell_threshold, contract, config, "short", price, rsi, trend))
-                        status = "SHORT_ZONE"
-                    else:
-                        status = "SHORT_SIGNAL_BLOCKED (momentum positive)"
-                else:
-                    status = "SHORT_ZONE"
+            direction, should_enter, reason = validate_dual_direction(
+                symbol=contract,
+                current_rsi=rsi,
+                sma_50=sma50,
+                current_price=price,
+                cash_available=cash_remaining if cash_remaining is not None else 0,
+                open_positions=len(open_prop_positions),
+                max_open=dynamic_max_positions,
+            )
+
+            if should_enter and direction != "hold":
+                # Strong mean reversion signal: record confidence as distance from threshold
+                confidence = abs(rsi - (30 if direction == "long" else 70))
+                candidates.append((confidence, contract, config, direction, price, rsi, trend))
+                status = f"{direction.upper()}_SETUP"
             else:
-                status = "NEUTRAL"
+                status = f"NEUTRAL ({reason})" if not should_enter else "HOLD"
+
             latest_signals[contract] = {
                 "symbol": config["symbol"], "price": price, "rsi": rsi, "trend": trend,
                 "momentum": momentum, "status": status, "has_position": False, "checked_at": now.isoformat(),

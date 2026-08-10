@@ -107,7 +107,7 @@ APEX_MANDATE = {
 CRYPTO_MANDATE = {
     "role": BotRole.CRYPTO_CAPTURE,
     "name": "crypto_coinbase_bot",
-    "description": "Short-term crypto opportunity capture with tight entry/exit",
+    "description": "Dual-direction mean reversion: long on oversold (RSI<35), short on overbought (RSI>70)",
 
     # Universe: What it can trade
     "universe": {
@@ -123,29 +123,42 @@ CRYPTO_MANDATE = {
         }
     },
 
-    # Entry: Tighter than APEX (crypto is volatile)
+    # Entry: DUAL DIRECTION - Long on oversold, Short on overbought
     "entry": {
-        "rsi_threshold": 35,  # Oversold
-        "volume_ratio_min": 1.5,  # Higher than average
-        "min_buying_power": 150,
-        "min_position_size": 50,
-        "max_open_positions": 2,
-        "max_total_notional_pct": 0.50,
-        "max_spread_pct": 0.001,  # Tight spread
-        "require_live_data": True,
-        "data_staleness_max_sec": 120,
+        "long": {
+            "rsi_threshold_oversold": 35,  # RSI < 35 = buy signal
+            "volume_ratio_min": 1.5,
+            "min_buying_power": 150,
+            "min_position_size": 50,
+        },
+        "short": {
+            "rsi_threshold_overbought": 70,  # RSI > 70 = sell signal (NEW)
+            "volume_ratio_min": 1.5,
+            "min_buying_power": 150,
+            "min_position_size": 50,
+        },
+        "shared": {
+            "max_open_positions": 4,  # 2 longs + 2 shorts
+            "max_total_notional_pct": 0.50,
+            "max_spread_pct": 0.001,
+            "require_live_data": True,
+            "data_staleness_max_sec": 120,
+        }
     },
 
-    # Exit: Faster exits, tighter targets
+    # Exit: Mean reversion with MINIMUM 2% profit targets
     "exit": {
-        "profit_target_pct": [0.01, 0.02, 0.03],  # 1-3% targets
-        "profit_scale": [0.50, 0.50],  # Exit 50% at 1%, 50% at 3%
-        "stop_loss_pct": 0.005,  # 0.5% (tighter for crypto)
+        "min_profit_target_pct": 0.02,  # MUST profit at least 2% or exit at loss
+        "profit_tiers_pct": [0.02, 0.03, 0.05],  # 2%, 3%, 5% targets
+        "tier_exit_pct": [0.33, 0.33, 0.34],  # Exit 1/3 at each level
+        "stop_loss_pct": 0.005,  # 0.5% max loss
         "aggressive_loss_pct": 0.01,  # 1% loss = full exit
         "max_hold_time_sec": 1800,  # 30 minutes
-        "no_movement_timeout_sec": 900,  # 15 min with no change
+        "no_movement_timeout_sec": 900,  # 15 min with no change = exit
         "no_fill_timeout_sec": 15,
         "spread_expansion_max_pct": 0.0015,
+        "mean_reversion_exit": True,  # Exit when price hits 50% retracement
+        "risk_reward_ratio_min": 1.0,  # Risk $1 to make $2 minimum
     },
 
     # Capital: Separate account
@@ -190,7 +203,7 @@ CRYPTO_MANDATE = {
 ALPACA_MANDATE = {
     "role": BotRole.ALPACA_GROWTH,
     "name": "alpaca_bot",
-    "description": "Short-term stock/ETF trading growth with capital availability",
+    "description": "Dual-direction mean reversion: long on oversold (RSI<30), short on overbought (RSI>70)",
 
     # Universe
     "universe": {
@@ -202,22 +215,36 @@ ALPACA_MANDATE = {
         }
     },
 
-    # Entry
+    # Entry: DUAL DIRECTION - Long on oversold, Short on overbought
     "entry": {
-        "rsi_threshold_long": [25, 35],  # Oversold for longs
-        "rsi_threshold_short": [65, 75],  # Overbought for shorts
-        "volume_ratio_min": 1.5,
-        "min_buying_power": 100,
-        "min_position_size": 30,
-        "max_open_positions": 3,
-        "max_total_notional_pct": 0.60,
+        "long": {
+            "rsi_threshold_oversold": 30,  # RSI < 30 = buy signal
+            "volume_ratio_min": 1.5,
+            "min_buying_power": 100,
+            "min_position_size": 30,
+        },
+        "short": {
+            "rsi_threshold_overbought": 70,  # RSI > 70 = sell/short signal
+            "volume_ratio_min": 1.5,
+            "min_buying_power": 100,
+            "min_position_size": 30,
+        },
+        "shared": {
+            "max_open_positions": 6,  # 3 longs + 3 shorts
+            "max_total_notional_pct": 0.60,
+        }
     },
 
-    # Exit
+    # Exit: Mean reversion with MINIMUM 2% profit targets
     "exit": {
-        "profit_target_pct": [0.02, 0.05],  # 2-5%
-        "stop_loss_pct": 0.015,  # 1.5%
+        "min_profit_target_pct": 0.02,  # MUST profit at least 2% or exit at loss
+        "profit_tiers_pct": [0.02, 0.05, 0.10],  # 2%, 5%, 10% targets
+        "tier_exit_pct": [0.33, 0.33, 0.34],  # Exit 1/3 at each level
+        "stop_loss_pct": 0.015,  # 1.5% max loss (wider for stocks)
+        "aggressive_loss_pct": 0.03,  # 3% loss = full exit
         "max_hold_time_sec": 7200,  # 2 hours
+        "mean_reversion_exit": True,  # Exit when price hits 50% retracement
+        "risk_reward_ratio_min": 1.0,  # Risk $1 to make $2 minimum
     },
 
     # Capital
@@ -318,8 +345,11 @@ def get_bot_mandate(bot_name: str) -> Dict:
 
 def validate_entry(bot_name: str, symbol: str, rsi: float, volume_ratio: float,
                    buying_power: float, open_positions: int, total_notional: float,
-                   equity: float) -> tuple[bool, str]:
-    """Validate entry against bot's mandate"""
+                   equity: float, direction: str = "long") -> tuple[bool, str]:
+    """Validate entry against bot's mandate (supports dual-direction)
+
+    direction: "long" (RSI < threshold) or "short" (RSI > threshold)
+    """
     mandate = get_bot_mandate(bot_name)
     if not mandate:
         return False, f"Unknown bot: {bot_name}"
@@ -328,25 +358,49 @@ def validate_entry(bot_name: str, symbol: str, rsi: float, volume_ratio: float,
     if "universe" in mandate:
         approved = (mandate["universe"].get("futures", []) +
                    mandate["universe"].get("crypto", []) +
-                   mandate["universe"].get("approved", []))
+                   mandate["universe"].get("approved", []) +
+                   mandate["universe"].get("approved_pairs", []))
         if approved and symbol not in approved:
             return False, f"{symbol} not in {bot_name}'s approved universe"
 
     # Check entry conditions
     entry = mandate.get("entry", {})
 
-    if rsi > entry.get("rsi_threshold", 30):
-        return False, f"RSI {rsi:.1f} not oversold (threshold: {entry.get('rsi_threshold')})"
+    # Handle dual-direction (crypto bot)
+    if isinstance(entry, dict) and "long" in entry and "short" in entry:
+        if direction == "long":
+            entry_rules = entry.get("long", {})
+            rsi_threshold = entry_rules.get("rsi_threshold_oversold", 35)
+            if rsi > rsi_threshold:
+                return False, f"RSI {rsi:.1f} not oversold for LONG (threshold: <{rsi_threshold})"
+        elif direction == "short":
+            entry_rules = entry.get("short", {})
+            rsi_threshold = entry_rules.get("rsi_threshold_overbought", 70)
+            if rsi < rsi_threshold:
+                return False, f"RSI {rsi:.1f} not overbought for SHORT (threshold: >{rsi_threshold})"
 
-    if buying_power < entry.get("min_buying_power", 150):
-        return False, f"Buying power ${buying_power:.0f} < minimum ${entry.get('min_buying_power')}"
+        shared = entry.get("shared", {})
+        min_bp = shared.get("min_buying_power", 150)
+        max_pos = shared.get("max_open_positions", 4)
+        max_notional_pct = shared.get("max_total_notional_pct", 0.50)
+    else:
+        # Single-direction entry
+        rsi_threshold = entry.get("rsi_threshold", 30)
+        if rsi > rsi_threshold:
+            return False, f"RSI {rsi:.1f} not oversold (threshold: {rsi_threshold})"
+        min_bp = entry.get("min_buying_power", 150)
+        max_pos = entry.get("max_open_positions", 2)
+        max_notional_pct = entry.get("max_total_notional_pct", 0.50)
 
-    if open_positions >= entry.get("max_open_positions", 2):
-        return False, f"Already at max {entry.get('max_open_positions')} positions"
+    if buying_power < min_bp:
+        return False, f"Buying power ${buying_power:.0f} < minimum ${min_bp}"
 
-    max_notional = equity * entry.get("max_total_notional_pct", 0.50)
+    if open_positions >= max_pos:
+        return False, f"Already at max {max_pos} positions"
+
+    max_notional = equity * max_notional_pct
     if total_notional >= max_notional:
-        return False, f"Notional ${total_notional:.0f} would exceed {entry.get('max_total_notional_pct')*100:.0f}% of equity"
+        return False, f"Notional ${total_notional:.0f} would exceed {max_notional_pct*100:.0f}% of equity"
 
     return True, "OK"
 
@@ -355,6 +409,46 @@ def check_kill_condition(bot_name: str, condition: str) -> bool:
     mandate = get_bot_mandate(bot_name)
     kill_conditions = mandate.get("kill_conditions", [])
     return condition in kill_conditions
+
+def validate_exit_target(bot_name: str, entry_price: float, current_price: float,
+                         stop_price: float, direction: str = "long") -> tuple[bool, str]:
+    """Enforce minimum profit targets and risk/reward ratios
+
+    Returns: (should_exit, reason)
+    - For longs: profit = (current_price - entry_price) / entry_price
+    - For shorts: profit = (entry_price - current_price) / entry_price
+    """
+    mandate = get_bot_mandate(bot_name)
+    exit_rules = mandate.get("exit", {})
+
+    # Calculate P&L
+    if direction == "long":
+        current_pnl_pct = (current_price - entry_price) / entry_price
+        risk_pnl_pct = (stop_price - entry_price) / entry_price
+    else:  # short
+        current_pnl_pct = (entry_price - current_price) / entry_price
+        risk_pnl_pct = (entry_price - stop_price) / entry_price
+
+    # Check minimum profit target (2% minimum)
+    min_profit = exit_rules.get("min_profit_target_pct", 0.02)
+    if current_pnl_pct >= min_profit:
+        return True, f"Hit minimum profit target {min_profit*100:.1f}% (current: {current_pnl_pct*100:.2f}%)"
+
+    # Check stop loss
+    stop_loss_pct = abs(exit_rules.get("stop_loss_pct", 0.005))
+    if current_pnl_pct <= -stop_loss_pct:
+        return True, f"Hit stop loss at {stop_loss_pct*100:.1f}% loss"
+
+    # Check risk/reward ratio is acceptable (risk $1 to make $2)
+    risk_reward_ratio = exit_rules.get("risk_reward_ratio_min", 1.0)
+    if risk_pnl_pct != 0:
+        actual_ratio = abs(current_pnl_pct / risk_pnl_pct)
+        if actual_ratio < risk_reward_ratio:
+            # Risk/reward is unfavorable
+            if current_pnl_pct < 0:  # We're in a loss
+                return True, f"Unfavorable risk/reward: {actual_ratio:.2f}:1 (need >{risk_reward_ratio}:1)"
+
+    return False, f"Hold: P&L {current_pnl_pct*100:.2f}% (target {min_profit*100:.1f}%)"
 
 # ============================================================================
 # DASHBOARD TEMPLATE
