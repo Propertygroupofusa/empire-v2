@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🏁 Bot Race — Alpaca vs Coinbase</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+        }
+
+        header h1 {
+            font-size: 3em;
+            margin-bottom: 10px;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        }
+
+        header p {
+            font-size: 1.2em;
+            opacity: 0.95;
+        }
+
+        .race-container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin-bottom: 40px;
+        }
+
+        .bot-card {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            transition: transform 0.3s, box-shadow 0.3s;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .bot-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 30px 80px rgba(0,0,0,0.4);
+        }
+
+        .bot-card.leading {
+            border: 4px solid #ffd700;
+            box-shadow: 0 0 30px rgba(255, 215, 0, 0.5), 0 20px 60px rgba(0,0,0,0.3);
+        }
+
+        .bot-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #f0f0f0;
+            padding-bottom: 15px;
+        }
+
+        .bot-name {
+            font-size: 1.8em;
+            font-weight: 700;
+            color: #333;
+        }
+
+        .bot-name.alpaca {
+            color: #1f77e0;
+        }
+
+        .bot-name.crypto {
+            color: #f7931a;
+        }
+
+        .leader-badge {
+            background: linear-gradient(135deg, #ffd700 0%, #ffed4e 100%);
+            color: #333;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 0.9em;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        }
+
+        .metric {
+            margin: 20px 0;
+        }
+
+        .metric-label {
+            font-size: 0.9em;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+
+        .metric-value {
+            font-size: 2.2em;
+            font-weight: 700;
+            color: #333;
+        }
+
+        .metric-value.positive {
+            color: #2ecc71;
+        }
+
+        .metric-value.negative {
+            color: #e74c3c;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 12px;
+            background: #e0e0e0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            border-radius: 10px;
+            transition: width 0.3s ease;
+            min-width: 2%;
+        }
+
+        .progress-fill.alpaca {
+            background: linear-gradient(90deg, #1f77e0 0%, #1f77e0 100%);
+        }
+
+        .progress-fill.crypto {
+            background: linear-gradient(90deg, #f7931a 0%, #ffa500 100%);
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-top: 25px;
+            padding-top: 20px;
+            border-top: 2px solid #f0f0f0;
+        }
+
+        .stat-box {
+            background: #f9f9f9;
+            padding: 15px;
+            border-radius: 12px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 1.6em;
+            font-weight: 700;
+            color: #333;
+            margin-bottom: 5px;
+        }
+
+        .stat-label {
+            font-size: 0.8em;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .leaderboard {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            margin-bottom: 40px;
+        }
+
+        .leaderboard h2 {
+            font-size: 1.8em;
+            margin-bottom: 25px;
+            color: #333;
+        }
+
+        .leaderboard-row {
+            display: grid;
+            grid-template-columns: 80px 1fr 150px 150px 150px 150px;
+            gap: 15px;
+            align-items: center;
+            padding: 15px 0;
+            border-bottom: 1px solid #f0f0f0;
+            font-weight: 500;
+        }
+
+        .leaderboard-row:last-child {
+            border-bottom: none;
+        }
+
+        .leaderboard-row.header {
+            background: #f5f5f5;
+            padding: 15px;
+            border-radius: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .rank {
+            font-size: 1.4em;
+            font-weight: 700;
+            text-align: center;
+        }
+
+        .rank.first {
+            color: #ffd700;
+            font-size: 1.8em;
+        }
+
+        .rank.second {
+            color: #c0c0c0;
+        }
+
+        .name-col {
+            font-size: 1.1em;
+            font-weight: 600;
+        }
+
+        .num-col {
+            text-align: right;
+            font-family: 'Monaco', 'Menlo', monospace;
+        }
+
+        .live-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            background: #2ecc71;
+            border-radius: 50%;
+            margin-right: 8px;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .timestamp {
+            text-align: center;
+            color: #888;
+            font-size: 0.9em;
+            margin-top: 20px;
+        }
+
+        .summary {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+
+        .summary-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 20px;
+        }
+
+        .summary-box {
+            text-align: center;
+        }
+
+        .summary-label {
+            color: #666;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+        }
+
+        .summary-value {
+            font-size: 2em;
+            font-weight: 700;
+            color: #333;
+        }
+
+        @media (max-width: 1024px) {
+            .race-container {
+                grid-template-columns: 1fr;
+            }
+
+            .leaderboard-row {
+                grid-template-columns: 60px 1fr 100px 100px;
+            }
+
+            .summary-grid {
+                grid-template-columns: 1fr;
+            }
+
+            header h1 {
+                font-size: 2em;
+            }
+        }
+
+        .error {
+            background: #ffe5e5;
+            color: #c33;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🏁 BOT RACE 2026</h1>
+            <p>Real-time competition: Alpaca vs Coinbase → Target $2,000</p>
+            <p style="font-size: 1em; margin-top: 10px;"><span class="live-indicator"></span>LIVE DATA</p>
+        </header>
+
+        <div id="error-container"></div>
+
+        <div class="race-container" id="race-container">
+            <!-- Will be populated by JavaScript -->
+        </div>
+
+        <div class="leaderboard" id="leaderboard-container">
+            <!-- Will be populated by JavaScript -->
+        </div>
+
+        <div class="summary">
+            <div class="summary-grid">
+                <div class="summary-box">
+                    <div class="summary-label">Combined Balance</div>
+                    <div class="summary-value" id="combined-balance">$1,700.81</div>
+                </div>
+                <div class="summary-box">
+                    <div class="summary-label">Combined Progress</div>
+                    <div class="summary-value" id="combined-progress">42.5%</div>
+                </div>
+                <div class="summary-box">
+                    <div class="summary-label">Gap Between Bots</div>
+                    <div class="summary-value" id="gap">$300.79</div>
+                </div>
+            </div>
+            <div class="timestamp">
+                Last updated: <span id="update-time">--:--:-- UTC</span> | Refresh rate: 10s
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = '/api/bot-race/race-data';
+        const REFRESH_INTERVAL = 10000; // 10 seconds
+
+        async function fetchRaceData() {
+            try {
+                const response = await fetch(API_URL);
+                if (!response.ok) throw new Error('API error: ' + response.status);
+                const data = await response.json();
+                updateDashboard(data);
+                document.getElementById('error-container').innerHTML = '';
+            } catch (error) {
+                console.error('Error fetching race data:', error);
+                showError('Failed to fetch bot race data: ' + error.message);
+            }
+        }
+
+        function updateDashboard(data) {
+            const alpaca = data.alpaca;
+            const crypto = data.crypto;
+            const leader = data.leader;
+
+            // Update race cards
+            const raceContainer = document.getElementById('race-container');
+            raceContainer.innerHTML = `
+                <div class="bot-card ${leader === 'alpaca' ? 'leading' : ''}">
+                    <div class="bot-header">
+                        <div class="bot-name alpaca">📈 Alpaca</div>
+                        ${leader === 'alpaca' ? '<div class="leader-badge">🥇 LEADING</div>' : ''}
+                    </div>
+
+                    <div class="metric">
+                        <div class="metric-label">Current Balance</div>
+                        <div class="metric-value">$${alpaca.balance.toFixed(2)}</div>
+                    </div>
+
+                    <div class="metric">
+                        <div class="metric-label">Progress to $2,000</div>
+                        <div class="metric-value">${alpaca.progress_pct.toFixed(1)}%</div>
+                        <div class="progress-bar">
+                            <div class="progress-fill alpaca" style="width: ${Math.min(alpaca.progress_pct, 100)}%"></div>
+                        </div>
+                    </div>
+
+                    <div class="stats-grid">
+                        <div class="stat-box">
+                            <div class="stat-value">${alpaca.open_positions}</div>
+                            <div class="stat-label">Open Positions</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-value">${(alpaca.daily_roi_pct || 0).toFixed(2)}%</div>
+                            <div class="stat-label">Daily ROI</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-value">${(alpaca.win_rate * 100).toFixed(0)}%</div>
+                            <div class="stat-label">Win Rate</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-value">$${alpaca.gap_to_target.toFixed(2)}</div>
+                            <div class="stat-label">Gap to Target</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bot-card ${leader === 'crypto' ? 'leading' : ''}">
+                    <div class="bot-header">
+                        <div class="bot-name crypto">🪙 Coinbase</div>
+                        ${leader === 'crypto' ? '<div class="leader-badge">🥇 LEADING</div>' : ''}
+                    </div>
+
+                    <div class="metric">
+                        <div class="metric-label">Current Balance</div>
+                        <div class="metric-value">$${crypto.balance.toFixed(2)}</div>
+                    </div>
+
+                    <div class="metric">
+                        <div class="metric-label">Progress to $2,000</div>
+                        <div class="metric-value">${crypto.progress_pct.toFixed(1)}%</div>
+                        <div class="progress-bar">
+                            <div class="progress-fill crypto" style="width: ${Math.min(crypto.progress_pct, 100)}%"></div>
+                        </div>
+                    </div>
+
+                    <div class="stats-grid">
+                        <div class="stat-box">
+                            <div class="stat-value">${crypto.open_positions}</div>
+                            <div class="stat-label">Open Positions</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-value">${(crypto.daily_roi_pct || 0).toFixed(2)}%</div>
+                            <div class="stat-label">Daily ROI</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-value">${(crypto.win_rate * 100).toFixed(0)}%</div>
+                            <div class="stat-label">Win Rate</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-value">$${crypto.gap_to_target.toFixed(2)}</div>
+                            <div class="stat-label">Gap to Target</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // Update leaderboard
+            const lb = [
+                { rank: 1, name: 'Alpaca', balance: alpaca.balance, progress: alpaca.progress_pct, dailyROI: alpaca.daily_roi_pct, gap: alpaca.gap_to_target },
+                { rank: 2, name: 'Coinbase', balance: crypto.balance, progress: crypto.progress_pct, dailyROI: crypto.daily_roi_pct, gap: crypto.gap_to_target },
+            ].sort((a, b) => b.balance - a.balance);
+
+            let leaderboardHTML = `
+                <h2>📊 Leaderboard</h2>
+                <div class="leaderboard-row header">
+                    <div>Rank</div>
+                    <div>Bot</div>
+                    <div>Balance</div>
+                    <div>Progress</div>
+                    <div>Daily ROI</div>
+                    <div>Gap to $2K</div>
+                </div>
+            `;
+
+            lb.forEach((bot, idx) => {
+                const rankClass = idx === 0 ? 'first' : 'second';
+                const rankEmoji = idx === 0 ? '🥇' : '🥈';
+                leaderboardHTML += `
+                    <div class="leaderboard-row">
+                        <div class="rank ${rankClass}">${rankEmoji}</div>
+                        <div class="name-col">${bot.name}</div>
+                        <div class="num-col"><strong>$${bot.balance.toFixed(2)}</strong></div>
+                        <div class="num-col">${bot.progress.toFixed(1)}%</div>
+                        <div class="num-col">${(bot.dailyROI || 0).toFixed(2)}%</div>
+                        <div class="num-col">$${bot.gap.toFixed(2)}</div>
+                    </div>
+                `;
+            });
+
+            document.getElementById('leaderboard-container').innerHTML = leaderboardHTML;
+
+            // Update summary
+            document.getElementById('combined-balance').textContent = `$${data.combined_balance.toFixed(2)}`;
+            document.getElementById('combined-progress').textContent = `${((data.combined_balance / 4000) * 100).toFixed(1)}%`;
+            document.getElementById('gap').textContent = `$${data.spread.toFixed(2)}`;
+            document.getElementById('update-time').textContent = new Date().toLocaleTimeString() + ' UTC';
+        }
+
+        function showError(message) {
+            document.getElementById('error-container').innerHTML = `<div class="error">⚠️ ${message}</div>`;
+        }
+
+        // Initial fetch
+        fetchRaceData();
+
+        // Poll every 10 seconds
+        setInterval(fetchRaceData, REFRESH_INTERVAL);
+    </script>
+</body>
+</html>
