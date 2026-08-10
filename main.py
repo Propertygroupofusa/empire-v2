@@ -321,6 +321,23 @@ async def run_migrations():
     import models  # noqa: F401  (registers every model on Base.metadata)
     from database import Base
 
+    # CRITICAL: Ensure crypto_rsi_state table exists for bot RSI state machine
+    # (this table may have been missed if init_db() failed to run)
+    async with engine.begin() as conn:
+        try:
+            existing_tables = await conn.run_sync(lambda c: inspect(c).get_table_names())
+            if "crypto_rsi_state" not in existing_tables:
+                log.info("Migration: Creating missing crypto_rsi_state table...")
+                # Get column definitions from the model
+                from models import CryptoRSIState
+                for table in Base.metadata.sorted_tables:
+                    if table.name == "crypto_rsi_state":
+                        await conn.run_sync(lambda c, t=table: t.create(c, checkfirst=True))
+                        log.info("✅ crypto_rsi_state table created")
+                        break
+        except Exception as e:
+            log.warning(f"Could not ensure crypto_rsi_state exists: {e}")
+
     # Counters exist so the run reports what it DID, not just that it ran.
     # Both outages so far were invisible in the logs: nothing announced that
     # payments was never considered, because a table absent from the old
