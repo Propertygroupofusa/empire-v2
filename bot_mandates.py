@@ -40,7 +40,7 @@ APEX_MANDATE = {
         "trend_required": True,  # Must confirm with SMA5/SMA10
         "min_buying_power": 150,
         "min_position_size": 50,
-        "max_open_positions": 2,
+        "max_open_positions": 6,  # 3 longs + 3 shorts for dual-direction mean reversion
         "max_total_notional_pct": 0.50,  # 50% of equity
         "require_live_data": True,
         "data_staleness_max_sec": 120,
