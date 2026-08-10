@@ -5,11 +5,38 @@
 
 ---
 
+## ⚠️ IMPORTANT: Railway Infrastructure Issue (US West)
+
+**Status:** Railway has reported **connectivity issues in US West** region.
+
+- Railway has pushed a fix and is monitoring the incident
+- This is NOT just an egress whitelist problem—infrastructure is affected
+- Bot 403 errors may be due to Railway's network stack, not just configuration
+
+**Check incident status:** https://status.railway.app
+
+**Timeline:**
+1. Wait for Railway to resolve US West connectivity (check status page)
+2. Once resolved, add egress whitelist (see below)
+3. Redeploy and verify bot reconnects
+
+If you're in a different region (us-east, eu-west, etc.), you may only need the egress whitelist and not be affected by this incident.
+
+---
+
 ## Quick Setup (5 minutes)
 
 ### Option A: Request Egress Whitelist (Recommended)
 
-**This is the permanent fix.** Do this first.
+**This is the permanent fix.**
+
+#### Prerequisites:
+1. **Check Railway status** at https://status.railway.app
+   - If US West is RED (incident ongoing), wait for resolution
+   - If GREEN (resolved), proceed to step 2 below
+   - If different region, proceed regardless (not affected by US West incident)
+
+#### Steps:
 
 1. Go to https://railway.app/dashboard
 2. Select `empire-v2` project → `main-app` service
@@ -77,6 +104,39 @@ Expected output:
 ✓ Network config: retry_attempts=5, cache_ttl=600s
 INFO:crypto_coinbase_bot:[CRYPTO] Scanning BTC/USD...
 ```
+
+---
+
+## Understanding the Two-Layer Problem
+
+Railway network access has **two separate layers** that must both work:
+
+### Layer 1: Infrastructure (Railway's US West Region)
+- **What it is:** Railway's network stack and connectivity
+- **Current status:** Connectivity issues reported, fix pushed, monitoring
+- **How to check:** https://status.railway.app
+- **What you do:** Wait for Railway to resolve (you can't fix this)
+- **Impact:** If down, ALL outbound connections fail (403 + timeouts)
+
+### Layer 2: Configuration (Egress Allowlist)
+- **What it is:** Whitelist of allowed external hosts your app can reach
+- **Current status:** api.coinbase.com, api.alpaca.markets NOT whitelisted
+- **How to check:** Railway dashboard → Settings → Network
+- **What you do:** Add hosts to allowlist and redeploy
+- **Impact:** If not configured, broker APIs blocked even if Layer 1 works
+
+### To Get Bots Trading Again: BOTH Must Be Fixed
+
+| Layer | Status | Action | Timeline |
+|-------|--------|--------|----------|
+| **Infrastructure** | 🟢 Check https://status.railway.app | Wait for Railway | Currently in progress |
+| **Egress Allowlist** | 🔴 Not configured | Add whitelist + redeploy | After Layer 1 resolved |
+
+**Right now:**
+- ❌ Bots can't reach Coinbase/Alpaca (both layers failing)
+- ⏳ Wait for Railway US West to resolve (Layer 1)
+- 📋 Then add egress whitelist (Layer 2)
+- ✅ Bots will reconnect and trade
 
 ---
 
@@ -190,12 +250,29 @@ No code changes needed to switch back.
 
 ## Troubleshooting
 
-**Q: Bot still shows "Equity: unknown" or "Cash available: unknown"**
+**Q: Bot still shows "Equity: unknown" or "Cash available: unknown" + lots of 403 errors**
 
-A: API access is still blocked. Check:
-1. Are env vars set on Railway?
-2. Did you redeploy after setting env vars?
-3. Check logs: `tail -50 /tmp/empire-server.log | grep "403\|Network"`
+A: Could be Railway infrastructure issue OR missing egress whitelist. Check:
+1. **Check Railway status:** https://status.railway.app
+   - If US West is red, wait for Railway to resolve infrastructure issue
+   - If green, then it's just an egress whitelist problem (proceed below)
+2. **Check if env vars are set on Railway** for workaround
+3. **Check if egress whitelist is configured:**
+   - Settings → Network → Egress Allowlist
+   - Should include api.coinbase.com, api.alpaca.markets, etc.
+4. **Check logs:** `tail -50 /tmp/empire-server.log | grep "403\|Network"`
+
+If you see:
+```
+HTTP 403: Host not in allowlist: api.coinbase.com
+```
+→ Add to egress whitelist (dashboard Settings → Network)
+
+If you see:
+```
+Connection refused / timeout / network unreachable
+```
+→ Railway infrastructure issue (wait for resolution at status.railway.app)
 
 **Q: Bot entries are skipped even though I set SKIP_ENTRIES_ON_API_FAILURE=false**
 
