@@ -199,6 +199,84 @@ async def _fetch_todays_filled_orders(session: aiohttp.ClientSession) -> list:
             return []
 
 
+@router.get("/trades/closed")
+async def get_closed_trades():
+    """Get all closed trades with real entry/exit prices and P&L.
+    Shows each trade individually, not bucketed by bot."""
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        raise HTTPException(status_code=500, detail="Alpaca credentials not configured")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Fetch closed orders from last 30 days
+            params = {"status": "closed", "direction": "desc", "limit": "500"}
+            async with session.get(f"{ALPACA_BASE_URL}/v2/orders", headers=ALPACA_HEADERS, params=params) as r:
+                if r.status != 200:
+                    raise HTTPException(status_code=502, detail="Failed to fetch orders from Alpaca")
+                orders = await r.json()
+
+            # Group buy/sell pairs to calculate P&L per round-trip trade
+            trades = []
+            buy_orders = {}
+
+            for order in orders:
+                if not isinstance(order, dict) or not order.get("filled_at"):
+                    continue
+
+                symbol = order.get("symbol", "?")
+                side = order.get("side", "").lower()
+                qty = float(order.get("filled_qty", 0))
+                price = float(order.get("filled_avg_price", 0))
+                filled_at = order.get("filled_at", "")
+
+                if side == "buy":
+                    buy_orders[symbol] = {
+                        "qty": qty,
+                        "price": price,
+                        "filled_at": filled_at,
+                    }
+                elif side == "sell" and symbol in buy_orders:
+                    buy = buy_orders.pop(symbol)
+                    entry_price = buy["price"]
+                    exit_price = price
+                    entry_qty = buy["qty"]
+
+                    # Calculate P&L
+                    gross_pnl = (exit_price - entry_price) * min(entry_qty, qty)
+                    pnl_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+
+                    trades.append({
+                        "symbol": symbol,
+                        "entry_price": round(entry_price, 2),
+                        "exit_price": round(exit_price, 2),
+                        "qty": round(min(entry_qty, qty), 2),
+                        "entry_at": buy["filled_at"],
+                        "exit_at": filled_at,
+                        "pnl": round(gross_pnl, 2),
+                        "pnl_pct": round(pnl_pct, 2),
+                        "status": "closed",
+                    })
+
+            # Sort by exit date, newest first
+            trades.sort(key=lambda t: t.get("exit_at", ""), reverse=True)
+
+            total_pnl = sum(t["pnl"] for t in trades)
+            winning_trades = len([t for t in trades if t["pnl"] > 0])
+            losing_trades = len([t for t in trades if t["pnl"] < 0])
+
+            return {
+                "trades": trades[:50],  # Last 50 closed trades
+                "total_trades": len(trades),
+                "total_pnl": round(total_pnl, 2),
+                "winning_trades": winning_trades,
+                "losing_trades": losing_trades,
+                "win_rate": round(winning_trades / len(trades) * 100, 1) if trades else 0,
+            }
+    except Exception as e:
+        log.error(f"Failed to get closed trades: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 @router.get("/status", dependencies=[Depends(require_admin_key)])
 async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
     """Real account snapshot: equity, cash, positions, today's trades, and
