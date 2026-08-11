@@ -604,12 +604,11 @@ async def get_price_rsi(session, symbol):
         above_ma50 = price > ma_50
 
         # RSI recovery: detect if RSI is bouncing UP from oversold zone
-        # True if: current RSI < 30 AND prior RSI < current RSI (upward momentum)
+        # True if: current RSI < 30 AND price is trending up (latest close > prior close)
+        # Direct price comparison is more reliable than re-computing RSI on different candle windows
         rsi_recovery = False
         if len(closes) >= 2:
-            prior_closes = closes[:-1]
-            prior_rsi = _compute_rsi(prior_closes) if len(prior_closes) >= 14 else 0
-            rsi_recovery = (rsi < 30 and rsi > prior_rsi)  # In oversold and bouncing up
+            rsi_recovery = (rsi < 30 and closes[-1] > closes[-2])  # In oversold and price bouncing up
 
         return {
             "price": price, "rsi": rsi, "atr": atr,
@@ -650,9 +649,8 @@ def size_position(cash_pool_remaining, slots_remaining, price):
     if cash_pool_remaining < FIXED_POSITION_SIZE * 1.05:  # Need 5% buffer for fees
         return None
 
-    # Calculate qty based on fixed dollar amount
-    quote_size = FIXED_POSITION_SIZE * (1 - TAKER_FEE_RATE)  # Account for taker fee
-    qty = round(quote_size / price, 8)
+    # Calculate qty based on fixed dollar amount (Coinbase taker fee is deducted from the fill, not pre-calculated)
+    qty = round(FIXED_POSITION_SIZE / price, 8)
     return qty if qty > 0 else None
 
 
@@ -1323,7 +1321,14 @@ async def run_crypto_cycle():
                     arm_rsi=armed_rsi or rsi, volume_ratio=volume_spike_ratio,
                     candle_close_position=close_position
                 )
-                cash_pool -= qty * price
+                # Update cash_pool from actual Coinbase balance to prevent tracking drift
+                # (fill price may differ from quoted price due to market conditions)
+                updated_cash, _ = await get_usd_balance(session)
+                if updated_cash is not None:
+                    cash_pool = min(updated_cash, unlocked, MAX_ALLOCATION) if MAX_ALLOCATION is not None else min(updated_cash, unlocked)
+                else:
+                    # Fallback to local tracking if balance fetch fails
+                    cash_pool -= qty * price
                 send_trade_alert(
                     f"🤖 Crypto bot — BUY {symbol} opened",
                     f"Long opened on your Coinbase account:\n\n"

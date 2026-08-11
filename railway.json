@@ -4,9 +4,9 @@
     "builder": "DOCKERFILE"
   },
   "deploy": {
-    "startCommand": "python main.py",
+    "startCommand": "./run_server.sh",
     "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 10
+    "restartPolicyMaxRetries": 3
   },
   "network": {
     "egress": {
@@ -31,8 +31,8 @@
       "build": {
         "dockerfile": "Dockerfile"
       },
-      "startCommand": "python main.py",
-      "port": 10000
+      "startCommand": "./run_server.sh",
+      "port": 8000
     },
     "video-generator": {
       "build": {
