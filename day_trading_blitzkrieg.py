@@ -23,6 +23,10 @@ from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, field
 from enum import Enum
 
+# Analytics integration (tracks paper vs live performance side-by-side)
+# Uncomment once blitzkrieg_analytics.py is deployed:
+# from blitzkrieg_analytics import blitzkrieg_analytics, TradingMode
+
 ET = ZoneInfo("America/New_York")
 log = logging.getLogger("blitzkrieg")
 
