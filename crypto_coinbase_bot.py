@@ -1476,3 +1476,64 @@ def run():
 
 if __name__ == "__main__":
     run()
+
+
+# DYNAMIC CAPITAL ROTATION — Track performance per pair and rotate to winners
+PAIR_PERFORMANCE = {}  # {symbol: {"wins": int, "losses": int, "total_pnl": float, "last_trade_at": datetime}}
+
+def update_pair_performance(symbol, exit_price, entry_price, quantity):
+    """Track win/loss and P&L for each pair to enable capital rotation."""
+    if symbol not in PAIR_PERFORMANCE:
+        PAIR_PERFORMANCE[symbol] = {
+            "wins": 0,
+            "losses": 0,
+            "total_pnl": 0.0,
+            "last_trade_at": datetime.utcnow(),
+            "win_rate": 0.0
+        }
+    
+    pnl = (exit_price - entry_price) * quantity
+    PAIR_PERFORMANCE[symbol]["total_pnl"] += pnl
+    
+    if pnl > 0:
+        PAIR_PERFORMANCE[symbol]["wins"] += 1
+    elif pnl < 0:
+        PAIR_PERFORMANCE[symbol]["losses"] += 1
+    
+    total_trades = PAIR_PERFORMANCE[symbol]["wins"] + PAIR_PERFORMANCE[symbol]["losses"]
+    if total_trades > 0:
+        PAIR_PERFORMANCE[symbol]["win_rate"] = PAIR_PERFORMANCE[symbol]["wins"] / total_trades * 100
+    
+    PAIR_PERFORMANCE[symbol]["last_trade_at"] = datetime.utcnow()
+
+
+def get_high_conviction_pairs():
+    """Return pairs with win rate > 40% in priority order."""
+    candidates = []
+    for symbol, perf in PAIR_PERFORMANCE.items():
+        if perf.get("win_rate", 0) >= 40:
+            candidates.append((symbol, perf["win_rate"], perf["total_pnl"]))
+    
+    # Sort by win rate (desc), then by total P&L (desc)
+    candidates.sort(key=lambda x: (x[1], x[2]), reverse=True)
+    return [c[0] for c in candidates]
+
+
+def get_position_size_multiplier(symbol):
+    """Scale position size based on recent wins (up to 2x on hot streaks)."""
+    if symbol not in PAIR_PERFORMANCE:
+        return 1.0
+    
+    # If pair has 3+ consecutive wins, use 1.5x
+    # If pair has 5+ consecutive wins, use 2.0x
+    wins = PAIR_PERFORMANCE[symbol].get("wins", 0)
+    
+    if wins >= 5:
+        return min(2.0, 1.0 + (wins - 3) * 0.25)  # 2.0x max
+    elif wins >= 3:
+        return 1.5
+    else:
+        return 1.0
+
+
+# END DYNAMIC CAPITAL ROTATION
