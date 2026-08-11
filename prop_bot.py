@@ -195,7 +195,7 @@ def get_dynamic_max_positions(scale: float) -> int:
 PROFIT_TARGET_DOLLARS_MILESTONES = [
     (0,     5.00),      # Micro: $5.00 (0.50% on $1000)
     (500,   7.50),      # Small: $7.50
-    (1000,  10.00),     # Medium: $10.00 (1% on $1000)
+    (1000,  2000.00),   # Medium: $2000.00 (200% on $1000 - aggressive growth mode)
     (5000,  15.00),     # Large: $15.00 (0.30% on $5000)
     (10000, 20.00),     # Huge: $20.00 (0.20% on $10000)
 ]
