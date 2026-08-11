@@ -61,6 +61,7 @@ routers_to_load = {
     'sweep': None,
     'bot_race': None,
     'alpaca_dashboard': None,
+    'trading_hub': None,
 }
 
 for router_name in routers_to_load:
@@ -95,6 +96,7 @@ alpaca_funding = routers_to_load['alpaca_funding']
 sweep = routers_to_load['sweep']
 bot_race = routers_to_load['bot_race']
 alpaca_dashboard = routers_to_load['alpaca_dashboard']
+trading_hub = routers_to_load['trading_hub']
 
 # Load remaining modules gracefully
 payee_router = None
@@ -1190,6 +1192,7 @@ routers_list = [
     (sweep, "/sweep", "Profit Sweep Engine"),
     (bot_race, "/api", "Bot Race Dashboard"),
     (alpaca_dashboard, "/alpaca", "Alpaca Trading Dashboard"),
+    (trading_hub, "/trading-hub", "Trading Hub - Live Bot Dashboard"),
 ]
 
 for router_module, prefix, tag in routers_list:
@@ -1649,6 +1652,39 @@ async def serve_quote_form():
     except Exception as e:
         log.error(f"Error serving quote form: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/trading-hub/dashboard")
+async def serve_trading_hub_dashboard():
+    """Serve the real-time trading hub dashboard"""
+    try:
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        possible_paths = [
+            os.path.join(app_dir, "trading_hub.html"),
+            "/app/trading_hub.html",
+            "trading_hub.html",
+            os.path.join(os.getcwd(), "trading_hub.html"),
+        ]
+
+        hub_path = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                hub_path = path
+                log.info(f"✓ Trading hub found at: {path}")
+                break
+
+        if not hub_path:
+            log.error(f"Trading hub not found. Tried: {possible_paths}. CWD: {os.getcwd()}, APP_DIR: {app_dir}")
+            raise HTTPException(status_code=404, detail="Trading hub file not found")
+
+        with open(hub_path, 'r') as f:
+            html_content = f.read()
+        return HTMLResponse(content=html_content, status_code=200)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Error serving trading hub: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
