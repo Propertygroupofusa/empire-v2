@@ -60,6 +60,14 @@ from database import AsyncSessionLocal
 from models import BotPosition, TradingBotState, CryptoRSIState, CryptoTradeLog
 from bot_mandates import CRYPTO_MANDATE
 
+# Measurement system: Trade logging with full signal context
+try:
+    from measurement_system import SignalContext, TradeLog, trade_logger, StatisticalAnalyzer
+    MEASUREMENT_AVAILABLE = True
+except ImportError:
+    MEASUREMENT_AVAILABLE = False
+    log.warning("measurement_system not available - trade logging disabled")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("crypto_coinbase_bot")
 
@@ -743,8 +751,10 @@ async def update_rsi_state(symbol: str, rsi: float, entered_oversold: bool, arme
 
 async def log_trade_entry(symbol: str, entry_rsi: float, entry_price: float, qty: float,
                           arm_rsi: float, volume_ratio: float, candle_close_position: float):
-    """Log when a trade enters (ENTER → ENTER)."""
+    """Log when a trade enters (ENTER → ENTER) and record to measurement system."""
     try:
+        trade_id = str(uuid.uuid4())[:8]  # Unique trade ID
+
         async with AsyncSessionLocal() as session:
             trade = CryptoTradeLog(
                 symbol=symbol,
@@ -761,6 +771,27 @@ async def log_trade_entry(symbol: str, entry_rsi: float, entry_price: float, qty
             session.add(trade)
             await session.commit()
             log.info(f"[CRYPTO-LOG] {symbol} ENTRY logged: RSI {entry_rsi:.1f} @ ${entry_price:.2f} vol_ratio {volume_ratio:.2f}x (strategy: RSI_RECOVERY_ATR_V1)")
+
+        # Log to measurement system
+        if MEASUREMENT_AVAILABLE:
+            signal_context = SignalContext(
+                symbol=symbol,
+                rsi=entry_rsi,
+                price=entry_price,
+                trend="uptrend",  # RSI recovery = uptrend
+                regime="bull",
+                custom_data={"arm_rsi": arm_rsi, "volume_ratio": volume_ratio, "candle_close_position": candle_close_position}
+            )
+            trade_logger.record_entry(
+                trade_id=trade_id,
+                strategy="crypto_coinbase_rsi_recovery",
+                symbol=symbol,
+                entry_price=entry_price,
+                entry_quantity=qty,
+                signal_context=signal_context,
+                expected_value=None,  # Will calculate based on exit targets
+                mode="live",
+            )
     except Exception as e:
         log.warning(f"Trade entry logging error for {symbol}: {e}")
 
@@ -828,7 +859,7 @@ async def log_trade_exit(symbol: str, exit_price: float, exit_reason: str, reali
                         realized_pnl_pct: float, time_held_minutes: int,
                         max_adverse_excursion: float = None, max_favorable_excursion: float = None,
                         partial_exit_count: int = 0, trailing_stop_triggered: bool = False):
-    """Log when a trade exits (EXIT)."""
+    """Log when a trade exits (EXIT) and record to measurement system."""
     try:
         async with AsyncSessionLocal() as session:
             # Find the most recent unclosed trade for this symbol
@@ -852,6 +883,16 @@ async def log_trade_exit(symbol: str, exit_price: float, exit_reason: str, reali
                 trade.trailing_stop_triggered = trailing_stop_triggered
                 await session.commit()
                 log.info(f"[CRYPTO-LOG] {symbol} EXIT logged: {exit_reason} @ ${exit_price:.2f} P&L ${realized_pnl:.2f} ({realized_pnl_pct*100:.2f}%)")
+
+                # Log to measurement system using database trade ID as trade_id
+                if MEASUREMENT_AVAILABLE:
+                    trade_logger.record_exit(
+                        trade_id=str(trade.id) if trade.id else symbol,  # Use database ID or symbol as fallback
+                        exit_price=exit_price,
+                        exit_reason=exit_reason,
+                        entry_slippage=None,
+                        exit_slippage=None,
+                    )
     except Exception as e:
         log.warning(f"Trade exit logging error for {symbol}: {e}")
 
