@@ -1,6 +1,7 @@
 #!/bin/bash
 # Empire v2 Server Watchdog - Keeps the FastAPI server running 24/7
 # Auto-restarts on crash, logs all activity, prevents duplicate processes
+# chmod +x run_server.sh (execute permission restored)
 
 set -u
 
