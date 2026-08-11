@@ -63,10 +63,16 @@ from bot_mandates import CRYPTO_MANDATE
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("crypto_coinbase_bot")
 
+# Network resilience cache — stores price data for 30min when API unavailable
+PRICE_CACHE = {}  # {symbol: {"price": float, "rsi": float, "atr": float, "timestamp": datetime}}
+CACHE_TTL_SECONDS = 1800  # 30 minutes
+
 COINBASE_API_KEY_NAME = os.getenv("COINBASE_API_KEY_NAME", "")
 COINBASE_API_PRIVATE_KEY = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\n", "\n")
 COINBASE_HOST = "api.coinbase.com"
 COINBASE_BASE_URL = f"https://{COINBASE_HOST}"
+NETWORK_RETRY_ATTEMPTS = int(os.getenv("NETWORK_RETRY_ATTEMPTS", "3"))
+NETWORK_RETRY_DELAY = float(os.getenv("NETWORK_RETRY_DELAY", "1.0"))  # seconds
 
 CRYPTO_PAIRS = [
     "BTC/USD", "ETH/USD",  # Tier 1: Core stable cryptos
@@ -345,6 +351,49 @@ async def load_all_rsi_states():
         log.warning(f"[CRYPTO] Initialized {len(RSI_STATE_CACHE)} symbols with default state")
 
 
+def cache_price_data(symbol: str, price_data: dict):
+    """Store price/RSI data locally for offline mode (Railway network unavailable).
+    Cache expires after 30 minutes."""
+    global PRICE_CACHE
+    PRICE_CACHE[symbol] = {
+        **price_data,
+        "timestamp": datetime.utcnow(),
+        "source": "coinbase"
+    }
+
+
+def get_cached_price(symbol: str, max_age_seconds: int = CACHE_TTL_SECONDS) -> dict:
+    """Retrieve cached price data if fresh (<30min old). Returns None if expired/missing."""
+    if symbol not in PRICE_CACHE:
+        return None
+
+    cached = PRICE_CACHE[symbol]
+    age = (datetime.utcnow() - cached["timestamp"]).total_seconds()
+
+    if age > max_age_seconds:
+        del PRICE_CACHE[symbol]  # Expire old cache
+        return None
+
+    return cached
+
+
+async def _retry_with_backoff(async_func, max_attempts: int = None):
+    """Retry network calls with exponential backoff. Falls back to cache on persistent failure."""
+    attempts = max_attempts or NETWORK_RETRY_ATTEMPTS
+    delay = NETWORK_RETRY_DELAY
+
+    for attempt in range(attempts):
+        try:
+            return await async_func()
+        except Exception as e:
+            if attempt == attempts - 1:
+                log.debug(f"Retry exhausted after {attempts} attempts")
+                return None
+
+            await asyncio.sleep(delay)
+            delay *= 1.5  # Exponential backoff: 1s → 1.5s → 2.25s, etc.
+
+
 async def _db_save_open(symbol: str, side: str, entry: float, qty: float):
     try:
         async with AsyncSessionLocal() as db:
@@ -580,17 +629,20 @@ async def _fetch_latest_candle(session, symbol):
 
 async def get_price_rsi(session, symbol):
     """Price+RSI+ATR+directional bias from Coinbase's public candles endpoint.
-    Returns price, RSI, ATR (volatility), 50-bar MA (trend filter), latest candle OHLC, RSI recovery status.
+    Network resilient: retries with backoff, falls back to cache if unavailable.
     Uses MA50 to determine directional bias: only long above MA50, only short below MA50.
-
     RSI recovery: True if RSI is bouncing UP from oversold (useful for entry timing)."""
-    try:
-        candles = await _fetch_coinbase_candles(session, symbol, limit=50)
-        candle = await _fetch_latest_candle(session, symbol)
-    except Exception as e:
-        log.debug(f"coinbase price fetch failed for {symbol}: {e}")
-        candles = None
-        candle = None
+
+    candles = await _retry_with_backoff(
+        lambda: _fetch_coinbase_candles(session, symbol, limit=50),
+        max_attempts=NETWORK_RETRY_ATTEMPTS
+    )
+    candle = None
+    if candles:
+        candle = await _retry_with_backoff(
+            lambda: _fetch_latest_candle(session, symbol),
+            max_attempts=NETWORK_RETRY_ATTEMPTS
+        )
 
     if candles and len(candles) >= 50:
         closes = [float(row[4]) for row in candles]
@@ -603,21 +655,27 @@ async def get_price_rsi(session, symbol):
         ma_50 = sum(closes[-50:]) / 50
         above_ma50 = price > ma_50
 
-        # RSI recovery: detect if RSI is bouncing UP from oversold zone
-        # True if: current RSI < 30 AND price is trending up (latest close > prior close)
-        # Direct price comparison is more reliable than re-computing RSI on different candle windows
         rsi_recovery = False
         if len(closes) >= 2:
-            rsi_recovery = (rsi < 30 and closes[-1] > closes[-2])  # In oversold and price bouncing up
+            rsi_recovery = (rsi < 30 and closes[-1] > closes[-2])
 
-        return {
+        result = {
             "price": price, "rsi": rsi, "atr": atr,
             "ma_50": ma_50, "in_uptrend": above_ma50,
             "candle": candle,
-            "rsi_recovery": rsi_recovery,  # True if RSI bouncing from oversold
+            "rsi_recovery": rsi_recovery,
         }
+        cache_price_data(symbol, result)  # Cache successful result
+        return result
 
-    log.error(f"❌ {symbol}: coinbase price fetch failed (need 50+ candles)")
+    # Network failed or insufficient data — try cache
+    cached = get_cached_price(symbol)
+    if cached:
+        log.warning(f"⚠️ {symbol}: Using cached price data ({(datetime.utcnow() - cached['timestamp']).total_seconds() / 60:.1f} min old)")
+        # Remove timestamp before returning
+        return {k: v for k, v in cached.items() if k != 'timestamp'}
+
+    log.error(f"❌ {symbol}: coinbase price fetch failed and no cache available")
     return None
 
 
