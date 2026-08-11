@@ -56,7 +56,7 @@ check_process_health() {
 
 start_server() {
     log "Starting FastAPI server..."
-    cd /home/user/empire-v2
+    cd /app
 
     # Start server in background, write PID
     python3 main.py >> "$SERVER_LOG" 2>&1 &
