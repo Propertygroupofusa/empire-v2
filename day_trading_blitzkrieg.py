@@ -22,6 +22,12 @@ import aiohttp
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, field
 from enum import Enum
+import uuid
+
+# Measurement system: Trade logging with full signal context
+from measurement_system import (
+    SignalContext, TradeLog, trade_logger, StatisticalAnalyzer
+)
 
 # Analytics integration (tracks paper vs live performance side-by-side)
 # Uncomment once blitzkrieg_analytics.py is deployed:
@@ -105,6 +111,8 @@ class BlitzkriegPosition:
     exit_time: Optional[datetime] = None
     exit_reason: str = ""
 
+    trade_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])  # Unique trade identifier
+
     def __post_init__(self):
         """Calculate derived fields on creation"""
         self.stop_loss_price = self.entry_price * (1 - HARD_STOP_PCT)
@@ -178,17 +186,58 @@ class BlitzkriegTracker:
         self.profitable_trades: int = 0
         self.losing_trades: int = 0
 
-    def add_position(self, position: BlitzkriegPosition) -> None:
-        """Open a new position"""
+    def add_position(
+        self,
+        position: BlitzkriegPosition,
+        rsi: Optional[float] = None,
+        iv_percentile: Optional[float] = None,
+        trend: Optional[str] = None,
+        regime: Optional[str] = None,
+        side: str = "long",
+    ) -> None:
+        """Open a new position and log to measurement system"""
         self.open_positions[position.symbol] = position
         self.trades_today += 1
+
+        # Calculate expected value: average of profit targets (33% exits at each level)
+        # Expected value = (1% gain × $qty/3) + (2% gain × $qty/3) + (3% gain × $qty/3) + (stop loss -1% × 1/3 chance)
+        # Simplified: assume 50% hit profit target, 50% stop loss
+        position_value = position.quantity * position.entry_price
+        avg_profit_target = sum(PROFIT_TARGETS) / len(PROFIT_TARGETS) * position_value
+        stop_loss_value = -HARD_STOP_PCT * position_value
+        expected_value = (avg_profit_target + stop_loss_value) / 2
+
+        # Create signal context from market data
+        signal_context = SignalContext(
+            symbol=position.symbol,
+            rsi=rsi,
+            iv_percentile=iv_percentile,
+            price=position.entry_price,
+            trend=trend,
+            regime=regime,
+            custom_data={"side": side, "multiplier": BLITZKRIEG_MULTIPLIER}
+        )
+
+        # Log entry to measurement system
+        trade_logger.record_entry(
+            trade_id=position.trade_id,
+            strategy="blitzkrieg",
+            symbol=position.symbol,
+            entry_price=position.entry_price,
+            entry_quantity=position.quantity,
+            signal_context=signal_context,
+            expected_value=expected_value,
+            mode="live",
+        )
+
         log.info(
             f"🔥 BLITZKRIEG ENTRY: {position.symbol} @ ${position.entry_price:.2f} "
-            f"× {position.quantity:.4f} (${position.quantity * position.entry_price:.2f})"
+            f"× {position.quantity:.4f} (${position_value:.2f}) | "
+            f"Expected Value: ${expected_value:.2f}"
         )
 
     def close_position(self, symbol: str, exit_price: float, reason: str) -> float:
-        """Close a position and track P&L"""
+        """Close a position, track P&L, and log to measurement system"""
         if symbol not in self.open_positions:
             return 0.0
 
@@ -207,6 +256,15 @@ class BlitzkriegTracker:
 
         position.phase = BlitzkriegPhase.EXITED
         self.daily_pnl += total_pnl
+
+        # Log exit to measurement system
+        trade_logger.record_exit(
+            trade_id=position.trade_id,
+            exit_price=exit_price,
+            exit_reason=reason,
+            entry_slippage=None,
+            exit_slippage=None,
+        )
 
         if total_pnl > 0:
             self.profitable_trades += 1
@@ -331,18 +389,21 @@ async def run_blitzkrieg_cycle(
                 continue
 
             price = price_data[symbol]
-            rsi = price_data.get(f"{symbol}_rsi", 50)  # Mock RSI
+            rsi = price_data.get(f"{symbol}_rsi", 50)  # RSI from market data
 
             # Entry signal: oversold (RSI < 30) or overbought (RSI > 70)
             should_enter = False
             side = "long"
+            trend = "neutral"
 
             if rsi < 30:
                 should_enter = True
                 side = "long"
+                trend = "uptrend"  # Recovery play
             elif rsi > 70:
                 should_enter = True
                 side = "short"
+                trend = "downtrend"  # Reversal play
 
             if should_enter:
                 # Calculate position size: 10x base
@@ -358,12 +419,22 @@ async def run_blitzkrieg_cycle(
                     entry_time=now,
                 )
 
-                tracker.add_position(position)
+                # Add position with full signal context
+                tracker.add_position(
+                    position=position,
+                    rsi=rsi,
+                    iv_percentile=None,  # Not computed in this strategy
+                    trend=trend,
+                    regime="bull" if side == "long" else "bear",
+                    side=side,
+                )
+
                 entries.append({
                     "symbol": symbol,
                     "price": price,
                     "quantity": qty,
                     "side": side,
+                    "rsi": rsi,
                 })
 
     # Increment cycle counter
@@ -443,14 +514,23 @@ def reset_daily_tracker() -> None:
 # ============================================================================
 
 def get_blitzkrieg_report() -> Dict[str, Any]:
-    """Current blitzkrieg status report"""
+    """Current blitzkrieg status report with statistical analysis"""
     summary = tracker.get_summary()
+
+    # Get trades from measurement system
+    blitzkrieg_trades = trade_logger.get_strategy_trades("blitzkrieg")
+
+    # Calculate statistical evidence
+    evidence = {}
+    if len(blitzkrieg_trades) >= 10:
+        evidence = StatisticalAnalyzer.calculate_summary(blitzkrieg_trades)
 
     return {
         "status": "ACTIVE" if BLITZKRIEG_ENABLED else "DISABLED",
         "position_size": f"${AGGRESSIVE_POSITION_SIZE:.0f}" + (f" (margin: {MARGIN_MULTIPLIER}x)" if USE_MARGIN else ""),
         "cycles_completed": tracker.cycles_completed,
         "summary": summary,
+        "evidence": evidence,  # Statistical validation (p-value, Sharpe ratio, etc)
         "open_positions": [
             {
                 "symbol": pos.symbol,
@@ -460,10 +540,12 @@ def get_blitzkrieg_report() -> Dict[str, Any]:
                 "profit_pct": pos.current_profit_pct,
                 "phase": pos.phase.value,
                 "partial_exits": len(pos.partial_exits),
+                "trade_id": pos.trade_id,
             }
             for pos in tracker.open_positions.values()
         ],
         "daily_pnl": tracker.daily_pnl,
+        "logged_trades": len(blitzkrieg_trades),
     }
 
 if __name__ == "__main__":
