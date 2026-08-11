@@ -18,12 +18,7 @@ from models import (
     CryptoTradeLog, BotPosition, TradingBotState
 )
 
-# Measurement system: Statistical edge validation
-try:
-    from measurement_system import trade_logger, StatisticalAnalyzer
-    MEASUREMENT_AVAILABLE = True
-except ImportError:
-    MEASUREMENT_AVAILABLE = False
+# Measurement system: Statistical edge validation (lazy-loaded on first use to avoid startup delay)
 
 ET = ZoneInfo("America/New_York")
 router = APIRouter(tags=["trading"])
@@ -205,7 +200,9 @@ async def get_trading_summary(db: AsyncSession = Depends(get_db)):
 @router.get("/api/measurements/strategies")
 async def get_strategies_evidence():
     """Get statistical evidence for all strategies"""
-    if not MEASUREMENT_AVAILABLE:
+    try:
+        from measurement_system import trade_logger, StatisticalAnalyzer
+    except ImportError:
         return []
 
     strategies = [
@@ -231,7 +228,9 @@ async def get_strategies_evidence():
 @router.get("/api/measurements/trades/recent")
 async def get_recent_measurements_trades(limit: int = 20):
     """Get recent trades from measurement system with full context"""
-    if not MEASUREMENT_AVAILABLE:
+    try:
+        from measurement_system import trade_logger
+    except ImportError:
         return {"trades": []}
 
     # Get all logged trades (from all strategies combined)
@@ -272,7 +271,9 @@ async def get_recent_measurements_trades(limit: int = 20):
 @router.get("/api/measurements/summary")
 async def get_measurements_summary():
     """Get overall measurements summary across all strategies"""
-    if not MEASUREMENT_AVAILABLE:
+    try:
+        from measurement_system import trade_logger, StatisticalAnalyzer
+    except ImportError:
         return {
             "total_trades": 0,
             "strategies": [],
