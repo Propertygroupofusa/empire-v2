@@ -16,6 +16,8 @@ once you've done that - this is bookkeeping, not a real money-movement API.
 
 import os
 import logging
+import asyncio
+import uuid
 from datetime import datetime, timezone
 
 import aiohttp
@@ -609,3 +611,164 @@ async def get_account_balance():
         "day_trading_buying_power": round(float(account.get("daytrading_buying_power", 0)), 2),
         "cash_withdrawable": round(float(account.get("cash", 0)), 2),
     }
+
+
+@router.get("/coinbase/balances")
+async def get_coinbase_balances():
+    """Get real Coinbase account balances with unrealized P&L per position.
+    Shows holdings, entry prices, current prices, and profit per coin."""
+    try:
+        import crypto_coinbase_bot
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Crypto bot not available")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Fetch current prices for all holdings
+            holdings = {}
+            for symbol in crypto_coinbase_bot.CRYPTO_PAIRS:
+                pair = symbol.replace("/", "-")
+                url = f"https://api.exchange.coinbase.com/products/{pair}/ticker"
+                try:
+                    async with session.get(url, headers={"Accept": "application/json"}) as r:
+                        if r.status == 200:
+                            data = await r.json()
+                            current_price = float(data.get("price", 0))
+                            holdings[symbol] = {"current_price": current_price}
+                except Exception:
+                    holdings[symbol] = {"current_price": 0}
+                await asyncio.sleep(0.05)  # Rate limit
+
+            # Get open positions from bot's in-memory dict
+            positions = crypto_coinbase_bot.open_crypto_positions
+
+            result = []
+            total_value = 0
+            total_unrealized_pnl = 0
+
+            for symbol, pos in positions.items():
+                entry_price = pos.get("entry_price", 0)
+                qty = pos.get("qty", 0)
+                current_price = holdings.get(symbol, {}).get("current_price", entry_price)
+
+                entry_value = entry_price * qty
+                current_value = current_price * qty
+                unrealized_pnl = current_value - entry_value
+                unrealized_pct = (unrealized_pnl / entry_value * 100) if entry_value > 0 else 0
+
+                total_value += current_value
+                total_unrealized_pnl += unrealized_pnl
+
+                result.append({
+                    "symbol": symbol,
+                    "qty": round(qty, 8),
+                    "entry_price": round(entry_price, 4),
+                    "current_price": round(current_price, 4),
+                    "entry_value": round(entry_value, 2),
+                    "current_value": round(current_value, 2),
+                    "unrealized_pnl": round(unrealized_pnl, 2),
+                    "unrealized_pct": round(unrealized_pct, 2),
+                    "targets": pos.get("targets", {}),
+                })
+
+            return {
+                "positions": result,
+                "total_value": round(total_value, 2),
+                "total_unrealized_pnl": round(total_unrealized_pnl, 2),
+                "position_count": len(result),
+            }
+    except Exception as e:
+        log.error(f"Failed to fetch Coinbase balances: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch balances: {str(e)}")
+
+
+class CoinbaseSellRequest(BaseModel):
+    symbol: str
+    qty: float = None  # If None, sell full position
+
+
+@router.post("/coinbase/sell")
+async def manual_sell_coinbase(req: CoinbaseSellRequest):
+    """Manually sell a Coinbase position at market price.
+    Keep stop loss active, but user decides when to lock in profit."""
+    try:
+        import crypto_coinbase_bot
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Crypto bot not available")
+
+    symbol = req.symbol
+    qty_to_sell = req.qty
+
+    # Check if position exists
+    if symbol not in crypto_coinbase_bot.open_crypto_positions:
+        raise HTTPException(status_code=404, detail=f"No open position for {symbol}")
+
+    position = crypto_coinbase_bot.open_crypto_positions[symbol]
+    if qty_to_sell is None:
+        qty_to_sell = position["qty"]
+
+    if qty_to_sell > position["qty"]:
+        raise HTTPException(status_code=400, detail=f"Cannot sell {qty_to_sell}, only {position['qty']} available")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Get current price
+            pair = symbol.replace("/", "-")
+            url = f"https://api.exchange.coinbase.com/products/{pair}/ticker"
+            async with session.get(url) as r:
+                data = await r.json()
+                current_price = float(data.get("price", 0))
+
+            # Place market sell order (use market_ioc for immediate execution)
+            product_id = symbol.replace("/", "-")
+            path = "/api/v3/brokerage/orders"
+            order_config = {
+                "market_ioc": {
+                    "base_size": f"{qty_to_sell:.8f}"
+                }
+            }
+            order = {
+                "client_order_id": str(uuid.uuid4()),
+                "product_id": product_id,
+                "side": "SELL",
+                "order_configuration": order_config,
+            }
+
+            headers = crypto_coinbase_bot._auth_headers("POST", path)
+            async with session.post(crypto_coinbase_bot.COINBASE_BASE_URL + path, headers=headers, json=order) as r:
+                result = await r.json()
+                if r.status not in (200, 201) or not result.get("success", True):
+                    raise HTTPException(status_code=502, detail=f"Order failed: {result.get('error_response', result)}")
+
+            # Update position in bot
+            entry_price = position["entry_price"]
+            realized_pnl = (current_price - entry_price) * qty_to_sell
+
+            if qty_to_sell >= position["qty"]:
+                # Full close
+                crypto_coinbase_bot.open_crypto_positions.pop(symbol, None)
+                return {
+                    "status": "closed",
+                    "symbol": symbol,
+                    "qty_sold": round(qty_to_sell, 8),
+                    "sell_price": round(current_price, 4),
+                    "entry_price": round(entry_price, 4),
+                    "realized_pnl": round(realized_pnl, 2),
+                    "realized_pct": round((realized_pnl / (entry_price * qty_to_sell) * 100), 2) if entry_price > 0 else 0,
+                }
+            else:
+                # Partial close
+                position["qty"] -= qty_to_sell
+                return {
+                    "status": "partial",
+                    "symbol": symbol,
+                    "qty_sold": round(qty_to_sell, 8),
+                    "qty_remaining": round(position["qty"], 8),
+                    "sell_price": round(current_price, 4),
+                    "entry_price": round(entry_price, 4),
+                    "realized_pnl": round(realized_pnl, 2),
+                    "realized_pct": round((realized_pnl / (entry_price * qty_to_sell) * 100), 2) if entry_price > 0 else 0,
+                }
+    except Exception as e:
+        log.error(f"Manual sell failed for {symbol}: {e}")
+        raise HTTPException(status_code=502, detail=f"Sell failed: {str(e)}")
