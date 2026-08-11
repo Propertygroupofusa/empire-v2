@@ -996,21 +996,55 @@ async def run_crypto_cycle():
                 tier3_hit = price >= tier3_price
                 rsi_exit = rsi > RSI_SELL_ABOVE and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE
 
+                # Micro-profit-taking: +0.5%, +1.5%, +2.5% (25% each layer)
+                micro_target_1 = entry * 1.005  # +0.5%
+                micro_target_2 = entry * 1.015  # +1.5%
+                micro_target_3 = entry * 1.025  # +2.5%
+                micro_hit_1 = price >= micro_target_1
+                micro_hit_2 = price >= micro_target_2
+                micro_hit_3 = price >= micro_target_3
+
                 latest_signals[symbol] = {
                     "price": price, "rsi": rsi, "status": "HOLDING_LONG",
                     "has_position": True, "checked_at": now.isoformat(),
                     "targets": {
                         "stop": stop_price,
+                        "micro_1": micro_target_1,
+                        "micro_2": micro_target_2,
+                        "micro_3": micro_target_3,
                         "tier1": tier1_price,
                         "tier2": tier2_price,
                         "tier3": tier3_price,
                     }
                 }
+
+                # Track partial sells (how many 25% chunks sold: 0-4)
+                partial_sells = position.get("partial_sells", 0)
+                remaining_qty = qty * (1 - partial_sells * 0.25)  # Qty left to sell
+                sell_qty = qty * 0.25  # 25% of original position
+
                 should_exit = False
+                partial_exit = False
                 reason = None
+
+                # Priority 1: Stop loss (hard exit)
                 if stop_hit:
                     should_exit = True
                     reason = f"STOP LOSS @ ${stop_price:.2f} (-{(1 - price/entry)*100:.2f}%)"
+                # Priority 2: Micro-profit taking (partial exits)
+                elif micro_hit_3 and partial_sells < 3:
+                    partial_exit = True
+                    reason = f"MICRO PROFIT L3 @ ${micro_target_3:.2f} (+0.25%, sell 25%)"
+                    position["partial_sells"] = 3
+                elif micro_hit_2 and partial_sells < 2:
+                    partial_exit = True
+                    reason = f"MICRO PROFIT L2 @ ${micro_target_2:.2f} (+0.15%, sell 25%)"
+                    position["partial_sells"] = 2
+                elif micro_hit_1 and partial_sells < 1:
+                    partial_exit = True
+                    reason = f"MICRO PROFIT L1 @ ${micro_target_1:.2f} (+0.05%, sell 25%)"
+                    position["partial_sells"] = 1
+                # Priority 3: Full exit on tier targets or RSI
                 elif rsi_exit:
                     should_exit = True
                     reason = "RSI EXIT"
@@ -1023,8 +1057,17 @@ async def run_crypto_cycle():
                 elif tier1_hit:
                     should_exit = True
                     reason = f"TIER 1 @ ${tier1_price:.2f} (+{(price/entry - 1)*100:.2f}%, lock early gain)"
-                if should_exit:
-                    filled = await place_order(session, symbol, "sell", qty, price)
+
+                if partial_exit:
+                    # Sell 25% of original position
+                    filled = await place_order(session, symbol, "sell", sell_qty, price)
+                    if filled:
+                        pnl_partial = (price - entry) * sell_qty
+                        daily_pnl += pnl_partial
+                        log.info(f"[CRYPTO] 💰 PARTIAL {symbol} ({reason}) | Qty: {sell_qty:.8f} | P&L: ${pnl_partial:.2f} | Remaining: {remaining_qty:.8f}")
+                elif should_exit:
+                    # Full exit: sell all remaining
+                    filled = await place_order(session, symbol, "sell", remaining_qty if remaining_qty > 0 else qty, price)
                     if filled:
                         daily_pnl += unrealized_pnl
                         log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}")
