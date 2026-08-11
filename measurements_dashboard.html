@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Measurements Dashboard - Edge Validation</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-dark: #0F1419;
+            --bg-card: #1A1F2E;
+            --bg-hover: #252E3F;
+            --text-primary: #E8EAED;
+            --text-secondary: #A0A9B8;
+            --text-muted: #6F7680;
+            --accent-green: #34A853;
+            --accent-red: #EA4335;
+            --accent-blue: #4285F4;
+            --accent-orange: #FBBC04;
+            --accent-purple: #9C27B0;
+            --border: #303845;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 1800px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        /* Header */
+        .header {
+            margin-bottom: 2rem;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 1.5rem;
+        }
+
+        .header h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }
+
+        .header p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+        }
+
+        .last-update {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-top: 0.5rem;
+        }
+
+        /* Strategy Grid */
+        .strategies-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .strategy-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .strategy-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 1rem;
+        }
+
+        .strategy-name {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .strategy-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.4rem 0.8rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+
+        .badge-proven {
+            background: rgba(52, 168, 83, 0.15);
+            color: var(--accent-green);
+        }
+
+        .badge-testing {
+            background: rgba(66, 133, 244, 0.15);
+            color: var(--accent-blue);
+        }
+
+        .badge-insufficient {
+            background: rgba(251, 188, 4, 0.15);
+            color: var(--accent-orange);
+        }
+
+        .badge-invalid {
+            background: rgba(234, 67, 53, 0.15);
+            color: var(--accent-red);
+        }
+
+        /* Metrics Grid */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 1rem;
+        }
+
+        .metric {
+            background: var(--bg-hover);
+            border-radius: 6px;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+        }
+
+        .metric-label {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .metric-value {
+            font-size: 1.5rem;
+            font-weight: 600;
+            font-family: 'Monaco', monospace;
+            color: var(--text-primary);
+        }
+
+        .metric-value.positive {
+            color: var(--accent-green);
+        }
+
+        .metric-value.negative {
+            color: var(--accent-red);
+        }
+
+        .metric-value.warning {
+            color: var(--accent-orange);
+        }
+
+        .metric-value.critical {
+            color: var(--accent-purple);
+        }
+
+        .metric-hint {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-top: 0.2rem;
+        }
+
+        /* P-Value Significance Indicator */
+        .pvalue-indicator {
+            background: linear-gradient(135deg, rgba(52, 168, 83, 0.1), rgba(66, 133, 244, 0.1));
+            border-left: 4px solid var(--accent-green);
+            border-radius: 4px;
+            padding: 1rem;
+            margin-top: 1rem;
+        }
+
+        .pvalue-indicator.testing {
+            border-left-color: var(--accent-blue);
+            background: linear-gradient(135deg, rgba(66, 133, 244, 0.1), rgba(251, 188, 4, 0.1));
+        }
+
+        .pvalue-indicator.invalid {
+            border-left-color: var(--accent-red);
+            background: linear-gradient(135deg, rgba(234, 67, 53, 0.1), rgba(251, 188, 4, 0.1));
+        }
+
+        .pvalue-text {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+        }
+
+        .pvalue-value {
+            font-size: 1.25rem;
+            font-weight: 600;
+            font-family: 'Monaco', monospace;
+            color: var(--text-primary);
+        }
+
+        .pvalue-meaning {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-top: 0.5rem;
+            font-style: italic;
+        }
+
+        /* Recent Trades */
+        .section {
+            margin-bottom: 2rem;
+        }
+
+        .section-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-primary);
+        }
+
+        .table-container {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.95rem;
+        }
+
+        thead {
+            background: var(--bg-hover);
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            padding: 1rem;
+            text-align: left;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-size: 0.85rem;
+        }
+
+        td {
+            padding: 1rem;
+            border-bottom: 1px solid var(--border);
+            font-family: 'Monaco', monospace;
+            font-size: 0.9rem;
+        }
+
+        tr:hover {
+            background: var(--bg-hover);
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        .symbol {
+            font-weight: 600;
+            color: var(--accent-blue);
+        }
+
+        .gain {
+            color: var(--accent-green);
+        }
+
+        .loss {
+            color: var(--accent-red);
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            padding: 0.3rem 0.6rem;
+            border-radius: 3px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+
+        .badge.entry {
+            background: rgba(66, 133, 244, 0.15);
+            color: var(--accent-blue);
+        }
+
+        .badge.exit {
+            background: rgba(52, 168, 83, 0.15);
+            color: var(--accent-green);
+        }
+
+        /* Empty State */
+        .empty {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-muted);
+            font-style: italic;
+        }
+
+        /* Loading */
+        .loading {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-muted);
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid var(--border);
+            border-top-color: var(--accent-blue);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .strategies-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .metrics-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .container {
+                padding: 1rem;
+            }
+
+            .header h1 {
+                font-size: 1.5rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>📊 Measurements Dashboard</h1>
+            <p>Statistical validation of trading edges — real proof vs random luck</p>
+            <div class="last-update" id="lastUpdate"></div>
+        </div>
+
+        <!-- Strategies -->
+        <div id="strategiesContainer" class="strategies-grid">
+            <div class="loading">
+                <div class="loading-spinner"></div>
+                <p>Loading measurements...</p>
+            </div>
+        </div>
+
+        <!-- Recent Trades -->
+        <div class="section">
+            <div class="section-title">📈 Recent Trades (All Strategies)</div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Strategy</th>
+                            <th>Symbol</th>
+                            <th>Type</th>
+                            <th>Price</th>
+                            <th>Qty</th>
+                            <th>Details</th>
+                            <th>Time</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tradesTable">
+                        <tr><td colspan="7" class="empty">Loading trades...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Edge Validation Explanation -->
+        <div class="section" style="margin-top: 3rem; padding: 2rem; background: var(--bg-card); border-radius: 8px; border: 1px solid var(--border);">
+            <div class="section-title">🔬 How to Read This Dashboard</div>
+            <div style="display: grid; gap: 1.5rem; font-size: 0.95rem; color: var(--text-secondary); line-height: 1.8;">
+                <div>
+                    <strong style="color: var(--text-primary);">P-Value < 0.05:</strong> Edge is statistically proven (not random luck). Only then scale capital.
+                </div>
+                <div>
+                    <strong style="color: var(--text-primary);">Win Rate 55%+:</strong> Profitable strategy baseline. Combine with p-value for proof.
+                </div>
+                <div>
+                    <strong style="color: var(--text-primary);">Profit Factor > 1.5:</strong> Gross profit is 1.5x gross loss. Healthy edge indicator.
+                </div>
+                <div>
+                    <strong style="color: var(--text-primary);">Sharpe Ratio > 1.0:</strong> Return per unit of risk. Higher = better risk-adjusted returns.
+                </div>
+                <div>
+                    <strong style="color: var(--text-primary);">Kelly Fraction:</strong> Optimal % of capital to risk per trade. Use Kelly/4 (quarter-kelly) for safety.
+                </div>
+                <div>
+                    <strong style="color: var(--text-primary);">30+ Trades Needed:</strong> Statistical significance requires minimum 30 samples. Before that, edge is unproven.
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const BASE_URL = location.origin;
+        const REFRESH_INTERVAL = 5000; // 5 seconds
+
+        async function fetchData(endpoint) {
+            try {
+                const response = await fetch(`${BASE_URL}/trading-hub/api/measurements/${endpoint}`);
+                return response.json();
+            } catch (error) {
+                console.error(`Error fetching ${endpoint}:`, error);
+                return null;
+            }
+        }
+
+        function formatCurrency(value) {
+            return new Intl.NumberFormat('en-US', {
+                style: 'currency',
+                currency: 'USD',
+            }).format(value);
+        }
+
+        function formatPercent(value) {
+            return (value * 100).toFixed(2) + '%';
+        }
+
+        function getPValueBadge(pValue) {
+            if (pValue < 0.05) {
+                return { class: 'badge-proven', text: '✓ PROVEN', meaning: 'Edge is statistically significant (p < 0.05)' };
+            } else if (pValue < 0.20) {
+                return { class: 'badge-testing', text: '⏳ TESTING', meaning: 'Likely edge, needs more data (p < 0.20)' };
+            } else {
+                return { class: 'badge-invalid', text: '✗ UNPROVEN', meaning: 'Insufficient evidence (p ≥ 0.20)' };
+            }
+        }
+
+        function createStrategyCard(strategy) {
+            const evidence = strategy.evidence || {};
+            const tradeCount = evidence.trade_count || 0;
+            const pValue = evidence.p_value || 1.0;
+            const badgeInfo = getPValueBadge(pValue);
+
+            return `
+                <div class="strategy-card">
+                    <div class="strategy-header">
+                        <div class="strategy-name">${strategy.name}</div>
+                        <div class="strategy-badge ${badgeInfo.class}">${badgeInfo.text}</div>
+                    </div>
+
+                    <div class="metrics-grid">
+                        <div class="metric">
+                            <div class="metric-label">Trade Count</div>
+                            <div class="metric-value ${tradeCount >= 30 ? 'positive' : 'warning'}">${tradeCount}</div>
+                            <div class="metric-hint">${tradeCount >= 30 ? '✓ Valid sample' : 'Need ' + (30 - tradeCount)}</div>
+                        </div>
+
+                        <div class="metric">
+                            <div class="metric-label">Win Rate</div>
+                            <div class="metric-value ${evidence.win_rate >= 55 ? 'positive' : 'negative'}">${(evidence.win_rate || 0).toFixed(1)}%</div>
+                            <div class="metric-hint">Target: 55%+</div>
+                        </div>
+
+                        <div class="metric">
+                            <div class="metric-label">Profit Factor</div>
+                            <div class="metric-value ${evidence.profit_factor >= 1.5 ? 'positive' : 'negative'}">${(evidence.profit_factor || 0).toFixed(2)}</div>
+                            <div class="metric-hint">Target: 1.5+</div>
+                        </div>
+
+                        <div class="metric">
+                            <div class="metric-label">Expectancy</div>
+                            <div class="metric-value">${formatCurrency(evidence.expectancy || 0)}</div>
+                            <div class="metric-hint">Avg per trade</div>
+                        </div>
+
+                        <div class="metric">
+                            <div class="metric-label">Sharpe Ratio</div>
+                            <div class="metric-value ${evidence.sharpe_ratio >= 1.0 ? 'positive' : 'negative'}">${(evidence.sharpe_ratio || 0).toFixed(2)}</div>
+                            <div class="metric-hint">Risk-adjusted</div>
+                        </div>
+
+                        <div class="metric">
+                            <div class="metric-label">Sortino Ratio</div>
+                            <div class="metric-value ${evidence.sortino_ratio >= 1.0 ? 'positive' : 'negative'}">${(evidence.sortino_ratio || 0).toFixed(2)}</div>
+                            <div class="metric-hint">Downside risk</div>
+                        </div>
+
+                        <div class="metric">
+                            <div class="metric-label">Max Drawdown</div>
+                            <div class="metric-value negative">${formatCurrency(evidence.max_drawdown || 0)}</div>
+                            <div class="metric-hint">Peak-to-trough</div>
+                        </div>
+
+                        <div class="metric">
+                            <div class="metric-label">Consecutive Losses</div>
+                            <div class="metric-value warning">${evidence.consecutive_losses || 0}</div>
+                            <div class="metric-hint">Max streak</div>
+                        </div>
+
+                        <div class="metric">
+                            <div class="metric-label">Kelly Fraction</div>
+                            <div class="metric-value critical">${(evidence.kelly_fraction || 0).toFixed(4)}</div>
+                            <div class="metric-hint">Use Kelly/4</div>
+                        </div>
+                    </div>
+
+                    <div class="pvalue-indicator ${badgeInfo.class.split('-')[1]}">
+                        <div class="pvalue-text">Statistical Significance</div>
+                        <div class="pvalue-value">p = ${pValue.toFixed(4)}</div>
+                        <div class="pvalue-meaning">${badgeInfo.meaning}</div>
+                    </div>
+                </div>
+            `;
+        }
+
+        async function updateDashboard() {
+            const strategies = await fetchData('strategies');
+            const recentTrades = await fetchData('trades/recent?limit=20');
+
+            // Update strategies
+            if (strategies && strategies.length > 0) {
+                const strategiesHtml = strategies.map(s => createStrategyCard(s)).join('');
+                document.getElementById('strategiesContainer').innerHTML = strategiesHtml;
+            } else {
+                document.getElementById('strategiesContainer').innerHTML = `
+                    <div class="strategy-card" style="grid-column: 1 / -1;">
+                        <div class="empty">No strategies with trade data yet. Run trading bots to start collecting evidence.</div>
+                    </div>
+                `;
+            }
+
+            // Update trades table
+            if (recentTrades && recentTrades.trades && recentTrades.trades.length > 0) {
+                const tradesHtml = recentTrades.trades.map(t => `
+                    <tr>
+                        <td><strong>${t.strategy || 'unknown'}</strong></td>
+                        <td><span class="symbol">${t.symbol}</span></td>
+                        <td>
+                            ${t.entry_price ? '<span class="badge entry">Entry</span>' : ''}
+                            ${t.exit_price ? '<span class="badge exit">Exit</span>' : ''}
+                        </td>
+                        <td>$${t.entry_price ? t.entry_price.toFixed(2) : (t.exit_price || '—').toFixed(2)}</td>
+                        <td>${(t.quantity || 0).toFixed(4)}</td>
+                        <td>
+                            ${t.entry_price ? `Entry @ ${new Date(t.entry_time).toLocaleTimeString()}` : ''}
+                            ${t.exit_price ? ` → Exit @ ${new Date(t.exit_time).toLocaleTimeString()}` : ''}
+                        </td>
+                        <td class="${t.pnl > 0 ? 'gain' : 'loss'}">${formatCurrency(t.pnl || 0)}</td>
+                    </tr>
+                `).join('');
+                document.getElementById('tradesTable').innerHTML = tradesHtml;
+            } else {
+                document.getElementById('tradesTable').innerHTML = `
+                    <tr><td colspan="7" class="empty">No trades yet. Bots will log trades as they execute.</td></tr>
+                `;
+            }
+
+            // Update timestamp
+            document.getElementById('lastUpdate').textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
+        }
+
+        // Initial load and periodic refresh
+        updateDashboard();
+        setInterval(updateDashboard, REFRESH_INTERVAL);
+
+        console.log('📊 Measurements Dashboard loaded. Refreshing every 5 seconds.');
+    </script>
+</body>
+</html>
