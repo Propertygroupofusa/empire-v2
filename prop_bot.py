@@ -22,6 +22,14 @@ from models import BotPosition, Payment
 from bot_mandates import APEX_MANDATE, validate_entry
 from alpaca_mean_reversion import should_exit_position as mr_should_exit, validate_dual_direction
 
+# Measurement system: Trade logging with full signal context
+try:
+    from measurement_system import SignalContext, TradeLog, trade_logger, StatisticalAnalyzer
+    MEASUREMENT_AVAILABLE = True
+except ImportError:
+    MEASUREMENT_AVAILABLE = False
+    log.warning("measurement_system not available - trade logging disabled") if 'log' in dir() else None
+
 ET = ZoneInfo("America/New_York")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -266,10 +274,31 @@ async def load_open_positions():
 
 
 async def _db_save_open(contract: str, side: str, entry: float, qty: float):
+    """Save opened position to database and log to measurement system."""
     try:
         async with AsyncSessionLocal() as db:
             db.add(BotPosition(bot=BOT_NAME, symbol=contract, side=side, entry_price=entry, qty=qty))
             await db.commit()
+
+        # Log to measurement system
+        if MEASUREMENT_AVAILABLE:
+            trade_id = f"{contract}_{entry}_{datetime.now(timezone.utc).timestamp()}"  # Unique trade ID
+            signal_context = SignalContext(
+                symbol=contract,
+                price=entry,
+                trend=side,  # Use side as trend indicator
+                regime="bull" if side == "long" else "bear",
+            )
+            trade_logger.record_entry(
+                trade_id=trade_id[:16],  # Truncate to 16 chars for storage
+                strategy="apex_mean_reversion",
+                symbol=contract,
+                entry_price=entry,
+                entry_quantity=qty,
+                signal_context=signal_context,
+                expected_value=None,
+                mode="live" if LIVE_TRADE else "paper",
+            )
     except Exception as e:
         log.error(f"[APEX_589296] Failed to persist opened position {contract}: {e}")
 
@@ -286,7 +315,7 @@ async def _db_delete_open(contract: str):
 
 
 async def _db_save_closed_trade(contract: str, side: str, entry_price: float, exit_price: float, qty: float, profit_loss: float, reason: str):
-    """Record a completed trade to closed_trades table for historical audit trail."""
+    """Record a completed trade to closed_trades table for historical audit trail and log to measurement system."""
     try:
         from models import ClosedTrade
         pnl_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
@@ -306,6 +335,17 @@ async def _db_save_closed_trade(contract: str, side: str, entry_price: float, ex
             db.add(trade)
             await db.commit()
             log.info(f"[AUDIT] Closed trade recorded: {contract} {side} | Entry ${entry_price:.2f} → Exit ${exit_price:.2f} | P&L: ${profit_loss:.2f}")
+
+        # Log to measurement system
+        if MEASUREMENT_AVAILABLE:
+            trade_id = f"{contract}_{entry_price}"  # Simple trade ID matching entry
+            trade_logger.record_exit(
+                trade_id=trade_id[:16],  # Truncate to 16 chars
+                exit_price=exit_price,
+                exit_reason=reason,
+                entry_slippage=None,
+                exit_slippage=None,
+            )
     except Exception as e:
         log.error(f"[APEX_589296] Failed to log closed trade {contract}: {e}")
 
