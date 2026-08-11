@@ -138,8 +138,8 @@ def _auth_headers(method: str, path: str) -> dict:
 
 # AGGRESSIVE THRESHOLDS for high-velocity trading in overbought/oversold markets
 # Long-only: Coinbase SPOT has no shorting support
-RSI_STRONG_BUY = 25   # RSI < 25 = oversold, strong reversal signal (lowered from 20)
-RSI_BUY = 40          # RSI < 40 = oversold/neutral zone, normal entry signal (lowered from 30)
+RSI_STRONG_BUY = 25   # RSI < 25 = oversold, strong reversal signal
+RSI_BUY = 50          # RSI < 50 = oversold/neutral zone, widened for faster entry (test phase)
 RSI_NO_ENTRY = 60     # RSI >= 60 = overbought, skip LONG entries only (lowered from 50, allows 40-60 zone)
 RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "75"))    # Exit threshold for LONG (raised from 70)
 RSI_BUY_BELOW = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "10"))      # Fallback for legacy env var (deprecated)
