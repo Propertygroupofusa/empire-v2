@@ -850,3 +850,77 @@ async def manual_sell_coinbase(req: CoinbaseSellRequest):
     except Exception as e:
         log.error(f"Manual sell failed for {symbol}: {e}")
         raise HTTPException(status_code=502, detail=f"Sell failed: {str(e)}")
+
+
+@router.get("/coinbase/usd-balance")
+async def get_coinbase_usd_balance():
+    """Get real-time Coinbase USD cash balance (not holdings, just cash).
+    This is the trading capital available for entries."""
+    import jwt
+    import time
+    import base64
+
+    coinbase_key_name = os.getenv("COINBASE_API_KEY_NAME", "")
+    coinbase_private_key = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\n", "\n")
+
+    if not (coinbase_key_name and coinbase_private_key):
+        return {"usd_balance": 0, "status": "unconfigured"}
+
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.backends import default_backend
+
+        raw = coinbase_private_key.strip()
+        if raw.startswith("-----BEGIN"):
+            private_key = serialization.load_pem_private_key(raw.encode(), password=None, backend=default_backend())
+            algorithm = "ES256"
+        else:
+            decoded = base64.b64decode(raw)
+            private_key = Ed25519PrivateKey.from_private_bytes(decoded[:32])
+            algorithm = "EdDSA"
+
+        now = int(time.time())
+        payload = {
+            "sub": coinbase_key_name,
+            "iss": "cdp",
+            "nbf": now,
+            "exp": now + 120,
+            "uri": "GET /api/v3/brokerage/accounts",
+        }
+        jwt_token = jwt.encode(payload, private_key, algorithm=algorithm)
+
+        headers = {
+            "Authorization": f"Bearer {jwt_token}",
+            "Content-Type": "application/json",
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://api.coinbase.com/api/v3/brokerage/accounts",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status != 200:
+                    log.error(f"Coinbase API returned {resp.status}")
+                    return {"usd_balance": 0, "status": "error", "detail": f"HTTP {resp.status}"}
+
+                data = await resp.json()
+                accounts = data.get("accounts", [])
+
+                usd_account = next(
+                    (a for a in accounts if a.get("currency") == "USD"),
+                    None
+                )
+
+                balance = round(float(usd_account.get("available_balance", {}).get("value", 0)), 2) if usd_account else 0.0
+                return {
+                    "usd_balance": balance,
+                    "status": "ok",
+                    "currency": "USD",
+                    "account_type": "Coinbase Advanced Trade"
+                }
+
+    except Exception as e:
+        log.error(f"Coinbase USD balance fetch failed: {e}")
+        return {"usd_balance": 0, "status": "error", "detail": str(e)}

@@ -1333,19 +1333,21 @@ async def get_orchestrator_stats(db = Depends(lambda: None)):
         except Exception as e:
             log.warning(f"Error fetching Alpaca stats: {e}")
 
-        # Coinbase crypto stats
+        # Coinbase crypto stats (real-time USD balance)
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get("http://localhost:8000/payments/crypto/account", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                async with session.get("http://localhost:8000/api/trading-dashboard/coinbase/usd-balance", timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         crypto_data = await resp.json()
                         if crypto_data.get("status") == "ok":
+                            usd_balance = crypto_data.get("usd_balance", 0)
                             stats["trading"]["accounts"].append({
                                 "name": "Coinbase (BTC/ETH 24/7)",
-                                "usd_balance": crypto_data.get("capital", {}).get("usd_balance", 0),
-                                "mode": crypto_data.get("mode", "LIVE CRYPTO")
+                                "usd_balance": usd_balance,
+                                "equity": usd_balance,
+                                "mode": "🔴 LIVE CRYPTO (24/7)"
                             })
-                            stats["trading"]["equity"] += crypto_data.get("capital", {}).get("usd_balance", 0)
+                            stats["trading"]["equity"] += usd_balance
         except Exception as e:
             log.warning(f"Error fetching Coinbase stats: {e}")
 
