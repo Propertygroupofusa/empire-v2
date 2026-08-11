@@ -4,7 +4,7 @@ Shows live positions, trade history, bot status, and P&L metrics
 Plus: Measurements Dashboard for statistical edge validation
 """
 
-from fastapi import APIRouter, Depends, FileNotFoundError
+from fastapi import APIRouter, Depends
 from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
@@ -26,7 +26,7 @@ except ImportError:
     MEASUREMENT_AVAILABLE = False
 
 ET = ZoneInfo("America/New_York")
-router = APIRouter(prefix="/trading-hub", tags=["trading"])
+router = APIRouter(tags=["trading"])
 log = logging.getLogger("trading_hub")
 
 # ============================================================================
