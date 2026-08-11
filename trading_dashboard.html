@@ -459,6 +459,12 @@
             </div>
 
             <div class="stat-card">
+                <h3>💰 Coinbase USD</h3>
+                <div class="stat-value" id="coinbaseBalance">$0.00</div>
+                <p id="coinbaseStatus" style="color: #00cc00;">24/7 Crypto Trading</p>
+            </div>
+
+            <div class="stat-card">
                 <h3>Active Positions</h3>
                 <div class="stat-value" id="activePositions">0</div>
                 <p id="positionStatus" style="color: #ffaa00;">Monitoring 7 symbols...</p>
@@ -866,6 +872,24 @@
             } catch (e) {
                 logEvent('❌ Failed to load account status: ' + e.message, 'error');
                 return;
+            }
+
+            // Fetch Coinbase balance
+            try {
+                const coinbaseData = await apiFetch('/coinbase/usd-balance');
+                if (coinbaseData.status === 'ok') {
+                    document.getElementById('coinbaseBalance').textContent = '$' + coinbaseData.usd_balance.toFixed(2);
+                    document.getElementById('coinbaseStatus').textContent = '✅ Real-time balance';
+                    document.getElementById('coinbaseStatus').style.color = '#00cc00';
+                } else {
+                    document.getElementById('coinbaseBalance').textContent = '$0.00';
+                    document.getElementById('coinbaseStatus').textContent = '⚠️ ' + (coinbaseData.detail || 'Offline');
+                    document.getElementById('coinbaseStatus').style.color = '#ffaa00';
+                }
+            } catch (e) {
+                document.getElementById('coinbaseBalance').textContent = '$0.00';
+                document.getElementById('coinbaseStatus').textContent = '❌ Failed to load';
+                document.getElementById('coinbaseStatus').style.color = '#ff0000';
             }
 
             document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
