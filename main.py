@@ -988,6 +988,23 @@ async def lifespan(app: FastAPI):
         log.warning(f"Database init failed: {e}")
 
     try:
+        # Loaded by path, not `import migrations.0002_...` - module names
+        # can't start with a digit, and the 000N_ prefix convention (see
+        # migrations/0001_create_crypto_rsi_state.py) predates this being
+        # wired into startup.
+        import importlib.util
+        _spec = importlib.util.spec_from_file_location(
+            "fix_notary_payouts_job_id_type",
+            os.path.join(os.path.dirname(__file__), "migrations",
+                         "0002_fix_notary_payouts_job_id_type.py"),
+        )
+        _mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        await _mod.migrate()
+    except Exception as e:
+        log.warning(f"notary_payouts.job_id type migration failed: {e}")
+
+    try:
         await create_monitor_tables()
         log.info("Monitor tables ready")
     except Exception as e:
