@@ -76,6 +76,18 @@ COINBASE_API_PRIVATE_KEY = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\
 COINBASE_HOST = "api.coinbase.com"
 COINBASE_BASE_URL = f"https://{COINBASE_HOST}"
 
+try:
+    NETWORK_RETRY_ATTEMPTS = int(os.getenv("NETWORK_RETRY_ATTEMPTS", "3"))
+except (ValueError, TypeError):
+    NETWORK_RETRY_ATTEMPTS = 3
+    log.warning("Invalid NETWORK_RETRY_ATTEMPTS, using default: 3")
+
+try:
+    NETWORK_RETRY_DELAY = float(os.getenv("NETWORK_RETRY_DELAY", "1.0"))
+except (ValueError, TypeError):
+    NETWORK_RETRY_DELAY = 1.0
+    log.warning("Invalid NETWORK_RETRY_DELAY, using default: 1.0")
+
 CRYPTO_PAIRS = [
     "BTC/USD", "ETH/USD",  # Tier 1: Core stable cryptos
     "SOL/USD", "XRP/USD", "AVAX/USD", "LINK/USD",  # Tier 2: Established mid-caps

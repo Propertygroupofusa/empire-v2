@@ -215,25 +215,37 @@ def get_fallback_data(broker: str, data_type: str) -> Optional[Dict[str, Any]]:
 def load_network_env_config():
     """Load network configuration from environment variables."""
 
-    # Example env vars:
-    # ALLOWED_EGRESS_HOSTS=api.coinbase.com,api.alpaca.markets
-    # NETWORK_RETRY_ATTEMPTS=5
-    # NETWORK_CACHE_TTL=300
+    try:
+        allowed_hosts = os.getenv("ALLOWED_EGRESS_HOSTS", "")
+        if allowed_hosts:
+            log.info(f"✓ Network config from env: ALLOWED_EGRESS_HOSTS={allowed_hosts}")
 
-    allowed_hosts = os.getenv("ALLOWED_EGRESS_HOSTS", "")
-    if allowed_hosts:
-        log.info(f"✓ Network config from env: ALLOWED_EGRESS_HOSTS={allowed_hosts}")
+        try:
+            retry_attempts = int(os.getenv("NETWORK_RETRY_ATTEMPTS", "3"))
+        except (ValueError, TypeError):
+            log.warning("Invalid NETWORK_RETRY_ATTEMPTS, using default: 3")
+            retry_attempts = 3
 
-    retry_attempts = int(os.getenv("NETWORK_RETRY_ATTEMPTS", "3"))
-    cache_ttl = int(os.getenv("NETWORK_CACHE_TTL", "300"))
+        try:
+            cache_ttl = int(os.getenv("NETWORK_CACHE_TTL", "300"))
+        except (ValueError, TypeError):
+            log.warning("Invalid NETWORK_CACHE_TTL, using default: 300")
+            cache_ttl = 300
 
-    log.info(f"✓ Network config: retry_attempts={retry_attempts}, cache_ttl={cache_ttl}s")
+        log.info(f"✓ Network config: retry_attempts={retry_attempts}, cache_ttl={cache_ttl}s")
 
-    return {
-        "allowed_hosts": allowed_hosts.split(",") if allowed_hosts else [],
-        "retry_attempts": retry_attempts,
-        "cache_ttl": cache_ttl,
-    }
+        return {
+            "allowed_hosts": allowed_hosts.split(",") if allowed_hosts else [],
+            "retry_attempts": retry_attempts,
+            "cache_ttl": cache_ttl,
+        }
+    except Exception as e:
+        log.warning(f"Error loading network env config: {e}, using defaults")
+        return {
+            "allowed_hosts": [],
+            "retry_attempts": 3,
+            "cache_ttl": 300,
+        }
 
 
 # Initialize network config on import
