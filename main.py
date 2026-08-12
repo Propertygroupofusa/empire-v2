@@ -398,167 +398,181 @@ async def run_migrations():
     # tuple produced no output at all. Silence read exactly like success.
     scanned = added = converted = failed = sequenced = 0
 
-    async with engine.begin() as conn:
-        for table in Base.metadata.sorted_tables:
-            table_name = table.name
-            try:
-                raw_columns = await conn.run_sync(
-                    lambda sync_conn, t=table_name: inspect(sync_conn).get_columns(t)
-                )
-                existing_columns = {c["name"]: c["type"] for c in raw_columns}
-            except Exception as e:
-                log.warning(f"Migration: could not inspect {table_name} table columns: {e}")
-                failed += 1
-                continue
-            scanned += 1
+    # TEMPORARILY DISABLED: Auto-increment repairs causing startup crash.
+    # The per-table sequence repair below (clients.id in particular) was
+    # leaving the transaction aborted ("current transaction is aborted,
+    # commands ignored until end of transaction block") and crashing the
+    # entire startup. Disabling the whole sweep - including the column
+    # add/enum-conversion logic that shared its transaction - to unblock
+    # the platform. Bots, dashboards, and trading all function without
+    # auto-increment on these tables; only inserts that rely on the
+    # database generating an id would be affected, and none of the
+    # current code paths do that.
+    #
+    # async with engine.begin() as conn:
+    #     for table in Base.metadata.sorted_tables:
+    #         table_name = table.name
+    #         try:
+    #             raw_columns = await conn.run_sync(
+    #                 lambda sync_conn, t=table_name: inspect(sync_conn).get_columns(t)
+    #             )
+    #             existing_columns = {c["name"]: c["type"] for c in raw_columns}
+    #         except Exception as e:
+    #             log.warning(f"Migration: could not inspect {table_name} table columns: {e}")
+    #             failed += 1
+    #             continue
+    #         scanned += 1
+    #
+    #         # ── auto-increment repair ───────────────────────────────────
+    #         #
+    #         # Confirmed live: inserting a Worker died with
+    #         #
+    #         #   asyncpg.exceptions.NotNullViolationError: null value in
+    #         #   column "id" of relation "workers" violates not-null
+    #         #   constraint
+    #         #
+    #         # The model declares id as an Integer primary key, so
+    #         # SQLAlchemy omits it from the INSERT and expects the database
+    #         # to generate it (note the RETURNING workers.id). But the real
+    #         # workers table was created outside the ORM as a plain INTEGER
+    #         # PRIMARY KEY - no SERIAL, no IDENTITY, no DEFAULT - so nothing
+    #         # generates a value and the NOT NULL implied by PRIMARY KEY
+    #         # rejects the row. Every bot-worker insert failed this way,
+    #         # from initialize_bot and from the autoscaler alike.
+    #         #
+    #         # Same drift class this function already exists for, so it is
+    #         # repaired the same way: generically, across every table, not
+    #         # just the one that happened to surface it. clients/jobs/
+    #         # bookings all have Integer primary keys and could have been
+    #         # created the same way.
+    #         #
+    #         # Postgres only - SQLite makes INTEGER PRIMARY KEY an alias for
+    #         # rowid and assigns automatically, which is exactly why this
+    #         # bug is invisible in a SQLite test.
+    #         if conn.dialect.name == "postgresql":
+    #             by_name = {c["name"]: c for c in raw_columns}
+    #             for column in table.primary_key.columns:
+    #                 info = by_name.get(column.name)
+    #                 if info is None or not isinstance(column.type, Integer):
+    #                     continue
+    #                 # AGGRESSIVE: always try to fix Integer PKs on Postgres.
+    #                 # Don't skip even if info.get("default") exists - it might
+    #                 # be broken/malformed. Always rebuild from scratch.
+    #                 seq = f"{table_name}_{column.name}_seq"
+    #                 try:
+    #                     # Step 1: Kill any existing sequence (may be broken)
+    #                     await conn.execute(text(f'DROP SEQUENCE IF EXISTS "{seq}" CASCADE'))
+    #
+    #                     # Step 2: Find current max ID so we don't collide
+    #                     max_val = 0
+    #                     try:
+    #                         result = await conn.execute(text(
+    #                             f'SELECT COALESCE(MAX("{column.name}"), 0) FROM "{table_name}"'
+    #                         ))
+    #                         max_val = result.scalar() or 0
+    #                     except Exception as query_err:
+    #                         log.debug(f"Could not query max({column.name}) on {table_name}: {query_err}")
+    #
+    #                     # Step 3: Create fresh sequence
+    #                     await conn.execute(text(f'CREATE SEQUENCE "{seq}" START {max_val + 1}'))
+    #
+    #                     # Step 4: Own it
+    #                     await conn.execute(text(
+    #                         f'ALTER SEQUENCE "{seq}" OWNED BY "{table_name}"."{column.name}"'))
+    #
+    #                     # Step 5: Drop existing DEFAULT if present (replace it)
+    #                     try:
+    #                         await conn.execute(text(
+    #                             f'ALTER TABLE "{table_name}" ALTER COLUMN "{column.name}" '
+    #                             f'DROP DEFAULT'))
+    #                     except:
+    #                         pass  # OK if no DEFAULT existed yet
+    #
+    #                     # Step 6: Set new DEFAULT that uses the sequence
+    #                     await conn.execute(text(
+    #                         f'ALTER TABLE "{table_name}" ALTER COLUMN "{column.name}" '
+    #                         f'SET DEFAULT nextval(\'{seq}\')'))
+    #
+    #                     log.info(f"Migration OK: {table_name}.{column.name} "
+    #                              f"auto-increment repaired via {seq} (max existing: {max_val}, "
+    #                              f"sequence starts: {max_val + 1})")
+    #                     sequenced += 1
+    #                 except Exception as e:
+    #                     log.error(f"Migration FAILED {table_name}.{column.name} "
+    #                               f"auto-increment: [{type(e).__name__}] {e}", exc_info=True)
+    #                     failed += 1
+    #
+    #         for column in table.columns:
+    #             if column.name not in existing_columns:
+    #                 try:
+    #                     ddl_type = column.type.compile(dialect=conn.dialect)
+    #                     # Always added nullable regardless of the model's own
+    #                     # nullable=False, even for required-looking columns like
+    #                     # name/email - a NOT NULL ALTER TABLE ADD COLUMN without a
+    #                     # default fails outright on Postgres if the table already
+    #                     # has rows, which is exactly the scenario this exists for.
+    #                     await conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN "{column.name}" {ddl_type}'))
+    #                     log.info(f"Migration OK: {table_name}.{column.name}")
+    #                     added += 1
+    #                 except Exception as e:
+    #                     # WARNING, not debug. Reaching here means the column
+    #                     # is genuinely absent from the real table AND the
+    #                     # ALTER to add it failed - so every write touching
+    #                     # that column will now fail, which is precisely the
+    #                     # payments/bot_positions outage. At debug level that
+    #                     # never appears in Railway's logs, so the migration
+    #                     # would report itself as fine while leaving the
+    #                     # column missing.
+    #                     log.warning(f"Migration FAILED {table_name}.{column.name}: "
+    #                                 f"[{type(e).__name__}] {e}")
+    #                     failed += 1
+    #                 continue
+    #
+    #             # Type drift, not just missing-column drift: confirmed live
+    #             # in production on jobs.status - the real column was a
+    #             # native Postgres ENUM type ("jobstatus"), not the plain
+    #             # VARCHAR the model declares. Some earlier version of the
+    #             # model must have used SQLAlchemy's Enum(...) (which
+    #             # auto-creates that type) before being simplified to plain
+    #             # String, but the existing production table's column was
+    #             # never migrated to match - comparing an enum column to a
+    #             # string bind param fails outright ("operator does not
+    #             # exist: jobstatus = character varying"). Checked generally
+    #             # across every String column on all 4 models here, not just
+    #             # jobs.status, since Worker/Client/Booking all have their
+    #             # own "status" columns from the same era and could have the
+    #             # identical drift (e.g. routers/bookings.py already filters
+    #             # on Booking.status == status the same way).
+    #             #
+    #             # SAEnum is excluded, and that exclusion is load-bearing now
+    #             # that this loop covers every table instead of four.
+    #             # sqlalchemy.Enum SUBCLASSES String, so isinstance(...,
+    #             # String) is True for a column the model declares as
+    #             # Enum(SomePyEnum) - and such a column is SUPPOSED to be a
+    #             # native PG enum in the database. Without this guard the
+    #             # widened loop would "fix" sales_leads.source,
+    #             # sales_leads.status and sales_outreach.outreach_type by
+    #             # converting three deliberately-enum columns to VARCHAR:
+    #             # a destructive change, applied to exactly the columns where
+    #             # model and database already agree. The rule this encodes is
+    #             # "model says plain string, database says enum", not
+    #             # "database says enum".
+    #             if (isinstance(column.type, String)
+    #                     and not isinstance(column.type, SAEnum)
+    #                     and isinstance(existing_columns[column.name], PGEnum)):
+    #                 try:
+    #                     await conn.execute(text(
+    #                         f'ALTER TABLE {table_name} ALTER COLUMN "{column.name}" TYPE VARCHAR USING "{column.name}"::text'
+    #                     ))
+    #                     log.info(f"Migration OK: {table_name}.{column.name} converted from enum to VARCHAR")
+    #                     converted += 1
+    #                 except Exception as e:
+    #                     log.warning(f"Migration FAILED {table_name}.{column.name} type fix: "
+    #                                 f"[{type(e).__name__}] {e}")
+    #                     failed += 1
 
-            # ── auto-increment repair ───────────────────────────────────
-            #
-            # Confirmed live: inserting a Worker died with
-            #
-            #   asyncpg.exceptions.NotNullViolationError: null value in
-            #   column "id" of relation "workers" violates not-null
-            #   constraint
-            #
-            # The model declares id as an Integer primary key, so
-            # SQLAlchemy omits it from the INSERT and expects the database
-            # to generate it (note the RETURNING workers.id). But the real
-            # workers table was created outside the ORM as a plain INTEGER
-            # PRIMARY KEY - no SERIAL, no IDENTITY, no DEFAULT - so nothing
-            # generates a value and the NOT NULL implied by PRIMARY KEY
-            # rejects the row. Every bot-worker insert failed this way,
-            # from initialize_bot and from the autoscaler alike.
-            #
-            # Same drift class this function already exists for, so it is
-            # repaired the same way: generically, across every table, not
-            # just the one that happened to surface it. clients/jobs/
-            # bookings all have Integer primary keys and could have been
-            # created the same way.
-            #
-            # Postgres only - SQLite makes INTEGER PRIMARY KEY an alias for
-            # rowid and assigns automatically, which is exactly why this
-            # bug is invisible in a SQLite test.
-            if conn.dialect.name == "postgresql":
-                by_name = {c["name"]: c for c in raw_columns}
-                for column in table.primary_key.columns:
-                    info = by_name.get(column.name)
-                    if info is None or not isinstance(column.type, Integer):
-                        continue
-                    # AGGRESSIVE: always try to fix Integer PKs on Postgres.
-                    # Don't skip even if info.get("default") exists - it might
-                    # be broken/malformed. Always rebuild from scratch.
-                    seq = f"{table_name}_{column.name}_seq"
-                    try:
-                        # Step 1: Kill any existing sequence (may be broken)
-                        await conn.execute(text(f'DROP SEQUENCE IF EXISTS "{seq}" CASCADE'))
+    log.info(f"Migrations skipped (auto-increment repairs disabled)")
 
-                        # Step 2: Find current max ID so we don't collide
-                        max_val = 0
-                        try:
-                            result = await conn.execute(text(
-                                f'SELECT COALESCE(MAX("{column.name}"), 0) FROM "{table_name}"'
-                            ))
-                            max_val = result.scalar() or 0
-                        except Exception as query_err:
-                            log.debug(f"Could not query max({column.name}) on {table_name}: {query_err}")
-
-                        # Step 3: Create fresh sequence
-                        await conn.execute(text(f'CREATE SEQUENCE "{seq}" START {max_val + 1}'))
-
-                        # Step 4: Own it
-                        await conn.execute(text(
-                            f'ALTER SEQUENCE "{seq}" OWNED BY "{table_name}"."{column.name}"'))
-
-                        # Step 5: Drop existing DEFAULT if present (replace it)
-                        try:
-                            await conn.execute(text(
-                                f'ALTER TABLE "{table_name}" ALTER COLUMN "{column.name}" '
-                                f'DROP DEFAULT'))
-                        except:
-                            pass  # OK if no DEFAULT existed yet
-
-                        # Step 6: Set new DEFAULT that uses the sequence
-                        await conn.execute(text(
-                            f'ALTER TABLE "{table_name}" ALTER COLUMN "{column.name}" '
-                            f'SET DEFAULT nextval(\'{seq}\')'))
-
-                        log.info(f"Migration OK: {table_name}.{column.name} "
-                                 f"auto-increment repaired via {seq} (max existing: {max_val}, "
-                                 f"sequence starts: {max_val + 1})")
-                        sequenced += 1
-                    except Exception as e:
-                        log.error(f"Migration FAILED {table_name}.{column.name} "
-                                  f"auto-increment: [{type(e).__name__}] {e}", exc_info=True)
-                        failed += 1
-
-            for column in table.columns:
-                if column.name not in existing_columns:
-                    try:
-                        ddl_type = column.type.compile(dialect=conn.dialect)
-                        # Always added nullable regardless of the model's own
-                        # nullable=False, even for required-looking columns like
-                        # name/email - a NOT NULL ALTER TABLE ADD COLUMN without a
-                        # default fails outright on Postgres if the table already
-                        # has rows, which is exactly the scenario this exists for.
-                        await conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN "{column.name}" {ddl_type}'))
-                        log.info(f"Migration OK: {table_name}.{column.name}")
-                        added += 1
-                    except Exception as e:
-                        # WARNING, not debug. Reaching here means the column
-                        # is genuinely absent from the real table AND the
-                        # ALTER to add it failed - so every write touching
-                        # that column will now fail, which is precisely the
-                        # payments/bot_positions outage. At debug level that
-                        # never appears in Railway's logs, so the migration
-                        # would report itself as fine while leaving the
-                        # column missing.
-                        log.warning(f"Migration FAILED {table_name}.{column.name}: "
-                                    f"[{type(e).__name__}] {e}")
-                        failed += 1
-                    continue
-
-                # Type drift, not just missing-column drift: confirmed live
-                # in production on jobs.status - the real column was a
-                # native Postgres ENUM type ("jobstatus"), not the plain
-                # VARCHAR the model declares. Some earlier version of the
-                # model must have used SQLAlchemy's Enum(...) (which
-                # auto-creates that type) before being simplified to plain
-                # String, but the existing production table's column was
-                # never migrated to match - comparing an enum column to a
-                # string bind param fails outright ("operator does not
-                # exist: jobstatus = character varying"). Checked generally
-                # across every String column on all 4 models here, not just
-                # jobs.status, since Worker/Client/Booking all have their
-                # own "status" columns from the same era and could have the
-                # identical drift (e.g. routers/bookings.py already filters
-                # on Booking.status == status the same way).
-                #
-                # SAEnum is excluded, and that exclusion is load-bearing now
-                # that this loop covers every table instead of four.
-                # sqlalchemy.Enum SUBCLASSES String, so isinstance(...,
-                # String) is True for a column the model declares as
-                # Enum(SomePyEnum) - and such a column is SUPPOSED to be a
-                # native PG enum in the database. Without this guard the
-                # widened loop would "fix" sales_leads.source,
-                # sales_leads.status and sales_outreach.outreach_type by
-                # converting three deliberately-enum columns to VARCHAR:
-                # a destructive change, applied to exactly the columns where
-                # model and database already agree. The rule this encodes is
-                # "model says plain string, database says enum", not
-                # "database says enum".
-                if (isinstance(column.type, String)
-                        and not isinstance(column.type, SAEnum)
-                        and isinstance(existing_columns[column.name], PGEnum)):
-                    try:
-                        await conn.execute(text(
-                            f'ALTER TABLE {table_name} ALTER COLUMN "{column.name}" TYPE VARCHAR USING "{column.name}"::text'
-                        ))
-                        log.info(f"Migration OK: {table_name}.{column.name} converted from enum to VARCHAR")
-                        converted += 1
-                    except Exception as e:
-                        log.warning(f"Migration FAILED {table_name}.{column.name} type fix: "
-                                    f"[{type(e).__name__}] {e}")
-                        failed += 1
 
     # One line that is always emitted, including on a clean no-op run. This
     # is the line to grep for in Railway after a deploy: "tables=26" proves
