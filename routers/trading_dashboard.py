@@ -886,9 +886,11 @@ async def get_coinbase_usd_balance():
             "iss": "cdp",
             "nbf": now,
             "exp": now + 120,
-            "uri": "GET /api/v3/brokerage/accounts",
+            "uri": "GET api.coinbase.com/api/v3/brokerage/accounts",
         }
-        jwt_token = jwt.encode(payload, private_key, algorithm=algorithm)
+        import secrets
+        headers_for_jwt = {"kid": coinbase_key_name, "nonce": secrets.token_hex(16)}
+        jwt_token = jwt.encode(payload, private_key, algorithm=algorithm, headers=headers_for_jwt)
 
         headers = {
             "Authorization": f"Bearer {jwt_token}",
