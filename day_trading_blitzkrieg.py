@@ -44,10 +44,18 @@ log = logging.getLogger("blitzkrieg")
 BLITZKRIEG_ENABLED = os.getenv("BLITZKRIEG_MODE", "true").lower() == "true"
 
 # Base position size (scale from existing)
-BASE_POSITION_SIZE = float(os.getenv("BASE_POSITION_SIZE", "250"))
+try:
+    BASE_POSITION_SIZE = float(os.getenv("BASE_POSITION_SIZE", "250"))
+except (ValueError, TypeError):
+    log.warning("Invalid BASE_POSITION_SIZE value, using default: 250")
+    BASE_POSITION_SIZE = 250.0
 
 # 10x multiplier
-BLITZKRIEG_MULTIPLIER = float(os.getenv("BLITZKRIEG_MULTIPLIER", "10"))
+try:
+    BLITZKRIEG_MULTIPLIER = float(os.getenv("BLITZKRIEG_MULTIPLIER", "10"))
+except (ValueError, TypeError):
+    log.warning("Invalid BLITZKRIEG_MULTIPLIER value, using default: 10")
+    BLITZKRIEG_MULTIPLIER = 10.0
 
 # Effective position size per trade
 AGGRESSIVE_POSITION_SIZE = BASE_POSITION_SIZE * BLITZKRIEG_MULTIPLIER
@@ -60,7 +68,11 @@ PROFIT_TARGETS = [
 ]
 
 # Hard stop-loss (no exceptions)
-HARD_STOP_PCT = float(os.getenv("BLITZKRIEG_STOP_LOSS", "0.01"))  # 1%
+try:
+    HARD_STOP_PCT = float(os.getenv("BLITZKRIEG_STOP_LOSS", "0.01"))
+except (ValueError, TypeError):
+    log.warning("Invalid BLITZKRIEG_STOP_LOSS value, using default: 0.01")
+    HARD_STOP_PCT = 0.01
 
 # Daily market hours (ET)
 MARKET_OPEN = datetime.now(ET).replace(hour=9, minute=30, second=0, microsecond=0)
@@ -68,12 +80,21 @@ MARKET_CLOSE = datetime.now(ET).replace(hour=16, minute=0, second=0, microsecond
 LIQUIDATE_TIME = datetime.now(ET).replace(hour=15, minute=45, second=0, microsecond=0)  # 3:45 PM
 
 # Cycles per day (entry opportunities)
-CYCLES_PER_DAY = int(os.getenv("BLITZKRIEG_CYCLES", "4"))
+try:
+    CYCLES_PER_DAY = int(os.getenv("BLITZKRIEG_CYCLES", "4"))
+except (ValueError, TypeError):
+    log.warning("Invalid BLITZKRIEG_CYCLES value, using default: 4")
+    CYCLES_PER_DAY = 4
+
 CYCLE_INTERVAL_MINUTES = 60  # Roughly one cycle per hour
 
 # Margin usage (increase buying power)
 USE_MARGIN = os.getenv("BLITZKRIEG_USE_MARGIN", "true").lower() == "true"
-MARGIN_MULTIPLIER = float(os.getenv("BLITZKRIEG_MARGIN", "2.0"))  # 2x buying power
+try:
+    MARGIN_MULTIPLIER = float(os.getenv("BLITZKRIEG_MARGIN", "2.0"))
+except (ValueError, TypeError):
+    log.warning("Invalid BLITZKRIEG_MARGIN value, using default: 2.0")
+    MARGIN_MULTIPLIER = 2.0
 
 # ============================================================================
 # DATA STRUCTURES

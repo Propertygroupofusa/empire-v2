@@ -398,7 +398,11 @@ def start():
     if not FASTAPI_OK:
         print("  Install: pip install fastapi uvicorn")
         return
-    port = int(os.getenv("PORT", 8000))
+    try:
+        port = int(os.getenv("PORT", 8000))
+    except (ValueError, TypeError):
+        print("  WARNING: Invalid PORT value, using default: 8000")
+        port = 8000
     print(f"  Dashboard: http://0.0.0.0:{port}")
     print(f"  Bracket orders: {'enabled' if BRACKET_OK else 'disabled'}")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
