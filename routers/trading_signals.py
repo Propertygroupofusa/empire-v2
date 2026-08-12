@@ -12,6 +12,7 @@ import stripe
 import os
 import logging
 import re
+import aiohttp
 
 from database import get_db
 from models import Campaign, CampaignContact
@@ -25,6 +26,12 @@ if stripe.api_key:
     log.info("✅ Stripe API key configured")
 else:
     log.warning("⚠️ Stripe API key not configured - paid tiers disabled")
+
+# Alpaca credentials for trade tracking
+ALPACA_KEY = os.getenv("ALPACA_API_KEY", "")
+ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
+ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+ALPACA_HEADERS = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
 
 # Subscription tiers - FREEMIUM MODE ONLY (paid tiers coming after signal quality proven)
 TIERS = {
@@ -390,6 +397,80 @@ async def unsubscribe(email: str, db: AsyncSession = Depends(get_db)):
 async def subscribe_signals_alias(subscriber: SignalSubscriber, db: AsyncSession = Depends(get_db)):
     """Alias endpoint for /subscribe (routes to /signals/subscribe for frontend compatibility)."""
     return await subscribe_to_signals(subscriber, db)
+
+
+@router.get("/trades/closed")
+async def get_closed_trades():
+    """Get all closed trades with real entry/exit prices and P&L.
+    Shows each trade individually, not bucketed by bot."""
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        raise HTTPException(status_code=500, detail="Alpaca credentials not configured")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            params = {"status": "closed", "direction": "desc", "limit": "500"}
+            async with session.get(f"{ALPACA_BASE_URL}/v2/orders", headers=ALPACA_HEADERS, params=params) as r:
+                if r.status != 200:
+                    raise HTTPException(status_code=502, detail="Failed to fetch orders from Alpaca")
+                orders = await r.json()
+
+            trades = []
+            buy_orders = {}
+
+            for order in orders:
+                if not isinstance(order, dict) or not order.get("filled_at"):
+                    continue
+
+                symbol = order.get("symbol", "?")
+                side = order.get("side", "").lower()
+                qty = float(order.get("filled_qty", 0))
+                price = float(order.get("filled_avg_price", 0))
+                filled_at = order.get("filled_at", "")
+
+                if side == "buy":
+                    buy_orders[symbol] = {
+                        "qty": qty,
+                        "price": price,
+                        "filled_at": filled_at,
+                    }
+                elif side == "sell" and symbol in buy_orders:
+                    buy = buy_orders.pop(symbol)
+                    entry_price = buy["price"]
+                    exit_price = price
+                    entry_qty = buy["qty"]
+
+                    gross_pnl = (exit_price - entry_price) * min(entry_qty, qty)
+                    pnl_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+
+                    trades.append({
+                        "symbol": symbol,
+                        "entry_price": round(entry_price, 2),
+                        "exit_price": round(exit_price, 2),
+                        "qty": round(min(entry_qty, qty), 2),
+                        "entry_at": buy["filled_at"],
+                        "exit_at": filled_at,
+                        "pnl": round(gross_pnl, 2),
+                        "pnl_pct": round(pnl_pct, 2),
+                        "status": "closed",
+                    })
+
+            trades.sort(key=lambda t: t.get("exit_at", ""), reverse=True)
+
+            total_pnl = sum(t["pnl"] for t in trades)
+            winning_trades = len([t for t in trades if t["pnl"] > 0])
+            losing_trades = len([t for t in trades if t["pnl"] < 0])
+
+            return {
+                "trades": trades[:50],
+                "total_trades": len(trades),
+                "total_pnl": round(total_pnl, 2),
+                "winning_trades": winning_trades,
+                "losing_trades": losing_trades,
+                "win_rate": round(winning_trades / len(trades) * 100, 1) if trades else 0,
+            }
+    except Exception as e:
+        log.error(f"Failed to get closed trades: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @router.get("/signals/health")

@@ -71,10 +71,28 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("crypto_coinbase_bot")
 
+# Network resilience cache — stores price data for 30min when API unavailable
+PRICE_CACHE = {}  # {symbol: {"price": float, "rsi": float, "atr": float, "timestamp": datetime}}
+CACHE_TTL_SECONDS = 1800  # 30 minutes
+
 COINBASE_API_KEY_NAME = os.getenv("COINBASE_API_KEY_NAME", "")
 COINBASE_API_PRIVATE_KEY = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\n", "\n")
 COINBASE_HOST = "api.coinbase.com"
 COINBASE_BASE_URL = f"https://{COINBASE_HOST}"
+NETWORK_RETRY_ATTEMPTS = int(os.getenv("NETWORK_RETRY_ATTEMPTS", "3"))
+NETWORK_RETRY_DELAY = float(os.getenv("NETWORK_RETRY_DELAY", "1.0"))  # seconds
+
+try:
+    NETWORK_RETRY_ATTEMPTS = int(os.getenv("NETWORK_RETRY_ATTEMPTS", "3"))
+except (ValueError, TypeError):
+    NETWORK_RETRY_ATTEMPTS = 3
+    log.warning("Invalid NETWORK_RETRY_ATTEMPTS, using default: 3")
+
+try:
+    NETWORK_RETRY_DELAY = float(os.getenv("NETWORK_RETRY_DELAY", "1.0"))
+except (ValueError, TypeError):
+    NETWORK_RETRY_DELAY = 1.0
+    log.warning("Invalid NETWORK_RETRY_DELAY, using default: 1.0")
 
 try:
     NETWORK_RETRY_ATTEMPTS = int(os.getenv("NETWORK_RETRY_ATTEMPTS", "3"))
@@ -400,6 +418,49 @@ async def load_all_rsi_states():
         log.warning(f"[CRYPTO] Initialized {len(RSI_STATE_CACHE)} symbols with default state")
 
 
+def cache_price_data(symbol: str, price_data: dict):
+    """Store price/RSI data locally for offline mode (Railway network unavailable).
+    Cache expires after 30 minutes."""
+    global PRICE_CACHE
+    PRICE_CACHE[symbol] = {
+        **price_data,
+        "timestamp": datetime.utcnow(),
+        "source": "coinbase"
+    }
+
+
+def get_cached_price(symbol: str, max_age_seconds: int = CACHE_TTL_SECONDS) -> dict:
+    """Retrieve cached price data if fresh (<30min old). Returns None if expired/missing."""
+    if symbol not in PRICE_CACHE:
+        return None
+
+    cached = PRICE_CACHE[symbol]
+    age = (datetime.utcnow() - cached["timestamp"]).total_seconds()
+
+    if age > max_age_seconds:
+        del PRICE_CACHE[symbol]  # Expire old cache
+        return None
+
+    return cached
+
+
+async def _retry_with_backoff(async_func, max_attempts: int = None):
+    """Retry network calls with exponential backoff. Falls back to cache on persistent failure."""
+    attempts = max_attempts or NETWORK_RETRY_ATTEMPTS
+    delay = NETWORK_RETRY_DELAY
+
+    for attempt in range(attempts):
+        try:
+            return await async_func()
+        except Exception as e:
+            if attempt == attempts - 1:
+                log.debug(f"Retry exhausted after {attempts} attempts")
+                return None
+
+            await asyncio.sleep(delay)
+            delay *= 1.5  # Exponential backoff: 1s → 1.5s → 2.25s, etc.
+
+
 async def _db_save_open(symbol: str, side: str, entry: float, qty: float):
     try:
         async with AsyncSessionLocal() as db:
@@ -637,17 +698,20 @@ async def _fetch_latest_candle(session, symbol):
 
 async def get_price_rsi(session, symbol):
     """Price+RSI+ATR+directional bias from Coinbase's public candles endpoint.
-    Returns price, RSI, ATR (volatility), 50-bar MA (trend filter), latest candle OHLC, RSI recovery status.
+    Network resilient: retries with backoff, falls back to cache if unavailable.
     Uses MA50 to determine directional bias: only long above MA50, only short below MA50.
-
     RSI recovery: True if RSI is bouncing UP from oversold (useful for entry timing)."""
-    try:
-        candles = await _fetch_coinbase_candles(session, symbol, limit=50)
-        candle = await _fetch_latest_candle(session, symbol)
-    except Exception as e:
-        log.debug(f"coinbase price fetch failed for {symbol}: {e}")
-        candles = None
-        candle = None
+
+    candles = await _retry_with_backoff(
+        lambda: _fetch_coinbase_candles(session, symbol, limit=50),
+        max_attempts=NETWORK_RETRY_ATTEMPTS
+    )
+    candle = None
+    if candles:
+        candle = await _retry_with_backoff(
+            lambda: _fetch_latest_candle(session, symbol),
+            max_attempts=NETWORK_RETRY_ATTEMPTS
+        )
 
     if candles and len(candles) >= 50:
         closes = [float(row[4]) for row in candles]
@@ -660,21 +724,27 @@ async def get_price_rsi(session, symbol):
         ma_50 = sum(closes[-50:]) / 50
         above_ma50 = price > ma_50
 
-        # RSI recovery: detect if RSI is bouncing UP from oversold zone
-        # True if: current RSI < 30 AND price is trending up (latest close > prior close)
-        # Direct price comparison is more reliable than re-computing RSI on different candle windows
         rsi_recovery = False
         if len(closes) >= 2:
-            rsi_recovery = (rsi < 30 and closes[-1] > closes[-2])  # In oversold and price bouncing up
+            rsi_recovery = (rsi < 30 and closes[-1] > closes[-2])
 
-        return {
+        result = {
             "price": price, "rsi": rsi, "atr": atr,
             "ma_50": ma_50, "in_uptrend": above_ma50,
             "candle": candle,
-            "rsi_recovery": rsi_recovery,  # True if RSI bouncing from oversold
+            "rsi_recovery": rsi_recovery,
         }
+        cache_price_data(symbol, result)  # Cache successful result
+        return result
 
-    log.error(f"❌ {symbol}: coinbase price fetch failed (need 50+ candles)")
+    # Network failed or insufficient data — try cache
+    cached = get_cached_price(symbol)
+    if cached:
+        log.warning(f"⚠️ {symbol}: Using cached price data ({(datetime.utcnow() - cached['timestamp']).total_seconds() / 60:.1f} min old)")
+        # Remove timestamp before returning
+        return {k: v for k, v in cached.items() if k != 'timestamp'}
+
+    log.error(f"❌ {symbol}: coinbase price fetch failed and no cache available")
     return None
 
 
@@ -1084,21 +1154,55 @@ async def run_crypto_cycle():
                 tier3_hit = price >= tier3_price
                 rsi_exit = rsi > RSI_SELL_ABOVE and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE
 
+                # Micro-profit-taking: +0.5%, +1.5%, +2.5% (25% each layer)
+                micro_target_1 = entry * 1.005  # +0.5%
+                micro_target_2 = entry * 1.015  # +1.5%
+                micro_target_3 = entry * 1.025  # +2.5%
+                micro_hit_1 = price >= micro_target_1
+                micro_hit_2 = price >= micro_target_2
+                micro_hit_3 = price >= micro_target_3
+
                 latest_signals[symbol] = {
                     "price": price, "rsi": rsi, "status": "HOLDING_LONG",
                     "has_position": True, "checked_at": now.isoformat(),
                     "targets": {
                         "stop": stop_price,
+                        "micro_1": micro_target_1,
+                        "micro_2": micro_target_2,
+                        "micro_3": micro_target_3,
                         "tier1": tier1_price,
                         "tier2": tier2_price,
                         "tier3": tier3_price,
                     }
                 }
+
+                # Track partial sells (how many 25% chunks sold: 0-4)
+                partial_sells = position.get("partial_sells", 0)
+                remaining_qty = qty * (1 - partial_sells * 0.25)  # Qty left to sell
+                sell_qty = qty * 0.25  # 25% of original position
+
                 should_exit = False
+                partial_exit = False
                 reason = None
+
+                # Priority 1: Stop loss (hard exit)
                 if stop_hit:
                     should_exit = True
                     reason = f"STOP LOSS @ ${stop_price:.2f} (-{(1 - price/entry)*100:.2f}%)"
+                # Priority 2: Micro-profit taking (partial exits)
+                elif micro_hit_3 and partial_sells < 3:
+                    partial_exit = True
+                    reason = f"MICRO PROFIT L3 @ ${micro_target_3:.2f} (+0.25%, sell 25%)"
+                    position["partial_sells"] = 3
+                elif micro_hit_2 and partial_sells < 2:
+                    partial_exit = True
+                    reason = f"MICRO PROFIT L2 @ ${micro_target_2:.2f} (+0.15%, sell 25%)"
+                    position["partial_sells"] = 2
+                elif micro_hit_1 and partial_sells < 1:
+                    partial_exit = True
+                    reason = f"MICRO PROFIT L1 @ ${micro_target_1:.2f} (+0.05%, sell 25%)"
+                    position["partial_sells"] = 1
+                # Priority 3: Full exit on tier targets or RSI
                 elif rsi_exit:
                     should_exit = True
                     reason = "RSI EXIT"
@@ -1111,8 +1215,17 @@ async def run_crypto_cycle():
                 elif tier1_hit:
                     should_exit = True
                     reason = f"TIER 1 @ ${tier1_price:.2f} (+{(price/entry - 1)*100:.2f}%, lock early gain)"
-                if should_exit:
-                    filled = await place_order(session, symbol, "sell", qty, price)
+
+                if partial_exit:
+                    # Sell 25% of original position
+                    filled = await place_order(session, symbol, "sell", sell_qty, price)
+                    if filled:
+                        pnl_partial = (price - entry) * sell_qty
+                        daily_pnl += pnl_partial
+                        log.info(f"[CRYPTO] 💰 PARTIAL {symbol} ({reason}) | Qty: {sell_qty:.8f} | P&L: ${pnl_partial:.2f} | Remaining: {remaining_qty:.8f}")
+                elif should_exit:
+                    # Full exit: sell all remaining
+                    filled = await place_order(session, symbol, "sell", remaining_qty if remaining_qty > 0 else qty, price)
                     if filled:
                         daily_pnl += unrealized_pnl
                         log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}")
@@ -1465,3 +1578,64 @@ def run():
 
 if __name__ == "__main__":
     run()
+
+
+# DYNAMIC CAPITAL ROTATION — Track performance per pair and rotate to winners
+PAIR_PERFORMANCE = {}  # {symbol: {"wins": int, "losses": int, "total_pnl": float, "last_trade_at": datetime}}
+
+def update_pair_performance(symbol, exit_price, entry_price, quantity):
+    """Track win/loss and P&L for each pair to enable capital rotation."""
+    if symbol not in PAIR_PERFORMANCE:
+        PAIR_PERFORMANCE[symbol] = {
+            "wins": 0,
+            "losses": 0,
+            "total_pnl": 0.0,
+            "last_trade_at": datetime.utcnow(),
+            "win_rate": 0.0
+        }
+    
+    pnl = (exit_price - entry_price) * quantity
+    PAIR_PERFORMANCE[symbol]["total_pnl"] += pnl
+    
+    if pnl > 0:
+        PAIR_PERFORMANCE[symbol]["wins"] += 1
+    elif pnl < 0:
+        PAIR_PERFORMANCE[symbol]["losses"] += 1
+    
+    total_trades = PAIR_PERFORMANCE[symbol]["wins"] + PAIR_PERFORMANCE[symbol]["losses"]
+    if total_trades > 0:
+        PAIR_PERFORMANCE[symbol]["win_rate"] = PAIR_PERFORMANCE[symbol]["wins"] / total_trades * 100
+    
+    PAIR_PERFORMANCE[symbol]["last_trade_at"] = datetime.utcnow()
+
+
+def get_high_conviction_pairs():
+    """Return pairs with win rate > 40% in priority order."""
+    candidates = []
+    for symbol, perf in PAIR_PERFORMANCE.items():
+        if perf.get("win_rate", 0) >= 40:
+            candidates.append((symbol, perf["win_rate"], perf["total_pnl"]))
+    
+    # Sort by win rate (desc), then by total P&L (desc)
+    candidates.sort(key=lambda x: (x[1], x[2]), reverse=True)
+    return [c[0] for c in candidates]
+
+
+def get_position_size_multiplier(symbol):
+    """Scale position size based on recent wins (up to 2x on hot streaks)."""
+    if symbol not in PAIR_PERFORMANCE:
+        return 1.0
+    
+    # If pair has 3+ consecutive wins, use 1.5x
+    # If pair has 5+ consecutive wins, use 2.0x
+    wins = PAIR_PERFORMANCE[symbol].get("wins", 0)
+    
+    if wins >= 5:
+        return min(2.0, 1.0 + (wins - 3) * 0.25)  # 2.0x max
+    elif wins >= 3:
+        return 1.5
+    else:
+        return 1.0
+
+
+# END DYNAMIC CAPITAL ROTATION

@@ -16,6 +16,8 @@ once you've done that - this is bookkeeping, not a real money-movement API.
 
 import os
 import logging
+import asyncio
+import uuid
 from datetime import datetime, timezone
 
 import aiohttp
@@ -195,6 +197,84 @@ async def _fetch_todays_filled_orders(session: aiohttp.ClientSession) -> list:
         except Exception as e:
             log.warning(f"Failed to parse orders: {e}")
             return []
+
+
+@router.get("/trades/closed")
+async def get_closed_trades():
+    """Get all closed trades with real entry/exit prices and P&L.
+    Shows each trade individually, not bucketed by bot."""
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        raise HTTPException(status_code=500, detail="Alpaca credentials not configured")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Fetch closed orders from last 30 days
+            params = {"status": "closed", "direction": "desc", "limit": "500"}
+            async with session.get(f"{ALPACA_BASE_URL}/v2/orders", headers=ALPACA_HEADERS, params=params) as r:
+                if r.status != 200:
+                    raise HTTPException(status_code=502, detail="Failed to fetch orders from Alpaca")
+                orders = await r.json()
+
+            # Group buy/sell pairs to calculate P&L per round-trip trade
+            trades = []
+            buy_orders = {}
+
+            for order in orders:
+                if not isinstance(order, dict) or not order.get("filled_at"):
+                    continue
+
+                symbol = order.get("symbol", "?")
+                side = order.get("side", "").lower()
+                qty = float(order.get("filled_qty", 0))
+                price = float(order.get("filled_avg_price", 0))
+                filled_at = order.get("filled_at", "")
+
+                if side == "buy":
+                    buy_orders[symbol] = {
+                        "qty": qty,
+                        "price": price,
+                        "filled_at": filled_at,
+                    }
+                elif side == "sell" and symbol in buy_orders:
+                    buy = buy_orders.pop(symbol)
+                    entry_price = buy["price"]
+                    exit_price = price
+                    entry_qty = buy["qty"]
+
+                    # Calculate P&L
+                    gross_pnl = (exit_price - entry_price) * min(entry_qty, qty)
+                    pnl_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+
+                    trades.append({
+                        "symbol": symbol,
+                        "entry_price": round(entry_price, 2),
+                        "exit_price": round(exit_price, 2),
+                        "qty": round(min(entry_qty, qty), 2),
+                        "entry_at": buy["filled_at"],
+                        "exit_at": filled_at,
+                        "pnl": round(gross_pnl, 2),
+                        "pnl_pct": round(pnl_pct, 2),
+                        "status": "closed",
+                    })
+
+            # Sort by exit date, newest first
+            trades.sort(key=lambda t: t.get("exit_at", ""), reverse=True)
+
+            total_pnl = sum(t["pnl"] for t in trades)
+            winning_trades = len([t for t in trades if t["pnl"] > 0])
+            losing_trades = len([t for t in trades if t["pnl"] < 0])
+
+            return {
+                "trades": trades[:50],  # Last 50 closed trades
+                "total_trades": len(trades),
+                "total_pnl": round(total_pnl, 2),
+                "winning_trades": winning_trades,
+                "losing_trades": losing_trades,
+                "win_rate": round(winning_trades / len(trades) * 100, 1) if trades else 0,
+            }
+    except Exception as e:
+        log.error(f"Failed to get closed trades: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @router.get("/status", dependencies=[Depends(require_admin_key)])
@@ -609,3 +689,238 @@ async def get_account_balance():
         "day_trading_buying_power": round(float(account.get("daytrading_buying_power", 0)), 2),
         "cash_withdrawable": round(float(account.get("cash", 0)), 2),
     }
+
+
+@router.get("/coinbase/balances")
+async def get_coinbase_balances():
+    """Get real Coinbase account balances with unrealized P&L per position.
+    Shows holdings, entry prices, current prices, and profit per coin."""
+    try:
+        import crypto_coinbase_bot
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Crypto bot not available")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Fetch current prices for all holdings
+            holdings = {}
+            for symbol in crypto_coinbase_bot.CRYPTO_PAIRS:
+                pair = symbol.replace("/", "-")
+                url = f"https://api.exchange.coinbase.com/products/{pair}/ticker"
+                try:
+                    async with session.get(url, headers={"Accept": "application/json"}) as r:
+                        if r.status == 200:
+                            data = await r.json()
+                            current_price = float(data.get("price", 0))
+                            holdings[symbol] = {"current_price": current_price}
+                except Exception:
+                    holdings[symbol] = {"current_price": 0}
+                await asyncio.sleep(0.05)  # Rate limit
+
+            # Get open positions from bot's in-memory dict
+            positions = crypto_coinbase_bot.open_crypto_positions
+
+            result = []
+            total_value = 0
+            total_unrealized_pnl = 0
+
+            for symbol, pos in positions.items():
+                entry_price = pos.get("entry_price", 0)
+                qty = pos.get("qty", 0)
+                current_price = holdings.get(symbol, {}).get("current_price", entry_price)
+
+                entry_value = entry_price * qty
+                current_value = current_price * qty
+                unrealized_pnl = current_value - entry_value
+                unrealized_pct = (unrealized_pnl / entry_value * 100) if entry_value > 0 else 0
+
+                total_value += current_value
+                total_unrealized_pnl += unrealized_pnl
+
+                result.append({
+                    "symbol": symbol,
+                    "qty": round(qty, 8),
+                    "entry_price": round(entry_price, 4),
+                    "current_price": round(current_price, 4),
+                    "entry_value": round(entry_value, 2),
+                    "current_value": round(current_value, 2),
+                    "unrealized_pnl": round(unrealized_pnl, 2),
+                    "unrealized_pct": round(unrealized_pct, 2),
+                    "targets": pos.get("targets", {}),
+                })
+
+            return {
+                "positions": result,
+                "total_value": round(total_value, 2),
+                "total_unrealized_pnl": round(total_unrealized_pnl, 2),
+                "position_count": len(result),
+            }
+    except Exception as e:
+        log.error(f"Failed to fetch Coinbase balances: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch balances: {str(e)}")
+
+
+class CoinbaseSellRequest(BaseModel):
+    symbol: str
+    qty: float = None  # If None, sell full position
+
+
+@router.post("/coinbase/sell")
+async def manual_sell_coinbase(req: CoinbaseSellRequest):
+    """Manually sell a Coinbase position at market price.
+    Keep stop loss active, but user decides when to lock in profit."""
+    try:
+        import crypto_coinbase_bot
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Crypto bot not available")
+
+    symbol = req.symbol
+    qty_to_sell = req.qty
+
+    # Check if position exists
+    if symbol not in crypto_coinbase_bot.open_crypto_positions:
+        raise HTTPException(status_code=404, detail=f"No open position for {symbol}")
+
+    position = crypto_coinbase_bot.open_crypto_positions[symbol]
+    if qty_to_sell is None:
+        qty_to_sell = position["qty"]
+
+    if qty_to_sell > position["qty"]:
+        raise HTTPException(status_code=400, detail=f"Cannot sell {qty_to_sell}, only {position['qty']} available")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Get current price
+            pair = symbol.replace("/", "-")
+            url = f"https://api.exchange.coinbase.com/products/{pair}/ticker"
+            async with session.get(url) as r:
+                data = await r.json()
+                current_price = float(data.get("price", 0))
+
+            # Place market sell order (use market_ioc for immediate execution)
+            product_id = symbol.replace("/", "-")
+            path = "/api/v3/brokerage/orders"
+            order_config = {
+                "market_ioc": {
+                    "base_size": f"{qty_to_sell:.8f}"
+                }
+            }
+            order = {
+                "client_order_id": str(uuid.uuid4()),
+                "product_id": product_id,
+                "side": "SELL",
+                "order_configuration": order_config,
+            }
+
+            headers = crypto_coinbase_bot._auth_headers("POST", path)
+            async with session.post(crypto_coinbase_bot.COINBASE_BASE_URL + path, headers=headers, json=order) as r:
+                result = await r.json()
+                if r.status not in (200, 201) or not result.get("success", True):
+                    raise HTTPException(status_code=502, detail=f"Order failed: {result.get('error_response', result)}")
+
+            # Update position in bot
+            entry_price = position["entry_price"]
+            realized_pnl = (current_price - entry_price) * qty_to_sell
+
+            if qty_to_sell >= position["qty"]:
+                # Full close
+                crypto_coinbase_bot.open_crypto_positions.pop(symbol, None)
+                return {
+                    "status": "closed",
+                    "symbol": symbol,
+                    "qty_sold": round(qty_to_sell, 8),
+                    "sell_price": round(current_price, 4),
+                    "entry_price": round(entry_price, 4),
+                    "realized_pnl": round(realized_pnl, 2),
+                    "realized_pct": round((realized_pnl / (entry_price * qty_to_sell) * 100), 2) if entry_price > 0 else 0,
+                }
+            else:
+                # Partial close
+                position["qty"] -= qty_to_sell
+                return {
+                    "status": "partial",
+                    "symbol": symbol,
+                    "qty_sold": round(qty_to_sell, 8),
+                    "qty_remaining": round(position["qty"], 8),
+                    "sell_price": round(current_price, 4),
+                    "entry_price": round(entry_price, 4),
+                    "realized_pnl": round(realized_pnl, 2),
+                    "realized_pct": round((realized_pnl / (entry_price * qty_to_sell) * 100), 2) if entry_price > 0 else 0,
+                }
+    except Exception as e:
+        log.error(f"Manual sell failed for {symbol}: {e}")
+        raise HTTPException(status_code=502, detail=f"Sell failed: {str(e)}")
+
+
+@router.get("/coinbase/usd-balance")
+async def get_coinbase_usd_balance():
+    """Get real-time Coinbase USD cash balance (not holdings, just cash).
+    This is the trading capital available for entries."""
+    import jwt
+    import time
+    import base64
+
+    coinbase_key_name = os.getenv("COINBASE_API_KEY_NAME", "")
+    coinbase_private_key = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\n", "\n")
+
+    if not (coinbase_key_name and coinbase_private_key):
+        return {"usd_balance": 0, "status": "unconfigured"}
+
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.backends import default_backend
+
+        raw = coinbase_private_key.strip()
+        if raw.startswith("-----BEGIN"):
+            private_key = serialization.load_pem_private_key(raw.encode(), password=None, backend=default_backend())
+            algorithm = "ES256"
+        else:
+            decoded = base64.b64decode(raw)
+            private_key = Ed25519PrivateKey.from_private_bytes(decoded[:32])
+            algorithm = "EdDSA"
+
+        now = int(time.time())
+        payload = {
+            "sub": coinbase_key_name,
+            "iss": "cdp",
+            "nbf": now,
+            "exp": now + 120,
+            "uri": "GET /api/v3/brokerage/accounts",
+        }
+        jwt_token = jwt.encode(payload, private_key, algorithm=algorithm)
+
+        headers = {
+            "Authorization": f"Bearer {jwt_token}",
+            "Content-Type": "application/json",
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://api.coinbase.com/api/v3/brokerage/accounts",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status != 200:
+                    log.error(f"Coinbase API returned {resp.status}")
+                    return {"usd_balance": 0, "status": "error", "detail": f"HTTP {resp.status}"}
+
+                data = await resp.json()
+                accounts = data.get("accounts", [])
+
+                usd_account = next(
+                    (a for a in accounts if a.get("currency") == "USD"),
+                    None
+                )
+
+                balance = round(float(usd_account.get("available_balance", {}).get("value", 0)), 2) if usd_account else 0.0
+                return {
+                    "usd_balance": balance,
+                    "status": "ok",
+                    "currency": "USD",
+                    "account_type": "Coinbase Advanced Trade"
+                }
+
+    except Exception as e:
+        log.error(f"Coinbase USD balance fetch failed: {e}")
+        return {"usd_balance": 0, "status": "error", "detail": str(e)}
