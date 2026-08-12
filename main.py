@@ -1951,5 +1951,9 @@ async def get_bot_status():
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
+    try:
+        port = int(os.getenv("PORT", 8000))
+    except (ValueError, TypeError):
+        log.warning("Invalid PORT value, using default: 8000")
+        port = 8000
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)

@@ -161,22 +161,49 @@ def _auth_headers(method: str, path: str) -> dict:
 RSI_STRONG_BUY = 25   # RSI < 25 = oversold, strong reversal signal
 RSI_BUY = 50          # RSI < 50 = oversold/neutral zone, widened for faster entry (test phase)
 RSI_NO_ENTRY = 60     # RSI >= 60 = overbought, skip LONG entries only (lowered from 50, allows 40-60 zone)
-RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "75"))    # Exit threshold for LONG (raised from 70)
-RSI_BUY_BELOW = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "10"))      # Fallback for legacy env var (deprecated)
+try:
+    RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "75"))
+except (ValueError, TypeError):
+    log.warning("Invalid CRYPTO_RSI_SELL_ABOVE value, using default: 75")
+    RSI_SELL_ABOVE = 75.0
 
-MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "18"))  # Expanded to 18: more concurrent longs in high-velocity markets
+try:
+    RSI_BUY_BELOW = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "10"))
+except (ValueError, TypeError):
+    log.warning("Invalid CRYPTO_RSI_BUY_BELOW value, using default: 10")
+    RSI_BUY_BELOW = 10.0
+
+try:
+    MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "18"))
+except (ValueError, TypeError):
+    log.warning("Invalid CRYPTO_MAX_POSITIONS value, using default: 18")
+    MAX_POSITIONS = 18
+
 # Unset by default - no ceiling, so the full account balance (principal +
 # compounded profit) is always in play. Set CRYPTO_MAX_ALLOCATION to cap
 # it at a fixed dollar amount instead, if ever wanted.
 _max_allocation_env = os.getenv("CRYPTO_MAX_ALLOCATION", "")
-MAX_ALLOCATION = float(_max_allocation_env) if _max_allocation_env else None
+try:
+    MAX_ALLOCATION = float(_max_allocation_env) if _max_allocation_env else None
+except (ValueError, TypeError):
+    log.warning("Invalid CRYPTO_MAX_ALLOCATION value, using default: None")
+    MAX_ALLOCATION = None
+
 # Micro-trades on small balances: $0.50 minimum lets bot scalp $0.58-100 accounts
 # without sitting idle. At $0.58 balance: $0.50 × 0.5% move = $0.0025 profit (micro-compounding)
 # $100+ balance: trades full notional, beats fees, compounds faster.
-MIN_POSITION_NOTIONAL = float(os.getenv("CRYPTO_MIN_POSITION_NOTIONAL", "0.50"))
+try:
+    MIN_POSITION_NOTIONAL = float(os.getenv("CRYPTO_MIN_POSITION_NOTIONAL", "0.50"))
+except (ValueError, TypeError):
+    log.warning("Invalid CRYPTO_MIN_POSITION_NOTIONAL value, using default: 0.50")
+    MIN_POSITION_NOTIONAL = 0.50
 
 # Minimum trade size guard: skip trading if cash pool is too small to be meaningful
-MIN_CRYPTO_TRADE_USD = float(os.getenv("MIN_CRYPTO_TRADE_USD", "5.00"))
+try:
+    MIN_CRYPTO_TRADE_USD = float(os.getenv("MIN_CRYPTO_TRADE_USD", "5.00"))
+except (ValueError, TypeError):
+    log.warning("Invalid MIN_CRYPTO_TRADE_USD value, using default: 5.00")
+    MIN_CRYPTO_TRADE_USD = 5.00
 
 # Staged capital release, requested after watching the account get drawn
 # down to single-digit cents trading with 100% of the balance every cycle:
@@ -189,7 +216,11 @@ MIN_CRYPTO_TRADE_USD = float(os.getenv("MIN_CRYPTO_TRADE_USD", "5.00"))
 # losing streak can't eat into gains that already "graduated" to the next
 # tier. Set CRYPTO_TIER_SIZE=0 to disable and go back to trading 100% of
 # the balance (or whatever CRYPTO_MAX_ALLOCATION caps it at) every cycle.
-TIER_SIZE = float(os.getenv("CRYPTO_TIER_SIZE", "100"))
+try:
+    TIER_SIZE = float(os.getenv("CRYPTO_TIER_SIZE", "100"))
+except (ValueError, TypeError):
+    log.warning("Invalid CRYPTO_TIER_SIZE value, using default: 100")
+    TIER_SIZE = 100.0
 
 
 def get_unlocked_tier(balance: float) -> float:
@@ -239,7 +270,11 @@ async def set_tier_highwater(value: float):
 # Coinbase trading cost: 0.40% total round-trip assumption = 0.20% entry + 0.20% exit
 # This is used only to size the profit target sensibly, not charged/simulated here
 # (the real fee is already reflected in Coinbase's fill price/balance).
-CRYPTO_ROUND_TRIP_FEE_RATE = float(os.getenv("CRYPTO_ROUND_TRIP_FEE_RATE", "0.004"))
+try:
+    CRYPTO_ROUND_TRIP_FEE_RATE = float(os.getenv("CRYPTO_ROUND_TRIP_FEE_RATE", "0.004"))
+except (ValueError, TypeError):
+    log.warning("Invalid CRYPTO_ROUND_TRIP_FEE_RATE value, using default: 0.004")
+    CRYPTO_ROUND_TRIP_FEE_RATE = 0.004
 
 # DEPRECATED: Fixed 37% target replaced with tiered system (see CRYPTO_TIER_LEVELS above)
 # The old fixed target was mathematically unsound: 18.5:1 reward/risk meant the bot held
