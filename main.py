@@ -1002,7 +1002,7 @@ async def lifespan(app: FastAPI):
         _spec.loader.exec_module(_mod)
         await _mod.migrate()
     except Exception as e:
-        log.warning(f"notary_payouts.job_id type migration failed: {e}")
+        log.warning(f"notary_payouts job_id/worker_id type migration failed: {e}")
 
     try:
         await create_monitor_tables()

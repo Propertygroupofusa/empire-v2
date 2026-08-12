@@ -542,15 +542,15 @@ class NotaryPayout(Base):
     __tablename__ = "notary_payouts"
 
     id = Column(Integer, primary_key=True, index=True)
-    # VARCHAR, not Integer: jobs.id is a VARCHAR primary key in production
-    # (see Job model / migrations/0002_fix_notary_payouts_job_id_type.py),
-    # so an Integer column here makes this FK impossible to create -
-    # "foreign key constraint notary_payouts_job_id_fkey cannot be
-    # implemented / Key columns job_id are of incompatible types: integer
-    # and character varying", raised straight out of Base.metadata.create_all()
-    # at startup.
+    # VARCHAR, not Integer: jobs.id and workers.id are VARCHAR primary keys
+    # in production (see Job/Worker models / migrations/
+    # 0002_fix_notary_payouts_job_id_type.py), so Integer columns here make
+    # these FKs impossible to create - "foreign key constraint
+    # notary_payouts_<col>_fkey cannot be implemented / Key columns
+    # incompatible types: integer and character varying", raised straight
+    # out of Base.metadata.create_all() at startup.
     job_id = Column(String, ForeignKey("jobs.id"), index=True)
-    worker_id = Column(Integer, ForeignKey("workers.id"), index=True)
+    worker_id = Column(String, ForeignKey("workers.id"), index=True)
     amount = Column(Float)  # USD, the notary's cut
     status = Column(String, default="owed", index=True)  # owed, requested, paid
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
