@@ -158,26 +158,26 @@ def _auth_headers(method: str, path: str) -> dict:
 
 # AGGRESSIVE THRESHOLDS for high-velocity trading in overbought/oversold markets
 # Long-only: Coinbase SPOT has no shorting support
-RSI_STRONG_BUY = 25   # RSI < 25 = oversold, strong reversal signal
-RSI_BUY = 50          # RSI < 50 = oversold/neutral zone, widened for faster entry (test phase)
-RSI_NO_ENTRY = 60     # RSI >= 60 = overbought, skip LONG entries only (lowered from 50, allows 40-60 zone)
+RSI_STRONG_BUY = 35   # RSI < 35 = oversold, aggressive entry zone
+RSI_BUY = 50          # RSI < 50 = oversold/neutral zone, wide zone for continuous entry
+RSI_NO_ENTRY = 75     # RSI >= 75 = extremely overbought, skip entries (allow entries up to 74 RSI)
 try:
-    RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "75"))
+    RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "60"))
 except (ValueError, TypeError):
-    log.warning("Invalid CRYPTO_RSI_SELL_ABOVE value, using default: 75")
-    RSI_SELL_ABOVE = 75.0
+    log.warning("Invalid CRYPTO_RSI_SELL_ABOVE value, using default: 60")
+    RSI_SELL_ABOVE = 60.0
 
 try:
-    RSI_BUY_BELOW = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "10"))
+    RSI_BUY_BELOW = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "40"))
 except (ValueError, TypeError):
-    log.warning("Invalid CRYPTO_RSI_BUY_BELOW value, using default: 10")
-    RSI_BUY_BELOW = 10.0
+    log.warning("Invalid CRYPTO_RSI_BUY_BELOW value, using default: 40")
+    RSI_BUY_BELOW = 40.0
 
 try:
-    MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "18"))
+    MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "24"))
 except (ValueError, TypeError):
-    log.warning("Invalid CRYPTO_MAX_POSITIONS value, using default: 18")
-    MAX_POSITIONS = 18
+    log.warning("Invalid CRYPTO_MAX_POSITIONS value, using default: 24")
+    MAX_POSITIONS = 24
 
 # Unset by default - no ceiling, so the full account balance (principal +
 # compounded profit) is always in play. Set CRYPTO_MAX_ALLOCATION to cap
@@ -200,10 +200,10 @@ except (ValueError, TypeError):
 
 # Minimum trade size guard: skip trading if cash pool is too small to be meaningful
 try:
-    MIN_CRYPTO_TRADE_USD = float(os.getenv("MIN_CRYPTO_TRADE_USD", "5.00"))
+    MIN_CRYPTO_TRADE_USD = float(os.getenv("MIN_CRYPTO_TRADE_USD", "1.50"))
 except (ValueError, TypeError):
-    log.warning("Invalid MIN_CRYPTO_TRADE_USD value, using default: 5.00")
-    MIN_CRYPTO_TRADE_USD = 5.00
+    log.warning("Invalid MIN_CRYPTO_TRADE_USD value, using default: 1.50")
+    MIN_CRYPTO_TRADE_USD = 1.50
 
 # Staged capital release, requested after watching the account get drawn
 # down to single-digit cents trading with 100% of the balance every cycle:
@@ -525,29 +525,31 @@ def _compute_atr(closes: list, highs: list, lows: list, period: int = 14) -> flo
 
 
 def _crypto_buy_signal_improved(rsi: float, rsi_recovery: bool, volume_ratio: float, close_position: float, entered_oversold: bool) -> str:
-    """Improved entry signal: tiered RSI + recovery trigger + momentum/volume confirmation.
-    Returns: "STRONG_BUY" (RSI < 20 + bounce), "BUY" (20-30 + bounce), or "NO_ACTION"
+    """AGGRESSIVE entry signal for continuous compounding: lower thresholds for frequent trades.
+    Returns: "STRONG_BUY" (RSI < 35) or "BUY" (35-50), or "NO_ACTION"
 
-    Key improvement: Only enter when RSI has ENTERED the oversold zone (10-30) AND
-    is BOUNCING upward (rsi_recovery=True), not just when it enters oversold.
-    This avoids catching falling knives and ensures we capture real reversals."""
+    Optimized for smaller positions and active capital deployment."""
 
     # Must have entered oversold zone before we can enter
     if not entered_oversold:
         return "NO_ACTION"
 
-    # Don't enter if RSI isn't recovering (still falling) - wait for bounce
-    if not rsi_recovery:
-        return "NO_ACTION"
+    # Enter on RSI recovery (or allow entry even without strong recovery for faster deployment)
+    # Relax the recovery requirement for aggressive mode
 
-    # Extreme oversold: strong reversal signal
-    if rsi < RSI_STRONG_BUY:  # RSI < 20
-        if volume_ratio >= 1.5 and close_position >= 0.50:
+    # Extreme oversold: strong reversal signal (RSI < 35)
+    if rsi < RSI_STRONG_BUY:  # RSI < 35 (aggressive)
+        # Lower volume/candle requirements for aggressive trading
+        if volume_ratio >= 1.0 and close_position >= 0.40:
+            return "STRONG_BUY"
+        # Even without perfect setup, enter if RSI < 20
+        if rsi < 20:
             return "STRONG_BUY"
 
-    # Oversold recovery: normal reversal signal
-    if RSI_STRONG_BUY <= rsi < RSI_BUY:  # 20 <= RSI < 30
-        if volume_ratio >= 1.5 and close_position >= 0.60:  # Stricter candle filter
+    # Oversold recovery zone: normal entry (35-50 RSI)
+    if RSI_STRONG_BUY <= rsi < RSI_BUY:  # 35-50 RSI
+        # Relaxed requirements for more frequent entries
+        if volume_ratio >= 1.0 and close_position >= 0.45:
             return "BUY"
 
     return "NO_ACTION"
@@ -1000,10 +1002,10 @@ async def run_crypto_cycle():
             cash_pool = min(cash, unlocked, MAX_ALLOCATION) if MAX_ALLOCATION is not None else min(cash, unlocked)
 
         # CRITICAL: Dynamic floor & aggressive growth strategy
-        BALANCE_FLOOR = 1990.00  # If drops to $1,990, resume aggressive trading
-        PROFIT_LOCK_ACTIVATION = 2000.10  # When balance hits $2,000.10+, take profits
-        TARGET_TRADE_PROFIT = 10.00  # Close trades with $10+ profit when activated
-        GROWTH_TARGET = 2000.00  # Seek to go above and beyond $2,000
+        BALANCE_FLOOR = 400.00  # If drops to $400, resume aggressive trading
+        PROFIT_LOCK_ACTIVATION = 750.00  # When balance hits $750+, take profits
+        TARGET_TRADE_PROFIT = 2.50  # Close trades with $2.50+ profit when activated
+        GROWTH_TARGET = 1000.00  # Seek to grow beyond $1,000
 
         is_at_floor = cash is not None and cash <= BALANCE_FLOOR
         should_take_profits = cash is not None and cash >= PROFIT_LOCK_ACTIVATION
