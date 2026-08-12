@@ -20,6 +20,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # all - they'd fail immediately on deploy.
 COPY . .
 
+# Ensure start command scripts are executable. Railway checks execute
+# permissions at container creation time (before the start command runs),
+# so this must be baked into the image rather than handled at runtime.
+RUN chmod +x video_generator_bot.py video_auto_editor.py video_editor_api.py run_server.sh
+
 # Create directories
 RUN mkdir -p video_uploads video_temp video_exports
 

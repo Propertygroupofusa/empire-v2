@@ -4,8 +4,8 @@ PROPERTY GROUP USA — DOCUMENTS PLATFORM BACKEND
 Full SaaS backend with worker management, client booking,
 job matching, payments, admin dashboard, and white label API.
 
-VERSION: v2.3-broker-network-recovery
-Deployed: 2026-08-12 02:20 UTC | Broker network recovery - redeploy stable version
+VERSION: v2.3-stable-broker-recovery
+Deployed: 2026-08-12 02:20 UTC | Stable redeploy - broker network recovery
 """
 
 from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks
@@ -986,6 +986,21 @@ async def lifespan(app: FastAPI):
         log.info("Database initialized")
     except Exception as e:
         log.warning(f"Database init failed: {e}")
+
+    # TEMPORARILY DISABLED: notary_payouts migration was causing startup timeout
+    # Will re-enable once migration system is refactored
+    # try:
+    #     import importlib.util
+    #     _spec = importlib.util.spec_from_file_location(
+    #         "fix_notary_payouts_job_id_type",
+    #         os.path.join(os.path.dirname(__file__), "migrations",
+    #                      "0002_fix_notary_payouts_job_id_type.py"),
+    #     )
+    #     _mod = importlib.util.module_from_spec(_spec)
+    #     _spec.loader.exec_module(_mod)
+    #     await _mod.migrate()
+    # except Exception as e:
+    #     log.warning(f"notary_payouts job_id/worker_id type migration failed: {e}")
 
     try:
         await create_monitor_tables()
