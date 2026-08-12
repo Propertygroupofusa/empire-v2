@@ -59,6 +59,7 @@ from sqlalchemy import select
 from database import AsyncSessionLocal
 from models import BotPosition, TradingBotState, CryptoRSIState, CryptoTradeLog
 from bot_mandates import CRYPTO_MANDATE
+from network_config import get_cached_response, cache_response, NETWORK_ENV_CONFIG
 
 # Measurement system: Trade logging with full signal context
 try:
@@ -531,6 +532,8 @@ async def get_usd_balance(session):
     path = "/api/v3/brokerage/accounts"
     all_currencies = []
     cursor = None
+    cache_key = "coinbase_usd_balance"
+
     try:
         while True:
             params = {"limit": 250}
@@ -539,12 +542,21 @@ async def get_usd_balance(session):
             async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path), params=params) as r:
                 if r.status != 200:
                     body = (await r.text())[:300]
+                    # Handle 403 Forbidden (network egress blocked)
+                    if r.status == 403 and "not in allowlist" in body:
+                        cached = get_cached_response(cache_key)
+                        if cached is not None:
+                            log.warning(f"⚠️  [WORKAROUND] API blocked (403), using cached USD balance: ${cached}")
+                            return cached, None
+                        return None, f"HTTP 403: Egress blocked. No cache available. Fix: Add api.coinbase.com to Railway egress allowlist"
                     return None, f"HTTP {r.status}: {body}"
                 data = await r.json()
                 accounts = data.get("accounts", [])
                 for account in accounts:
                     if account.get("currency") == "USD":
-                        return float(account["available_balance"]["value"]), None
+                        balance = float(account["available_balance"]["value"])
+                        cache_response(cache_key, balance, NETWORK_ENV_CONFIG.get("cache_ttl", 300))
+                        return balance, None
                 all_currencies.extend(a.get("currency") for a in accounts)
                 if not data.get("has_next") or not data.get("cursor"):
                     break
@@ -648,19 +660,34 @@ def _calculate_atr_targets(entry_price: float, atr: float) -> dict:
 async def _fetch_coinbase_candles(session, symbol, limit=50):
     """Fetch OHLCV candles for RSI, ATR, and directional bias calculation.
     Returns list of candles (newest first in API, reversed to chronological for analysis).
-    Each candle: [time, low, high, open, close, volume]"""
+    Each candle: [time, low, high, open, close, volume]
+    On 403 (egress blocked), uses cached candles if available."""
     pair = _to_product_id(symbol)
     url = f"https://api.exchange.coinbase.com/products/{pair}/candles?granularity=300"
+    cache_key = f"candles_{symbol}"
     try:
         async with session.get(url, headers={"Accept": "application/json"}) as r:
             if r.status != 200:
+                # Check cache on 403 (egress blocked)
+                if r.status == 403:
+                    cached = get_cached_response(cache_key)
+                    if cached is not None:
+                        log.warning(f"⚠️  [WORKAROUND] Candles API blocked (403) for {symbol}, using cache")
+                        return cached
                 return None
             data = await r.json()
             if not data or len(data) < limit:
                 return None
             # Coinbase returns newest-first; reverse to chronological order
-            return list(reversed(data))[-limit:]
+            candles = list(reversed(data))[-limit:]
+            cache_response(cache_key, candles, NETWORK_ENV_CONFIG.get("cache_ttl", 300))
+            return candles
     except Exception:
+        # On error, try cache as fallback
+        cached = get_cached_response(cache_key)
+        if cached:
+            log.warning(f"⚠️  [WORKAROUND] Candles fetch error for {symbol}, using cache")
+            return cached
         return None
 
 
@@ -674,26 +701,43 @@ async def _fetch_coinbase_closes(session, symbol):
 
 async def _fetch_latest_candle(session, symbol):
     """Fetch latest 5-minute candle OHLC data + volume for momentum & volume confirmation.
-    Returns candle dict with open, close, high, low, volume, and prior candle volume or None if fetch fails."""
+    Returns candle dict with open, close, high, low, volume, and prior candle volume or None if fetch fails.
+    On 403 (egress blocked), uses cached latest candle if available."""
     pair = _to_product_id(symbol)
     url = f"https://api.exchange.coinbase.com/products/{pair}/candles?granularity=300"
-    async with session.get(url, headers={"Accept": "application/json"}) as r:
-        if r.status != 200:
-            return None
-        data = await r.json()
-        if not data or len(data) < 2:
-            return None
-        # Latest candle is first in response; each row is [time, low, high, open, close, volume]
-        latest = data[0]
-        prior = data[1] if len(data) > 1 else None
-        return {
-            "open": float(latest[3]),
-            "close": float(latest[4]),
-            "high": float(latest[2]),
-            "low": float(latest[1]),
-            "volume": float(latest[5]),
-            "prior_volume": float(prior[5]) if prior else 0,
-        }
+    cache_key = f"latest_candle_{symbol}"
+    try:
+        async with session.get(url, headers={"Accept": "application/json"}) as r:
+            if r.status != 200:
+                # Check cache on 403
+                if r.status == 403:
+                    cached = get_cached_response(cache_key)
+                    if cached is not None:
+                        log.warning(f"⚠️  [WORKAROUND] Latest candle API blocked (403) for {symbol}, using cache")
+                        return cached
+                return None
+            data = await r.json()
+            if not data or len(data) < 2:
+                return None
+            # Latest candle is first in response; each row is [time, low, high, open, close, volume]
+            latest = data[0]
+            prior = data[1] if len(data) > 1 else None
+            candle = {
+                "open": float(latest[3]),
+                "close": float(latest[4]),
+                "high": float(latest[2]),
+                "low": float(latest[1]),
+                "volume": float(latest[5]),
+                "prior_volume": float(prior[5]) if prior else 0,
+            }
+            cache_response(cache_key, candle, NETWORK_ENV_CONFIG.get("cache_ttl", 300))
+            return candle
+    except Exception:
+        cached = get_cached_response(cache_key)
+        if cached:
+            log.warning(f"⚠️  [WORKAROUND] Latest candle fetch error for {symbol}, using cache")
+            return cached
+        return None
 
 
 async def get_price_rsi(session, symbol):
