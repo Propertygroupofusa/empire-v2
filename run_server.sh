@@ -1,6 +1,7 @@
 #!/bin/bash
 # Empire v2 Server Watchdog - Keeps the FastAPI server running 24/7
 # Auto-restarts on crash, logs all activity, prevents duplicate processes
+# chmod +x run_server.sh (execute permission restored)
 
 set -u
 
@@ -56,7 +57,7 @@ check_process_health() {
 
 start_server() {
     log "Starting FastAPI server..."
-    cd /home/user/empire-v2
+    cd /app
 
     # Start server in background, write PID
     python3 main.py >> "$SERVER_LOG" 2>&1 &
