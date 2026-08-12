@@ -21,6 +21,8 @@ RUN python -m pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+RUN chmod +x run_server.sh
+
 # Verify greenlet is actually installed
 RUN python -c "import greenlet; print(f'✓ greenlet {greenlet.__version__} installed')"
 
