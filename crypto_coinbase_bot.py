@@ -1092,8 +1092,10 @@ async def run_crypto_cycle():
     last_cycle_at = now.isoformat()
     log.info(f"[CRYPTO] Scanning {', '.join(CRYPTO_PAIRS)} (24/7, no market-hours gate) | Daily P&L: ${daily_pnl:.2f}")
 
-    connector = aiohttp.TCPConnector(use_dns_cache=True)
-    timeout = aiohttp.ClientTimeout(total=15, connect=5, sock_read=5)
+    connector = aiohttp.TCPConnector(use_dns_cache=True, limit=20, limit_per_host=5, ttl_dns_cache=300)
+    # Railway network: much higher latency, need 60+ second total timeout
+    # connect=20s for initial TCP handshake, sock_read=30s for slow API responses
+    timeout = aiohttp.ClientTimeout(total=90, connect=20, sock_read=30, sock_connect=10)
     async with aiohttp.ClientSession(connector=connector, trust_env=False, timeout=timeout) as session:
         cash, balance_error = await get_usd_balance(session)
         unlocked = 0.0
