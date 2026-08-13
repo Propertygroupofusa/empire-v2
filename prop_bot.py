@@ -784,8 +784,9 @@ async def run_prop_cycle():
     # CONTINUOUS AUTO-SCALING TO $1,000,000 — No milestones, just compound
     # Scale formula: 1.0x baseline + 0.01x per $1000 earned, capped at 5.0x
     # $1K equity → 1.0x, $100K equity → 2.0x, $400K+ equity → 5.0x (capped)
-    connector = aiohttp.TCPConnector(use_dns_cache=True)
-    async with aiohttp.ClientSession(connector=connector, trust_env=False) as session:
+    connector = aiohttp.TCPConnector(use_dns_cache=True, limit=20, limit_per_host=5, ttl_dns_cache=300)
+    timeout = aiohttp.ClientTimeout(total=90, connect=20, sock_read=30, sock_connect=10)
+    async with aiohttp.ClientSession(connector=connector, trust_env=False, timeout=timeout) as session:
         equity = await get_account_equity(session)
 
         # MANDATE: Check kill conditions before trading
@@ -1017,8 +1018,9 @@ async def run_prop_cycle():
             cash_remaining -= qty * price
         return opened
 
-    connector = aiohttp.TCPConnector(use_dns_cache=True)
-    async with aiohttp.ClientSession(connector=connector, trust_env=False) as session:
+    connector = aiohttp.TCPConnector(use_dns_cache=True, limit=20, limit_per_host=5, ttl_dns_cache=300)
+    timeout = aiohttp.ClientTimeout(total=90, connect=20, sock_read=30, sock_connect=10)
+    async with aiohttp.ClientSession(connector=connector, trust_env=False, timeout=timeout) as session:
         await reconcile_positions_with_broker(session)
 
         equity = await get_account_equity(session)
