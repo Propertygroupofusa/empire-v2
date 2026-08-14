@@ -1684,4 +1684,4 @@ def get_position_size_multiplier(symbol):
         return 1.0
 
 
-# END DYNAMIC CAPITAL ROTATION
+# END DYNAMIC CAPITAL ROTATION      
