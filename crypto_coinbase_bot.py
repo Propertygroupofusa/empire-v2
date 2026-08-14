@@ -203,10 +203,10 @@ except (ValueError, TypeError):
 # it at a fixed dollar amount instead, if ever wanted.
 _max_allocation_env = os.getenv("CRYPTO_MAX_ALLOCATION", "")
 try:
-    MAX_ALLOCATION = float(_max_allocation_env) if _max_allocation_env else None
+    MAX_ALLOCATION = float(_max_allocation_env) if _max_allocation_env else 100003.0
 except (ValueError, TypeError):
-    log.warning("Invalid CRYPTO_MAX_ALLOCATION value, using default: None")
-    MAX_ALLOCATION = None
+    log.warning("Invalid CRYPTO_MAX_ALLOCATION value, using default: 100003.0")
+    MAX_ALLOCATION = 100003.0
 
 # Micro-trades on small balances: $0.50 minimum lets bot scalp $0.58-100 accounts
 # without sitting idle. At $0.58 balance: $0.50 × 0.5% move = $0.0025 profit (micro-compounding)
