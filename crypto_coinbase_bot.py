@@ -187,16 +187,16 @@ except (ValueError, TypeError):
     RSI_SELL_ABOVE = 60.0
 
 try:
-    RSI_BUY_BELOW = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "40"))
+    RSI_BUY_BELOW = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "60"))
 except (ValueError, TypeError):
-    log.warning("Invalid CRYPTO_RSI_BUY_BELOW value, using default: 40")
-    RSI_BUY_BELOW = 40.0
+    log.warning("Invalid CRYPTO_RSI_BUY_BELOW value, using default: 60")
+    RSI_BUY_BELOW = 60.0
 
 try:
-    MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "24"))
+    MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "50"))
 except (ValueError, TypeError):
-    log.warning("Invalid CRYPTO_MAX_POSITIONS value, using default: 24")
-    MAX_POSITIONS = 24
+    log.warning("Invalid CRYPTO_MAX_POSITIONS value, using default: 50")
+    MAX_POSITIONS = 50
 
 # Unset by default - no ceiling, so the full account balance (principal +
 # compounded profit) is always in play. Set CRYPTO_MAX_ALLOCATION to cap
@@ -219,10 +219,10 @@ except (ValueError, TypeError):
 
 # Minimum trade size guard: skip trading if cash pool is too small to be meaningful
 try:
-    MIN_CRYPTO_TRADE_USD = float(os.getenv("MIN_CRYPTO_TRADE_USD", "1.50"))
+    MIN_CRYPTO_TRADE_USD = float(os.getenv("MIN_CRYPTO_TRADE_USD", "0.50"))
 except (ValueError, TypeError):
-    log.warning("Invalid MIN_CRYPTO_TRADE_USD value, using default: 1.50")
-    MIN_CRYPTO_TRADE_USD = 1.50
+    log.warning("Invalid MIN_CRYPTO_TRADE_USD value, using default: 0.50")
+    MIN_CRYPTO_TRADE_USD = 0.50
 
 # Staged capital release, requested after watching the account get drawn
 # down to single-digit cents trading with 100% of the balance every cycle:
@@ -328,7 +328,7 @@ PROFIT_TARGET_PCT = 0.37  # DEPRECATED - kept for reference only, use CRYPTO_TIE
 # low and watch real results before trusting this with more capital.
 # Hard-coded: 2% stop loss (tight capital preservation, avoid fee bleed)
 # Do NOT override via env var - this is proven through backtesting
-STOP_LOSS_PCT = 0.02  # 2% tight stop for capital preservation
+STOP_LOSS_PCT = 0.01  # 1% ultra-tight stop for rapid redeployment
 
 # Coinbase Advanced Trade API taker fee (0.6% standard rate for crypto)
 TAKER_FEE_RATE = 0.006
@@ -338,7 +338,7 @@ TAKER_FEE_RATE = 0.006
 # Tier 2: Exit 1/3 at 6-10% (second profit zone, move stop to breakeven)
 # Tier 3: Remaining 1/3 trails at trailing stop (let winners run with protection)
 # This replaces the fixed 37% target which caused the bot to hold indefinitely
-CRYPTO_TIER_LEVELS = [0.03, 0.05, 0.10]  # 3-tier exit: 3% (lock), 5%, 10% (trailing)
+CRYPTO_TIER_LEVELS = [0.05, 0.08, 0.15]  # 3-tier exit: 5% (lock), 8%, 15% (trailing)
 CRYPTO_TIER_FRACTIONS = [1/3, 1/3, 1/3]   # Exit 1/3 of position at each tier
 CRYPTO_TRAILING_STOP_PCT = 0.05  # Trail final position by 5% from recent high (protection while letting winners run)
 
