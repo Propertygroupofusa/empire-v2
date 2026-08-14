@@ -19,8 +19,9 @@ from urllib.parse import quote
 
 from database import get_db, AsyncSessionLocal
 from admin_auth import require_admin_key
-from models import VideoQuoteOrder, User
+from models import VideoQuoteOrder, User, Job, Payment, Worker, Client
 from payments_pause import payments_paused, PAUSE_MESSAGE
+import uuid
 
 log = logging.getLogger("orders")
 
@@ -251,6 +252,11 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
                 await db.commit()
                 log.info(f"Order {order_id} marked as paid via Stripe webhook")
 
+                # Create Job and Payment records for bot earnings tracking
+                job, payment = await create_job_and_payment_from_video_order(order, db)
+                if job and payment:
+                    log.info(f"Video order {order_id} integrated into earnings system")
+
                 # Trigger video generation in background
                 asyncio.create_task(generate_video_for_order(order.id))
 
@@ -332,6 +338,121 @@ def calculate_quote_price(video_type: str, delivery_days: int) -> int:
     return base_price
 
 
+async def get_or_create_bot_worker(db: AsyncSession):
+    """Get or create the bot worker for video production."""
+    bot_worker_email = "bot@pgusa.local"
+    result = await db.execute(
+        select(Worker).where(Worker.email == bot_worker_email)
+    )
+    bot_worker = result.scalar_one_or_none()
+
+    if not bot_worker:
+        bot_worker = Worker(
+            email=bot_worker_email,
+            phone="",
+            name="Video Bot",
+            w9_status="exempt",
+            is_active=True,
+        )
+        db.add(bot_worker)
+        await db.commit()
+        await db.refresh(bot_worker)
+        log.info(f"Created bot worker: {bot_worker.id}")
+
+    return bot_worker
+
+
+async def get_or_create_video_client(db: AsyncSession):
+    """Get or create the generic client account for video orders."""
+    generic_client_email = "video-client@pgusa.local"
+    result = await db.execute(
+        select(Client).where(Client.email == generic_client_email)
+    )
+    client = result.scalar_one_or_none()
+
+    if not client:
+        client = Client(
+            email=generic_client_email,
+            name="Video Order Customers",
+            company="Video Order Customers",
+            status="active",
+        )
+        db.add(client)
+        await db.commit()
+        await db.refresh(client)
+        log.info(f"Created generic video client: {client.id}")
+
+    return client
+
+
+async def create_job_and_payment_from_video_order(order: VideoQuoteOrder, db: AsyncSession):
+    """
+    Create Job and Payment records when a VideoQuoteOrder is paid.
+    This integrates video orders into the bot earnings system.
+    """
+    try:
+        # Check if job already exists for this order
+        result = await db.execute(
+            select(Job).where(
+                (Job.stripe_session_id == order.stripe_session_id) |
+                (func.json_extract(Job.custom_metadata, '$.video_order_id') == str(order.id))
+            )
+        )
+        if result.scalar_one_or_none():
+            log.info(f"Job already exists for video order {order.id}")
+            return None, None
+
+        bot_worker = await get_or_create_bot_worker(db)
+        client = await get_or_create_video_client(db)
+
+        # Create Job record
+        job = Job(
+            job_type="video_production",
+            client_id=client.id,
+            worker_id=bot_worker.id,
+            state="US",
+            description=f"{order.video_type} video for {order.customer_name}",
+            status="completed",
+            service_tier="standard",
+            price=order.quote_price / 100.0,
+            paid=True,
+            stripe_session_id=order.stripe_session_id,
+            completed_at=datetime.utcnow(),
+            custom_metadata={"video_order_id": order.id, "customer_email": order.customer_email},
+        )
+        db.add(job)
+        await db.commit()
+        await db.refresh(job)
+        log.info(f"Created job {job.id} from video order {order.id}")
+
+        # Create Payment record
+        worker_amount = (order.quote_price / 100.0) * 0.9
+        platform_amount = (order.quote_price / 100.0) * 0.1
+
+        payment = Payment(
+            id=str(uuid.uuid4()),
+            job_id=str(job.id),
+            worker_id=str(bot_worker.id),
+            client_id=str(client.id),
+            gross_amount=order.quote_price / 100.0,
+            worker_amount=worker_amount,
+            platform_amount=platform_amount,
+            payout_status="paid",
+            stripe_payout_id=f"video_order_{order.id}",
+            created_at=datetime.utcnow(),
+            paid_at=datetime.utcnow(),
+        )
+        db.add(payment)
+        await db.commit()
+        log.info(f"Created payment {payment.id} for video order {order.id}, worker earnings: ${worker_amount}")
+
+        return job, payment
+
+    except Exception as e:
+        log.error(f"Failed to create job/payment from video order {order.id}: {str(e)}")
+        return None, None
+
+
 # Note: Stripe payment processing removed. Orders now bypass payment and go directly to video generation.
 
 
@@ -404,6 +525,37 @@ async def generate_video_for_order(order_id: int):
             order.video_generation_status = "error"
             await db.commit()
             log.error(f"Video generation error for order {order_id}: {str(e)}")
+
+
+# ============================================================
+# Migration Endpoint - Create jobs/payments for existing paid video orders
+# ============================================================
+
+@router.post("/migrate-to-earnings", dependencies=[Depends(require_admin_key)])
+async def migrate_video_orders_to_earnings(db: AsyncSession = Depends(get_db)):
+    """Migrate existing paid VideoQuoteOrders to Job/Payment system for earnings tracking."""
+    try:
+        # Find all paid video orders without corresponding jobs
+        result = await db.execute(
+            select(VideoQuoteOrder).where(VideoQuoteOrder.paid == True)
+        )
+        paid_orders = result.scalars().all()
+
+        migrated_count = 0
+        for order in paid_orders:
+            job, payment = await create_job_and_payment_from_video_order(order, db)
+            if job and payment:
+                migrated_count += 1
+
+        log.info(f"Migrated {migrated_count} paid video orders to earnings system")
+        return {
+            "status": "success",
+            "migrated_count": migrated_count,
+            "total_paid_orders": len(paid_orders),
+        }
+    except Exception as e:
+        log.error(f"Migration failed: {str(e)}")
+        return {"status": "error", "detail": str(e)}
 
 
 # ============================================================
