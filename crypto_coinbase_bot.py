@@ -1591,30 +1591,21 @@ def run():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    try:
-        loop.run_until_complete(load_open_positions())
-    except Exception as e:
-        log.error(f"[CRYPTO] Startup position reload failed: {e}")
-
-    try:
-        loop.run_until_complete(load_all_rsi_states())
-    except Exception as e:
-        log.error(f"[CRYPTO] Startup RSI state cache load failed: {e}")
-
     while True:
         if os.getenv("STOP_TRADING", "false").lower() == "true":
             log.warning("STOP_TRADING=true — crypto bot paused")
             time.sleep(60)
             continue
         try:
-            loop.run_until_complete(run_crypto_cycle())
+            
+=======
         except RuntimeError as e:
             if "attached to a different loop" in str(e):
                 log.warning(f"[CRYPTO] Event loop mismatch detected: {e} - recreating event loop")
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
             else:
-                log.error(f"Crypto cycle error: {e}")
+                log.error(f"Crypto cycle error: {e}
         except Exception as e:
             log.error(f"Crypto cycle error: {e}")
         time.sleep(60)  # 1-min cycle for quality entries + reduced fee bleed (1 scan/min, high-quality trades)
@@ -1678,8 +1669,6 @@ def get_position_size_multiplier(symbol):
         return min(2.0, 1.0 + (wins - 3) * 0.25)  # 2.0x max
     elif wins >= 3:
         return 1.5
-    else:
-        return 1.0
-
+      
 
 # END DYNAMIC CAPITAL ROTATION
