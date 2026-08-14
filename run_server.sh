@@ -66,9 +66,9 @@ start_server() {
     # Wait for startup
     sleep 3
 
-    # Verify startup
+    # Verify startup (allow 180 seconds for bot initialization)
     local retries=0
-    while [ $retries -lt 30 ]; do
+    while [ $retries -lt 90 ]; do
         if curl -s http://localhost:8000/health >/dev/null 2>&1; then
             log "✅ Server started successfully (PID: $(cat $SERVER_PID_FILE))"
             return 0
@@ -77,7 +77,7 @@ start_server() {
         retries=$((retries + 1))
     done
 
-    error "Server failed to start after 60 seconds"
+    error "Server failed to start after 180 seconds"
     return 1
 }
 
