@@ -594,6 +594,12 @@ async def upload_to_youtube(
                 data = upload_response.json()
                 video_id = data.get("id")
                 log.info(f"✅ Uploaded to YouTube: https://youtube.com/watch?v={video_id}")
+                if video_id:
+                    try:
+                        from youtube_seo_optimizer import optimize_uploaded_video
+                        await optimize_uploaded_video(video_id, title, description, tags)
+                    except Exception as e:
+                        log.warning(f"SEO optimize skipped for {video_id}: {e}")
                 return video_id
             else:
                 log.error(f"Upload failed: {upload_response.status_code}")

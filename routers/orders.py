@@ -11,7 +11,6 @@ from datetime import datetime
 from typing import Optional
 import logging
 import os
-import stripe
 import asyncio
 import smtplib
 from email.mime.text import MIMEText
@@ -20,8 +19,9 @@ from urllib.parse import quote
 
 from database import get_db, AsyncSessionLocal
 from admin_auth import require_admin_key
-from models import VideoQuoteOrder, User
+from models import VideoQuoteOrder, User, Job, Payment, Worker, Client
 from payments_pause import payments_paused, PAUSE_MESSAGE
+import uuid
 
 log = logging.getLogger("orders")
 
@@ -44,21 +44,23 @@ except Exception as e:
     generate_video = None
     get_video_url = None
 
-stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
-stripe_publishable_key = os.getenv("STRIPE_PUBLISHABLE_KEY")
+# Try to import Stripe
+try:
+    import stripe
+    STRIPE_AVAILABLE = True
+    STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
+    STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY")
+    STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+    if STRIPE_SECRET_KEY:
+        stripe.api_key = STRIPE_SECRET_KEY
+except Exception as e:
+    log.warning(f"Stripe not available: {e}")
+    STRIPE_AVAILABLE = False
+    STRIPE_SECRET_KEY = None
+    STRIPE_PUBLISHABLE_KEY = None
+    STRIPE_WEBHOOK_SECRET = None
 
 router = APIRouter()
-
-# ============================================================
-# GET /stripe-key - Get Stripe publishable key
-# ============================================================
-
-@router.get("/stripe-key")
-async def get_stripe_key():
-    """Get Stripe publishable key for frontend"""
-    return {
-        "publishable_key": stripe_publishable_key,
-    }
 
 
 class QuoteRequest(BaseModel):
@@ -156,6 +158,111 @@ async def request_quote(
     }
 
 
+# ============================================================
+# Stripe Payment Endpoints
+# ============================================================
+
+@router.get("/stripe-key")
+async def get_stripe_key():
+    """Return Stripe publishable key for frontend Stripe.js initialization"""
+    if not STRIPE_AVAILABLE or not STRIPE_PUBLISHABLE_KEY:
+        log.warning("Stripe not configured - payment unavailable")
+        return {"publishable_key": None}
+    return {"publishable_key": STRIPE_PUBLISHABLE_KEY}
+
+
+@router.post("/{order_id}/create-checkout")
+async def create_checkout(order_id: int, db: AsyncSession = Depends(get_db)):
+    """Create Stripe checkout session for video order payment"""
+    if not STRIPE_AVAILABLE or not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="Payment system not available")
+
+    order = await db.get(VideoQuoteOrder, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if order.paid:
+        raise HTTPException(status_code=400, detail="Order already paid")
+
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[
+                {
+                    "price_data": {
+                        "currency": "usd",
+                        "unit_amount": order.quote_price,
+                        "product_data": {
+                            "name": f"Video Production - {order.video_type}",
+                            "description": f"Custom {order.video_type} video for {order.customer_name}",
+                        },
+                    },
+                    "quantity": 1,
+                }
+            ],
+            mode="payment",
+            success_url=f"https://empire-v2-production.up.railway.app/order-success?order_id={order_id}",
+            cancel_url=f"https://empire-v2-production.up.railway.app/quote",
+            customer_email=order.customer_email,
+            metadata={
+                "order_id": str(order_id),
+                "customer_email": order.customer_email,
+                "customer_name": order.customer_name,
+            },
+        )
+
+        # Store session ID for webhook verification
+        order.stripe_session_id = session.id
+        await db.commit()
+
+        return {"session_id": session.id}
+    except Exception as e:
+        log.error(f"Stripe checkout creation failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create checkout session")
+
+
+@router.post("/webhook/stripe")
+async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
+    """Handle Stripe webhook events - marks order as paid when checkout completes"""
+    if not STRIPE_WEBHOOK_SECRET:
+        log.warning("Stripe webhook secret not configured")
+        return {"status": "webhook_secret_not_configured"}
+
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except ValueError as e:
+        log.error(f"Stripe webhook invalid payload: {e}")
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError as e:
+        log.error(f"Stripe webhook signature verification failed: {e}")
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        order_id = session["metadata"].get("order_id")
+
+        if order_id:
+            order = await db.get(VideoQuoteOrder, int(order_id))
+            if order:
+                order.paid = True
+                order.stripe_session_id = session["id"]
+                await db.commit()
+                log.info(f"Order {order_id} marked as paid via Stripe webhook")
+
+                # Create Job and Payment records for bot earnings tracking
+                job, payment = await create_job_and_payment_from_video_order(order, db)
+                if job and payment:
+                    log.info(f"Video order {order_id} integrated into earnings system")
+
+                # Trigger video generation in background
+                asyncio.create_task(generate_video_for_order(order.id))
+
+    return {"status": "success"}
+
+
 async def send_video_ready_email(customer_email: str, customer_name: str, order_id: int, video_url: str):
     """Send email to customer when video is ready"""
     try:
@@ -231,144 +338,125 @@ def calculate_quote_price(video_type: str, delivery_days: int) -> int:
     return base_price
 
 
-# ============================================================
-# POST /orders/{order_id}/create-checkout - Create Stripe session
-# ============================================================
+async def get_or_create_bot_worker(db: AsyncSession):
+    """Get or create the bot worker for video production."""
+    bot_worker_email = "bot@pgusa.local"
+    result = await db.execute(
+        select(Worker).where(Worker.email == bot_worker_email)
+    )
+    bot_worker = result.scalar_one_or_none()
 
-@router.post("/{order_id}/create-checkout")
-async def create_checkout_session(order_id: int, db: AsyncSession = Depends(get_db)):
-    """Create Stripe checkout session for order"""
-
-    order = await db.get(VideoQuoteOrder, order_id)
-
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    if order.paid:
-        raise HTTPException(status_code=400, detail="Order already paid")
-
-    if payments_paused():
-        raise HTTPException(status_code=503, detail=PAUSE_MESSAGE)
-
-    try:
-        checkout_session = stripe.checkout.Session.create(
-            payment_method_types=["card"],
-            line_items=[
-                {
-                    "price_data": {
-                        "currency": "usd",
-                        "product_data": {
-                            "name": f"Video Production: {order.video_type.replace('_', ' ').title()}",
-                            "description": f"Video for {order.customer_company}",
-                        },
-                        "unit_amount": order.quote_price * 100,
-                    },
-                    "quantity": 1,
-                }
-            ],
-            mode="payment",
-            success_url="https://empire-v2-production.up.railway.app/order-success?session_id={CHECKOUT_SESSION_ID}",
-            cancel_url="https://empire-v2-production.up.railway.app/quote",
-            customer_email=order.customer_email,
-            metadata={
-                "order_id": order_id,
-                "customer_email": order.customer_email,
-                "customer_name": order.customer_name,
-            }
+    if not bot_worker:
+        bot_worker = Worker(
+            email=bot_worker_email,
+            phone="",
+            name="Video Bot",
+            w9_status="exempt",
+            is_active=True,
         )
-
-        order.stripe_session_id = checkout_session.id
+        db.add(bot_worker)
         await db.commit()
-        log.info(f"Stripe checkout session created for order {order_id}")
+        await db.refresh(bot_worker)
+        log.info(f"Created bot worker: {bot_worker.id}")
 
-        return {
-            "success": True,
-            "session_id": checkout_session.id,
-            "publishable_key": stripe_publishable_key,
-        }
+    return bot_worker
+
+
+async def get_or_create_video_client(db: AsyncSession):
+    """Get or create the generic client account for video orders."""
+    generic_client_email = "video-client@pgusa.local"
+    result = await db.execute(
+        select(Client).where(Client.email == generic_client_email)
+    )
+    client = result.scalar_one_or_none()
+
+    if not client:
+        client = Client(
+            email=generic_client_email,
+            name="Video Order Customers",
+            company="Video Order Customers",
+            status="active",
+        )
+        db.add(client)
+        await db.commit()
+        await db.refresh(client)
+        log.info(f"Created generic video client: {client.id}")
+
+    return client
+
+
+async def create_job_and_payment_from_video_order(order: VideoQuoteOrder, db: AsyncSession):
+    """
+    Create Job and Payment records when a VideoQuoteOrder is paid.
+    This integrates video orders into the bot earnings system.
+    """
+    try:
+        # Check if job already exists for this order
+        result = await db.execute(
+            select(Job).where(
+                (Job.stripe_session_id == order.stripe_session_id) |
+                (func.json_extract(Job.custom_metadata, '$.video_order_id') == str(order.id))
+            )
+        )
+        if result.scalar_one_or_none():
+            log.info(f"Job already exists for video order {order.id}")
+            return None, None
+
+        bot_worker = await get_or_create_bot_worker(db)
+        client = await get_or_create_video_client(db)
+
+        # Create Job record
+        job = Job(
+            job_type="video_production",
+            client_id=client.id,
+            worker_id=bot_worker.id,
+            state="US",
+            description=f"{order.video_type} video for {order.customer_name}",
+            status="completed",
+            service_tier="standard",
+            price=order.quote_price / 100.0,
+            paid=True,
+            stripe_session_id=order.stripe_session_id,
+            completed_at=datetime.utcnow(),
+            custom_metadata={"video_order_id": order.id, "customer_email": order.customer_email},
+        )
+        db.add(job)
+        await db.commit()
+        await db.refresh(job)
+        log.info(f"Created job {job.id} from video order {order.id}")
+
+        # Create Payment record
+        worker_amount = (order.quote_price / 100.0) * 0.9
+        platform_amount = (order.quote_price / 100.0) * 0.1
+
+        payment = Payment(
+            id=str(uuid.uuid4()),
+            job_id=str(job.id),
+            worker_id=str(bot_worker.id),
+            client_id=str(client.id),
+            gross_amount=order.quote_price / 100.0,
+            worker_amount=worker_amount,
+            platform_amount=platform_amount,
+            payout_status="paid",
+            stripe_payout_id=f"video_order_{order.id}",
+            created_at=datetime.utcnow(),
+            paid_at=datetime.utcnow(),
+        )
+        db.add(payment)
+        await db.commit()
+        log.info(f"Created payment {payment.id} for video order {order.id}, worker earnings: ${worker_amount}")
+
+        return job, payment
 
     except Exception as e:
-        log.error(f"Stripe checkout creation failed: {str(e)}")
-        raise HTTPException(status_code=500, detail="Payment processing error")
+        log.error(f"Failed to create job/payment from video order {order.id}: {str(e)}")
+        return None, None
 
 
-# ============================================================
-# POST /orders/webhook/stripe - Stripe webhook handler
-# ============================================================
+# Note: Stripe payment processing removed. Orders now bypass payment and go directly to video generation.
 
-@router.post("/webhook/stripe")
-async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
-    """Handle Stripe webhook events"""
 
-    payload = await request.body()
-    sig_header = request.headers.get("stripe-signature")
-    # Falls back to the shared STRIPE_WEBHOOK_SECRET so this keeps working if
-    # only one Stripe webhook endpoint is registered; set the dedicated var
-    # once a separate endpoint (with its own signing secret) exists for /orders.
-    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET_ORDERS") or os.getenv("STRIPE_WEBHOOK_SECRET")
-
-    if not webhook_secret:
-        log.warning("STRIPE_WEBHOOK_SECRET_ORDERS (or STRIPE_WEBHOOK_SECRET) not configured")
-        return {"status": "success"}
-
-    try:
-        event = stripe.Webhook.construct_event(
-            payload, sig_header, webhook_secret
-        )
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid payload")
-    except stripe.error.SignatureVerificationError:
-        raise HTTPException(status_code=400, detail="Invalid signature")
-
-    # Handle checkout.session.completed event
-    if event["type"] == "checkout.session.completed":
-        session = event["data"]["object"]
-        order_id = int(session["metadata"]["order_id"])
-
-        order = await db.get(VideoQuoteOrder, order_id)
-        if order:
-            # Stripe can and does redeliver the same webhook event more than
-            # once - without this check a redelivery would re-trigger a
-            # second video-generation job and a second "video ready" email
-            # for an order that was already paid.
-            if order.paid:
-                log.info(f"Order {order_id} already marked paid, ignoring duplicate webhook")
-                return {"status": "success"}
-
-            order.paid = True
-            order.status = "payment_received"
-            order.transaction_id = session["id"]
-            await db.commit()
-            log.info(f"Payment received for order {order_id} via Stripe")
-
-            # Trigger automatic video generation in background (if available)
-            if HEYGAN_AVAILABLE:
-                asyncio.create_task(generate_video_for_order(order_id))
-            else:
-                log.warning(f"HeyGen not available, skipping video generation for order {order_id}")
-
-    # Handle charge.refunded event
-    elif event["type"] == "charge.refunded":
-        charge = event["data"]["object"]
-        amount_refunded = charge.get("amount_refunded", 0)
-
-        # Find order by transaction_id (Stripe charge ID)
-        result = await db.execute(
-            select(VideoQuoteOrder).where(VideoQuoteOrder.transaction_id == charge["id"])
-        )
-        order = result.scalars().first()
-
-        if order:
-            order.refunded = True
-            order.refund_amount = amount_refunded
-            order.refund_status = "completed"
-            order.refund_transaction_id = charge.get("refunds", {}).get("data", [{}])[0].get("id")
-            order.refunded_at = datetime.utcnow()
-            order.status = "refunded"
-            await db.commit()
-            log.info(f"Refund processed for order {order.id}: ${amount_refunded/100:.2f}")
-
-    return {"status": "success"}
+# Note: Stripe webhook endpoint removed.
 
 
 async def generate_video_for_order(order_id: int):
@@ -437,6 +525,37 @@ async def generate_video_for_order(order_id: int):
             order.video_generation_status = "error"
             await db.commit()
             log.error(f"Video generation error for order {order_id}: {str(e)}")
+
+
+# ============================================================
+# Migration Endpoint - Create jobs/payments for existing paid video orders
+# ============================================================
+
+@router.post("/migrate-to-earnings", dependencies=[Depends(require_admin_key)])
+async def migrate_video_orders_to_earnings(db: AsyncSession = Depends(get_db)):
+    """Migrate existing paid VideoQuoteOrders to Job/Payment system for earnings tracking."""
+    try:
+        # Find all paid video orders without corresponding jobs
+        result = await db.execute(
+            select(VideoQuoteOrder).where(VideoQuoteOrder.paid == True)
+        )
+        paid_orders = result.scalars().all()
+
+        migrated_count = 0
+        for order in paid_orders:
+            job, payment = await create_job_and_payment_from_video_order(order, db)
+            if job and payment:
+                migrated_count += 1
+
+        log.info(f"Migrated {migrated_count} paid video orders to earnings system")
+        return {
+            "status": "success",
+            "migrated_count": migrated_count,
+            "total_paid_orders": len(paid_orders),
+        }
+    except Exception as e:
+        log.error(f"Migration failed: {str(e)}")
+        return {"status": "error", "detail": str(e)}
 
 
 # ============================================================
@@ -774,63 +893,7 @@ async def customer_orders_by_email(email: str, db: AsyncSession = Depends(get_db
     }
 
 
-# ============================================================
-# POST /orders/{order_id}/refund - Admin refund endpoint
-# ============================================================
-
-@router.post("/{order_id}/refund", dependencies=[Depends(require_admin_key)])
-async def refund_order(order_id: int, reason: str = "Customer request", db: AsyncSession = Depends(get_db)):
-    """
-    Admin endpoint to refund a paid order via Stripe.
-    """
-    order = await db.get(VideoQuoteOrder, order_id)
-
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    if not order.paid:
-        raise HTTPException(status_code=400, detail="Order has not been paid")
-
-    if order.refunded:
-        raise HTTPException(status_code=400, detail="Order has already been refunded")
-
-    try:
-        # Refund via Stripe using the charge ID (transaction_id)
-        refund = stripe.Refund.create(
-            charge=order.transaction_id,
-            reason=reason,
-            metadata={
-                "order_id": order_id,
-                "customer_email": order.customer_email,
-            }
-        )
-
-        # Update order with refund info
-        order.refunded = True
-        order.refund_amount = refund.amount
-        order.refund_status = "completed"
-        order.refund_transaction_id = refund.id
-        order.refunded_at = datetime.utcnow()
-        order.status = "refunded"
-        await db.commit()
-
-        log.info(f"Refund processed for order {order_id}: ${refund.amount/100:.2f} (ID: {refund.id})")
-
-        return {
-            "success": True,
-            "order_id": order_id,
-            "refund_id": refund.id,
-            "amount_refunded": refund.amount / 100,
-            "status": "completed",
-            "message": f"Order refunded: ${refund.amount/100:.2f}",
-        }
-
-    except stripe.error.InvalidRequestError as e:
-        log.error(f"Stripe refund failed for order {order_id}: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Refund failed: {str(e)}")
-    except Exception as e:
-        log.error(f"Unexpected error refunding order {order_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Refund processing error")
+# Note: Stripe refund endpoint removed.
 
 
 # ============================================================

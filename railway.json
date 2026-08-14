@@ -6,15 +6,33 @@
   "deploy": {
     "startCommand": "python main.py",
     "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 10
+    "restartPolicyMaxRetries": 3
+  },
+  "network": {
+    "egress": {
+      "allowlist": [
+        "api.coinbase.com",
+        "*.coinbase.com",
+        "api.alpaca.markets",
+        "data.alpaca.markets",
+        "alpaca.markets",
+        "api.polygon.io",
+        "polygon.io",
+        "stripe.com",
+        "*.stripe.com",
+        "github.com",
+        "raw.githubusercontent.com",
+        "smtp.gmail.com"
+      ]
+    }
   },
   "services": {
     "main-app": {
       "build": {
         "dockerfile": "Dockerfile"
       },
-      "startCommand": "python main.py",
-      "port": 10000
+      "startCommand": "./run_server.sh",
+      "port": 8000
     },
     "video-generator": {
       "build": {
@@ -44,28 +62,11 @@
       "startCommand": "cd video-editor && npm start",
       "port": 3000
     },
-    "crypto-trading-bot": {
-      "build": {
-        "dockerfile": "Dockerfile"
-      },
-      "startCommand": "python crypto_alpaca_bot.py",
-      "restartPolicyType": "ON_FAILURE",
-      "restartPolicyMaxRetries": 10
-    },
     "pl-tracker": {
       "build": {
         "dockerfile": "Dockerfile"
       },
       "startCommand": "python bot_pl_tracker.py",
-      "restartPolicyType": "ON_FAILURE",
-      "restartPolicyMaxRetries": 10
-    },
-    "bot-api": {
-      "build": {
-        "dockerfile": "Dockerfile"
-      },
-      "startCommand": "python bot_api.py",
-      "port": 8001,
       "restartPolicyType": "ON_FAILURE",
       "restartPolicyMaxRetries": 10
     }

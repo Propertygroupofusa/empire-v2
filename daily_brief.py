@@ -48,10 +48,15 @@ ET = ZoneInfo("America/New_York")
 ALPACA_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+
+try:
+    BRIEF_HOUR = int(os.getenv("DAILY_BRIEF_HOUR", "7"))
+except (ValueError, TypeError):
+    log.warning("Invalid DAILY_BRIEF_HOUR value, using default: 7")
+    BRIEF_HOUR = 7
 ALPACA_HEADERS = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
 
 # Sent before market open (9:30am ET) by default.
-BRIEF_HOUR = int(os.getenv("DAILY_BRIEF_HOUR", "7"))
 BRIEF_EMAIL = os.getenv("DAILY_BRIEF_EMAIL", os.getenv("TRADE_ALERT_EMAIL", "delfarrell591@gmail.com"))
 
 CLAUDE_KEY = os.getenv("ANTHROPIC_API_KEY", "")

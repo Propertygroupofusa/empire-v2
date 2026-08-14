@@ -101,6 +101,51 @@ class CampaignContact(Base):
         }
 
 
+class ReferralContact(Base):
+    """Past customers enrolled in the post-delivery referral campaign
+    (email_campaigns.py) - a different thing from CampaignContact above,
+    which is a recipient row belonging to a Campaign.
+
+    This used to be a second class named CampaignContact declared inside
+    email_campaigns.py against the SAME "campaign_contacts" table and the
+    same Base. Importing both raised
+
+        InvalidRequestError: Table 'campaign_contacts' is already defined
+        for this MetaData instance.
+
+    which only stayed latent because main.py never imported
+    email_campaigns. It lives here now so that it has its own table and
+    so run_migrations() actually creates it - the migration walks
+    Base.metadata.sorted_tables, and a model declared in a module the app
+    never imports is not in that registry at all.
+    """
+    __tablename__ = "referral_contacts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    customer_name = Column(String, nullable=True)
+    customer_email = Column(String, index=True, unique=True)
+    company = Column(String, nullable=True)
+    referral_code = Column(String, unique=True, index=True)
+    status = Column(String, default="new", index=True)  # new, sent, opened, clicked, converted
+    email_sent_at = Column(DateTime, nullable=True)
+    opened_at = Column(DateTime, nullable=True)
+    clicked_at = Column(DateTime, nullable=True)
+    converted_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "customer_name": self.customer_name,
+            "customer_email": self.customer_email,
+            "company": self.company,
+            "referral_code": self.referral_code,
+            "status": self.status,
+            "email_sent_at": self.email_sent_at.isoformat() if self.email_sent_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 class Worker(Base):
     """Worker/contractor profile. Fields below (w9_*, credentials_*,
     notary_*, ron_*) mirror the raw ALTER TABLE columns main.py's
@@ -109,7 +154,7 @@ class Worker(Base):
     as orphaned raw DB columns nothing in the code touched)."""
     __tablename__ = "workers"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True, autoincrement=True, index=True)
     email = Column(String, unique=True, index=True)
     name = Column(String)
     phone = Column(String, nullable=True)
@@ -142,6 +187,9 @@ class Worker(Base):
     notary_commission_expires = Column(String, nullable=True)  # ISO date string
     ron_authorized = Column(Boolean, default=False)  # Remote Online Notarization
     ron_authorization_state = Column(String, nullable=True)
+
+    # Stripe Connect account for automated payouts
+    stripe_account_id = Column(String, nullable=True)
 
     def to_dict(self):
         return {
@@ -215,6 +263,14 @@ class Job(Base):
     completed_at = Column(DateTime, nullable=True)
     custom_metadata = Column(JSON, nullable=True)
 
+    # Payment - see routers/jobs.py's SERVICE_TIERS for the actual price
+    # list. Client pays upfront via Stripe Checkout at request time (not
+    # on completion) so a notary never does the work before it's paid for.
+    service_tier = Column(String, nullable=True)  # key into SERVICE_TIERS, e.g. "standard", "ron"
+    price = Column(Float, nullable=True)  # USD, snapshotted at request time so a later SERVICE_TIERS price change never rewrites an existing job's price
+    paid = Column(Boolean, default=False)
+    stripe_session_id = Column(String, nullable=True)
+
     def to_dict(self):
         return {
             "id": self.id,
@@ -229,6 +285,9 @@ class Job(Base):
             "matched_at": self.matched_at.isoformat() if self.matched_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "custom_metadata": self.custom_metadata,
+            "service_tier": self.service_tier,
+            "price": self.price,
+            "paid": self.paid,
         }
 
 
@@ -268,6 +327,12 @@ class StudyUser(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True)
+    # bcrypt hash. Nullable because rows created under the old
+    # no-authentication scheme have no password - those accounts cannot
+    # log in until they sign up properly, which is the intended outcome:
+    # they were never owned by anyone in the first place, since any caller
+    # could conjure one by sending an arbitrary email as a bearer token.
+    password_hash = Column(String, nullable=True)
     tier = Column(String, default="free")  # free, paid
     materials_generated_month = Column(Integer, default=0)
     stripe_customer_id = Column(String, nullable=True)
@@ -409,18 +474,27 @@ class CustomerSubscription(Base):
 class TradingBotState(Base):
     """Per-bot tracked state for the trading dashboard - Alpaca itself has no
     concept of 'base capital' vs 'profit', so we track our own baseline here.
-    Profit shown on the dashboard is real equity minus this stored value."""
+    Profit shown on the dashboard is real equity minus this stored value.
+
+    base_capital is the bucket's whole current tracked value (see
+    routers/trading_dashboard.py's per-bot withdrawal design). starting_capital
+    is a separate, never-updated snapshot of what the bucket started at, so
+    each bucket's own profit = base_capital - starting_capital - used by the
+    "withdraw all profit" bulk endpoint to know how much of each bucket is
+    actually gain versus original principal, without touching the principal."""
     __tablename__ = "trading_bot_state"
 
     id = Column(Integer, primary_key=True, index=True)
     bot_name = Column(String, unique=True, index=True)  # e.g. "bare_metal_builders"
     base_capital = Column(Float)
+    starting_capital = Column(Float, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def to_dict(self):
         return {
             "bot_name": self.bot_name,
             "base_capital": self.base_capital,
+            "starting_capital": self.starting_capital,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
@@ -448,6 +522,51 @@ class WithdrawalRequest(Base):
             "status": self.status,
             "requested_at": self.requested_at.isoformat() if self.requested_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+        }
+
+
+class NotaryPayout(Base):
+    """What's owed to a notary after they complete a paid job - same
+    bookkeeping-ledger pattern as WithdrawalRequest above: this app has no
+    programmatic way to actually move money into a notary's bank account,
+    so this tracks that a payout is owed/requested/paid, not a real
+    automated transfer. The admin sends the money manually (Zelle/PayPal/
+    check/ACH) and marks it paid here once done.
+
+    One row is created per completed job (see routers/jobs.py and
+    routers/workers.py's complete-job endpoints), for NOTARY_PAYOUT_SHARE
+    (0.80 by default - the notary keeps 80%, the platform keeps 20%) of
+    that job's price, snapshotted at completion time so a later change to
+    the split or to SERVICE_TIERS pricing never rewrites an already-earned
+    payout."""
+    __tablename__ = "notary_payouts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # VARCHAR, not Integer: jobs.id and workers.id are VARCHAR primary keys
+    # in production (see Job/Worker models / migrations/
+    # 0002_fix_notary_payouts_job_id_type.py), so Integer columns here make
+    # these FKs impossible to create - "foreign key constraint
+    # notary_payouts_<col>_fkey cannot be implemented / Key columns
+    # incompatible types: integer and character varying", raised straight
+    # out of Base.metadata.create_all() at startup.
+    job_id = Column(String, ForeignKey("jobs.id"), index=True)
+    worker_id = Column(String, ForeignKey("workers.id"), index=True)
+    amount = Column(Float)  # USD, the notary's cut
+    status = Column(String, default="owed", index=True)  # owed, requested, paid
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    requested_at = Column(DateTime, nullable=True)
+    paid_at = Column(DateTime, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "job_id": self.job_id,
+            "worker_id": self.worker_id,
+            "amount": self.amount,
+            "status": self.status,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "requested_at": self.requested_at.isoformat() if self.requested_at else None,
+            "paid_at": self.paid_at.isoformat() if self.paid_at else None,
         }
 
 
@@ -721,3 +840,387 @@ class Response(Base):
 
     received_at = Column(DateTime, default=datetime.utcnow, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PayoutStatus(str, enum.Enum):
+    """Status of a worker payout."""
+    pending = "pending"
+    processing = "processing"
+    paid = "paid"
+    failed = "failed"
+
+
+class Payment(Base):
+    """Payment record for completed jobs - tracks earnings for workers."""
+    __tablename__ = "payments"
+
+    id = Column(String, primary_key=True, index=True)
+    job_id = Column(String, nullable=True, index=True)
+    worker_id = Column(String, nullable=True, index=True)
+    client_id = Column(String, nullable=True, index=True)
+    gross_amount = Column(Float)  # Total amount from client
+    worker_amount = Column(Float)  # Worker's earnings
+    platform_amount = Column(Float)  # Platform fee
+    payout_status = Column(String, default="pending", index=True)  # pending, processing, paid, failed
+    stripe_payout_id = Column(String, nullable=True, unique=True)  # Stripe payout ID when transferred
+    stripe_transfer_id = Column(String, nullable=True)  # Stripe Transfer ID if using Connect
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    paid_at = Column(DateTime, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "job_id": self.job_id,
+            "worker_id": self.worker_id,
+            "worker_amount": self.worker_amount,
+            "platform_amount": self.platform_amount,
+            "payout_status": self.payout_status,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "paid_at": self.paid_at.isoformat() if self.paid_at else None,
+        }
+
+
+class BotPosition(Base):
+    """A trading bot's currently-open position, persisted so a Railway
+    restart can't silently orphan a real open position. Both prop_bot.py
+    and crypto_coinbase_bot.py track open positions in an in-memory dict
+    for fast per-cycle access - that dict is the source of truth for
+    trading decisions, but it used to live only in process memory, so
+    every redeploy wiped it while the position stayed open for real on
+    the broker. Each bot now mirrors its dict here (insert on open,
+    delete on close) and reloads from this table into the dict once on
+    startup, before its first cycle runs."""
+    __tablename__ = "bot_positions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot = Column(String, index=True)  # "crypto_coinbase" or "prop_apex"
+    symbol = Column(String, index=True)  # e.g. "BTC/USD" or a futures contract code
+    side = Column(String)  # "long" or "short"
+    entry_price = Column(Float)
+    qty = Column(Float)
+    opened_at = Column(DateTime, default=datetime.utcnow)
+
+    # Best unrealized return this position has reached, as a fraction
+    # (0.023 = it was up 2.3% at some point). Needed by prop_bot's
+    # trailing stop, and persisted rather than kept in a module-level dict
+    # for the same reason the rest of this row is: a Railway redeploy
+    # wipes process memory while the position stays open on the broker.
+    # An in-memory peak would silently reset to zero on every restart,
+    # disarming the trailing stop on exactly the positions that had run up
+    # the most - and a dict lookup would KeyError against a position
+    # reloaded from this table. Nullable so existing rows migrate cleanly;
+    # readers treat None as "no peak recorded yet".
+    peak_pct = Column(Float, nullable=True)
+
+    # ── Signal snapshot at the moment of entry ───────────────────────────
+    #
+    # Both bots already compute these to DECIDE the trade and then throw
+    # them away - they reach a log line and nothing else. That makes it
+    # impossible to ask afterwards "did entries below RSI 35 do better?"
+    # or "did high-volatility entries lose more?", because the conditions
+    # that caused each trade no longer exist anywhere by the time its
+    # outcome is known.
+    #
+    # Captured here so that when the position closes, ClosedTrade can pair
+    # these inputs with the realised result and every trade becomes one
+    # labelled row. Nullable throughout: positions already open at deploy
+    # time, and any adopted by reconcile_positions_with_broker (which only
+    # learns of a position after the fact and never sees its entry
+    # signals), legitimately have none.
+    entry_rsi = Column(Float, nullable=True)
+    entry_trend = Column(String, nullable=True)      # "bullish" / "bearish"
+    entry_atr_pct = Column(Float, nullable=True)     # ATR as a fraction of price
+
+
+class ClosedTrade(Base):
+    """One completed round trip, with the conditions that caused it.
+
+    Nothing durable records a finished trade today. prop_bot and
+    crypto_coinbase_bot log the close and DELETE the BotPosition row, so
+    the outcome survives only in Railway stdout (which rotates) and in
+    ml_trades.json, which is gitignored AND on Railway's ephemeral disk -
+    wiped on every redeploy. That is why market_brain's ML filter never
+    accumulated a training set: its dataset was being deleted continuously.
+
+    This table is the missing half. Paired with the entry snapshot copied
+    off BotPosition, each row is a supervised training example - features
+    known BEFORE the trade, label known after - which is the minimum needed
+    to answer "which conditions predict wins" from real money rather than
+    from a backtest.
+
+    Deliberately append-only and never deleted. Rows are cheap and the
+    value is entirely in the accumulated history.
+    """
+    __tablename__ = "closed_trades"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot = Column(String, index=True)
+    symbol = Column(String, index=True)
+    side = Column(String)
+
+    # features - all known at entry, before the outcome exists
+    entry_price = Column(Float)
+    entry_rsi = Column(Float, nullable=True)
+    entry_trend = Column(String, nullable=True)
+    entry_atr_pct = Column(Float, nullable=True)
+    qty = Column(Float)
+
+    # label - known only at exit
+    exit_price = Column(Float)
+    exit_reason = Column(String, index=True)   # PROFIT TARGET / STOP LOSS / RSI / TRAIL / TIME STOP
+    pnl = Column(Float, index=True)            # realised dollars, gross of fees
+    pnl_pct = Column(Float)
+    peak_pct = Column(Float, nullable=True)    # best it ever reached, for giveback analysis
+    hold_hours = Column(Float)
+
+    opened_at = Column(DateTime, nullable=True)
+    closed_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "bot": self.bot,
+            "symbol": self.symbol,
+            "side": self.side,
+            "entry_price": self.entry_price,
+            "entry_rsi": self.entry_rsi,
+            "entry_trend": self.entry_trend,
+            "entry_atr_pct": self.entry_atr_pct,
+            "qty": self.qty,
+            "exit_price": self.exit_price,
+            "exit_reason": self.exit_reason,
+            "pnl": self.pnl,
+            "pnl_pct": self.pnl_pct,
+            "peak_pct": self.peak_pct,
+            "hold_hours": self.hold_hours,
+            "opened_at": self.opened_at.isoformat() if self.opened_at else None,
+            "closed_at": self.closed_at.isoformat() if self.closed_at else None,
+        }
+
+
+class SweepProposal(Base):
+    """Proposed transfer of platform profit into Alpaca trading capital.
+
+    No API deposit is called. User funds in Alpaca UI / bank, then marks funded.
+    Workflow: proposed → approved → funded → applied
+    """
+    __tablename__ = "sweep_proposals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    amount = Column(Float)  # USD to transfer
+    status = Column(String, default="proposed", index=True)
+    # proposed | approved | funded | applied | cancelled | rejected
+
+    # Snapshot of calculator inputs at proposal time (for audit)
+    gross_platform = Column(Float)  # Sum of platform_amount before reserves
+    tax_reserve = Column(Float)  # Amount held for taxes
+    business_reserve = Column(Float)  # Amount held for operations buffer
+    already_swept = Column(Float)  # Σ funded SweepProposals to subtract
+    free_cash = Column(Float)  # free_cash = gross - tax - already_swept - biz_reserve
+    rules_snapshot = Column(JSON)  # The rule set (min_transfer, max_pct, etc.) used
+
+    # Status timestamps
+    proposed_at = Column(DateTime, default=datetime.utcnow, index=True)
+    approved_at = Column(DateTime, nullable=True)
+    funded_at = Column(DateTime, nullable=True)  # User confirms ACH landed
+    applied_at = Column(DateTime, nullable=True)  # base_capital updated
+    cancelled_at = Column(DateTime, nullable=True)
+
+    notes = Column(Text, nullable=True)
+    target_bot_name = Column(String, nullable=True)  # e.g. "prop_bot"
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "amount": self.amount,
+            "status": self.status,
+            "gross_platform": self.gross_platform,
+            "tax_reserve": self.tax_reserve,
+            "business_reserve": self.business_reserve,
+            "already_swept": self.already_swept,
+            "free_cash": self.free_cash,
+            "rules_snapshot": self.rules_snapshot,
+            "proposed_at": self.proposed_at.isoformat() if self.proposed_at else None,
+            "approved_at": self.approved_at.isoformat() if self.approved_at else None,
+            "funded_at": self.funded_at.isoformat() if self.funded_at else None,
+            "applied_at": self.applied_at.isoformat() if self.applied_at else None,
+            "cancelled_at": self.cancelled_at.isoformat() if self.cancelled_at else None,
+            "notes": self.notes,
+            "target_bot_name": self.target_bot_name,
+        }
+
+
+class SweepAuditLog(Base):
+    """Append-only log of every calculator run and status change."""
+    __tablename__ = "sweep_audit_log"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event = Column(String, index=True)  # calculated | proposed | approved | funded | applied | rejected | cancelled
+    proposal_id = Column(Integer, ForeignKey("sweep_proposals.id"), nullable=True, index=True)
+    detail = Column(JSON)  # Full context of the event
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "event": self.event,
+            "proposal_id": self.proposal_id,
+            "detail": self.detail,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class CryptoRSIState(Base):
+    """Track RSI state machine per symbol for tiered entry discipline.
+
+    Replaces static RSI thresholds with event-driven entry: only enter when RSI
+    has ENTERED the oversold zone (10-30), then bounces upward.
+
+    States:
+    - entered_oversold=False, armed_rsi=None: WATCH (RSI > 30 or never entered)
+    - entered_oversold=True, armed_rsi!=None: ARM (in 10-30, waiting for bounce)
+    - Entry triggers when: entered_oversold=True + RSI > armed_rsi + vol + candle
+    - Reset when: RSI > 50 (forces fresh cycle)
+    """
+    __tablename__ = "crypto_rsi_state"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, unique=True, index=True)  # "BTC/USD", "ETH/USD", etc.
+    entered_oversold = Column(Boolean, default=False)  # Has RSI dipped to 10-30?
+    armed_rsi = Column(Float, nullable=True)  # RSI value when entered oversold
+    last_rsi = Column(Float, nullable=True)  # Previous cycle RSI (for recovery check)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "symbol": self.symbol,
+            "entered_oversold": self.entered_oversold,
+            "armed_rsi": self.armed_rsi,
+            "last_rsi": self.last_rsi,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class CryptoTradeLog(Base):
+    """Comprehensive trade instrumentation for validating state machine effectiveness.
+
+    Captures full lifecycle: ARM → ENTER → EXIT with all metrics needed to measure
+    if the new event-driven entry logic improves expectancy vs. old threshold-based approach.
+
+    Strategy version protection: every entry is tagged with strategy_version to prevent
+    accidentally mixing old threshold-based data with new RSI state machine data.
+
+    Metrics tracked:
+    - ARM state: RSI progression, entered_oversold flag
+    - ENTRY: RSI, volume ratio, candle confirmation, position size
+    - EXIT: reason, P&L (gross/fees/net), time held
+    - Risk metrics: MAE (max adverse excursion), MFE (max favorable excursion)
+    - Exit performance: partial-exit fills, trailing-stop effectiveness
+    - Non-trades: WATCH, ARM with no recovery, rejected entries (for state machine validation)
+    """
+    __tablename__ = "crypto_trade_log"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True)  # "BTC/USD", "ETH/USD", etc.
+    strategy_version = Column(String, default="RSI_STATE_MACHINE_V1", index=True)  # Prevents data mixing
+    trade_id = Column(String, unique=True, index=True)  # UUID for deduplication
+    event_type = Column(String, index=True)  # "WATCH", "ARM", "RECOVERY_REJECTED", "ENTER", "EXIT"
+
+    # Timeline
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    armed_at = Column(DateTime, nullable=True, index=True)  # When RSI entered 10-30
+    entered_at = Column(DateTime, nullable=True, index=True)  # When trade opened
+    exit_at = Column(DateTime, nullable=True, index=True)  # When position closed
+
+    # RSI progression (critical for state machine validation)
+    rsi_before_arm = Column(Float, nullable=True)  # RSI before oversold zone
+    rsi_arm = Column(Float, nullable=True)  # RSI when armed (entered 10-30)
+    rsi_low = Column(Float, nullable=True)  # Lowest RSI during hold
+    rsi_at_recovery = Column(Float, nullable=True)  # RSI when recovery started
+    rsi_at_entry = Column(Float, nullable=True)  # RSI at actual entry
+    entered_oversold = Column(Boolean, default=False)  # Did RSI genuinely enter 10-30?
+
+    # Entry confirmation metrics
+    volume_ratio_at_entry = Column(Float, nullable=True)  # Volume spike ratio
+    candle_confirmation = Column(Float, nullable=True)  # Close position in upper half (0-1)
+
+    # Position details
+    entry_price = Column(Float, nullable=True)
+    position_size = Column(Float, nullable=True)
+    atr_at_entry = Column(Float, nullable=True)  # Volatility at entry
+    atr_stop = Column(Float, nullable=True)  # Stop price derived from ATR
+    atr_target_1 = Column(Float, nullable=True)  # 1st target (ATR-based)
+    atr_target_2 = Column(Float, nullable=True)  # 2nd target (ATR-based)
+    atr_target_3 = Column(Float, nullable=True)  # 3rd target (ATR-based)
+
+    # Exit details
+    exit_price = Column(Float, nullable=True)
+    exit_reason = Column(String, nullable=True)  # "TIER1", "TIER2", "TIER3", "STOP_LOSS", "RSI_EXIT", "POSITION_ALREADY_EXISTS", "VOLUME_INSUFFICIENT", "CANDLE_FAILED", etc.
+    rejection_reason = Column(String, nullable=True)  # For non-entry events: why was entry rejected
+
+    # P&L accounting (gross → fees → net)
+    gross_pnl = Column(Float, nullable=True)  # Price difference × quantity
+    fees_usd = Column(Float, nullable=True)  # Transaction fees
+    net_pnl = Column(Float, nullable=True)  # Gross P&L - fees
+    net_pnl_pct = Column(Float, nullable=True)  # Net P&L as percentage
+
+    # Risk metrics
+    max_adverse_excursion = Column(Float, nullable=True)  # Worst drawdown during hold
+    max_favorable_excursion = Column(Float, nullable=True)  # Best profit during hold
+    time_held_minutes = Column(Integer, nullable=True)
+
+    # Exit performance details
+    partial_exit_count = Column(Integer, default=0)
+    partial_exit_prices = Column(JSON, nullable=True)  # List of partial exit prices
+    partial_exit_quantities = Column(JSON, nullable=True)  # Quantities exited at each tier
+    trailing_stop_triggered = Column(Boolean, default=False)
+    trailing_stop_price = Column(Float, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "trade_id": self.trade_id,
+            "symbol": self.symbol,
+            "strategy_version": self.strategy_version,
+            "event_type": self.event_type,
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "rsi_progression": {
+                "before_arm": self.rsi_before_arm,
+                "at_arm": self.rsi_arm,
+                "low": self.rsi_low,
+                "at_recovery": self.rsi_at_recovery,
+                "at_entry": self.rsi_at_entry,
+                "entered_oversold": self.entered_oversold,
+            },
+            "entry_confirmation": {
+                "volume_ratio": self.volume_ratio_at_entry,
+                "candle_position": self.candle_confirmation,
+            },
+            "position": {
+                "entry_price": self.entry_price,
+                "size": self.position_size,
+                "atr_at_entry": self.atr_at_entry,
+                "stop": self.atr_stop,
+                "targets": [self.atr_target_1, self.atr_target_2, self.atr_target_3],
+            },
+            "exit": {
+                "price": self.exit_price,
+                "reason": self.exit_reason,
+                "timestamp": self.exit_at.isoformat() if self.exit_at else None,
+            },
+            "pnl": {
+                "gross": self.gross_pnl,
+                "fees": self.fees_usd,
+                "net": self.net_pnl,
+                "net_pct": self.net_pnl_pct,
+            },
+            "risk_metrics": {
+                "max_adverse_excursion": self.max_adverse_excursion,
+                "max_favorable_excursion": self.max_favorable_excursion,
+                "time_held_minutes": self.time_held_minutes,
+            },
+            "rejection_reason": self.rejection_reason,
+        }

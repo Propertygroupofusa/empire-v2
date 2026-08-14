@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Hub - Live Bot Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-dark: #0F1419;
+            --bg-card: #1A1F2E;
+            --bg-hover: #252E3F;
+            --text-primary: #E8EAED;
+            --text-secondary: #A0A9B8;
+            --text-muted: #6F7680;
+            --accent-green: #34A853;
+            --accent-red: #EA4335;
+            --accent-blue: #4285F4;
+            --accent-orange: #FBBC04;
+            --border: #303845;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        /* Header */
+        .header {
+            margin-bottom: 2rem;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 1.5rem;
+        }
+
+        .header h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }
+
+        .header p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+        }
+
+        .last-update {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-top: 0.5rem;
+        }
+
+        /* Status Bar */
+        .status-bar {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .status-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .status-label {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .status-value {
+            font-size: 1.75rem;
+            font-weight: 600;
+            font-family: 'Monaco', monospace;
+            color: var(--text-primary);
+        }
+
+        .status-value.positive {
+            color: var(--accent-green);
+        }
+
+        .status-value.negative {
+            color: var(--accent-red);
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.8rem;
+            padding: 0.4rem 0.8rem;
+            border-radius: 4px;
+            background: var(--bg-hover);
+            width: fit-content;
+            margin-top: 0.5rem;
+        }
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--accent-green);
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.offline {
+            background: var(--accent-red);
+            animation: none;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* Sections */
+        .section {
+            margin-bottom: 2rem;
+        }
+
+        .section-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-primary);
+        }
+
+        /* Tables */
+        .table-container {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.95rem;
+        }
+
+        thead {
+            background: var(--bg-hover);
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            padding: 1rem;
+            text-align: left;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-size: 0.85rem;
+        }
+
+        td {
+            padding: 1rem;
+            border-bottom: 1px solid var(--border);
+            font-family: 'Monaco', monospace;
+            font-size: 0.9rem;
+        }
+
+        tr:hover {
+            background: var(--bg-hover);
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        /* Data formatting */
+        .symbol {
+            font-weight: 600;
+            color: var(--accent-blue);
+        }
+
+        .price {
+            color: var(--text-primary);
+        }
+
+        .gain {
+            color: var(--accent-green);
+        }
+
+        .loss {
+            color: var(--accent-red);
+        }
+
+        .neutral {
+            color: var(--text-muted);
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            padding: 0.3rem 0.6rem;
+            border-radius: 3px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+
+        .badge.long {
+            background: rgba(52, 168, 83, 0.15);
+            color: var(--accent-green);
+        }
+
+        .badge.short {
+            background: rgba(234, 67, 53, 0.15);
+            color: var(--accent-red);
+        }
+
+        /* Grid */
+        .grid-2 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 1.5rem;
+        }
+
+        /* Loading */
+        .loading {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-muted);
+        }
+
+        .empty {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-muted);
+            font-style: italic;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .grid-2 {
+                grid-template-columns: 1fr;
+            }
+
+            .container {
+                padding: 1rem;
+            }
+
+            .header h1 {
+                font-size: 1.5rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>🚀 Trading Hub</h1>
+            <p>Real-time bot activity and position tracking</p>
+            <div class="last-update" id="lastUpdate"></div>
+        </div>
+
+        <!-- Status Overview -->
+        <div class="status-bar" id="statusBar">
+            <div class="status-card">
+                <div class="status-label">Bot Status</div>
+                <div class="status-value" id="botStatus">—</div>
+                <div class="status-badge">
+                    <span class="status-dot" id="statusDot"></span>
+                    <span id="statusText">Connecting...</span>
+                </div>
+            </div>
+
+            <div class="status-card">
+                <div class="status-label">Open Positions</div>
+                <div class="status-value" id="openPositions">0</div>
+                <div style="font-size: 0.85rem; color: var(--text-muted);">
+                    Value: <span id="positionValue" style="color: var(--text-primary);">$0</span>
+                </div>
+            </div>
+
+            <div class="status-card">
+                <div class="status-label">Today's P&L</div>
+                <div class="status-value" id="dailyPnL">$0.00</div>
+                <div style="font-size: 0.85rem; color: var(--text-muted);">
+                    <span id="winRate">0</span> Wins | <span id="tradeCount">0</span> Trades
+                </div>
+            </div>
+
+            <div class="status-card">
+                <div class="status-label">Account Equity</div>
+                <div class="status-value" id="equity">$0.00</div>
+                <div style="font-size: 0.85rem; color: var(--text-muted);">
+                    Cash: <span id="cash" style="color: var(--text-primary);">$0.00</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Live Positions -->
+        <div class="section">
+            <div class="section-title">📊 Live Positions</div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Side</th>
+                            <th>Quantity</th>
+                            <th>Entry Price</th>
+                            <th>Current Price</th>
+                            <th>Unrealized P&L</th>
+                            <th>Entered</th>
+                        </tr>
+                    </thead>
+                    <tbody id="positionsTable">
+                        <tr><td colspan="7" class="empty">No open positions</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Recent Trades -->
+        <div class="section">
+            <div class="section-title">📈 Recent Trades</div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Side</th>
+                            <th>Entry</th>
+                            <th>Exit</th>
+                            <th>Qty</th>
+                            <th>P&L</th>
+                            <th>Status</th>
+                            <th>Time</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tradesTable">
+                        <tr><td colspan="8" class="empty">No trades yet</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const BASE_URL = location.origin;
+        const REFRESH_INTERVAL = 5000; // 5 seconds
+
+        async function fetchData(endpoint) {
+            try {
+                const response = await fetch(`${BASE_URL}/trading-hub/api/${endpoint}`);
+                return response.json();
+            } catch (error) {
+                console.error(`Error fetching ${endpoint}:`, error);
+                return null;
+            }
+        }
+
+        function formatCurrency(value) {
+            return new Intl.NumberFormat('en-US', {
+                style: 'currency',
+                currency: 'USD',
+            }).format(value);
+        }
+
+        function formatPrice(value) {
+            return typeof value === 'number' ? value.toFixed(2) : '—';
+        }
+
+        function formatTime(timestamp) {
+            if (!timestamp) return '—';
+            const date = new Date(timestamp);
+            return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        }
+
+        async function updateDashboard() {
+            const [summary, positions, trades, status] = await Promise.all([
+                fetchData('summary'),
+                fetchData('positions'),
+                fetchData('trades/recent?limit=10'),
+                fetchData('bot-status'),
+            ]);
+
+            // Update status
+            if (status) {
+                document.getElementById('botStatus').textContent = status.status === 'active' ? 'ACTIVE' : 'IDLE';
+                document.getElementById('statusDot').className = status.status === 'active' ? 'status-dot' : 'status-dot offline';
+                document.getElementById('statusText').textContent = status.status === 'active' ? 'Online' : 'Offline';
+                document.getElementById('equity').textContent = formatCurrency(status.equity);
+                document.getElementById('cash').textContent = formatCurrency(status.cash);
+            }
+
+            // Update summary
+            if (summary) {
+                const pnl = summary.today.pnl;
+                const pnlElement = document.getElementById('dailyPnL');
+                pnlElement.textContent = formatCurrency(pnl);
+                pnlElement.className = 'status-value ' + (pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : '');
+
+                document.getElementById('openPositions').textContent = summary.positions.count;
+                document.getElementById('positionValue').textContent = formatCurrency(summary.positions.total_value);
+                document.getElementById('tradeCount').textContent = summary.today.trades;
+                document.getElementById('winRate').textContent = summary.today.wins;
+            }
+
+            // Update positions table
+            if (positions && positions.positions) {
+                const tbody = document.getElementById('positionsTable');
+                if (positions.positions.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" class="empty">No open positions</td></tr>';
+                } else {
+                    tbody.innerHTML = positions.positions.map(p => `
+                        <tr>
+                            <td><span class="symbol">${p.symbol}</span></td>
+                            <td><span class="badge ${p.side === 'long' ? 'long' : 'short'}">${p.side.toUpperCase()}</span></td>
+                            <td>${formatPrice(p.quantity)}</td>
+                            <td class="price">$${formatPrice(p.entry_price)}</td>
+                            <td class="price">${p.current_price ? '$' + formatPrice(p.current_price) : '—'}</td>
+                            <td class="${p.pnl > 0 ? 'gain' : 'loss'}">${formatCurrency(p.pnl)} (${p.pnl_pct.toFixed(2)}%)</td>
+                            <td class="text-muted">${formatTime(p.entered_at)}</td>
+                        </tr>
+                    `).join('');
+                }
+            }
+
+            // Update trades table
+            if (trades && trades.trades) {
+                const tbody = document.getElementById('tradesTable');
+                if (trades.trades.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="8" class="empty">No trades yet</td></tr>';
+                } else {
+                    tbody.innerHTML = trades.trades.map(t => `
+                        <tr>
+                            <td><span class="symbol">${t.symbol}</span></td>
+                            <td><span class="badge ${t.side === 'long' ? 'long' : 'short'}">${t.side?.toUpperCase() || '—'}</span></td>
+                            <td class="price">$${formatPrice(t.entry_price)}</td>
+                            <td class="price">${t.exit_price ? '$' + formatPrice(t.exit_price) : '—'}</td>
+                            <td>${formatPrice(t.quantity)}</td>
+                            <td class="${t.pnl > 0 ? 'gain' : 'loss'}">${formatCurrency(t.pnl)}</td>
+                            <td><span class="badge">${t.status || 'closed'}</span></td>
+                            <td class="text-muted">${formatTime(t.timestamp)}</td>
+                        </tr>
+                    `).join('');
+                }
+            }
+
+            // Update timestamp
+            document.getElementById('lastUpdate').textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
+        }
+
+        // Initial load and periodic refresh
+        updateDashboard();
+        setInterval(updateDashboard, REFRESH_INTERVAL);
+
+        console.log('🚀 Trading Hub dashboard loaded. Refreshing every 5 seconds.');
+    </script>
+</body>
+</html>

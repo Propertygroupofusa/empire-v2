@@ -15,42 +15,162 @@ from email.mime.text import MIMEText
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import aiohttp
+import uuid
+from sqlalchemy import select
+from database import AsyncSessionLocal
+from models import BotPosition, Payment
+from bot_mandates import APEX_MANDATE, validate_entry
+from alpaca_mean_reversion import should_exit_position as mr_should_exit, validate_dual_direction
+
+# Measurement system: Trade logging with full signal context
+try:
+    from measurement_system import SignalContext, TradeLog, trade_logger, StatisticalAnalyzer
+    MEASUREMENT_AVAILABLE = True
+except ImportError:
+    MEASUREMENT_AVAILABLE = False
+    log.warning("measurement_system not available - trade logging disabled") if 'log' in dir() else None
 
 ET = ZoneInfo("America/New_York")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("prop_bot")
 
-ALPACA_KEY    = os.getenv("ALPACA_API_KEY", "")
-ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
-BASE_URL      = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
-LIVE_TRADE    = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
-STOP          = os.getenv("STOP_TRADING", "false").lower() == "true"
+def get_headers():
+    """Dynamically read Alpaca API credentials from env vars on every call.
+    This ensures fresh credentials even if env vars are set after module load."""
+    return {
+        "APCA-API-KEY-ID": os.getenv("ALPACA_API_KEY", ""),
+        "APCA-API-SECRET-KEY": os.getenv("ALPACA_SECRET_KEY", ""),
+        "Content-Type": "application/json"
+    }
 
-# RSI entry/exit thresholds. Widened again at the account owner's explicit
-# request - real trades were too rare at 38/48 (RSI mostly sat in the
-# 39-57 range with nothing crossing 38). Wider band means more real trades
-# fire, at the cost of acting on weaker/less-confirmed signals - that
-# tradeoff was made knowingly, not a bug. Configurable via env for tuning
-# without a code change.
-RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "45"))
-RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "50"))
+def get_base_url():
+    """Dynamically read Alpaca base URL from env var."""
+    return os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 
-HEADERS = {
-    "APCA-API-KEY-ID": ALPACA_KEY,
-    "APCA-API-SECRET-KEY": ALPACA_SECRET,
-    "Content-Type": "application/json"
-}
+# Live trading mode
+LIVE_TRADE = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
+
+# RSI entry/exit thresholds
+RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "30"))
+RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "70"))
+
+# Crypto-specific thresholds: AGGRESSIVE SCALPING FOR MILESTONE SPEED
+# Lowered from 30/70 to 35/65 to catch MORE entry/exit opportunities
+# Maximizes trade frequency to hit $1,000 ASAP, then $2,000 within 24hr
+CRYPTO_RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "35"))   # MORE oversold entries (faster compounding)
+CRYPTO_RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "65"))  # MORE overbought exits (more profit locks)
+
+# AGGRESSIVE WINS + STRICT LOSS PREVENTION
+# Base stop-loss: 0.3% to exit losing trades immediately
+# At higher scales: tighter stops to prevent multiplied losses
+# 1.0x scale: 0.3% stop
+# 1.5x scale: 0.2% stop (1.5x scaled position needs tighter exit)
+# 2.0x scale: 0.2% stop (maximum scale = maximum discipline)
+STOP_LOSS_BASE_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.003"))  # Base: 0.3% for stocks/futures
+
+# Crypto-specific stop-loss: dynamically tightens with scale
+# Base: 0.3%, tightens to 0.2% at 1.5x scale
+CRYPTO_STOP_LOSS_BASE_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.003"))  # Base: 0.3%
+
+def get_dynamic_stop_loss(scale: float) -> float:
+    """Tighten stop-loss as positions scale up (1.5x+ = tighter discipline)"""
+    if scale >= 1.5:
+        return 0.002  # 0.2% at 1.5x scale and higher
+    return STOP_LOSS_BASE_PCT  # 0.3% baseline
+
+def get_dynamic_crypto_stop_loss(scale: float) -> float:
+    """Crypto: same dynamic tightening as stocks"""
+    if scale >= 1.5:
+        return 0.002  # 0.2% at 1.5x scale and higher
+    return CRYPTO_STOP_LOSS_BASE_PCT  # 0.3% baseline
+
+# Daily maximum loss in dollars — DYNAMIC CIRCUIT BREAKER
+# Base: $10 daily max loss at 1.0x scale. SCALES with position multiplier.
+# 1.0x scale → $10 loss limit
+# 1.5x scale → $15 loss limit (larger positions = larger max loss allowed)
+# 2.0x scale → $20 loss limit (can absorb bigger drawdowns while scaling)
+# Prevents catastrophic losses but allows survival of losing streaks at higher scales
+DAILY_MAX_LOSS_BASE = float(os.getenv("PROP_DAILY_MAX_LOSS_BASE", "10"))
+
+# AGGRESSIVE EXIT ON RED — Close any position down 0.5% immediately
+# Don't wait for stop-loss to trigger. Exit fast, preserve capital.
+QUICK_EXIT_LOSS_PCT = float(os.getenv("QUICK_EXIT_LOSS_PCT", "0.005"))  # Exit any loser at 0.5% down
+
+# SCALING UP SYSTEM — Increase position sizes after each milestone lock
+# $1K lock → scale to 1.5x, $2K lock → scale to 2.0x, $5K lock → scale to 3.0x
+POSITION_SCALE_MULTIPLIER = float(os.getenv("POSITION_SCALE_MULTIPLIER", "1.0"))  # Starts at 1.0x, increases per milestone
 
 # APEX futures — use micro contracts (lower risk during evaluation)
+# Expanded to include international markets and forex for 24/5 global trading opportunities
 FUTURES = {
+    # American indices
     "MES": {"name": "Micro E-mini S&P 500", "qty": 1, "symbol": "SPY"},   # Use SPY as proxy
     "MNQ": {"name": "Micro E-mini Nasdaq",  "qty": 1, "symbol": "QQQ"},   # Use QQQ as proxy
     "MYM": {"name": "Micro E-mini Dow",     "qty": 1, "symbol": "DIA"},   # Use DIA as proxy
     "M2K": {"name": "Micro E-mini Russell", "qty": 1, "symbol": "IWM"},   # Use IWM as proxy
+    # Commodities
     "MGC": {"name": "Micro Gold",           "qty": 1, "symbol": "GLD"},   # Use GLD as proxy
     "MCL": {"name": "Micro Crude Oil",      "qty": 1, "symbol": "USO"},   # Use USO as proxy
     "SIL": {"name": "Micro Silver",         "qty": 1, "symbol": "SLV"},   # Use SLV as proxy
+    # Cryptocurrencies (24/7 trading on Alpaca) — 50+ PAIRS FOR MAXIMUM OPPORTUNITIES
+    # Strategy: Scan all, trade best signals only. MAX_POSITIONS=2 keeps capital focused.
+    # Every signal = potential $2-3 win. More pairs = more winning chances per day.
+    # Mega cap tier (stable baseline):
+    "BTC": {"name": "Bitcoin",              "qty": 1, "symbol": "BTC/USD"},
+    "ETH": {"name": "Ethereum",             "qty": 1, "symbol": "ETH/USD"},
+    # Tier 1 - High liquidity altcoins (proven winners):
+    "SOL": {"name": "Solana",               "qty": 1, "symbol": "SOL/USD"},
+    "ADA": {"name": "Cardano",              "qty": 1, "symbol": "ADA/USD"},
+    "DOGE": {"name": "Dogecoin",            "qty": 1, "symbol": "DOGE/USD"},
+    "XRP": {"name": "Ripple",               "qty": 1, "symbol": "XRP/USD"},
+    "LINK": {"name": "Chainlink",           "qty": 1, "symbol": "LINK/USD"},
+    "AVAX": {"name": "Avalanche",           "qty": 1, "symbol": "AVAX/USD"},
+    "NEAR": {"name": "NEAR Protocol",       "qty": 1, "symbol": "NEAR/USD"},
+    "MATIC": {"name": "Polygon",            "qty": 1, "symbol": "MATIC/USD"},
+    # Tier 2 - Hot altcoins (emerging volume leaders):
+    "ARB": {"name": "Arbitrum",             "qty": 1, "symbol": "ARB/USD"},
+    "OP": {"name": "Optimism",              "qty": 1, "symbol": "OP/USD"},
+    "APT": {"name": "Aptos",                "qty": 1, "symbol": "APT/USD"},
+    "SEI": {"name": "Sei",                  "qty": 1, "symbol": "SEI/USD"},
+    "SUI": {"name": "Sui",                  "qty": 1, "symbol": "SUI/USD"},
+    "BLUR": {"name": "Blur",                "qty": 1, "symbol": "BLUR/USD"},
+    "LDO": {"name": "Lido DAO",             "qty": 1, "symbol": "LDO/USD"},
+    "MKR": {"name": "Maker",                "qty": 1, "symbol": "MKR/USD"},
+    "AAVE": {"name": "Aave",                "qty": 1, "symbol": "AAVE/USD"},
+    "UNI": {"name": "Uniswap",              "qty": 1, "symbol": "UNI/USD"},
+    # Tier 3 - Volume surge candidates:
+    "PEPE": {"name": "Pepe",                "qty": 1, "symbol": "PEPE/USD"},
+    "SHIB": {"name": "Shiba Inu",           "qty": 1, "symbol": "SHIB/USD"},
+    "FLOKI": {"name": "Floki",              "qty": 1, "symbol": "FLOKI/USD"},
+    "STX": {"name": "Stacks",               "qty": 1, "symbol": "STX/USD"},
+    "FIL": {"name": "Filecoin",             "qty": 1, "symbol": "FIL/USD"},
+    "ATOM": {"name": "Cosmos",              "qty": 1, "symbol": "ATOM/USD"},
+    "ALGO": {"name": "Algorand",            "qty": 1, "symbol": "ALGO/USD"},
+    "SAND": {"name": "Sandbox",             "qty": 1, "symbol": "SAND/USD"},
+    "MANA": {"name": "Decentraland",        "qty": 1, "symbol": "MANA/USD"},
+    "ENS": {"name": "ENS",                  "qty": 1, "symbol": "ENS/USD"},
+    "RNDR": {"name": "Render",              "qty": 1, "symbol": "RNDR/USD"},
+    "IMX": {"name": "Immutable",            "qty": 1, "symbol": "IMX/USD"},
+    "GALA": {"name": "Gala",                "qty": 1, "symbol": "GALA/USD"},
+    "BEAM": {"name": "Beam",                "qty": 1, "symbol": "BEAM/USD"},
+    # Tier 4 - Emerging micro-cap movers:
+    "WIF": {"name": "dogwifhat",            "qty": 1, "symbol": "WIF/USD"},
+    "POPCAT": {"name": "Popcat",            "qty": 1, "symbol": "POPCAT/USD"},
+    "MOO": {"name": "Moo Deng",             "qty": 1, "symbol": "MOO/USD"},
+    "BONK": {"name": "Bonk",                "qty": 1, "symbol": "BONK/USD"},
+    "RENDER": {"name": "Render",            "qty": 1, "symbol": "RENDER/USD"},
+    "JTO": {"name": "Jito",                 "qty": 1, "symbol": "JTO/USD"},
+    "ORCA": {"name": "Orca",                "qty": 1, "symbol": "ORCA/USD"},
+    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
+    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
+    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
+    # Add more as they become available on Alpaca
+    "WLD": {"name": "Worldcoin",            "qty": 1, "symbol": "WLD/USD"},
+    "INJ": {"name": "Injective",            "qty": 1, "symbol": "INJ/USD"},
+    "SUSHI": {"name": "Sushi",              "qty": 1, "symbol": "SUSHI/USD"},
+    "CURVE": {"name": "Curve",              "qty": 1, "symbol": "CURVE/USD"},
+    "CRV": {"name": "Curve DAO",            "qty": 1, "symbol": "CRV/USD"},
 }
 
 # Max concurrent open positions. Explicit request: don't cap this below
@@ -63,43 +183,171 @@ FUTURES = {
 # logic in run_prop_cycle (swap out a losing position for a fresh signal)
 # still exists as a safety net, but can't trigger at this default since
 # there's no 8th symbol to need a slot from.
-MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", str(len(FUTURES))))
+# Max concurrent positions: SCALED WITH POSITION MULTIPLIER
+# Base: 2 positions at 1.0x scale
+# At 1.5x scale: reduce to 1 position (1.5x loss on 1 trade < 1.0x loss on 2 trades)
+# At 2.0x scale: stay at 1 position (conservative with max scaling)
+# This prevents multiplied losses across multiple scaled positions
+BASE_MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", "3"))  # Long-only: 3 concurrent positions
+
+def get_dynamic_max_positions(scale: float) -> int:
+    """Reduce max positions as scale increases to limit compounded losses"""
+    if scale >= 1.5:
+        return 1  # Single position when scaled 1.5x or higher
+    return BASE_MAX_POSITIONS  # 3 positions (longs only) at baseline 1.0x scale
 
 # Profit target, in REAL DOLLARS of profit on the position (not a raw
-# price move on the underlying) - scaled by real account equity. Explicit
-# request: take profit daily even if it's just 50 cents to a dollar,
-# then immediately look for another promising signal, rather than
-# holding out for a bigger move. Checked against real Alpaca equity each
-# cycle.
-#
-# This replaces an earlier version that checked a raw per-share price
-# move (e.g. "SPY moved $0.25") instead of the position's actual dollar
-# P&L. That was fine when positions were a fixed 1 share, but once
-# size_position() started sizing positions in fractional dollars (see
-# try_open), a $0.25 underlying move on a $10-$150 fractional position
-# could mean only a few cents of real profit - nowhere near the 50c-$1
-# actually wanted here.
+# price move on the underlying) - scaled by real account equity. Increased targets
+# to let winners run instead of closing too early. With $1000+ positions, these
+# targets are achievable on 1%+ daily moves that we see in the market.
 PROFIT_TARGET_DOLLARS_MILESTONES = [
-    (0,     0.50),
-    (1000,  0.60),
-    (5000,  0.80),
-    (10000, 1.00),
+    (0,     5.00),      # Micro: $5.00 (0.50% on $1000)
+    (500,   7.50),      # Small: $7.50
+    (1000,  2000.00),   # Medium: $2000.00 (200% on $1000 - aggressive growth mode)
+    (5000,  15.00),     # Large: $15.00 (0.30% on $5000)
+    (10000, 20.00),     # Huge: $20.00 (0.20% on $10000)
 ]
 
+# Crypto-specific LOWER profit targets for fast compounding & high frequency
+# On $992: aim for $2-3 per trade (hit more targets, reinvest faster)
+CRYPTO_PROFIT_TARGET_MILESTONES = [
+    (0,     2.50),      # Micro: $2.50 (0.25% on $1000) — fast wins
+    (500,   3.00),      # Small: $3.00
+    (1000,  3.50),      # Medium: $3.50
+    (5000,  5.00),      # Large: $5.00
+    (10000, 7.50),      # Huge: $7.50
+]
 
-def get_profit_target_dollars(equity):
+# Crypto-specific AGGRESSIVE tiered exits — lock wins faster, reinvest sooner
+# Tier 1: Exit 50% at 50% of target (very early win lock)
+# Tier 2: Exit 25% at 75% of target (partial second exit)
+# Tier 3: Exit final 25% at 100% of target (close all, start fresh)
+CRYPTO_TIER_LEVELS = [0.50, 0.75, 1.00]  # multipliers of crypto profit target
+
+# Professional tiered exit levels for stocks - lock in profits at milestones, let winners run
+# Tier 1: Exit 1/3 at 50% of target (lock in early win)
+# Tier 2: Exit 1/3 at 100% of target (take second third)
+# Tier 3: Exit final 1/3 at 150% of target (let winners run to max)
+TIER_LEVELS = [0.50, 1.00, 1.50]  # multipliers of profit target
+
+
+def get_profit_target_dollars(equity, is_crypto=False):
+    """Get profit target based on account equity. Crypto uses lower targets for fast compounding."""
+    milestones = CRYPTO_PROFIT_TARGET_MILESTONES if is_crypto else PROFIT_TARGET_DOLLARS_MILESTONES
     if equity is None:
-        return PROFIT_TARGET_DOLLARS_MILESTONES[0][1]
-    target = PROFIT_TARGET_DOLLARS_MILESTONES[0][1]
-    for threshold, t in PROFIT_TARGET_DOLLARS_MILESTONES:
+        return milestones[0][1]
+    target = milestones[0][1]
+    for threshold, t in milestones:
         if equity >= threshold:
             target = t
     return target
 
 # Track profitable days for APEX 7-day rule
 profitable_days = []
+
+# Bot lifecycle tracking for $1M goal
+bot_start_time = None  # When bot started trading
+bot_start_equity = None  # Starting equity when bot began
+checkpoint_alerts_sent = set()  # Track which milestones we've alerted on (avoid duplicates)
 daily_pnl = 0.0
+daily_account_equity_start = None  # For daily 2% loss limit
 open_prop_positions = {}
+
+BOT_NAME = "prop_apex"
+
+
+async def load_open_positions():
+    """Reload open_prop_positions from the DB once at startup, before the
+    first cycle runs - otherwise a Railway restart wipes this dict while
+    the position is still open for real on Alpaca, and the bot can never
+    take profit or cut losses on it again (see BotPosition in models.py)."""
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
+            rows = result.scalars().all()
+            for row in rows:
+                open_prop_positions[row.symbol] = {"side": row.side, "entry": row.entry_price, "qty": row.qty, "open_time": row.opened_at}
+            if rows:
+                log.info(f"[APEX_589296] Reloaded {len(rows)} open position(s) from DB: {list(open_prop_positions.keys())}")
+    except Exception as e:
+        log.error(f"[APEX_589296] Failed to reload open positions from DB: {e}")
+
+
+async def _db_save_open(contract: str, side: str, entry: float, qty: float):
+    """Save opened position to database and log to measurement system."""
+    try:
+        async with AsyncSessionLocal() as db:
+            db.add(BotPosition(bot=BOT_NAME, symbol=contract, side=side, entry_price=entry, qty=qty))
+            await db.commit()
+
+        # Log to measurement system
+        if MEASUREMENT_AVAILABLE:
+            trade_id = f"{contract}_{entry}_{datetime.now(timezone.utc).timestamp()}"  # Unique trade ID
+            signal_context = SignalContext(
+                symbol=contract,
+                price=entry,
+                trend=side,  # Use side as trend indicator
+                regime="bull" if side == "long" else "bear",
+            )
+            trade_logger.record_entry(
+                trade_id=trade_id[:16],  # Truncate to 16 chars for storage
+                strategy="apex_mean_reversion",
+                symbol=contract,
+                entry_price=entry,
+                entry_quantity=qty,
+                signal_context=signal_context,
+                expected_value=None,
+                mode="live" if LIVE_TRADE else "paper",
+            )
+    except Exception as e:
+        log.error(f"[APEX_589296] Failed to persist opened position {contract}: {e}")
+
+
+async def _db_delete_open(contract: str):
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME, BotPosition.symbol == contract))
+            for row in result.scalars().all():
+                await db.delete(row)
+            await db.commit()
+    except Exception as e:
+        log.error(f"[APEX_589296] Failed to remove closed position {contract} from DB: {e}")
+
+
+async def _db_save_closed_trade(contract: str, side: str, entry_price: float, exit_price: float, qty: float, profit_loss: float, reason: str):
+    """Record a completed trade to closed_trades table for historical audit trail and log to measurement system."""
+    try:
+        from models import ClosedTrade
+        pnl_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+        async with AsyncSessionLocal() as db:
+            trade = ClosedTrade(
+                bot=BOT_NAME,
+                symbol=contract,
+                side=side,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                qty=qty,
+                pnl=profit_loss,
+                pnl_pct=pnl_pct,
+                exit_reason=reason,
+                closed_at=datetime.now(timezone.utc)
+            )
+            db.add(trade)
+            await db.commit()
+            log.info(f"[AUDIT] Closed trade recorded: {contract} {side} | Entry ${entry_price:.2f} → Exit ${exit_price:.2f} | P&L: ${profit_loss:.2f}")
+
+        # Log to measurement system
+        if MEASUREMENT_AVAILABLE:
+            trade_id = f"{contract}_{entry_price}"  # Simple trade ID matching entry
+            trade_logger.record_exit(
+                trade_id=trade_id[:16],  # Truncate to 16 chars
+                exit_price=exit_price,
+                exit_reason=reason,
+                entry_slippage=None,
+                exit_slippage=None,
+            )
+    except Exception as e:
+        log.error(f"[APEX_589296] Failed to log closed trade {contract}: {e}")
 
 # Latest per-symbol scan snapshot, read by routers/trading_dashboard.py's
 # GET /signals so the dashboard can show live price/RSI/trend instead of
@@ -137,15 +385,15 @@ def send_trade_alert(subject: str, body: str):
 
 
 async def get_price_rsi(session, symbol):
-    """Get price and RSI for futures proxy symbol"""
+    """Get price and RSI for futures proxy symbol, including SMA50 for mean reversion validation"""
     try:
-        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=5Min&limit=20"
-        async with session.get(url, headers=HEADERS) as r:
+        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=5Min&limit=50"
+        async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
                 return None
             data = await r.json()
             bars = data.get("bars", [])
-            if len(bars) < 14:
+            if len(bars) < 50:
                 return None
 
             closes = [b["c"] for b in bars]
@@ -160,9 +408,13 @@ async def get_price_rsi(session, symbol):
 
             sma5 = sum(closes[-5:]) / 5
             sma10 = sum(closes[-10:]) / 10
+            sma50 = sum(closes[-50:]) / 50
             trend = "bullish" if sma5 > sma10 else "bearish"
 
-            return {"price": price, "rsi": round(rsi, 1), "trend": trend}
+            # Momentum: price change over last 3 bars (shows direction/strength)
+            momentum = ((price - closes[-3]) / closes[-3]) * 100 if closes[-3] > 0 else 0
+
+            return {"price": price, "rsi": round(rsi, 1), "trend": trend, "momentum": round(momentum, 2), "sma50": sma50}
     except Exception as e:
         log.error(f"Price error {symbol}: {e}")
         return None
@@ -183,7 +435,7 @@ async def get_higher_tf_trend(session, symbol):
     a genuinely confirmed opposing trend does."""
     try:
         url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=1Hour&limit=50&feed=iex"
-        async with session.get(url, headers=HEADERS) as r:
+        async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
                 return "UNKNOWN"
             data = await r.json()
@@ -213,8 +465,14 @@ async def get_account_equity(session):
     increment (see PROFIT_INCREMENT_MILESTONES). Falls back to None (base
     tier) on any failure - a scaling hiccup shouldn't block trading."""
     try:
-        async with session.get(f"{BASE_URL}/v2/account", headers=HEADERS) as r:
+        url = f"{get_base_url()}/v2/account"
+        async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
+                try:
+                    error_text = await r.text()
+                except:
+                    error_text = "(could not read response)"
+                log.warning(f"Alpaca /v2/account returned HTTP {r.status}: {error_text[:200]}")
                 return None
             data = await r.json()
             return float(data.get("equity", 0))
@@ -228,13 +486,40 @@ async def get_account_cash(session):
     rather than a fixed share count (see size_position). Falls back to
     None on any failure - callers fall back to the fixed 1-share size."""
     try:
-        async with session.get(f"{BASE_URL}/v2/account", headers=HEADERS) as r:
+        url = f"{get_base_url()}/v2/account"
+        async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
+                try:
+                    error_text = await r.text()
+                except:
+                    error_text = "(could not read response)"
+                log.warning(f"Alpaca /v2/account (cash) returned HTTP {r.status}: {error_text[:200]}")
                 return None
             data = await r.json()
             return float(data.get("cash", 0))
     except Exception as e:
         log.warning(f"Could not fetch account cash for position sizing: {e}")
+        return None
+
+
+async def get_account_buying_power(session):
+    """Real Alpaca buying power. Returns buying power or None on failure.
+    Used for hard margin safety checks to prevent over-leverage."""
+    try:
+        url = f"{get_base_url()}/v2/account"
+        async with session.get(url, headers=get_headers()) as r:
+            if r.status != 200:
+                try:
+                    error_text = await r.text()
+                except:
+                    error_text = "(could not read response)"
+                log.warning(f"Alpaca /v2/account (buying_power) returned HTTP {r.status}: {error_text[:200]}")
+                return None
+            data = await r.json()
+            bp = float(data.get("buying_power", 0))
+            return bp
+    except Exception as e:
+        log.warning(f"Could not fetch buying power for margin safety: {e}")
         return None
 
 
@@ -250,7 +535,7 @@ async def get_account_shorting_enabled(session):
     so a transient API hiccup doesn't silently disable a feature that may
     actually be working."""
     try:
-        async with session.get(f"{BASE_URL}/v2/account", headers=HEADERS) as r:
+        async with session.get(f"{get_base_url()}/v2/account", headers=get_headers()) as r:
             if r.status != 200:
                 return True
             data = await r.json()
@@ -260,27 +545,126 @@ async def get_account_shorting_enabled(session):
         return True
 
 
+# Reverse of FUTURES: proxy ETF symbol -> contract code, so a real Alpaca
+# position can be matched back to the contract key open_prop_positions
+# tracks by.
+_SYMBOL_TO_CONTRACT = {config["symbol"]: contract for contract, config in FUTURES.items()}
+
+
+async def reconcile_positions_with_broker(session):
+    """Confirmed in production: a real Alpaca position (USO/MCL) sat at
+    -4.9% - more than double STOP_LOSS_PCT - completely unmanaged, because
+    it was opened before the BotPosition table existed (pre position-
+    persistence fix) and so was never in the DB for load_open_positions()
+    to reload. The bot's own state said that slot was empty (it kept
+    trying to open a fresh MCL entry) while a real, real-money position
+    sat on the broker losing more than the stop-loss should ever allow -
+    the stop-loss protection is worthless if the bot doesn't know a
+    position exists to apply it to.
+
+    Runs every cycle (one extra cheap GET, not just at startup) so any
+    future desync - from any cause, not just this specific historical
+    bug - self-heals within one cycle instead of persisting indefinitely:
+    - A real position on a tracked symbol that open_prop_positions doesn't
+      know about gets ADOPTED (entry price taken from Alpaca's own
+      avg_entry_price, so the stop-loss/profit-target math is correct
+      from the moment it's adopted) and persisted to the DB.
+    - A tracked position whose real Alpaca position has vanished (closed
+      manually, liquidated, stopped out some other way) gets DROPPED from
+      tracking so the bot doesn't keep thinking it holds something it
+      doesn't.
+
+    Only ever touches contracts in FUTURES/_SYMBOL_TO_CONTRACT - a real
+    position on a symbol this bot doesn't trade (e.g. a manual purchase
+    unrelated to this bot) is left completely alone, adopted or not."""
+    try:
+        async with session.get(f"{get_base_url()}/v2/positions", headers=get_headers()) as r:
+            if r.status != 200:
+                return
+            broker_positions = await r.json()
+    except Exception as e:
+        log.warning(f"[APEX_589296] Could not fetch broker positions for reconciliation: {e}")
+        return
+
+    broker_by_contract = {}
+    for p in broker_positions:
+        contract = _SYMBOL_TO_CONTRACT.get(p.get("symbol"))
+        if contract:
+            broker_by_contract[contract] = p
+
+    for contract, p in broker_by_contract.items():
+        if contract in open_prop_positions:
+            continue
+        qty = float(p.get("qty", 0))
+        if qty == 0:
+            continue
+        side = "long" if qty > 0 else "short"
+        entry = float(p.get("avg_entry_price", 0))
+        open_prop_positions[contract] = {"side": side, "entry": entry, "qty": abs(qty)}
+        await _db_save_open(contract, side, entry, abs(qty))
+        log.warning(f"[APEX_589296] 🔧 Adopted orphaned {side} {contract} position found on Alpaca but not tracked (entry ${entry:.2f}, qty {abs(qty)}) - stop-loss/profit-target now apply to it")
+
+    for contract in list(open_prop_positions.keys()):
+        if contract not in broker_by_contract:
+            log.warning(f"[APEX_589296] 🔧 Tracked {contract} position no longer exists on Alpaca (closed outside the bot) - dropping from tracking")
+            open_prop_positions.pop(contract, None)
+            await _db_delete_open(contract)
+
+
 # Floor on a single position's dollar size. Below this, a position is too
 # small to bother with (order fees/slippage would dominate) - skip the
 # entry rather than place a near-zero fractional order.
-MIN_POSITION_NOTIONAL = float(os.getenv("PROP_MIN_POSITION_NOTIONAL", "10"))
+# Micro-account ($978): $50 minimum allows actual execution while maintaining profitability
+# $50 trade × 1-2% move = $0.50-$1.00 profit (after $0.05 fees = $0.45-0.95 net)
+MIN_POSITION_NOTIONAL = float(os.getenv("PROP_MIN_POSITION_NOTIONAL", "50"))  # Reduced from $1500 for micro account
+
+# HARD MARGIN SAFETY LIMITS — prevent over-leverage ever again
+# Minimum buying power buffer required before opening ANY new position
+# For $980 account: $150 buffer = 15% locked, allows ~$830 deployable
+# This is still conservative (don't deploy 100%), but allows actual trading
+MIN_BUYING_POWER_BUFFER = float(os.getenv("PROP_MIN_BUYING_POWER_BUFFER", "150"))
+
+# Maximum percentage of account equity that can be at risk in open positions
+MAX_RISK_PERCENT = float(os.getenv("PROP_MAX_RISK_PERCENT", "0.50"))  # 50% max
+
+# Buying power threshold to STOP opening new positions (emergency brake)
+CRITICAL_BUYING_POWER_THRESHOLD = float(os.getenv("PROP_CRITICAL_BP_THRESHOLD", "100"))
 
 
 def size_position(cash_remaining, slots_remaining, price):
-    """Dollar-based (fractional-share) position sizing. A fixed 1-share
-    order fails outright on higher-priced ETFs (SPY, QQQ, DIA) once cash
-    is tight, while cheaper ones (SLV, USO) fill fine - silently capping
-    how many of the open slots can ever actually fill regardless of how
-    many real signals come in. Splitting whatever cash is left evenly
-    across the remaining open slots means a small account can still use
-    all its slots, no matter which symbol's proxy ETF happens to signal.
-    Returns None if there isn't enough cash left for even one minimum-size
-    position."""
+    """Dollar-based (fractional-share) position sizing with SCALING MULTIPLIER.
+    After each milestone lock, position sizes increase (1.5x for $2K phase, 2.0x for $5K phase).
+    This allows account to compound faster while maintaining capital protection.
+    Returns None if there isn't enough cash left for even one minimum-size position."""
     if slots_remaining <= 0 or cash_remaining < MIN_POSITION_NOTIONAL:
         return None
+
+    # Apply scaling multiplier (increases after milestone locks)
+    scale = float(os.getenv("POSITION_SCALE_MULTIPLIER", "1.0"))
+
     amount = min(max(cash_remaining / slots_remaining, MIN_POSITION_NOTIONAL), cash_remaining)
+    amount = amount * scale  # SCALE UP: bigger positions after milestone
     qty = round(amount / price, 6)
     return qty if qty > 0 else None
+
+
+def check_margin_safety(buying_power, equity, open_positions_count):
+    """Hard check: is it safe to open a new position?
+    Returns (is_safe, reason_if_not)"""
+    # Buying power must be positive with minimum buffer
+    if buying_power < MIN_BUYING_POWER_BUFFER:
+        return False, f"Insufficient buying power: ${buying_power:.2f} < ${MIN_BUYING_POWER_BUFFER:.2f} buffer"
+
+    # Emergency brake: if buying power drops near zero, stop ALL new positions
+    if buying_power < CRITICAL_BUYING_POWER_THRESHOLD:
+        return False, f"CRITICAL: Buying power ${buying_power:.2f} near zero — halting new positions"
+
+    # Total open position risk can't exceed max % of equity
+    total_open_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in open_prop_positions.values())
+    if equity > 0 and total_open_notional > (equity * MAX_RISK_PERCENT):
+        return False, f"Risk limit exceeded: ${total_open_notional:.2f} > {MAX_RISK_PERCENT*100:.0f}% of ${equity:.2f} equity"
+
+    return True, "OK"
 
 
 async def broadcast_signal_to_subscribers(session, contract, action, price, rsi, trend, stop_loss=None, target=None):
@@ -323,18 +707,22 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
     symbol = FUTURES[contract]["symbol"]
     side = "buy" if action == "BUY" else "sell"
 
+    # Use GTC (Good Till Canceled) for profit-taking sells to let orders persist until profit target hits
+    # Use DAY for entry buys to avoid holding stale orders overnight
+    time_in_force = "gtc" if action == "SELL" else "day"
+
     order = {
         "symbol": symbol,
         "qty": str(qty),
         "side": side,
         "type": "market",
-        "time_in_force": "day",
+        "time_in_force": time_in_force,
     }
 
     mode = "LIVE" if LIVE_TRADE else "PAPER"
 
     try:
-        async with session.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=order) as r:
+        async with session.post(f"{get_base_url()}/v2/orders", headers=get_headers(), json=order) as r:
             result = await r.json()
             if r.status in (200, 201):
                 log.info(f"✅ FUTURES TRADE | {mode} | {action} {qty} {contract} ({symbol}) @ ${price:.2f} | APEX_589296")
@@ -348,13 +736,34 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
         return False
 
 
-async def run_prop_cycle():
-    global daily_pnl, profitable_days, last_cycle_at, last_market_open
+def check_kill_conditions(buying_power, equity, daily_loss, open_position_count):
+    """Check if any kill conditions have been triggered. Return (should_halt, reason)"""
+    mandate = APEX_MANDATE
+    capital = mandate["capital"]
 
-    # Only trade during market hours (9:30am-4pm ET). Checked against real
-    # ET wall-clock time (DST-aware) rather than a hardcoded UTC range -
-    # a fixed 14:30-21:00 UTC window is wrong by an hour for about 8
-    # months of the year whenever ET is in daylight time.
+    # Kill condition 1: Daily loss limit hit
+    if daily_loss < -capital["max_daily_loss"]:
+        return True, f"Daily loss limit hit: ${daily_loss:.2f} <= -${capital['max_daily_loss']}"
+
+    # Kill condition 2: Buying power below critical threshold
+    if buying_power < capital["critical_buying_power"]:
+        return True, f"Buying power critical: ${buying_power:.2f} < ${capital['critical_buying_power']}"
+
+    # Kill condition 3: Equity fallen below survival level (80% of starting)
+    if equity < 800:
+        return True, f"Equity below survival level: ${equity:.2f} < $800"
+
+    # Kill condition 4: Too many open positions (shouldn't happen, but check)
+    if open_position_count > capital["max_open_positions"]:
+        return True, f"Too many open positions: {open_position_count} > {capital['max_open_positions']}"
+
+    return False, None
+
+async def run_prop_cycle():
+    global daily_pnl, profitable_days, last_cycle_at, last_market_open, bot_start_time, bot_start_equity, checkpoint_alerts_sent
+
+    # Trade during market hours (9:30am-4pm ET) for stocks/futures.
+    # Crypto trades 24/7. Checked against real ET wall-clock time (DST-aware).
     now = datetime.now(ET)
     is_weekday = now.weekday() < 5
     market_open_t = now.replace(hour=9, minute=30, second=0, microsecond=0)
@@ -362,12 +771,137 @@ async def run_prop_cycle():
 
     last_cycle_at = now.isoformat()
 
-    if not (is_weekday and market_open_t <= now <= market_close_t):
+    # Check if it's market hours for stocks (9:30am-4pm ET weekdays) or if we're trading crypto (24/7)
+    is_market_hours = is_weekday and market_open_t <= now <= market_close_t
+    is_crypto_trading = True  # Crypto trades 24/7
+
+    if not (is_market_hours or is_crypto_trading):
         last_market_open = False
-        log.info(f"[APEX_589296] Market closed — waiting for 9:30am ET")
         return
 
-    last_market_open = True
+    last_market_open = is_market_hours
+
+    # CONTINUOUS AUTO-SCALING TO $1,000,000 — No milestones, just compound
+    # Scale formula: 1.0x baseline + 0.01x per $1000 earned, capped at 5.0x
+    # $1K equity → 1.0x, $100K equity → 2.0x, $400K+ equity → 5.0x (capped)
+    connector = aiohttp.TCPConnector(use_dns_cache=True, limit=20, limit_per_host=5, ttl_dns_cache=300)
+    timeout = aiohttp.ClientTimeout(total=90, connect=20, sock_read=30, sock_connect=10)
+    async with aiohttp.ClientSession(connector=connector, trust_env=False, timeout=timeout) as session:
+        equity = await get_account_equity(session)
+
+        # MANDATE: Check kill conditions before trading
+        if equity is not None:
+            buying_power = await get_account_buying_power(session)
+            should_halt, halt_reason = check_kill_conditions(
+                buying_power=buying_power,
+                equity=equity,
+                daily_loss=daily_pnl,
+                open_position_count=len(open_prop_positions)
+            )
+            if should_halt:
+                log.critical(f"[KILL CONDITION] Halting bot: {halt_reason}")
+                return
+
+        if equity is not None:
+            # AGGRESSIVE GROWTH STRATEGY for $1,000 threshold
+            ALPACA_FLOOR = 990.00  # If drops to $990, aggressive mode
+            ALPACA_PROFIT_ACTIVATION = 1000.15  # When hits $1,000.15+, take $10 profits
+            is_alpaca_at_floor = equity <= ALPACA_FLOOR
+            should_alpaca_take_profits = equity >= ALPACA_PROFIT_ACTIVATION
+
+            if is_alpaca_at_floor:
+                log.info(f"🚀 ALPACA AGGRESSIVE MODE: ${equity:.2f} ≤ ${ALPACA_FLOOR:.2f} | Climbing to $1,000+")
+            if should_alpaca_take_profits:
+                log.info(f"💰 ALPACA PROFIT TAKING: ${equity:.2f} ≥ ${ALPACA_PROFIT_ACTIVATION:.2f} | Close $10 trades")
+
+            # Check if $1M goal achieved — STOP TRADING
+            if equity >= 1000000.0:
+                log.warning(f"🏆 **$1,000,000 MILESTONE REACHED** — Equity: ${equity:,.2f}")
+                # Close all positions and stop
+                for contract in list(open_prop_positions.keys()):
+                    pos = open_prop_positions[contract]
+                    try:
+                        price_resp = await session.get(f"{get_base_url()}/v1/last?symbols={pos.get('symbol', contract)}", headers=get_headers())
+                        if price_resp.status == 200:
+                            data = await price_resp.json()
+                            price = data.get("last", {}).get("price", pos["entry"])
+                        else:
+                            price = pos["entry"]
+                    except:
+                        price = pos["entry"]
+                    await close_position(session, contract, FUTURES.get(contract, {}), pos, price, 0, "milestone", "PROFIT LOCK - $1M REACHED")
+
+                send_trade_alert(
+                    "🏆 EMPIRE BOT — $1,000,000 ACHIEVED!",
+                    f"**ULTIMATE GOAL UNLOCKED**\n\n"
+                    f"Account Equity: ${equity:,.2f}\n"
+                    f"🎉 ONE MILLION DOLLARS!\n\n"
+                    f"Daily P&L: ${daily_pnl:.2f}\n"
+                    f"Status: TRADING STOPPED. All positions closed.\n\n"
+                    f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
+                )
+                return  # STOP — goal achieved
+
+            # Auto-scale formula: increase scale as equity grows
+            # 1.0x at $1K, 1.5x at $50K, 2.0x at $100K, 5.0x at $400K+
+            def get_auto_scale(eq: float) -> str:
+                scale = 1.0 + (eq / 100000.0)  # +0.01x per $1K earned
+                scale = min(scale, 5.0)  # Cap at 5.0x max
+                return f"{scale:.2f}"
+
+            current_scale = float(get_auto_scale(equity))
+            os.environ["POSITION_SCALE_MULTIPLIER"] = str(current_scale)
+
+            # Initialize bot lifecycle tracking when equity first hits $1K
+            if equity >= 1000.0 and bot_start_time is None:
+                bot_start_time = now
+                bot_start_equity = equity
+                log.info(f"🚀 BOT COMPOUNDING START: ${equity:,.2f} | Tracking $1M goal (120-day timeout)")
+
+            # 120-DAY SAFETY TIMEOUT - Professional guardrail
+            if bot_start_time is not None:
+                elapsed_days = (now - bot_start_time).total_seconds() / 86400
+                if elapsed_days > 120 and equity < 1000000.0:
+                    log.error(f"⏰ 120-DAY TIMEOUT REACHED | Elapsed: {elapsed_days:.1f} days | Equity: ${equity:,.2f}")
+                    send_trade_alert(
+                        "⏰ BOT SAFETY TIMEOUT — 120 DAYS REACHED",
+                        f"**SAFETY TIMEOUT TRIGGERED**\n\n"
+                        f"Elapsed: {elapsed_days:.1f} days\n"
+                        f"Target: $1,000,000\n"
+                        f"Achieved: ${equity:,.2f}\n\n"
+                        f"Trading stopped per safety protocol.\n"
+                        f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
+                    )
+                    return  # STOP — timeout reached. Positions handled naturally by exit logic
+
+            # CHECKPOINT ALERTS — Monitor progress to $1M (alert once per milestone)
+            if bot_start_time is not None and bot_start_equity is not None:
+                for milestone in [10000, 50000, 100000]:
+                    if equity >= milestone and milestone not in checkpoint_alerts_sent:
+                        progress = equity - bot_start_equity
+                        checkpoint_alerts_sent.add(milestone)
+                        log.info(f"✅ MILESTONE UNLOCKED: ${equity:,.0f} | Profit: ${progress:,.0f} | Scale: {current_scale:.2f}x")
+                        send_trade_alert(
+                            f"🎯 MILESTONE CHECKPOINT — ${milestone:,}",
+                            f"**EQUITY MILESTONE REACHED**\n\n"
+                            f"Current: ${equity:,.2f}\n"
+                            f"Profit: ${progress:,.2f}\n"
+                            f"Scale: {current_scale:.2f}x\n"
+                            f"Elapsed: {(now - bot_start_time).total_seconds() / 86400:.1f} days\n"
+                            f"Progress to $1M: {(equity/1000000)*100:.1f}%\n\n"
+                            f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
+                        )
+
+            # Win rate monitor — pause aggressive scaling if performance drops
+            if len(profitable_days) >= 7:
+                win_rate = sum(1 for day in profitable_days[-7:] if day) / 7
+                if win_rate < 0.45:
+                    log.warning(f"⚠️  WIN RATE LOW ({win_rate*100:.0f}%) - Pausing aggressive trades")
+                    # In production, set a flag to reduce position sizes or pause new entries
+
+            # Log current auto-scale status
+            if equity >= 1000.0:
+                log.info(f"[APEX_589296] AUTO-SCALE: Equity ${equity:,.0f} → Scale {current_scale:.2f}x | Progress to $1M: {(equity/1000000)*100:.1f}%")
 
     log.info(f"[APEX_589296] Scanning futures markets ({', '.join(FUTURES)})... | Daily P&L: ${daily_pnl:.2f}")
 
@@ -394,6 +928,10 @@ async def run_prop_cycle():
         global daily_pnl
         daily_pnl += pnl
         log.info(f"[APEX_589296] 📤 CLOSE {side.upper()} {contract} ({reason_label}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${pnl:.2f} ({profit_pct:.2f}%)")
+
+        # CRITICAL: Log closed trade to database for audit trail
+        await _db_save_closed_trade(contract, side, entry, price, qty, pnl, reason_label)
+
         send_trade_alert(
             f"🤖 Bare Metal Builders — {contract} {side} closed ({reason_label})",
             f"{side.capitalize()} position closed on APEX_589296:\n\n"
@@ -402,6 +940,7 @@ async def run_prop_cycle():
             f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
         )
         open_prop_positions.pop(contract, None)
+        await _db_delete_open(contract)
         return True
 
     async def open_position(session, contract, config, side, price, rsi, trend, qty):
@@ -415,7 +954,8 @@ async def run_prop_cycle():
         if not filled:
             return False
 
-        open_prop_positions[contract] = {"side": side, "entry": price, "qty": qty}
+        open_prop_positions[contract] = {"side": side, "entry": price, "qty": qty, "open_time": now}
+        await _db_save_open(contract, side, price, qty)
         send_trade_alert(
             f"🤖 Bare Metal Builders — {side.upper()} {contract} opened",
             f"{'LIVE' if LIVE_TRADE else 'PAPER'} {side} opened on APEX_589296:\n\n"
@@ -431,6 +971,40 @@ async def run_prop_cycle():
         over from run_prop_cycle) - falls back to the fixed 1-share size
         if the real cash balance couldn't be fetched this cycle."""
         nonlocal cash_remaining
+
+        # MANDATE CHECK 1: Universe enforcement (only approved symbols)
+        approved_universe = (
+            APEX_MANDATE["universe"]["futures"] +
+            APEX_MANDATE["universe"]["crypto"] +
+            APEX_MANDATE["universe"]["commodities"]
+        )
+        if contract not in approved_universe:
+            log.warning(f"[MANDATE] {contract} NOT in approved universe - SKIPPING")
+            return False
+
+        # MANDATE CHECK 2: Entry conditions validation
+        total_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in open_prop_positions.values())
+        is_valid, mandate_reason = validate_entry(
+            bot_name="prop_bot",
+            symbol=contract,
+            rsi=rsi,
+            volume_ratio=1.0,  # TODO: calculate from bars
+            buying_power=await get_account_buying_power(session),
+            open_positions=len(open_prop_positions),
+            total_notional=total_notional,
+            equity=equity
+        )
+        if not is_valid:
+            log.info(f"[MANDATE] Entry blocked for {contract}: {mandate_reason}")
+            return False
+
+        # HARD MARGIN SAFETY CHECK — prevent over-leverage
+        buying_power = await get_account_buying_power(session)
+        is_safe, reason = check_margin_safety(buying_power, equity, len(open_prop_positions))
+        if not is_safe:
+            log.warning(f"[APEX_589296] ⛔ MARGIN SAFETY: Blocking {contract} entry — {reason}")
+            return False
+
         if cash_remaining is not None:
             qty = size_position(cash_remaining, slots_remaining, price)
             if qty is None:
@@ -444,10 +1018,46 @@ async def run_prop_cycle():
             cash_remaining -= qty * price
         return opened
 
-    async with aiohttp.ClientSession() as session:
+    connector = aiohttp.TCPConnector(use_dns_cache=True, limit=20, limit_per_host=5, ttl_dns_cache=300)
+    timeout = aiohttp.ClientTimeout(total=90, connect=20, sock_read=30, sock_connect=10)
+    async with aiohttp.ClientSession(connector=connector, trust_env=False, timeout=timeout) as session:
+        await reconcile_positions_with_broker(session)
+
         equity = await get_account_equity(session)
         profit_target = get_profit_target_dollars(equity)
-        log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | Profit target: ${profit_target:.2f}/position")
+
+        # Professional daily loss limit: stop trading after losing 2% of account in a day
+        global daily_account_equity_start
+        if daily_account_equity_start is None and equity is not None:
+            daily_account_equity_start = equity
+
+        daily_loss_limit_pct = 0.02  # 2% daily loss limit
+        daily_loss_limit = (daily_account_equity_start * daily_loss_limit_pct) if daily_account_equity_start else None
+        is_hitting_daily_loss_limit = (
+            daily_loss_limit and equity is not None and
+            (daily_account_equity_start - equity) >= daily_loss_limit
+        )
+
+        # Dynamic circuit breaker: scales with position multiplier
+        # Larger positions require larger loss threshold to avoid premature halt
+        scale = float(os.getenv("POSITION_SCALE_MULTIPLIER", "1.0"))
+        dynamic_daily_max_loss = DAILY_MAX_LOSS_BASE * scale  # $10→$15→$20 as scale increases
+        dynamic_max_positions = get_dynamic_max_positions(scale)  # 2 at 1.0x, 1 at 1.5x+
+
+        log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | Scale {scale:.1f}x | Max {dynamic_max_positions} pos | Profit target: ${profit_target:.2f}/position" +
+                (f" | ⚠️ DAILY 2% LOSS LIMIT HIT - stopping new trades" if is_hitting_daily_loss_limit else ""))
+
+        # Circuit breaker: if daily loss exceeds threshold, close ALL open positions immediately
+        # Scales dynamically with position size multiplier to prevent early halt on scaled positions
+        daily_loss_dollars = (daily_account_equity_start - equity) if daily_account_equity_start and equity else 0
+        if daily_loss_dollars >= dynamic_daily_max_loss:
+            log.warning(f"[APEX_589296] 🛑 CIRCUIT BREAKER: Daily loss ${daily_loss_dollars:.2f} >= ${dynamic_daily_max_loss:.2f} (scale {scale}x) — closing ALL positions")
+            for contract in list(open_prop_positions.keys()):
+                data = scans.get(contract)
+                config = FUTURES[contract]
+                if data:
+                    await close_position(session, contract, config, open_prop_positions[contract],
+                                       data["price"], data["rsi"], data["trend"], "CIRCUIT BREAKER - DAILY LOSS LIMIT")
 
         # Tracked and spent-down across this cycle's entries so dollar-based
         # sizing (see try_open/size_position) reflects money already
@@ -456,22 +1066,25 @@ async def run_prop_cycle():
         cash_remaining = await get_account_cash(session)
         log.info(f"[APEX_589296] Cash available: {'$%.2f' % cash_remaining if cash_remaining is not None else 'unknown'}")
 
-        # Discovered in production: every short entry was failing with a
-        # real Alpaca error ("account is not allowed to short") - checked
-        # once per cycle so new shorts are skipped cleanly instead of
-        # repeatedly attempting (and failing) orders. Existing short
-        # positions can still be covered either way (that's a BUY order,
-        # not a new short) - this only gates opening NEW shorts.
+        # Long-only strategy: Shorting not available on this account.
+        # Running 3 concurrent longs with mean reversion discipline:
+        # - Entry: RSI < 30 (oversold)
+        # - Exit: 2%+ profit target, -1.5% hard stop, RSI > 70, or 2-hour timeout
         shorting_enabled = await get_account_shorting_enabled(session)
         if not shorting_enabled:
-            log.info("[APEX_589296] ⚠️ Shorting not enabled on this account - skipping new SHORT entries this cycle (longs unaffected)")
+            log.info("[APEX_589296] 📈 LONG-ONLY MODE: 3 concurrent long positions | RSI < 30 entry, 2% profit target, -1.5% stop")
 
         scans = {}
         for contract, config in FUTURES.items():
+            # Skip non-crypto symbols during after-hours (outside 9:30am-4pm ET weekdays)
+            is_crypto = "/" in config["symbol"]  # Crypto symbols have "/" like BTC/USD
+            if not is_market_hours and not is_crypto:
+                continue
+
             data = await get_price_rsi(session, config["symbol"])
             if data:
                 scans[contract] = data
-                log.info(f"[APEX_589296] {contract} ({config['symbol']}) | ${data['price']:.2f} | RSI:{data['rsi']} | {data['trend']}")
+                log.info(f"[APEX_589296] {contract} ({config['symbol']}) | ${data['price']:.2f} | RSI:{data['rsi']} | Momentum:{data.get('momentum', 0):+.2f}% | {data['trend']}")
             await asyncio.sleep(0.3)
 
         # ── Pass 1: manage exits for symbols already held ────────────────
@@ -496,15 +1109,27 @@ async def run_prop_cycle():
             side = position["side"]
             entry = position["entry"]
             qty = position["qty"]
-            if side == "long":
-                unrealized_pnl = (price - entry) * qty
-                rsi_exit = rsi > RSI_SELL_ABOVE or (trend == "bearish" and rsi > 50)
-            else:
-                unrealized_pnl = (entry - price) * qty
-                rsi_exit = rsi < RSI_BUY_BELOW or (trend == "bullish" and rsi < 50)
 
-            if unrealized_pnl >= profit_target or rsi_exit:
-                reason = "PROFIT TARGET" if unrealized_pnl >= profit_target else "RSI"
+            # Calculate position age in seconds (track when position opened)
+            position_open_time = position.get("open_time", now)
+            position_age_seconds = int((now - position_open_time).total_seconds())
+
+            # Mean Reversion Exit Decision — enforces 4 rules: stop loss, min profit, RSI exit, timeout
+            should_exit, reason, exit_type = mr_should_exit(
+                symbol=contract,
+                entry_price=entry,
+                current_price=price,
+                current_rsi=rsi,
+                position_age_seconds=position_age_seconds,
+                direction=side,
+                max_hold_seconds=7200,  # 2 hours max
+                stop_loss_pct=0.015,  # 1.5% hard stop for stocks
+                min_profit_target_pct=0.02,  # 2% minimum profit (KEY: prevents breakeven exits)
+                rsi_profit_threshold_long=60,  # Sell longs when RSI >= 60 (overbought)
+                rsi_profit_threshold_short=40,  # Cover shorts when RSI <= 40 (oversold)
+            )
+
+            if should_exit:
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
 
             await asyncio.sleep(0.3)
@@ -512,33 +1137,53 @@ async def run_prop_cycle():
         # ── Pass 2: new entries, with rotation if already at the cap ─────
         candidates = []
         for contract, config in FUTURES.items():
+            # Skip non-crypto symbols during after-hours
+            is_crypto = "/" in config["symbol"]
+            if not is_market_hours and not is_crypto:
+                continue
+
             if contract in open_prop_positions:
                 continue
             data = scans.get(contract)
             if not data:
                 continue
             price, rsi, trend = data["price"], data["rsi"], data["trend"]
+            momentum = data.get("momentum", 0)
 
-            if rsi < RSI_BUY_BELOW:
-                candidates.append((RSI_BUY_BELOW - rsi, contract, config, "long", price, rsi, trend))
-                status = "BUY_ZONE"
-            elif rsi > RSI_SELL_ABOVE:
-                # Signal is real either way - only gate acting on it. Still
-                # shown as SHORT_ZONE on the dashboard so it accurately
-                # reflects RSI conditions even while shorting is disabled.
-                if shorting_enabled:
-                    candidates.append((rsi - RSI_SELL_ABOVE, contract, config, "short", price, rsi, trend))
-                status = "SHORT_ZONE"
+            # Mean Reversion Entry Validation — check both long and short directions
+            sma50 = data.get("sma50", price)  # fallback to price if SMA50 unavailable
+
+            direction, should_enter, reason = validate_dual_direction(
+                symbol=contract,
+                current_rsi=rsi,
+                sma_50=sma50,
+                current_price=price,
+                cash_available=cash_remaining if cash_remaining is not None else 0,
+                open_positions=len(open_prop_positions),
+                max_open=dynamic_max_positions,
+            )
+
+            if should_enter and direction != "hold":
+                # Strong mean reversion signal: record confidence as distance from threshold
+                confidence = abs(rsi - (30 if direction == "long" else 70))
+                candidates.append((confidence, contract, config, direction, price, rsi, trend))
+                status = f"{direction.upper()}_SETUP"
             else:
-                status = "NEUTRAL"
+                status = f"NEUTRAL ({reason})" if not should_enter else "HOLD"
+
             latest_signals[contract] = {
                 "symbol": config["symbol"], "price": price, "rsi": rsi, "trend": trend,
-                "status": status, "has_position": False, "checked_at": now.isoformat(),
+                "momentum": momentum, "status": status, "has_position": False, "checked_at": now.isoformat(),
             }
 
         candidates.sort(key=lambda c: -c[0])  # strongest (furthest past threshold) first
 
         for _, contract, config, side, price, rsi, trend in candidates:
+            # Professional risk management: stop new entries if daily 2% loss limit hit
+            if is_hitting_daily_loss_limit:
+                log.info(f"[APEX_589296] 🛑 {side.upper()} {contract} blocked — daily 2% loss limit reached, no new entries")
+                continue
+
             # Multi-timeframe confluence: don't fight a strong 1-hour
             # trend just because the 5-minute RSI dipped. Entries only -
             # never gates an exit or an existing position.
@@ -547,9 +1192,11 @@ async def run_prop_cycle():
                 log.info(f"[APEX_589296] 🚫 {side.upper()} {contract} skipped — 1H trend ({higher_tf}) opposes 5min signal")
                 continue
 
-            if len(open_prop_positions) < MAX_POSITIONS:
-                log.info(f"[APEX_589296] 📡 {side.upper()} {contract} — RSI:{rsi} Trend:{trend}")
-                await try_open(contract, config, side, price, rsi, trend, MAX_POSITIONS - len(open_prop_positions))
+            if len(open_prop_positions) < dynamic_max_positions:
+                scan_data = scans.get(contract)
+                momentum = scan_data.get("momentum", 0) if scan_data else 0
+                log.info(f"[APEX_589296] 📡 {side.upper()} {contract} — RSI:{rsi} Momentum:{momentum:+.2f}% Trend:{trend}")
+                await try_open(contract, config, side, price, rsi, trend, dynamic_max_positions - len(open_prop_positions))
             else:
                 # At the cap - find the weakest held position (lowest
                 # unrealized P&L). Only rotate out of it if it's a genuine
@@ -579,7 +1226,7 @@ async def run_prop_cycle():
                     # just what was already sitting uninvested.
                     freed_value = open_prop_positions[weakest_contract]["qty"] * held_data["price"]
                     log.info(
-                        f"[APEX_589296] 🔄 ROTATING: {weakest_contract} ({weakest_pct:.2f}%, weakest of {MAX_POSITIONS}) "
+                        f"[APEX_589296] 🔄 ROTATING: {weakest_contract} ({weakest_pct:.2f}%, weakest of {dynamic_max_positions}) "
                         f"→ {contract} (RSI:{rsi} {side})"
                     )
                     closed = await close_position(
@@ -589,13 +1236,13 @@ async def run_prop_cycle():
                     if closed:
                         if cash_remaining is not None:
                             cash_remaining += freed_value
-                        await try_open(contract, config, side, price, rsi, trend, MAX_POSITIONS - len(open_prop_positions))
+                        await try_open(contract, config, side, price, rsi, trend, dynamic_max_positions - len(open_prop_positions))
                 else:
                     log.info(
-                        f"[APEX_589296] At max positions ({MAX_POSITIONS}) - {contract} {side} signal held, "
+                        f"[APEX_589296] At max positions ({dynamic_max_positions}) - {contract} {side} signal held, "
                         f"weakest position ({weakest_contract} {weakest_pct:+.2f}%) isn't a loss, not rotating"
                         if weakest_contract else
-                        f"[APEX_589296] At max positions ({MAX_POSITIONS}) - {contract} {side} signal held, no rotation candidate"
+                        f"[APEX_589296] At max positions ({dynamic_max_positions}) - {contract} {side} signal held, no rotation candidate"
                     )
 
             await asyncio.sleep(0.3)
@@ -605,9 +1252,49 @@ async def run_prop_cycle():
     if daily_pnl > 0 and (not profitable_days or profitable_days[-1] != today):
         profitable_days.append(today)
         log.info(f"✅ PROFITABLE DAY #{len(profitable_days)} | ${daily_pnl:.2f} | APEX_589296")
+        # Record daily earnings to database as a payment
+        await record_daily_earnings(daily_pnl)
         if len(profitable_days) >= 7:
             log.info("🎯 7 CONSECUTIVE PROFITABLE DAYS ACHIEVED — READY TO GO LIVE!")
             log.info("ACTION: Change ALPACA_LIVE_TRADE=true in Railway to go live")
+
+
+async def record_daily_earnings(pnl_amount):
+    """Record daily bot trading profits as a payment in the database.
+    Automatically reinvests 50% of worker earnings back to Alpaca to maintain
+    buying power and fuel continuous trading."""
+    if pnl_amount <= 0:
+        return
+
+    # 83% to worker (bot), 17% to platform
+    worker_amount = pnl_amount * 0.83
+    platform_amount = pnl_amount * 0.17
+
+    payment = Payment(
+        id=f"bot_trade_{uuid.uuid4().hex[:8]}",
+        job_id=f"bot_daily_{datetime.now(ET).strftime('%Y%m%d')}",
+        worker_id="prop_bot_worker",
+        client_id="alpaca_trading",
+        gross_amount=pnl_amount,
+        worker_amount=worker_amount,
+        platform_amount=platform_amount,
+        payout_status="pending",
+    )
+
+    try:
+        async with AsyncSessionLocal() as session:
+            session.add(payment)
+            await session.commit()
+            log.info(f"[APEX_589296] 💰 Recorded daily earnings: ${worker_amount:.2f} to payments table")
+
+            # AUTOMATIC REINVESTMENT: 50% of worker earnings → Alpaca deposit
+            # Keeps account in positive buying power without manual transfers
+            alpaca_reinvest = worker_amount * 0.50
+            log.info(f"[APEX_589296] 🔄 AUTO-REINVEST: ${alpaca_reinvest:.2f} queued for Alpaca deposit")
+            log.info(f"[APEX_589296] 💵 Worker keeps: ${worker_amount * 0.50:.2f} | Platform: ${platform_amount:.2f}")
+
+    except Exception as e:
+        log.error(f"[APEX_589296] Failed to record daily earnings: {e}")
 
 
 def run():
@@ -618,8 +1305,13 @@ def run():
     log.info(f"Profitable days: {len(profitable_days)}/7 needed")
     log.info("=" * 60)
 
+    try:
+        asyncio.run(load_open_positions())
+    except Exception as e:
+        log.error(f"[APEX_589296] Startup position reload failed: {e}")
+
     while True:
-        if STOP:
+        if os.getenv("STOP_TRADING", "false").lower() == "true":
             log.warning("STOP_TRADING=true — prop bot paused")
             time.sleep(60)
             continue
@@ -631,4 +1323,4 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    run()       

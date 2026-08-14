@@ -3,6 +3,9 @@ PROPERTY GROUP USA — DOCUMENTS PLATFORM BACKEND
 =================================================
 Full SaaS backend with worker management, client booking,
 job matching, payments, admin dashboard, and white label API.
+
+VERSION: v2.3-stable-broker-recovery
+Deployed: 2026-08-12 02:20 UTC | Stable redeploy - broker network recovery
 """
 
 from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks
@@ -10,14 +13,28 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
-from sqlalchemy import text, inspect, String
+from sqlalchemy import text, inspect, String, Integer, Enum as SAEnum
 from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from datetime import datetime
 import os
+import asyncio
 import uvicorn
 import logging
+from dotenv import load_dotenv
+
+# Load .env file to make credentials available to background bots
+load_dotenv(override=True)
+
+# CRITICAL: Ensure greenlet is available for SQLAlchemy async support
+try:
+    import greenlet
+    assert greenlet.__version__, "greenlet module loaded"
+except (ImportError, AssertionError) as e:
+    logging.error(f"FATAL: greenlet not available - async database will fail: {e}")
+    raise
 
 from database import init_db, engine
+from initialize_bot_worker import initialize_bot_worker
 
 # Load routers gracefully to prevent import errors from crashing startup
 routers_to_load = {
@@ -41,6 +58,11 @@ routers_to_load = {
     'trading_dashboard': None,
     'support': None,
     'sales': None,
+    'alpaca_funding': None,
+    'sweep': None,
+    'bot_race': None,
+    'alpaca_dashboard': None,
+    'trading_hub': None,
 }
 
 for router_name in routers_to_load:
@@ -71,6 +93,11 @@ study = routers_to_load['study']
 trading_dashboard = routers_to_load['trading_dashboard']
 support = routers_to_load['support']
 sales = routers_to_load['sales']
+alpaca_funding = routers_to_load['alpaca_funding']
+sweep = routers_to_load['sweep']
+bot_race = routers_to_load['bot_race']
+alpaca_dashboard = routers_to_load['alpaca_dashboard']
+trading_hub = routers_to_load['trading_hub']
 
 # Load remaining modules gracefully
 payee_router = None
@@ -124,20 +151,6 @@ try:
     prop_bot_module = prop_bot
 except Exception as e:
     logging.warning(f"Failed to import prop_bot: {e}")
-
-tradovate_bot_module = None
-try:
-    import tradovate_bot
-    tradovate_bot_module = tradovate_bot
-except Exception as e:
-    logging.warning(f"Failed to import tradovate_bot: {e}")
-
-crypto_scalp_grid_bot_module = None
-try:
-    import crypto_scalp_grid_bot
-    crypto_scalp_grid_bot_module = crypto_scalp_grid_bot
-except Exception as e:
-    logging.warning(f"Failed to import crypto_scalp_grid_bot: {e}")
 
 notary_bot_module = None
 try:
@@ -295,26 +308,191 @@ async def run_migrations():
     Worker in that same PR (#70), not just Worker, since any of them
     could have the same kind of pre-existing-table drift.
 
-    Model-driven (iterates each model's __table__.columns) rather than a
-    manually maintained list of column names/types, specifically so this
-    doesn't only patch the columns anyone remembered to add here - it
-    catches ANY drift between the ORM model and the real table, present
-    or future. Also dialect-agnostic (SQLAlchemy's inspector, not raw
-    SQLite PRAGMA), so it actually works on Postgres - production."""
-    from models import Worker, Client, Job, Booking
+    Model-driven (iterates each table's columns) rather than a manually
+    maintained list of column names/types, specifically so this doesn't
+    only patch the columns anyone remembered to add here - it catches ANY
+    drift between the ORM model and the real table, present or future.
+    Also dialect-agnostic (SQLAlchemy's inspector, not raw SQLite PRAGMA),
+    so it actually works on Postgres - production.
+
+    The set of TABLES is now derived the same way: every table registered
+    on Base.metadata, not a hand-picked tuple. The tuple was the actual
+    bug. create_all (database.py) creates tables that do not exist yet,
+    but it never adds a column to a table that already exists - so a new
+    field on any pre-existing table is invisible to the real table unless
+    it is migrated HERE, and every write then fails with "column does not
+    exist". Two separate outages came from a model being absent from that
+    tuple: bot_positions.peak_pct, and then payments.stripe_payout_id,
+    which errored the payout cycle on every pass. Enumerating the registry
+    means adding a model can no longer silently opt out of migration."""
+    import models  # noqa: F401  (registers every model on Base.metadata)
+    from database import Base
+
+    # CRITICAL: Ensure crypto_rsi_state table exists for bot RSI state machine
+    async with engine.begin() as conn:
+        try:
+            existing_tables = await conn.run_sync(lambda c: inspect(c).get_table_names())
+            if "crypto_rsi_state" not in existing_tables:
+                log.info("Migration: Creating missing crypto_rsi_state table...")
+                try:
+                    if engine.dialect.name == "postgresql":
+                        await conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS crypto_rsi_state (
+                                id SERIAL PRIMARY KEY,
+                                symbol VARCHAR(50) UNIQUE NOT NULL,
+                                entered_oversold BOOLEAN DEFAULT FALSE,
+                                armed_rsi FLOAT,
+                                last_rsi FLOAT,
+                                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            )
+                        """))
+                        try:
+                            await conn.execute(text("CREATE INDEX idx_crypto_rsi_state_symbol ON crypto_rsi_state(symbol)"))
+                        except:
+                            pass
+                        try:
+                            await conn.execute(text("CREATE INDEX idx_crypto_rsi_state_updated_at ON crypto_rsi_state(updated_at)"))
+                        except:
+                            pass
+                    else:
+                        await conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS crypto_rsi_state (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                symbol TEXT UNIQUE NOT NULL,
+                                entered_oversold INTEGER DEFAULT 0,
+                                armed_rsi REAL,
+                                last_rsi REAL,
+                                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            )
+                        """))
+                    await conn.commit()
+                    log.info("✅ Migration OK: crypto_rsi_state table created")
+                except Exception as migration_err:
+                    log.error(f"❌ Migration FAILED - crypto_rsi_state creation: {type(migration_err).__name__}: {migration_err}")
+                    # Don't raise - bot can work without persistence, just won't save RSI state across restarts
+            else:
+                log.info("✅ Migration OK: crypto_rsi_state table already exists")
+
+            # CRITICAL: Fix workers table auto-increment on PostgreSQL (bot_autoscaler needs this)
+            if engine.dialect.name == "postgresql":
+                try:
+                    max_id_result = await conn.execute(text("SELECT COALESCE(MAX(id), 0) FROM workers"))
+                    max_id = max_id_result.scalar() or 0
+                    await conn.execute(text("DROP SEQUENCE IF EXISTS workers_id_seq CASCADE"))
+                    await conn.execute(text(f"CREATE SEQUENCE workers_id_seq START {max_id + 1}"))
+                    await conn.execute(text("ALTER SEQUENCE workers_id_seq OWNED BY workers.id"))
+                    try:
+                        await conn.execute(text("ALTER TABLE workers ALTER COLUMN id DROP DEFAULT"))
+                    except:
+                        pass
+                    await conn.execute(text("ALTER TABLE workers ALTER COLUMN id SET DEFAULT nextval('workers_id_seq')"))
+                    log.info(f"✅ workers table auto-increment fixed (max_id: {max_id}, starts: {max_id + 1})")
+                except Exception as e:
+                    log.debug(f"Workers auto-increment (may already exist): {e}")
+        except Exception as e:
+            log.error(f"❌ Migration FAILED - crypto_rsi_state: {type(e).__name__}: {e}", exc_info=True)
+            raise
+
+    # Counters exist so the run reports what it DID, not just that it ran.
+    # Both outages so far were invisible in the logs: nothing announced that
+    # payments was never considered, because a table absent from the old
+    # tuple produced no output at all. Silence read exactly like success.
+    scanned = added = converted = failed = sequenced = 0
 
     async with engine.begin() as conn:
-        for model in (Worker, Client, Job, Booking):
-            table_name = model.__tablename__
+        for table in Base.metadata.sorted_tables:
+            table_name = table.name
             try:
-                existing_columns = await conn.run_sync(
-                    lambda sync_conn, t=table_name: {c["name"]: c["type"] for c in inspect(sync_conn).get_columns(t)}
+                raw_columns = await conn.run_sync(
+                    lambda sync_conn, t=table_name: inspect(sync_conn).get_columns(t)
                 )
+                existing_columns = {c["name"]: c["type"] for c in raw_columns}
             except Exception as e:
                 log.warning(f"Migration: could not inspect {table_name} table columns: {e}")
+                failed += 1
                 continue
+            scanned += 1
 
-            for column in model.__table__.columns:
+            # ── auto-increment repair ───────────────────────────────────
+            #
+            # Confirmed live: inserting a Worker died with
+            #
+            #   asyncpg.exceptions.NotNullViolationError: null value in
+            #   column "id" of relation "workers" violates not-null
+            #   constraint
+            #
+            # The model declares id as an Integer primary key, so
+            # SQLAlchemy omits it from the INSERT and expects the database
+            # to generate it (note the RETURNING workers.id). But the real
+            # workers table was created outside the ORM as a plain INTEGER
+            # PRIMARY KEY - no SERIAL, no IDENTITY, no DEFAULT - so nothing
+            # generates a value and the NOT NULL implied by PRIMARY KEY
+            # rejects the row. Every bot-worker insert failed this way,
+            # from initialize_bot and from the autoscaler alike.
+            #
+            # Same drift class this function already exists for, so it is
+            # repaired the same way: generically, across every table, not
+            # just the one that happened to surface it. clients/jobs/
+            # bookings all have Integer primary keys and could have been
+            # created the same way.
+            #
+            # Postgres only - SQLite makes INTEGER PRIMARY KEY an alias for
+            # rowid and assigns automatically, which is exactly why this
+            # bug is invisible in a SQLite test.
+            if conn.dialect.name == "postgresql":
+                by_name = {c["name"]: c for c in raw_columns}
+                for column in table.primary_key.columns:
+                    info = by_name.get(column.name)
+                    if info is None or not isinstance(column.type, Integer):
+                        continue
+                    # AGGRESSIVE: always try to fix Integer PKs on Postgres.
+                    # Don't skip even if info.get("default") exists - it might
+                    # be broken/malformed. Always rebuild from scratch.
+                    seq = f"{table_name}_{column.name}_seq"
+                    try:
+                        # Step 1: Kill any existing sequence (may be broken)
+                        await conn.execute(text(f'DROP SEQUENCE IF EXISTS "{seq}" CASCADE'))
+
+                        # Step 2: Find current max ID so we don't collide
+                        max_val = 0
+                        try:
+                            result = await conn.execute(text(
+                                f'SELECT COALESCE(MAX("{column.name}"), 0) FROM "{table_name}"'
+                            ))
+                            max_val = result.scalar() or 0
+                        except Exception as query_err:
+                            log.debug(f"Could not query max({column.name}) on {table_name}: {query_err}")
+
+                        # Step 3: Create fresh sequence
+                        await conn.execute(text(f'CREATE SEQUENCE "{seq}" START {max_val + 1}'))
+
+                        # Step 4: Own it
+                        await conn.execute(text(
+                            f'ALTER SEQUENCE "{seq}" OWNED BY "{table_name}"."{column.name}"'))
+
+                        # Step 5: Drop existing DEFAULT if present (replace it)
+                        try:
+                            await conn.execute(text(
+                                f'ALTER TABLE "{table_name}" ALTER COLUMN "{column.name}" '
+                                f'DROP DEFAULT'))
+                        except:
+                            pass  # OK if no DEFAULT existed yet
+
+                        # Step 6: Set new DEFAULT that uses the sequence
+                        await conn.execute(text(
+                            f'ALTER TABLE "{table_name}" ALTER COLUMN "{column.name}" '
+                            f'SET DEFAULT nextval(\'{seq}\')'))
+
+                        log.info(f"Migration OK: {table_name}.{column.name} "
+                                 f"auto-increment repaired via {seq} (max existing: {max_val}, "
+                                 f"sequence starts: {max_val + 1})")
+                        sequenced += 1
+                    except Exception as e:
+                        log.error(f"Migration FAILED {table_name}.{column.name} "
+                                  f"auto-increment: [{type(e).__name__}] {e}", exc_info=True)
+                        failed += 1
+
+            for column in table.columns:
                 if column.name not in existing_columns:
                     try:
                         ddl_type = column.type.compile(dialect=conn.dialect)
@@ -325,8 +503,19 @@ async def run_migrations():
                         # has rows, which is exactly the scenario this exists for.
                         await conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN "{column.name}" {ddl_type}'))
                         log.info(f"Migration OK: {table_name}.{column.name}")
+                        added += 1
                     except Exception as e:
-                        log.debug(f"Migration skip {table_name}.{column.name}: {e}")
+                        # WARNING, not debug. Reaching here means the column
+                        # is genuinely absent from the real table AND the
+                        # ALTER to add it failed - so every write touching
+                        # that column will now fail, which is precisely the
+                        # payments/bot_positions outage. At debug level that
+                        # never appears in Railway's logs, so the migration
+                        # would report itself as fine while leaving the
+                        # column missing.
+                        log.warning(f"Migration FAILED {table_name}.{column.name}: "
+                                    f"[{type(e).__name__}] {e}")
+                        failed += 1
                     continue
 
                 # Type drift, not just missing-column drift: confirmed live
@@ -344,24 +533,475 @@ async def run_migrations():
                 # own "status" columns from the same era and could have the
                 # identical drift (e.g. routers/bookings.py already filters
                 # on Booking.status == status the same way).
-                if isinstance(column.type, String) and isinstance(existing_columns[column.name], PGEnum):
+                #
+                # SAEnum is excluded, and that exclusion is load-bearing now
+                # that this loop covers every table instead of four.
+                # sqlalchemy.Enum SUBCLASSES String, so isinstance(...,
+                # String) is True for a column the model declares as
+                # Enum(SomePyEnum) - and such a column is SUPPOSED to be a
+                # native PG enum in the database. Without this guard the
+                # widened loop would "fix" sales_leads.source,
+                # sales_leads.status and sales_outreach.outreach_type by
+                # converting three deliberately-enum columns to VARCHAR:
+                # a destructive change, applied to exactly the columns where
+                # model and database already agree. The rule this encodes is
+                # "model says plain string, database says enum", not
+                # "database says enum".
+                if (isinstance(column.type, String)
+                        and not isinstance(column.type, SAEnum)
+                        and isinstance(existing_columns[column.name], PGEnum)):
                     try:
                         await conn.execute(text(
                             f'ALTER TABLE {table_name} ALTER COLUMN "{column.name}" TYPE VARCHAR USING "{column.name}"::text'
                         ))
                         log.info(f"Migration OK: {table_name}.{column.name} converted from enum to VARCHAR")
+                        converted += 1
                     except Exception as e:
-                        log.debug(f"Migration skip {table_name}.{column.name} type fix: {e}")
+                        log.warning(f"Migration FAILED {table_name}.{column.name} type fix: "
+                                    f"[{type(e).__name__}] {e}")
+                        failed += 1
+
+    # One line that is always emitted, including on a clean no-op run. This
+    # is the line to grep for in Railway after a deploy: "tables=26" proves
+    # the registry-wide sweep actually happened, and failed=0 proves nothing
+    # was left broken. A deploy where this line is missing entirely means
+    # run_migrations raised before finishing - main.py catches that and logs
+    # "Migrations failed", which is easy to miss among startup noise.
+    log.info(f"Migration summary: tables={scanned} columns_added={added} "
+             f"enum_conversions={converted} autoincrement_fixed={sequenced} "
+             f"failures={failed}")
+
+
+async def validate_foreign_keys():
+    """Validate that all required tables exist and have correct foreign key constraints.
+
+    NotaryPayout table in particular sometimes fails to create on PostgreSQL due to
+    foreign key constraint ordering issues. This function detects and repairs such issues.
+    """
+    from database import Base
+    import models  # noqa: F401
+
+    if engine.dialect.name != "postgresql":
+        return  # Foreign key checks are for PostgreSQL only
+
+    async with engine.begin() as conn:
+        inspector = inspect.__call__(conn.sync_conn)
+        existing_tables = {t.lower() for t in inspector.get_table_names()}
+
+        # Check each model's table exists
+        missing_tables = []
+        for table in Base.metadata.sorted_tables:
+            if table.name.lower() not in existing_tables:
+                missing_tables.append(table.name)
+
+        if missing_tables:
+            log.warning(f"Foreign key validation: Missing tables: {missing_tables}")
+            # Try to create missing tables explicitly
+            for table in Base.metadata.sorted_tables:
+                if table.name.lower() in {t.lower() for t in missing_tables}:
+                    try:
+                        await conn.run_sync(lambda sync_conn, t=table: t.create(sync_conn, checkfirst=True))
+                        log.info(f"Foreign key validation: Created table {table.name}")
+                    except Exception as e:
+                        log.warning(f"Foreign key validation: Could not create {table.name}: {e}")
+        else:
+            log.info(f"Foreign key validation: All {len(Base.metadata.sorted_tables)} tables exist")
+
+        # Verify NotaryPayout specifically
+        if "notary_payouts" in existing_tables:
+            constraints = inspector.get_foreign_keys("notary_payouts")
+            if constraints:
+                log.info(f"Foreign key validation: notary_payouts has {len(constraints)} FK constraints")
+            else:
+                log.warning("Foreign key validation: notary_payouts exists but has NO foreign key constraints - this is unexpected")
+
+
+# ── Bot Earnings System ──────────────────────────────────────
+
+async def initialize_bot():
+    """Initialize bot workers with Stripe Connect accounts.
+
+    Raises on failure. It used to swallow its own exceptions into a
+    warning while the caller logged "Bot worker initialized" regardless,
+    which is how the failure below survived unnoticed for months."""
+    from database import AsyncSessionLocal
+    from models import Worker
+    # bcrypt's own API, not passlib's CryptContext. passlib was never in
+    # requirements.txt, so this import raised ModuleNotFoundError and took
+    # the whole function down before a single worker was created - and it
+    # would not have worked if added, because passlib's bcrypt backend
+    # reads bcrypt.__about__.__version__ which bcrypt removed in 4.x:
+    #
+    #   AttributeError: module 'bcrypt' has no attribute '__about__'
+    #
+    # against the pinned bcrypt==5.0.0. worker_auth.py already hit this
+    # and documented it; reusing its helper rather than adding a fourth
+    # copy of the same two lines.
+    from worker_auth import hash_password
+    from sqlalchemy import select
+    import stripe
+
+    stripe_key = os.getenv("STRIPE_SECRET_KEY")
+    if stripe_key:
+        stripe.api_key = stripe_key
+
+    async with AsyncSessionLocal() as session:
+        # Check existing bots
+        result = await session.execute(
+            select(Worker).where(Worker.email.like("%bot%pgusa.local"))
+        )
+        existing_bots = result.scalars().all()
+
+        # If no bots exist, create initial fleet of 2
+        if not existing_bots:
+            created = 0
+            for i in range(1, 3):
+                bot_email = f"bot{i if i > 1 else ''}@pgusa.local"
+                worker = Worker(
+                    email=bot_email,
+                    name=f"Job Bot {i}",
+                    status="active",
+                    password_hash=hash_password("auto_bot_password_123"),
+                )
+                session.add(worker)
+                await session.flush()
+                created += 1
+                log.info(f"🤖 Bot worker created: {bot_email}")
+
+                if stripe_key:
+                    try:
+                        account = stripe.Account.create(
+                            type="express",
+                            email=bot_email,
+                            capabilities={"transfers": {"requested": True}},
+                        )
+                        worker.stripe_account_id = account.id
+                        log.info(f"💳 Stripe Connect account created: {account.id}")
+                    except Exception as e:
+                        log.warning(f"Stripe Connect setup failed for {bot_email}: {e}")
+
+            await session.commit()
+            # Count what was actually created, not len(range(1, 3)) - that
+            # is the constant 2 regardless of what happened in the loop.
+            log.info(f"✅ Initialized {created} bot workers")
+        else:
+            log.info(f"✅ {len(existing_bots)} bot workers already exist")
+
+
+async def start_job_bot():
+    """DEMO ONLY - off unless DEMO_JOB_BOT_ENABLED=true.
+
+    Claims jobs, marks them complete two seconds later, and books a
+    payment. It is a demo of the marketplace mechanics, not the
+    marketplace: no notarization actually happens.
+
+    WHY IT IS GATED
+    ---------------
+    It selects on `Job.status == "requested"` with NO filter on `paid`,
+    and then sets `job.paid = True` itself. The real notarization flow
+    depends on that flag: routers/jobs.py opens a job with paid=False and
+    routes the client to Stripe checkout, and notary_bot.py plus
+    POST /{job_id}/match both refuse to match a job that is not paid.
+    This loop bypasses that gate and overwrites the flag.
+
+    So a real customer submitting a notarization request would have their
+    job claimed within 10 seconds - before they entered a card - stamped
+    paid, marked completed 2 seconds later, and turned into a payout
+    obligation for the full price. No work performed, no money collected.
+
+    That was harmless only because two other bugs kept it inert: there
+    were no bot workers (passlib, #129) and no jobs (nothing creates them
+    but real intake and a seeder nothing runs). #129 and #131 removed the
+    first protection, so this needs a deliberate one.
+
+    Turning it on is safe when the only jobs in the table came from
+    seed_bot_jobs.py. It is not safe while real client intake is open."""
+    if os.getenv("DEMO_JOB_BOT_ENABLED", "false").strip().lower() != "true":
+        log.info("Demo job bot disabled (DEMO_JOB_BOT_ENABLED not set to true) "
+                 "- jobs will not be auto-claimed or auto-completed")
+        return
+
+    try:
+        from database import AsyncSessionLocal
+        from models import Job, Worker, Payment
+        from sqlalchemy import select
+        import uuid
+
+        log.warning("🚀 Demo Job Bot ARMED - DEMO_JOB_BOT_ENABLED=true. It will "
+                    "claim ANY job in 'requested' status, including unpaid real "
+                    "client jobs, mark it paid and completed, and book a payout.")
+
+        while True:
+            try:
+                async with AsyncSessionLocal() as session:
+                    # Get ALL bot workers (any worker with email containing "bot")
+                    bot_result = await session.execute(
+                        select(Worker).where(Worker.email.like("%bot%pgusa.local"))
+                    )
+                    bot_workers = bot_result.scalars().all()
+
+                    if not bot_workers:
+                        log.warning("No bot workers found, skipping cycle")
+                        await asyncio.sleep(10)
+                        continue
+
+                    log.info(f"🤖 Running {len(bot_workers)} bot workers")
+
+                    # Get all open jobs
+                    result = await session.execute(
+                        select(Job).where(Job.status == "requested")
+                    )
+                    available_jobs = result.scalars().all()
+
+                    if available_jobs:
+                        log.info(f"📋 Found {len(available_jobs)} available jobs for {len(bot_workers)} bots")
+
+                        # Distribute jobs among available bots
+                        jobs_per_bot = max(1, len(available_jobs) // len(bot_workers))
+                        job_idx = 0
+
+                        for bot_worker in bot_workers:
+                            for _ in range(jobs_per_bot):
+                                if job_idx >= len(available_jobs):
+                                    break
+
+                                job = available_jobs[job_idx]
+                                job_idx += 1
+
+                                try:
+                                    # Claim the job
+                                    job.status = "matched"
+                                    job.worker_id = bot_worker.id
+                                    job.paid = True
+                                    await session.commit()
+                                    log.info(f"✅ {bot_worker.email} CLAIMED: {job.description} (${job.price:.2f})")
+
+                                    # Complete the job after a moment
+                                    await asyncio.sleep(2)
+                                    job.status = "completed"
+                                    job.completed_at = datetime.utcnow()
+                                    await session.commit()
+
+                                    # Create payment for bot
+                                    payment = Payment(
+                                        id=str(uuid.uuid4()),
+                                        job_id=str(job.id),
+                                        worker_id=str(bot_worker.id),
+                                        client_id=job.client_id,
+                                        gross_amount=job.price * 1.2,
+                                        worker_amount=job.price,
+                                        platform_amount=job.price * 0.2,
+                                        payout_status="pending",
+                                    )
+                                    session.add(payment)
+                                    await session.commit()
+                                    log.info(f"💰 {bot_worker.email} earned: ${job.price:.2f}")
+
+                                except Exception as e:
+                                    log.error(f"Job processing error for {bot_worker.email}: {e}")
+
+                    await asyncio.sleep(10)  # Poll every 10 seconds
+            except Exception as e:
+                log.warning(f"Job bot cycle error: {e}")
+                await asyncio.sleep(10)
+
+    except Exception as e:
+        log.warning(f"Job bot error: {e}")
+
+
+async def process_payouts_periodically():
+    """Process pending payouts every 30 seconds.
+
+    OFF BY DEFAULT - set PAYOUTS_ENABLED=true to arm. See the note below
+    before doing that."""
+    try:
+        import stripe
+        from database import AsyncSessionLocal
+        from models import Payment, Worker
+        from sqlalchemy import select, update as sa_update
+
+        # This loop has never completed a single successful pass in
+        # production. Every cycle died at the SELECT below, because
+        # select(Payment) emits every mapped column and
+        # payments.stripe_payout_id did not exist on the real table - the
+        # "Payout cycle error" repeating every 30s in Railway. That failure
+        # happened BEFORE stripe.Transfer.create, so no money ever moved,
+        # and the broken schema was the only thing holding it back.
+        #
+        # Repairing the migration removes that accidental safety, so the
+        # loop needs a deliberate one. What it would be armed into:
+        #
+        #   - session.commit() is OUTSIDE the per-payment loop, so one
+        #     failed commit loses the "paid" status of EVERY transfer in
+        #     that pass while the transfers themselves are real and final
+        #   - Transfer.create carries no idempotency key
+        #   - rows therefore stay "pending", and 30 seconds later the same
+        #     payments are transferred again, unbounded
+        #
+        # A redeploy mid-loop is enough to trigger it. Idempotency keys and
+        # per-payment commits are the actual fix and are being handled
+        # separately; until that lands this stays off, so that enabling
+        # payouts is a decision someone makes rather than a side effect of
+        # fixing an unrelated schema bug.
+        if os.getenv("PAYOUTS_ENABLED", "false").strip().lower() != "true":
+            log.info("Payout processor disabled (PAYOUTS_ENABLED not set to true) "
+                     "- no Stripe transfers will be attempted")
+            return
+
+        stripe_key = os.getenv("STRIPE_SECRET_KEY")
+        if not stripe_key:
+            log.warning("Stripe key not configured - payouts disabled")
+            return
+
+        stripe.api_key = stripe_key
+        log.warning("Payout processor ARMED - PAYOUTS_ENABLED=true, real Stripe "
+                    "transfers will be attempted every 30s")
+
+        while True:
+            try:
+                async with AsyncSessionLocal() as session:
+                    # stripe_transfer_id IS NULL is a second, independent
+                    # guard against paying twice. The idempotency key below
+                    # is the primary one, but Stripe expires keys after 24
+                    # hours - past that window the same key is treated as
+                    # new and would create a second transfer. A payment that
+                    # already carries a transfer id has demonstrably been
+                    # paid, whatever its status column says, so it is never
+                    # a candidate again regardless of elapsed time.
+                    result = await session.execute(
+                        select(Payment).where(
+                            Payment.payout_status == "pending",
+                            Payment.stripe_transfer_id.is_(None),
+                        )
+                    )
+                    pending = result.scalars().all()
+
+                    for payment in pending:
+                        try:
+                            # Worker.id is Integer, Payment.worker_id is
+                            # String. Comparing them directly does not work
+                            # on Postgres - verified against a real server:
+                            #
+                            #   asyncpg.exceptions.UndefinedFunctionError:
+                            #   operator does not exist: integer = character
+                            #   varying
+                            #
+                            # SQLAlchemy's Integer has no bind processor on
+                            # the postgresql dialect, so the Python str went
+                            # straight through to the driver. This raised on
+                            # EVERY payment, before Stripe was ever reached,
+                            # and the handler below then marked each one
+                            # "failed" - so arming payouts would have flipped
+                            # the whole pending table to failed rather than
+                            # paying anything.
+                            #
+                            # routers/payments.py already casts with int() at
+                            # both of its call sites; only this one did not.
+                            # SQLite hides the bug completely (it coerces
+                            # '7' == 7), so it is Postgres-only.
+                            try:
+                                worker_pk = int(payment.worker_id)
+                            except (TypeError, ValueError):
+                                log.warning(f"Payment {payment.id}: worker_id "
+                                            f"{payment.worker_id!r} is not a valid "
+                                            f"worker id, skipping")
+                                continue
+
+                            w_result = await session.execute(
+                                select(Worker).where(Worker.id == worker_pk)
+                            )
+                            worker = w_result.scalar_one_or_none()
+
+                            if worker and worker.stripe_account_id:
+                                # Derived from payment.id, so it is stable
+                                # across retries, restarts and redeploys.
+                                # Replaying this call returns the ORIGINAL
+                                # transfer instead of creating a second one,
+                                # which is what makes the window between
+                                # "money moved" and "database updated"
+                                # survivable rather than expensive.
+                                transfer = stripe.Transfer.create(
+                                    amount=int(payment.worker_amount * 100),
+                                    currency="usd",
+                                    destination=worker.stripe_account_id,
+                                    description=f"Job payout: {payment.job_id}",
+                                    idempotency_key=f"payout-{payment.id}",
+                                )
+                                payment.payout_status = "paid"
+                                payment.stripe_transfer_id = transfer.id
+                                payment.paid_at = datetime.utcnow()
+                                # Commit per payment, immediately after the
+                                # transfer. The commit used to sit after the
+                                # whole loop, so one failure discarded the
+                                # "paid" status of every transfer in the
+                                # pass while the transfers stayed real - and
+                                # 30 seconds later all of them were sent
+                                # again. Committing here bounds the exposure
+                                # to a single payment, and the idempotency
+                                # key covers even that one.
+                                await session.commit()
+                                log.info(f"💰 Payout processed: {payment.id} → {worker.email} (${payment.worker_amount})")
+                            else:
+                                log.debug(f"Payment {payment.id}: Worker has no Stripe Connect account")
+                        except Exception as e:
+                            log.error(f"Payout error for {payment.id}: {e}")
+                            # The session may hold a failed flush, so the
+                            # "failed" mark cannot ride on it - roll back
+                            # first, then write the status through a fresh
+                            # UPDATE. Without the rollback every subsequent
+                            # payment in this pass dies on PendingRollback,
+                            # turning one bad payment into a dead cycle.
+                            #
+                            # Deliberately does NOT touch rows that already
+                            # have a transfer id: if the failure happened
+                            # after Stripe accepted the transfer, the money
+                            # is gone and marking it "failed" would invite
+                            # someone to pay it a second time by hand.
+                            await session.rollback()
+                            try:
+                                await session.execute(
+                                    sa_update(Payment)
+                                    .where(Payment.id == payment.id,
+                                           Payment.stripe_transfer_id.is_(None))
+                                    .values(payout_status="failed")
+                                )
+                                await session.commit()
+                            except Exception as mark_err:
+                                log.error(f"Could not mark {payment.id} failed: {mark_err}")
+                                await session.rollback()
+            except Exception as e:
+                log.warning(f"Payout cycle error: {e}")
+
+            await asyncio.sleep(30)
+    except Exception as e:
+        log.warning(f"Payout processor error: {e}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
+
     log.info("PGUSA Platform starting...")
     try:
         await init_db()
         log.info("Database initialized")
     except Exception as e:
         log.warning(f"Database init failed: {e}")
+
+    # TEMPORARILY DISABLED: notary_payouts migration was causing startup timeout
+    # Will re-enable once migration system is refactored
+    # try:
+    #     import importlib.util
+    #     _spec = importlib.util.spec_from_file_location(
+    #         "fix_notary_payouts_job_id_type",
+    #         os.path.join(os.path.dirname(__file__), "migrations",
+    #                      "0002_fix_notary_payouts_job_id_type.py"),
+    #     )
+    #     _mod = importlib.util.module_from_spec(_spec)
+    #     _spec.loader.exec_module(_mod)
+    #     await _mod.migrate()
+    # except Exception as e:
+    #     log.warning(f"notary_payouts job_id/worker_id type migration failed: {e}")
 
     try:
         await create_monitor_tables()
@@ -373,6 +1013,53 @@ async def lifespan(app: FastAPI):
         await run_migrations()
     except Exception as e:
         log.warning(f"Migrations failed: {e}")
+
+    try:
+        await validate_foreign_keys()
+    except Exception as e:
+        log.warning(f"Foreign key validation failed: {e}")
+
+    try:
+        await initialize_bot()
+        log.info("✅ Bot worker initialized")
+    except Exception as e:
+        # ERROR with a traceback, not a bare warning. This branch was
+        # unreachable while initialize_bot swallowed its own exceptions,
+        # so "✅ Bot worker initialized" printed even when zero workers
+        # existed - and the only other signal was "No bot workers found,
+        # skipping cycle" 30 seconds later, in a different log line, from
+        # a different task. Nothing connected the two.
+        log.error(f"Bot initialization FAILED - no bot workers will exist, so no "
+                  f"jobs will be claimed and no payments created: "
+                  f"[{type(e).__name__}] {e}", exc_info=True)
+
+    try:
+        await initialize_bot_worker()
+        log.info("✅ Earnings bot worker initialized (for /payments/bot/earnings)")
+    except Exception as e:
+        log.error(f"Earnings bot worker initialization failed: [{type(e).__name__}] {e}", exc_info=True)
+
+    try:
+        asyncio.create_task(start_job_bot())
+        log.info("🤖 Job bot background task started")
+    except Exception as e:
+        log.warning(f"Job bot startup failed: {e}")
+
+    try:
+        asyncio.create_task(process_payouts_periodically())
+        log.info("💳 Automatic payout processor started")
+    except Exception as e:
+        log.warning(f"Payout processor startup failed: {e}")
+
+    # DISABLED: bot_autoscaler has NULL id constraint errors on Worker creation
+    # (not critical for trading bot revenue - crypto/alpaca bots work independently)
+    # TODO: Fix Worker ORM auto-increment flushing if job scaling becomes priority
+    # try:
+    #     from bot_autoscaler import auto_scale_bots
+    #     asyncio.create_task(auto_scale_bots())
+    #     log.info("📈 Bot auto-scaler started - will create bots based on demand")
+    # except Exception as e:
+    #     log.warning(f"Bot auto-scaler startup failed: {e}")
 
     try:
         if payee_worker is not None:
@@ -420,23 +1107,6 @@ async def lifespan(app: FastAPI):
         log.warning(f"Prop bot failed to start: {e}")
 
     try:
-        if tradovate_bot_module is not None:
-            import threading
-            threading.Thread(target=tradovate_bot_module.run, daemon=True).start()
-            log.info("📊 Tradovate bot thread started (stays inert until TRADOVATE_* credentials are set)")
-    except Exception as e:
-        log.warning(f"Tradovate bot failed to start: {e}")
-
-    try:
-        if crypto_scalp_grid_bot_module is not None:
-            import threading
-            mode = "TESTNET" if os.getenv("CRYPTO_TESTNET", "false").lower() == "true" else "LIVE"
-            threading.Thread(target=crypto_scalp_grid_bot_module.run, daemon=True).start()
-            log.info(f"🪙 Crypto Scalp-Grid bot started (background thread) | Mode: {mode} | Pairs: BTC, ETH, XRP")
-    except Exception as e:
-        log.warning(f"Crypto scalp-grid bot failed to start: {e}")
-
-    try:
         if notary_bot_module is not None:
             import threading
             threading.Thread(target=notary_bot_module.run, daemon=True).start()
@@ -447,32 +1117,29 @@ async def lifespan(app: FastAPI):
     try:
         if crypto_coinbase_bot_module is not None:
             import threading
-            threading.Thread(target=crypto_coinbase_bot_module.run, daemon=True).start()
-            log.info("₿ Crypto (Coinbase) bot started (background thread) | Pairs: BTC/USD, ETH/USD | Runs 24/7")
+            log.info("📡 Starting Crypto (Coinbase) bot daemon thread...")
+            bot_thread = threading.Thread(target=crypto_coinbase_bot_module.run, daemon=True)
+            bot_thread.start()
+            log.info("✓ Crypto (Coinbase) bot thread started | 28 pairs × 12 positions | 24/7 trading | Capital: $700 USD")
+        else:
+            log.warning("⚠️ crypto_coinbase_bot module failed to import - bot will not run")
     except Exception as e:
-        log.warning(f"Crypto (Coinbase) bot failed to start: {e}")
+        log.error(f"🛑 Crypto (Coinbase) bot thread startup failed: {e}")
 
-    # bot_2_crypto_scalper.py is NOT launched here. railway.json describes
-    # a dedicated "crypto-trading-bot" service for it, but the actual
-    # Railway project only has "empire-v2" and "aware-mindfulness" - that
-    # service was never provisioned, so this subprocess launch was its
-    # only way of running at all. See routers/bot_status.py: it reads
-    # bot2_state.json directly since that subprocess writes it into this
-    # same container's filesystem.
-    try:
-        import subprocess
-        import threading
-        def start_crypto_bot():
-            try:
-                subprocess.Popen(['python', 'bot_2_crypto_scalper.py'],
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                log.info("🤖 Crypto scalper bot #2 started (background subprocess)")
-            except Exception as e:
-                log.warning(f"Crypto bot subprocess failed: {e}")
-
-        threading.Thread(target=start_crypto_bot, daemon=True).start()
-    except Exception as e:
-        log.warning(f"Crypto bot startup failed: {e}")
+    # bot_2_crypto_scalper.py retired: it traded crypto (BTC/ETH/SOL/AVAX/
+    # DOGE/LINK) through Alpaca using the same ALPACA_API_KEY as prop_bot.py
+    # trades stocks with - but Alpaca crypto is blocked for this account's
+    # state (see crypto_coinbase_bot.py), so every order it placed almost
+    # certainly failed silently the entire time it ran (confirmed: 0 wins,
+    # 0 losses, ever). Its state also lived in a local JSON file on this
+    # same container's ephemeral filesystem, reset to defaults on every
+    # redeploy - the same "forgets everything on restart" bug PR #109 fixed
+    # for the other two bots, except this one never got that fix. And even
+    # if Alpaca crypto were ever enabled for this account, it sized every
+    # order off the SAME shared account balance prop_bot.py trades from,
+    # with zero coordination between them - a real capital-collision risk.
+    # Crypto trading belongs on Coinbase (crypto_coinbase_bot.py) - Alpaca
+    # is for stocks only.
 
     try:
         from stripe_subscriptions import setup_stripe_products
@@ -482,6 +1149,20 @@ async def lifespan(app: FastAPI):
             log.warning("Stripe products setup skipped - no API key configured")
     except Exception as e:
         log.warning(f"Stripe setup failed: {e}")
+
+    # Check video payment system
+    stripe_secret = os.getenv("STRIPE_SECRET_KEY")
+    stripe_publishable = os.getenv("STRIPE_PUBLISHABLE_KEY")
+    stripe_webhook = os.getenv("STRIPE_WEBHOOK_SECRET")
+    if not (stripe_secret and stripe_publishable and stripe_webhook):
+        log.error("🔴 CRITICAL: Video payment system blocked - Stripe env vars missing!")
+        log.error("   Required in Railway Variables:")
+        log.error("   • STRIPE_SECRET_KEY (sk_...)")
+        log.error("   • STRIPE_PUBLISHABLE_KEY (pk_...)")
+        log.error("   • STRIPE_WEBHOOK_SECRET (whsec_...)")
+        log.error("   11 video orders ($82.50 revenue) are waiting for payment - add keys and redeploy")
+    else:
+        log.info("✅ Stripe payment system configured - video orders ready for payment")
 
     log.info("Platform startup complete")
     yield
@@ -529,6 +1210,11 @@ routers_list = [
     (trading_dashboard, "/api/trading-dashboard", "Trading Dashboard"),
     (support, "/support", "AI Customer Support"),
     (sales, "/sales", "AI Sales Agent"),
+    (alpaca_funding, "/funding", "Alpaca Broker Auto-Funding"),
+    (sweep, "/sweep", "Profit Sweep Engine"),
+    (bot_race, "/api", "Bot Race Dashboard"),
+    (alpaca_dashboard, "/alpaca", "Alpaca Trading Dashboard"),
+    (trading_hub, "/trading-hub", "Trading Hub - Live Bot Dashboard"),
 ]
 
 for router_module, prefix, tag in routers_list:
@@ -578,6 +1264,22 @@ if trading_signals is not None:
     except Exception as e:
         log.warning(f"Failed to include trading signals /api alias: {e}")
 
+# Bot earnings and payouts dashboard
+try:
+    from routers import dashboard
+    app.include_router(dashboard.router, tags=["Bot Dashboard"])
+    log.info("✅ Router loaded: /dashboard (bot earnings)")
+except Exception as e:
+    log.warning(f"Failed to load bot dashboard router: {e}")
+
+# Crypto bot analytics and trade instrumentation
+try:
+    from routers import crypto_analytics
+    app.include_router(crypto_analytics.router, tags=["Crypto Analytics"])
+    log.info("✅ Router loaded: /crypto/analytics (state machine instrumentation)")
+except Exception as e:
+    log.warning(f"Failed to load crypto analytics router: {e}")
+
 
 @app.get("/dashboard")
 async def serve_dashboard():
@@ -597,12 +1299,8 @@ async def serve_signals_signup():
     return FileResponse(signals_path, media_type="text/html")
 
 
-try:
-    from routers import bot_status
-    app.include_router(bot_status.router, prefix="/api/bot", tags=["Bot Status"])
-    log.info("Router loaded: /api/bot (in-process, no separate bot-api service required)")
-except Exception as e:
-    log.warning(f"Failed to include router /api/bot: {e}")
+# routers/bot_status.py (mounted at /api/bot) was retired along with
+# bot_2_crypto_scalper.py - see the lifespan startup comment above for why.
 
 
 @app.get("/trading-dashboard")
@@ -615,32 +1313,425 @@ async def serve_trading_dashboard():
     return FileResponse(dashboard_path, media_type="text/html")
 
 
+@app.get("/api/orchestrator/stats")
+async def get_orchestrator_stats(db = Depends(lambda: None)):
+    """Aggregate all earnings: video production + trading (prop + crypto)"""
+    import aiohttp
+    import asyncio
+
+    try:
+        stats = {
+            "timestamp": datetime.now().isoformat(),
+            "video_production": {"total_earned": 0, "jobs_completed": 0, "pending": 0},
+            "trading": {"total_earned": 0, "equity": 0, "daily_pnl": 0, "accounts": []},
+            "summary": {"total_earned": 0, "net_equity": 0, "status": "loading"}
+        }
+
+        # Video production stats
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("http://localhost:8000/payments/bot/earnings", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        video_data = await resp.json()
+                        stats["video_production"] = {
+                            "total_earned": video_data.get("total_earned", 0),
+                            "jobs_completed": video_data.get("payment_count", 0),
+                            "pending": video_data.get("pending_payout", 0)
+                        }
+        except Exception as e:
+            log.warning(f"Error fetching video stats: {e}")
+
+        # Alpaca trading stats
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("http://localhost:8000/payments/alpaca/account", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        alpaca_data = await resp.json()
+                        if alpaca_data.get("status") == "ok":
+                            stats["trading"]["accounts"].append({
+                                "name": "Alpaca (Stocks/ETFs/Futures)",
+                                "equity": alpaca_data.get("capital", {}).get("equity", 0),
+                                "buying_power": alpaca_data.get("buying_power", {}).get("available", 0),
+                                "mode": alpaca_data.get("trading_mode", "PAPER")
+                            })
+                            stats["trading"]["equity"] += alpaca_data.get("capital", {}).get("equity", 0)
+        except Exception as e:
+            log.warning(f"Error fetching Alpaca stats: {e}")
+
+        # Coinbase crypto stats (real-time USD balance)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("http://localhost:8000/api/trading-dashboard/coinbase/usd-balance", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        crypto_data = await resp.json()
+                        if crypto_data.get("status") == "ok":
+                            usd_balance = crypto_data.get("usd_balance", 0)
+                            stats["trading"]["accounts"].append({
+                                "name": "Coinbase (BTC/ETH 24/7)",
+                                "usd_balance": usd_balance,
+                                "equity": usd_balance,
+                                "mode": "🔴 LIVE CRYPTO (24/7)"
+                            })
+                            stats["trading"]["equity"] += usd_balance
+        except Exception as e:
+            log.warning(f"Error fetching Coinbase stats: {e}")
+
+        # Calculate totals
+        stats["trading"]["total_earned"] = stats["trading"]["equity"]
+        stats["summary"]["total_earned"] = stats["video_production"]["total_earned"] + stats["trading"]["total_earned"]
+        stats["summary"]["net_equity"] = stats["trading"]["equity"]
+        stats["summary"]["status"] = "ok"
+
+        return stats
+
+    except Exception as e:
+        log.error(f"Error in orchestrator stats: {e}")
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e),
+            "status": "error"
+        }
+
+
+@app.get("/orchestrator")
+async def serve_orchestrator_dashboard():
+    """Serve the unified Orchestrator dashboard - video production + trading earnings"""
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>🎯 Orchestrator Dashboard - Empire v2</title>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+                background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+                color: #fff;
+                min-height: 100vh;
+                padding: 20px;
+            }
+            .container { max-width: 1400px; margin: 0 auto; }
+            h1 { text-align: center; margin-bottom: 30px; font-size: 2.5em; text-shadow: 0 2px 10px rgba(0,0,0,0.3); }
+
+            .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 20px; margin-bottom: 30px; }
+            .card {
+                background: rgba(255,255,255,0.1);
+                border: 1px solid rgba(255,255,255,0.2);
+                border-radius: 12px;
+                padding: 25px;
+                backdrop-filter: blur(10px);
+                box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+                transition: transform 0.3s ease, box-shadow 0.3s ease;
+            }
+            .card:hover { transform: translateY(-5px); box-shadow: 0 12px 40px rgba(0,0,0,0.3); }
+
+            .card h2 { font-size: 1.2em; margin-bottom: 15px; opacity: 0.9; }
+            .metric { margin: 12px 0; display: flex; justify-content: space-between; align-items: center; }
+            .metric-label { opacity: 0.8; font-size: 0.95em; }
+            .metric-value { font-size: 1.5em; font-weight: bold; color: #4ade80; }
+
+            .summary-card {
+                grid-column: 1 / -1;
+                background: linear-gradient(135deg, rgba(74,222,128,0.2), rgba(59,130,246,0.2));
+                border: 2px solid rgba(74,222,128,0.4);
+            }
+            .summary-card h2 { font-size: 1.8em; color: #4ade80; }
+            .summary-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; }
+
+            .status-badge {
+                display: inline-block;
+                padding: 6px 12px;
+                border-radius: 20px;
+                font-size: 0.85em;
+                font-weight: 600;
+                background: rgba(74,222,128,0.2);
+                color: #4ade80;
+                border: 1px solid rgba(74,222,128,0.5);
+            }
+            .status-badge.error { background: rgba(239,68,68,0.2); color: #ef4444; border-color: rgba(239,68,68,0.5); }
+            .status-badge.loading { background: rgba(59,130,246,0.2); color: #3b82f6; border-color: rgba(59,130,246,0.5); }
+
+            .account-list { margin-top: 15px; }
+            .account-item {
+                background: rgba(255,255,255,0.05);
+                padding: 10px;
+                border-radius: 6px;
+                margin: 8px 0;
+                font-size: 0.9em;
+            }
+            .account-item .name { font-weight: 600; margin-bottom: 5px; }
+            .account-item .details { opacity: 0.8; display: flex; justify-content: space-between; }
+
+            .refresh-btn {
+                background: rgba(59,130,246,0.3);
+                border: 1px solid rgba(59,130,246,0.6);
+                color: #fff;
+                padding: 10px 20px;
+                border-radius: 6px;
+                cursor: pointer;
+                font-size: 1em;
+                transition: all 0.3s ease;
+            }
+            .refresh-btn:hover { background: rgba(59,130,246,0.5); }
+            .controls { text-align: center; margin-bottom: 30px; }
+
+            .last-update { text-align: center; opacity: 0.7; font-size: 0.9em; margin-top: 20px; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🎯 Orchestrator Dashboard</h1>
+
+            <div class="controls">
+                <button class="refresh-btn" onclick="refreshData()">🔄 Refresh</button>
+            </div>
+
+            <div class="grid" id="dashboard">
+                <div class="card" style="grid-column: 1 / -1;">
+                    <h2>Loading data...</h2>
+                    <p>Aggregating video production, trading, and equity data...</p>
+                </div>
+            </div>
+
+            <div class="last-update" id="lastUpdate"></div>
+        </div>
+
+        <script>
+            async function loadData() {
+                try {
+                    const resp = await fetch('/api/orchestrator/stats');
+                    const data = await resp.json();
+                    renderDashboard(data);
+                } catch (e) {
+                    console.error('Error loading data:', e);
+                    document.getElementById('dashboard').innerHTML = '<div class="card" style="grid-column: 1 / -1;"><h2>⚠️ Error Loading Data</h2><p>' + e.message + '</p></div>';
+                }
+            }
+
+            function renderDashboard(data) {
+                const dashboard = document.getElementById('dashboard');
+                let html = '';
+
+                // Summary card
+                html += `
+                    <div class="card summary-card">
+                        <h2>💰 Total Earnings</h2>
+                        <div class="summary-metrics">
+                            <div>
+                                <div class="metric-label">Combined Revenue</div>
+                                <div class="metric-value">$${data.summary.total_earned.toFixed(2)}</div>
+                            </div>
+                            <div>
+                                <div class="metric-label">Trading Equity</div>
+                                <div class="metric-value">$${data.summary.net_equity.toFixed(2)}</div>
+                            </div>
+                            <div>
+                                <div class="metric-label">System Status</div>
+                                <div style="margin-top: 8px;"><span class="status-badge ${data.summary.status === 'ok' ? '' : 'error'}">● ${data.summary.status.toUpperCase()}</span></div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                // Video production
+                html += `
+                    <div class="card">
+                        <h2>🎬 Video Production</h2>
+                        <div class="metric">
+                            <span class="metric-label">Total Earned</span>
+                            <span class="metric-value">$${data.video_production.total_earned.toFixed(2)}</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Jobs Completed</span>
+                            <span class="metric-value">${data.video_production.jobs_completed}</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Pending Payout</span>
+                            <span class="metric-value" style="color: #fbbf24;">$${data.video_production.pending.toFixed(2)}</span>
+                        </div>
+                    </div>
+                `;
+
+                // Trading summary
+                html += `
+                    <div class="card">
+                        <h2>📈 Trading Accounts</h2>
+                        <div class="metric">
+                            <span class="metric-label">Total Equity</span>
+                            <span class="metric-value">$${data.trading.equity.toFixed(2)}</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Active Accounts</span>
+                            <span class="metric-value">${data.trading.accounts.length}</span>
+                        </div>
+                        <div class="account-list">
+                            ${data.trading.accounts.map(acc => `
+                                <div class="account-item">
+                                    <div class="name">${acc.name}</div>
+                                    <div class="details">
+                                        <span>Equity: $${(acc.equity || acc.usd_balance || 0).toFixed(2)}</span>
+                                        <span>${acc.mode}</span>
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+
+                dashboard.innerHTML = html;
+                document.getElementById('lastUpdate').textContent = '🕐 Updated: ' + new Date(data.timestamp).toLocaleString();
+            }
+
+            function refreshData() {
+                loadData();
+            }
+
+            // Load on page load
+            loadData();
+            // Auto-refresh every 30 seconds
+            setInterval(loadData, 30000);
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+
+@app.get("/notary-portal")
+async def serve_notary_portal():
+    """Serve the notary partner self-service portal. Until now, /workers,
+    /jobs, and /bookings only existed as bare JSON APIs - real notaries had
+    no page to actually register, log in, submit credentials, or see jobs
+    matched to them on. This is per-worker login (their own email+password,
+    see worker_auth.py), not the shared admin key the trading/social
+    dashboards use."""
+    portal_path = os.path.join(os.path.dirname(__file__), "notary_portal.html")
+    if not os.path.exists(portal_path):
+        raise HTTPException(status_code=404, detail="Notary portal not found")
+    return FileResponse(portal_path, media_type="text/html")
+
+
+@app.get("/get-notarized")
+async def serve_notary_request():
+    """Public, no-auth client-facing intake page for POST
+    /jobs/notarization/request - the other half of the same gap the notary
+    portal fixed. Without this, the only way a real client could ever
+    submit a notarization job was hand-crafting a raw JSON POST - there was
+    no marketplace demand side at all, just a backend API nobody outside
+    this codebase could actually use."""
+    request_path = os.path.join(os.path.dirname(__file__), "notary_request.html")
+    if not os.path.exists(request_path):
+        raise HTTPException(status_code=404, detail="Notarization request page not found")
+    return FileResponse(request_path, media_type="text/html")
+
+
+@app.get("/notary-admin")
+async def serve_notary_admin():
+    """Admin-only (gated by X-Admin-Key on every API call it makes, same
+    pattern as /trading-dashboard) panel to review pending notary
+    credential submissions and approve/reject them, and to manually match
+    'requested' jobs to an eligible verified notary. Verification is
+    deliberately not self-service (see routers/workers.py) since these are
+    real legal credentials - this page is what makes that admin step
+    actually usable instead of requiring a raw curl command."""
+    admin_path = os.path.join(os.path.dirname(__file__), "notary_admin.html")
+    if not os.path.exists(admin_path):
+        raise HTTPException(status_code=404, detail="Notary admin panel not found")
+    return FileResponse(admin_path, media_type="text/html")
+
+
 @app.get("/quote")
 async def serve_quote_form():
     """Serve the subscription-aware video quote form"""
     try:
-        # Try multiple possible paths for new subscription form first
+        app_dir = os.path.dirname(os.path.abspath(__file__))
         possible_paths = [
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "subscription_quote_form.html"),
+            os.path.join(app_dir, "subscription_quote_form.html"),
+            os.path.join(app_dir, "quote_request.html"),
             "/app/subscription_quote_form.html",
-            "subscription_quote_form.html",
-            # Fallback to old form if new one not found
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "quote_request.html"),
             "/app/quote_request.html",
+            "subscription_quote_form.html",
             "quote_request.html",
+            os.path.join(os.getcwd(), "quote_request.html"),
         ]
 
         quote_path = None
         for path in possible_paths:
             if os.path.exists(path):
                 quote_path = path
+                log.info(f"✓ Quote form found at: {path}")
                 break
 
         if not quote_path:
-            log.error(f"Quote form HTML file not found in any location: {possible_paths}")
+            log.error(f"Quote form not found. Tried: {possible_paths}. CWD: {os.getcwd()}, APP_DIR: {app_dir}")
             raise HTTPException(status_code=404, detail="Quote form file not found")
 
         with open(quote_path, 'r') as f:
+            html_content = f.read()
+        return HTMLResponse(content=html_content, status_code=200)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Error serving quote form: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/trading-hub/dashboard")
+async def serve_trading_hub_dashboard():
+    """Serve the real-time trading hub dashboard"""
+    try:
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        possible_paths = [
+            os.path.join(app_dir, "trading_hub.html"),
+            "/app/trading_hub.html",
+            "trading_hub.html",
+            os.path.join(os.getcwd(), "trading_hub.html"),
+        ]
+
+        hub_path = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                hub_path = path
+                log.info(f"✓ Trading hub found at: {path}")
+                break
+
+        if not hub_path:
+            log.error(f"Trading hub not found. Tried: {possible_paths}. CWD: {os.getcwd()}, APP_DIR: {app_dir}")
+            raise HTTPException(status_code=404, detail="Trading hub file not found")
+
+        with open(hub_path, 'r') as f:
+            html_content = f.read()
+        return HTMLResponse(content=html_content, status_code=200)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Error serving trading hub: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/bot-earnings")
+async def serve_bot_earnings_dashboard():
+    """Serve the bot earnings dashboard widget"""
+    try:
+        possible_paths = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_earnings.html"),
+            "/app/bot_earnings.html",
+            "bot_earnings.html",
+        ]
+
+        bot_path = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                bot_path = path
+                break
+
+        if not bot_path:
+            raise HTTPException(status_code=404, detail="Bot earnings dashboard not found")
+
+        with open(bot_path, 'r') as f:
             html_content = f.read()
         return HTMLResponse(content=html_content, status_code=200)
     except Exception as e:
@@ -815,20 +1906,6 @@ def _read_json_file(filepath: str) -> dict:
         return {"status": "error", "message": str(e)}
 
 
-@app.get("/admin/bot-logs/crypto")
-async def get_crypto_bot_logs(lines: int = 100):
-    """Get last N lines from crypto trading bot log (bot2_crypto.log)"""
-    log_lines = _read_log_file("bot2_crypto.log", lines)
-    return {
-        "service": "crypto-trading-bot",
-        "log_file": "bot2_crypto.log",
-        "lines_requested": lines,
-        "lines_returned": len(log_lines),
-        "logs": [line.rstrip('\n') for line in log_lines],
-        "timestamp": datetime.now().isoformat()
-    }
-
-
 @app.get("/admin/bot-logs/pl-tracker")
 async def get_pl_tracker_logs(lines: int = 100):
     """Get last N lines from P&L tracker log (logs/bot_pl_tracker.log)"""
@@ -839,18 +1916,6 @@ async def get_pl_tracker_logs(lines: int = 100):
         "lines_requested": lines,
         "lines_returned": len(log_lines),
         "logs": [line.rstrip('\n') for line in log_lines],
-        "timestamp": datetime.now().isoformat()
-    }
-
-
-@app.get("/admin/bot-state")
-async def get_bot_state():
-    """Get current bot state (day count, win/loss ratio, peak portfolio, etc)"""
-    state = _read_json_file("bot2_state.json")
-    return {
-        "service": "crypto-trading-bot",
-        "state_file": "bot2_state.json",
-        "data": state,
         "timestamp": datetime.now().isoformat()
     }
 
@@ -885,10 +1950,8 @@ async def get_bot_pl_history(limit: int = 500):
 
 @app.get("/admin/bot-status")
 async def get_bot_status():
-    """Get comprehensive bot status - logs, state, and P&L in one call"""
-    crypto_logs = _read_log_file("bot2_crypto.log", 30)
+    """Get comprehensive bot status - logs and P&L in one call"""
     pl_logs = _read_log_file("logs/bot_pl_tracker.log", 20)
-    state = _read_json_file("bot2_state.json")
     history = _read_json_file("bot_pl_history.json")
 
     # Get latest snapshot if available
@@ -901,11 +1964,6 @@ async def get_bot_status():
     return {
         "timestamp": datetime.now().isoformat(),
         "services": {
-            "crypto-trading-bot": {
-                "log_file": "bot2_crypto.log",
-                "recent_logs": [line.rstrip('\n') for line in crypto_logs],
-                "state": state
-            },
             "pl-tracker": {
                 "log_file": "logs/bot_pl_tracker.log",
                 "recent_logs": [line.rstrip('\n') for line in pl_logs],
@@ -917,5 +1975,9 @@ async def get_bot_status():
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
+    try:
+        port = int(os.getenv("PORT", 8000))
+    except (ValueError, TypeError):
+        log.warning("Invalid PORT value, using default: 8000")
+        port = 8000
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)

@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🗂️ Notary Admin</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        background: #0f172a; color: #e2e8f0; min-height: 100vh; padding: 16px;
+    }
+    .container { max-width: 900px; margin: 0 auto; }
+    .header { text-align: center; margin-bottom: 24px; padding-bottom: 16px; border-bottom: 2px solid #334155; }
+    .header h1 { font-size: 1.6em; margin-bottom: 6px; }
+    .header p { color: #94a3b8; font-size: 0.9em; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 20px; margin-bottom: 16px; }
+    .card h2 { font-size: 1.1em; margin-bottom: 14px; color: #38bdf8; }
+    .item { border: 1px solid #334155; border-radius: 8px; padding: 14px; margin-bottom: 10px; }
+    .item-top { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+    .muted { color: #94a3b8; font-size: 0.85em; }
+    button {
+        padding: 8px 14px; border: none; border-radius: 6px; font-weight: 600;
+        font-size: 0.9em; cursor: pointer; background: #38bdf8; color: #0f172a;
+    }
+    button:hover { background: #0ea5e9; }
+    button.danger { background: #ef4444; color: #fff; }
+    button.danger:hover { background: #dc2626; }
+    select, input[type=text] {
+        padding: 8px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0;
+    }
+    .badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 0.78em; font-weight: 600; }
+    .badge.requested { background: #78350f; color: #fed7aa; }
+    .badge.matched { background: #1e3a8a; color: #bfdbfe; }
+    .badge.scheduled { background: #713f12; color: #fde68a; }
+    .badge.completed { background: #14532d; color: #bbf7d0; }
+    .badge.cancelled { background: #450a0a; color: #fca5a5; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+    .tab-btn { flex: 1; padding: 10px; background: #1e293b; color: #94a3b8; border: 1px solid #334155; border-radius: 6px; }
+    .tab-btn.active { background: #38bdf8; color: #0f172a; border-color: #38bdf8; }
+    .row2 { display: flex; gap: 8px; flex-wrap: wrap; }
+    .msg { margin-top: 8px; font-size: 0.85em; }
+    .msg.error { color: #fca5a5; }
+    .msg.success { color: #86efac; }
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1>🗂️ Notary Marketplace Admin</h1>
+        <p>Verify notary credentials and match open job requests to eligible notaries.</p>
+    </div>
+
+    <div class="card">
+        <h2>⏳ Pending Verifications</h2>
+        <div id="pendingList">Loading...</div>
+    </div>
+
+    <div class="card">
+        <h2>📋 Jobs</h2>
+        <div class="tabs">
+            <button class="tab-btn active" id="tab-requested" onclick="setJobFilter('requested')">Requested</button>
+            <button class="tab-btn" id="tab-matched" onclick="setJobFilter('matched')">Matched</button>
+            <button class="tab-btn" id="tab-scheduled" onclick="setJobFilter('scheduled')">Scheduled</button>
+            <button class="tab-btn" id="tab-completed" onclick="setJobFilter('completed')">Completed</button>
+            <button class="tab-btn" id="tab-all" onclick="setJobFilter(null)">All</button>
+        </div>
+        <div id="jobsList">Loading...</div>
+    </div>
+
+    <div class="card">
+        <h2>✅ Verified Notaries</h2>
+        <div id="verifiedList">Loading...</div>
+    </div>
+
+    <div class="card">
+        <h2>💰 Payouts</h2>
+        <p class="muted" style="margin-bottom: 10px;">Bookkeeping ledger, not automatic transfers - once you've actually sent a notary their money (Zelle/PayPal/check/ACH), click Mark Paid here.</p>
+        <div id="payoutsList">Loading...</div>
+    </div>
+</div>
+
+<script>
+    const API_BASE = 'https://empire-v2-production.up.railway.app';
+    let adminKey = localStorage.getItem('notary_admin_key') || '';
+    let jobFilter = 'requested';
+
+    function ensureAdminKey() {
+        if (!adminKey) {
+            adminKey = prompt('Enter admin key:') || '';
+            if (adminKey) localStorage.setItem('notary_admin_key', adminKey);
+        }
+        return adminKey;
+    }
+
+    async function apiFetch(path, options = {}) {
+        ensureAdminKey();
+        const headers = Object.assign({ 'X-Admin-Key': adminKey, 'Content-Type': 'application/json' }, options.headers || {});
+        const res = await fetch(API_BASE + path, Object.assign({}, options, { headers }));
+        if (res.status === 401) {
+            localStorage.removeItem('notary_admin_key');
+            adminKey = '';
+            throw new Error('Unauthorized - check your admin key');
+        }
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.detail || ('Request failed: ' + res.status));
+        return body;
+    }
+
+    async function loadPending() {
+        let workers;
+        try {
+            workers = (await apiFetch('/workers')).workers;
+        } catch (e) {
+            document.getElementById('pendingList').textContent = '❌ ' + e.message;
+            return;
+        }
+        const pending = workers.filter(w => w.credentials_submitted && !w.credentials_verified);
+        const el = document.getElementById('pendingList');
+        if (pending.length === 0) {
+            el.innerHTML = '<p class="muted">No pending verifications.</p>';
+            return;
+        }
+        el.innerHTML = pending.map(w => (
+            '<div class="item">' +
+                '<div class="item-top">' +
+                    '<strong>' + w.name + '</strong> <span class="muted">' + w.email + '</span>' +
+                '</div>' +
+                '<div class="muted">Commission: ' + (w.notary_commission_number || '—') + ' (' + (w.notary_commission_state || '—') + '), expires ' + (w.notary_commission_expires || '—') + '</div>' +
+                '<div class="muted">RON: ' + (w.ron_authorized ? 'Yes (' + (w.ron_authorization_state || '—') + ')' : 'No') + ' | W9: ' + (w.w9_legal_name || '—') + '</div>' +
+                '<div class="row2" style="margin-top:8px;">' +
+                    '<button onclick="verifyWorker(' + w.id + ', true)">Approve</button>' +
+                    '<button class="danger" onclick="verifyWorker(' + w.id + ', false)">Reject</button>' +
+                '</div>' +
+                '<div class="msg" id="verify-msg-' + w.id + '"></div>' +
+            '</div>'
+        )).join('');
+    }
+
+    async function verifyWorker(workerId, verified) {
+        const msgEl = document.getElementById('verify-msg-' + workerId);
+        try {
+            await apiFetch('/workers/' + workerId + '/verify', { method: 'POST', body: JSON.stringify({ verified }) });
+            await loadPending();
+            await loadVerified();
+        } catch (e) {
+            msgEl.className = 'msg error';
+            msgEl.textContent = e.message;
+        }
+    }
+
+    async function loadVerified() {
+        let data;
+        try {
+            data = await apiFetch('/workers/notaries/available');
+        } catch (e) {
+            document.getElementById('verifiedList').textContent = '❌ ' + e.message;
+            return;
+        }
+        const el = document.getElementById('verifiedList');
+        if (data.notaries.length === 0) {
+            el.innerHTML = '<p class="muted">No verified notaries yet.</p>';
+            return;
+        }
+        el.innerHTML = data.notaries.map(w => (
+            '<div class="item"><strong>' + w.name + '</strong> <span class="muted">' + w.email + ' — ' + (w.notary_commission_state || '—') + (w.ron_authorized ? ' (RON)' : '') + '</span></div>'
+        )).join('');
+    }
+
+    function setJobFilter(status) {
+        jobFilter = status;
+        ['requested', 'matched', 'scheduled', 'completed', 'all'].forEach(s => {
+            document.getElementById('tab-' + s).classList.toggle('active', (status || 'all') === s);
+        });
+        loadJobs();
+    }
+
+    async function loadJobs() {
+        let data;
+        try {
+            const path = jobFilter ? '?status=' + jobFilter : '';
+            data = await apiFetch('/jobs' + path);
+        } catch (e) {
+            document.getElementById('jobsList').textContent = '❌ ' + e.message;
+            return;
+        }
+        const el = document.getElementById('jobsList');
+        if (data.jobs.length === 0) {
+            el.innerHTML = '<p class="muted">No jobs in this state.</p>';
+            return;
+        }
+        el.innerHTML = data.jobs.map(j => (
+            '<div class="item">' +
+                '<div class="item-top">' +
+                    '<strong>#' + j.id + ' — ' + j.job_type + ' (' + j.state + ')</strong>' +
+                    '<span class="badge ' + j.status + '">' + j.status + '</span>' +
+                '</div>' +
+                (j.description ? '<div class="muted">' + j.description + '</div>' : '') +
+                '<div class="muted">Worker: ' + (j.worker_id || 'unmatched') + ' | ' + (j.service_tier || '—') + ': $' + (j.price != null ? j.price.toFixed(2) : '—') + ' — ' + (j.paid ? 'paid' : 'NOT PAID YET') + '</div>' +
+                (j.status === 'requested' && j.paid ? (
+                    '<div class="row2" style="margin-top:8px;">' +
+                        '<select id="match-select-' + j.id + '"><option>Loading eligible notaries...</option></select>' +
+                        '<button onclick="matchJob(' + j.id + ', \'' + j.state + '\')">Match</button>' +
+                    '</div>'
+                ) : (j.status === 'requested' ? '<div class="muted">Waiting on client payment before this can be matched.</div>' : '')) +
+                '<div class="msg" id="job-msg-' + j.id + '"></div>' +
+            '</div>'
+        )).join('');
+
+        data.jobs.filter(j => j.status === 'requested').forEach(j => populateEligible(j.id, j.state));
+    }
+
+    async function populateEligible(jobId, state) {
+        const selectEl = document.getElementById('match-select-' + jobId);
+        if (!selectEl) return;
+        try {
+            const data = await apiFetch('/workers/notaries/available?state=' + encodeURIComponent(state));
+            if (data.notaries.length === 0) {
+                selectEl.innerHTML = '<option value="">No eligible notaries in ' + state + '</option>';
+                return;
+            }
+            selectEl.innerHTML = data.notaries.map(w => '<option value="' + w.id + '">' + w.name + ' (' + w.email + ')</option>').join('');
+        } catch (e) {
+            selectEl.innerHTML = '<option value="">Error loading notaries</option>';
+        }
+    }
+
+    async function matchJob(jobId, state) {
+        const selectEl = document.getElementById('match-select-' + jobId);
+        const msgEl = document.getElementById('job-msg-' + jobId);
+        const workerId = selectEl.value;
+        if (!workerId) {
+            msgEl.className = 'msg error';
+            msgEl.textContent = 'Select a notary first.';
+            return;
+        }
+        try {
+            await apiFetch('/jobs/' + jobId + '/match', { method: 'POST', body: JSON.stringify({ worker_id: parseInt(workerId, 10) }) });
+            await loadJobs();
+        } catch (e) {
+            msgEl.className = 'msg error';
+            msgEl.textContent = e.message;
+        }
+    }
+
+    async function loadPayouts() {
+        let data;
+        try {
+            data = await apiFetch('/workers/payouts?status=requested');
+        } catch (e) {
+            document.getElementById('payoutsList').textContent = '❌ ' + e.message;
+            return;
+        }
+        const el = document.getElementById('payoutsList');
+        if (data.payouts.length === 0) {
+            el.innerHTML = '<p class="muted">No payout requests pending.</p>';
+            return;
+        }
+        el.innerHTML = data.payouts.map(p => (
+            '<div class="item">' +
+                '<div class="item-top">' +
+                    '<strong>Worker #' + p.worker_id + ' — $' + p.amount.toFixed(2) + ' (job #' + p.job_id + ')</strong>' +
+                    '<span class="badge scheduled">requested</span>' +
+                '</div>' +
+                '<div class="muted">Requested: ' + (p.requested_at ? new Date(p.requested_at).toLocaleString() : '—') + '</div>' +
+                '<button onclick="markPayoutPaid(' + p.id + ')">Mark Paid</button>' +
+                '<div class="msg" id="payout-msg-' + p.id + '"></div>' +
+            '</div>'
+        )).join('');
+    }
+
+    async function markPayoutPaid(payoutId) {
+        const msgEl = document.getElementById('payout-msg-' + payoutId);
+        try {
+            await apiFetch('/workers/payouts/' + payoutId + '/mark-paid', { method: 'POST' });
+            await loadPayouts();
+        } catch (e) {
+            msgEl.className = 'msg error';
+            msgEl.textContent = e.message;
+        }
+    }
+
+    loadPending();
+    loadJobs();
+    loadVerified();
+    loadPayouts();
+    setInterval(() => { loadPending(); loadJobs(); loadVerified(); loadPayouts(); }, 30000);
+</script>
+</body>
+</html>

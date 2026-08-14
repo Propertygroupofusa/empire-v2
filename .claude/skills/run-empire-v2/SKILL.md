@@ -21,10 +21,10 @@ smoke tests on key endpoints (health check, quote form, subscription tiers,
 order creation, order status).
 
 **This skill covers the HTTP surface** (routes, orders, subscriptions). For
-the background trading bots (`prop_bot.py`, `tradovate_bot.py`) - which are
-daemon threads calling a real broker API on a timer, not HTTP endpoints -
-see the separate `.claude/skills/verify/SKILL.md`, which drives them with a
-stubbed network boundary instead.
+the background trading bots (`prop_bot.py`, `crypto_coinbase_bot.py`) -
+which are daemon threads calling a real broker API on a timer, not HTTP
+endpoints - see the separate `.claude/skills/verify/SKILL.md`, which drives
+them with a stubbed network boundary instead.
 
 ## Prerequisites
 
@@ -222,30 +222,11 @@ at `./empire.db` in the repo root (no `DATABASE_URL` needed); set
 `empire.db` to reset local state between runs (e.g. if `create-order` keeps
 incrementing order IDs and you want a clean slate).
 
-### `python-binance` version pin can silently break the whole build
-
-**Issue:** `pip install -r requirements.txt` fails entirely (not just the
-optional crypto bot) with `No matching distribution found for
-python-binance==X.Y.Z` if that pin doesn't exist on PyPI.
-
-**Why:** `crypto_scalp_grid_bot.py`'s import is guarded in `main.py` (won't
-crash the app if missing), but `requirements.txt` itself isn't - a bad pin
-there fails the *entire* `pip install`, which fails the Railway build for
-every feature, not just the crypto bot. This actually happened - a pin of
-`python-binance==1.20.1` (a version that was never published; latest real
-release is `1.0.37`) broke production builds until fixed.
-
-**Fix:** `pip index versions python-binance` to check what's real before
-pinning. If `pip install -r requirements.txt` fails on an unrelated-looking
-package, check whether it's guarded in `main.py` but still hard-pinned in
-`requirements.txt` - the guard doesn't help if the file itself won't install.
-
 ## Troubleshooting
 
 | Error | Fix |
 |-------|-----|
 | `ModuleNotFoundError: No module named 'fastapi'` | Run `pip install -r requirements.txt` |
-| `No matching distribution found for python-binance==...` | Bad version pin in `requirements.txt` - check `pip index versions python-binance` and fix the pin (see Gotchas). Blocks *all* deps from installing, not just the crypto bot. |
 | `Address already in use: ('0.0.0.0', 8000)` | Another process is using port 8000. Run `pkill -f "python main.py"` or change PORT in driver. |
 | `ConnectionRefused` on smoke tests, or on `health`/`quote-form`/`create-order` | Server isn't running. `health`/`quote-form`/`create-order` don't start one themselves - run `start` first (or use `test`, which is self-contained). |
 | Stripe endpoint returns null publishable key | `STRIPE_PUBLISHABLE_KEY` env var not set. Set it or skip payment tests locally. |
@@ -259,7 +240,7 @@ package, check whether it's guarded in `main.py` but still hard-pinned in
 - **main.py** — FastAPI app, guarded router imports (`routers_to_load` dict, each wrapped in try/except so one missing optional module doesn't crash the app), `routers_list` registration loop, background bot threads started at startup, core endpoints (`/health`, `/quote`, `/order-success`, `/trading-dashboard`)
 - **routers/orders.py** — Order lifecycle: quote (JSON body, DB-backed) → Stripe checkout → payment webhook → video generation → customer portal (email-gated) / admin lookup (key-gated)
 - **routers/trading_dashboard.py** — Real Alpaca account data + withdrawal-request log backing `trading_dashboard.html`; see the `verify` skill to drive this without hitting the real broker API
-- **prop_bot.py** / **tradovate_bot.py** — Background trading bots (daemon threads, not HTTP routes) - see `.claude/skills/verify/SKILL.md`
+- **prop_bot.py** / **crypto_coinbase_bot.py** — Background trading bots (daemon threads, not HTTP routes) - see `.claude/skills/verify/SKILL.md`
 - **models.py** / **database.py** — SQLAlchemy models and async engine; SQLite locally by default, Postgres via `DATABASE_URL`
 - **heygan_integration.py** — HeyGen API wrapper (avatar/language mapping, video polling)
 - **quote_request.html** — Frontend form with two-stage flow and Stripe.js integration

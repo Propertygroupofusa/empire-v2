@@ -225,11 +225,17 @@ class ComprehensiveHealthMonitor:
         
         results = {}
         port = os.getenv("PORT", 8000)
+        # /revenue/dashboard/all-metrics is admin-key gated - without this
+        # header it 401s on every single check, forever, which used to spam
+        # the logs with a permanent false alarm (harmless to the "ok" verdict
+        # since 401 < 500, but confusing to anyone reading the logs).
+        admin_key = os.getenv("ADMIN_API_KEY")
+        headers = {"X-Admin-Key": admin_key} if admin_key else {}
         for endpoint in endpoints:
             try:
                 import httpx
                 async with httpx.AsyncClient(timeout=5) as client:
-                    response = await client.get(f"http://localhost:{port}{endpoint}")
+                    response = await client.get(f"http://localhost:{port}{endpoint}", headers=headers)
                     results[endpoint] = {
                         "ok": response.status_code < 500,
                         "status_code": response.status_code
