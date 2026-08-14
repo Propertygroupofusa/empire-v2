@@ -177,9 +177,9 @@ def _auth_headers(method: str, path: str) -> dict:
 
 # AGGRESSIVE THRESHOLDS for high-velocity trading in overbought/oversold markets
 # Long-only: Coinbase SPOT has no shorting support
-RSI_STRONG_BUY = 35   # RSI < 35 = oversold, aggressive entry zone
-RSI_BUY = 50          # RSI < 50 = oversold/neutral zone, wide zone for continuous entry
-RSI_NO_ENTRY = 75     # RSI >= 75 = extremely overbought, skip entries (allow entries up to 74 RSI)
+RSI_STRONG_BUY = 40   # RSI < 40 = MORE aggressive entry zone (was 35)
+RSI_BUY = 60          # RSI < 60 = ultra-wide zone for continuous entry (was 50)
+RSI_NO_ENTRY = 80     # RSI >= 80 = skip entries (was 75) - allow entries up to 79 RSI
 try:
     RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "60"))
 except (ValueError, TypeError):
@@ -193,7 +193,7 @@ except (ValueError, TypeError):
     RSI_BUY_BELOW = 40.0
 
 try:
-    MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "24"))
+    MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "50"))
 except (ValueError, TypeError):
     log.warning("Invalid CRYPTO_MAX_POSITIONS value, using default: 24")
     MAX_POSITIONS = 24
@@ -208,18 +208,18 @@ except (ValueError, TypeError):
     log.warning("Invalid CRYPTO_MAX_ALLOCATION value, using default: 100003.0")
     MAX_ALLOCATION = 100003.0
 
-# Micro-trades on small balances: $0.50 minimum lets bot scalp $0.58-100 accounts
-# without sitting idle. At $0.58 balance: $0.50 × 0.5% move = $0.0025 profit (micro-compounding)
-# $100+ balance: trades full notional, beats fees, compounds faster.
+# Micro-trades on small balances: $0.25 minimum lets bot scalp ultra-aggressively
+# without sitting idle. At $0.58 balance: $0.25 × 0.5% move = $0.00125 profit (micro-compounding)
+# $100+ balance: trades full notional, beats fees, compounds MASSIVELY faster.
 try:
-    MIN_POSITION_NOTIONAL = float(os.getenv("CRYPTO_MIN_POSITION_NOTIONAL", "0.50"))
+    MIN_POSITION_NOTIONAL = float(os.getenv("CRYPTO_MIN_POSITION_NOTIONAL", "0.25"))
 except (ValueError, TypeError):
     log.warning("Invalid CRYPTO_MIN_POSITION_NOTIONAL value, using default: 0.50")
     MIN_POSITION_NOTIONAL = 0.50
 
 # Minimum trade size guard: skip trading if cash pool is too small to be meaningful
 try:
-    MIN_CRYPTO_TRADE_USD = float(os.getenv("MIN_CRYPTO_TRADE_USD", "1.50"))
+    MIN_CRYPTO_TRADE_USD = float(os.getenv("MIN_CRYPTO_TRADE_USD", "0.50"))
 except (ValueError, TypeError):
     log.warning("Invalid MIN_CRYPTO_TRADE_USD value, using default: 1.50")
     MIN_CRYPTO_TRADE_USD = 1.50
@@ -328,7 +328,7 @@ PROFIT_TARGET_PCT = 0.37  # DEPRECATED - kept for reference only, use CRYPTO_TIE
 # low and watch real results before trusting this with more capital.
 # Hard-coded: 2% stop loss (tight capital preservation, avoid fee bleed)
 # Do NOT override via env var - this is proven through backtesting
-STOP_LOSS_PCT = 0.02  # 2% tight stop for capital preservation
+STOP_LOSS_PCT = 0.01  # 1% ultra-tight stop for rapid capital redeployment (was 2%)
 
 # Coinbase Advanced Trade API taker fee (0.6% standard rate for crypto)
 TAKER_FEE_RATE = 0.006
@@ -338,7 +338,7 @@ TAKER_FEE_RATE = 0.006
 # Tier 2: Exit 1/3 at 6-10% (second profit zone, move stop to breakeven)
 # Tier 3: Remaining 1/3 trails at trailing stop (let winners run with protection)
 # This replaces the fixed 37% target which caused the bot to hold indefinitely
-CRYPTO_TIER_LEVELS = [0.03, 0.05, 0.10]  # 3-tier exit: 3% (lock), 5%, 10% (trailing)
+CRYPTO_TIER_LEVELS = [0.05, 0.08, 0.15]  # 3-tier exit: 5% (lock), 8%, 15% (massive gains)
 CRYPTO_TIER_FRACTIONS = [1/3, 1/3, 1/3]   # Exit 1/3 of position at each tier
 CRYPTO_TRAILING_STOP_PCT = 0.05  # Trail final position by 5% from recent high (protection while letting winners run)
 
