@@ -34,6 +34,7 @@ except (ImportError, AssertionError) as e:
     raise
 
 from database import init_db, engine
+from initialize_bot_worker import initialize_bot_worker
 
 # Load routers gracefully to prevent import errors from crashing startup
 routers_to_load = {
@@ -1031,6 +1032,12 @@ async def lifespan(app: FastAPI):
         log.error(f"Bot initialization FAILED - no bot workers will exist, so no "
                   f"jobs will be claimed and no payments created: "
                   f"[{type(e).__name__}] {e}", exc_info=True)
+
+    try:
+        await initialize_bot_worker()
+        log.info("✅ Earnings bot worker initialized (for /payments/bot/earnings)")
+    except Exception as e:
+        log.error(f"Earnings bot worker initialization failed: [{type(e).__name__}] {e}", exc_info=True)
 
     try:
         asyncio.create_task(start_job_bot())
