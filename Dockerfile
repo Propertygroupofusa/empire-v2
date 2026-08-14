@@ -26,4 +26,4 @@ RUN chmod +x run_server.sh
 # Verify greenlet is actually installed
 RUN python -c "import greenlet; print(f'✓ greenlet {greenlet.__version__} installed')"
 
-CMD ["python", "main.py"]
+CMD ["python3", "-u", "main.py"]
