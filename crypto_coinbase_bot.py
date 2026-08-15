@@ -224,22 +224,16 @@ except (ValueError, TypeError):
     log.warning("Invalid MIN_CRYPTO_TRADE_USD value, using default: 0.50")
     MIN_CRYPTO_TRADE_USD = 0.50
 
-# Staged capital release, requested after watching the account get drawn
-# down to single-digit cents trading with 100% of the balance every cycle:
-# instead of always trading the full balance, only ever risk it in fixed
-# $100 steps. Below the first $100 the bot places no new entries at all
-# (existing open positions still get managed normally, below in Pass 1 -
-# this only gates Pass 2's new entries). Once the real balance crosses a
-# tier, that whole tier becomes tradable; anything above the current tier
-# sits untouched until the balance actually grows past the next one, so a
-# losing streak can't eat into gains that already "graduated" to the next
-# tier. Set CRYPTO_TIER_SIZE=0 to disable and go back to trading 100% of
-# the balance (or whatever CRYPTO_MAX_ALLOCATION caps it at) every cycle.
+# Staged capital release DISABLED for aggressive capital deployment.
+# Previous logic: Only ever risk fixed $100 steps to prevent account wipeout.
+# New behavior: Trade 100% of available balance (or whatever CRYPTO_MAX_ALLOCATION caps it at).
+# The account has grown from $0.58 → $483.43 through earnings, so tier protection no longer needed.
+# Set CRYPTO_TIER_SIZE to a positive value to re-enable tiered capital release if desired.
 try:
-    TIER_SIZE = float(os.getenv("CRYPTO_TIER_SIZE", "100"))
+    TIER_SIZE = float(os.getenv("CRYPTO_TIER_SIZE", "0"))
 except (ValueError, TypeError):
-    log.warning("Invalid CRYPTO_TIER_SIZE value, using default: 100")
-    TIER_SIZE = 100.0
+    log.warning("Invalid CRYPTO_TIER_SIZE value, using default: 0 (tiering disabled)")
+    TIER_SIZE = 0.0
 
 
 def get_unlocked_tier(balance: float) -> float:
