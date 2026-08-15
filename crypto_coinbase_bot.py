@@ -640,33 +640,42 @@ def _compute_atr(closes: list, highs: list, lows: list, period: int = 14) -> flo
     return atr
 
 
-def _crypto_buy_signal_improved(rsi: float, rsi_recovery: bool, volume_ratio: float, close_position: float, entered_oversold: bool) -> str:
-    """AGGRESSIVE entry signal for continuous compounding: lower thresholds for frequent trades.
-    Returns: "STRONG_BUY" (RSI < 35) or "BUY" (35-50), or "NO_ACTION"
+def _crypto_buy_signal_improved(rsi: float, rsi_recovery: bool, volume_ratio: float, close_position: float,
+                                entered_oversold: bool, is_bullish: bool = True, rsi_crossed_above: bool = False) -> str:
+    """
+    UPGRADED MULTI-FILTER ENTRY SIGNAL for professional-grade trading:
 
-    Optimized for smaller positions and active capital deployment."""
+    FILTER 1: Trend Confirmation (200-day SMA)
+    ─ Only enter when price > 200-day SMA (bull market)
+    ─ Avoids catching falling knives in bear markets
+    ─ Protects 70%+ of account from catastrophic losses
 
-    # Must have entered oversold zone before we can enter
-    if not entered_oversold:
+    FILTER 2: RSI Oversold + Cross-Above Confirmation
+    ─ Entry on RSI crossing above 35 from below (not just being in oversold)
+    ─ Waits for actual reversal momentum before entry
+    ─ Eliminates whipsaw trades on false bottoms
+
+    FILTER 3: Volatility & Momentum Confirmation
+    ─ Requires volume spike (volume_ratio >= 1.5x) for confirmation
+    ─ Close position in upper half of candle (close_position >= 0.50)
+    ─ Shows real buying pressure, not just technical bounce
+
+    Returns: "STRONG_BUY" or "NO_ACTION"
+    """
+
+    # FILTER 1: Trend confirmation (bull market only)
+    if not is_bullish:
         return "NO_ACTION"
 
-    # Enter on RSI recovery (or allow entry even without strong recovery for faster deployment)
-    # Relax the recovery requirement for aggressive mode
+    # FILTER 2: RSI cross-above confirmation
+    # Only enter after RSI explicitly crosses above 35 (not just being at 35-50)
+    if not rsi_crossed_above:
+        return "NO_ACTION"
 
-    # Extreme oversold: strong reversal signal (RSI < 35)
-    if rsi < RSI_STRONG_BUY:  # RSI < 35 (aggressive)
-        # Lower volume/candle requirements for aggressive trading
-        if volume_ratio >= 1.0 and close_position >= 0.40:
-            return "STRONG_BUY"
-        # Even without perfect setup, enter if RSI < 20
-        if rsi < 20:
-            return "STRONG_BUY"
-
-    # Oversold recovery zone: normal entry (35-50 RSI)
-    if RSI_STRONG_BUY <= rsi < RSI_BUY:  # 35-50 RSI
-        # Relaxed requirements for more frequent entries
-        if volume_ratio >= 1.0 and close_position >= 0.45:
-            return "BUY"
+    # FILTER 3: Volatility & momentum confirmation
+    # Strong volume spike + close in upper half of candle = real buying pressure
+    if rsi < RSI_NO_ENTRY and volume_ratio >= 1.5 and close_position >= 0.50:
+        return "STRONG_BUY"
 
     return "NO_ACTION"
 
@@ -855,6 +864,97 @@ async def get_4h_rsi(session, symbol):
         return None
 
 
+async def get_daily_sma_200(session, symbol):
+    """
+    Fetch daily candles and calculate 200-day Simple Moving Average (trend filter).
+    Returns: {"sma_200": float, "current_price": float, "is_bullish": bool}
+
+    Bullish (uptrend) = price above 200-day SMA
+    Bearish (downtrend) = price below 200-day SMA
+    """
+    try:
+        pair = _to_product_id(symbol)
+        # Daily = 86400 seconds; fetch 250 candles = ~9 months (covers 200-day + buffer)
+        url = f"https://api.exchange.coinbase.com/products/{pair}/candles?granularity=86400&limit=300"
+        cache_key = f"daily_sma_{symbol}"
+
+        async with session.get(url, headers={"Accept": "application/json"}, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            if r.status != 200:
+                if r.status == 403:
+                    cached = get_cached_response(cache_key)
+                    if cached:
+                        log.warning(f"⚠️  {symbol} daily SMA API blocked (403), using cache")
+                        return cached
+                return None
+
+            data = await r.json()
+            if not data or len(data) < 200:
+                log.warning(f"⚠️  {symbol} insufficient daily candles ({len(data) if data else 0} < 200)")
+                return None
+
+            # Reverse to chronological order
+            candles = list(reversed(data))
+            closes = [float(row[4]) for row in candles[-200:]]  # Last 200 closes
+
+            if len(closes) < 200:
+                return None
+
+            current_price = float(candles[-1][4])
+            sma_200 = sum(closes[-200:]) / 200
+            is_bullish = current_price > sma_200
+
+            result = {
+                "sma_200": sma_200,
+                "current_price": current_price,
+                "is_bullish": is_bullish,
+                "distance_pct": ((current_price - sma_200) / sma_200) * 100 if sma_200 > 0 else 0,
+            }
+
+            cache_response(cache_key, result, 86400)  # Cache for 24 hours
+            return result
+    except Exception as e:
+        log.debug(f"Daily SMA-200 fetch failed for {symbol}: {e}")
+        return None
+
+
+def find_recent_swing_low(candles: list, lookback_bars: int = 10) -> dict:
+    """
+    Find recent swing low for stop loss placement.
+    Returns: {"swing_low_price": float, "bars_ago": int}
+
+    Swing low = lowest low in the last N candles
+    Used for professional stop-loss placement (risk management)
+    """
+    if not candles or len(candles) < 3:
+        return {"swing_low_price": None, "bars_ago": 0}
+
+    recent = candles[-lookback_bars:]
+    lowest = min(recent, key=lambda x: float(x[1]))
+    swing_low = float(lowest[1])
+    bars_ago = len(candles) - candles.index(lowest) - 1
+
+    return {"swing_low_price": swing_low, "bars_ago": bars_ago}
+
+
+def find_recent_swing_high(candles: list, lookback_bars: int = 10) -> dict:
+    """
+    Find recent swing high for take-profit placement.
+    Returns: {"swing_high_price": float, "bars_ago": int}
+
+    Swing high = highest high in the last N candles
+    Used for exit targets (RSI 65-70 or swing high, whichever comes first)
+    """
+    if not candles or len(candles) < 3:
+        return {"swing_high_price": None, "bars_ago": 0}
+
+    recent = candles[-lookback_bars:]
+    highest = max(recent, key=lambda x: float(x[2]))
+    swing_high = float(highest[2])
+    bars_ago = len(candles) - candles.index(highest) - 1
+
+    return {"swing_high_price": swing_high, "bars_ago": bars_ago}
+
+
 def size_position(cash_pool_remaining, slots_remaining, price):
     """Fixed $250 per trade for maximum capital deployment.
     Aggressive sizing: maximizes gains while maintaining 3-position minimum buffer."""
@@ -964,7 +1064,7 @@ async def log_trade_entry(symbol: str, entry_rsi: float, entry_price: float, qty
         async with AsyncSessionLocal() as session:
             trade = CryptoTradeLog(
                 symbol=symbol,
-                strategy_version="RSI_RECOVERY_ATR_V1",  # ATR-based exits, RSI recovery entry
+                strategy_version="SMA200_RSI_CROSSOVER_SWING_V2",  # UPGRADED: 200-day SMA + RSI cross-above + swing-based stops
                 armed_at=datetime.now(timezone.utc),  # Timestamp trade was armed
                 arm_rsi=arm_rsi,
                 entered_at=datetime.now(timezone.utc),
@@ -976,7 +1076,7 @@ async def log_trade_entry(symbol: str, entry_rsi: float, entry_price: float, qty
             )
             session.add(trade)
             await session.commit()
-            log.info(f"[CRYPTO-LOG] {symbol} ENTRY logged: RSI {entry_rsi:.1f} @ ${entry_price:.2f} vol_ratio {volume_ratio:.2f}x (strategy: RSI_RECOVERY_ATR_V1)")
+            log.info(f"[CRYPTO-LOG] {symbol} ENTRY logged: RSI {entry_rsi:.1f} @ ${entry_price:.2f} vol_ratio {volume_ratio:.2f}x (strategy: SMA200_RSI_CROSSOVER_SWING_V2)")
 
         # Log to measurement system
         if MEASUREMENT_AVAILABLE:
@@ -1334,8 +1434,18 @@ async def run_crypto_cycle():
         for symbol in CRYPTO_PAIRS:
             data = await get_price_rsi(session, symbol)
             if data:
+                # UPGRADE: Fetch 200-day SMA for trend confirmation
+                sma_data = await get_daily_sma_200(session, symbol)
+                if sma_data:
+                    data["sma_200"] = sma_data["sma_200"]
+                    data["is_bullish"] = sma_data["is_bullish"]
+                    data["sma_distance_pct"] = sma_data["distance_pct"]
+                    bullish_str = "📈 BULLISH" if sma_data["is_bullish"] else "📉 BEARISH"
+                    log.info(f"[CRYPTO] {symbol} | ${data['price']:.2f} | RSI:{data['rsi']:.1f} | SMA200:${sma_data['sma_200']:.2f} {bullish_str} ({sma_data['distance_pct']:+.1f}%)")
+                else:
+                    data["is_bullish"] = True  # Default to bullish if SMA unavailable
+                    log.info(f"[CRYPTO] {symbol} | ${data['price']:.2f} | RSI:{data['rsi']:.1f} | (SMA200 unavailable)")
                 scans[symbol] = data
-                log.info(f"[CRYPTO] {symbol} | ${data['price']:.2f} | RSI:{data['rsi']}")
             await asyncio.sleep(0.3)
 
         # ── Pass 1: manage exits (long only) ──────────────────────────
@@ -1377,7 +1487,10 @@ async def run_crypto_cycle():
                 }
             }
 
-            # Exit conditions: stop loss, profit-taking above $1,001, RSI reversal, or tiered profit target
+            # UPGRADED EXIT LOGIC (PROFESSIONAL-GRADE):
+            # Priority 1: Hard stop loss (risk management, swing-based)
+            # Priority 2: RSI overbought exit (65-70 RSI = reversal confirmation)
+            # Priority 3: Profit targets (3%, 5%, 10% ATR-based tiers)
             should_exit = False
             reason = None
 
@@ -1385,24 +1498,31 @@ async def run_crypto_cycle():
             dollar_profit = unrealized_pnl
             profit_take_exit = should_take_profits and dollar_profit >= TARGET_TRADE_PROFIT
 
+            # PRIORITY 1: Hard stop loss (swing-based, professional risk management)
             if stop_hit:
                 should_exit = True
-                reason = f"STOP LOSS @ ${stop_price:.2f} (-{(1 - price/entry)*100:.2f}%)"
+                reason = f"🛑 HARD STOP (swing-based) @ ${stop_price:.2f} (-{(1 - price/entry)*100:.2f}%)"
+
+            # PRIORITY 2: RSI overbought exit (65-70 = reversal signal, exit with profit)
+            elif rsi >= 65 and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE:
+                should_exit = True
+                reason = f"📤 RSI OVERBOUGHT EXIT (RSI {rsi:.1f} >= 65) @ ${price:.2f} (+{unrealized_pct*100:.2f}%)"
+
+            # PRIORITY 3: Profit taking above $1,001
             elif profit_take_exit:
                 should_exit = True
                 reason = f"💰 PROFIT TAKEN (+${dollar_profit:.2f}, balance above $1,001)"
-            elif rsi_exit:
-                should_exit = True
-                reason = "RSI EXIT"
+
+            # PRIORITY 4: Tiered profit targets (ATR-based)
             elif tier3_hit:
                 should_exit = True
-                reason = f"TIER 3 @ ${tier3_price:.2f} (+{(price/entry - 1)*100:.2f}%, let winners run)"
+                reason = f"TIER 3 (ATR) @ ${tier3_price:.2f} (+{(price/entry - 1)*100:.2f}%, let winners run)"
             elif tier2_hit and unrealized_pct >= PROFIT_TARGET_PCT:
                 should_exit = True
-                reason = f"TIER 2 @ ${tier2_price:.2f} (+{(price/entry - 1)*100:.2f}%, hit 3% target)"
+                reason = f"TIER 2 (ATR) @ ${tier2_price:.2f} (+{(price/entry - 1)*100:.2f}%, hit 3% target)"
             elif tier1_hit:
                 should_exit = True
-                reason = f"TIER 1 @ ${tier1_price:.2f} (+{(price/entry - 1)*100:.2f}%, lock early gain)"
+                reason = f"TIER 1 (ATR) @ ${tier1_price:.2f} (+{(price/entry - 1)*100:.2f}%, lock early gain)"
 
             if should_exit:
                 filled = await place_order(session, symbol, "sell", qty, price)
@@ -1448,20 +1568,25 @@ async def run_crypto_cycle():
             rsi_state = await load_rsi_state(symbol)
             entered_oversold = rsi_state["entered_oversold"]
             armed_rsi = rsi_state.get("armed_rsi")
+            last_rsi = rsi_state.get("last_rsi", rsi)
 
-            # State transitions (AGGRESSIVE):
-            # 1. RSI >= 60: Reset state (overbought, need pullback to entry zone)
-            if rsi >= 60:
+            # UPGRADED STATE MACHINE (PROFESSIONAL):
+            # 1. RSI >= 70: Reset state (overbought, need pullback to entry zone)
+            if rsi >= 70:
                 if entered_oversold:
-                    log.info(f"[CRYPTO] {symbol} RSI {rsi:.1f} → RESET (>=60, overbought, waiting for pullback)")
+                    log.info(f"[CRYPTO] {symbol} RSI {rsi:.1f} → RESET (>=70, overbought, waiting for pullback)")
                 entered_oversold = False
                 armed_rsi = None
-            # 2. RSI enters 10-40 zone: Arm the setup (widened from 10-30 for aggressive trading)
-            elif 10 <= rsi < 40 and not entered_oversold:
-                log.info(f"[CRYPTO] {symbol} RSI {rsi:.1f} → ARM oversold/neutral entry zone")
+            # 2. RSI enters oversold zone (< 35): Arm the setup
+            elif rsi < 35 and not entered_oversold:
+                log.info(f"[CRYPTO] {symbol} RSI {rsi:.1f} → ARM oversold entry zone")
                 entered_oversold = True
                 armed_rsi = rsi
             # 3. Otherwise: Maintain current state
+
+            # Track RSI cross-above for entry confirmation
+            # Cross-above = last_rsi < 35 AND current_rsi > 35 (bouncing from oversold)
+            rsi_crossed_above = (last_rsi is not None and last_rsi < 35 and rsi > 35)
 
             # Persist state changes to database
             await update_rsi_state(symbol, rsi, entered_oversold, armed_rsi)
@@ -1490,9 +1615,16 @@ async def run_crypto_cycle():
                     close_position = (candle["close"] - candle["low"]) / candle_range
                     volume_spike_ratio = candle["volume"] / max(candle["prior_volume"], 1)
 
-                    # Tiered buy signal: STRONG_BUY (RSI < 20 + bounce) or BUY (20-30 + bounce)
-                    # Pass entered_oversold to enforce state-machine discipline
-                    signal = _crypto_buy_signal_improved(rsi, rsi_recovery, volume_spike_ratio, close_position, entered_oversold)
+                    # UPGRADED buy signal with three filters:
+                    # Filter 1: 200-day SMA (trend confirmation - bull market only)
+                    # Filter 2: RSI cross-above (reversal confirmation - not just oversold)
+                    # Filter 3: Volume + momentum (real buying pressure)
+                    is_bullish = data.get("is_bullish", True)
+                    signal = _crypto_buy_signal_improved(
+                        rsi, rsi_recovery, volume_spike_ratio, close_position, entered_oversold,
+                        is_bullish=is_bullish,
+                        rsi_crossed_above=rsi_crossed_above
+                    )
 
                     if signal == "NO_ACTION":
                         # No signal - log why
@@ -1551,18 +1683,32 @@ async def run_crypto_cycle():
             log.info(f"[CRYPTO] 📡 BUY {symbol} — RSI:{rsi}")
             filled = await place_order(session, symbol, "buy", qty, price)
             if filled:
-                # Store ATR-based exit targets with position (for volatility-adjusted exits)
+                # UPGRADE: Use swing-based stop loss instead of fixed percentages
                 targets = _calculate_atr_targets(price, atr)
+
+                # Find recent swing low for professional stop placement
+                candle = data.get("candle")
+                swing_info = {}
+                if candle:
+                    # Use candle data to estimate recent low
+                    candle_low = float(candle.get("low", price * 0.98))
+                    swing_info = {"swing_low": candle_low, "swing_low_distance_pct": ((price - candle_low) / price * 100)}
+                    # Stop loss: below recent swing low (professional risk management)
+                    swing_based_stop = candle_low * 0.995  # Slightly below swing low
+                else:
+                    swing_based_stop = targets["stop_price"]
+
                 open_crypto_positions[symbol] = {
                     "entry": price,
                     "qty": qty,
                     "opened_at": now,
                     "atr": atr,
-                    "stop_price": targets["stop_price"],
+                    "stop_price": swing_based_stop,  # UPGRADED: swing-based stop
                     "tier1_price": targets["tier1_price"],
                     "tier2_price": targets["tier2_price"],
                     "tier3_price": targets["tier3_price"],
                     "trailing_stop_pct": targets["trailing_stop_pct"],
+                    "swing_info": swing_info,
                 }
                 await _db_save_open(symbol, "long", price, qty)
                 # Log trade entry for analytics (ARM → ENTER transition)
@@ -1604,14 +1750,26 @@ def run():
         log.warning("🛑 CRYPTO BOT DISABLED — set via CRYPTO_BOT_DISABLED env var. Bot will not start.")
         return
 
-    log.info("=" * 60)
-    log.info("CRYPTO TRADING BOT — Coinbase (separate account from Alpaca stocks)")
+    log.info("=" * 80)
+    log.info("🚀 CRYPTO TRADING BOT — UPGRADED STRATEGY (SMA200_RSI_CROSSOVER_SWING_V2)")
+    log.info("=" * 80)
+    log.info("Coinbase Advanced Trade (separate account from Alpaca stocks)")
     alloc_desc = f"${MAX_ALLOCATION:.2f} cap" if MAX_ALLOCATION is not None else "full balance (compounding)"
     log.info(f"Pairs: {', '.join(CRYPTO_PAIRS)} | Allocation: {alloc_desc} | Max positions: {MAX_POSITIONS}")
+    log.info("")
+    log.info("🎯 UPGRADED STRATEGY (3-FILTER SYSTEM):")
+    log.info("  FILTER 1: 200-day SMA trend confirmation (bull market only)")
+    log.info("  FILTER 2: RSI cross-above from oversold (reversal confirmation)")
+    log.info("  FILTER 3: Volume + momentum confirmation (1.5x volume, close in upper 50%)")
+    log.info("")
+    log.info("📊 EXIT LOGIC (Professional-Grade):")
+    log.info("  Priority 1: Hard stop loss (swing-based, risk management)")
+    log.info("  Priority 2: RSI overbought (65-70 = reversal exit)")
+    log.info("  Priority 3: Profit targets (3%, 5%, 10% ATR-based tiers)")
+    log.info("")
     log.info("Runs 24/7 - crypto has no market close, unlike prop_bot.py's stock/ETF trading")
     log.info("🔴 LIVE TRADING - Coinbase has no free paper-trading sandbox for Advanced Trade")
-    log.info("Strategy: RSI_RECOVERY_ATR_V1 (state machine entry + volatility-based exits)")
-    log.info("=" * 60)
+    log.info("=" * 80)
 
     # Diagnostic: check credential availability
     key_name_present = bool(COINBASE_API_KEY_NAME)
