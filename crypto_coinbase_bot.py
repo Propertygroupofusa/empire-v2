@@ -175,11 +175,12 @@ def _auth_headers(method: str, path: str) -> dict:
     return {"Authorization": f"Bearer {_build_jwt(method, path)}", "Content-Type": "application/json"}
 
 
-# AGGRESSIVE THRESHOLDS for high-velocity trading in overbought/oversold markets
+# CONSERVATIVE THRESHOLDS for profit-focused trading (no losing streaks)
 # Long-only: Coinbase SPOT has no shorting support
-RSI_STRONG_BUY = 35   # RSI < 35 = oversold, aggressive entry zone
-RSI_BUY = 50          # RSI < 50 = oversold/neutral zone, wide zone for continuous entry
-RSI_NO_ENTRY = 75     # RSI >= 75 = extremely overbought, skip entries (allow entries up to 74 RSI)
+# Only enter on strong oversold signals to maximize win probability
+RSI_STRONG_BUY = 25   # RSI < 25 = heavily oversold, highest confidence entry
+RSI_BUY = 35          # RSI < 35 = moderately oversold, secondary entry zone
+RSI_NO_ENTRY = 65     # RSI >= 65 = overbought territory, skip entries (only <64 allowed)
 try:
     RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "60"))
 except (ValueError, TypeError):
