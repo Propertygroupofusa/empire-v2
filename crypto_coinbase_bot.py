@@ -235,6 +235,14 @@ except (ValueError, TypeError):
     log.warning("Invalid CRYPTO_TIER_SIZE value, using default: 0 (tiering disabled)")
     TIER_SIZE = 0.0
 
+# Minimum cash reserve: never deploy this amount, only grows from profits
+# With $483.43 balance: keep $25, deploy $458.43 in active trades
+try:
+    MIN_CASH_RESERVE = float(os.getenv("CRYPTO_MIN_CASH_RESERVE", "25"))
+except (ValueError, TypeError):
+    log.warning("Invalid CRYPTO_MIN_CASH_RESERVE value, using default: 25")
+    MIN_CASH_RESERVE = 25.0
+
 
 def get_unlocked_tier(balance: float) -> float:
     """The highest whole multiple of TIER_SIZE that `balance` has actually
@@ -1136,7 +1144,9 @@ async def run_crypto_cycle():
             cash_pool = 0.0
         elif TIER_SIZE <= 0:
             unlocked = cash
-            cash_pool = min(unlocked, MAX_ALLOCATION) if MAX_ALLOCATION is not None else unlocked
+            # Subtract MIN_CASH_RESERVE from deployable capital
+            deployable = max(0, unlocked - MIN_CASH_RESERVE)
+            cash_pool = min(deployable, MAX_ALLOCATION) if MAX_ALLOCATION is not None else deployable
         else:
             raw_tier = get_unlocked_tier(cash)
             highwater = await get_tier_highwater()
@@ -1175,7 +1185,8 @@ async def run_crypto_cycle():
         if TIER_SIZE > 0:
             tier_desc = f"tier unlocked (permanent): ${unlocked:.2f} | tradable now: ${cash_pool:.2f}"
         else:
-            tier_desc = "tiering off"
+            reserve_desc = f"reserve (untouched): ${MIN_CASH_RESERVE:.2f}"
+            tier_desc = f"tiering off | deployable: ${cash_pool:.2f} | {reserve_desc}"
 
         status_suffix = ""
         if is_at_floor:
