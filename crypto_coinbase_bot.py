@@ -517,8 +517,14 @@ def send_trade_alert(subject: str, body: str):
 
 
 async def get_supplemental_capital() -> float:
-    """Read supplemental capital from prop_bot earnings transferred to crypto bot.
-    Returns total amount in crypto_supplemental_capital table, or 0 on any error."""
+    """Read capital allocation target from prop_bot earnings.
+
+    This is NOT actual money in Coinbase - it's a target pool that tracks:
+    - Earnings from prop_bot that should go to crypto trading
+    - User must manually transfer from Alpaca → bank → Coinbase
+    - Used to scale position sizes as capital is allocated
+
+    Returns total allocated amount, or 0 on any error."""
     try:
         async with AsyncSessionLocal() as db:
             from sqlalchemy import func
@@ -526,7 +532,7 @@ async def get_supplemental_capital() -> float:
             total = result.scalar() or 0.0
             return total
     except Exception as e:
-        log.warning(f"[CRYPTO] Failed to read supplemental capital: {e}")
+        log.warning(f"[CRYPTO] Failed to read capital allocation target: {e}")
         return 0.0
 
 
@@ -586,12 +592,14 @@ async def get_usd_balance(session):
                 cursor = data.get("cursor")
 
         if coinbase_balance is not None:
-            # Add supplemental capital from prop_bot earnings
-            supplemental = await get_supplemental_capital()
-            total = coinbase_balance + supplemental
-            if supplemental > 0:
-                log.info(f"[CRYPTO] Capital pool: Coinbase ${coinbase_balance:.2f} + supplemental ${supplemental:.2f} = ${total:.2f}")
-            return total, None
+            # Supplemental capital: prop_bot earnings allocated for crypto trading
+            # USER ACTION REQUIRED: Manually transfer from Alpaca → bank → Coinbase to realize allocation
+            allocated = await get_supplemental_capital()
+            if allocated > 0:
+                # Log the allocation target so user knows how much to transfer
+                log.info(f"[CRYPTO] 💡 Allocation target: ${allocated:.2f} from prop_bot | Manual action: Withdraw from Alpaca, deposit to Coinbase to unlock")
+                log.info(f"[CRYPTO] Current: Coinbase ${coinbase_balance:.2f} real | Target with allocation: ${coinbase_balance + allocated:.2f}")
+            return coinbase_balance, None
 
         return None, f"no USD account found across {len(all_currencies)} accounts on this key: {all_currencies}"
     except asyncio.TimeoutError:
