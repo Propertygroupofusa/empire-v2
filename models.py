@@ -1102,6 +1102,21 @@ class CryptoRSIState(Base):
         }
 
 
+class CryptoSupplementalCapital(Base):
+    """Earnings transferred from prop_bot to crypto bot for compounded trading.
+
+    Tracks capital flow from prop_bot's profit-taking to crypto_bot's trading pool.
+    Crypto bot reads total = (Coinbase balance + supplemental pool) and trades with full amount.
+    """
+    __tablename__ = "crypto_supplemental_capital"
+
+    id = Column(Integer, primary_key=True, index=True)
+    amount_usd = Column(Float)  # USD amount transferred
+    source = Column(String, default="prop_bot_earnings", index=True)  # tracking origin
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class CryptoTradeLog(Base):
     """Comprehensive trade instrumentation for validating state machine effectiveness.
 

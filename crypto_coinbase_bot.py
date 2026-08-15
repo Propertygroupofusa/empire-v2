@@ -55,9 +55,9 @@ import aiohttp
 import jwt as pyjwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from sqlalchemy import select
+from sqlalchemy import select, func
 from database import AsyncSessionLocal
-from models import BotPosition, TradingBotState, CryptoRSIState, CryptoTradeLog
+from models import BotPosition, TradingBotState, CryptoRSIState, CryptoTradeLog, CryptoSupplementalCapital
 from bot_mandates import CRYPTO_MANDATE
 from network_config import get_cached_response, cache_response, NETWORK_ENV_CONFIG
 
@@ -516,6 +516,20 @@ def send_trade_alert(subject: str, body: str):
         log.warning(f"Trade alert email failed: {e}")
 
 
+async def get_supplemental_capital() -> float:
+    """Read supplemental capital from prop_bot earnings transferred to crypto bot.
+    Returns total amount in crypto_supplemental_capital table, or 0 on any error."""
+    try:
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import func
+            result = await db.execute(select(func.sum(CryptoSupplementalCapital.amount_usd)))
+            total = result.scalar() or 0.0
+            return total
+    except Exception as e:
+        log.warning(f"[CRYPTO] Failed to read supplemental capital: {e}")
+        return 0.0
+
+
 async def get_usd_balance(session):
     """Real Coinbase USD balance available for trading. Returns
     (balance, None) on success, or (None, reason) on any failure (auth
@@ -528,13 +542,16 @@ async def get_usd_balance(session):
     at ~49 regardless of the requested limit) - this account holds
     dozens of small/dust altcoin wallets, so the USD wallet is often not
     on the first page at all. Looking at only page 1 previously made
-    the bot think there was no USD wallet when there was one further in."""
+    the bot think there was no USD wallet when there was one further in.
+
+    NOW INCLUDES: Supplemental capital from prop_bot earnings pool."""
     path = "/api/v3/brokerage/accounts"
     all_currencies = []
     cursor = None
     cache_key = "coinbase_usd_balance"
 
     try:
+        coinbase_balance = None
         while True:
             params = {"limit": 250}
             if cursor:
@@ -547,20 +564,35 @@ async def get_usd_balance(session):
                         cached = get_cached_response(cache_key)
                         if cached is not None:
                             log.warning(f"⚠️  [WORKAROUND] API blocked (403), using cached USD balance: ${cached}")
-                            return cached, None
+                            supplemental = await get_supplemental_capital()
+                            total = cached + supplemental
+                            if supplemental > 0:
+                                log.info(f"[CRYPTO] Combining Coinbase ${cached:.2f} + supplemental ${supplemental:.2f} = ${total:.2f}")
+                            return total, None
                         return None, f"HTTP 403: Egress blocked. No cache available. Fix: Add api.coinbase.com to Railway egress allowlist"
                     return None, f"HTTP {r.status}: {body}"
                 data = await r.json()
                 accounts = data.get("accounts", [])
                 for account in accounts:
                     if account.get("currency") == "USD":
-                        balance = float(account["available_balance"]["value"])
-                        cache_response(cache_key, balance, NETWORK_ENV_CONFIG.get("cache_ttl", 300))
-                        return balance, None
+                        coinbase_balance = float(account["available_balance"]["value"])
+                        cache_response(cache_key, coinbase_balance, NETWORK_ENV_CONFIG.get("cache_ttl", 300))
+                        break
+                if coinbase_balance is not None:
+                    break
                 all_currencies.extend(a.get("currency") for a in accounts)
                 if not data.get("has_next") or not data.get("cursor"):
                     break
                 cursor = data.get("cursor")
+
+        if coinbase_balance is not None:
+            # Add supplemental capital from prop_bot earnings
+            supplemental = await get_supplemental_capital()
+            total = coinbase_balance + supplemental
+            if supplemental > 0:
+                log.info(f"[CRYPTO] Capital pool: Coinbase ${coinbase_balance:.2f} + supplemental ${supplemental:.2f} = ${total:.2f}")
+            return total, None
+
         return None, f"no USD account found across {len(all_currencies)} accounts on this key: {all_currencies}"
     except asyncio.TimeoutError:
         return None, "Coinbase API timeout (network slow or API unresponsive)"
