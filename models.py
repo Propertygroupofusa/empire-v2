@@ -1239,3 +1239,17 @@ class CryptoTradeLog(Base):
             },
             "rejection_reason": self.rejection_reason,
         }
+
+
+class BankTransferLog(Base):
+    """Audit trail for automated bank transfers between Alpaca and Coinbase."""
+    __tablename__ = "bank_transfer_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    transfer_id = Column(String, index=True)  # Unique ID for tracking related steps
+    step = Column(String, index=True)  # "alpaca_withdrawal_initiated", "coinbase_deposit_initiated", etc.
+    amount_usd = Column(Float)
+    external_id = Column(String, nullable=True)  # ID from Alpaca or Coinbase API
+    status = Column(String, default="pending")  # pending, processing, completed, failed
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    error_message = Column(Text, nullable=True)

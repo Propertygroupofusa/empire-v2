@@ -1262,7 +1262,8 @@ async def record_daily_earnings(pnl_amount):
     Automatically reinvests 50% of worker earnings back to Alpaca to maintain
     buying power and fuel continuous trading.
 
-    ALSO TRANSFERS: 50% of worker earnings to crypto bot's capital pool."""
+    ALSO INITIATES: Automated bank transfer of 50% of worker earnings:
+    Alpaca → linked bank account → Coinbase (for crypto bot)"""
     if pnl_amount <= 0:
         return
 
@@ -1287,23 +1288,29 @@ async def record_daily_earnings(pnl_amount):
             await session.commit()
             log.info(f"[APEX_589296] 💰 Recorded daily earnings: ${worker_amount:.2f} to payments table")
 
-            # AUTOMATIC REINVESTMENT: 50% of worker earnings → Alpaca + Crypto bot
-            reinvest_amount = worker_amount * 0.50
-            crypto_transfer = reinvest_amount  # Full 50% goes to crypto bot
-            alpaca_reinvest = reinvest_amount
+            # AUTOMATIC BANK TRANSFER: 50% of worker earnings → Alpaca ACH → bank → Coinbase ACH
+            transfer_amount = worker_amount * 0.50
 
-            log.info(f"[APEX_589296] 🔄 AUTO-REINVEST: ${alpaca_reinvest:.2f} queued for Alpaca deposit")
+            log.info(f"[APEX_589296] 🔄 AUTO-TRANSFER: Initiating ${transfer_amount:.2f} from Alpaca → Coinbase")
 
-            # Transfer to crypto bot's supplemental capital pool
-            from models import CryptoSupplementalCapital
-            async with AsyncSessionLocal() as session:
-                session.add(CryptoSupplementalCapital(
-                    amount_usd=crypto_transfer,
-                    source="prop_bot_earnings"
-                ))
-                await session.commit()
-            log.info(f"[APEX→CRYPTO] 🚀 Transferred ${crypto_transfer:.2f} to crypto bot trading pool")
-            log.info(f"[APEX_589296] 💵 Worker: ${alpaca_reinvest:.2f} (Alpaca) + ${crypto_transfer:.2f} (Crypto) | Platform: ${platform_amount:.2f}")
+            # Trigger automated bank transfer sequence (Alpaca withdrawal → bank → Coinbase deposit)
+            from bank_transfer_automation import initiate_transfer_for_earnings
+            transfer_ok = await initiate_transfer_for_earnings(transfer_amount)
+
+            if transfer_ok:
+                log.info(f"[APEX→COINBASE] ✓ Transfer sequence initiated: ${transfer_amount:.2f}")
+                # Also track in crypto supplemental capital for reference
+                from models import CryptoSupplementalCapital
+                async with AsyncSessionLocal() as session:
+                    session.add(CryptoSupplementalCapital(
+                        amount_usd=transfer_amount,
+                        source="prop_bot_earnings_bank_transfer"
+                    ))
+                    await session.commit()
+            else:
+                log.warning(f"[APEX→COINBASE] Transfer sequence failed - check bank account linking")
+
+            log.info(f"[APEX_589296] 💵 Worker: 50% reinvest (${transfer_amount:.2f} to Coinbase) | Platform: ${platform_amount:.2f}")
 
     except Exception as e:
         log.error(f"[APEX_589296] Failed to record daily earnings: {e}")
