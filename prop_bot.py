@@ -762,24 +762,10 @@ def check_kill_conditions(buying_power, equity, daily_loss, open_position_count)
 async def run_prop_cycle():
     global daily_pnl, profitable_days, last_cycle_at, last_market_open, bot_start_time, bot_start_equity, checkpoint_alerts_sent
 
-    # Trade during market hours (9:30am-4pm ET) for stocks/futures.
-    # Crypto trades 24/7. Checked against real ET wall-clock time (DST-aware).
+    # 24/7 Trading: Scan crypto, commodities, and indices across all hours
+    # Alpaca supports round-the-clock trading on crypto and extended hours on commodities
     now = datetime.now(ET)
-    is_weekday = now.weekday() < 5
-    market_open_t = now.replace(hour=9, minute=30, second=0, microsecond=0)
-    market_close_t = now.replace(hour=16, minute=0, second=0, microsecond=0)
-
     last_cycle_at = now.isoformat()
-
-    # Check if it's market hours for stocks (9:30am-4pm ET weekdays) or if we're trading crypto (24/7)
-    is_market_hours = is_weekday and market_open_t <= now <= market_close_t
-    is_crypto_trading = True  # Crypto trades 24/7
-
-    if not (is_market_hours or is_crypto_trading):
-        last_market_open = False
-        return
-
-    last_market_open = is_market_hours
 
     # CONTINUOUS AUTO-SCALING TO $1,000,000 — No milestones, just compound
     # Scale formula: 1.0x baseline + 0.01x per $1000 earned, capped at 5.0x
@@ -1074,11 +1060,7 @@ async def run_prop_cycle():
 
         scans = {}
         for contract, config in FUTURES.items():
-            # Skip non-crypto symbols during after-hours (outside 9:30am-4pm ET weekdays)
-            is_crypto = "/" in config["symbol"]  # Crypto symbols have "/" like BTC/USD
-            if not is_market_hours and not is_crypto:
-                continue
-
+            # Scan all symbols 24/7 — crypto, commodities, indices all available on Alpaca
             data = await get_price_rsi(session, config["symbol"])
             if data:
                 scans[contract] = data
@@ -1136,10 +1118,6 @@ async def run_prop_cycle():
         candidates = []
         for contract, config in FUTURES.items():
             # Skip non-crypto symbols during after-hours
-            is_crypto = "/" in config["symbol"]
-            if not is_market_hours and not is_crypto:
-                continue
-
             if contract in open_prop_positions:
                 continue
             data = scans.get(contract)
