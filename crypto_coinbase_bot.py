@@ -978,9 +978,10 @@ async def place_order(session, symbol, side, qty, price):
 
     if side == "buy":
         # Market order: immediate entry at market price (IOC = Immediate or Cancel)
+        # Use base_size (amount of crypto) for buy orders instead of quote_size
         order_config = {
             "market_ioc": {
-                "quote_size": f"{qty * price:.2f}"
+                "base_size": f"{qty:.8f}"
             }
         }
     else:
