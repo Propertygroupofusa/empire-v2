@@ -188,13 +188,15 @@ FUTURES = {
 # At 1.5x scale: reduce to 1 position (1.5x loss on 1 trade < 1.0x loss on 2 trades)
 # At 2.0x scale: stay at 1 position (conservative with max scaling)
 # This prevents multiplied losses across multiple scaled positions
-BASE_MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", "3"))  # Long-only: 3 concurrent positions
+BASE_MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", "8"))  # Increased from 3 to 8: more concurrent positions for faster capital deployment
 
 def get_dynamic_max_positions(scale: float) -> int:
-    """Reduce max positions as scale increases to limit compounded losses"""
+    """Allow more positions at all scales to maximize capital deployment"""
+    if scale >= 2.0:
+        return 6  # Still allow 6 at 2.0x scale (was 1)
     if scale >= 1.5:
-        return 1  # Single position when scaled 1.5x or higher
-    return BASE_MAX_POSITIONS  # 3 positions (longs only) at baseline 1.0x scale
+        return 7  # Allow 7 at 1.5x scale (was 1)
+    return BASE_MAX_POSITIONS  # 8 positions at baseline 1.0x scale (was 3)
 
 # Profit target, in REAL DOLLARS of profit on the position (not a raw
 # price move on the underlying) - scaled by real account equity. Increased targets
