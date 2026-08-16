@@ -179,19 +179,19 @@ def _auth_headers(method: str, path: str) -> dict:
 # Long-only: Coinbase SPOT has no shorting support
 # Only enter on strong oversold signals to maximize win probability
 RSI_STRONG_BUY = 25   # RSI < 25 = heavily oversold, highest confidence entry
-RSI_BUY = 35          # RSI < 35 = moderately oversold, secondary entry zone
+RSI_BUY = 30          # RSI < 30 = standard oversold threshold (higher quality entries)
 RSI_NO_ENTRY = 65     # RSI >= 65 = overbought territory, skip entries (only <64 allowed)
 try:
-    RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "60"))
+    RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "70"))
 except (ValueError, TypeError):
-    log.warning("Invalid CRYPTO_RSI_SELL_ABOVE value, using default: 60")
-    RSI_SELL_ABOVE = 60.0
+    log.warning("Invalid CRYPTO_RSI_SELL_ABOVE value, using default: 70")
+    RSI_SELL_ABOVE = 70.0
 
 try:
-    RSI_BUY_BELOW = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "60"))
+    RSI_BUY_BELOW = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "30"))
 except (ValueError, TypeError):
-    log.warning("Invalid CRYPTO_RSI_BUY_BELOW value, using default: 60")
-    RSI_BUY_BELOW = 60.0
+    log.warning("Invalid CRYPTO_RSI_BUY_BELOW value, using default: 30")
+    RSI_BUY_BELOW = 30.0
 
 try:
     MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "50"))
