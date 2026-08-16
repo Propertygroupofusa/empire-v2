@@ -996,7 +996,7 @@ def size_position(cash_pool_remaining, slots_remaining, price):
     return qty if qty > 0 else None
 
 
-async def place_order(session, symbol, side, qty, price):
+async def place_order(session, symbol, side, qty, price, skip_on_network_error=False):
     """Coinbase Advanced Trade orders:
     - BUY: market IOC for immediate entry
     - SELL: limit GTC at profit target to hold order until price reached
@@ -1028,15 +1028,31 @@ async def place_order(session, symbol, side, qty, price):
         "order_configuration": order_config,
     }
     try:
-        async with session.post(COINBASE_BASE_URL + path, headers=_auth_headers("POST", path), json=order) as r:
+        async with session.post(COINBASE_BASE_URL + path, headers=_auth_headers("POST", path), json=order, timeout=5) as r:
             result = await r.json()
             if r.status in (200, 201) and result.get("success", True):
                 log.info(f"✅ CRYPTO TRADE | {side.upper()} {qty} {symbol}")
                 return True
-            log.error(f"❌ Crypto order failed (requested {order_config}): {result.get('error_response', result)}")
+            # Check if this is a network/auth error vs order validation error
+            error_detail = result.get('error_response', result)
+            if "403" in str(r.status) or "not in allowlist" in str(error_detail):
+                log.warning(f"⚠️  Coinbase API network blocked (403) - skipping orders this cycle")
+                return False
+            log.debug(f"Order validation failed ({order_config}): {error_detail}")
             return False
+    except asyncio.TimeoutError:
+        if skip_on_network_error:
+            log.warning("⚠️  Coinbase API timeout - network may be blocked, skipping orders this cycle")
+        else:
+            log.warning(f"Crypto order timeout for {symbol}")
+        return False
     except Exception as e:
-        log.error(f"Crypto order error: {e}")
+        error_str = str(e).lower()
+        if "403" in error_str or "gateway" in error_str or "policy" in error_str:
+            if skip_on_network_error:
+                log.warning(f"⚠️  Coinbase API blocked ({e}) - add api.coinbase.com to Railway egress allowlist")
+            else:
+                log.debug(f"Network error on {symbol}: {e}")
         return False
 
 
@@ -1267,11 +1283,24 @@ async def run_crypto_cycle():
     connector = aiohttp.TCPConnector(use_dns_cache=True)
     timeout = aiohttp.ClientTimeout(total=15, connect=5, sock_read=5)
     async with aiohttp.ClientSession(connector=connector, trust_env=False, timeout=timeout) as session:
+        # Check if Coinbase API is accessible before attempting any orders
+        api_accessible = True
+        try:
+            async with session.get(COINBASE_BASE_URL + "/api/v3/accounts", headers=_auth_headers("GET", "/api/v3/accounts"), timeout=5) as r:
+                if r.status == 403:
+                    api_accessible = False
+                    log.warning("⚠️  [CRYPTO] Coinbase API blocked (403) — add api.coinbase.com to Railway egress allowlist. Skipping all orders this cycle.")
+        except Exception as e:
+            if "403" in str(e) or "gateway" in str(e).lower():
+                api_accessible = False
+                log.warning(f"⚠️  [CRYPTO] Coinbase API unreachable ({e}) — network policy may be blocking access. Skipping all orders this cycle.")
+
         cash, balance_error = await get_usd_balance(session)
         unlocked = 0.0
         if cash is None:
             log.warning(f"[CRYPTO] Could not read Coinbase USD balance - {balance_error} - skipping entries this cycle (exits below still run on open positions)")
             cash_pool = 0.0
+            api_accessible = False  # If can't get balance, assume API is blocked
         elif TIER_SIZE <= 0:
             unlocked = cash
             # Subtract MIN_CASH_RESERVE from deployable capital
@@ -1709,6 +1738,10 @@ async def run_crypto_cycle():
             qty = size_position(cash_pool, slots_remaining, price)
             if qty is None:
                 log.info(f"[CRYPTO] Skipping {symbol} entry — not enough allocated cash (${cash_pool:.2f})")
+                continue
+
+            if not api_accessible:
+                log.info(f"[CRYPTO] {symbol} BUY signal held — Coinbase API blocked, skipping orders (will retry next cycle)")
                 continue
 
             log.info(f"[CRYPTO] 📡 BUY {symbol} — RSI:{rsi}")
