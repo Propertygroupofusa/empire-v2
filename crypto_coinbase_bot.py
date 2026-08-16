@@ -175,12 +175,20 @@ def _auth_headers(method: str, path: str) -> dict:
     return {"Authorization": f"Bearer {_build_jwt(method, path)}", "Content-Type": "application/json"}
 
 
-# CONSERVATIVE THRESHOLDS for profit-focused trading (no losing streaks)
-# Long-only: Coinbase SPOT has no shorting support
-# Only enter on strong oversold signals to maximize win probability
-RSI_STRONG_BUY = 25   # RSI < 25 = heavily oversold, highest confidence entry
-RSI_BUY = 30          # RSI < 30 = standard oversold threshold (higher quality entries)
-RSI_NO_ENTRY = 65     # RSI >= 65 = overbought territory, skip entries (only <64 allowed)
+# STATE-BASED RSI ENTRY SYSTEM for profit-only trading
+# Strategy: Track RSI state transitions, enter only after recovery confirmation
+# ─────────────────────────────────────────────────────────────────────────────
+# RSI > 30:     WATCH    — no entry, monitor for oversold
+# RSI 20-30:    ARM      — prepare for entry, wait for recovery confirmation
+# RSI 10-20:    STRONG_ARM — higher quality entry, wait for recovery confirmation
+# RSI > 50:     RESET    — cycle complete, reset tracking
+#
+# Entry happens ONLY when RSI recovers UP from oversold state (not just reaching threshold)
+RSI_RESET_THRESHOLD = 50      # When RSI crosses above this, reset all entry tracking
+RSI_STRONG_ARM_THRESHOLD = 20 # RSI < 20 = strongest oversold signal
+RSI_ARM_THRESHOLD = 30        # RSI < 30 = standard oversold (arm for entry)
+RSI_WATCH_THRESHOLD = 50      # Above this = WATCH state
+RSI_NO_ENTRY = 65             # RSI >= 65 = overbought territory, skip entries
 try:
     RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "70"))
 except (ValueError, TypeError):
@@ -640,40 +648,60 @@ def _compute_atr(closes: list, highs: list, lows: list, period: int = 14) -> flo
     return atr
 
 
-def _crypto_buy_signal_improved(rsi: float, rsi_recovery: bool, volume_ratio: float, close_position: float,
-                                entered_oversold: bool, is_bullish: bool = True, rsi_crossed_above: bool = False) -> str:
+def _get_rsi_state(rsi: float) -> str:
+    """Determine RSI state: RESET, WATCH, ARM, or STRONG_ARM."""
+    if rsi > RSI_RESET_THRESHOLD:
+        return "RESET"
+    elif rsi > RSI_ARM_THRESHOLD:
+        return "WATCH"
+    elif rsi > RSI_STRONG_ARM_THRESHOLD:
+        return "ARM"
+    else:
+        return "STRONG_ARM"
+
+
+def _crypto_buy_signal_improved(rsi: float, prev_rsi: float, volume_ratio: float, close_position: float,
+                                is_bullish: bool = True, is_recovering: bool = False) -> str:
     """
-    UPGRADED MULTI-FILTER ENTRY SIGNAL for professional-grade trading:
+    STATE-BASED RSI ENTRY SYSTEM for highest-quality profit trades:
 
-    FILTER 1: Trend Confirmation (200-day SMA)
-    ─ Only enter when price > 200-day SMA (bull market)
-    ─ Avoids catching falling knives in bear markets
-    ─ Protects 70%+ of account from catastrophic losses
+    Entry State Machine:
+    ─────────────────────
+    RSI > 50:      RESET      — Cycle complete, awaiting new oversold
+    RSI 30-50:     WATCH      — Monitoring for oversold entry setup
+    RSI 20-30:     ARM        — Oversold signal, waiting for recovery
+    RSI < 20:      STRONG_ARM — Heavily oversold, highest quality entry
 
-    FILTER 2: RSI Oversold + Cross-Above Confirmation
-    ─ Entry on RSI crossing above 35 from below (not just being in oversold)
-    ─ Waits for actual reversal momentum before entry
-    ─ Eliminates whipsaw trades on false bottoms
+    Entry Rules:
+    ────────────
+    1. Must be bullish (price > 200-day SMA)
+    2. Must be RECOVERING (RSI going UP from oversold state)
+    3. Entry happens when recovery confirmation + volume spike + close in upper half
 
-    FILTER 3: Volatility & Momentum Confirmation
-    ─ Requires volume spike (volume_ratio >= 1.5x) for confirmation
-    ─ Close position in upper half of candle (close_position >= 0.50)
-    ─ Shows real buying pressure, not just technical bounce
-
-    Returns: "STRONG_BUY" or "NO_ACTION"
+    Returns: "STRONG_BUY" (recovery from oversold) or "NO_ACTION"
     """
 
     # FILTER 1: Trend confirmation (bull market only)
     if not is_bullish:
         return "NO_ACTION"
 
-    # FILTER 2: RSI cross-above confirmation
-    # Only enter after RSI explicitly crosses above 35 (not just being at 35-50)
-    if not rsi_crossed_above:
+    # Determine current state
+    current_state = _get_rsi_state(rsi)
+    prev_state = _get_rsi_state(prev_rsi)
+
+    # FILTER 2: Only enter on recovery from STRONG_ARM or ARM states
+    # Recovery means: RSI going UP from oversold (prev_state in [ARM, STRONG_ARM])
+    if prev_state not in ["ARM", "STRONG_ARM"]:
         return "NO_ACTION"
 
-    # FILTER 3: Volatility & momentum confirmation
-    # Strong volume spike + close in upper half of candle = real buying pressure
+    # Must be recovering (RSI > prev_rsi) to confirm reversal momentum
+    if not is_recovering or rsi <= prev_rsi:
+        return "NO_ACTION"
+
+    # FILTER 3: Volume + momentum confirmation for entry execution
+    # Only enter if recovery has sufficient conviction:
+    # - Volume spike (1.5x normal)
+    # - Close in upper half of candle (strength confirmation)
     if rsi < RSI_NO_ENTRY and volume_ratio >= 1.5 and close_position >= 0.50:
         return "STRONG_BUY"
 
@@ -1616,25 +1644,27 @@ async def run_crypto_cycle():
                     close_position = (candle["close"] - candle["low"]) / candle_range
                     volume_spike_ratio = candle["volume"] / max(candle["prior_volume"], 1)
 
-                    # UPGRADED buy signal with three filters:
-                    # Filter 1: 200-day SMA (trend confirmation - bull market only)
-                    # Filter 2: RSI cross-above (reversal confirmation - not just oversold)
-                    # Filter 3: Volume + momentum (real buying pressure)
+                    # STATE-BASED RSI ENTRY: Only enter on recovery from oversold
+                    # is_recovering = RSI moving UP from oversold state (true momentum)
+                    is_recovering = (last_rsi is not None and rsi > last_rsi)
+
                     is_bullish = data.get("is_bullish", True)
                     signal = _crypto_buy_signal_improved(
-                        rsi, rsi_recovery, volume_spike_ratio, close_position, entered_oversold,
+                        rsi, last_rsi or rsi, volume_spike_ratio, close_position,
                         is_bullish=is_bullish,
-                        rsi_crossed_above=rsi_crossed_above
+                        is_recovering=is_recovering
                     )
 
                     if signal == "NO_ACTION":
                         # No signal - log why
-                        if rsi < RSI_STRONG_BUY and close_position < 0.50:
+                        if rsi < RSI_STRONG_ARM_THRESHOLD and close_position < 0.50:
+                            reason = "STRONG_OVERSOLD_NO_MOMENTUM"
+                        elif rsi < RSI_STRONG_ARM_THRESHOLD and volume_spike_ratio < 1.5:
+                            reason = "STRONG_OVERSOLD_LOW_VOLUME"
+                        elif rsi < RSI_ARM_THRESHOLD and close_position < 0.60:
                             reason = "OVERSOLD_NO_MOMENTUM"
-                        elif rsi < RSI_STRONG_BUY and volume_spike_ratio < 1.5:
-                            reason = "OVERSOLD_LOW_VOLUME"
-                        elif rsi < RSI_BUY and close_position < 0.60:
-                            reason = "OVERSOLD_NO_MOMENTUM"
+                        elif not is_recovering:
+                            reason = "OVERSOLD_NOT_RECOVERING"
                         else:
                             reason = "NO_ENTRY_SIGNAL"
                         latest_signals[symbol] = {
