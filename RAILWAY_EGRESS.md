@@ -1,23 +1,22 @@
-# Configure Railway Network Egress Allowlist
+# Railway Network Egress Allowlist Configuration
 
 **CRITICAL:** Trading bots cannot reach broker APIs without this configuration.
 
-## Quick Checklist
+## ⚡ Quick Setup (5 minutes)
 
-### Step 1: Go to Railway Dashboard
-- URL: https://railway.app/dashboard
+### Step 1: Open Railway Dashboard
+- Go to: https://railway.app/dashboard
 - Select Project: **empire-v2**
 - Select Service: **main-app**
 
 ### Step 2: Navigate to Network Settings
 - Click: **Settings** tab
 - Click: **Network** (or "Policies" section)
-- Find: **"Egress Allowlist"** section
+- Find: **"Egress Allowlist"**
 
-### Step 3: Add These Exact Hosts
+### Step 3: Add All These Hosts
 
-Copy and add each host exactly as shown:
-
+Copy and add each line exactly:
 ```
 api.alpaca.markets
 data.alpaca.markets
@@ -33,52 +32,56 @@ raw.githubusercontent.com
 smtp.gmail.com
 ```
 
-**IMPORTANT:** Include BOTH exact hostnames AND wildcards:
+**⚠️ CRITICAL:** Add BOTH exact hostnames AND wildcards:
 - ✓ `stripe.com` (exact)
 - ✓ `*.stripe.com` (wildcard)
-- ✓ `api.alpaca.markets` (exact)
-- ✓ `api.coinbase.com` (exact)
-- ✓ `*.coinbase.com` (wildcard)
 
-### Step 4: Save & Deploy
+### Step 4: Save & Redeploy
 - Click: **Save** or **Apply**
-- Railway will redeploy (takes 2-3 minutes)
-- Wait for status to show: **Active** (green)
+- Wait 2-3 minutes for redeploy (status: Active/green)
 
 ### Step 5: Verify Success
-After redeploy, check logs:
-- Go to: **Deploy** tab
-- Look for logs showing:
-  ```
-  INFO:prop_bot: Equity: $XXXX
-  INFO:prop_bot: Cash: $XXXX
-  ✓ Alpaca account connected successfully
-  ```
+Go to **Deploy** tab and check logs for:
+```
+✓ INFO:prop_bot: Equity: $XXXX
+✓ INFO:prop_bot: Cash: $XXXX
+✓ Alpaca account connected successfully
+```
 
-Or if still failing:
-  ```
-  ❌ HTTP 401 Unauthorized
-  ```
-
-## What This Fixes
-
-| Issue | Root Cause | After Fix |
-|-------|-----------|-----------|
-| Bot gets HTTP 401 | Credentials not on Railway | Set ALPACA_API_KEY & ALPACA_SECRET_KEY |
-| Bot gets HTTP 403 "Host not in allowlist" | Network egress blocked | Configure egress allowlist (THIS STEP) |
-| No new orders generated | Bot can't trade | Able to place orders |
-| No revenue flowing | No client orders | Revenue resumes |
-
-## Expected Timeline
-
-1. **Configure allowlist:** 2 minutes
-2. **Railway redeploy:** 2-3 minutes
-3. **Bot connects to Alpaca:** Immediate on redeploy
-4. **First new order:** Within 5 minutes
-5. **Revenue resumes:** Within 10 minutes of redeploy
+If you still see:
+```
+❌ HTTP 401 Unauthorized
+```
+Then also set these environment variables on Railway:
+- `ALPACA_API_KEY` = your_api_key
+- `ALPACA_SECRET_KEY` = your_secret_key
 
 ---
 
-**Status:** Awaiting manual Railway dashboard configuration
-**Blocking:** Network egress allowlist not yet applied
+## Why This Is Required
+
+The FastAPI app and trading bots communicate with:
+- **Alpaca** (futures trading) → api.alpaca.markets
+- **Coinbase** (crypto trading) → api.coinbase.com
+- **Stripe** (payments) → stripe.com
+- **Polygon** (market data) → api.polygon.io
+- **GitHub** (code updates) → github.com
+- **Gmail** (email) → smtp.gmail.com
+
+Without the egress allowlist, all these APIs return **HTTP 403 "Host not in allowlist"**.
+
+## Expected Timeline After Configuration
+
+| Step | Time | Status |
+|------|------|--------|
+| Configure allowlist | Now | 2 min |
+| Railway redeploy | +2m | 3 min total |
+| Bot connects to Alpaca | +5m | 8 min total |
+| First new order placed | +10m | 13 min total |
+| Revenue resumes | +15m | 18 min total |
+
+---
+
+**Status:** Awaiting manual Railway egress allowlist configuration
+**Blocking:** Cannot reach broker APIs without this
 **Action:** Complete steps 1-4 above, then monitor for revenue resumption
