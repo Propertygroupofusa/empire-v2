@@ -45,8 +45,8 @@ def get_headers():
     }
 
 def get_base_url():
-    """Dynamically read Alpaca base URL from env var."""
-    return os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+    """Dynamically read Alpaca base URL from env var. Default: production API (not paper trading)."""
+    return os.getenv("ALPACA_BASE_URL", "https://api.alpaca.markets")
 
 # Live trading mode
 LIVE_TRADE = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
