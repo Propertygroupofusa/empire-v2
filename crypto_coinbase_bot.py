@@ -80,6 +80,7 @@ COINBASE_API_KEY_NAME = os.getenv("COINBASE_API_KEY_NAME", "")
 COINBASE_API_PRIVATE_KEY = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\n", "\n")
 COINBASE_HOST = "api.coinbase.com"
 COINBASE_BASE_URL = f"https://{COINBASE_HOST}"
+FMP_API_KEY = os.getenv("FMP_API_KEY", "")
 NETWORK_RETRY_ATTEMPTS = int(os.getenv("NETWORK_RETRY_ATTEMPTS", "3"))
 NETWORK_RETRY_DELAY = float(os.getenv("NETWORK_RETRY_DELAY", "1.0"))  # seconds
 
@@ -779,6 +780,43 @@ async def _fetch_coinbase_closes(session, symbol):
     return [float(row[4]) for row in candles]
 
 
+async def _fetch_fmp_candles(session, symbol, limit=50):
+    """Fetch OHLCV candles from FMP (Financial Modeling Prep) for RSI and trend analysis.
+    Returns list of candles in chronological order [time, low, high, open, close, volume].
+    FMP symbol format: BTCUSD (not BTC-USD or BTC/USD)."""
+    if not FMP_API_KEY:
+        return None
+    fmp_symbol = symbol.replace("/", "").replace("-", "")  # BTC/USD -> BTCUSD
+    url = f"https://financialmodelingprep.com/api/v3/historical-chart/5min/{fmp_symbol}?apikey={FMP_API_KEY}"
+    cache_key = f"fmp_candles_{symbol}"
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            if r.status != 200:
+                cached = get_cached_response(cache_key)
+                if cached:
+                    log.warning(f"⚠️  FMP candles blocked/failed for {symbol}, using cache")
+                    return cached
+                return None
+            data = await r.json()
+            if not data or len(data) < limit:
+                return None
+            # FMP returns newest-first; reverse to chronological order and return last N
+            candles = [[float(d.get('date', 0)), float(d.get('low', 0)), float(d.get('high', 0)),
+                        float(d.get('open', 0)), float(d.get('close', 0)), float(d.get('volume', 0))]
+                       for d in reversed(data)][-limit:]
+            if len(candles) < limit:
+                return None
+            cache_response(cache_key, candles, NETWORK_ENV_CONFIG.get("cache_ttl", 300))
+            return candles
+    except Exception as e:
+        log.debug(f"FMP candles fetch failed for {symbol}: {e}")
+        cached = get_cached_response(cache_key)
+        if cached:
+            log.warning(f"⚠️  FMP candles error for {symbol}, using cache")
+            return cached
+        return None
+
+
 async def _fetch_latest_candle(session, symbol):
     """Fetch latest 5-minute candle OHLC data + volume for momentum & volume confirmation.
     Returns candle dict with open, close, high, low, volume, and prior candle volume or None if fetch fails.
@@ -821,15 +859,25 @@ async def _fetch_latest_candle(session, symbol):
 
 
 async def get_price_rsi(session, symbol):
-    """Price+RSI+ATR+directional bias from Coinbase's public candles endpoint.
+    """Price+RSI+ATR+directional bias from FMP (primary) or Coinbase (fallback).
     Network resilient: retries with backoff, falls back to cache if unavailable.
     Uses MA50 to determine directional bias: only long above MA50, only short below MA50.
     RSI recovery: True if RSI is bouncing UP from oversold (useful for entry timing)."""
 
-    candles = await _retry_with_backoff(
-        lambda: _fetch_coinbase_candles(session, symbol, limit=50),
-        max_attempts=NETWORK_RETRY_ATTEMPTS
-    )
+    # Try FMP first (real market data from Financial Modeling Prep)
+    candles = None
+    if FMP_API_KEY:
+        candles = await _retry_with_backoff(
+            lambda: _fetch_fmp_candles(session, symbol, limit=50),
+            max_attempts=NETWORK_RETRY_ATTEMPTS
+        )
+
+    # Fall back to Coinbase if FMP unavailable
+    if not candles:
+        candles = await _retry_with_backoff(
+            lambda: _fetch_coinbase_candles(session, symbol, limit=50),
+            max_attempts=NETWORK_RETRY_ATTEMPTS
+        )
     candle = None
     if candles:
         candle = await _retry_with_backoff(
