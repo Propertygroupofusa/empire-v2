@@ -163,8 +163,6 @@ FUTURES = {
     "JTO": {"name": "Jito",                 "qty": 1, "symbol": "JTO/USD"},
     "ORCA": {"name": "Orca",                "qty": 1, "symbol": "ORCA/USD"},
     "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
-    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
-    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
     # Add more as they become available on Alpaca
     "WLD": {"name": "Worldcoin",            "qty": 1, "symbol": "WLD/USD"},
     "INJ": {"name": "Injective",            "qty": 1, "symbol": "INJ/USD"},
