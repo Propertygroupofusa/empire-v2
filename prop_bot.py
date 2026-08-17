@@ -163,8 +163,6 @@ FUTURES = {
     "JTO": {"name": "Jito",                 "qty": 1, "symbol": "JTO/USD"},
     "ORCA": {"name": "Orca",                "qty": 1, "symbol": "ORCA/USD"},
     "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
-    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
-    "COPE": {"name": "Cope",                "qty": 1, "symbol": "COPE/USD"},
     # Add more as they become available on Alpaca
     "WLD": {"name": "Worldcoin",            "qty": 1, "symbol": "WLD/USD"},
     "INJ": {"name": "Injective",            "qty": 1, "symbol": "INJ/USD"},
@@ -188,13 +186,15 @@ FUTURES = {
 # At 1.5x scale: reduce to 1 position (1.5x loss on 1 trade < 1.0x loss on 2 trades)
 # At 2.0x scale: stay at 1 position (conservative with max scaling)
 # This prevents multiplied losses across multiple scaled positions
-BASE_MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", "3"))  # Long-only: 3 concurrent positions
+BASE_MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", "8"))  # Increased from 3 to 8: more concurrent positions for faster capital deployment
 
 def get_dynamic_max_positions(scale: float) -> int:
-    """Reduce max positions as scale increases to limit compounded losses"""
+    """Allow more positions at all scales to maximize capital deployment"""
+    if scale >= 2.0:
+        return 6  # Still allow 6 at 2.0x scale (was 1)
     if scale >= 1.5:
-        return 1  # Single position when scaled 1.5x or higher
-    return BASE_MAX_POSITIONS  # 3 positions (longs only) at baseline 1.0x scale
+        return 7  # Allow 7 at 1.5x scale (was 1)
+    return BASE_MAX_POSITIONS  # 8 positions at baseline 1.0x scale (was 3)
 
 # Profit target, in REAL DOLLARS of profit on the position (not a raw
 # price move on the underlying) - scaled by real account equity. Increased targets
@@ -762,24 +762,10 @@ def check_kill_conditions(buying_power, equity, daily_loss, open_position_count)
 async def run_prop_cycle():
     global daily_pnl, profitable_days, last_cycle_at, last_market_open, bot_start_time, bot_start_equity, checkpoint_alerts_sent
 
-    # Trade during market hours (9:30am-4pm ET) for stocks/futures.
-    # Crypto trades 24/7. Checked against real ET wall-clock time (DST-aware).
+    # 24/7 Trading: Scan crypto, commodities, and indices across all hours
+    # Alpaca supports round-the-clock trading on crypto and extended hours on commodities
     now = datetime.now(ET)
-    is_weekday = now.weekday() < 5
-    market_open_t = now.replace(hour=9, minute=30, second=0, microsecond=0)
-    market_close_t = now.replace(hour=16, minute=0, second=0, microsecond=0)
-
     last_cycle_at = now.isoformat()
-
-    # Check if it's market hours for stocks (9:30am-4pm ET weekdays) or if we're trading crypto (24/7)
-    is_market_hours = is_weekday and market_open_t <= now <= market_close_t
-    is_crypto_trading = True  # Crypto trades 24/7
-
-    if not (is_market_hours or is_crypto_trading):
-        last_market_open = False
-        return
-
-    last_market_open = is_market_hours
 
     # CONTINUOUS AUTO-SCALING TO $1,000,000 — No milestones, just compound
     # Scale formula: 1.0x baseline + 0.01x per $1000 earned, capped at 5.0x
@@ -1076,11 +1062,7 @@ async def run_prop_cycle():
 
         scans = {}
         for contract, config in FUTURES.items():
-            # Skip non-crypto symbols during after-hours (outside 9:30am-4pm ET weekdays)
-            is_crypto = "/" in config["symbol"]  # Crypto symbols have "/" like BTC/USD
-            if not is_market_hours and not is_crypto:
-                continue
-
+            # Scan all symbols 24/7 — crypto, commodities, indices all available on Alpaca
             data = await get_price_rsi(session, config["symbol"])
             if data:
                 scans[contract] = data
@@ -1138,10 +1120,6 @@ async def run_prop_cycle():
         candidates = []
         for contract, config in FUTURES.items():
             # Skip non-crypto symbols during after-hours
-            is_crypto = "/" in config["symbol"]
-            if not is_market_hours and not is_crypto:
-                continue
-
             if contract in open_prop_positions:
                 continue
             data = scans.get(contract)
@@ -1261,8 +1239,8 @@ async def run_prop_cycle():
 
 async def record_daily_earnings(pnl_amount):
     """Record daily bot trading profits as a payment in the database.
-    Automatically reinvests 50% of worker earnings back to Alpaca to maintain
-    buying power and fuel continuous trading."""
+    Earnings accumulate in Alpaca account for compounding.
+    Manual transfers can be made later as needed."""
     if pnl_amount <= 0:
         return
 
@@ -1285,13 +1263,8 @@ async def record_daily_earnings(pnl_amount):
         async with AsyncSessionLocal() as session:
             session.add(payment)
             await session.commit()
-            log.info(f"[APEX_589296] 💰 Recorded daily earnings: ${worker_amount:.2f} to payments table")
-
-            # AUTOMATIC REINVESTMENT: 50% of worker earnings → Alpaca deposit
-            # Keeps account in positive buying power without manual transfers
-            alpaca_reinvest = worker_amount * 0.50
-            log.info(f"[APEX_589296] 🔄 AUTO-REINVEST: ${alpaca_reinvest:.2f} queued for Alpaca deposit")
-            log.info(f"[APEX_589296] 💵 Worker keeps: ${worker_amount * 0.50:.2f} | Platform: ${platform_amount:.2f}")
+            log.info(f"[APEX_589296] 💰 Earnings recorded: ${worker_amount:.2f} | Platform fee: ${platform_amount:.2f}")
+            log.info(f"[APEX_589296] 📊 Money accumulates in Alpaca | Total balance growing")
 
     except Exception as e:
         log.error(f"[APEX_589296] Failed to record daily earnings: {e}")

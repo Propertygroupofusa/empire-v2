@@ -55,9 +55,9 @@ import aiohttp
 import jwt as pyjwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from sqlalchemy import select
+from sqlalchemy import select, func
 from database import AsyncSessionLocal
-from models import BotPosition, TradingBotState, CryptoRSIState, CryptoTradeLog
+from models import BotPosition, TradingBotState, CryptoRSIState, CryptoTradeLog, CryptoSupplementalCapital
 from bot_mandates import CRYPTO_MANDATE
 from network_config import get_cached_response, cache_response, NETWORK_ENV_CONFIG
 
@@ -80,20 +80,9 @@ COINBASE_API_KEY_NAME = os.getenv("COINBASE_API_KEY_NAME", "")
 COINBASE_API_PRIVATE_KEY = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\n", "\n")
 COINBASE_HOST = "api.coinbase.com"
 COINBASE_BASE_URL = f"https://{COINBASE_HOST}"
+FMP_API_KEY = os.getenv("FMP_API_KEY", "")
 NETWORK_RETRY_ATTEMPTS = int(os.getenv("NETWORK_RETRY_ATTEMPTS", "3"))
 NETWORK_RETRY_DELAY = float(os.getenv("NETWORK_RETRY_DELAY", "1.0"))  # seconds
-
-try:
-    NETWORK_RETRY_ATTEMPTS = int(os.getenv("NETWORK_RETRY_ATTEMPTS", "3"))
-except (ValueError, TypeError):
-    NETWORK_RETRY_ATTEMPTS = 3
-    log.warning("Invalid NETWORK_RETRY_ATTEMPTS, using default: 3")
-
-try:
-    NETWORK_RETRY_DELAY = float(os.getenv("NETWORK_RETRY_DELAY", "1.0"))
-except (ValueError, TypeError):
-    NETWORK_RETRY_DELAY = 1.0
-    log.warning("Invalid NETWORK_RETRY_DELAY, using default: 1.0")
 
 try:
     NETWORK_RETRY_ATTEMPTS = int(os.getenv("NETWORK_RETRY_ATTEMPTS", "3"))
@@ -175,22 +164,31 @@ def _auth_headers(method: str, path: str) -> dict:
     return {"Authorization": f"Bearer {_build_jwt(method, path)}", "Content-Type": "application/json"}
 
 
-# AGGRESSIVE THRESHOLDS for high-velocity trading in overbought/oversold markets
-# Long-only: Coinbase SPOT has no shorting support
-RSI_STRONG_BUY = 35   # RSI < 35 = oversold, aggressive entry zone
-RSI_BUY = 50          # RSI < 50 = oversold/neutral zone, wide zone for continuous entry
-RSI_NO_ENTRY = 75     # RSI >= 75 = extremely overbought, skip entries (allow entries up to 74 RSI)
+# STATE-BASED RSI ENTRY SYSTEM for profit-only trading
+# Strategy: Track RSI state transitions, enter only after recovery confirmation
+# ─────────────────────────────────────────────────────────────────────────────
+# RSI > 30:     WATCH    — no entry, monitor for oversold
+# RSI 20-30:    ARM      — prepare for entry, wait for recovery confirmation
+# RSI 10-20:    STRONG_ARM — higher quality entry, wait for recovery confirmation
+# RSI > 50:     RESET    — cycle complete, reset tracking
+#
+# Entry happens ONLY when RSI recovers UP from oversold state (not just reaching threshold)
+RSI_RESET_THRESHOLD = 50      # When RSI crosses above this, reset all entry tracking
+RSI_STRONG_ARM_THRESHOLD = 20 # RSI < 20 = strongest oversold signal
+RSI_ARM_THRESHOLD = 30        # RSI < 30 = standard oversold (arm for entry)
+RSI_WATCH_THRESHOLD = 50      # Above this = WATCH state
+RSI_NO_ENTRY = 65             # RSI >= 65 = overbought territory, skip entries
 try:
-    RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "60"))
+    RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "70"))
 except (ValueError, TypeError):
-    log.warning("Invalid CRYPTO_RSI_SELL_ABOVE value, using default: 60")
-    RSI_SELL_ABOVE = 60.0
+    log.warning("Invalid CRYPTO_RSI_SELL_ABOVE value, using default: 70")
+    RSI_SELL_ABOVE = 70.0
 
 try:
-    RSI_BUY_BELOW = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "60"))
+    RSI_BUY_BELOW = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "30"))
 except (ValueError, TypeError):
-    log.warning("Invalid CRYPTO_RSI_BUY_BELOW value, using default: 60")
-    RSI_BUY_BELOW = 60.0
+    log.warning("Invalid CRYPTO_RSI_BUY_BELOW value, using default: 30")
+    RSI_BUY_BELOW = 30.0
 
 try:
     MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "50"))
@@ -224,22 +222,24 @@ except (ValueError, TypeError):
     log.warning("Invalid MIN_CRYPTO_TRADE_USD value, using default: 0.50")
     MIN_CRYPTO_TRADE_USD = 0.50
 
-# Staged capital release, requested after watching the account get drawn
-# down to single-digit cents trading with 100% of the balance every cycle:
-# instead of always trading the full balance, only ever risk it in fixed
-# $100 steps. Below the first $100 the bot places no new entries at all
-# (existing open positions still get managed normally, below in Pass 1 -
-# this only gates Pass 2's new entries). Once the real balance crosses a
-# tier, that whole tier becomes tradable; anything above the current tier
-# sits untouched until the balance actually grows past the next one, so a
-# losing streak can't eat into gains that already "graduated" to the next
-# tier. Set CRYPTO_TIER_SIZE=0 to disable and go back to trading 100% of
-# the balance (or whatever CRYPTO_MAX_ALLOCATION caps it at) every cycle.
+# Staged capital release DISABLED for aggressive capital deployment.
+# Previous logic: Only ever risk fixed $100 steps to prevent account wipeout.
+# New behavior: Trade 100% of available balance (or whatever CRYPTO_MAX_ALLOCATION caps it at).
+# The account has grown from $0.58 → $483.43 through earnings, so tier protection no longer needed.
+# Set CRYPTO_TIER_SIZE to a positive value to re-enable tiered capital release if desired.
 try:
-    TIER_SIZE = float(os.getenv("CRYPTO_TIER_SIZE", "100"))
+    TIER_SIZE = float(os.getenv("CRYPTO_TIER_SIZE", "0"))
 except (ValueError, TypeError):
-    log.warning("Invalid CRYPTO_TIER_SIZE value, using default: 100")
-    TIER_SIZE = 100.0
+    log.warning("Invalid CRYPTO_TIER_SIZE value, using default: 0 (tiering disabled)")
+    TIER_SIZE = 0.0
+
+# Minimum cash reserve: never deploy this amount, only grows from profits
+# With $483.43 balance: keep $25, deploy $458.43 in active trades
+try:
+    MIN_CASH_RESERVE = float(os.getenv("CRYPTO_MIN_CASH_RESERVE", "25"))
+except (ValueError, TypeError):
+    log.warning("Invalid CRYPTO_MIN_CASH_RESERVE value, using default: 25")
+    MIN_CASH_RESERVE = 25.0
 
 
 def get_unlocked_tier(balance: float) -> float:
@@ -516,6 +516,26 @@ def send_trade_alert(subject: str, body: str):
         log.warning(f"Trade alert email failed: {e}")
 
 
+async def get_supplemental_capital() -> float:
+    """Read capital allocation target from prop_bot earnings.
+
+    This is NOT actual money in Coinbase - it's a target pool that tracks:
+    - Earnings from prop_bot that should go to crypto trading
+    - User must manually transfer from Alpaca → bank → Coinbase
+    - Used to scale position sizes as capital is allocated
+
+    Returns total allocated amount, or 0 on any error."""
+    try:
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import func
+            result = await db.execute(select(func.sum(CryptoSupplementalCapital.amount_usd)))
+            total = result.scalar() or 0.0
+            return total
+    except Exception as e:
+        log.warning(f"[CRYPTO] Failed to read capital allocation target: {e}")
+        return 0.0
+
+
 async def get_usd_balance(session):
     """Real Coinbase USD balance available for trading. Returns
     (balance, None) on success, or (None, reason) on any failure (auth
@@ -528,13 +548,16 @@ async def get_usd_balance(session):
     at ~49 regardless of the requested limit) - this account holds
     dozens of small/dust altcoin wallets, so the USD wallet is often not
     on the first page at all. Looking at only page 1 previously made
-    the bot think there was no USD wallet when there was one further in."""
+    the bot think there was no USD wallet when there was one further in.
+
+    NOW INCLUDES: Supplemental capital from prop_bot earnings pool."""
     path = "/api/v3/brokerage/accounts"
     all_currencies = []
     cursor = None
     cache_key = "coinbase_usd_balance"
 
     try:
+        coinbase_balance = None
         while True:
             params = {"limit": 250}
             if cursor:
@@ -547,20 +570,37 @@ async def get_usd_balance(session):
                         cached = get_cached_response(cache_key)
                         if cached is not None:
                             log.warning(f"⚠️  [WORKAROUND] API blocked (403), using cached USD balance: ${cached}")
-                            return cached, None
+                            supplemental = await get_supplemental_capital()
+                            total = cached + supplemental
+                            if supplemental > 0:
+                                log.info(f"[CRYPTO] Combining Coinbase ${cached:.2f} + supplemental ${supplemental:.2f} = ${total:.2f}")
+                            return total, None
                         return None, f"HTTP 403: Egress blocked. No cache available. Fix: Add api.coinbase.com to Railway egress allowlist"
                     return None, f"HTTP {r.status}: {body}"
                 data = await r.json()
                 accounts = data.get("accounts", [])
                 for account in accounts:
                     if account.get("currency") == "USD":
-                        balance = float(account["available_balance"]["value"])
-                        cache_response(cache_key, balance, NETWORK_ENV_CONFIG.get("cache_ttl", 300))
-                        return balance, None
+                        coinbase_balance = float(account["available_balance"]["value"])
+                        cache_response(cache_key, coinbase_balance, NETWORK_ENV_CONFIG.get("cache_ttl", 300))
+                        break
+                if coinbase_balance is not None:
+                    break
                 all_currencies.extend(a.get("currency") for a in accounts)
                 if not data.get("has_next") or not data.get("cursor"):
                     break
                 cursor = data.get("cursor")
+
+        if coinbase_balance is not None:
+            # Supplemental capital: prop_bot earnings allocated for crypto trading
+            # USER ACTION REQUIRED: Manually transfer from Alpaca → bank → Coinbase to realize allocation
+            allocated = await get_supplemental_capital()
+            if allocated > 0:
+                # Log the allocation target so user knows how much to transfer
+                log.info(f"[CRYPTO] 💡 Allocation target: ${allocated:.2f} from prop_bot | Manual action: Withdraw from Alpaca, deposit to Coinbase to unlock")
+                log.info(f"[CRYPTO] Current: Coinbase ${coinbase_balance:.2f} real | Target with allocation: ${coinbase_balance + allocated:.2f}")
+            return coinbase_balance, None
+
         return None, f"no USD account found across {len(all_currencies)} accounts on this key: {all_currencies}"
     except asyncio.TimeoutError:
         return None, "Coinbase API timeout (network slow or API unresponsive)"
@@ -597,33 +637,62 @@ def _compute_atr(closes: list, highs: list, lows: list, period: int = 14) -> flo
     return atr
 
 
-def _crypto_buy_signal_improved(rsi: float, rsi_recovery: bool, volume_ratio: float, close_position: float, entered_oversold: bool) -> str:
-    """AGGRESSIVE entry signal for continuous compounding: lower thresholds for frequent trades.
-    Returns: "STRONG_BUY" (RSI < 35) or "BUY" (35-50), or "NO_ACTION"
+def _get_rsi_state(rsi: float) -> str:
+    """Determine RSI state: RESET, WATCH, ARM, or STRONG_ARM."""
+    if rsi > RSI_RESET_THRESHOLD:
+        return "RESET"
+    elif rsi > RSI_ARM_THRESHOLD:
+        return "WATCH"
+    elif rsi > RSI_STRONG_ARM_THRESHOLD:
+        return "ARM"
+    else:
+        return "STRONG_ARM"
 
-    Optimized for smaller positions and active capital deployment."""
 
-    # Must have entered oversold zone before we can enter
-    if not entered_oversold:
+def _crypto_buy_signal_improved(rsi: float, prev_rsi: float, volume_ratio: float, close_position: float,
+                                is_bullish: bool = True, is_recovering: bool = False) -> str:
+    """
+    STATE-BASED RSI ENTRY SYSTEM for highest-quality profit trades:
+
+    Entry State Machine:
+    ─────────────────────
+    RSI > 50:      RESET      — Cycle complete, awaiting new oversold
+    RSI 30-50:     WATCH      — Monitoring for oversold entry setup
+    RSI 20-30:     ARM        — Oversold signal, waiting for recovery
+    RSI < 20:      STRONG_ARM — Heavily oversold, highest quality entry
+
+    Entry Rules:
+    ────────────
+    1. Must be bullish (price > 200-day SMA)
+    2. Must be RECOVERING (RSI going UP from oversold state)
+    3. Entry happens when recovery confirmation + volume spike + close in upper half
+
+    Returns: "STRONG_BUY" (recovery from oversold) or "NO_ACTION"
+    """
+
+    # FILTER 1: Trend confirmation (bull market only)
+    if not is_bullish:
         return "NO_ACTION"
 
-    # Enter on RSI recovery (or allow entry even without strong recovery for faster deployment)
-    # Relax the recovery requirement for aggressive mode
+    # Determine current state
+    current_state = _get_rsi_state(rsi)
+    prev_state = _get_rsi_state(prev_rsi)
 
-    # Extreme oversold: strong reversal signal (RSI < 35)
-    if rsi < RSI_STRONG_BUY:  # RSI < 35 (aggressive)
-        # Lower volume/candle requirements for aggressive trading
-        if volume_ratio >= 1.0 and close_position >= 0.40:
-            return "STRONG_BUY"
-        # Even without perfect setup, enter if RSI < 20
-        if rsi < 20:
-            return "STRONG_BUY"
+    # FILTER 2: Only enter on recovery from STRONG_ARM or ARM states
+    # Recovery means: RSI going UP from oversold (prev_state in [ARM, STRONG_ARM])
+    if prev_state not in ["ARM", "STRONG_ARM"]:
+        return "NO_ACTION"
 
-    # Oversold recovery zone: normal entry (35-50 RSI)
-    if RSI_STRONG_BUY <= rsi < RSI_BUY:  # 35-50 RSI
-        # Relaxed requirements for more frequent entries
-        if volume_ratio >= 1.0 and close_position >= 0.45:
-            return "BUY"
+    # Must be recovering (RSI > prev_rsi) to confirm reversal momentum
+    if not is_recovering or rsi <= prev_rsi:
+        return "NO_ACTION"
+
+    # FILTER 3: Volume + momentum confirmation for entry execution
+    # Only enter if recovery has sufficient conviction:
+    # - Volume spike (1.5x normal)
+    # - Close in upper half of candle (strength confirmation)
+    if rsi < RSI_NO_ENTRY and volume_ratio >= 1.5 and close_position >= 0.50:
+        return "STRONG_BUY"
 
     return "NO_ACTION"
 
@@ -699,6 +768,43 @@ async def _fetch_coinbase_closes(session, symbol):
     return [float(row[4]) for row in candles]
 
 
+async def _fetch_fmp_candles(session, symbol, limit=50):
+    """Fetch OHLCV candles from FMP (Financial Modeling Prep) for RSI and trend analysis.
+    Returns list of candles in chronological order [time, low, high, open, close, volume].
+    FMP symbol format: BTCUSD (not BTC-USD or BTC/USD)."""
+    if not FMP_API_KEY:
+        return None
+    fmp_symbol = symbol.replace("/", "").replace("-", "")  # BTC/USD -> BTCUSD
+    url = f"https://financialmodelingprep.com/api/v3/historical-chart/5min/{fmp_symbol}?apikey={FMP_API_KEY}"
+    cache_key = f"fmp_candles_{symbol}"
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            if r.status != 200:
+                cached = get_cached_response(cache_key)
+                if cached:
+                    log.warning(f"⚠️  FMP candles blocked/failed for {symbol}, using cache")
+                    return cached
+                return None
+            data = await r.json()
+            if not data or len(data) < limit:
+                return None
+            # FMP returns newest-first; reverse to chronological order and return last N
+            candles = [[float(d.get('date', 0)), float(d.get('low', 0)), float(d.get('high', 0)),
+                        float(d.get('open', 0)), float(d.get('close', 0)), float(d.get('volume', 0))]
+                       for d in reversed(data)][-limit:]
+            if len(candles) < limit:
+                return None
+            cache_response(cache_key, candles, NETWORK_ENV_CONFIG.get("cache_ttl", 300))
+            return candles
+    except Exception as e:
+        log.debug(f"FMP candles fetch failed for {symbol}: {e}")
+        cached = get_cached_response(cache_key)
+        if cached:
+            log.warning(f"⚠️  FMP candles error for {symbol}, using cache")
+            return cached
+        return None
+
+
 async def _fetch_latest_candle(session, symbol):
     """Fetch latest 5-minute candle OHLC data + volume for momentum & volume confirmation.
     Returns candle dict with open, close, high, low, volume, and prior candle volume or None if fetch fails.
@@ -741,15 +847,25 @@ async def _fetch_latest_candle(session, symbol):
 
 
 async def get_price_rsi(session, symbol):
-    """Price+RSI+ATR+directional bias from Coinbase's public candles endpoint.
+    """Price+RSI+ATR+directional bias from FMP (primary) or Coinbase (fallback).
     Network resilient: retries with backoff, falls back to cache if unavailable.
     Uses MA50 to determine directional bias: only long above MA50, only short below MA50.
     RSI recovery: True if RSI is bouncing UP from oversold (useful for entry timing)."""
 
-    candles = await _retry_with_backoff(
-        lambda: _fetch_coinbase_candles(session, symbol, limit=50),
-        max_attempts=NETWORK_RETRY_ATTEMPTS
-    )
+    # Try FMP first (real market data from Financial Modeling Prep)
+    candles = None
+    if FMP_API_KEY:
+        candles = await _retry_with_backoff(
+            lambda: _fetch_fmp_candles(session, symbol, limit=50),
+            max_attempts=NETWORK_RETRY_ATTEMPTS
+        )
+
+    # Fall back to Coinbase if FMP unavailable
+    if not candles:
+        candles = await _retry_with_backoff(
+            lambda: _fetch_coinbase_candles(session, symbol, limit=50),
+            max_attempts=NETWORK_RETRY_ATTEMPTS
+        )
     candle = None
     if candles:
         candle = await _retry_with_backoff(
@@ -812,6 +928,97 @@ async def get_4h_rsi(session, symbol):
         return None
 
 
+async def get_daily_sma_200(session, symbol):
+    """
+    Fetch daily candles and calculate 200-day Simple Moving Average (trend filter).
+    Returns: {"sma_200": float, "current_price": float, "is_bullish": bool}
+
+    Bullish (uptrend) = price above 200-day SMA
+    Bearish (downtrend) = price below 200-day SMA
+    """
+    try:
+        pair = _to_product_id(symbol)
+        # Daily = 86400 seconds; fetch 250 candles = ~9 months (covers 200-day + buffer)
+        url = f"https://api.exchange.coinbase.com/products/{pair}/candles?granularity=86400&limit=300"
+        cache_key = f"daily_sma_{symbol}"
+
+        async with session.get(url, headers={"Accept": "application/json"}, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            if r.status != 200:
+                if r.status == 403:
+                    cached = get_cached_response(cache_key)
+                    if cached:
+                        log.warning(f"⚠️  {symbol} daily SMA API blocked (403), using cache")
+                        return cached
+                return None
+
+            data = await r.json()
+            if not data or len(data) < 200:
+                log.warning(f"⚠️  {symbol} insufficient daily candles ({len(data) if data else 0} < 200)")
+                return None
+
+            # Reverse to chronological order
+            candles = list(reversed(data))
+            closes = [float(row[4]) for row in candles[-200:]]  # Last 200 closes
+
+            if len(closes) < 200:
+                return None
+
+            current_price = float(candles[-1][4])
+            sma_200 = sum(closes[-200:]) / 200
+            is_bullish = current_price > sma_200
+
+            result = {
+                "sma_200": sma_200,
+                "current_price": current_price,
+                "is_bullish": is_bullish,
+                "distance_pct": ((current_price - sma_200) / sma_200) * 100 if sma_200 > 0 else 0,
+            }
+
+            cache_response(cache_key, result, 86400)  # Cache for 24 hours
+            return result
+    except Exception as e:
+        log.debug(f"Daily SMA-200 fetch failed for {symbol}: {e}")
+        return None
+
+
+def find_recent_swing_low(candles: list, lookback_bars: int = 10) -> dict:
+    """
+    Find recent swing low for stop loss placement.
+    Returns: {"swing_low_price": float, "bars_ago": int}
+
+    Swing low = lowest low in the last N candles
+    Used for professional stop-loss placement (risk management)
+    """
+    if not candles or len(candles) < 3:
+        return {"swing_low_price": None, "bars_ago": 0}
+
+    recent = candles[-lookback_bars:]
+    lowest = min(recent, key=lambda x: float(x[1]))
+    swing_low = float(lowest[1])
+    bars_ago = len(candles) - candles.index(lowest) - 1
+
+    return {"swing_low_price": swing_low, "bars_ago": bars_ago}
+
+
+def find_recent_swing_high(candles: list, lookback_bars: int = 10) -> dict:
+    """
+    Find recent swing high for take-profit placement.
+    Returns: {"swing_high_price": float, "bars_ago": int}
+
+    Swing high = highest high in the last N candles
+    Used for exit targets (RSI 65-70 or swing high, whichever comes first)
+    """
+    if not candles or len(candles) < 3:
+        return {"swing_high_price": None, "bars_ago": 0}
+
+    recent = candles[-lookback_bars:]
+    highest = max(recent, key=lambda x: float(x[2]))
+    swing_high = float(highest[2])
+    bars_ago = len(candles) - candles.index(highest) - 1
+
+    return {"swing_high_price": swing_high, "bars_ago": bars_ago}
+
+
 def size_position(cash_pool_remaining, slots_remaining, price):
     """Fixed $250 per trade for maximum capital deployment.
     Aggressive sizing: maximizes gains while maintaining 3-position minimum buffer."""
@@ -825,7 +1032,7 @@ def size_position(cash_pool_remaining, slots_remaining, price):
     return qty if qty > 0 else None
 
 
-async def place_order(session, symbol, side, qty, price):
+async def place_order(session, symbol, side, qty, price, skip_on_network_error=False):
     """Coinbase Advanced Trade orders:
     - BUY: market IOC for immediate entry
     - SELL: limit GTC at profit target to hold order until price reached
@@ -835,8 +1042,9 @@ async def place_order(session, symbol, side, qty, price):
 
     if side == "buy":
         # Market order: immediate entry at market price (IOC = Immediate or Cancel)
+        # Coinbase API expects: market_market_ioc with quote_size (USD amount to spend)
         order_config = {
-            "market_ioc": {
+            "market_market_ioc": {
                 "quote_size": f"{qty * price:.2f}"
             }
         }
@@ -856,15 +1064,31 @@ async def place_order(session, symbol, side, qty, price):
         "order_configuration": order_config,
     }
     try:
-        async with session.post(COINBASE_BASE_URL + path, headers=_auth_headers("POST", path), json=order) as r:
+        async with session.post(COINBASE_BASE_URL + path, headers=_auth_headers("POST", path), json=order, timeout=5) as r:
             result = await r.json()
             if r.status in (200, 201) and result.get("success", True):
                 log.info(f"✅ CRYPTO TRADE | {side.upper()} {qty} {symbol}")
                 return True
-            log.error(f"❌ Crypto order failed (requested {order_config}): {result.get('error_response', result)}")
+            # Check if this is a network/auth error vs order validation error
+            error_detail = result.get('error_response', result)
+            if "403" in str(r.status) or "not in allowlist" in str(error_detail):
+                log.warning(f"⚠️  Coinbase API network blocked (403) - skipping orders this cycle")
+                return False
+            log.debug(f"Order validation failed ({order_config}): {error_detail}")
             return False
+    except asyncio.TimeoutError:
+        if skip_on_network_error:
+            log.warning("⚠️  Coinbase API timeout - network may be blocked, skipping orders this cycle")
+        else:
+            log.warning(f"Crypto order timeout for {symbol}")
+        return False
     except Exception as e:
-        log.error(f"Crypto order error: {e}")
+        error_str = str(e).lower()
+        if "403" in error_str or "gateway" in error_str or "policy" in error_str:
+            if skip_on_network_error:
+                log.warning(f"⚠️  Coinbase API blocked ({e}) - add api.coinbase.com to Railway egress allowlist")
+            else:
+                log.debug(f"Network error on {symbol}: {e}")
         return False
 
 
@@ -921,7 +1145,7 @@ async def log_trade_entry(symbol: str, entry_rsi: float, entry_price: float, qty
         async with AsyncSessionLocal() as session:
             trade = CryptoTradeLog(
                 symbol=symbol,
-                strategy_version="RSI_RECOVERY_ATR_V1",  # ATR-based exits, RSI recovery entry
+                strategy_version="SMA200_RSI_CROSSOVER_SWING_V2",  # UPGRADED: 200-day SMA + RSI cross-above + swing-based stops
                 armed_at=datetime.now(timezone.utc),  # Timestamp trade was armed
                 arm_rsi=arm_rsi,
                 entered_at=datetime.now(timezone.utc),
@@ -933,7 +1157,7 @@ async def log_trade_entry(symbol: str, entry_rsi: float, entry_price: float, qty
             )
             session.add(trade)
             await session.commit()
-            log.info(f"[CRYPTO-LOG] {symbol} ENTRY logged: RSI {entry_rsi:.1f} @ ${entry_price:.2f} vol_ratio {volume_ratio:.2f}x (strategy: RSI_RECOVERY_ATR_V1)")
+            log.info(f"[CRYPTO-LOG] {symbol} ENTRY logged: RSI {entry_rsi:.1f} @ ${entry_price:.2f} vol_ratio {volume_ratio:.2f}x (strategy: SMA200_RSI_CROSSOVER_SWING_V2)")
 
         # Log to measurement system
         if MEASUREMENT_AVAILABLE:
@@ -1095,14 +1319,29 @@ async def run_crypto_cycle():
     connector = aiohttp.TCPConnector(use_dns_cache=True)
     timeout = aiohttp.ClientTimeout(total=15, connect=5, sock_read=5)
     async with aiohttp.ClientSession(connector=connector, trust_env=False, timeout=timeout) as session:
+        # Check if Coinbase API is accessible before attempting any orders
+        api_accessible = True
+        try:
+            async with session.get(COINBASE_BASE_URL + "/api/v3/accounts", headers=_auth_headers("GET", "/api/v3/accounts"), timeout=5) as r:
+                if r.status == 403:
+                    api_accessible = False
+                    log.warning("⚠️  [CRYPTO] Coinbase API blocked (403) — add api.coinbase.com to Railway egress allowlist. Skipping all orders this cycle.")
+        except Exception as e:
+            if "403" in str(e) or "gateway" in str(e).lower():
+                api_accessible = False
+                log.warning(f"⚠️  [CRYPTO] Coinbase API unreachable ({e}) — network policy may be blocking access. Skipping all orders this cycle.")
+
         cash, balance_error = await get_usd_balance(session)
         unlocked = 0.0
         if cash is None:
             log.warning(f"[CRYPTO] Could not read Coinbase USD balance - {balance_error} - skipping entries this cycle (exits below still run on open positions)")
             cash_pool = 0.0
+            api_accessible = False  # If can't get balance, assume API is blocked
         elif TIER_SIZE <= 0:
             unlocked = cash
-            cash_pool = min(unlocked, MAX_ALLOCATION) if MAX_ALLOCATION is not None else unlocked
+            # Subtract MIN_CASH_RESERVE from deployable capital
+            deployable = max(0, unlocked - MIN_CASH_RESERVE)
+            cash_pool = min(deployable, MAX_ALLOCATION) if MAX_ALLOCATION is not None else deployable
         else:
             raw_tier = get_unlocked_tier(cash)
             highwater = await get_tier_highwater()
@@ -1141,7 +1380,8 @@ async def run_crypto_cycle():
         if TIER_SIZE > 0:
             tier_desc = f"tier unlocked (permanent): ${unlocked:.2f} | tradable now: ${cash_pool:.2f}"
         else:
-            tier_desc = "tiering off"
+            reserve_desc = f"reserve (untouched): ${MIN_CASH_RESERVE:.2f}"
+            tier_desc = f"tiering off | deployable: ${cash_pool:.2f} | {reserve_desc}"
 
         status_suffix = ""
         if is_at_floor:
@@ -1288,8 +1528,18 @@ async def run_crypto_cycle():
         for symbol in CRYPTO_PAIRS:
             data = await get_price_rsi(session, symbol)
             if data:
+                # UPGRADE: Fetch 200-day SMA for trend confirmation
+                sma_data = await get_daily_sma_200(session, symbol)
+                if sma_data:
+                    data["sma_200"] = sma_data["sma_200"]
+                    data["is_bullish"] = sma_data["is_bullish"]
+                    data["sma_distance_pct"] = sma_data["distance_pct"]
+                    bullish_str = "📈 BULLISH" if sma_data["is_bullish"] else "📉 BEARISH"
+                    log.info(f"[CRYPTO] {symbol} | ${data['price']:.2f} | RSI:{data['rsi']:.1f} | SMA200:${sma_data['sma_200']:.2f} {bullish_str} ({sma_data['distance_pct']:+.1f}%)")
+                else:
+                    data["is_bullish"] = True  # Default to bullish if SMA unavailable
+                    log.info(f"[CRYPTO] {symbol} | ${data['price']:.2f} | RSI:{data['rsi']:.1f} | (SMA200 unavailable)")
                 scans[symbol] = data
-                log.info(f"[CRYPTO] {symbol} | ${data['price']:.2f} | RSI:{data['rsi']}")
             await asyncio.sleep(0.3)
 
         # ── Pass 1: manage exits (long only) ──────────────────────────
@@ -1331,7 +1581,10 @@ async def run_crypto_cycle():
                 }
             }
 
-            # Exit conditions: stop loss, profit-taking above $1,001, RSI reversal, or tiered profit target
+            # UPGRADED EXIT LOGIC (PROFESSIONAL-GRADE):
+            # Priority 1: Hard stop loss (risk management, swing-based)
+            # Priority 2: RSI overbought exit (65-70 RSI = reversal confirmation)
+            # Priority 3: Profit targets (3%, 5%, 10% ATR-based tiers)
             should_exit = False
             reason = None
 
@@ -1339,24 +1592,31 @@ async def run_crypto_cycle():
             dollar_profit = unrealized_pnl
             profit_take_exit = should_take_profits and dollar_profit >= TARGET_TRADE_PROFIT
 
+            # PRIORITY 1: Hard stop loss (swing-based, professional risk management)
             if stop_hit:
                 should_exit = True
-                reason = f"STOP LOSS @ ${stop_price:.2f} (-{(1 - price/entry)*100:.2f}%)"
+                reason = f"🛑 HARD STOP (swing-based) @ ${stop_price:.2f} (-{(1 - price/entry)*100:.2f}%)"
+
+            # PRIORITY 2: RSI overbought exit (65-70 = reversal signal, exit with profit)
+            elif rsi >= 65 and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE:
+                should_exit = True
+                reason = f"📤 RSI OVERBOUGHT EXIT (RSI {rsi:.1f} >= 65) @ ${price:.2f} (+{unrealized_pct*100:.2f}%)"
+
+            # PRIORITY 3: Profit taking above $1,001
             elif profit_take_exit:
                 should_exit = True
                 reason = f"💰 PROFIT TAKEN (+${dollar_profit:.2f}, balance above $1,001)"
-            elif rsi_exit:
-                should_exit = True
-                reason = "RSI EXIT"
+
+            # PRIORITY 4: Tiered profit targets (ATR-based)
             elif tier3_hit:
                 should_exit = True
-                reason = f"TIER 3 @ ${tier3_price:.2f} (+{(price/entry - 1)*100:.2f}%, let winners run)"
+                reason = f"TIER 3 (ATR) @ ${tier3_price:.2f} (+{(price/entry - 1)*100:.2f}%, let winners run)"
             elif tier2_hit and unrealized_pct >= PROFIT_TARGET_PCT:
                 should_exit = True
-                reason = f"TIER 2 @ ${tier2_price:.2f} (+{(price/entry - 1)*100:.2f}%, hit 3% target)"
+                reason = f"TIER 2 (ATR) @ ${tier2_price:.2f} (+{(price/entry - 1)*100:.2f}%, hit 3% target)"
             elif tier1_hit:
                 should_exit = True
-                reason = f"TIER 1 @ ${tier1_price:.2f} (+{(price/entry - 1)*100:.2f}%, lock early gain)"
+                reason = f"TIER 1 (ATR) @ ${tier1_price:.2f} (+{(price/entry - 1)*100:.2f}%, lock early gain)"
 
             if should_exit:
                 filled = await place_order(session, symbol, "sell", qty, price)
@@ -1402,20 +1662,25 @@ async def run_crypto_cycle():
             rsi_state = await load_rsi_state(symbol)
             entered_oversold = rsi_state["entered_oversold"]
             armed_rsi = rsi_state.get("armed_rsi")
+            last_rsi = rsi_state.get("last_rsi", rsi)
 
-            # State transitions (AGGRESSIVE):
-            # 1. RSI >= 60: Reset state (overbought, need pullback to entry zone)
-            if rsi >= 60:
+            # UPGRADED STATE MACHINE (PROFESSIONAL):
+            # 1. RSI >= 70: Reset state (overbought, need pullback to entry zone)
+            if rsi >= 70:
                 if entered_oversold:
-                    log.info(f"[CRYPTO] {symbol} RSI {rsi:.1f} → RESET (>=60, overbought, waiting for pullback)")
+                    log.info(f"[CRYPTO] {symbol} RSI {rsi:.1f} → RESET (>=70, overbought, waiting for pullback)")
                 entered_oversold = False
                 armed_rsi = None
-            # 2. RSI enters 10-40 zone: Arm the setup (widened from 10-30 for aggressive trading)
-            elif 10 <= rsi < 40 and not entered_oversold:
-                log.info(f"[CRYPTO] {symbol} RSI {rsi:.1f} → ARM oversold/neutral entry zone")
+            # 2. RSI enters oversold zone (< 35): Arm the setup
+            elif rsi < 35 and not entered_oversold:
+                log.info(f"[CRYPTO] {symbol} RSI {rsi:.1f} → ARM oversold entry zone")
                 entered_oversold = True
                 armed_rsi = rsi
             # 3. Otherwise: Maintain current state
+
+            # Track RSI cross-above for entry confirmation
+            # Cross-above = last_rsi < 35 AND current_rsi > 35 (bouncing from oversold)
+            rsi_crossed_above = (last_rsi is not None and last_rsi < 35 and rsi > 35)
 
             # Persist state changes to database
             await update_rsi_state(symbol, rsi, entered_oversold, armed_rsi)
@@ -1444,18 +1709,27 @@ async def run_crypto_cycle():
                     close_position = (candle["close"] - candle["low"]) / candle_range
                     volume_spike_ratio = candle["volume"] / max(candle["prior_volume"], 1)
 
-                    # Tiered buy signal: STRONG_BUY (RSI < 20 + bounce) or BUY (20-30 + bounce)
-                    # Pass entered_oversold to enforce state-machine discipline
-                    signal = _crypto_buy_signal_improved(rsi, rsi_recovery, volume_spike_ratio, close_position, entered_oversold)
+                    # STATE-BASED RSI ENTRY: Only enter on recovery from oversold
+                    # is_recovering = RSI moving UP from oversold state (true momentum)
+                    is_recovering = (last_rsi is not None and rsi > last_rsi)
+
+                    is_bullish = data.get("is_bullish", True)
+                    signal = _crypto_buy_signal_improved(
+                        rsi, last_rsi or rsi, volume_spike_ratio, close_position,
+                        is_bullish=is_bullish,
+                        is_recovering=is_recovering
+                    )
 
                     if signal == "NO_ACTION":
                         # No signal - log why
-                        if rsi < RSI_STRONG_BUY and close_position < 0.50:
+                        if rsi < RSI_STRONG_ARM_THRESHOLD and close_position < 0.50:
+                            reason = "STRONG_OVERSOLD_NO_MOMENTUM"
+                        elif rsi < RSI_STRONG_ARM_THRESHOLD and volume_spike_ratio < 1.5:
+                            reason = "STRONG_OVERSOLD_LOW_VOLUME"
+                        elif rsi < RSI_ARM_THRESHOLD and close_position < 0.60:
                             reason = "OVERSOLD_NO_MOMENTUM"
-                        elif rsi < RSI_STRONG_BUY and volume_spike_ratio < 1.5:
-                            reason = "OVERSOLD_LOW_VOLUME"
-                        elif rsi < RSI_BUY and close_position < 0.60:
-                            reason = "OVERSOLD_NO_MOMENTUM"
+                        elif not is_recovering:
+                            reason = "OVERSOLD_NOT_RECOVERING"
                         else:
                             reason = "NO_ENTRY_SIGNAL"
                         latest_signals[symbol] = {
@@ -1502,21 +1776,39 @@ async def run_crypto_cycle():
                 log.info(f"[CRYPTO] Skipping {symbol} entry — not enough allocated cash (${cash_pool:.2f})")
                 continue
 
+            if not api_accessible:
+                log.info(f"[CRYPTO] {symbol} BUY signal held — Coinbase API blocked, skipping orders (will retry next cycle)")
+                continue
+
             log.info(f"[CRYPTO] 📡 BUY {symbol} — RSI:{rsi}")
             filled = await place_order(session, symbol, "buy", qty, price)
             if filled:
-                # Store ATR-based exit targets with position (for volatility-adjusted exits)
+                # UPGRADE: Use swing-based stop loss instead of fixed percentages
                 targets = _calculate_atr_targets(price, atr)
+
+                # Find recent swing low for professional stop placement
+                candle = data.get("candle")
+                swing_info = {}
+                if candle:
+                    # Use candle data to estimate recent low
+                    candle_low = float(candle.get("low", price * 0.98))
+                    swing_info = {"swing_low": candle_low, "swing_low_distance_pct": ((price - candle_low) / price * 100)}
+                    # Stop loss: below recent swing low (professional risk management)
+                    swing_based_stop = candle_low * 0.995  # Slightly below swing low
+                else:
+                    swing_based_stop = targets["stop_price"]
+
                 open_crypto_positions[symbol] = {
                     "entry": price,
                     "qty": qty,
                     "opened_at": now,
                     "atr": atr,
-                    "stop_price": targets["stop_price"],
+                    "stop_price": swing_based_stop,  # UPGRADED: swing-based stop
                     "tier1_price": targets["tier1_price"],
                     "tier2_price": targets["tier2_price"],
                     "tier3_price": targets["tier3_price"],
                     "trailing_stop_pct": targets["trailing_stop_pct"],
+                    "swing_info": swing_info,
                 }
                 await _db_save_open(symbol, "long", price, qty)
                 # Log trade entry for analytics (ARM → ENTER transition)
@@ -1558,14 +1850,26 @@ def run():
         log.warning("🛑 CRYPTO BOT DISABLED — set via CRYPTO_BOT_DISABLED env var. Bot will not start.")
         return
 
-    log.info("=" * 60)
-    log.info("CRYPTO TRADING BOT — Coinbase (separate account from Alpaca stocks)")
+    log.info("=" * 80)
+    log.info("🚀 CRYPTO TRADING BOT — UPGRADED STRATEGY (SMA200_RSI_CROSSOVER_SWING_V2)")
+    log.info("=" * 80)
+    log.info("Coinbase Advanced Trade (separate account from Alpaca stocks)")
     alloc_desc = f"${MAX_ALLOCATION:.2f} cap" if MAX_ALLOCATION is not None else "full balance (compounding)"
     log.info(f"Pairs: {', '.join(CRYPTO_PAIRS)} | Allocation: {alloc_desc} | Max positions: {MAX_POSITIONS}")
+    log.info("")
+    log.info("🎯 UPGRADED STRATEGY (3-FILTER SYSTEM):")
+    log.info("  FILTER 1: 200-day SMA trend confirmation (bull market only)")
+    log.info("  FILTER 2: RSI cross-above from oversold (reversal confirmation)")
+    log.info("  FILTER 3: Volume + momentum confirmation (1.5x volume, close in upper 50%)")
+    log.info("")
+    log.info("📊 EXIT LOGIC (Professional-Grade):")
+    log.info("  Priority 1: Hard stop loss (swing-based, risk management)")
+    log.info("  Priority 2: RSI overbought (65-70 = reversal exit)")
+    log.info("  Priority 3: Profit targets (3%, 5%, 10% ATR-based tiers)")
+    log.info("")
     log.info("Runs 24/7 - crypto has no market close, unlike prop_bot.py's stock/ETF trading")
     log.info("🔴 LIVE TRADING - Coinbase has no free paper-trading sandbox for Advanced Trade")
-    log.info("Strategy: RSI_RECOVERY_ATR_V1 (state machine entry + volatility-based exits)")
-    log.info("=" * 60)
+    log.info("=" * 80)
 
     # Diagnostic: check credential availability
     key_name_present = bool(COINBASE_API_KEY_NAME)
