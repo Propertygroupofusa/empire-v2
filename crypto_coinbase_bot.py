@@ -1006,9 +1006,9 @@ async def place_order(session, symbol, side, qty, price, skip_on_network_error=F
 
     if side == "buy":
         # Market order: immediate entry at market price (IOC = Immediate or Cancel)
-        # Coinbase API expects: market_market_ioc with quote_size (USD amount to spend)
+        # Coinbase API expects: market_ioc with quote_size (USD amount to spend)
         order_config = {
-            "market_market_ioc": {
+            "market_ioc": {
                 "quote_size": f"{qty * price:.2f}"
             }
         }
