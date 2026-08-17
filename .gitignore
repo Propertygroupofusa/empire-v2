@@ -10,6 +10,11 @@ video_uploads/
 video_temp/
 video_exports/
 
+# Generated video files (test videos, exports)
+*.mp4
+*.mov
+*.avi
+
 # Video editor frontend
 video-editor/node_modules/
 video-editor/build/
