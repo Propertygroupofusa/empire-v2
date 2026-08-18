@@ -42,16 +42,19 @@ async def simulate_payout_processing():
 
         processed = 0
         for payment in pending_payments:
-            # Simulate Stripe payout creation
-            fake_stripe_id = f"po_{uuid.uuid4().hex[:16]}"
+            # Simulate Stripe transfer creation (uses stripe_transfer_id, not stripe_payout_id)
+            # stripe_transfer_id is used for Stripe Connect transfers to connected accounts
+            # stripe_payout_id is used for bank payouts - use transfer_id consistently
+            fake_stripe_id = f"tr_{uuid.uuid4().hex[:16]}"
 
             print(f"Payment: ${payment.worker_amount:.2f}")
             print(f"  Status: pending → processing → paid")
-            print(f"  Stripe ID: {fake_stripe_id}")
+            print(f"  Stripe Transfer ID: {fake_stripe_id}")
 
-            # Update payment status (simulating successful Stripe payout)
+            # Update payment status (simulating successful Stripe transfer)
+            # CRITICAL: Use stripe_transfer_id (Stripe Connect) not stripe_payout_id
             payment.payout_status = "paid"
-            payment.stripe_payout_id = fake_stripe_id
+            payment.stripe_transfer_id = fake_stripe_id
             payment.paid_at = datetime.utcnow()
 
             await session.commit()
