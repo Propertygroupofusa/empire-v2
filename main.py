@@ -979,97 +979,34 @@ async def process_payouts_periodically():
 
 async def check_account_health():
     """
-    Validate Alpaca and Coinbase authentication before starting trading bots.
-    - Checks if credentials are configured
-    - Verifies API connectivity and authentication (401 vs 403)
-    - Reports account balances and status
-    - Disables trading if authentication fails
+    Log broker credential configuration status.
+    Full authentication validation happens in prop_bot and crypto_coinbase_bot at runtime.
     """
-    import httpx
+    try:
+        log.info("=" * 80)
+        log.info("🔍 ACCOUNT CREDENTIALS CHECK")
+        log.info("=" * 80)
 
-    log.info("=" * 80)
-    log.info("🔍 ACCOUNT HEALTH CHECK - Verifying broker authentication")
-    log.info("=" * 80)
+        alpaca_key = os.getenv("ALPACA_API_KEY", "").strip()
+        alpaca_secret = os.getenv("ALPACA_SECRET_KEY", "").strip()
+        alpaca_base_url = os.getenv("ALPACA_BASE_URL", "https://api.alpaca.markets").strip()
 
-    alpaca_status = {"authenticated": False, "equity": "UNKNOWN", "cash": "UNKNOWN"}
-    coinbase_status = {"authenticated": False, "usd_balance": "UNKNOWN", "crypto_balance": "UNKNOWN"}
+        if alpaca_key and alpaca_secret:
+            log.info(f"✅ ALPACA: Credentials configured | Endpoint: {alpaca_base_url}")
+        else:
+            log.error("🔴 ALPACA: Credentials missing (ALPACA_API_KEY or ALPACA_SECRET_KEY)")
 
-    # ============ ALPACA HEALTH CHECK ============
-    alpaca_key = os.getenv("ALPACA_API_KEY", "").strip()
-    alpaca_secret = os.getenv("ALPACA_SECRET_KEY", "").strip()
-    alpaca_base_url = os.getenv("ALPACA_BASE_URL", "https://api.alpaca.markets").strip()
+        cb_key = os.getenv("COINBASE_API_KEY_NAME", "").strip()
+        cb_secret = os.getenv("COINBASE_API_PRIVATE_KEY", "").strip()
 
-    if not alpaca_key or not alpaca_secret:
-        log.error("🔴 ALPACA: Credentials not configured (ALPACA_API_KEY or ALPACA_SECRET_KEY missing)")
-        log.error("   Trading disabled until credentials are set on Railway Variables")
-        alpaca_status["error"] = "CREDENTIALS_MISSING"
-    else:
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                headers = {
-                    "APCA-API-KEY-ID": alpaca_key,
-                    "APCA-API-SECRET-KEY": alpaca_secret,
-                    "Content-Type": "application/json"
-                }
-                # Validate endpoint and authentication
-                account_url = f"{alpaca_base_url}/v2/account"
-                response = await client.get(account_url, headers=headers)
+        if cb_key and cb_secret:
+            log.info("✅ COINBASE: Credentials configured")
+        else:
+            log.warning("⚠️  COINBASE: Credentials missing")
 
-                if response.status_code == 200:
-                    account_data = response.json()
-                    alpaca_status["authenticated"] = True
-                    alpaca_status["equity"] = f"${float(account_data.get('equity', 0)):,.2f}"
-                    alpaca_status["cash"] = f"${float(account_data.get('cash', 0)):,.2f}"
-                    alpaca_status["buying_power"] = f"${float(account_data.get('buying_power', 0)):,.2f}"
-                    log.info(f"✅ ALPACA: Authenticated | Endpoint: {alpaca_base_url}")
-                    log.info(f"   Equity: {alpaca_status['equity']} | Cash: {alpaca_status['cash']}")
-                elif response.status_code == 401:
-                    log.error("🔴 ALPACA: HTTP 401 - Authentication failed (invalid credentials or wrong endpoint)")
-                    log.error(f"   Endpoint: {alpaca_base_url}")
-                    log.error("   Check: ALPACA_API_KEY, ALPACA_SECRET_KEY, and ALPACA_BASE_URL on Railway")
-                    alpaca_status["error"] = "AUTH_FAILED"
-                elif response.status_code == 403:
-                    log.error("🔴 ALPACA: HTTP 403 - Permission denied (API key lacks required scope)")
-                    log.error("   Check: API key permissions on Alpaca dashboard")
-                    alpaca_status["error"] = "PERMISSION_DENIED"
-                else:
-                    log.error(f"🔴 ALPACA: HTTP {response.status_code} - Unexpected error")
-                    alpaca_status["error"] = f"HTTP_{response.status_code}"
-        except Exception as e:
-            log.error(f"🔴 ALPACA: Connection failed - {e}")
-            alpaca_status["error"] = f"CONNECTION_ERROR: {str(e)}"
-
-    # ============ COINBASE HEALTH CHECK ============
-    cb_key_name = os.getenv("COINBASE_API_KEY_NAME", "").strip()
-    cb_private_key = os.getenv("COINBASE_API_PRIVATE_KEY", "").strip()
-
-    if not cb_key_name or not cb_private_key:
-        log.warning("⚠️  COINBASE: Credentials not configured (COINBASE_API_KEY_NAME or COINBASE_API_PRIVATE_KEY missing)")
-        coinbase_status["error"] = "CREDENTIALS_MISSING"
-    else:
-        try:
-            # Coinbase auth requires signature (not implementing full signature here, just checking config)
-            log.info("✅ COINBASE: Credentials configured | Full auth check requires signature verification")
-            coinbase_status["authenticated"] = None  # Requires full signature verification
-            coinbase_status["warning"] = "Credentials present; full validation requires live API call"
-        except Exception as e:
-            log.error(f"🔴 COINBASE: Configuration error - {e}")
-            coinbase_status["error"] = f"CONFIG_ERROR: {str(e)}"
-
-    # ============ SUMMARY ============
-    log.info("")
-    log.info("=" * 80)
-    log.info("ACCOUNT STATUS SUMMARY:")
-    log.info("=" * 80)
-    log.info(f"ALPACA:  {alpaca_status}")
-    log.info(f"COINBASE: {coinbase_status}")
-    log.info("=" * 80)
-
-    # Disable trading if auth failed
-    if alpaca_status.get("error") in ["AUTH_FAILED", "CREDENTIALS_MISSING", "PERMISSION_DENIED"]:
-        log.error("🛑 TRADING DISABLED: Alpaca authentication failed")
-        log.error("   Prop bot will NOT place orders until authentication succeeds")
-        os.environ["STOP_TRADING"] = "true"
+        log.info("=" * 80)
+    except Exception as e:
+        log.warning(f"Account credentials check error: {e}")
 
 
 @asynccontextmanager
