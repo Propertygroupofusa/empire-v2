@@ -61,6 +61,9 @@ from models import BotPosition, TradingBotState, CryptoRSIState, CryptoTradeLog,
 from bot_mandates import CRYPTO_MANDATE
 from network_config import get_cached_response, cache_response, NETWORK_ENV_CONFIG
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("crypto_coinbase_bot")
+
 # Measurement system: Trade logging with full signal context
 try:
     from measurement_system import SignalContext, TradeLog, trade_logger, StatisticalAnalyzer
@@ -68,9 +71,6 @@ try:
 except ImportError:
     MEASUREMENT_AVAILABLE = False
     log.warning("measurement_system not available - trade logging disabled")
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("crypto_coinbase_bot")
 
 # Network resilience cache — stores price data for 30min when API unavailable
 PRICE_CACHE = {}  # {symbol: {"price": float, "rsi": float, "atr": float, "timestamp": datetime}}
