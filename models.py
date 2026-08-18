@@ -17,6 +17,10 @@ class User(Base):
     is_active = Column(Boolean, default=True, index=True)
     is_verified = Column(Boolean, default=False)
     verification_code = Column(String, nullable=True)
+    # GitHub OAuth integration
+    github_id = Column(Integer, nullable=True, unique=True, index=True)
+    github_username = Column(String, nullable=True, index=True)
+    github_access_token = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
