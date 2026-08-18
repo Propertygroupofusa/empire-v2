@@ -1191,11 +1191,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Retention manager failed: {e}")
 
-    # ACCOUNT HEALTH CHECK: Validate broker credentials before starting trading
+    # ACCOUNT HEALTH CHECK: Validate broker credentials (non-blocking background task)
     try:
-        await check_account_health()
+        asyncio.create_task(check_account_health())
+        log.info("🔍 Account health check started (background task)")
     except Exception as e:
-        log.error(f"Account health check failed during startup: {e}")
+        log.error(f"Account health check failed to start: {e}")
 
     try:
         if prop_bot_module is not None:
