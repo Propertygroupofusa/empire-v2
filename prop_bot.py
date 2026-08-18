@@ -1268,6 +1268,26 @@ async def record_daily_earnings(pnl_amount):
         log.error(f"[APEX_589296] Failed to record daily earnings: {e}")
 
 
+def check_credentials():
+    """Verify Alpaca API credentials are configured before starting."""
+    api_key = os.getenv("ALPACA_API_KEY", "").strip()
+    secret_key = os.getenv("ALPACA_SECRET_KEY", "").strip()
+    base_url = os.getenv("ALPACA_BASE_URL", "https://api.alpaca.markets")
+
+    if not api_key or not secret_key:
+        log.error("❌ ALPACA CREDENTIALS NOT SET")
+        log.error("   ALPACA_API_KEY is missing or empty")
+        log.error("   ALPACA_SECRET_KEY is missing or empty")
+        log.error("   Bot will NOT be able to authenticate to Alpaca")
+        log.error("   Set these in Railway Variables and redeploy")
+        return False
+
+    log.info(f"✅ Credentials configured")
+    log.info(f"   API Key (first 10 chars): {api_key[:10]}...")
+    log.info(f"   Base URL: {base_url}")
+    return True
+
+
 def run():
     log.info("=" * 60)
     log.info("DEL'S TRADING EMPIRE — PROP BOT v3")
@@ -1275,6 +1295,16 @@ def run():
     log.info(f"RSI thresholds: long entry < {RSI_BUY_BELOW} | short entry > {RSI_SELL_ABOVE} (trades both directions)")
     log.info(f"Profitable days: {len(profitable_days)}/7 needed")
     log.info("=" * 60)
+
+    # Verify credentials before starting
+    if not check_credentials():
+        log.error("⚠️  STARTUP BLOCKED - Credentials not configured")
+        log.error("   Waiting for manual credential setup...")
+        while True:
+            time.sleep(60)
+            if os.getenv("ALPACA_API_KEY", "").strip() and os.getenv("ALPACA_SECRET_KEY", "").strip():
+                log.info("✅ Credentials detected! Restarting bot...")
+                break
 
     try:
         asyncio.run(load_open_positions())
