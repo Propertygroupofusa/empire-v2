@@ -977,38 +977,6 @@ async def process_payouts_periodically():
         log.warning(f"Payout processor error: {e}")
 
 
-async def check_account_health():
-    """
-    Log broker credential configuration status.
-    Full authentication validation happens in prop_bot and crypto_coinbase_bot at runtime.
-    """
-    try:
-        log.info("=" * 80)
-        log.info("🔍 ACCOUNT CREDENTIALS CHECK")
-        log.info("=" * 80)
-
-        alpaca_key = os.getenv("ALPACA_API_KEY", "").strip()
-        alpaca_secret = os.getenv("ALPACA_SECRET_KEY", "").strip()
-        alpaca_base_url = os.getenv("ALPACA_BASE_URL", "https://api.alpaca.markets").strip()
-
-        if alpaca_key and alpaca_secret:
-            log.info(f"✅ ALPACA: Credentials configured | Endpoint: {alpaca_base_url}")
-        else:
-            log.error("🔴 ALPACA: Credentials missing (ALPACA_API_KEY or ALPACA_SECRET_KEY)")
-
-        cb_key = os.getenv("COINBASE_API_KEY_NAME", "").strip()
-        cb_secret = os.getenv("COINBASE_API_PRIVATE_KEY", "").strip()
-
-        if cb_key and cb_secret:
-            log.info("✅ COINBASE: Credentials configured")
-        else:
-            log.warning("⚠️  COINBASE: Credentials missing")
-
-        log.info("=" * 80)
-    except Exception as e:
-        log.warning(f"Account credentials check error: {e}")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import asyncio
@@ -1127,13 +1095,6 @@ async def lifespan(app: FastAPI):
             log.info("💾 Data Retention Manager initialized - ALL DATA KEPT FOREVER")
     except Exception as e:
         log.warning(f"Retention manager failed: {e}")
-
-    # ACCOUNT HEALTH CHECK: Validate broker credentials (non-blocking background task)
-    try:
-        asyncio.create_task(check_account_health())
-        log.info("🔍 Account health check started (background task)")
-    except Exception as e:
-        log.error(f"Account health check failed to start: {e}")
 
     try:
         if prop_bot_module is not None:
