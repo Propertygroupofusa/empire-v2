@@ -173,6 +173,13 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import alpaca_swing_bot: {e}")
 
+congress_trading_bot_module = None
+try:
+    import congress_trading_bot
+    congress_trading_bot_module = congress_trading_bot
+except Exception as e:
+    logging.warning(f"Failed to import congress_trading_bot: {e}")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pgusa")
 
@@ -1146,6 +1153,18 @@ async def lifespan(app: FastAPI):
             log.warning("⚠️ alpaca_swing_bot module failed to import - bot will not run")
     except Exception as e:
         log.error(f"🛑 Alpaca Swing bot startup failed: {e}")
+
+    try:
+        if congress_trading_bot_module is not None:
+            import threading
+            log.info("🏛️ Starting Congressional Trading bot daemon thread...")
+            congress_thread = threading.Thread(target=congress_trading_bot_module.run, daemon=True)
+            congress_thread.start()
+            log.info("✅ Congressional Trading bot started | Mirrors insider trades | Bullish congress activity")
+        else:
+            log.warning("⚠️ congress_trading_bot module not available")
+    except Exception as e:
+        log.error(f"🛑 Congressional Trading bot startup failed: {e}")
 
     # bot_2_crypto_scalper.py retired: it traded crypto (BTC/ETH/SOL/AVAX/
     # DOGE/LINK) through Alpaca using the same ALPACA_API_KEY as prop_bot.py
