@@ -1103,16 +1103,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Retention manager failed: {e}")
 
-    try:
-        if prop_bot_module is not None:
-            import threading
-            mode = "LIVE" if os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true" else "PAPER"
-            stopped = os.getenv("STOP_TRADING", "false").lower() == "true"
-            threading.Thread(target=prop_bot_module.run, daemon=True).start()
-            log.info(f"📈 Prop bot started (background thread) | Mode: {mode} | STOP_TRADING: {stopped}")
-            log.info("💰 Strategy: Market hours stock scalping + 24/7 crypto = constant opportunities and taking profits")
-    except Exception as e:
-        log.warning(f"Prop bot failed to start: {e}")
+    # DISABLED: Prop bot - until real money trading is configured
+    # try:
+    #     if prop_bot_module is not None:
+    #         import threading
+    #         mode = "LIVE" if os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true" else "PAPER"
+    #         stopped = os.getenv("STOP_TRADING", "false").lower() == "true"
+    #         threading.Thread(target=prop_bot_module.run, daemon=True).start()
+    #         log.info(f"📈 Prop bot started (background thread) | Mode: {mode} | STOP_TRADING: {stopped}")
+    #         log.info("💰 Strategy: Market hours stock scalping + 24/7 crypto = constant opportunities and taking profits")
+    # except Exception as e:
+    #     log.warning(f"Prop bot failed to start: {e}")
+    log.info("⏸️  Prop bot DISABLED - awaiting real money trading configuration")
 
     try:
         if notary_bot_module is not None:
@@ -1122,30 +1124,34 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Notary bot failed to start: {e}")
 
-    try:
-        if crypto_coinbase_bot_module is not None:
-            import threading
-            log.info("📡 Starting Crypto (Coinbase) bot daemon thread...")
-            bot_thread = threading.Thread(target=crypto_coinbase_bot_module.run, daemon=True)
-            bot_thread.start()
-            log.info("✓ Crypto (Coinbase) bot thread started | 28 pairs × 12 positions | 24/7 trading | Capital: $700 USD")
-            log.info("💰 Strategy: 24/7 crypto + market hours stock scalping = constant opportunities and taking profits")
-        else:
-            log.warning("⚠️ crypto_coinbase_bot module failed to import - bot will not run")
-    except Exception as e:
-        log.error(f"🛑 Crypto (Coinbase) bot thread startup failed: {e}")
+    # DISABLED: Crypto (Coinbase) bot - until real money trading is configured
+    # try:
+    #     if crypto_coinbase_bot_module is not None:
+    #         import threading
+    #         log.info("📡 Starting Crypto (Coinbase) bot daemon thread...")
+    #         bot_thread = threading.Thread(target=crypto_coinbase_bot_module.run, daemon=True)
+    #         bot_thread.start()
+    #         log.info("✓ Crypto (Coinbase) bot thread started | 28 pairs × 12 positions | 24/7 trading | Capital: $700 USD")
+    #         log.info("💰 Strategy: 24/7 crypto + market hours stock scalping = constant opportunities and taking profits")
+    #     else:
+    #         log.warning("⚠️ crypto_coinbase_bot module failed to import - bot will not run")
+    # except Exception as e:
+    #     log.error(f"🛑 Crypto (Coinbase) bot thread startup failed: {e}")
+    log.info("⏸️  Crypto (Coinbase) bot DISABLED - awaiting real money trading configuration")
 
-    try:
-        if alpaca_swing_bot_module is not None:
-            import threading
-            log.info("🌊 Starting Alpaca Swing bot daemon thread...")
-            swing_bot_thread = threading.Thread(target=alpaca_swing_bot_module.run, daemon=True)
-            swing_bot_thread.start()
-            log.info("✅ Alpaca Swing bot started | Weekly RSI < 30 entries | 5-10 day holds | Indices + Commodities")
-        else:
-            log.warning("⚠️ alpaca_swing_bot module failed to import - bot will not run")
-    except Exception as e:
-        log.error(f"🛑 Alpaca Swing bot startup failed: {e}")
+    # DISABLED: Alpaca Swing bot - until real money trading is configured
+    # try:
+    #     if alpaca_swing_bot_module is not None:
+    #         import threading
+    #         log.info("🌊 Starting Alpaca Swing bot daemon thread...")
+    #         swing_bot_thread = threading.Thread(target=alpaca_swing_bot_module.run, daemon=True)
+    #         swing_bot_thread.start()
+    #         log.info("✅ Alpaca Swing bot started | Weekly RSI < 30 entries | 5-10 day holds | Indices + Commodities")
+    #     else:
+    #         log.warning("⚠️ alpaca_swing_bot module failed to import - bot will not run")
+    # except Exception as e:
+    #     log.error(f"🛑 Alpaca Swing bot startup failed: {e}")
+    log.info("⏸️  Alpaca Swing bot DISABLED - awaiting real money trading configuration")
 
     # bot_2_crypto_scalper.py retired: it traded crypto (BTC/ETH/SOL/AVAX/
     # DOGE/LINK) through Alpaca using the same ALPACA_API_KEY as prop_bot.py
