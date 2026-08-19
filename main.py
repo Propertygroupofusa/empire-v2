@@ -187,6 +187,13 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import tim_moore_copytrader: {e}")
 
+discord_signal_receiver = None
+try:
+    import discord_signal_receiver
+    discord_signal_receiver = discord_signal_receiver
+except Exception as e:
+    logging.warning(f"Failed to import discord_signal_receiver: {e}")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pgusa")
 
@@ -1185,6 +1192,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.error(f"🛑 Tim Moore Copy Trader startup failed: {e}")
 
+    try:
+        if discord_signal_receiver is not None:
+            await discord_signal_receiver.start_discord_signal_receiver()
+            log.info("✅ Discord Signal Receiver initialized | Endpoint: /discord/signal | Status: /discord/status")
+        else:
+            log.warning("⚠️ discord_signal_receiver module not available")
+    except Exception as e:
+        log.error(f"🛑 Discord Signal Receiver startup failed: {e}")
+
     # bot_2_crypto_scalper.py retired: it traded crypto (BTC/ETH/SOL/AVAX/
     # DOGE/LINK) through Alpaca using the same ALPACA_API_KEY as prop_bot.py
     # trades stocks with - but Alpaca crypto is blocked for this account's
@@ -1346,6 +1362,13 @@ try:
     log.info("✅ Router loaded: /trading/dashboard (real-time P&L tracking)")
 except Exception as e:
     log.warning(f"Failed to load trading dashboard router: {e}")
+
+try:
+    if discord_signal_receiver:
+        app.include_router(discord_signal_receiver.router, tags=["Discord Signals"])
+        log.info("✅ Router loaded: /discord/signal (Discord trading signal receiver)")
+except Exception as e:
+    log.warning(f"Failed to load Discord signal receiver: {e}")
 
 
 @app.get("/dashboard")
