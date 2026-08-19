@@ -1185,6 +1185,37 @@ async def lifespan(app: FastAPI):
     else:
         log.info("✅ Stripe payment system configured - video orders ready for payment")
 
+    # Initialize Hermes Agent (Phase 1)
+    try:
+        from hermes_agent import init_hermes, HermesAgentConfig
+        from telegram_integration import init_telegram, TelegramConfig
+        from status_reporter import init_status_reporter
+
+        hermes_config = HermesAgentConfig(
+            enabled=bool(os.getenv("HERMES_API_KEY")),
+            api_key=os.getenv("HERMES_API_KEY"),
+            model=os.getenv("HERMES_MODEL", "claude-opus"),
+        )
+
+        telegram_config = TelegramConfig(
+            enabled=bool(os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID")),
+            bot_token=os.getenv("TELEGRAM_BOT_TOKEN"),
+            chat_id=os.getenv("TELEGRAM_CHAT_ID"),
+        )
+
+        hermes = init_hermes(hermes_config)
+        telegram = init_telegram(telegram_config)
+        status_reporter = init_status_reporter(telegram)
+
+        if hermes.enabled:
+            log.info("🤖 Hermes Agent initialized - autonomous bot management active")
+        if telegram.enabled:
+            log.info("📱 Telegram integration ready - status reports will be sent to chat")
+        if not hermes.enabled and not telegram.enabled:
+            log.warning("⚠️ Hermes & Telegram disabled - configure HERMES_API_KEY and TELEGRAM_BOT_TOKEN to enable")
+    except Exception as e:
+        log.warning(f"Hermes Agent initialization failed: {e}")
+
     log.info("Platform startup complete")
     yield
     log.info("PGUSA Platform shutting down")
@@ -1993,6 +2024,198 @@ async def get_bot_status():
             }
         }
     }
+
+
+# ============================================================================
+# HERMES AGENT - PHASE 1 ENDPOINTS (Autonomous Bot Management)
+# ============================================================================
+
+@app.get("/hermes/status")
+async def hermes_status():
+    """Get current Hermes Agent status and configuration"""
+    from hermes_agent import get_hermes
+    from telegram_integration import get_telegram
+    from status_reporter import get_status_reporter
+
+    hermes = get_hermes()
+    telegram = get_telegram()
+    reporter = get_status_reporter()
+
+    if not hermes:
+        return {"error": "Hermes not initialized", "timestamp": datetime.utcnow().isoformat()}
+
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "hermes": hermes.get_config(),
+        "telegram": telegram.get_config() if telegram else None,
+        "reporter": reporter.get_statistics() if reporter else None,
+    }
+
+
+@app.post("/hermes/init-session")
+async def hermes_init_session(session_id: str):
+    """Initialize a new Hermes Agent session"""
+    from hermes_agent import get_hermes
+
+    hermes = get_hermes()
+    if not hermes or not hermes.enabled:
+        raise HTTPException(status_code=503, detail="Hermes not available")
+
+    try:
+        session = await hermes.initialize_session(session_id)
+        return {"status": "ok", "session": {
+            "session_id": session.session_id,
+            "status": session.status,
+            "started_at": session.started_at.isoformat(),
+        }}
+    except Exception as e:
+        log.error(f"Session init error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/telegram/health")
+async def telegram_health():
+    """Check Telegram bot connection status"""
+    from telegram_integration import get_telegram
+
+    telegram = get_telegram()
+    if not telegram:
+        return {"status": "not_initialized", "enabled": False}
+
+    return {
+        "status": "ok" if telegram.enabled else "disabled",
+        "enabled": telegram.enabled,
+        "chat_id": telegram.chat_id[:5] + "..." if telegram.chat_id else None,
+        "message_count": len(telegram.message_history),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@app.post("/telegram/send-test")
+async def telegram_send_test(message: str = "Test message from Hermes Agent 🤖"):
+    """Send a test message to Telegram"""
+    from telegram_integration import get_telegram
+
+    telegram = get_telegram()
+    if not telegram or not telegram.enabled:
+        raise HTTPException(status_code=503, detail="Telegram not available")
+
+    try:
+        success = await telegram.send_message(message, message_type="test")
+        return {"status": "ok" if success else "failed", "timestamp": datetime.utcnow().isoformat()}
+    except Exception as e:
+        log.error(f"Telegram send error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/bot/status/record")
+async def record_bot_status(
+    bot_name: str,
+    cash_available: float,
+    daily_pnl: float,
+    win_rate: float = 0.0,
+    trade_count: int = 0,
+    open_positions: dict = None,
+    errors: list = None,
+):
+    """Record trading bot status (called by bots)"""
+    from status_reporter import get_status_reporter
+    from database import AsyncSessionLocal
+    from models import BotStatus as BotStatusModel
+
+    open_positions = open_positions or {}
+    errors = errors or []
+    reporter = get_status_reporter()
+
+    if not reporter:
+        raise HTTPException(status_code=503, detail="Status reporter not initialized")
+
+    try:
+        # Record in reporter
+        await reporter.record_bot_status(
+            bot_name=bot_name,
+            open_positions=open_positions,
+            cash_available=cash_available,
+            daily_pnl=daily_pnl,
+            win_rate=win_rate,
+            trade_count=trade_count,
+            errors=errors,
+        )
+
+        # Also persist to database
+        async with AsyncSessionLocal() as session:
+            db_status = BotStatusModel(
+                bot_name=bot_name,
+                timestamp=datetime.utcnow(),
+                cash_available=cash_available,
+                daily_pnl=daily_pnl,
+                win_rate=win_rate,
+                trade_count=trade_count,
+                open_positions_count=len(open_positions),
+                errors=errors,
+                metadata={"positions": open_positions},
+            )
+            session.add(db_status)
+            await session.commit()
+
+        return {"status": "recorded", "bot": bot_name, "timestamp": datetime.utcnow().isoformat()}
+    except Exception as e:
+        log.error(f"Status record error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/bot/status/latest")
+async def get_latest_bot_status(bot_name: str = None):
+    """Get latest status for a bot or all bots"""
+    from status_reporter import get_status_reporter
+
+    reporter = get_status_reporter()
+    if not reporter:
+        raise HTTPException(status_code=503, detail="Status reporter not initialized")
+
+    try:
+        if bot_name:
+            status = await reporter.get_bot_status(bot_name)
+            if not status:
+                raise HTTPException(status_code=404, detail=f"No status found for {bot_name}")
+            return {
+                "bot": bot_name,
+                "cash": status.cash_available,
+                "daily_pnl": status.daily_pnl,
+                "win_rate": status.win_rate,
+                "positions": len(status.open_positions),
+                "timestamp": status.timestamp.isoformat(),
+            }
+        else:
+            # Return summary for all bots
+            report = await reporter.generate_summary_report()
+            return report
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Status fetch error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/bot/status/report")
+async def send_bot_status_report(bot_name: str = None):
+    """Send status report to Telegram"""
+    from status_reporter import get_status_reporter
+
+    reporter = get_status_reporter()
+    if not reporter:
+        raise HTTPException(status_code=503, detail="Status reporter not initialized")
+
+    try:
+        success = await reporter.send_status_report(bot_name)
+        return {
+            "status": "sent" if success else "failed",
+            "bot": bot_name or "all",
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        log.error(f"Report send error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

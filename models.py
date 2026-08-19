@@ -1253,3 +1253,89 @@ class BankTransferLog(Base):
     status = Column(String, default="pending")  # pending, processing, completed, failed
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
     error_message = Column(Text, nullable=True)
+
+
+class HermesSession(Base):
+    """Tracks Hermes Agent sessions for autonomy management."""
+    __tablename__ = "hermes_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String, unique=True, index=True)
+    status = Column(String, default="active")  # active, idle, error, closed
+    started_at = Column(DateTime, default=datetime.utcnow, index=True)
+    last_activity = Column(DateTime, default=datetime.utcnow, index=True)
+    message_count = Column(Integer, default=0)
+    metadata = Column(JSON, nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "session_id": self.session_id,
+            "status": self.status,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "last_activity": self.last_activity.isoformat() if self.last_activity else None,
+            "message_count": self.message_count,
+            "closed_at": self.closed_at.isoformat() if self.closed_at else None,
+        }
+
+
+class TelegramMessage(Base):
+    """Audit trail for Telegram bot messages."""
+    __tablename__ = "telegram_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    chat_id = Column(String, index=True)
+    message_id = Column(String, nullable=True, index=True)
+    text = Column(Text)
+    message_type = Column(String, index=True)  # status, alert, command, report
+    status = Column(String, default="sent")  # sent, failed, pending
+    sent_at = Column(DateTime, default=datetime.utcnow, index=True)
+    metadata = Column(JSON, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "chat_id": self.chat_id,
+            "message_id": self.message_id,
+            "message_type": self.message_type,
+            "status": self.status,
+            "sent_at": self.sent_at.isoformat() if self.sent_at else None,
+        }
+
+
+class BotStatus(Base):
+    """Snapshots of trading bot performance metrics."""
+    __tablename__ = "bot_statuses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot_name = Column(String, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    cash_available = Column(Float)
+    daily_pnl = Column(Float)
+    weekly_pnl = Column(Float, default=0.0)
+    monthly_pnl = Column(Float, default=0.0)
+    win_rate = Column(Float, default=0.0)
+    trade_count = Column(Integer, default=0)
+    win_count = Column(Integer, default=0)
+    loss_count = Column(Integer, default=0)
+    avg_win = Column(Float, default=0.0)
+    avg_loss = Column(Float, default=0.0)
+    open_positions_count = Column(Integer, default=0)
+    errors = Column(JSON, nullable=True)  # List of error messages
+    metadata = Column(JSON, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "bot_name": self.bot_name,
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "cash_available": self.cash_available,
+            "daily_pnl": self.daily_pnl,
+            "weekly_pnl": self.weekly_pnl,
+            "monthly_pnl": self.monthly_pnl,
+            "win_rate": self.win_rate,
+            "trade_count": self.trade_count,
+            "win_count": self.win_count,
+            "loss_count": self.loss_count,
+        }
