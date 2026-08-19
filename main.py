@@ -1301,6 +1301,14 @@ try:
 except Exception as e:
     log.warning(f"Failed to load crypto analytics router: {e}")
 
+# Trading P&L Dashboard
+try:
+    from routers import trading_dashboard
+    app.include_router(trading_dashboard.router, tags=["Trading Dashboard"])
+    log.info("✅ Router loaded: /trading/dashboard (real-time P&L tracking)")
+except Exception as e:
+    log.warning(f"Failed to load trading dashboard router: {e}")
+
 
 @app.get("/dashboard")
 async def serve_dashboard():
