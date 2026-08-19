@@ -336,6 +336,12 @@ daily_usd_balance_start = None  # For daily 2% loss limit
 latest_signals = {}
 last_cycle_at = None
 
+# Hourly P&L tracking (1% hourly profit target = $4/hour on $400 capital)
+hourly_start_time = None  # Track when current hour started
+hourly_opening_balance = None  # Capital at start of hour
+hourly_pnl = 0.0  # Current hour's profit/loss
+HOURLY_PROFIT_TARGET = 4.0  # $4/hour target (1% of $400 starting capital)
+
 # RSI state cache: loaded once at startup, maintained in-memory during cycle, batch-flushed to DB at end
 # This removes database latency from the hot trading loop - 56 DB queries per cycle become 0
 RSI_STATE_CACHE = {}  # {symbol: {"entered_oversold": bool, "armed_rsi": float, "last_rsi": float, "changed": bool}}
@@ -1298,10 +1304,17 @@ async def run_crypto_cycle():
     BACKTEST BEFORE DEPLOYING: Old vs. New on 28 pairs, historical data
     ═════════════════════════════════════════════════════════════════════
     """
-    global daily_pnl, last_cycle_at
+    global daily_pnl, last_cycle_at, hourly_start_time, hourly_opening_balance, hourly_pnl
 
     now = datetime.now(timezone.utc)
     last_cycle_at = now.isoformat()
+
+    # Initialize hourly tracking on first cycle or when hour changes
+    if hourly_start_time is None or hourly_start_time.hour != now.hour:
+        hourly_start_time = now
+        hourly_opening_balance = None  # Will be set after balance is read
+        hourly_pnl = 0.0
+        log.info(f"[CRYPTO] 📅 New trading hour started: {now.strftime('%H:%M UTC')}")
     log.info(f"[CRYPTO] Scanning {', '.join(CRYPTO_PAIRS)} (24/7, no market-hours gate) | Daily P&L: ${daily_pnl:.2f}")
 
     connector = aiohttp.TCPConnector(use_dns_cache=True)
@@ -1326,6 +1339,20 @@ async def run_crypto_cycle():
             log.info(f"[CRYPTO] Using default starting capital: $400.00 (proceeding with trades)")
             cash = 400.0  # Default to starting capital when API fails
             api_accessible = False  # If can't get balance, assume API is blocked
+
+        # Initialize hourly opening balance (1st cycle of hour)
+        if hourly_opening_balance is None and cash is not None:
+            hourly_opening_balance = cash
+
+        # Calculate hourly P&L
+        if hourly_opening_balance is not None and cash is not None:
+            hourly_pnl = cash - hourly_opening_balance
+            hourly_pnl_pct = (hourly_pnl / hourly_opening_balance * 100) if hourly_opening_balance > 0 else 0.0
+            pct_of_target = (hourly_pnl / HOURLY_PROFIT_TARGET * 100) if HOURLY_PROFIT_TARGET > 0 else 0.0
+
+            # Log hourly P&L status
+            target_status = "✅ TARGET HIT" if hourly_pnl >= HOURLY_PROFIT_TARGET else f"{pct_of_target:.0f}% of target"
+            log.info(f"[CRYPTO] ⏱️  Hour P&L: ${hourly_pnl:+.2f} ({hourly_pnl_pct:+.2f}%) | {target_status}")
         elif TIER_SIZE <= 0:
             unlocked = cash
             # Subtract MIN_CASH_RESERVE from deployable capital
