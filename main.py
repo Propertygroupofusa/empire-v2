@@ -21,6 +21,8 @@ import asyncio
 import uvicorn
 import logging
 from dotenv import load_dotenv
+from pydantic import BaseModel
+from typing import Optional, Dict, Any, List
 
 # Load .env file to make credentials available to background bots
 load_dotenv(override=True)
@@ -35,6 +37,19 @@ except (ImportError, AssertionError) as e:
 
 from database import init_db, engine
 from initialize_bot_worker import initialize_bot_worker
+
+
+# Pydantic request models for Hermes Phase 1 endpoints
+class BotStatusRequest(BaseModel):
+    """Request model for recording bot status"""
+    bot_name: str
+    cash_available: float
+    daily_pnl: float
+    win_rate: float = 0.0
+    trade_count: int = 0
+    open_positions: Dict[str, Any] = {}
+    errors: List[str] = []
+
 
 # Load routers gracefully to prevent import errors from crashing startup
 routers_to_load = {
@@ -2109,22 +2124,12 @@ async def telegram_send_test(message: str = "Test message from Hermes Agent 🤖
 
 
 @app.post("/bot/status/record")
-async def record_bot_status(
-    bot_name: str,
-    cash_available: float,
-    daily_pnl: float,
-    win_rate: float = 0.0,
-    trade_count: int = 0,
-    open_positions: dict = None,
-    errors: list = None,
-):
+async def record_bot_status(request: BotStatusRequest):
     """Record trading bot status (called by bots)"""
     from status_reporter import get_status_reporter
     from database import AsyncSessionLocal
     from models import BotStatus as BotStatusModel
 
-    open_positions = open_positions or {}
-    errors = errors or []
     reporter = get_status_reporter()
 
     if not reporter:
@@ -2133,32 +2138,32 @@ async def record_bot_status(
     try:
         # Record in reporter
         await reporter.record_bot_status(
-            bot_name=bot_name,
-            open_positions=open_positions,
-            cash_available=cash_available,
-            daily_pnl=daily_pnl,
-            win_rate=win_rate,
-            trade_count=trade_count,
-            errors=errors,
+            bot_name=request.bot_name,
+            open_positions=request.open_positions,
+            cash_available=request.cash_available,
+            daily_pnl=request.daily_pnl,
+            win_rate=request.win_rate,
+            trade_count=request.trade_count,
+            errors=request.errors,
         )
 
         # Also persist to database
         async with AsyncSessionLocal() as session:
             db_status = BotStatusModel(
-                bot_name=bot_name,
+                bot_name=request.bot_name,
                 timestamp=datetime.utcnow(),
-                cash_available=cash_available,
-                daily_pnl=daily_pnl,
-                win_rate=win_rate,
-                trade_count=trade_count,
-                open_positions_count=len(open_positions),
-                errors=errors,
-                metadata={"positions": open_positions},
+                cash_available=request.cash_available,
+                daily_pnl=request.daily_pnl,
+                win_rate=request.win_rate,
+                trade_count=request.trade_count,
+                open_positions_count=len(request.open_positions),
+                errors=request.errors,
+                metadata={"positions": request.open_positions},
             )
             session.add(db_status)
             await session.commit()
 
-        return {"status": "recorded", "bot": bot_name, "timestamp": datetime.utcnow().isoformat()}
+        return {"status": "recorded", "bot": request.bot_name, "timestamp": datetime.utcnow().isoformat()}
     except Exception as e:
         log.error(f"Status record error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
