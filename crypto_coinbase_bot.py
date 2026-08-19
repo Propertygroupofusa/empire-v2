@@ -94,18 +94,9 @@ except (ValueError, TypeError):
     log.warning("Invalid NETWORK_RETRY_DELAY, using default: 1.0")
 
 CRYPTO_PAIRS = [
-    "BTC/USD", "ETH/USD",  # Tier 1: Core stable cryptos
-    "SOL/USD", "XRP/USD", "AVAX/USD", "LINK/USD",  # Tier 2: Established mid-caps
-    "DOGE/USD", "SHIB/USD",  # Meme coins with strong volume
-    "NEAR/USD", "MATIC/USD",  # Layer 2 / scaling solutions
-    "ARB/USD", "OP/USD",  # Arbitrum & Optimism
-    "AAVE/USD", "UNI/USD",  # DeFi protocols
-    "STX/USD", "ATOM/USD",  # Bitcoin L2 & Cosmos
-    "LTC/USD", "ADA/USD", "DOT/USD",  # Established alts with high volume
-    "APT/USD", "SUI/USD", "JUP/USD",  # High-velocity newer pairs
-    "LDO/USD", "RNDR/USD", "ICP/USD",  # Staking & compute protocols
-    "BLUR/USD", "FLOKI/USD", "BONK/USD",  # Additional meme/community coins
-]  # 28 pairs total - aggressive expansion for 4x entry frequency
+    "BTC/USD", "ETH/USD",  # Core: largest, most stable
+    "SOL/USD", "XRP/USD", "AVAX/USD", "LINK/USD",  # Tier 2: best momentum swings
+]  # 6 pairs total - high-frequency intraday trading for hourly profits
 
 
 def _to_product_id(symbol: str) -> str:
@@ -171,8 +162,8 @@ def _auth_headers(method: str, path: str) -> dict:
 #
 # Entry happens ONLY when RSI recovers UP from oversold state (not just reaching threshold)
 RSI_RESET_THRESHOLD = 50      # When RSI crosses above this, reset all entry tracking
-RSI_STRONG_ARM_THRESHOLD = 20 # RSI < 20 = strongest oversold signal
-RSI_ARM_THRESHOLD = 30        # RSI < 30 = standard oversold (arm for entry)
+RSI_STRONG_ARM_THRESHOLD = 15 # RSI < 15 = strongest oversold signal (lowered for more entries)
+RSI_ARM_THRESHOLD = 25        # RSI < 25 = standard oversold (lowered for more frequent entries)
 RSI_WATCH_THRESHOLD = 50      # Above this = WATCH state
 RSI_NO_ENTRY = 65             # RSI >= 65 = overbought territory, skip entries
 try:
@@ -1019,7 +1010,7 @@ def find_recent_swing_high(candles: list, lookback_bars: int = 10) -> dict:
 def size_position(cash_pool_remaining, slots_remaining, price):
     """Fixed $250 per trade for maximum capital deployment.
     Aggressive sizing: maximizes gains while maintaining 3-position minimum buffer."""
-    FIXED_POSITION_SIZE = 250.0  # $250 per entry — with $700 pool, allows 2-3 concurrent positions
+    FIXED_POSITION_SIZE = 120.0  # $120 per entry — with $400 pool, allows 3 concurrent positions for hourly compounding
 
     if cash_pool_remaining < FIXED_POSITION_SIZE * 1.05:  # Need 5% buffer for fees
         return None
