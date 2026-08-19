@@ -341,6 +341,11 @@ hourly_start_time = None  # Track when current hour started
 hourly_opening_balance = None  # Capital at start of hour
 hourly_pnl = 0.0  # Current hour's profit/loss
 HOURLY_PROFIT_TARGET = 4.0  # $4/hour target (1% of $400 starting capital)
+hourly_target_hit = False  # Flag: target hit, now in profit-locking mode
+
+# Profit locking (once hourly target hit, protect gains aggressively)
+PROFIT_LOCK_TRAILING_STOP_PCT = 0.01  # 1% trailing stop when target hit (tight protection)
+position_peak_profit = {}  # Track peak profit per position: {symbol: {"peak_usd": X, "peak_pct": Y}}
 
 # RSI state cache: loaded once at startup, maintained in-memory during cycle, batch-flushed to DB at end
 # This removes database latency from the hot trading loop - 56 DB queries per cycle become 0
@@ -1304,7 +1309,7 @@ async def run_crypto_cycle():
     BACKTEST BEFORE DEPLOYING: Old vs. New on 28 pairs, historical data
     ═════════════════════════════════════════════════════════════════════
     """
-    global daily_pnl, last_cycle_at, hourly_start_time, hourly_opening_balance, hourly_pnl
+    global daily_pnl, last_cycle_at, hourly_start_time, hourly_opening_balance, hourly_pnl, hourly_target_hit, position_peak_profit
 
     now = datetime.now(timezone.utc)
     last_cycle_at = now.isoformat()
@@ -1314,6 +1319,8 @@ async def run_crypto_cycle():
         hourly_start_time = now
         hourly_opening_balance = None  # Will be set after balance is read
         hourly_pnl = 0.0
+        hourly_target_hit = False  # Reset profit-lock flag for new hour
+        position_peak_profit.clear()  # Reset peak tracking for new hour
         log.info(f"[CRYPTO] 📅 New trading hour started: {now.strftime('%H:%M UTC')}")
     log.info(f"[CRYPTO] Scanning {', '.join(CRYPTO_PAIRS)} (24/7, no market-hours gate) | Daily P&L: ${daily_pnl:.2f}")
 
@@ -1366,7 +1373,13 @@ async def run_crypto_cycle():
             hourly_pnl = cash - hourly_opening_balance
             hourly_pnl_pct = (hourly_pnl / hourly_opening_balance * 100) if hourly_opening_balance > 0 else 0.0
             pct_of_target = (hourly_pnl / HOURLY_PROFIT_TARGET * 100) if HOURLY_PROFIT_TARGET > 0 else 0.0
-            target_status = "✅ TARGET HIT" if hourly_pnl >= HOURLY_PROFIT_TARGET else f"{pct_of_target:.0f}% of target"
+
+            # Check if target hit and activate profit locking
+            if hourly_pnl >= HOURLY_PROFIT_TARGET and not hourly_target_hit:
+                hourly_target_hit = True
+                log.info(f"[CRYPTO] 🎯 ✅✅✅ HOURLY TARGET HIT: ${hourly_pnl:.2f} (${hourly_opening_balance:.2f} → ${cash:.2f}) | PROFIT LOCKING ACTIVATED — tight trailing stops (1%) on all positions")
+
+            target_status = "🔒 PROFIT LOCKED" if hourly_target_hit else ("✅ TARGET HIT" if hourly_pnl >= HOURLY_PROFIT_TARGET else f"{pct_of_target:.0f}% of target")
             log.info(f"[CRYPTO] ⏱️  Hour P&L: ${hourly_pnl:+.2f} ({hourly_pnl_pct:+.2f}%) | {target_status}")
 
         # CRITICAL: Dynamic floor & aggressive growth strategy
@@ -1484,34 +1497,59 @@ async def run_crypto_cycle():
                 partial_exit = False
                 reason = None
 
-                # Priority 1: Stop loss (hard exit)
-                if stop_hit:
+                # Priority 1: Profit locking (when hourly target hit, use 1% trailing stop)
+                if hourly_target_hit and symbol in open_crypto_positions:
+                    # Initialize or update peak profit tracking
+                    current_profit_usd = unrealized_pnl
+                    current_profit_pct = unrealized_pct * 100
+
+                    if symbol not in position_peak_profit:
+                        position_peak_profit[symbol] = {"peak_usd": current_profit_usd, "peak_pct": current_profit_pct}
+                    else:
+                        # Update peak if current profit exceeds it
+                        if current_profit_usd > position_peak_profit[symbol]["peak_usd"]:
+                            position_peak_profit[symbol]["peak_usd"] = current_profit_usd
+                            position_peak_profit[symbol]["peak_pct"] = current_profit_pct
+
+                        # Check if profit has declined from peak
+                        peak_profit = position_peak_profit[symbol]["peak_usd"]
+                        profit_decline = peak_profit - current_profit_usd
+                        decline_pct = (profit_decline / peak_profit * 100) if peak_profit > 0 else 0
+
+                        # Close if: profit declined from peak, OR if using 1% trailing stop
+                        if current_profit_usd > 0 and profit_decline > 0:
+                            # Profit locked in, now any decline triggers exit
+                            should_exit = True
+                            reason = f"PROFIT LOCK EXIT (peak: ${peak_profit:.2f}, now: ${current_profit_usd:.2f}, decline: ${profit_decline:.2f})"
+
+                # Priority 2: Stop loss (hard exit)
+                if not should_exit and stop_hit:
                     should_exit = True
                     reason = f"STOP LOSS @ ${stop_price:.2f} (-{(1 - price/entry)*100:.2f}%)"
-                # Priority 2: Micro-profit taking (partial exits)
-                elif micro_hit_3 and partial_sells < 3:
+                # Priority 4: Micro-profit taking (partial exits) - only if not in profit-lock mode
+                elif not hourly_target_hit and micro_hit_3 and partial_sells < 3:
                     partial_exit = True
                     reason = f"MICRO PROFIT L3 @ ${micro_target_3:.2f} (+0.25%, sell 25%)"
                     position["partial_sells"] = 3
-                elif micro_hit_2 and partial_sells < 2:
+                elif not hourly_target_hit and micro_hit_2 and partial_sells < 2:
                     partial_exit = True
                     reason = f"MICRO PROFIT L2 @ ${micro_target_2:.2f} (+0.15%, sell 25%)"
                     position["partial_sells"] = 2
-                elif micro_hit_1 and partial_sells < 1:
+                elif not hourly_target_hit and micro_hit_1 and partial_sells < 1:
                     partial_exit = True
                     reason = f"MICRO PROFIT L1 @ ${micro_target_1:.2f} (+0.05%, sell 25%)"
                     position["partial_sells"] = 1
-                # Priority 3: Full exit on tier targets or RSI
-                elif rsi_exit:
+                # Priority 5: Full exit on tier targets or RSI - only if not in profit-lock mode
+                elif not hourly_target_hit and rsi_exit:
                     should_exit = True
                     reason = "RSI EXIT"
-                elif tier3_hit:
+                elif not hourly_target_hit and tier3_hit:
                     should_exit = True
                     reason = f"TIER 3 @ ${tier3_price:.2f} (+{(price/entry - 1)*100:.2f}%, let winners run)"
-                elif tier2_hit and unrealized_pct >= PROFIT_TARGET_PCT:
+                elif not hourly_target_hit and tier2_hit and unrealized_pct >= PROFIT_TARGET_PCT:
                     should_exit = True
                     reason = f"TIER 2 @ ${tier2_price:.2f} (+{(price/entry - 1)*100:.2f}%, hit 3% target)"
-                elif tier1_hit:
+                elif not hourly_target_hit and tier1_hit:
                     should_exit = True
                     reason = f"TIER 1 @ ${tier1_price:.2f} (+{(price/entry - 1)*100:.2f}%, lock early gain)"
 
@@ -1607,29 +1645,48 @@ async def run_crypto_cycle():
             dollar_profit = unrealized_pnl
             profit_take_exit = should_take_profits and dollar_profit >= TARGET_TRADE_PROFIT
 
-            # PRIORITY 1: Hard stop loss (swing-based, professional risk management)
-            if stop_hit:
+            # PRIORITY 1: Profit locking (when hourly target hit, use 1% trailing stop)
+            if hourly_target_hit and symbol in open_crypto_positions:
+                current_profit_usd = unrealized_pnl
+                current_profit_pct = unrealized_pct * 100
+
+                if symbol not in position_peak_profit:
+                    position_peak_profit[symbol] = {"peak_usd": current_profit_usd, "peak_pct": current_profit_pct}
+                else:
+                    if current_profit_usd > position_peak_profit[symbol]["peak_usd"]:
+                        position_peak_profit[symbol]["peak_usd"] = current_profit_usd
+                        position_peak_profit[symbol]["peak_pct"] = current_profit_pct
+
+                    peak_profit = position_peak_profit[symbol]["peak_usd"]
+                    profit_decline = peak_profit - current_profit_usd
+
+                    if current_profit_usd > 0 and profit_decline > 0:
+                        should_exit = True
+                        reason = f"🔒 PROFIT LOCK (peak: ${peak_profit:.2f}, now: ${current_profit_usd:.2f}, decline: ${profit_decline:.2f})"
+
+            # PRIORITY 2: Hard stop loss (swing-based, professional risk management)
+            if not should_exit and stop_hit:
                 should_exit = True
                 reason = f"🛑 HARD STOP (swing-based) @ ${stop_price:.2f} (-{(1 - price/entry)*100:.2f}%)"
 
-            # PRIORITY 2: RSI overbought exit (65-70 = reversal signal, exit with profit)
-            elif rsi >= 65 and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE:
+            # PRIORITY 3: RSI overbought exit (65-70 = reversal signal, exit with profit)
+            elif not should_exit and not hourly_target_hit and rsi >= 65 and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE:
                 should_exit = True
                 reason = f"📤 RSI OVERBOUGHT EXIT (RSI {rsi:.1f} >= 65) @ ${price:.2f} (+{unrealized_pct*100:.2f}%)"
 
-            # PRIORITY 3: Profit taking above $1,001
-            elif profit_take_exit:
+            # PRIORITY 4: Profit taking above $1,001
+            elif not should_exit and profit_take_exit:
                 should_exit = True
                 reason = f"💰 PROFIT TAKEN (+${dollar_profit:.2f}, balance above $1,001)"
 
-            # PRIORITY 4: Tiered profit targets (ATR-based)
-            elif tier3_hit:
+            # PRIORITY 5: Tiered profit targets (ATR-based)
+            elif not should_exit and not hourly_target_hit and tier3_hit:
                 should_exit = True
                 reason = f"TIER 3 (ATR) @ ${tier3_price:.2f} (+{(price/entry - 1)*100:.2f}%, let winners run)"
-            elif tier2_hit and unrealized_pct >= PROFIT_TARGET_PCT:
+            elif not should_exit and not hourly_target_hit and tier2_hit and unrealized_pct >= PROFIT_TARGET_PCT:
                 should_exit = True
                 reason = f"TIER 2 (ATR) @ ${tier2_price:.2f} (+{(price/entry - 1)*100:.2f}%, hit 3% target)"
-            elif tier1_hit:
+            elif not should_exit and not hourly_target_hit and tier1_hit:
                 should_exit = True
                 reason = f"TIER 1 (ATR) @ ${tier1_price:.2f} (+{(price/entry - 1)*100:.2f}%, lock early gain)"
 
