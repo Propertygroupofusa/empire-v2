@@ -165,6 +165,13 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import crypto_coinbase_bot: {e}")
 
+btc_profit_lock_bot_module = None
+try:
+    import btc_profit_lock_bot
+    btc_profit_lock_bot_module = btc_profit_lock_bot
+except Exception as e:
+    logging.warning(f"Failed to import btc_profit_lock_bot: {e}")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pgusa")
 
@@ -1118,6 +1125,18 @@ async def lifespan(app: FastAPI):
             log.warning("⚠️ crypto_coinbase_bot module failed to import - bot will not run")
     except Exception as e:
         log.error(f"🛑 Crypto (Coinbase) bot thread startup failed: {e}")
+
+    try:
+        if btc_profit_lock_bot_module is not None:
+            import threading
+            log.info("💰 Starting BTC Profit Lock bot daemon thread...")
+            btc_bot_thread = threading.Thread(target=btc_profit_lock_bot_module.run, daemon=True)
+            btc_bot_thread.start()
+            log.info("✅ BTC Profit Lock bot started | $50 → 10% cycle → reinvest | Target: $8,000+")
+        else:
+            log.warning("⚠️ btc_profit_lock_bot module failed to import - bot will not run")
+    except Exception as e:
+        log.error(f"🛑 BTC Profit Lock bot startup failed: {e}")
 
     # bot_2_crypto_scalper.py retired: it traded crypto (BTC/ETH/SOL/AVAX/
     # DOGE/LINK) through Alpaca using the same ALPACA_API_KEY as prop_bot.py
