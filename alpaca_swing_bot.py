@@ -21,7 +21,7 @@ Runs: Once per day (end of market close, ~4:30pm ET)
 import os
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 import aiohttp
 import uuid
@@ -374,10 +374,12 @@ def run():
 
         # If past 4:30pm today, schedule for next day
         if now >= next_check:
-            next_check = next_check.replace(day=next_check.day + 1)
+            next_check = next_check + timedelta(days=1)
 
         seconds_until_next = (next_check - now).total_seconds()
-        log.info(f"⏳ Next check in {seconds_until_next/3600:.1f} hours at {next_check.strftime('%H:%M %Z')}")
+        hours_until_next = seconds_until_next / 3600
+        time_str = next_check.strftime('%H:%M %Z')
+        log.info(f"⏳ Next check in {hours_until_next:.1f} hours at {time_str}")
 
         import time
         time.sleep(seconds_until_next)
