@@ -52,7 +52,7 @@ def get_base_url():
 LIVE_TRADE = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 
 # RSI entry/exit thresholds
-RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "30"))
+RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "28.6"))
 RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "70"))
 
 # Crypto-specific thresholds: AGGRESSIVE SCALPING FOR MILESTONE SPEED
