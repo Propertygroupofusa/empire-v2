@@ -172,6 +172,13 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import btc_profit_lock_bot: {e}")
 
+alpaca_swing_bot_module = None
+try:
+    import alpaca_swing_bot
+    alpaca_swing_bot_module = alpaca_swing_bot
+except Exception as e:
+    logging.warning(f"Failed to import alpaca_swing_bot: {e}")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pgusa")
 
@@ -1137,6 +1144,18 @@ async def lifespan(app: FastAPI):
             log.warning("⚠️ btc_profit_lock_bot module failed to import - bot will not run")
     except Exception as e:
         log.error(f"🛑 BTC Profit Lock bot startup failed: {e}")
+
+    try:
+        if alpaca_swing_bot_module is not None:
+            import threading
+            log.info("🌊 Starting Alpaca Swing bot daemon thread...")
+            swing_bot_thread = threading.Thread(target=alpaca_swing_bot_module.run, daemon=True)
+            swing_bot_thread.start()
+            log.info("✅ Alpaca Swing bot started | Weekly RSI < 30 entries | 5-10 day holds | Indices + Commodities")
+        else:
+            log.warning("⚠️ alpaca_swing_bot module failed to import - bot will not run")
+    except Exception as e:
+        log.error(f"🛑 Alpaca Swing bot startup failed: {e}")
 
     # bot_2_crypto_scalper.py retired: it traded crypto (BTC/ETH/SOL/AVAX/
     # DOGE/LINK) through Alpaca using the same ALPACA_API_KEY as prop_bot.py
