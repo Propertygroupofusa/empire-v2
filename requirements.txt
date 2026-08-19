@@ -33,4 +33,4 @@ schedule==1.2.0
 python-multipart==0.0.6
 sendgrid==6.11.0
 stripe
-python-telegram-bot>=21.0,<22.0
+# python-telegram-bot>=21.0,<22.0  # Added in Phase 2 for actual Telegram API implementation
