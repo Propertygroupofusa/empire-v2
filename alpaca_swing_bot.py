@@ -85,10 +85,24 @@ async def get_weekly_rsi(session, symbol):
                 log.warning(f"Weekly RSI fetch failed for {symbol}: HTTP {r.status}")
                 return None
 
-            data = await r.json()
-            bars = data.get("bars", [])
-            if not bars or len(bars) < 50:
-                log.debug(f"Insufficient daily bars for {symbol}: got {len(bars) if bars else 0}, need 50")
+            try:
+                data = await r.json()
+            except Exception as e:
+                log.warning(f"Failed to parse JSON for {symbol}: {type(e).__name__}: {e}")
+                return None
+
+            if not isinstance(data, dict):
+                log.warning(f"Invalid API response for {symbol}: expected dict, got {type(data).__name__}")
+                return None
+
+            bars = data.get("bars")
+            if bars is None or (isinstance(bars, list) and len(bars) < 50):
+                bar_count = len(bars) if isinstance(bars, list) else 0
+                log.debug(f"Insufficient daily bars for {symbol}: got {bar_count}, need 50")
+                return None
+
+            if not isinstance(bars, list):
+                log.warning(f"Invalid bars format for {symbol}: expected list, got {type(bars).__name__}")
                 return None
 
             # Convert to weekly (group by week ending Friday)
