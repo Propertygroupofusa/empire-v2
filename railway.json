@@ -31,7 +31,7 @@
       "build": {
         "dockerfile": "Dockerfile"
       },
-      "startCommand": "./run_server.sh",
+      "startCommand": "python main.py",
       "port": 8000
     },
     "video-generator": {
