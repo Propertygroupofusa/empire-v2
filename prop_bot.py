@@ -201,21 +201,21 @@ def get_dynamic_max_positions(scale: float) -> int:
 # to let winners run instead of closing too early. With $1000+ positions, these
 # targets are achievable on 1%+ daily moves that we see in the market.
 PROFIT_TARGET_DOLLARS_MILESTONES = [
-    (0,     5.00),      # Micro: $5.00 (0.50% on $1000)
-    (500,   7.50),      # Small: $7.50
-    (1000,  2000.00),   # Medium: $2000.00 (200% on $1000 - aggressive growth mode)
-    (5000,  15.00),     # Large: $15.00 (0.30% on $5000)
-    (10000, 20.00),     # Huge: $20.00 (0.20% on $10000)
+    (0,     999999),    # Unlimited: No profit target cap - let positions run indefinitely
+    (500,   999999),
+    (1000,  999999),
+    (5000,  999999),
+    (10000, 999999),
 ]
 
 # Crypto-specific LOWER profit targets for fast compounding & high frequency
 # On $992: aim for $2-3 per trade (hit more targets, reinvest faster)
 CRYPTO_PROFIT_TARGET_MILESTONES = [
-    (0,     2.50),      # Micro: $2.50 (0.25% on $1000) — fast wins
-    (500,   3.00),      # Small: $3.00
-    (1000,  3.50),      # Medium: $3.50
-    (5000,  5.00),      # Large: $5.00
-    (10000, 7.50),      # Huge: $7.50
+    (0,     999999),    # Unlimited: No profit target cap - let positions run indefinitely 24/7
+    (500,   999999),
+    (1000,  999999),
+    (5000,  999999),
+    (10000, 999999),
 ]
 
 # Crypto-specific AGGRESSIVE tiered exits — lock wins faster, reinvest sooner
