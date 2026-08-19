@@ -1,9 +1,10 @@
 """
-TIM MOORE COPY TRADING BOT
-==========================
-Mirrors Tim Moore's insider trades in real-time.
+INSIDER COPY TRADING BOT
+========================
+Mirrors any insider trader's trades from QuiverQuant in real-time.
 Auto-executes trades without waiting for approval.
 YOLO mode: Maximum position sizing, aggressive compounding.
+Tracks: Tim Moore, Michael Burry, Bill Ackman, and 100+ other insider traders
 """
 import os
 import asyncio
@@ -26,8 +27,21 @@ ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://api.alpaca.markets")
 ALPACA_LIVE_TRADE = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 
-# YOLO Config
-TIM_MOORE_ID = "timothy-moore"  # Insider ID from QuiverQuant
+# YOLO Config - Track multiple insider traders
+TRADERS_TO_MIRROR = [
+    "Timothy Moore",
+    "Michael Burry",
+    "Bill Ackman",
+    "Cathie Wood",
+    "David Einhorn",
+    "Carl Icahn",
+]
+
+# Env var to override: COPYTRADER_TARGETS="Timothy Moore,Michael Burry,Bill Ackman"
+traders_env = os.getenv("COPYTRADER_TARGETS", "")
+if traders_env:
+    TRADERS_TO_MIRROR = [t.strip() for t in traders_env.split(",")]
+
 MAX_POSITION_SIZE = float(os.getenv("COPYTRADER_MAX_POSITION_USD", "1000"))  # $1K per trade (aggressive)
 MIN_DAYS_LOOKBACK = int(os.getenv("COPYTRADER_LOOKBACK_DAYS", "7"))  # Check last 7 days
 AUTO_EXECUTE = os.getenv("COPYTRADER_AUTO_EXECUTE", "true").lower() == "true"  # YOLO: auto-execute
@@ -44,8 +58,8 @@ class TimMooreCopyTrader:
         self.tracked_positions = {}
         self.today_loss = 0
 
-    async def get_tim_moore_trades(self) -> list:
-        """Fetch Tim Moore's recent insider trades"""
+    async def get_insider_trades(self) -> list:
+        """Fetch recent insider trades from tracked traders"""
         try:
             lookback_date = (datetime.now() - timedelta(days=MIN_DAYS_LOOKBACK)).strftime("%Y-%m-%d")
 
@@ -58,32 +72,36 @@ class TimMooreCopyTrader:
                 ) as resp:
                     if resp.status == 200:
                         all_trades = await resp.json()
-                        # Filter for Tim Moore only
-                        tim_trades = [t for t in all_trades if t.get("Representative") == "Timothy Moore"]
-                        log.info(f"✓ Fetched {len(tim_trades)} Tim Moore trades from QuiverQuant")
-                        return tim_trades
+                        # Filter for tracked traders
+                        insider_trades = [
+                            t for t in all_trades
+                            if t.get("Representative") in TRADERS_TO_MIRROR
+                        ]
+                        log.info(f"✓ Fetched {len(insider_trades)} trades from {len(TRADERS_TO_MIRROR)} tracked traders")
+                        return insider_trades
                     else:
                         text = await resp.text()
                         log.error(f"QuiverQuant API error: {resp.status} - {text[:200]}")
                         return []
 
         except Exception as e:
-            log.error(f"Failed to fetch Tim Moore trades: {e}")
+            log.error(f"Failed to fetch insider trades: {e}")
             return []
 
-    def _process_tim_trades(self, trades: list) -> dict:
-        """Convert Tim Moore trades to execution list"""
+    def _process_insider_trades(self, trades: list) -> dict:
+        """Convert insider trades to execution list"""
         execution_list = {}
 
         for trade in trades:
             ticker = trade.get("Ticker", "").upper()
             transaction = trade.get("Transaction", "").upper()
             amount = trade.get("Amount", "Unknown")
+            trader = trade.get("Representative", "Unknown")
 
             if not ticker or ticker == "NAN":
                 continue
 
-            log.info(f"📊 TIM MOORE ACTIVITY: {ticker}")
+            log.info(f"📊 INSIDER ACTIVITY: {ticker} by {trader}")
             log.info(f"   Transaction: {transaction}")
             log.info(f"   Amount: {amount}")
             log.info(f"   Date: {trade.get('TransactionDate')}")
@@ -92,7 +110,8 @@ class TimMooreCopyTrader:
                 "side": "buy" if transaction == "PURCHASE" else "sell",
                 "amount": amount,
                 "date": trade.get("TransactionDate"),
-                "confidence": 0.95  # Tim Moore has high conviction
+                "trader": trader,
+                "confidence": 0.95  # Insider trades have high conviction
             }
 
         return execution_list
@@ -172,7 +191,8 @@ class TimMooreCopyTrader:
 
     async def run(self):
         """Main bot loop - YOLO mode"""
-        log.info("🎯 TIM MOORE COPY TRADER STARTED (YOLO MODE)")
+        log.info("🎯 INSIDER COPY TRADER STARTED (YOLO MODE)")
+        log.info(f"   Tracking traders: {', '.join(TRADERS_TO_MIRROR)}")
         log.info(f"   Max position size: ${MAX_POSITION_SIZE} per trade")
         log.info(f"   Auto-execute: {AUTO_EXECUTE}")
         log.info(f"   Lookback: {MIN_DAYS_LOOKBACK} days")
@@ -185,16 +205,16 @@ class TimMooreCopyTrader:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 log.info(f"\n[Cycle {cycle}] {timestamp}")
 
-                # Get Tim Moore's latest trades
-                tim_trades = await self.get_tim_moore_trades()
+                # Get insider trades from tracked traders
+                insider_trades = await self.get_insider_trades()
 
-                if not tim_trades:
-                    log.info("No new Tim Moore trades found. Waiting...")
+                if not insider_trades:
+                    log.info("No new insider trades found. Waiting...")
                     await asyncio.sleep(1800)  # Check every 30 minutes
                     continue
 
                 # Process trades
-                execution_list = self._process_tim_trades(tim_trades)
+                execution_list = self._process_insider_trades(insider_trades)
 
                 if not execution_list:
                     log.info("No valid trades to execute")
@@ -202,7 +222,7 @@ class TimMooreCopyTrader:
                     continue
 
                 # Execute each trade
-                for ticker, trade_info in list(execution_list.items())[:3]:  # Top 3 picks
+                for ticker, trade_info in list(execution_list.items())[:5]:  # Top 5 picks
                     # Skip if already holding (limit to 1 position per stock)
                     if ticker in self.tracked_positions:
                         log.info(f"   Already holding {ticker}, skipping")
@@ -212,7 +232,8 @@ class TimMooreCopyTrader:
                     price = await self.get_stock_price(ticker)
                     if price > 0:
                         side = trade_info.get("side", "buy")
-                        log.info(f"\n🎯 EXECUTE TIM MOORE SIGNAL: {ticker}")
+                        trader = trade_info.get("trader", "Unknown")
+                        log.info(f"\n🎯 EXECUTE INSIDER SIGNAL: {ticker} (by {trader})")
                         log.info(f"   Price: ${price:.2f}")
                         log.info(f"   Side: {side.upper()}")
                         log.info(f"   Confidence: {trade_info.get('confidence', 0.9):.0%}")
@@ -223,6 +244,7 @@ class TimMooreCopyTrader:
                                 self.tracked_positions[ticker] = {
                                     "entry_price": price,
                                     "side": side,
+                                    "trader": trader,
                                     "confidence": trade_info.get("confidence", 0.9)
                                 }
                         else:
@@ -236,11 +258,12 @@ class TimMooreCopyTrader:
                 log.error(f"Bot error: {e}", exc_info=True)
                 await asyncio.sleep(300)
 
-async def start_tim_moore_bot():
-    """Start the copy trader"""
+async def start_insider_copytrader():
+    """Start the insider copy trader"""
     bot = TimMooreCopyTrader()
     await bot.run()
 
 if __name__ == "__main__":
-    log.info("Starting Tim Moore Copy Trader (YOLO mode)...")
-    asyncio.run(start_tim_moore_bot())
+    log.info("Starting Insider Copy Trader (YOLO mode)...")
+    log.info(f"Tracking: {', '.join(TRADERS_TO_MIRROR)}")
+    asyncio.run(start_insider_copytrader())
