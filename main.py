@@ -1117,6 +1117,7 @@ async def lifespan(app: FastAPI):
             stopped = os.getenv("STOP_TRADING", "false").lower() == "true"
             threading.Thread(target=prop_bot_module.run, daemon=True).start()
             log.info(f"📈 Prop bot started (background thread) | Mode: {mode} | STOP_TRADING: {stopped}")
+            log.info("💰 Strategy: Market hours stock scalping + 24/7 crypto = constant opportunities and taking profits")
     except Exception as e:
         log.warning(f"Prop bot failed to start: {e}")
 
@@ -1135,6 +1136,7 @@ async def lifespan(app: FastAPI):
             bot_thread = threading.Thread(target=crypto_coinbase_bot_module.run, daemon=True)
             bot_thread.start()
             log.info("✓ Crypto (Coinbase) bot thread started | 28 pairs × 12 positions | 24/7 trading | Capital: $700 USD")
+            log.info("💰 Strategy: 24/7 crypto + market hours stock scalping = constant opportunities and taking profits")
         else:
             log.warning("⚠️ crypto_coinbase_bot module failed to import - bot will not run")
     except Exception as e:
