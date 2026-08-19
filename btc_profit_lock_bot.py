@@ -56,7 +56,7 @@ COINBASE_API_PRIVATE_KEY = os.getenv("COINBASE_API_PRIVATE_KEY", "").strip()
 BTC_PROFIT_TARGET_PCT = 0.10  # 10% profit target
 BTC_STOP_LOSS_PCT = 0.03  # -3% stop loss
 BTC_MAX_HOLD_HOURS = 24  # Max 24 hour hold
-BTC_MIN_ORDER_USD = 50.0  # Minimum order size
+BTC_MIN_ORDER_USD = 150.0  # TRIPLED: $50 → $150 per cycle (3x speed)
 
 # Tracking
 open_btc_position = None  # Current position: {order_id, entry_price, qty, entry_time, entry_usd}
@@ -374,9 +374,9 @@ async def run_cycle():
 def run():
     """Main bot runner"""
     log.info("=" * 70)
-    log.info("BTC PROFIT LOCK BOT v1 - Starting")
+    log.info("BTC PROFIT LOCK BOT v1 - TURBO MODE (3x Speed)")
     log.info(f"Strategy: Buy BTC → +10% Sell → Repeat")
-    log.info(f"Stop Loss: -3% | Max Hold: 24h | Min Order: ${BTC_MIN_ORDER_USD}")
+    log.info(f"Stop Loss: -3% | Max Hold: 24h | Order Size: ${BTC_MIN_ORDER_USD} (3x speed)")
     log.info("=" * 70)
 
     # Check credentials
@@ -385,7 +385,7 @@ def run():
         log.error("Set COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY")
         return
 
-    # Run cycles every 30 seconds
+    # Run cycles every 10 seconds (3x faster monitoring)
     while True:
         try:
             asyncio.run(run_cycle())
@@ -396,7 +396,7 @@ def run():
             log.error(f"Cycle error: {e}")
 
         import time
-        time.sleep(30)  # Check every 30 seconds
+        time.sleep(10)  # Check every 10 seconds (3x faster = catch 10% swings quicker)
 
 
 if __name__ == "__main__":
