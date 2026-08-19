@@ -1517,7 +1517,8 @@ async def run_crypto_cycle():
                         decline_pct = (profit_decline / peak_profit * 100) if peak_profit > 0 else 0
 
                         # Close if profit declined by 5% or more from peak (5% trailing stop)
-                        if current_profit_usd > 0 and decline_pct >= (PROFIT_LOCK_TRAILING_STOP_PCT * 100):
+                        # CRITICAL: Only exit if profit exceeds round-trip fees, so net profit remains after fees
+                        if current_profit_usd > 0 and decline_pct >= (PROFIT_LOCK_TRAILING_STOP_PCT * 100) and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE:
                             should_exit = True
                             reason = f"PROFIT LOCK EXIT (peak: ${peak_profit:.2f}, now: ${current_profit_usd:.2f}, decline: {decline_pct:.1f}% / ${profit_decline:.2f})"
 
@@ -1661,7 +1662,8 @@ async def run_crypto_cycle():
                     decline_pct = (profit_decline / peak_profit * 100) if peak_profit > 0 else 0
 
                     # Close if profit declined by 5% or more from peak (5% trailing stop)
-                    if current_profit_usd > 0 and decline_pct >= (PROFIT_LOCK_TRAILING_STOP_PCT * 100):
+                    # CRITICAL: Only exit if profit exceeds round-trip fees, so net profit remains after fees
+                    if current_profit_usd > 0 and decline_pct >= (PROFIT_LOCK_TRAILING_STOP_PCT * 100) and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE:
                         should_exit = True
                         reason = f"🔒 PROFIT LOCK (peak: ${peak_profit:.2f}, now: ${current_profit_usd:.2f}, decline: {decline_pct:.1f}% / ${profit_decline:.2f})"
 
