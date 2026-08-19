@@ -180,6 +180,13 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import congress_trading_bot: {e}")
 
+tim_moore_copytrader_module = None
+try:
+    import tim_moore_copytrader
+    tim_moore_copytrader_module = tim_moore_copytrader
+except Exception as e:
+    logging.warning(f"Failed to import tim_moore_copytrader: {e}")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pgusa")
 
@@ -1165,6 +1172,18 @@ async def lifespan(app: FastAPI):
             log.warning("⚠️ congress_trading_bot module not available")
     except Exception as e:
         log.error(f"🛑 Congressional Trading bot startup failed: {e}")
+
+    try:
+        if tim_moore_copytrader_module is not None:
+            import threading
+            log.info("🎯 Starting Tim Moore Copy Trader (YOLO MODE)...")
+            tim_moore_thread = threading.Thread(target=tim_moore_copytrader_module.run, daemon=True)
+            tim_moore_thread.start()
+            log.info("✅ Tim Moore Copy Trader started | Auto-executes insider trades | $1K per trade | 8% profit target")
+        else:
+            log.warning("⚠️ tim_moore_copytrader module not available")
+    except Exception as e:
+        log.error(f"🛑 Tim Moore Copy Trader startup failed: {e}")
 
     # bot_2_crypto_scalper.py retired: it traded crypto (BTC/ETH/SOL/AVAX/
     # DOGE/LINK) through Alpaca using the same ALPACA_API_KEY as prop_bot.py
