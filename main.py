@@ -21,7 +21,7 @@ import asyncio
 import uvicorn
 import logging
 from dotenv import load_dotenv
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 
 # Load .env file to make credentials available to background bots
@@ -47,8 +47,8 @@ class BotStatusRequest(BaseModel):
     daily_pnl: float
     win_rate: float = 0.0
     trade_count: int = 0
-    open_positions: Dict[str, Any] = {}
-    errors: List[str] = []
+    open_positions: Dict[str, Any] = Field(default_factory=dict)
+    errors: List[str] = Field(default_factory=list)
 
 
 # Load routers gracefully to prevent import errors from crashing startup
