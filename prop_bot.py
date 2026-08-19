@@ -395,14 +395,22 @@ async def get_price_rsi(session, symbol):
 
             try:
                 data = await r.json()
-            except (ValueError, AttributeError) as e:
-                log.warning(f"Failed to parse JSON for {symbol}: {e}")
+            except Exception as e:
+                log.warning(f"Failed to parse JSON for {symbol}: {type(e).__name__}: {e}")
                 return None
 
-            bars = data.get("bars") if data else None
-            if not bars or len(bars) < 50:
-                bar_count = len(bars) if bars else 0
+            if not isinstance(data, dict):
+                log.warning(f"Invalid API response for {symbol}: expected dict, got {type(data).__name__}")
+                return None
+
+            bars = data.get("bars")
+            if bars is None or (isinstance(bars, list) and len(bars) < 50):
+                bar_count = len(bars) if isinstance(bars, list) else 0
                 log.debug(f"Insufficient bars for {symbol}: got {bar_count}, need 50")
+                return None
+
+            if not isinstance(bars, list):
+                log.warning(f"Invalid bars format for {symbol}: expected list, got {type(bars).__name__}")
                 return None
 
             closes = [b["c"] for b in bars]
