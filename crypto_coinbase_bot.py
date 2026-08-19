@@ -343,8 +343,8 @@ hourly_pnl = 0.0  # Current hour's profit/loss
 HOURLY_PROFIT_TARGET = 4.0  # $4/hour target (1% of $400 starting capital)
 hourly_target_hit = False  # Flag: target hit, now in profit-locking mode
 
-# Profit locking (once hourly target hit, protect gains aggressively)
-PROFIT_LOCK_TRAILING_STOP_PCT = 0.01  # 1% trailing stop when target hit (tight protection)
+# Profit locking (once hourly target hit, protect gains with 5% trailing stop)
+PROFIT_LOCK_TRAILING_STOP_PCT = 0.05  # 5% trailing stop when target hit (allow winners to run, protect on decline)
 position_peak_profit = {}  # Track peak profit per position: {symbol: {"peak_usd": X, "peak_pct": Y}}
 
 # RSI state cache: loaded once at startup, maintained in-memory during cycle, batch-flushed to DB at end
@@ -1516,11 +1516,10 @@ async def run_crypto_cycle():
                         profit_decline = peak_profit - current_profit_usd
                         decline_pct = (profit_decline / peak_profit * 100) if peak_profit > 0 else 0
 
-                        # Close if: profit declined from peak, OR if using 1% trailing stop
-                        if current_profit_usd > 0 and profit_decline > 0:
-                            # Profit locked in, now any decline triggers exit
+                        # Close if profit declined by 5% or more from peak (5% trailing stop)
+                        if current_profit_usd > 0 and decline_pct >= (PROFIT_LOCK_TRAILING_STOP_PCT * 100):
                             should_exit = True
-                            reason = f"PROFIT LOCK EXIT (peak: ${peak_profit:.2f}, now: ${current_profit_usd:.2f}, decline: ${profit_decline:.2f})"
+                            reason = f"PROFIT LOCK EXIT (peak: ${peak_profit:.2f}, now: ${current_profit_usd:.2f}, decline: {decline_pct:.1f}% / ${profit_decline:.2f})"
 
                 # Priority 2: Stop loss (hard exit)
                 if not should_exit and stop_hit:
@@ -1659,10 +1658,12 @@ async def run_crypto_cycle():
 
                     peak_profit = position_peak_profit[symbol]["peak_usd"]
                     profit_decline = peak_profit - current_profit_usd
+                    decline_pct = (profit_decline / peak_profit * 100) if peak_profit > 0 else 0
 
-                    if current_profit_usd > 0 and profit_decline > 0:
+                    # Close if profit declined by 5% or more from peak (5% trailing stop)
+                    if current_profit_usd > 0 and decline_pct >= (PROFIT_LOCK_TRAILING_STOP_PCT * 100):
                         should_exit = True
-                        reason = f"🔒 PROFIT LOCK (peak: ${peak_profit:.2f}, now: ${current_profit_usd:.2f}, decline: ${profit_decline:.2f})"
+                        reason = f"🔒 PROFIT LOCK (peak: ${peak_profit:.2f}, now: ${current_profit_usd:.2f}, decline: {decline_pct:.1f}% / ${profit_decline:.2f})"
 
             # PRIORITY 2: Hard stop loss (swing-based, professional risk management)
             if not should_exit and stop_hit:
