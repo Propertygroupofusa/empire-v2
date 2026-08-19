@@ -29,7 +29,7 @@ ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://api.alpaca.markets")
 ALPACA_LIVE_TRADE = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 
 # Trading params
-MAX_POSITION_SIZE = float(os.getenv("CONGRESS_MAX_POSITION_USD", "500"))  # $500 per stock
+MAX_POSITION_SIZE = float(os.getenv("CONGRESS_MAX_POSITION_USD", "250"))  # $250 per stock
 MIN_CONGRESS_ACTIVITY = int(os.getenv("CONGRESS_MIN_ACTIVITY", "3"))  # Min 3 congress members
 LOOKBACK_DAYS = int(os.getenv("CONGRESS_LOOKBACK_DAYS", "14"))  # Last 14 days of data
 DAILY_MAX_LOSS = float(os.getenv("CONGRESS_DAILY_LOSS_LIMIT", "50"))  # $50 daily loss limit
