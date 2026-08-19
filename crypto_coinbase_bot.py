@@ -1339,20 +1339,8 @@ async def run_crypto_cycle():
             log.info(f"[CRYPTO] Using default starting capital: $400.00 (proceeding with trades)")
             cash = 400.0  # Default to starting capital when API fails
             api_accessible = False  # If can't get balance, assume API is blocked
-
-        # Initialize hourly opening balance (1st cycle of hour)
-        if hourly_opening_balance is None and cash is not None:
-            hourly_opening_balance = cash
-
-        # Calculate hourly P&L
-        if hourly_opening_balance is not None and cash is not None:
-            hourly_pnl = cash - hourly_opening_balance
-            hourly_pnl_pct = (hourly_pnl / hourly_opening_balance * 100) if hourly_opening_balance > 0 else 0.0
-            pct_of_target = (hourly_pnl / HOURLY_PROFIT_TARGET * 100) if HOURLY_PROFIT_TARGET > 0 else 0.0
-
-            # Log hourly P&L status
-            target_status = "✅ TARGET HIT" if hourly_pnl >= HOURLY_PROFIT_TARGET else f"{pct_of_target:.0f}% of target"
-            log.info(f"[CRYPTO] ⏱️  Hour P&L: ${hourly_pnl:+.2f} ({hourly_pnl_pct:+.2f}%) | {target_status}")
+            # Initialize cash_pool for fallback balance
+            cash_pool = cash
         elif TIER_SIZE <= 0:
             unlocked = cash
             # Subtract MIN_CASH_RESERVE from deployable capital
@@ -1369,6 +1357,17 @@ async def run_crypto_cycle():
             # Tier is a permanent permission, not a promise there's still
             # cash sitting there - can never trade more than what's real.
             cash_pool = min(cash, unlocked, MAX_ALLOCATION) if MAX_ALLOCATION is not None else min(cash, unlocked)
+
+        # Initialize hourly opening balance (1st cycle of hour) and calculate hourly P&L
+        if hourly_opening_balance is None and cash is not None:
+            hourly_opening_balance = cash
+
+        if hourly_opening_balance is not None and cash is not None:
+            hourly_pnl = cash - hourly_opening_balance
+            hourly_pnl_pct = (hourly_pnl / hourly_opening_balance * 100) if hourly_opening_balance > 0 else 0.0
+            pct_of_target = (hourly_pnl / HOURLY_PROFIT_TARGET * 100) if HOURLY_PROFIT_TARGET > 0 else 0.0
+            target_status = "✅ TARGET HIT" if hourly_pnl >= HOURLY_PROFIT_TARGET else f"{pct_of_target:.0f}% of target"
+            log.info(f"[CRYPTO] ⏱️  Hour P&L: ${hourly_pnl:+.2f} ({hourly_pnl_pct:+.2f}%) | {target_status}")
 
         # CRITICAL: Dynamic floor & aggressive growth strategy
         BALANCE_FLOOR = 400.00  # If drops to $400, resume aggressive trading
