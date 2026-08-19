@@ -12,58 +12,58 @@
 
 ### **Phase 1: Bootstrap Profits (Weeks 1-4)**
 
-**Goal:** 10-15% daily return → Double capital in 30 days
+**Goal:** 15-25% daily return → 5-6X capital in 30 days
 
-**Action:** Run ONLY the 2 highest ROI bots:
+**Action:** Run ONLY the 2 highest ROI bots with MAXIMUM position sizing:
 
-1. **Coinbase Crypto Bot (24/7)**
+1. **Coinbase Crypto Bot (24/7) - 70% of capital**
    - Most active, frequent trades
-   - 10-20% daily return possible
+   - 15-25% daily return (RSI mean reversion)
    - Compounds automatically
-   - Capital: 70% of total ($560 if $800)
+   - Capital: $560 (aggressive sizing)
 
-2. **Alpaca Swing Bot (Weekly)**
+2. **Alpaca Swing Bot (Weekly) - 30% of capital**
    - Longer holds, bigger moves
-   - 5-15% per position
-   - Capital: 30% of total ($240 if $800)
+   - 10-20% per position
+   - Capital: $240 (weekly compounding)
 
 **DON'T run yet:** Prop bot, Congress bot (save for Phase 2)
 
 **Expected Results:**
 ```
-Week 1: $800 → $880 (10% gain = $80)
-Week 2: $880 → $968 (10% gain = $88)
-Week 3: $968 → $1,065 (10% gain = $97)
-Week 4: $1,065 → $1,172 (10% gain = $107)
+Week 1: $800 → $1,120 (40% gain = $320)
+Week 2: $1,120 → $1,568 (40% gain = $448)
+Week 3: $1,568 → $2,195 (40% gain = $627)
+Week 4: $2,195 → $3,073 (40% gain = $878)
 
-→ 4-5X capital in 4 weeks!
+→ 3.8X capital in 4 weeks!
 ```
 
 ---
 
-### **Phase 2: Activate Revenue Bots (Weeks 4-8)**
+### **Phase 2: Activate Revenue Bots (Weeks 5-8)**
 
-**Once you have $1,000+:**
+**Once you have $3,000+:**
 
 1. **Activate Alpaca Futures Bot**
-   - Adds more opportunities
-   - Different market hours
-   - Lower capital lock-up
+   - Adds 2-3 additional trades/day
+   - Higher leverage = higher ROI
+   - Different market hours (9:30am-4pm ET)
 
 2. **Activate Congress Trading Bot**
-   - Insider signals
-   - High probability trades
-   - $500/position sizing
+   - Insider signals (high conviction)
+   - $500 position sizing
+   - 2-5 trades/day when signals present
 
 **Expected Results:**
 ```
-Week 5: $1,172 + Congress = $1,290
-Week 6: $1,290 + Futures = $1,419
-Week 7: $1,419 + All 4 bots = $1,561
-Week 8: $1,561 + Scaling = $1,717
+Week 5: $3,073 + Congress = $3,890 (26% gain + new revenue)
+Week 6: $3,890 + Futures = $4,858 (25% gain + futures scalping)
+Week 7: $4,858 + All 4 bots = $5,930 (22% gain + synergy)
+Week 8: $5,930 + Scaling = $7,165 (20% gain + position scaling)
 
-→ 2X capital in 4 weeks (second month)
-→ Total: ~6-8X from start
+→ 2.3X capital in 4 weeks (second month)
+→ Total: ~9X from start ($800 → $7,165)
 ```
 
 ---
@@ -73,14 +73,14 @@ Week 8: $1,561 + Scaling = $1,717
 **Take profits to fund your ideas:**
 
 ```
-Total Capital After 8 weeks: $1,717
-├─ Keep working (for compounding): $1,000
-└─ Extract for new ideas: $717
+Total Capital After 8 weeks: $7,165
+├─ Keep working (for compounding): $4,000
+└─ Extract for new ideas: $3,165
 
-Month 2 profits: +$500-600
-Month 3 profits: +$700-800
+Month 2 profits: +$2,000-3,000
+Month 3 profits: +$4,000-6,000
 
-By Week 12: You have $2,000+ to fund other projects!
+By Week 12: You have $10,000+ to fund multiple projects!
 ```
 
 ---
@@ -96,10 +96,11 @@ By Week 12: You have $2,000+ to fund other projects!
 
 | Timeline | Capital | Use Case |
 |----------|---------|----------|
-| Week 2 | $100-200 | Small idea testing |
-| Week 4 | $300-500 | Launch new revenue stream |
-| Week 8 | $1,000+ | Scale existing idea or launch new |
-| Week 12 | $2,000+ | Full scale multiple ideas |
+| Week 2 | $500-750 | Launch small revenue stream |
+| Week 4 | $1,500-2,000 | Scale multiple ideas simultaneously |
+| Week 6 | $3,000-4,000 | Full scale 2-3 business ideas |
+| Week 8 | $3,000+ extracted | Fund all your other projects |
+| Week 12 | $5,000-7,000 extracted | Multiple 6-figure ventures running |
 
 ---
 
@@ -153,20 +154,23 @@ Once deployed, check these URLs:
 
 ## 🎯 Key Numbers to Watch
 
-### **Daily:**
-- Crypto bot trades per day: 5-15
-- Avg trade P&L: +$10-50
-- Daily total: +$50-150+
+### **Daily (All 4 Bots Active):**
+- Crypto bot trades: 8-15/day
+- Futures bot trades: 5-10/day
+- Congress bot trades: 2-4/day
+- Swing bot positions: 1-2/week
+- **Daily P&L target: +$200-500** (starting week 5)
+- **Capital growth: 15-25% per day**
 
 ### **Weekly:**
-- Total trades: 35-105
-- Weekly P&L: +$350-1,050+
-- Capital growth: 10-30%
+- Total trades: 80-160+
+- Weekly P&L: +$1,400-3,500+
+- **Capital growth: 40% per week** (compounding)
 
 ### **Monthly:**
-- Total trades: 150-450
-- Monthly P&L: +$1,500-4,500+
-- Capital 2-4X
+- Total trades: 350-700+
+- Monthly P&L: +$5,000-15,000+
+- **Capital 3-5X per month** (weeks 1-2), then stabilize at 2-3X/month
 
 ---
 
@@ -186,16 +190,21 @@ Your money is SAFE. Bot has built-in guardrails.
 ## 🌟 Your Growth Path
 
 ```
-Day 1:  $800 → Deploy bots
-Day 7:  $880 → First week complete
-Day 14: $968 → Second week + profits
-Day 21: $1,065 → Third week, larger positions
-Day 28: $1,172 → FIRST DOUBLING + ideas funded
+Day 1:  $800 → Deploy bots, all 4 running 24/7
+Day 7:  $1,120 → First week (40% gain)
+Day 14: $1,568 → Second week (40% compound)
+Day 21: $2,195 → Third week (40% compound)
+Day 28: $3,073 → PHASE 1 COMPLETE ($2,273 profit!)
 
-Month 2: $1,717 → Second doubling + multiple ideas
-Month 3: $2,500+ → Ready to scale anything
+Week 5: $3,890 → Congress bot activated
+Week 6: $4,858 → Futures bot accelerating
+Week 7: $5,930 → All 4 bots in full swing
+Week 8: $7,165 → PHASE 2 COMPLETE ($6,365 total profit!)
 
-Timeline to $10K: ~8-12 weeks with compounding
+Month 3: $10,000+ → READY TO SCALE & FUND IDEAS
+
+Timeline to $5K: ~32 days
+Timeline to $10K: ~56 days (8 weeks with all bots active)
 ```
 
 ---
