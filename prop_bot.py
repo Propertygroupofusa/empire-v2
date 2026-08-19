@@ -67,11 +67,11 @@ CRYPTO_RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "65"))  # MORE 
 # 1.0x scale: 0.3% stop
 # 1.5x scale: 0.2% stop (1.5x scaled position needs tighter exit)
 # 2.0x scale: 0.2% stop (maximum scale = maximum discipline)
-STOP_LOSS_BASE_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.003"))  # Base: 0.3% for stocks/futures
+STOP_LOSS_BASE_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.001"))  # Base: 0.1% for stocks/futures
 
 # Crypto-specific stop-loss: dynamically tightens with scale
 # Base: 0.3%, tightens to 0.2% at 1.5x scale
-CRYPTO_STOP_LOSS_BASE_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.003"))  # Base: 0.3%
+CRYPTO_STOP_LOSS_BASE_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.001"))  # Base: 0.1%
 
 def get_dynamic_stop_loss(scale: float) -> float:
     """Tighten stop-loss as positions scale up (1.5x+ = tighter discipline)"""
