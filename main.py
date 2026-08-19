@@ -173,6 +173,27 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import alpaca_swing_bot: {e}")
 
+congress_trading_bot_module = None
+try:
+    import congress_trading_bot
+    congress_trading_bot_module = congress_trading_bot
+except Exception as e:
+    logging.warning(f"Failed to import congress_trading_bot: {e}")
+
+tim_moore_copytrader_module = None
+try:
+    import tim_moore_copytrader
+    tim_moore_copytrader_module = tim_moore_copytrader
+except Exception as e:
+    logging.warning(f"Failed to import tim_moore_copytrader: {e}")
+
+discord_signal_receiver = None
+try:
+    import discord_signal_receiver
+    discord_signal_receiver = discord_signal_receiver
+except Exception as e:
+    logging.warning(f"Failed to import discord_signal_receiver: {e}")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pgusa")
 
@@ -1147,6 +1168,39 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.error(f"🛑 Alpaca Swing bot startup failed: {e}")
 
+    try:
+        if congress_trading_bot_module is not None:
+            import threading
+            log.info("🏛️ Starting Congressional Trading bot daemon thread...")
+            congress_thread = threading.Thread(target=congress_trading_bot_module.run, daemon=True)
+            congress_thread.start()
+            log.info("✅ Congressional Trading bot started | Mirrors insider trades | Bullish congress activity")
+        else:
+            log.warning("⚠️ congress_trading_bot module not available")
+    except Exception as e:
+        log.error(f"🛑 Congressional Trading bot startup failed: {e}")
+
+    try:
+        if tim_moore_copytrader_module is not None:
+            import threading
+            log.info("🎯 Starting Tim Moore Copy Trader (YOLO MODE)...")
+            tim_moore_thread = threading.Thread(target=tim_moore_copytrader_module.run, daemon=True)
+            tim_moore_thread.start()
+            log.info("✅ Tim Moore Copy Trader started | Auto-executes insider trades | $1K per trade | 8% profit target")
+        else:
+            log.warning("⚠️ tim_moore_copytrader module not available")
+    except Exception as e:
+        log.error(f"🛑 Tim Moore Copy Trader startup failed: {e}")
+
+    try:
+        if discord_signal_receiver is not None:
+            await discord_signal_receiver.start_discord_signal_receiver()
+            log.info("✅ Discord Signal Receiver initialized | Endpoint: /discord/signal | Status: /discord/status")
+        else:
+            log.warning("⚠️ discord_signal_receiver module not available")
+    except Exception as e:
+        log.error(f"🛑 Discord Signal Receiver startup failed: {e}")
+
     # bot_2_crypto_scalper.py retired: it traded crypto (BTC/ETH/SOL/AVAX/
     # DOGE/LINK) through Alpaca using the same ALPACA_API_KEY as prop_bot.py
     # trades stocks with - but Alpaca crypto is blocked for this account's
@@ -1300,6 +1354,21 @@ try:
     log.info("✅ Router loaded: /crypto/analytics (state machine instrumentation)")
 except Exception as e:
     log.warning(f"Failed to load crypto analytics router: {e}")
+
+# Trading P&L Dashboard
+try:
+    from routers import trading_dashboard
+    app.include_router(trading_dashboard.router, tags=["Trading Dashboard"])
+    log.info("✅ Router loaded: /trading/dashboard (real-time P&L tracking)")
+except Exception as e:
+    log.warning(f"Failed to load trading dashboard router: {e}")
+
+try:
+    if discord_signal_receiver:
+        app.include_router(discord_signal_receiver.router, tags=["Discord Signals"])
+        log.info("✅ Router loaded: /discord/signal (Discord trading signal receiver)")
+except Exception as e:
+    log.warning(f"Failed to load Discord signal receiver: {e}")
 
 
 @app.get("/dashboard")
