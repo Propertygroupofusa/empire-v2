@@ -390,10 +390,19 @@ async def get_price_rsi(session, symbol):
         url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=5Min&limit=50"
         async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
+                log.warning(f"Alpaca API error for {symbol}: HTTP {r.status}")
                 return None
-            data = await r.json()
-            bars = data.get("bars", [])
-            if len(bars) < 50:
+
+            try:
+                data = await r.json()
+            except (ValueError, AttributeError) as e:
+                log.warning(f"Failed to parse JSON for {symbol}: {e}")
+                return None
+
+            bars = data.get("bars") if data else None
+            if not bars or len(bars) < 50:
+                bar_count = len(bars) if bars else 0
+                log.debug(f"Insufficient bars for {symbol}: got {bar_count}, need 50")
                 return None
 
             closes = [b["c"] for b in bars]
@@ -1065,7 +1074,7 @@ async def run_prop_cycle():
             if data:
                 scans[contract] = data
                 log.info(f"[APEX_589296] {contract} ({config['symbol']}) | ${data['price']:.2f} | RSI:{data['rsi']} | Momentum:{data.get('momentum', 0):+.2f}% | {data['trend']}")
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.5)  # 500ms between requests to prevent rate limiting
 
         # ── Pass 1: manage exits for symbols already held ────────────────
         # A long profits as price rises and exits on overbought RSI; a
@@ -1103,7 +1112,7 @@ async def run_prop_cycle():
                 position_age_seconds=position_age_seconds,
                 direction=side,
                 max_hold_seconds=7200,  # 2 hours max
-                stop_loss_pct=0.015,  # 1.5% hard stop for stocks
+                stop_loss_pct=0.003,  # 0.3% hard stop (matches get_dynamic_stop_loss base)
                 min_profit_target_pct=0.02,  # 2% minimum profit (KEY: prevents breakeven exits)
                 rsi_profit_threshold_long=60,  # Sell longs when RSI >= 60 (overbought)
                 rsi_profit_threshold_short=40,  # Cover shorts when RSI <= 40 (oversold)
@@ -1249,7 +1258,7 @@ async def record_daily_earnings(pnl_amount):
     payment = Payment(
         id=f"bot_trade_{uuid.uuid4().hex[:8]}",
         job_id=f"bot_daily_{datetime.now(ET).strftime('%Y%m%d')}",
-        worker_id="prop_bot_worker",
+        worker_id="bot@pgusa.local",  # Use consistent worker ID matching system
         client_id="alpaca_trading",
         gross_amount=pnl_amount,
         worker_amount=worker_amount,
