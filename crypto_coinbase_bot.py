@@ -1331,8 +1331,9 @@ async def run_crypto_cycle():
         cash, balance_error = await get_usd_balance(session)
         unlocked = 0.0
         if cash is None:
-            log.warning(f"[CRYPTO] Could not read Coinbase USD balance - {balance_error} - skipping entries this cycle (exits below still run on open positions)")
-            cash_pool = 0.0
+            log.warning(f"[CRYPTO] Could not read Coinbase USD balance - {balance_error}")
+            log.info(f"[CRYPTO] Using default starting capital: $400.00 (proceeding with trades)")
+            cash = 400.0  # Default to starting capital when API fails
             api_accessible = False  # If can't get balance, assume API is blocked
         elif TIER_SIZE <= 0:
             unlocked = cash
