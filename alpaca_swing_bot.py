@@ -519,13 +519,16 @@ async def run_swing_check():
 
 def run():
     """Main entry point - Swing + Day Trading"""
+    # Startup diagnostics
     log.info("=" * 70)
     log.info("ALPACA DUAL STRATEGY BOT v2 — Swing + Day Trading")
     log.info(f"Mode: {'LIVE' if LIVE_TRADE else 'PAPER'}")
     log.info(f"Account: ${ACCOUNT_SIZE:,.0f} | Risk/Trade: {RISK_PER_TRADE_PCT*100:.1f}% (${RISK_PER_TRADE:.0f})")
     log.info(f"Daily Target: ${DAILY_PROFIT_TARGET:.0f}")
+    log.info(f"API Key: {'✓ Configured' if os.getenv('ALPACA_API_KEY') else '✗ NOT SET'}")
+    log.info(f"Base URL: {get_base_url()}")
     log.info(f"")
-    log.info("SWING: RSI < {WEEKLY_RSI_BUY} entry, max {MAX_CONCURRENT_SWING} positions, hold 5-10 days")
+    log.info(f"SWING: RSI < {WEEKLY_RSI_BUY} entry, max {MAX_CONCURRENT_SWING} positions, hold 5-10 days")
     log.info(f"DAY: RSI < {INTRADAY_RSI_BUY} intraday entry, max {MAX_CONCURRENT_INTRADAY} positions, close same day")
     log.info("=" * 70)
 
@@ -567,7 +570,9 @@ def run():
             log.info("\n⏹️  Bot stopped")
             break
         except Exception as e:
+            import traceback
             log.error(f"Bot error: {e}")
+            log.error(f"Traceback: {traceback.format_exc()}")
             import time
             time.sleep(30)
 
