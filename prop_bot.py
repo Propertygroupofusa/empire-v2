@@ -761,6 +761,41 @@ async def run_prop_cycle():
                 log.info(f"🚀 ALPACA AGGRESSIVE MODE: ${equity:.2f} ≤ ${ALPACA_FLOOR:.2f} | Climbing to $1,000+")
             if should_alpaca_take_profits:
                 log.info(f"💰 ALPACA PROFIT TAKING: ${equity:.2f} ≥ ${ALPACA_PROFIT_ACTIVATION:.2f} | Close $10 trades")
+                # Actually close the most profitable positions to lock in gains
+                profit_positions = []
+                for contract, pos in open_prop_positions.items():
+                    if pos.get("pnl", 0) > 0:  # Only profitable positions
+                        profit_positions.append((contract, pos, pos.get("pnl", 0)))
+
+                # Sort by profit (highest first) and close top 10
+                profit_positions.sort(key=lambda x: x[2], reverse=True)
+                trades_closed = 0
+                for contract, pos, pnl in profit_positions[:10]:  # Top 10 most profitable
+                    try:
+                        # Get current price
+                        try:
+                            price_resp = await session.get(f"{get_base_url()}/v1/last?symbols={pos.get('symbol', contract)}", headers=get_headers())
+                            if price_resp.status == 200:
+                                data = await price_resp.json()
+                                price = data.get("last", {}).get("price", pos["entry"])
+                            else:
+                                price = pos["entry"]
+                        except:
+                            price = pos["entry"]
+
+                        # Close position and realize profit
+                        await close_position(session, contract, FUTURES.get(contract, {}), pos, price, 0, "profit_taking", f"PROFIT LOCK: +${pnl:.2f}")
+                        trades_closed += 1
+
+                        # Update cash_remaining to reflect realized profit
+                        if cash_remaining is not None:
+                            cash_remaining += pnl
+
+                    except Exception as e:
+                        log.error(f"[APEX_589296] Failed to close profitable position {contract}: {e}")
+
+                if trades_closed > 0:
+                    log.info(f"✅ PROFIT LOCK EXECUTED: Closed {trades_closed} positions, cash_remaining: ${cash_remaining:.2f}")
 
             # Check if $1M goal achieved — STOP TRADING
             if equity >= 1000000.0:
