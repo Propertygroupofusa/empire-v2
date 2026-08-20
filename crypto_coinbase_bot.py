@@ -1625,7 +1625,12 @@ async def run_crypto_cycle():
                 should_exit = True
                 reason = f"💵 CLOSE ON PROFIT (after fees) @ ${price:.2f} (+{unrealized_pct*100:.2f}%)"
 
-            # PRIORITY 3: RSI overbought exit (safety valve - reversal signal at high RSI)
+            # PRIORITY 3: Profit-taking when balance high (lock in gains during compounding phase)
+            elif profit_take_exit:
+                should_exit = True
+                reason = f"💰 PROFIT LOCK (${TARGET_TRADE_PROFIT:.2f} target reached) @ ${price:.2f} (+${dollar_profit:.2f})"
+
+            # PRIORITY 4: RSI overbought exit (safety valve - reversal signal at high RSI)
             elif rsi >= 65:
                 should_exit = True
                 reason = f"📤 RSI OVERBOUGHT EXIT (RSI {rsi:.1f} >= 65) @ ${price:.2f} ({unrealized_pct*100:+.2f}%)"
