@@ -9,7 +9,7 @@ Strategy: Mean reversion on weekly RSI
 - Exit: Weekly RSI > 70 (overbought) OR +5% profit OR -2% stop loss
 - Hold: 5-10 days typical (vs prop_bot's 2-hour scalps)
 - Max positions: 3 concurrent
-- Position sizing: Dynamic based on equity (start $100/position at $800 equity)
+- Position sizing: Dynamic based on equity (start $25/position at $100 equity)
 
 Trades: Indices (MES, MNQ, MYM, M2K) + Commodities (MGC, MCL, SIL)
         (Crypto excluded due to regulatory restrictions noted in crypto_coinbase_bot.py)
@@ -68,8 +68,8 @@ MAX_HOLD_DAYS = 10        # Exit after 10 days regardless
 
 # Position management
 MAX_CONCURRENT = 3
-MIN_EQUITY = 800.0
-POSITION_SIZE_BASE = 100.0  # $100 per position at min equity
+MIN_EQUITY = 100.0  # Lowered to allow trading with minimal capital
+POSITION_SIZE_BASE = 25.0  # $25 per position at min equity
 
 
 async def get_weekly_rsi(session, symbol):
