@@ -385,8 +385,18 @@
 
     <script>
         const API_URL = '/api/trading-dashboard/live-dashboard-data';
-        const UPDATE_INTERVAL = 3000; // 3 seconds
+        const UPDATE_INTERVAL = 30000; // 30 seconds (check for changes, not constant polling)
         let lastUpdateTime = null;
+        let lastDataHash = null;
+        let lastTradeTime = null;
+
+        function hashData(data) {
+            return JSON.stringify({
+                accounts: data.accounts,
+                trades: data.trading.recent_trades,
+                bots: data.bots
+            });
+        }
 
         async function fetchDashboardData() {
             try {
@@ -394,7 +404,19 @@
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
                 const data = await response.json();
-                updateDashboard(data);
+                const currentHash = hashData(data);
+
+                // Only update display if data changed
+                if (currentHash !== lastDataHash) {
+                    updateDashboard(data);
+                    lastDataHash = currentHash;
+
+                    // Track if trades changed (bot is active)
+                    if (data.trading.recent_trades.length > 0) {
+                        lastTradeTime = new Date();
+                    }
+                }
+
                 document.getElementById('status-text').textContent = 'Live';
                 document.getElementById('error-message').innerHTML = '';
             } catch (error) {
