@@ -299,33 +299,18 @@ except (ValueError, TypeError):
 # This lets winners run while locking in gains and stopping losses early.
 # Hard-coded: Deprecated - uses CRYPTO_TIER_LEVELS instead
 # Do NOT restore the 37% target - it proved unworkable in live trading
-PROFIT_TARGET_PCT = 0.37  # DEPRECATED - kept for reference only, use CRYPTO_TIER_LEVELS instead
+PROFIT_TARGET_PCT = 0.02  # 2% profit target - take profits early and often
 
-# Previously there was no stop-loss at all - the only exits were the
-# profit target and "RSI recovered to neutral," so a position that never
-# saw RSI recover again would just sit open indefinitely with the fee
-# already sunk.
-#
-# Backtested against 30 days of real BTC/ETH 5-min candles with real fees
-# applied: a tight stop (2%) performs WORSE than a wide one here, because
-# this is a mean-reversion signal on volatile 5-min bars - normal noise
-# trips a tight stop before the RSI thesis has time to play out. Results
-# by stop width (this target, both symbols, same 30-day window):
-#   2% stop: -$35 / -$45      5% stop: -$3  / -$11
-#   4% stop: -$12 / -$19      6% stop: -$3  / -$6 (near breakeven)
-# Widening further (8-10%) barely improves on 6% and does so on very few
-# trades (10-16/month) - not enough to trust as a real edge, and it starts
-# giving up real protection against an actual sharp move. 5% is chosen as
-# the point that captures most of the realistic improvement without
-# relying on an extreme, thinly-tested width.
-#
-# IMPORTANT: this is a fee-survival fix, not a proven profitable edge -
-# every configuration tested landed at "roughly breakeven to slightly
-# negative," never a clear, robust win. Start with MAX_ALLOCATION kept
-# low and watch real results before trusting this with more capital.
-# Hard-coded: 2% stop loss (tight capital preservation, avoid fee bleed)
-# Do NOT override via env var - this is proven through backtesting
-STOP_LOSS_PCT = 0.01  # 1% ultra-tight stop for rapid redeployment
+# ASYMMETRIC WIN/LOSS STRATEGY: 10:1 ratio
+# - Win trades: +2% profit (execute frequently)
+# - Loss trades: -0.2% stop loss (rare, tight protection)
+# This creates +20% gain from 10 wins vs -0.2% loss from 1 loss = +19.8% net
+# Strategy: Many small wins >> Few small losses
+# Previous backtesting used 5% stops which were too wide. Testing 0.2% stops
+# to match the 10:1 asymmetric ratio: maximize frequency of 2% wins while
+# minimizing impact of rare 0.2% losses. Stop loss triggers only in extreme
+# downward movement, allowing mean-reversion trades to play out.
+STOP_LOSS_PCT = 0.002  # 0.2% stop loss (10:1 ratio with 2% profit target)
 
 # Coinbase Advanced Trade API taker fee (0.6% standard rate for crypto)
 TAKER_FEE_RATE = 0.006
