@@ -1265,7 +1265,7 @@ class HermesSession(Base):
     started_at = Column(DateTime, default=datetime.utcnow, index=True)
     last_activity = Column(DateTime, default=datetime.utcnow, index=True)
     message_count = Column(Integer, default=0)
-    metadata = Column(JSON, nullable=True)
+    extra_data = Column(JSON, nullable=True)
     closed_at = Column(DateTime, nullable=True)
 
     def to_dict(self):
@@ -1291,7 +1291,7 @@ class TelegramMessage(Base):
     message_type = Column(String, index=True)  # status, alert, command, report
     status = Column(String, default="sent")  # sent, failed, pending
     sent_at = Column(DateTime, default=datetime.utcnow, index=True)
-    metadata = Column(JSON, nullable=True)
+    extra_data = Column(JSON, nullable=True)
 
     def to_dict(self):
         return {
@@ -1323,7 +1323,7 @@ class BotStatus(Base):
     avg_loss = Column(Float, default=0.0)
     open_positions_count = Column(Integer, default=0)
     errors = Column(JSON, nullable=True)  # List of error messages
-    metadata = Column(JSON, nullable=True)
+    extra_data = Column(JSON, nullable=True)
 
     def to_dict(self):
         return {
