@@ -66,10 +66,10 @@ PROFIT_TARGET_PCT = 0.05  # Exit at +5% profit
 STOP_LOSS_PCT = 0.02      # Exit at -2% loss
 MAX_HOLD_DAYS = 10        # Exit after 10 days regardless
 
-# Position management
+# Position management - AGGRESSIVE SCALING FOR 10-20X GROWTH
 MAX_CONCURRENT = 3
-MIN_EQUITY = 100.0  # Lowered to allow trading with minimal capital
-POSITION_SIZE_BASE = 25.0  # $25 per position at min equity
+MIN_EQUITY = 100.0  # Minimum equity threshold to enable trading
+POSITION_SIZE_BASE = 150.0  # $150 per position at min equity — accelerates capital deployment
 
 
 async def get_weekly_rsi(session, symbol):

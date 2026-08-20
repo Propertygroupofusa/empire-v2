@@ -233,10 +233,10 @@ except (ValueError, TypeError):
 # Minimum cash reserve: never deploy this amount, only grows from profits
 # With $483.43 balance: keep $25, deploy $458.43 in active trades
 try:
-    MIN_CASH_RESERVE = float(os.getenv("CRYPTO_MIN_CASH_RESERVE", "5"))
+    MIN_CASH_RESERVE = float(os.getenv("CRYPTO_MIN_CASH_RESERVE", "1"))
 except (ValueError, TypeError):
-    log.warning("Invalid CRYPTO_MIN_CASH_RESERVE value, using default: 5")
-    MIN_CASH_RESERVE = 5.0
+    log.warning("Invalid CRYPTO_MIN_CASH_RESERVE value, using default: 1")
+    MIN_CASH_RESERVE = 1.0
 
 
 def get_unlocked_tier(balance: float) -> float:
@@ -1000,9 +1000,9 @@ def find_recent_swing_high(candles: list, lookback_bars: int = 10) -> dict:
 
 
 def size_position(cash_pool_remaining, slots_remaining, price):
-    """Fixed $25 per trade for small account compatibility.
-    Works with any balance size while maintaining 3-position buffer."""
-    FIXED_POSITION_SIZE = 25.0  # $25 per entry — allows 2-3 concurrent positions even on small accounts
+    """Aggressive position sizing: $150 per trade for 10-20x faster growth.
+    Balances growth speed with 3-position concurrent limit."""
+    FIXED_POSITION_SIZE = 150.0  # $150 per entry — accelerates capital deployment and compounding
 
     if cash_pool_remaining < FIXED_POSITION_SIZE * 1.05:  # Need 5% buffer for fees
         return None
