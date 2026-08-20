@@ -1310,12 +1310,22 @@ async def run_crypto_cycle():
                 api_accessible = False
                 log.warning(f"⚠️  [CRYPTO] Coinbase API unreachable ({e}) — network policy may be blocking access. Skipping all orders this cycle.")
 
-        cash, balance_error = await get_usd_balance(session)
+        # LOCAL BALANCE TRACKING: Don't call Coinbase API every cycle
+        # Instead, start with your actual balance and track entries/exits locally
+        if not hasattr(run_swing_check, 'initial_cash'):
+            starting_balance = float(os.getenv("CRYPTO_STARTING_BALANCE", "451.50"))
+            run_swing_check.initial_cash = starting_balance
+            run_swing_check.current_cash = starting_balance
+            log.info(f"[CRYPTO] Initialized local balance tracking: ${starting_balance:.2f}")
+
+        # Calculate current cash = starting - deployed in positions + realized profits
+        deployed_in_positions = sum(pos["entry"] * pos["qty"] for pos in open_crypto_positions.values())
+        cash = run_swing_check.current_cash
         unlocked = 0.0
         if cash is None:
-            log.warning(f"[CRYPTO] Could not read Coinbase USD balance - {balance_error} - skipping entries this cycle (exits below still run on open positions)")
+            log.warning(f"[CRYPTO] Balance tracking error - falling back to last known balance")
             cash_pool = 0.0
-            api_accessible = False  # If can't get balance, assume API is blocked
+            api_accessible = False
         elif TIER_SIZE <= 0:
             unlocked = cash
             # Subtract MIN_CASH_RESERVE from deployable capital
@@ -1485,13 +1495,15 @@ async def run_crypto_cycle():
                     if filled:
                         pnl_partial = (price - entry) * sell_qty
                         daily_pnl += pnl_partial
-                        log.info(f"[CRYPTO] 💰 PARTIAL {symbol} ({reason}) | Qty: {sell_qty:.8f} | P&L: ${pnl_partial:.2f} | Remaining: {remaining_qty:.8f}")
+                        run_swing_check.current_cash += pnl_partial  # Update local balance
+                        log.info(f"[CRYPTO] 💰 PARTIAL {symbol} ({reason}) | Qty: {sell_qty:.8f} | P&L: ${pnl_partial:.2f} | Remaining: {remaining_qty:.8f} | Cash pool: ${run_swing_check.current_cash:.2f}")
                 elif should_exit:
                     # Full exit: sell all remaining
                     filled = await place_order(session, symbol, "sell", remaining_qty if remaining_qty > 0 else qty, price)
                     if filled:
                         daily_pnl += unrealized_pnl
-                        log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}")
+                        run_swing_check.current_cash += unrealized_pnl  # Update local balance
+                        log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f} | Cash pool: ${run_swing_check.current_cash:.2f}")
                         send_trade_alert(
                             f"🤖 Crypto bot — {symbol} closed ({reason})",
                             f"Position closed on your Coinbase account:\n\n"
@@ -1601,7 +1613,8 @@ async def run_crypto_cycle():
                 filled = await place_order(session, symbol, "sell", qty, price)
                 if filled:
                     daily_pnl += unrealized_pnl
-                    log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}")
+                    run_swing_check.current_cash += unrealized_pnl  # Update local balance
+                    log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f} | Cash pool: ${run_swing_check.current_cash:.2f}")
                     # Log trade exit for analytics
                     time_held = (now - position.get("opened_at", now)).total_seconds() // 60 if "opened_at" in position else 0
                     await log_trade_exit(
