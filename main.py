@@ -1003,11 +1003,15 @@ async def process_payouts_periodically():
 async def lifespan(app: FastAPI):
     import asyncio
 
+    print("[LIFESPAN] Platform startup beginning...", flush=True)
     log.info("PGUSA Platform starting...")
+    print("[LIFESPAN] Initializing database...", flush=True)
     try:
         await init_db()
+        print("[LIFESPAN] ✓ Database initialized", flush=True)
         log.info("Database initialized")
     except Exception as e:
+        print(f"[LIFESPAN] ✗ Database init failed: {e}", flush=True)
         log.warning(f"Database init failed: {e}")
 
     # TEMPORARILY DISABLED: notary_payouts migration was causing startup timeout
@@ -1025,24 +1029,35 @@ async def lifespan(app: FastAPI):
     # except Exception as e:
     #     log.warning(f"notary_payouts job_id/worker_id type migration failed: {e}")
 
+    print("[LIFESPAN] Creating monitor tables...", flush=True)
     try:
         await create_monitor_tables()
+        print("[LIFESPAN] ✓ Monitor tables created", flush=True)
         log.info("Monitor tables ready")
     except Exception as e:
+        print(f"[LIFESPAN] ✗ Monitor tables failed: {e}", flush=True)
         log.warning(f"Monitor tables failed: {e}")
 
+    print("[LIFESPAN] Running migrations...", flush=True)
     try:
         await run_migrations()
+        print("[LIFESPAN] ✓ Migrations complete", flush=True)
     except Exception as e:
+        print(f"[LIFESPAN] ✗ Migrations failed: {e}", flush=True)
         log.warning(f"Migrations failed: {e}")
 
+    print("[LIFESPAN] Validating foreign keys...", flush=True)
     try:
         await validate_foreign_keys()
+        print("[LIFESPAN] ✓ Foreign keys validated", flush=True)
     except Exception as e:
+        print(f"[LIFESPAN] ✗ Foreign key validation failed: {e}", flush=True)
         log.warning(f"Foreign key validation failed: {e}")
 
+    print("[LIFESPAN] Initializing bot worker...", flush=True)
     try:
         await initialize_bot()
+        print("[LIFESPAN] ✓ Bot worker initialized", flush=True)
         log.info("✅ Bot worker initialized")
     except Exception as e:
         # ERROR with a traceback, not a bare warning. This branch was
@@ -1150,16 +1165,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.error(f"🛑 Crypto (Coinbase) bot thread startup failed: {e}")
 
+    print(f"[LIFESPAN] About to check alpaca_swing_bot_module: {alpaca_swing_bot_module is not None}", flush=True)
     try:
         if alpaca_swing_bot_module is not None:
             import threading
+            print("[LIFESPAN] ✓ alpaca_swing_bot_module is not None, starting thread...", flush=True)
             log.info("🌊 Starting Alpaca Swing bot daemon thread...")
             swing_bot_thread = threading.Thread(target=alpaca_swing_bot_module.run, daemon=True)
             swing_bot_thread.start()
+            print("[LIFESPAN] ✓ Bot thread started", flush=True)
             log.info("✅ Alpaca Swing bot started | Weekly RSI < 30 entries | 5-10 day holds | Indices + Commodities")
         else:
+            print("[LIFESPAN] ✗ alpaca_swing_bot_module is None", flush=True)
             log.warning("⚠️ alpaca_swing_bot module failed to import - bot will not run")
     except Exception as e:
+        import traceback
+        print(f"[LIFESPAN] ✗ Exception: {e}", flush=True)
+        print(f"[LIFESPAN] Traceback: {traceback.format_exc()}", flush=True)
         log.error(f"🛑 Alpaca Swing bot startup failed: {e}")
 
     # bot_2_crypto_scalper.py retired: it traded crypto (BTC/ETH/SOL/AVAX/
