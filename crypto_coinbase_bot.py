@@ -283,14 +283,15 @@ async def set_tier_highwater(value: float):
     except Exception as e:
         log.error(f"[CRYPTO] Failed to persist tier high-water mark: {e}")
 
-# Coinbase trading cost: 0.40% total round-trip assumption = 0.20% entry + 0.20% exit
-# This is used only to size the profit target sensibly, not charged/simulated here
-# (the real fee is already reflected in Coinbase's fill price/balance).
+# CLOSE-ON-PROFIT-AFTER-FEES STRATEGY:
+# Coinbase Advanced Trade: ~0.6% taker on buy + 0.6% taker on sell = ~1.2% round-trip
+# Positions close as soon as unrealized_pct > this value (profitable after paying fees).
+# This captures profit immediately instead of waiting for fixed 2% target.
 try:
-    CRYPTO_ROUND_TRIP_FEE_RATE = float(os.getenv("CRYPTO_ROUND_TRIP_FEE_RATE", "0.004"))
+    CRYPTO_ROUND_TRIP_FEE_RATE = float(os.getenv("CRYPTO_ROUND_TRIP_FEE_RATE", "0.012"))
 except (ValueError, TypeError):
-    log.warning("Invalid CRYPTO_ROUND_TRIP_FEE_RATE value, using default: 0.004")
-    CRYPTO_ROUND_TRIP_FEE_RATE = 0.004
+    log.warning("Invalid CRYPTO_ROUND_TRIP_FEE_RATE value, using default: 0.012")
+    CRYPTO_ROUND_TRIP_FEE_RATE = 0.012
 
 # DEPRECATED: Fixed 37% target replaced with tiered system (see CRYPTO_TIER_LEVELS above)
 # The old fixed target was mathematically unsound: 18.5:1 reward/risk meant the bot held
@@ -1483,47 +1484,21 @@ async def run_crypto_cycle():
                 partial_exit = False
                 reason = None
 
+                # CLOSE-ON-PROFIT-AFTER-FEES STRATEGY (simplified, full exits only):
                 # Priority 1: Stop loss (hard exit)
                 if stop_hit:
                     should_exit = True
-                    reason = f"STOP LOSS @ ${stop_price:.2f} (-{(1 - price/entry)*100:.2f}%)"
-                # Priority 2: Micro-profit taking (partial exits)
-                elif micro_hit_3 and partial_sells < 3:
-                    partial_exit = True
-                    reason = f"MICRO PROFIT L3 @ ${micro_target_3:.2f} (+0.25%, sell 25%)"
-                    position["partial_sells"] = 3
-                elif micro_hit_2 and partial_sells < 2:
-                    partial_exit = True
-                    reason = f"MICRO PROFIT L2 @ ${micro_target_2:.2f} (+0.15%, sell 25%)"
-                    position["partial_sells"] = 2
-                elif micro_hit_1 and partial_sells < 1:
-                    partial_exit = True
-                    reason = f"MICRO PROFIT L1 @ ${micro_target_1:.2f} (+0.05%, sell 25%)"
-                    position["partial_sells"] = 1
-                # Priority 3: Full exit on tier targets or RSI
-                elif rsi_exit:
+                    reason = f"🛑 STOP LOSS @ ${stop_price:.2f} (-{(1 - price/entry)*100:.2f}%)"
+                # Priority 2: Close on profit after fees (main strategy)
+                elif unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE:
                     should_exit = True
-                    reason = "RSI EXIT"
-                elif tier3_hit:
+                    reason = f"💵 CLOSE ON PROFIT (after fees) @ ${price:.2f} (+{unrealized_pct*100:.2f}%)"
+                # Priority 3: RSI overbought exit (safety valve)
+                elif rsi >= 65:
                     should_exit = True
-                    reason = f"TIER 3 @ ${tier3_price:.2f} (+{(price/entry - 1)*100:.2f}%, let winners run)"
-                elif tier2_hit and unrealized_pct >= PROFIT_TARGET_PCT:
-                    should_exit = True
-                    reason = f"TIER 2 @ ${tier2_price:.2f} (+{(price/entry - 1)*100:.2f}%, hit 3% target)"
-                elif tier1_hit:
-                    should_exit = True
-                    reason = f"TIER 1 @ ${tier1_price:.2f} (+{(price/entry - 1)*100:.2f}%, lock early gain)"
+                    reason = f"📤 RSI OVERBOUGHT EXIT (RSI {rsi:.1f} >= 65) @ ${price:.2f} ({unrealized_pct*100:+.2f}%)"
 
-                if partial_exit:
-                    # Sell 25% of original position
-                    filled = await place_order(session, symbol, "sell", sell_qty, price)
-                    if filled:
-                        pnl_partial = (price - entry) * sell_qty
-                        daily_pnl += pnl_partial
-                        run_swing_check.realized_profit += pnl_partial  # Track realized gain/loss
-                        available_cash_after = run_swing_check.initial_cash + run_swing_check.realized_profit - deployed_cost_basis
-                        log.info(f"[CRYPTO] 💰 PARTIAL {symbol} ({reason}) | Qty: {sell_qty:.8f} | P&L: ${pnl_partial:+.2f} | Remaining: {remaining_qty:.8f} | Available: ${available_cash_after:.2f} | Total Realized: ${run_swing_check.realized_profit:+.2f}")
-                elif should_exit:
+                if should_exit:
                     # Full exit: sell all remaining
                     filled = await place_order(session, symbol, "sell", remaining_qty if remaining_qty > 0 else qty, price)
                     if filled:
@@ -1599,10 +1574,10 @@ async def run_crypto_cycle():
                 }
             }
 
-            # UPGRADED EXIT LOGIC (PROFESSIONAL-GRADE):
+            # CLOSE-ON-PROFIT-AFTER-FEES EXIT LOGIC:
             # Priority 1: Hard stop loss (risk management, swing-based)
-            # Priority 2: RSI overbought exit (65-70 RSI = reversal confirmation)
-            # Priority 3: Profit targets (3%, 5%, 10% ATR-based tiers)
+            # Priority 2: Close on profit after fees (simplifies strategy: exit as soon as profitable after paying fees)
+            # Priority 3: RSI overbought exit (safety valve: reversal signal at high RSI)
             should_exit = False
             reason = None
 
@@ -1615,26 +1590,15 @@ async def run_crypto_cycle():
                 should_exit = True
                 reason = f"🛑 HARD STOP (swing-based) @ ${stop_price:.2f} (-{(1 - price/entry)*100:.2f}%)"
 
-            # PRIORITY 2: RSI overbought exit (65-70 = reversal signal, exit with profit)
-            elif rsi >= 65 and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE:
+            # PRIORITY 2: Close on profit after fees (main exit strategy - redeploy capital immediately)
+            elif unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE:
                 should_exit = True
-                reason = f"📤 RSI OVERBOUGHT EXIT (RSI {rsi:.1f} >= 65) @ ${price:.2f} (+{unrealized_pct*100:.2f}%)"
+                reason = f"💵 CLOSE ON PROFIT (after fees) @ ${price:.2f} (+{unrealized_pct*100:.2f}%)"
 
-            # PRIORITY 3: Profit taking above $1,001
-            elif profit_take_exit:
+            # PRIORITY 3: RSI overbought exit (safety valve - reversal signal at high RSI)
+            elif rsi >= 65:
                 should_exit = True
-                reason = f"💰 PROFIT TAKEN (+${dollar_profit:.2f}, balance above $1,001)"
-
-            # PRIORITY 4: Tiered profit targets (ATR-based)
-            elif tier3_hit:
-                should_exit = True
-                reason = f"TIER 3 (ATR) @ ${tier3_price:.2f} (+{(price/entry - 1)*100:.2f}%, let winners run)"
-            elif tier2_hit and unrealized_pct >= PROFIT_TARGET_PCT:
-                should_exit = True
-                reason = f"TIER 2 (ATR) @ ${tier2_price:.2f} (+{(price/entry - 1)*100:.2f}%, hit 3% target)"
-            elif tier1_hit:
-                should_exit = True
-                reason = f"TIER 1 (ATR) @ ${tier1_price:.2f} (+{(price/entry - 1)*100:.2f}%, lock early gain)"
+                reason = f"📤 RSI OVERBOUGHT EXIT (RSI {rsi:.1f} >= 65) @ ${price:.2f} ({unrealized_pct*100:+.2f}%)"
 
             if should_exit:
                 filled = await place_order(session, symbol, "sell", qty, price)
