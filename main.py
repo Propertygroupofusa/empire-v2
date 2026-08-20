@@ -396,21 +396,8 @@ async def run_migrations():
                 log.info("✅ Migration OK: crypto_rsi_state table already exists")
 
             # CRITICAL: Fix workers table auto-increment on PostgreSQL (bot_autoscaler needs this)
-            if engine.dialect.name == "postgresql":
-                try:
-                    max_id_result = await conn.execute(text("SELECT COALESCE(MAX(id), 0) FROM workers"))
-                    max_id = max_id_result.scalar() or 0
-                    await conn.execute(text("DROP SEQUENCE IF EXISTS workers_id_seq CASCADE"))
-                    await conn.execute(text(f"CREATE SEQUENCE workers_id_seq START {max_id + 1}"))
-                    await conn.execute(text("ALTER SEQUENCE workers_id_seq OWNED BY workers.id"))
-                    try:
-                        await conn.execute(text("ALTER TABLE workers ALTER COLUMN id DROP DEFAULT"))
-                    except:
-                        pass
-                    await conn.execute(text("ALTER TABLE workers ALTER COLUMN id SET DEFAULT nextval('workers_id_seq')"))
-                    log.info(f"✅ workers table auto-increment fixed (max_id: {max_id}, starts: {max_id + 1})")
-                except Exception as e:
-                    log.debug(f"Workers auto-increment (may already exist): {e}")
+            # NOTE: Skipped during initial migration block to avoid transaction abort issues
+            # This will be handled in the main migration loop below instead
         except Exception as e:
             log.warning(f"⚠️ Initial migration block (crypto_rsi_state / workers seq): {type(e).__name__}: {e}")
             # Don't re-raise - continue with main migration loop. The first async with block can fail
