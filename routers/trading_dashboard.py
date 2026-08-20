@@ -928,7 +928,7 @@ async def get_coinbase_usd_balance():
 
 
 @router.get("/live-dashboard-data")
-async def get_live_dashboard_data():
+async def get_live_dashboard_data(db: AsyncSession = Depends(get_db)):
     """Comprehensive endpoint for the Empire trading dashboard.
     Returns: balance, open positions, recent trades, daily P&L, bot status, win rate."""
     try:
@@ -1006,33 +1006,41 @@ async def get_live_dashboard_data():
         except Exception as e:
             log.warning(f"Open positions fetch failed: {e}")
 
-        # Get recent closed trades
+        # Query database for closed trades (where exit_at is not None)
+        from models import CryptoTradeLog
         recent_trades = []
+        total_profit = 0.0
+        win_count = 0
         try:
-            trade_log = getattr(crypto_coinbase_bot, 'trade_history', [])
-            for trade in trade_log[-10:]:  # Last 10 trades
+            result = await db.execute(
+                select(CryptoTradeLog)
+                .where(CryptoTradeLog.exit_at != None)
+                .order_by(CryptoTradeLog.exit_at.desc())
+                .limit(10)
+            )
+            trades_from_db = result.scalars().all()
+            for trade in trades_from_db:
+                profit = trade.net_pnl if trade.net_pnl else (trade.gross_pnl if trade.gross_pnl else 0)
+                if profit > 0:
+                    win_count += 1
+                total_profit += profit
+                profit_pct = 0
+                if trade.entry_price and trade.entry_price > 0:
+                    profit_pct = round(((trade.exit_price - trade.entry_price) / trade.entry_price * 100), 2) if trade.exit_price else 0
                 recent_trades.append({
-                    "symbol": trade.get("symbol", "unknown"),
-                    "entry_price": trade.get("entry_price", 0),
-                    "exit_price": trade.get("exit_price", 0),
-                    "qty": trade.get("qty", 0),
-                    "profit": round(trade.get("profit", 0), 2),
-                    "profit_pct": round(trade.get("profit_pct", 0), 2),
-                    "close_time": trade.get("close_time", "unknown")
+                    "symbol": trade.symbol or "unknown",
+                    "entry_price": round(trade.entry_price, 2) if trade.entry_price else 0,
+                    "exit_price": round(trade.exit_price, 2) if trade.exit_price else 0,
+                    "qty": round(trade.position_size, 4) if trade.position_size else 0,
+                    "profit": round(profit, 2),
+                    "profit_pct": profit_pct,
+                    "close_time": trade.exit_at.isoformat() if trade.exit_at else "unknown"
                 })
         except Exception as e:
-            log.warning(f"Trade history fetch failed: {e}")
+            log.warning(f"Trade history query failed: {e}")
 
-        # Calculate daily P&L
-        daily_pnl = 0
-        daily_trades = 0
-        win_count = 0
-        for trade in recent_trades:
-            if trade.get("profit", 0) > 0:
-                win_count += 1
-            daily_pnl += trade.get("profit", 0)
-            daily_trades = len(recent_trades)
-
+        # Calculate stats from trades
+        daily_trades = len(recent_trades)
         win_rate = round((win_count / daily_trades * 100), 1) if daily_trades > 0 else 0
 
         # Bot status
@@ -1044,9 +1052,9 @@ async def get_live_dashboard_data():
             "account": {
                 "balance": coinbase_balance,
                 "starting_balance": 483.00,
-                "daily_profit": round(daily_pnl, 2),
-                "total_profit": round(coinbase_balance - 483.00, 2),
-                "growth_percent": round(((coinbase_balance - 483.00) / 483.00 * 100), 2) if coinbase_balance > 0 else 0
+                "daily_profit": round(sum(t.get("profit", 0) for t in recent_trades), 2),
+                "total_profit": round(total_profit, 2),
+                "growth_percent": round((total_profit / 483.00 * 100), 2) if total_profit > 0 else 0
             },
             "positions": {
                 "open": open_positions,
@@ -1076,4 +1084,3 @@ async def get_live_dashboard_data():
     except Exception as e:
         log.error(f"Dashboard data fetch failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-        return {"usd_balance": 0, "status": "error", "detail": str(e)}
