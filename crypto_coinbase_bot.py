@@ -1837,14 +1837,9 @@ async def run_crypto_cycle():
                     arm_rsi=armed_rsi or rsi, volume_ratio=volume_spike_ratio,
                     candle_close_position=close_position
                 )
-                # Update cash_pool from actual Coinbase balance to prevent tracking drift
-                # (fill price may differ from quoted price due to market conditions)
-                updated_cash, _ = await get_usd_balance(session)
-                if updated_cash is not None:
-                    cash_pool = min(updated_cash, unlocked, MAX_ALLOCATION) if MAX_ALLOCATION is not None else min(updated_cash, unlocked)
-                else:
-                    # Fallback to local tracking if balance fetch fails
-                    cash_pool -= qty * price
+                # Local balance tracking: deployed cost deducted from available cash
+                # No API call needed - we track starting balance + realized profit - deployed capital
+                cash_pool -= qty * price
                 send_trade_alert(
                     f"🤖 Crypto bot — BUY {symbol} opened",
                     f"Long opened on your Coinbase account:\n\n"
