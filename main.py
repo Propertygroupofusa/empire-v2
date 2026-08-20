@@ -995,9 +995,12 @@ async def lifespan(app: FastAPI):
     log.info("PGUSA Platform starting...")
     print("[LIFESPAN] Initializing database...", flush=True)
     try:
-        await init_db()
+        await asyncio.wait_for(init_db(), timeout=30.0)
         print("[LIFESPAN] ✓ Database initialized", flush=True)
         log.info("Database initialized")
+    except asyncio.TimeoutError:
+        print(f"[LIFESPAN] ✗ Database init TIMEOUT (30s) - continuing startup", flush=True)
+        log.warning(f"Database init timed out - app will start but DB features may be unavailable")
     except Exception as e:
         print(f"[LIFESPAN] ✗ Database init failed: {e}", flush=True)
         log.warning(f"Database init failed: {e}")
@@ -1019,34 +1022,46 @@ async def lifespan(app: FastAPI):
 
     print("[LIFESPAN] Creating monitor tables...", flush=True)
     try:
-        await create_monitor_tables()
+        await asyncio.wait_for(create_monitor_tables(), timeout=30.0)
         print("[LIFESPAN] ✓ Monitor tables created", flush=True)
         log.info("Monitor tables ready")
+    except asyncio.TimeoutError:
+        print(f"[LIFESPAN] ✗ Monitor tables TIMEOUT (30s) - continuing startup", flush=True)
+        log.warning(f"Monitor tables creation timed out")
     except Exception as e:
         print(f"[LIFESPAN] ✗ Monitor tables failed: {e}", flush=True)
         log.warning(f"Monitor tables failed: {e}")
 
     print("[LIFESPAN] Running migrations...", flush=True)
     try:
-        await run_migrations()
+        await asyncio.wait_for(run_migrations(), timeout=60.0)
         print("[LIFESPAN] ✓ Migrations complete", flush=True)
+    except asyncio.TimeoutError:
+        print(f"[LIFESPAN] ✗ Migrations TIMEOUT (60s) - continuing startup", flush=True)
+        log.warning(f"Migrations timed out - database schema may be incomplete")
     except Exception as e:
         print(f"[LIFESPAN] ✗ Migrations failed: {e}", flush=True)
         log.warning(f"Migrations failed: {e}")
 
     print("[LIFESPAN] Validating foreign keys...", flush=True)
     try:
-        await validate_foreign_keys()
+        await asyncio.wait_for(validate_foreign_keys(), timeout=30.0)
         print("[LIFESPAN] ✓ Foreign keys validated", flush=True)
+    except asyncio.TimeoutError:
+        print(f"[LIFESPAN] ✗ Foreign key validation TIMEOUT (30s) - continuing startup", flush=True)
+        log.warning(f"Foreign key validation timed out")
     except Exception as e:
         print(f"[LIFESPAN] ✗ Foreign key validation failed: {e}", flush=True)
         log.warning(f"Foreign key validation failed: {e}")
 
     print("[LIFESPAN] Initializing bot worker...", flush=True)
     try:
-        await initialize_bot()
+        await asyncio.wait_for(initialize_bot(), timeout=30.0)
         print("[LIFESPAN] ✓ Bot worker initialized", flush=True)
         log.info("✅ Bot worker initialized")
+    except asyncio.TimeoutError:
+        print(f"[LIFESPAN] ✗ Bot initialization TIMEOUT (30s) - continuing startup", flush=True)
+        log.error(f"Bot initialization TIMEOUT - no bot workers will exist")
     except Exception as e:
         # ERROR with a traceback, not a bare warning. This branch was
         # unreachable while initialize_bot swallowed its own exceptions,
@@ -1059,8 +1074,10 @@ async def lifespan(app: FastAPI):
                   f"[{type(e).__name__}] {e}", exc_info=True)
 
     try:
-        await initialize_bot_worker()
+        await asyncio.wait_for(initialize_bot_worker(), timeout=30.0)
         log.info("✅ Earnings bot worker initialized (for /payments/bot/earnings)")
+    except asyncio.TimeoutError:
+        log.warning(f"Earnings bot worker initialization TIMEOUT")
     except Exception as e:
         log.error(f"Earnings bot worker initialization failed: [{type(e).__name__}] {e}", exc_info=True)
 
@@ -1144,8 +1161,10 @@ async def lifespan(app: FastAPI):
         if crypto_coinbase_bot_module is not None:
             import threading
             log.info("📡 Starting Crypto (Coinbase) bot daemon thread...")
+            print("[LIFESPAN] Starting crypto bot thread...", flush=True)
             bot_thread = threading.Thread(target=crypto_coinbase_bot_module.run, daemon=True)
             bot_thread.start()
+            print("[LIFESPAN] ✓ Crypto bot thread started", flush=True)
             log.info("✓ Crypto (Coinbase) bot thread started | 28 pairs × 12 positions | 24/7 trading | Capital: $700 USD")
             log.info("💰 Strategy: 24/7 crypto + market hours stock scalping = constant opportunities and taking profits")
         else:
@@ -1161,7 +1180,7 @@ async def lifespan(app: FastAPI):
             log.info("🌊 Starting Alpaca Swing bot daemon thread...")
             swing_bot_thread = threading.Thread(target=alpaca_swing_bot_module.run, daemon=True)
             swing_bot_thread.start()
-            print("[LIFESPAN] ✓ Bot thread started", flush=True)
+            print("[LIFESPAN] ✓ Alpaca Swing bot thread successfully started", flush=True)
             log.info("✅ Alpaca Swing bot started | Weekly RSI < 30 entries | 5-10 day holds | Indices + Commodities")
         else:
             print("[LIFESPAN] ✗ alpaca_swing_bot_module is None", flush=True)
