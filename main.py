@@ -412,8 +412,9 @@ async def run_migrations():
                 except Exception as e:
                     log.debug(f"Workers auto-increment (may already exist): {e}")
         except Exception as e:
-            log.error(f"❌ Migration FAILED - crypto_rsi_state: {type(e).__name__}: {e}", exc_info=True)
-            raise
+            log.warning(f"⚠️ Initial migration block (crypto_rsi_state / workers seq): {type(e).__name__}: {e}")
+            # Don't re-raise - continue with main migration loop. The first async with block can fail
+            # without blocking the rest of startup. Bot will just skip some optional persistence features.
 
     # Counters exist so the run reports what it DID, not just that it ran.
     # Both outages so far were invisible in the logs: nothing announced that
