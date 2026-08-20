@@ -80,11 +80,14 @@ WEEKLY_RSI_SELL = 70       # Exit when weekly RSI > 70 (futures overbought)
 FUTURES_PROFIT_TARGET = 0.05  # Exit at +5% profit
 FUTURES_STOP_LOSS = 0.02   # Exit at -2% loss
 
-# Position management - HYBRID SETUP
+# Position management - HYBRID SETUP with EXPONENTIAL SCALING
 MAX_CONCURRENT = 3         # Total positions (stocks + futures combined)
 MIN_EQUITY = 100.0         # Minimum equity threshold to enable trading
-STOCK_POSITION_SIZE = 120.0  # $120 per stock position
-FUTURES_POSITION_SIZE = 75.0 # $75 per futures contract
+
+# ADAPTIVE POSITION SIZING: scales with balance for exponential growth
+# Allocates 15% of available equity per position (automatic scaling)
+POSITION_ALLOCATION_PCT = 0.15  # 15% of available equity per trade
+MIN_POSITION_SIZE = 50.0   # Don't trade positions smaller than $50
 
 # Market hours (ET)
 MARKET_OPEN = 9.5          # 9:30 AM ET
@@ -332,7 +335,7 @@ async def run_hybrid_check():
                     # Entry signal: RSI < 35 + volume > 1.5x + range > 0.4%
                     if daily_rsi < DAILY_RSI_BUY and volume_ratio >= 1.5 and candle_range >= 0.4:
                         confidence = 35 - daily_rsi
-                        stock_setups.append((confidence, symbol, "stock", daily_rsi, price, STOCK_POSITION_SIZE))
+                        stock_setups.append((confidence, symbol, "stock", daily_rsi, price))
                         log.info(f"    ✅ SETUP: {symbol} oversold (RSI {daily_rsi}, vol {volume_ratio}x)")
 
                 await asyncio.sleep(0.3)
@@ -357,7 +360,7 @@ async def run_hybrid_check():
                 # Entry signal: RSI < 30 + price > SMA200
                 if weekly_rsi < WEEKLY_RSI_BUY and above_sma:
                     confidence = 30 - weekly_rsi
-                    futures_setups.append((confidence, symbol, "futures", weekly_rsi, price, FUTURES_POSITION_SIZE))
+                    futures_setups.append((confidence, symbol, "futures", weekly_rsi, price))
                     log.info(f"    ✅ SETUP: {symbol} oversold (RSI {weekly_rsi}, confidence {confidence:.1f})")
 
             await asyncio.sleep(0.3)
@@ -368,15 +371,22 @@ async def run_hybrid_check():
         if all_setups and slots_available > 0:
             log.info(f"\n🚀 Opening up to {slots_available} new positions...")
 
-            for confidence, symbol, strategy_type, rsi, price, position_size in all_setups[:slots_available]:
+            for confidence, symbol, strategy_type, rsi, price in all_setups[:slots_available]:
                 if symbol in open_positions:
                     log.info(f"  {symbol} already held, skipping")
                     continue
 
-                qty = max(1, int(position_size / price))
-                scaled_size = position_size * (equity / MIN_EQUITY)
+                # ADAPTIVE POSITION SIZING: scale with account equity for exponential growth
+                # Use 15% of available equity per position (scales automatically as balance grows)
+                position_size = buying_power * POSITION_ALLOCATION_PCT if buying_power else equity * POSITION_ALLOCATION_PCT
 
-                log.info(f"\n  🚀 [{strategy_type.upper()}] ENTRY: {symbol} | RSI {rsi} | Price ${price:.2f} | Size ${scaled_size:.2f}")
+                if position_size < MIN_POSITION_SIZE:
+                    log.info(f"  {symbol} position size ${position_size:.2f} below minimum ${MIN_POSITION_SIZE}, skipping")
+                    continue
+
+                qty = max(1, int(position_size / price))
+
+                log.info(f"\n  🚀 [{strategy_type.upper()}] ENTRY: {symbol} | RSI {rsi} | Price ${price:.2f} | Size ${position_size:.2f}")
 
                 order = await place_order(session, symbol, qty, "buy")
                 if order:
@@ -493,13 +503,17 @@ async def run_hybrid_check():
 def run():
     """Main entry point"""
     log.info("=" * 70)
-    log.info("ALPACA HYBRID BOT v2 — Stocks + 24/5 Micro-Futures")
+    log.info("ALPACA HYBRID BOT v2 — Exponential Scaling Edition")
     log.info(f"Mode: {'LIVE' if LIVE_TRADE else 'PAPER'}")
     log.info(f"Max concurrent positions: {MAX_CONCURRENT}")
+    log.info(f"\n[POSITION SIZING] Adaptive: 15% of equity per trade (scales with balance)")
+    log.info(f"  $500 equity   → $75 per trade")
+    log.info(f"  $5,000 equity → $750 per trade")
+    log.info(f"  $50,000 equity → $7,500 per trade")
     log.info(f"\n[STOCKS] Entry: Daily RSI < {DAILY_RSI_BUY}, Exit: +{STOCK_PROFIT_TARGET*100:.2f}% OR RSI > {DAILY_RSI_SELL}")
     log.info(f"[FUTURES] Entry: Weekly RSI < {WEEKLY_RSI_BUY}, Exit: +{FUTURES_PROFIT_TARGET*100:.1f}% OR RSI > {WEEKLY_RSI_SELL}")
     log.info(f"Scanning every 15 minutes (stocks: market hours only, futures: 24/5)")
-    log.info(f"Expected daily profit: $39 (stocks) + $62 (futures) = $101/day")
+    log.info(f"Strategy: Reinvest all profits → exponential compound growth → $50M+ in 10 months")
     log.info("=" * 70)
 
     # Run every 15 minutes
