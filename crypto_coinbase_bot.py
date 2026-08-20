@@ -301,16 +301,13 @@ except (ValueError, TypeError):
 # Do NOT restore the 37% target - it proved unworkable in live trading
 PROFIT_TARGET_PCT = 0.02  # 2% profit target - take profits early and often
 
-# ASYMMETRIC WIN/LOSS STRATEGY: 10:1 ratio
-# - Win trades: +2% profit (execute frequently)
-# - Loss trades: -0.2% stop loss (rare, tight protection)
-# This creates +20% gain from 10 wins vs -0.2% loss from 1 loss = +19.8% net
-# Strategy: Many small wins >> Few small losses
-# Previous backtesting used 5% stops which were too wide. Testing 0.2% stops
-# to match the 10:1 asymmetric ratio: maximize frequency of 2% wins while
-# minimizing impact of rare 0.2% losses. Stop loss triggers only in extreme
-# downward movement, allowing mean-reversion trades to play out.
-STOP_LOSS_PCT = 0.002  # 0.2% stop loss (10:1 ratio with 2% profit target)
+# ASYMMETRIC WIN/LOSS STRATEGY: 2:1 ratio
+# - Win trades: +2% profit (execute frequently on RSI recovery)
+# - Loss trades: -1% stop loss (room to breathe for mean reversion to play out)
+# This creates +20% gain from 10 wins vs -10% loss from 10 losses = +10% net
+# Strategy: Many small wins >> Few 1% losses. Stop loss wide enough to avoid
+# whipsaws on normal volatility while RSI mean-reversion thesis develops.
+STOP_LOSS_PCT = 0.01  # 1% stop loss (allows mean reversion bounce to develop)
 
 # Coinbase Advanced Trade API taker fee (0.6% standard rate for crypto)
 TAKER_FEE_RATE = 0.006
