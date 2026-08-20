@@ -18,7 +18,7 @@ import os
 import logging
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException
@@ -927,10 +927,21 @@ async def get_coinbase_usd_balance():
         log.error(f"Coinbase USD balance fetch failed: {e}")
 
 
+def _get_utc_timestamp():
+    """Helper to avoid datetime scoping issues."""
+    try:
+        return datetime.now(timezone.utc).isoformat()
+    except NameError as e:
+        log.error(f"Datetime error in helper: {e}")
+        raise
+
+
 @router.get("/live-dashboard-data")
-async def get_live_dashboard_data(db: AsyncSession = Depends(get_db)):
+async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
     """Comprehensive endpoint for the Empire trading dashboard.
     Returns: balance, open positions, recent trades, daily P&L, bot status, win rate."""
+    timestamp_str = _get_utc_timestamp()
+
     try:
         import crypto_coinbase_bot
     except ImportError:
@@ -942,7 +953,6 @@ async def get_live_dashboard_data(db: AsyncSession = Depends(get_db)):
         try:
             if crypto_coinbase_bot.COINBASE_API_KEY_NAME and crypto_coinbase_bot.COINBASE_API_PRIVATE_KEY:
                 import jwt as pyjwt
-                from datetime import datetime, timezone, timedelta
                 import uuid
 
                 key_name = crypto_coinbase_bot.COINBASE_API_KEY_NAME
@@ -1048,7 +1058,7 @@ async def get_live_dashboard_data(db: AsyncSession = Depends(get_db)):
         alpaca_bot_active = True  # Assume active; could check via prop_bot
 
         return {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": timestamp_str,
             "account": {
                 "balance": coinbase_balance,
                 "starting_balance": 483.00,
@@ -1082,5 +1092,7 @@ async def get_live_dashboard_data(db: AsyncSession = Depends(get_db)):
         }
 
     except Exception as e:
+        import traceback
         log.error(f"Dashboard data fetch failed: {e}")
+        log.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
