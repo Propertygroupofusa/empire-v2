@@ -1155,15 +1155,22 @@ async def lifespan(app: FastAPI):
         log.error(f"🛑 Crypto (Coinbase) bot thread startup failed: {e}")
 
     try:
+        print(f"[LIFESPAN] Checking alpaca_swing_bot_module: {alpaca_swing_bot_module}", flush=True)
         if alpaca_swing_bot_module is not None:
             import threading
+            print("[LIFESPAN] ✓ Module is not None, attempting to start bot...", flush=True)
             log.info("🌊 Starting Alpaca Swing bot daemon thread...")
             swing_bot_thread = threading.Thread(target=alpaca_swing_bot_module.run, daemon=True)
             swing_bot_thread.start()
+            print("[LIFESPAN] ✓ Bot thread started successfully", flush=True)
             log.info("✅ Alpaca Swing bot started | Weekly RSI < 30 entries | 5-10 day holds | Indices + Commodities")
         else:
+            print("[LIFESPAN] ✗ alpaca_swing_bot_module is None!", flush=True)
             log.warning("⚠️ alpaca_swing_bot module failed to import - bot will not run")
     except Exception as e:
+        import traceback
+        print(f"[LIFESPAN] ✗ Exception in bot startup: {e}", flush=True)
+        print(f"[LIFESPAN] Traceback: {traceback.format_exc()}", flush=True)
         log.error(f"🛑 Alpaca Swing bot startup failed: {e}")
 
     # bot_2_crypto_scalper.py retired: it traded crypto (BTC/ETH/SOL/AVAX/
