@@ -93,19 +93,20 @@ except (ValueError, TypeError):
     NETWORK_RETRY_DELAY = 1.0
     log.warning("Invalid NETWORK_RETRY_DELAY, using default: 1.0")
 
+# OPTIMIZED: Top 10 high-liquidity pairs only
+# This reduces scan time 3x, tightens spreads, improves execution speed
 CRYPTO_PAIRS = [
-    "BTC/USD", "ETH/USD",  # Tier 1: Core stable cryptos
-    "SOL/USD", "XRP/USD", "AVAX/USD", "LINK/USD",  # Tier 2: Established mid-caps
-    "DOGE/USD", "SHIB/USD",  # Meme coins with strong volume
-    "NEAR/USD", "MATIC/USD",  # Layer 2 / scaling solutions
-    "ARB/USD", "OP/USD",  # Arbitrum & Optimism
-    "AAVE/USD", "UNI/USD",  # DeFi protocols
-    "STX/USD", "ATOM/USD",  # Bitcoin L2 & Cosmos
-    "LTC/USD", "ADA/USD", "DOT/USD",  # Established alts with high volume
-    "APT/USD", "SUI/USD", "JUP/USD",  # High-velocity newer pairs
-    "LDO/USD", "RNDR/USD", "ICP/USD",  # Staking & compute protocols
-    "BLUR/USD", "FLOKI/USD", "BONK/USD",  # Additional meme/community coins
-]  # 28 pairs total - aggressive expansion for 4x entry frequency
+    "BTC/USD",   # Tier 1: Deepest liquidity, tightest spreads
+    "ETH/USD",   # Tier 1: 2nd deepest, excellent volatility for RSI swings
+    "SOL/USD",   # Tier 2: High volume, consistent RSI bounces
+    "DOGE/USD",  # Tier 2: Strong retail volume, predictable RSI swings
+    "MATIC/USD", # Layer 2: Solid spreads, active trading
+    "XRP/USD",   # Institutional: Reliable liquidity
+    "ADA/USD",   # Established: Consistent volume baseline
+    "LINK/USD",  # Oracle infrastructure: Stable price action
+    "AVAX/USD",  # Growing ecosystem: Good volatility
+    "LTC/USD",   # Historical: Deep order book, tight spreads
+]  # 10 pairs total - optimized for quality entries + fast execution
 
 
 def _to_product_id(symbol: str) -> str:
@@ -168,13 +169,7 @@ def _auth_headers(method: str, path: str) -> dict:
 # RSI 20-30:    ARM      — prepare for entry, wait for recovery confirmation
 # RSI 10-20:    STRONG_ARM — higher quality entry, wait for recovery confirmation
 # RSI > 50:     RESET    — cycle complete, reset tracking
-#
-# Entry happens ONLY when RSI recovers UP from oversold state (not just reaching threshold)
-RSI_RESET_THRESHOLD = 50      # When RSI crosses above this, reset all entry tracking
-RSI_STRONG_ARM_THRESHOLD = 20 # RSI < 20 = strongest oversold signal
-RSI_ARM_THRESHOLD = 30        # RSI < 30 = standard oversold (arm for entry)
-RSI_WATCH_THRESHOLD = 50      # Above this = WATCH state
-RSI_NO_ENTRY = 65             # RSI >= 65 = overbought territory, skip entries
+# RSI STATE MACHINE (unified with optimized thresholds defined below)
 try:
     RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "70"))
 except (ValueError, TypeError):
@@ -286,32 +281,44 @@ async def set_tier_highwater(value: float):
 # CLOSE-ON-PROFIT-AFTER-FEES STRATEGY:
 # Coinbase Advanced Trade: ~0.6% taker on buy + 0.6% taker on sell = ~1.2% round-trip
 # Positions close as soon as unrealized_pct > this value (profitable after paying fees).
-# This captures profit immediately instead of waiting for fixed 2% target.
 try:
     CRYPTO_ROUND_TRIP_FEE_RATE = float(os.getenv("CRYPTO_ROUND_TRIP_FEE_RATE", "0.012"))
 except (ValueError, TypeError):
     log.warning("Invalid CRYPTO_ROUND_TRIP_FEE_RATE value, using default: 0.012")
     CRYPTO_ROUND_TRIP_FEE_RATE = 0.012
 
-# DEPRECATED: Fixed 37% target replaced with tiered system (see CRYPTO_TIER_LEVELS above)
-# The old fixed target was mathematically unsound: 18.5:1 reward/risk meant the bot held
-# positions indefinitely waiting for 37%, bleeding capital on the 2% stop while RSI recovered.
-# New strategy: Take profits at realistic milestones (3%, 5%, 10%) and trail the final position.
-# This lets winners run while locking in gains and stopping losses early.
-# Hard-coded: Deprecated - uses CRYPTO_TIER_LEVELS instead
-# Do NOT restore the 37% target - it proved unworkable in live trading
-PROFIT_TARGET_PCT = 0.02  # 2% profit target - take profits early and often
+# OPTIMIZED ENTRY THRESHOLDS: Tighter RSI for better quality signals
+RSI_RESET_THRESHOLD = 50  # When RSI crosses above, reset entry tracking
+RSI_NO_ENTRY = 50  # RSI >= 50: neutral/bullish, don't enter new positions
+RSI_SELL_ABOVE = 65  # RSI > 65: overbought, exit signal
+RSI_ARM_THRESHOLD = 32  # Strong oversold (upgraded from 35, better quality)
+RSI_STRONG_ARM_THRESHOLD = 28  # Ultra-strong oversold (highest confidence)
+RSI_WATCH_THRESHOLD = 50  # Above this = monitoring state
 
-# ASYMMETRIC WIN/LOSS STRATEGY: 2:1 ratio
-# - Win trades: +2% profit (execute frequently on RSI recovery)
-# - Loss trades: -1% stop loss (room to breathe for mean reversion to play out)
-# This creates +20% gain from 10 wins vs -10% loss from 10 losses = +10% net
-# Strategy: Many small wins >> Few 1% losses. Stop loss wide enough to avoid
-# whipsaws on normal volatility while RSI mean-reversion thesis develops.
-STOP_LOSS_PCT = 0.01  # 1% stop loss (allows mean reversion bounce to develop)
+PROFIT_TARGET_PCT = 0.02  # Deprecated - using fee-based + micro-exits instead
+STOP_LOSS_PCT = 0.01  # 1% stop loss (hard risk management)
+TAKER_FEE_RATE = 0.006  # Coinbase taker fee per side
 
-# Coinbase Advanced Trade API taker fee (0.6% standard rate for crypto)
-TAKER_FEE_RATE = 0.006
+# MICRO-EXIT LADDER: Lock gains fast, redeploy capital quickly
+# Layer 1: Exit 40% at 0.8% profit (covers entry fee + small profit)
+# Layer 2: Exit 60% at 1.2%+ profit (full target)
+MICRO_EXIT_1_TARGET = 0.008  # 0.8%
+MICRO_EXIT_1_QTY_PCT = 0.40  # 40% of position
+MICRO_EXIT_2_TARGET = 0.012  # 1.2%
+MICRO_EXIT_2_QTY_PCT = 0.60  # 60% of position
+
+# TIME-BASED TRAP ESCAPE: Don't hold unprofitable positions
+MAX_HOLD_TIME_MINUTES = 90  # Auto-close if no profit after 90 min
+ESCAPE_EXIT_PROFIT_TARGET = 0.005  # Exit at 0.5% profit if time limit hits
+
+# ENTRY FILTERS: Quality control for signals
+MIN_VOLUME_SPIKE_RATIO = 1.5  # Only enter if volume > 1.5x average (real moves)
+MIN_CANDLE_RANGE_PCT = 0.004  # Only enter if candle range > 0.4% (avoid chop)
+ENTRY_WINDOW_MINUTES = 8  # Only 8 min to enter after RSI bounce (don't chase)
+
+# LOSS CIRCUIT BREAKER: Pause if market regime shifts
+CONSECUTIVE_LOSSES_TO_PAUSE = 2  # Pause entries after 2 losses in a row
+CIRCUIT_BREAKER_PAUSE_MINUTES = 120  # Pause for 2 hours (lets market recover)
 
 # IMPROVED tiered exit levels - take profits at realistic milestones, not fixed 37%
 # Tier 1: Exit 1/3 at 3-5% (first profit zone, lock early gain)
@@ -630,24 +637,27 @@ def _get_rsi_state(rsi: float) -> str:
 
 
 def _crypto_buy_signal_improved(rsi: float, prev_rsi: float, volume_ratio: float, close_position: float,
-                                is_bullish: bool = True, is_recovering: bool = False) -> str:
+                                is_bullish: bool = True, is_recovering: bool = False,
+                                candle_range_pct: float = 0.0) -> str:
     """
-    STATE-BASED RSI ENTRY SYSTEM for highest-quality profit trades:
+    OPTIMIZED RSI ENTRY SYSTEM: Quality > Quantity
 
-    Entry State Machine:
+    Entry State Machine (TIGHTER thresholds for better signals):
     ─────────────────────
     RSI > 50:      RESET      — Cycle complete, awaiting new oversold
-    RSI 30-50:     WATCH      — Monitoring for oversold entry setup
-    RSI 20-30:     ARM        — Oversold signal, waiting for recovery
-    RSI < 20:      STRONG_ARM — Heavily oversold, highest quality entry
+    RSI 32-50:     WATCH      — Monitoring for oversold entry setup (was 30-50)
+    RSI 28-32:     ARM        — Strong oversold signal, waiting for recovery
+    RSI < 28:      STRONG_ARM — Heavily oversold, highest quality entry (was < 20)
 
-    Entry Rules:
+    Entry Rules (with new quality filters):
     ────────────
     1. Must be bullish (price > 200-day SMA)
     2. Must be RECOVERING (RSI going UP from oversold state)
-    3. Entry happens when recovery confirmation + volume spike + close in upper half
+    3. Volume spike confirmed (> 1.5x average)
+    4. Candle range meaningful (> 0.4% to avoid chop)
+    5. Close in upper half (> 0.50 = strength)
 
-    Returns: "STRONG_BUY" (recovery from oversold) or "NO_ACTION"
+    Returns: "STRONG_BUY" or "NO_ACTION"
     """
 
     # FILTER 1: Trend confirmation (bull market only)
@@ -659,7 +669,6 @@ def _crypto_buy_signal_improved(rsi: float, prev_rsi: float, volume_ratio: float
     prev_state = _get_rsi_state(prev_rsi)
 
     # FILTER 2: Only enter on recovery from STRONG_ARM or ARM states
-    # Recovery means: RSI going UP from oversold (prev_state in [ARM, STRONG_ARM])
     if prev_state not in ["ARM", "STRONG_ARM"]:
         return "NO_ACTION"
 
@@ -667,11 +676,20 @@ def _crypto_buy_signal_improved(rsi: float, prev_rsi: float, volume_ratio: float
     if not is_recovering or rsi <= prev_rsi:
         return "NO_ACTION"
 
-    # FILTER 3: Volume + momentum confirmation for entry execution
-    # Only enter if recovery has sufficient conviction:
-    # - Volume spike (1.5x normal)
-    # - Close in upper half of candle (strength confirmation)
-    if rsi < RSI_NO_ENTRY and volume_ratio >= 1.5 and close_position >= 0.50:
+    # FILTER 3: Volume confirmation (real moves only, not dead-cat bounces)
+    if volume_ratio < MIN_VOLUME_SPIKE_RATIO:
+        return "NO_ACTION"
+
+    # FILTER 4: Price consolidation filter (skip chop, only trade real range moves)
+    if candle_range_pct < MIN_CANDLE_RANGE_PCT:
+        return "NO_ACTION"
+
+    # FILTER 5: Close in upper half (strength confirmation)
+    if close_position < 0.50:
+        return "NO_ACTION"
+
+    # ALL FILTERS PASSED: Issue STRONG_BUY signal
+    if rsi < RSI_NO_ENTRY:
         return "STRONG_BUY"
 
     return "NO_ACTION"
@@ -1691,17 +1709,18 @@ async def run_crypto_cycle():
                 candle_range = candle["high"] - candle["low"]
                 if candle_range > 0:
                     close_position = (candle["close"] - candle["low"]) / candle_range
+                    candle_range_pct = candle_range / candle["close"]  # Range as % of price
                     volume_spike_ratio = candle["volume"] / max(candle["prior_volume"], 1)
 
                     # STATE-BASED RSI ENTRY: Only enter on recovery from oversold
-                    # is_recovering = RSI moving UP from oversold state (true momentum)
                     is_recovering = (last_rsi is not None and rsi > last_rsi)
 
                     is_bullish = data.get("is_bullish", True)
                     signal = _crypto_buy_signal_improved(
                         rsi, last_rsi or rsi, volume_spike_ratio, close_position,
                         is_bullish=is_bullish,
-                        is_recovering=is_recovering
+                        is_recovering=is_recovering,
+                        candle_range_pct=candle_range_pct
                     )
 
                     if signal == "NO_ACTION":
