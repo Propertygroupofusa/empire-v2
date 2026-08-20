@@ -1310,17 +1310,42 @@ async def run_crypto_cycle():
                 api_accessible = False
                 log.warning(f"⚠️  [CRYPTO] Coinbase API unreachable ({e}) — network policy may be blocking access. Skipping all orders this cycle.")
 
-        # LOCAL BALANCE TRACKING: Don't call Coinbase API every cycle
-        # Instead, start with your actual balance and track entries/exits locally
+        # ═══════════════════════════════════════════════════════════════════
+        # LOCAL BALANCE TRACKING: Accurate cash calculation every cycle
+        # ═══════════════════════════════════════════════════════════════════
+
+        # Initialize on first run
         if not hasattr(run_swing_check, 'initial_cash'):
             starting_balance = float(os.getenv("CRYPTO_STARTING_BALANCE", "451.50"))
             run_swing_check.initial_cash = starting_balance
-            run_swing_check.current_cash = starting_balance
-            log.info(f"[CRYPTO] Initialized local balance tracking: ${starting_balance:.2f}")
+            run_swing_check.realized_profit = 0.0  # Track cumulative realized P&L
+            run_swing_check.positions_cost_basis = 0.0  # Total $ deployed in open positions
+            log.info(f"[CRYPTO] Initialized balance tracking | Starting: ${starting_balance:.2f}")
 
-        # Calculate current cash = starting - deployed in positions + realized profits
-        deployed_in_positions = sum(pos["entry"] * pos["qty"] for pos in open_crypto_positions.values())
-        cash = run_swing_check.current_cash
+        # CALCULATION:
+        # Total Account Value = Initial + Realized Profits + Unrealized P&L on Open Positions
+        # Available Cash = Initial + Realized Profits - Capital Deployed in Positions
+
+        # Calculate unrealized P&L across all open positions (for display)
+        unrealized_total = 0.0
+        deployed_cost_basis = 0.0
+        for symbol, pos in open_crypto_positions.items():
+            entry = pos["entry"]
+            qty = pos["qty"]
+            cost = entry * qty
+            deployed_cost_basis += cost
+
+        # Realized gains + realized losses from closed positions
+        realized_total = run_swing_check.realized_profit
+
+        # Available cash = starting balance + profits - deployed capital
+        available_cash = run_swing_check.initial_cash + realized_total - deployed_cost_basis
+
+        # Total account value = starting balance + all realized + all unrealized
+        total_account_value = run_swing_check.initial_cash + realized_total + unrealized_total
+
+        cash = total_account_value  # For compatibility with rest of code
+        cash_pool = max(0, available_cash)  # Can't go negative
         unlocked = 0.0
         if cash is None:
             log.warning(f"[CRYPTO] Balance tracking error - falling back to last known balance")
@@ -1382,7 +1407,7 @@ async def run_crypto_cycle():
         if is_hitting_daily_loss_limit:
             status_suffix += " | ⚠️ DAILY 2% LOSS LIMIT HIT - stopping new trades"
 
-        log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} ({cap_desc}, {tier_desc}) | Target: +{PROFIT_TARGET_PCT*100:.2f}% | Stop: -{STOP_LOSS_PCT*100:.2f}% | Round-trip fee: {CRYPTO_ROUND_TRIP_FEE_RATE*100:.2f}%{status_suffix}")
+        log.info(f"[CRYPTO] 📊 BALANCE: Starting ${run_swing_check.initial_cash:.2f} + Realized ${run_swing_check.realized_profit:+.2f} - Deployed ${deployed_cost_basis:.2f} = Available ${cash_pool:.2f} | Account Value: ${total_account_value:.2f} | Target: +{PROFIT_TARGET_PCT*100:.2f}% | Stop: -{STOP_LOSS_PCT*100:.2f}%{status_suffix}")
 
         # AGGRESSIVE GROWTH MODE: If at floor ($990), maximize position sizing
         if is_at_floor and not is_hitting_daily_loss_limit:
@@ -1495,19 +1520,21 @@ async def run_crypto_cycle():
                     if filled:
                         pnl_partial = (price - entry) * sell_qty
                         daily_pnl += pnl_partial
-                        run_swing_check.current_cash += pnl_partial  # Update local balance
-                        log.info(f"[CRYPTO] 💰 PARTIAL {symbol} ({reason}) | Qty: {sell_qty:.8f} | P&L: ${pnl_partial:.2f} | Remaining: {remaining_qty:.8f} | Cash pool: ${run_swing_check.current_cash:.2f}")
+                        run_swing_check.realized_profit += pnl_partial  # Track realized gain/loss
+                        available_cash_after = run_swing_check.initial_cash + run_swing_check.realized_profit - deployed_cost_basis
+                        log.info(f"[CRYPTO] 💰 PARTIAL {symbol} ({reason}) | Qty: {sell_qty:.8f} | P&L: ${pnl_partial:+.2f} | Remaining: {remaining_qty:.8f} | Available: ${available_cash_after:.2f} | Total Realized: ${run_swing_check.realized_profit:+.2f}")
                 elif should_exit:
                     # Full exit: sell all remaining
                     filled = await place_order(session, symbol, "sell", remaining_qty if remaining_qty > 0 else qty, price)
                     if filled:
                         daily_pnl += unrealized_pnl
-                        run_swing_check.current_cash += unrealized_pnl  # Update local balance
-                        log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f} | Cash pool: ${run_swing_check.current_cash:.2f}")
+                        run_swing_check.realized_profit += unrealized_pnl  # Track realized gain/loss
+                        available_cash_after = run_swing_check.initial_cash + run_swing_check.realized_profit - deployed_cost_basis
+                        log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:+.2f} | Available: ${available_cash_after:.2f} | Total Realized: ${run_swing_check.realized_profit:+.2f}")
                         send_trade_alert(
                             f"🤖 Crypto bot — {symbol} closed ({reason})",
                             f"Position closed on your Coinbase account:\n\n"
-                            f"{symbol} | Entry: ${entry:.2f} | Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}\n"
+                            f"{symbol} | Entry: ${entry:.2f} | Exit: ${price:.2f} | P&L: ${unrealized_pnl:+.2f}\n"
                             f"Reason: {reason}\n\nDashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
                         )
                         open_crypto_positions.pop(symbol, None)
@@ -1613,8 +1640,9 @@ async def run_crypto_cycle():
                 filled = await place_order(session, symbol, "sell", qty, price)
                 if filled:
                     daily_pnl += unrealized_pnl
-                    run_swing_check.current_cash += unrealized_pnl  # Update local balance
-                    log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f} | Cash pool: ${run_swing_check.current_cash:.2f}")
+                    run_swing_check.realized_profit += unrealized_pnl  # Track realized gain/loss
+                    available_cash_after = run_swing_check.initial_cash + run_swing_check.realized_profit - deployed_cost_basis
+                    log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:+.2f} | Available: ${available_cash_after:.2f} | Total Realized: ${run_swing_check.realized_profit:+.2f}")
                     # Log trade exit for analytics
                     time_held = (now - position.get("opened_at", now)).total_seconds() // 60 if "opened_at" in position else 0
                     await log_trade_exit(
@@ -1625,7 +1653,7 @@ async def run_crypto_cycle():
                     send_trade_alert(
                         f"🤖 Crypto bot — {symbol} closed ({reason})",
                         f"Position closed on your Coinbase account:\n\n"
-                        f"{symbol} | Entry: ${entry:.2f} | Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}\n"
+                        f"{symbol} | Entry: ${entry:.2f} | Exit: ${price:.2f} | P&L: ${unrealized_pnl:+.2f}\n"
                         f"Reason: {reason}\n\nDashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
                     )
                     open_crypto_positions.pop(symbol, None)
