@@ -185,7 +185,11 @@ alpaca_swing_bot_module = None
 try:
     import alpaca_swing_bot
     alpaca_swing_bot_module = alpaca_swing_bot
+    print("[STARTUP] ✓ alpaca_swing_bot module imported successfully", flush=True)
 except Exception as e:
+    import traceback
+    print(f"[STARTUP] ✗ FAILED to import alpaca_swing_bot: {e}", flush=True)
+    print(f"[STARTUP] Traceback: {traceback.format_exc()}", flush=True)
     logging.warning(f"Failed to import alpaca_swing_bot: {e}")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
