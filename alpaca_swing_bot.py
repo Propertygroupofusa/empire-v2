@@ -348,6 +348,11 @@ async def run_intraday_check():
                 should_exit = True
                 reason = f"Stop loss -{abs(pnl_pct):.2f}% hit"
 
+            # Skip exit if position is negative (hold through losses)
+            if pnl_pct < 0:
+                log.info(f"  {symbol} at {pnl_pct:+.2f}% — HOLDING (no stop-loss closes)")
+                continue
+
             if should_exit:
                 log.info(f"\n  🛑 INTRADAY EXIT {symbol}: {reason} | P&L {pnl_pct:+.2f}%")
                 order = await place_order(session, symbol, qty, "sell")
@@ -463,7 +468,7 @@ async def run_swing_check():
             qty = float(position_data["qty"])
             pnl_pct = (current_price - entry_price) / entry_price * 100
 
-            # Exit signals
+            # Exit signals (no stop-loss closes — hold through losses)
             should_exit = False
             reason = None
 
@@ -473,9 +478,12 @@ async def run_swing_check():
             elif pnl_pct >= PROFIT_TARGET_PCT * 100:
                 should_exit = True
                 reason = f"Profit target +{pnl_pct:.2f}% hit"
-            elif pnl_pct <= -STOP_LOSS_PCT * 100:
-                should_exit = True
-                reason = f"Stop loss -{abs(pnl_pct):.2f}% hit"
+            # Removed: elif pnl_pct <= -STOP_LOSS_PCT * 100 (no stop-loss closes)
+
+            # Skip exit if position is negative (hold through losses)
+            if pnl_pct < 0:
+                log.info(f"  {symbol} at {pnl_pct:+.2f}% — HOLDING (no stop-loss closes)")
+                should_exit = False
 
             if should_exit:
                 log.info(f"\n  🛑 EXIT {symbol}: {reason} | P&L {pnl_pct:+.2f}%")
