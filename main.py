@@ -1409,6 +1409,15 @@ async def serve_trading_dashboard():
     return FileResponse(dashboard_path, media_type="text/html")
 
 
+@app.get("/live-dashboard")
+async def serve_live_dashboard():
+    """Serve the live trading dashboard with real-time account and bot status"""
+    dashboard_path = os.path.join(os.path.dirname(__file__), "live_trading_dashboard.html")
+    if not os.path.exists(dashboard_path):
+        raise HTTPException(status_code=404, detail="Live dashboard not found")
+    return FileResponse(dashboard_path, media_type="text/html")
+
+
 @app.get("/api/orchestrator/stats")
 async def get_orchestrator_stats(db = Depends(lambda: None)):
     """Aggregate all earnings: video production + trading (prop + crypto)"""

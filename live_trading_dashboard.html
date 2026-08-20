@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Empire Trading Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-tertiary: #334155;
+            --text-primary: #f1f5f9;
+            --text-secondary: #cbd5e1;
+            --accent-profit: #10b981;
+            --accent-loss: #f43f5e;
+            --accent-alert: #f59e0b;
+            --border-color: #475569;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root:not([data-theme="light"]) {
+                --bg-primary: #0f172a;
+                --bg-secondary: #1e293b;
+                --bg-tertiary: #334155;
+                --text-primary: #f1f5f9;
+                --text-secondary: #cbd5e1;
+            }
+        }
+
+        @media (prefers-color-scheme: light) {
+            :root:not([data-theme="dark"]) {
+                --bg-primary: #f8fafc;
+                --bg-secondary: #e2e8f0;
+                --bg-tertiary: #cbd5e1;
+                --text-primary: #0f172a;
+                --text-secondary: #475569;
+                --border-color: #94a3b8;
+            }
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            padding: 24px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 32px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        h1 {
+            font-size: 28px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+
+        .update-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 8px;
+            background: var(--bg-secondary);
+            border-radius: 4px;
+        }
+
+        .pulse {
+            width: 8px;
+            height: 8px;
+            background: var(--accent-profit);
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .accounts-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 24px;
+            margin-bottom: 32px;
+        }
+
+        .account-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 24px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .account-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: var(--accent-profit);
+        }
+
+        .account-name {
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+            margin-bottom: 12px;
+        }
+
+        .balance-row {
+            margin-bottom: 20px;
+        }
+
+        .balance-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+        }
+
+        .balance-value {
+            font-size: 32px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            letter-spacing: -1px;
+        }
+
+        .metric-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 16px;
+            margin-bottom: 12px;
+        }
+
+        .metric {
+            flex: 1;
+        }
+
+        .metric-label {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+        }
+
+        .metric-value {
+            font-size: 18px;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .positive {
+            color: var(--accent-profit);
+        }
+
+        .negative {
+            color: var(--accent-loss);
+        }
+
+        .bot-status-section {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 32px;
+        }
+
+        .bot-status-title {
+            font-size: 14px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 16px;
+            color: var(--text-secondary);
+        }
+
+        .bot-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+        }
+
+        .bot-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px;
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+        }
+
+        .bot-status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .bot-status-indicator.active {
+            background: var(--accent-profit);
+            box-shadow: 0 0 8px var(--accent-profit);
+        }
+
+        .bot-status-indicator.inactive {
+            background: var(--accent-loss);
+        }
+
+        .bot-info h3 {
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 2px;
+        }
+
+        .bot-info p {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .trades-section {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 24px;
+            overflow-x: auto;
+        }
+
+        .trades-title {
+            font-size: 14px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 16px;
+            color: var(--text-secondary);
+        }
+
+        table {
+            width: 100%;
+            font-size: 13px;
+            border-collapse: collapse;
+        }
+
+        thead {
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        th {
+            text-align: left;
+            padding: 12px 8px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            font-size: 11px;
+            letter-spacing: 0.5px;
+        }
+
+        td {
+            padding: 12px 8px;
+            border-bottom: 1px solid var(--border-color);
+            font-variant-numeric: tabular-nums;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        .symbol-cell {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 32px;
+            color: var(--text-secondary);
+        }
+
+        .error-message {
+            background: var(--bg-secondary);
+            border: 1px solid var(--accent-loss);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+            color: var(--accent-loss);
+            font-size: 14px;
+        }
+
+        .loading {
+            opacity: 0.6;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>⚡ Trading Dashboard</h1>
+            <div class="header-right">
+                <span id="update-time">--:--:--</span>
+                <div class="update-indicator">
+                    <div class="pulse"></div>
+                    <span id="status-text">Connecting...</span>
+                </div>
+            </div>
+        </header>
+
+        <div id="error-message"></div>
+
+        <div class="accounts-grid" id="accounts-grid">
+            <div class="account-card loading">
+                <div class="account-name">Coinbase</div>
+                <div class="balance-value">Loading...</div>
+            </div>
+            <div class="account-card loading">
+                <div class="account-name">Alpaca</div>
+                <div class="balance-value">Loading...</div>
+            </div>
+        </div>
+
+        <div class="bot-status-section">
+            <div class="bot-status-title">Bot Status</div>
+            <div class="bot-grid" id="bot-status">
+                <div class="bot-item loading">
+                    <div class="bot-status-indicator inactive"></div>
+                    <div class="bot-info">
+                        <h3>Loading...</h3>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="trades-section">
+            <div class="trades-title">Recent Trades</div>
+            <div id="trades-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Entry</th>
+                            <th>Exit</th>
+                            <th>Qty</th>
+                            <th>Profit</th>
+                            <th>%</th>
+                            <th>Time</th>
+                        </tr>
+                    </thead>
+                    <tbody id="trades-body">
+                        <tr>
+                            <td colspan="7" class="empty-state">Loading trades...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = '/api/trading-dashboard/live-dashboard-data';
+        const UPDATE_INTERVAL = 3000; // 3 seconds
+        let lastUpdateTime = null;
+
+        async function fetchDashboardData() {
+            try {
+                const response = await fetch(API_URL);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                const data = await response.json();
+                updateDashboard(data);
+                document.getElementById('status-text').textContent = 'Live';
+                document.getElementById('error-message').innerHTML = '';
+            } catch (error) {
+                console.error('Fetch error:', error);
+                document.getElementById('status-text').textContent = 'Error';
+                showError(`Failed to fetch data: ${error.message}`);
+            }
+        }
+
+        function updateDashboard(data) {
+            updateAccounts(data.accounts);
+            updateBotStatus(data.bots);
+            updateTrades(data.trading.recent_trades);
+            updateTimestamp(data.timestamp);
+        }
+
+        function updateAccounts(accounts) {
+            const grid = document.getElementById('accounts-grid');
+            grid.innerHTML = '';
+
+            if (accounts.coinbase) {
+                grid.appendChild(createAccountCard('coinbase', accounts.coinbase));
+            }
+            if (accounts.alpaca) {
+                grid.appendChild(createAccountCard('alpaca', accounts.alpaca));
+            }
+        }
+
+        function createAccountCard(key, account) {
+            const card = document.createElement('div');
+            card.className = 'account-card';
+
+            const profitClass = account.total_profit >= 0 ? 'positive' : 'negative';
+            const growthClass = account.growth_percent >= 0 ? 'positive' : 'negative';
+
+            const buyingPower = account.buying_power !== undefined ? `${formatCurrency(account.buying_power)}` : 'N/A';
+            const equity = account.equity !== undefined && account.equity > 0 ? `Equity: ${formatCurrency(account.equity)}` : '';
+
+            card.innerHTML = `
+                <div class="account-name">${account.name}</div>
+                <div class="balance-row">
+                    <div class="balance-label">${key === 'alpaca' ? 'Buying Power' : 'Balance'}</div>
+                    <div class="balance-value">${key === 'alpaca' ? buyingPower : formatCurrency(account.balance)}</div>
+                    ${equity ? `<div class="balance-label" style="margin-top: 8px;">${equity}</div>` : ''}
+                </div>
+                <div class="metric-row">
+                    <div class="metric">
+                        <div class="metric-label">Daily P&L</div>
+                        <div class="metric-value ${account.daily_profit >= 0 ? 'positive' : 'negative'}">
+                            ${account.daily_profit >= 0 ? '+' : ''}${formatCurrency(account.daily_profit)}
+                        </div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Total Profit</div>
+                        <div class="metric-value ${profitClass}">
+                            ${account.total_profit >= 0 ? '+' : ''}${formatCurrency(account.total_profit)}
+                        </div>
+                    </div>
+                </div>
+                <div class="metric-row">
+                    <div class="metric">
+                        <div class="metric-label">Growth</div>
+                        <div class="metric-value ${growthClass}">
+                            ${account.growth_percent >= 0 ? '+' : ''}${account.growth_percent.toFixed(1)}%
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            return card;
+        }
+
+        function updateBotStatus(bots) {
+            const container = document.getElementById('bot-status');
+            container.innerHTML = '';
+
+            for (const [key, bot] of Object.entries(bots)) {
+                const botItem = document.createElement('div');
+                botItem.className = 'bot-item';
+                const isActive = bot.status === 'active';
+                const statusClass = isActive ? 'active' : 'inactive';
+
+                botItem.innerHTML = `
+                    <div class="bot-status-indicator ${statusClass}"></div>
+                    <div class="bot-info">
+                        <h3>${bot.name}</h3>
+                        <p>${isActive ? '🟢 Active' : '🔴 Inactive'}</p>
+                        ${bot.pairs ? `<p>${bot.pairs.slice(0, 3).join(', ')}...</p>` : ''}
+                    </div>
+                `;
+
+                container.appendChild(botItem);
+            }
+        }
+
+        function updateTrades(trades) {
+            const tbody = document.getElementById('trades-body');
+
+            if (!trades || trades.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No trades yet</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = trades.map(trade => `
+                <tr>
+                    <td class="symbol-cell">${trade.symbol}</td>
+                    <td>${formatCurrency(trade.entry_price)}</td>
+                    <td>${formatCurrency(trade.exit_price)}</td>
+                    <td>${formatNumber(trade.qty)}</td>
+                    <td class="${trade.profit >= 0 ? 'positive' : 'negative'}">
+                        ${trade.profit >= 0 ? '+' : ''}${formatCurrency(trade.profit)}
+                    </td>
+                    <td class="${trade.profit_pct >= 0 ? 'positive' : 'negative'}">
+                        ${trade.profit_pct >= 0 ? '+' : ''}${trade.profit_pct.toFixed(2)}%
+                    </td>
+                    <td>${formatTime(trade.close_time)}</td>
+                </tr>
+            `).join('');
+        }
+
+        function updateTimestamp(timestamp) {
+            const date = new Date(timestamp);
+            const time = date.toLocaleTimeString('en-US', {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: true
+            });
+            document.getElementById('update-time').textContent = time;
+        }
+
+        function formatCurrency(value) {
+            if (value === null || value === undefined) return '$0.00';
+            return new Intl.NumberFormat('en-US', {
+                style: 'currency',
+                currency: 'USD',
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            }).format(value);
+        }
+
+        function formatNumber(value) {
+            if (value === null || value === undefined) return '0';
+            return parseFloat(value).toFixed(4);
+        }
+
+        function formatTime(timestamp) {
+            if (!timestamp || timestamp === 'unknown') return '--:--';
+            try {
+                const date = new Date(timestamp);
+                return date.toLocaleTimeString('en-US', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hour12: true
+                });
+            } catch {
+                return '--:--';
+            }
+        }
+
+        function showError(message) {
+            const container = document.getElementById('error-message');
+            container.innerHTML = `<div class="error-message">⚠️ ${message}</div>`;
+        }
+
+        // Initial fetch and set up polling
+        fetchDashboardData();
+        setInterval(fetchDashboardData, UPDATE_INTERVAL);
+    </script>
+</body>
+</html>
