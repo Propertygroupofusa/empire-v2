@@ -1003,6 +1003,31 @@ async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
             log.warning(f"Coinbase balance fetch failed, using cached: {e}")
             coinbase_balance = getattr(crypto_coinbase_bot, 'LAST_KNOWN_BALANCE', 483.00)
 
+        # Fetch Alpaca account data
+        alpaca_buying_power = 0
+        alpaca_equity = 0
+        try:
+            import aiohttp
+            alpaca_key = os.getenv("ALPACA_API_KEY", "")
+            alpaca_secret = os.getenv("ALPACA_SECRET_KEY", "")
+            if alpaca_key and alpaca_secret:
+                headers = {
+                    "APCA-API-KEY-ID": alpaca_key,
+                    "APCA-API-SECRET-KEY": alpaca_secret
+                }
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        "https://paper-api.alpaca.markets/v2/account",
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=5)
+                    ) as resp:
+                        if resp.status == 200:
+                            account = await resp.json()
+                            alpaca_buying_power = round(float(account.get("buying_power", 0)), 2)
+                            alpaca_equity = round(float(account.get("equity", 0)), 2)
+        except Exception as e:
+            log.warning(f"Alpaca account fetch failed: {e}")
+
         # Get open positions from bot
         open_positions = []
         try:
@@ -1062,12 +1087,23 @@ async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
 
         return {
             "timestamp": timestamp_str,
-            "account": {
-                "balance": coinbase_balance,
-                "starting_balance": 483.00,
-                "daily_profit": round(sum(t.get("profit", 0) for t in recent_trades), 2),
-                "total_profit": round(total_profit, 2),
-                "growth_percent": round((total_profit / 483.00 * 100), 2) if total_profit > 0 else 0
+            "accounts": {
+                "coinbase": {
+                    "name": "Coinbase (Crypto 24/7)",
+                    "balance": coinbase_balance,
+                    "starting_balance": 483.00,
+                    "daily_profit": round(sum(t.get("profit", 0) for t in recent_trades), 2),
+                    "total_profit": round(total_profit, 2),
+                    "growth_percent": round((total_profit / 483.00 * 100), 2) if total_profit > 0 else 0
+                },
+                "alpaca": {
+                    "name": "Alpaca (Stocks & Futures)",
+                    "buying_power": alpaca_buying_power,
+                    "equity": alpaca_equity,
+                    "daily_profit": 0,  # TODO: Calculate from Alpaca trade logs when database logging added
+                    "total_profit": 0,  # TODO: Calculate from Alpaca trade logs when database logging added
+                    "growth_percent": 0
+                }
             },
             "positions": {
                 "open": open_positions,
