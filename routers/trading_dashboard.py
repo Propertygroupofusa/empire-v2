@@ -959,8 +959,11 @@ async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
                 private_key_str = crypto_coinbase_bot.COINBASE_API_PRIVATE_KEY
 
                 # Build JWT
-                now = datetime.now(timezone.utc)
-                expiry = now + timedelta(minutes=1)
+                dt_obj = globals()['datetime']
+                tz_obj = globals()['timezone']
+                td_obj = globals()['timedelta']
+                now = dt_obj.now(tz_obj.utc)
+                expiry = now + td_obj(minutes=1)
                 payload = {
                     "sub": key_name,
                     "iss": "cdp_service",
