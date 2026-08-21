@@ -152,11 +152,18 @@ def validate_dual_direction(
 ) -> Tuple[str, bool, str]:
     """
     Determine if we should enter LONG, SHORT, or HOLD.
+    AGGRESSIVE MODE: Lower RSI thresholds + no SMA requirement (catch MORE entries).
 
     Returns:
         (direction, should_enter, reason)
         direction: "long", "short", or "hold"
     """
+    import os
+
+    # Configurable aggressive thresholds (can override via env vars)
+    RSI_LONG_THRESHOLD = float(os.getenv("RSI_LONG_THRESHOLD", "40"))   # More aggressive: 40 instead of 30
+    RSI_SHORT_THRESHOLD = float(os.getenv("RSI_SHORT_THRESHOLD", "60"))  # More aggressive: 60 instead of 70
+    REQUIRE_MA_CONFIRMATION = os.getenv("REQUIRE_MA_CONFIRMATION", "false").lower() == "true"
 
     # Check position limit
     if open_positions >= max_open:
@@ -166,16 +173,20 @@ def validate_dual_direction(
     if cash_available < 1000:
         return "hold", False, f"Insufficient cash (${cash_available:.0f} < $1,000 min)"
 
-    # LONG setup: Oversold + below MA
-    if current_rsi < 30 and current_price < sma_50:
-        return "long", True, f"Long setup: RSI {current_rsi:.1f} (oversold), price below MA50"
+    # LONG setup: Oversold (aggressive: RSI < 40) — optional MA confirmation
+    if current_rsi < RSI_LONG_THRESHOLD:
+        if REQUIRE_MA_CONFIRMATION and current_price >= sma_50:
+            return "hold", False, f"Long RSI {current_rsi:.1f} but price above MA50"
+        return "long", True, f"Long entry: RSI {current_rsi:.1f} < {RSI_LONG_THRESHOLD} (oversold)"
 
-    # SHORT setup: Overbought + above MA
-    if current_rsi > 70 and current_price > sma_50:
-        return "short", True, f"Short setup: RSI {current_rsi:.1f} (overbought), price above MA50"
+    # SHORT setup: Overbought (aggressive: RSI > 60) — optional MA confirmation
+    if current_rsi > RSI_SHORT_THRESHOLD:
+        if REQUIRE_MA_CONFIRMATION and current_price <= sma_50:
+            return "hold", False, f"Short RSI {current_rsi:.1f} but price below MA50"
+        return "short", True, f"Short entry: RSI {current_rsi:.1f} > {RSI_SHORT_THRESHOLD} (overbought)"
 
     # HOLD: No setup
-    return "hold", False, f"No setup: RSI {current_rsi:.1f}, price vs MA50"
+    return "hold", False, f"No setup: RSI {current_rsi:.1f} (need < {RSI_LONG_THRESHOLD} for long or > {RSI_SHORT_THRESHOLD} for short)"
 
 
 def calculate_profit_targets_stocks(
