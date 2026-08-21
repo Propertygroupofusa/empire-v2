@@ -203,7 +203,7 @@ async def create_donation_checkout(
 
 @router.post("/webhook/stripe")
 async def stripe_fundraiser_webhook(request: Request, db: AsyncSession = Depends(get_db)):
-    if not STRIPE_WEBHOOK_SECRET:
+    if not STRIPE_AVAILABLE or not STRIPE_WEBHOOK_SECRET:
         return {"status": "webhook_secret_not_configured"}
 
     payload = await request.body()
