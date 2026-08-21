@@ -73,6 +73,11 @@ STOP_LOSS_BASE_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.001"))  # Base: 0.
 # Base: 0.3%, tightens to 0.2% at 1.5x scale
 CRYPTO_STOP_LOSS_BASE_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.001"))  # Base: 0.1%
 
+# MULTI-TIMEFRAME CONFIRMATION CONTROL
+# Set to "false" to disable 1H trend checking (let all RSI signals through)
+# Set to "true" to enforce 1H trend alignment (default: avoid fighting higher trend)
+REQUIRE_HIGHER_TF_CONFIRMATION = os.getenv("REQUIRE_HIGHER_TF_CONFIRMATION", "true").lower() == "true"
+
 def get_dynamic_stop_loss(scale: float) -> float:
     """Tighten stop-loss as positions scale up (1.5x+ = tighter discipline)"""
     if scale >= 1.5:
@@ -978,7 +983,7 @@ async def run_prop_cycle():
             equity=equity
         )
         if not is_valid:
-            log.info(f"[MANDATE] Entry blocked for {contract}: {mandate_reason}")
+            log.warning(f"[APEX_589296] ⛔ MANDATE BLOCKED: {contract} {side} — {mandate_reason}")
             return False
 
         # HARD MARGIN SAFETY CHECK — prevent over-leverage
@@ -991,14 +996,17 @@ async def run_prop_cycle():
         if cash_remaining is not None:
             qty = size_position(cash_remaining, slots_remaining, price)
             if qty is None:
-                log.info(f"[APEX_589296] Skipping {contract} {side} entry — not enough cash left (${cash_remaining:.2f})")
+                log.warning(f"[APEX_589296] ⛔ INSUFFICIENT CASH: {contract} {side} skipped — only ${cash_remaining:.2f} left (need ${config.get('min_cash', 1000):.2f})")
                 return False
         else:
             qty = config["qty"]
+            log.warning(f"[APEX_589296] ⚠️  Cash unavailable from API, using default qty: {qty}")
 
+        log.info(f"[APEX_589296] 🟢 READY TO ENTER: {side.upper()} {contract} | Price: ${price:.2f} | Qty: {qty} | Risk: ${qty * price:.2f}")
         opened = await open_position(session, contract, config, side, price, rsi, trend, qty)
         if opened and cash_remaining is not None:
             cash_remaining -= qty * price
+            log.info(f"[APEX_589296] 💳 POSITION OPENED | Cash remaining after position: ${cash_remaining:.2f}")
         return opened
 
     connector = aiohttp.TCPConnector(use_dns_cache=True, limit=20, limit_per_host=5, ttl_dns_cache=300)
@@ -1162,10 +1170,18 @@ async def run_prop_cycle():
             # Multi-timeframe confluence: don't fight a strong 1-hour
             # trend just because the 5-minute RSI dipped. Entries only -
             # never gates an exit or an existing position.
-            higher_tf = await get_higher_tf_trend(session, config["symbol"])
-            if (side == "long" and higher_tf == "DOWN") or (side == "short" and higher_tf == "UP"):
-                log.info(f"[APEX_589296] 🚫 {side.upper()} {contract} skipped — 1H trend ({higher_tf}) opposes 5min signal")
+            # This can be disabled via REQUIRE_HIGHER_TF_CONFIRMATION=false env var
+            higher_tf = "DISABLED" if not REQUIRE_HIGHER_TF_CONFIRMATION else await get_higher_tf_trend(session, config["symbol"])
+            log.info(f"[APEX_589296] 📊 {side.upper()} {contract} — 5min trend: {trend}, 1H trend: {higher_tf}, RSI: {rsi:.1f}")
+
+            if REQUIRE_HIGHER_TF_CONFIRMATION and ((side == "long" and higher_tf == "DOWN") or (side == "short" and higher_tf == "UP")):
+                log.warning(f"[APEX_589296] 🚫 {side.upper()} {contract} BLOCKED — 1H trend ({higher_tf}) opposes 5min ({trend}) signal")
                 continue
+            elif not REQUIRE_HIGHER_TF_CONFIRMATION:
+                log.info(f"[APEX_589296] ✅ {side.upper()} {contract} READY (1H check disabled) — 5min {trend} | RSI:{rsi:.1f} | attempting entry...")
+            else:
+                # If we get here, higher TF confirms the signal — ready to try entry
+                log.info(f"[APEX_589296] ✅ {side.upper()} {contract} CONFIRMED — 5min {trend} + 1H {higher_tf} align | RSI:{rsi:.1f} | attempting entry...")
 
             if len(open_prop_positions) < dynamic_max_positions:
                 scan_data = scans.get(contract)
