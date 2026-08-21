@@ -159,10 +159,27 @@ def validate_dual_direction(
         direction: "long", "short", or "hold"
     """
     import os
+    import logging
+    log = logging.getLogger("alpaca_mean_reversion")
+
+    def _safe_float_env(name: str, default: float) -> float:
+        """A malformed Railway variable (e.g. someone pastes 'default: 40'
+        instead of '40') used to raise ValueError here and crash the whole
+        trading cycle, every cycle, forever - falling back to the numeric
+        default and logging a warning instead means a typo in one env var
+        degrades to 'ignored' rather than 'bot can't trade at all'."""
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        try:
+            return float(raw)
+        except ValueError:
+            log.warning(f"{name}={raw!r} is not a valid number - using default {default} instead. Fix this in Railway's Variables tab.")
+            return default
 
     # Configurable aggressive thresholds (can override via env vars)
-    RSI_LONG_THRESHOLD = float(os.getenv("RSI_LONG_THRESHOLD", "40"))   # More aggressive: 40 instead of 30
-    RSI_SHORT_THRESHOLD = float(os.getenv("RSI_SHORT_THRESHOLD", "60"))  # More aggressive: 60 instead of 70
+    RSI_LONG_THRESHOLD = _safe_float_env("RSI_LONG_THRESHOLD", 40.0)   # More aggressive: 40 instead of 30
+    RSI_SHORT_THRESHOLD = _safe_float_env("RSI_SHORT_THRESHOLD", 60.0)  # More aggressive: 60 instead of 70
     REQUIRE_MA_CONFIRMATION = os.getenv("REQUIRE_MA_CONFIRMATION", "false").lower() == "true"
 
     # Check position limit
