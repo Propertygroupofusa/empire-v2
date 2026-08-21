@@ -38,6 +38,31 @@ ET = ZoneInfo("America/New_York")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("prop_bot")
 
+def _safe_float_env(name: str, default: str) -> float:
+    """Parse a Railway env var as float, falling back to the numeric default
+    and logging a warning instead of crashing on a bad value (e.g. someone
+    pastes 'default: 40' or a stray label into the Variables tab). These all
+    run at module import time, so an unguarded float()/int() here used to
+    mean one bad Railway variable could crash the entire bot before its
+    first cycle - see the RSI_LONG_THRESHOLD incident in alpaca_mean_reversion.py."""
+    raw = os.getenv(name, default)
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning(f"{name}={raw!r} is not a valid number - using default {default} instead. Fix this in Railway's Variables tab.")
+        return float(default)
+
+
+def _safe_int_env(name: str, default: str) -> int:
+    """Same as _safe_float_env but for integer-valued env vars."""
+    raw = os.getenv(name, default)
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning(f"{name}={raw!r} is not a valid integer - using default {default} instead. Fix this in Railway's Variables tab.")
+        return int(default)
+
+
 def get_headers():
     """Dynamically read Alpaca API credentials from env vars on every call.
     This ensures fresh credentials even if env vars are set after module load."""
@@ -55,14 +80,14 @@ def get_base_url():
 LIVE_TRADE = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 
 # RSI entry/exit thresholds
-RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "30"))
-RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "70"))
+RSI_BUY_BELOW  = _safe_float_env("PROP_RSI_BUY_BELOW", "30")
+RSI_SELL_ABOVE = _safe_float_env("PROP_RSI_SELL_ABOVE", "70")
 
 # Crypto-specific thresholds: AGGRESSIVE SCALPING FOR MILESTONE SPEED
 # Lowered from 30/70 to 35/65 to catch MORE entry/exit opportunities
 # Maximizes trade frequency to hit $1,000 ASAP, then $2,000 within 24hr
-CRYPTO_RSI_BUY_BELOW  = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "35"))   # MORE oversold entries (faster compounding)
-CRYPTO_RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "65"))  # MORE overbought exits (more profit locks)
+CRYPTO_RSI_BUY_BELOW  = _safe_float_env("CRYPTO_RSI_BUY_BELOW", "35")   # MORE oversold entries (faster compounding)
+CRYPTO_RSI_SELL_ABOVE = _safe_float_env("CRYPTO_RSI_SELL_ABOVE", "65")  # MORE overbought exits (more profit locks)
 
 # AGGRESSIVE WINS + STRICT LOSS PREVENTION
 # Base stop-loss: 0.3% to exit losing trades immediately
@@ -70,11 +95,11 @@ CRYPTO_RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "65"))  # MORE 
 # 1.0x scale: 0.3% stop
 # 1.5x scale: 0.2% stop (1.5x scaled position needs tighter exit)
 # 2.0x scale: 0.2% stop (maximum scale = maximum discipline)
-STOP_LOSS_BASE_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.003"))  # Base: 0.3% for stocks/futures
+STOP_LOSS_BASE_PCT = _safe_float_env("PROP_STOP_LOSS_PCT", "0.003")  # Base: 0.3% for stocks/futures
 
 # Crypto-specific stop-loss: dynamically tightens with scale
 # Base: 0.3%, tightens to 0.2% at 1.5x scale
-CRYPTO_STOP_LOSS_BASE_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.003"))  # Base: 0.3%
+CRYPTO_STOP_LOSS_BASE_PCT = _safe_float_env("CRYPTO_STOP_LOSS_PCT", "0.003")  # Base: 0.3%
 
 # MULTI-TIMEFRAME CONFIRMATION CONTROL
 # Set to "false" to disable 1H trend checking (let all RSI signals through)
@@ -99,15 +124,15 @@ def get_dynamic_crypto_stop_loss(scale: float) -> float:
 # 1.5x scale → $15 loss limit (larger positions = larger max loss allowed)
 # 2.0x scale → $20 loss limit (can absorb bigger drawdowns while scaling)
 # Prevents catastrophic losses but allows survival of losing streaks at higher scales
-DAILY_MAX_LOSS_BASE = float(os.getenv("PROP_DAILY_MAX_LOSS_BASE", "10"))
+DAILY_MAX_LOSS_BASE = _safe_float_env("PROP_DAILY_MAX_LOSS_BASE", "10")
 
 # AGGRESSIVE EXIT ON RED — Close any position down 0.5% immediately
 # Don't wait for stop-loss to trigger. Exit fast, preserve capital.
-QUICK_EXIT_LOSS_PCT = float(os.getenv("QUICK_EXIT_LOSS_PCT", "0.005"))  # Exit any loser at 0.5% down
+QUICK_EXIT_LOSS_PCT = _safe_float_env("QUICK_EXIT_LOSS_PCT", "0.005")  # Exit any loser at 0.5% down
 
 # SCALING UP SYSTEM — Increase position sizes after each milestone lock
 # $1K lock → scale to 1.5x, $2K lock → scale to 2.0x, $5K lock → scale to 3.0x
-POSITION_SCALE_MULTIPLIER = float(os.getenv("POSITION_SCALE_MULTIPLIER", "1.0"))  # Starts at 1.0x, increases per milestone
+POSITION_SCALE_MULTIPLIER = _safe_float_env("POSITION_SCALE_MULTIPLIER", "1.0")  # Starts at 1.0x, increases per milestone
 
 # APEX futures — use micro contracts (lower risk during evaluation)
 # Stock/futures only (Alpaca crypto is blocked for this account)
@@ -139,7 +164,7 @@ FUTURES = {
 # At 1.5x scale: reduce to 1 position (1.5x loss on 1 trade < 1.0x loss on 2 trades)
 # At 2.0x scale: stay at 1 position (conservative with max scaling)
 # This prevents multiplied losses across multiple scaled positions
-BASE_MAX_POSITIONS = int(os.getenv("PROP_MAX_POSITIONS", "8"))  # Increased from 3 to 8: more concurrent positions for faster capital deployment
+BASE_MAX_POSITIONS = _safe_int_env("PROP_MAX_POSITIONS", "8")  # Increased from 3 to 8: more concurrent positions for faster capital deployment
 
 def get_dynamic_max_positions(scale: float) -> int:
     """Allow more positions at all scales to maximize capital deployment"""
@@ -224,8 +249,8 @@ BOT_NAME = "prop_apex"
 # closes every open position immediately and halts new entries until equity
 # is back above it — same mechanism as the daily circuit breaker, just keyed
 # to the account's all-time high instead of today's start.
-EQUITY_FLOOR_TIER = float(os.getenv("PROP_EQUITY_FLOOR_TIER", "1000"))
-EQUITY_FLOOR_BASE = float(os.getenv("PROP_EQUITY_FLOOR_BASE", "500"))
+EQUITY_FLOOR_TIER = _safe_float_env("PROP_EQUITY_FLOOR_TIER", "1000")
+EQUITY_FLOOR_BASE = _safe_float_env("PROP_EQUITY_FLOOR_BASE", "500")
 EQUITY_FLOOR_STATE_KEY = "prop_apex_equity_floor"
 equity_floor = EQUITY_FLOOR_BASE
 
@@ -639,21 +664,21 @@ async def reconcile_positions_with_broker(session):
 # entry rather than place a near-zero fractional order.
 # Micro-account ($978): $50 minimum allows actual execution while maintaining profitability
 # $50 trade × 1-2% move = $0.50-$1.00 profit (after $0.05 fees = $0.45-0.95 net)
-MIN_POSITION_NOTIONAL = float(os.getenv("PROP_MIN_POSITION_NOTIONAL", "50"))  # Reduced from $1500 for micro account
+MIN_POSITION_NOTIONAL = _safe_float_env("PROP_MIN_POSITION_NOTIONAL", "50")  # Reduced from $1500 for micro account
 
 # HARD MARGIN SAFETY LIMITS — prevent over-leverage ever again
 # Minimum buying power buffer required before opening ANY new position
 # For $980 account: $150 buffer = 15% locked, allows ~$830 deployable
 # This is still conservative (don't deploy 100%), but allows actual trading
-MIN_BUYING_POWER_BUFFER = float(os.getenv("PROP_MIN_BUYING_POWER_BUFFER", "150"))
+MIN_BUYING_POWER_BUFFER = _safe_float_env("PROP_MIN_BUYING_POWER_BUFFER", "150")
 
 # Maximum percentage of account equity that can be at risk in open positions
 # Lowered from 50% to 20% for micro-account safety - 50% risk-at-once was
 # sized for a much larger evaluation account, not a ~$1K live account.
-MAX_RISK_PERCENT = float(os.getenv("PROP_MAX_RISK_PERCENT", "0.20"))  # 20% max
+MAX_RISK_PERCENT = _safe_float_env("PROP_MAX_RISK_PERCENT", "0.20")  # 20% max
 
 # Buying power threshold to STOP opening new positions (emergency brake)
-CRITICAL_BUYING_POWER_THRESHOLD = float(os.getenv("PROP_CRITICAL_BP_THRESHOLD", "100"))
+CRITICAL_BUYING_POWER_THRESHOLD = _safe_float_env("PROP_CRITICAL_BP_THRESHOLD", "100")
 
 
 def size_position(cash_remaining, slots_remaining, price, account_equity=None):
@@ -690,7 +715,7 @@ def size_position(cash_remaining, slots_remaining, price, account_equity=None):
     amount = min(amount, cash_remaining * 0.4)  # Cap at 40% to maintain safety
 
     # Apply additional scaling multiplier (increases after milestone locks)
-    scale = float(os.getenv("POSITION_SCALE_MULTIPLIER", "1.0"))
+    scale = _safe_float_env("POSITION_SCALE_MULTIPLIER", "1.0")
     amount = amount * scale  # SCALE UP: bigger positions after milestone
 
     qty = round(amount / price, 6)
@@ -1120,7 +1145,7 @@ async def run_prop_cycle():
 
         # Dynamic circuit breaker: scales with position multiplier
         # Larger positions require larger loss threshold to avoid premature halt
-        scale = float(os.getenv("POSITION_SCALE_MULTIPLIER", "1.0"))
+        scale = _safe_float_env("POSITION_SCALE_MULTIPLIER", "1.0")
         dynamic_daily_max_loss = DAILY_MAX_LOSS_BASE * scale  # $10→$15→$20 as scale increases
         dynamic_max_positions = get_dynamic_max_positions(scale)  # 2 at 1.0x, 1 at 1.5x+
 

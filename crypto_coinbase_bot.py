@@ -64,6 +64,31 @@ from network_config import get_cached_response, cache_response, NETWORK_ENV_CONF
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("crypto_coinbase_bot")
 
+def _safe_float_env(name: str, default: str) -> float:
+    """Parse a Railway env var as float, falling back to the numeric default
+    and logging a warning instead of crashing on a bad value (e.g. someone
+    pastes 'default: 40' or a stray label into the Variables tab). These all
+    run at module import time, so an unguarded float()/int() here used to
+    mean one bad Railway variable could crash the entire bot before its
+    first cycle - see the RSI_LONG_THRESHOLD incident in alpaca_mean_reversion.py."""
+    raw = os.getenv(name, default)
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning(f"{name}={raw!r} is not a valid number - using default {default} instead. Fix this in Railway's Variables tab.")
+        return float(default)
+
+
+def _safe_int_env(name: str, default: str) -> int:
+    """Same as _safe_float_env but for integer-valued env vars."""
+    raw = os.getenv(name, default)
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning(f"{name}={raw!r} is not a valid integer - using default {default} instead. Fix this in Railway's Variables tab.")
+        return int(default)
+
+
 # Measurement system: Trade logging with full signal context
 try:
     from measurement_system import SignalContext, TradeLog, trade_logger, StatisticalAnalyzer
@@ -81,17 +106,8 @@ COINBASE_API_PRIVATE_KEY = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\
 COINBASE_HOST = "api.coinbase.com"
 COINBASE_BASE_URL = f"https://{COINBASE_HOST}"
 FMP_API_KEY = os.getenv("FMP_API_KEY", "")
-try:
-    NETWORK_RETRY_ATTEMPTS = int(os.getenv("NETWORK_RETRY_ATTEMPTS", "3"))
-except (ValueError, TypeError):
-    NETWORK_RETRY_ATTEMPTS = 3
-    log.warning("Invalid NETWORK_RETRY_ATTEMPTS, using default: 3")
-
-try:
-    NETWORK_RETRY_DELAY = float(os.getenv("NETWORK_RETRY_DELAY", "1.0"))
-except (ValueError, TypeError):
-    NETWORK_RETRY_DELAY = 1.0
-    log.warning("Invalid NETWORK_RETRY_DELAY, using default: 1.0")
+NETWORK_RETRY_ATTEMPTS = _safe_int_env("NETWORK_RETRY_ATTEMPTS", "3")
+NETWORK_RETRY_DELAY = _safe_float_env("NETWORK_RETRY_DELAY", "1.0")
 
 CRYPTO_PAIRS = [
     "BTC/USD", "ETH/USD",  # Tier 1: Core stable cryptos
@@ -176,19 +192,19 @@ RSI_ARM_THRESHOLD = 30        # RSI < 30 = standard oversold (arm for entry)
 RSI_WATCH_THRESHOLD = 50      # Above this = WATCH state
 RSI_NO_ENTRY = 65             # RSI >= 65 = overbought territory, skip entries
 try:
-    RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "70"))
+    RSI_SELL_ABOVE = _safe_float_env("CRYPTO_RSI_SELL_ABOVE", "70")
 except (ValueError, TypeError):
     log.warning("Invalid CRYPTO_RSI_SELL_ABOVE value, using default: 70")
     RSI_SELL_ABOVE = 70.0
 
 try:
-    RSI_BUY_BELOW = float(os.getenv("CRYPTO_RSI_BUY_BELOW", "30"))
+    RSI_BUY_BELOW = _safe_float_env("CRYPTO_RSI_BUY_BELOW", "30")
 except (ValueError, TypeError):
     log.warning("Invalid CRYPTO_RSI_BUY_BELOW value, using default: 30")
     RSI_BUY_BELOW = 30.0
 
 try:
-    MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "50"))
+    MAX_POSITIONS = _safe_int_env("CRYPTO_MAX_POSITIONS", "50")
 except (ValueError, TypeError):
     log.warning("Invalid CRYPTO_MAX_POSITIONS value, using default: 50")
     MAX_POSITIONS = 50
@@ -207,14 +223,14 @@ except (ValueError, TypeError):
 # without sitting idle. At $0.58 balance: $0.50 × 0.5% move = $0.0025 profit (micro-compounding)
 # $100+ balance: trades full notional, beats fees, compounds faster.
 try:
-    MIN_POSITION_NOTIONAL = float(os.getenv("CRYPTO_MIN_POSITION_NOTIONAL", "0.50"))
+    MIN_POSITION_NOTIONAL = _safe_float_env("CRYPTO_MIN_POSITION_NOTIONAL", "0.50")
 except (ValueError, TypeError):
     log.warning("Invalid CRYPTO_MIN_POSITION_NOTIONAL value, using default: 0.50")
     MIN_POSITION_NOTIONAL = 0.50
 
 # Minimum trade size guard: skip trading if cash pool is too small to be meaningful
 try:
-    MIN_CRYPTO_TRADE_USD = float(os.getenv("MIN_CRYPTO_TRADE_USD", "0.50"))
+    MIN_CRYPTO_TRADE_USD = _safe_float_env("MIN_CRYPTO_TRADE_USD", "0.50")
 except (ValueError, TypeError):
     log.warning("Invalid MIN_CRYPTO_TRADE_USD value, using default: 0.50")
     MIN_CRYPTO_TRADE_USD = 0.50
@@ -225,7 +241,7 @@ except (ValueError, TypeError):
 # The account has grown from $0.58 → $483.43 through earnings, so tier protection no longer needed.
 # Set CRYPTO_TIER_SIZE to a positive value to re-enable tiered capital release if desired.
 try:
-    TIER_SIZE = float(os.getenv("CRYPTO_TIER_SIZE", "0"))
+    TIER_SIZE = _safe_float_env("CRYPTO_TIER_SIZE", "0")
 except (ValueError, TypeError):
     log.warning("Invalid CRYPTO_TIER_SIZE value, using default: 0 (tiering disabled)")
     TIER_SIZE = 0.0
@@ -233,7 +249,7 @@ except (ValueError, TypeError):
 # Minimum cash reserve: never deploy this amount, only grows from profits
 # With $483.43 balance: keep $25, deploy $458.43 in active trades
 try:
-    MIN_CASH_RESERVE = float(os.getenv("CRYPTO_MIN_CASH_RESERVE", "25"))
+    MIN_CASH_RESERVE = _safe_float_env("CRYPTO_MIN_CASH_RESERVE", "25")
 except (ValueError, TypeError):
     log.warning("Invalid CRYPTO_MIN_CASH_RESERVE value, using default: 25")
     MIN_CASH_RESERVE = 25.0
@@ -287,7 +303,7 @@ async def set_tier_highwater(value: float):
 # This is used only to size the profit target sensibly, not charged/simulated here
 # (the real fee is already reflected in Coinbase's fill price/balance).
 try:
-    CRYPTO_ROUND_TRIP_FEE_RATE = float(os.getenv("CRYPTO_ROUND_TRIP_FEE_RATE", "0.004"))
+    CRYPTO_ROUND_TRIP_FEE_RATE = _safe_float_env("CRYPTO_ROUND_TRIP_FEE_RATE", "0.004")
 except (ValueError, TypeError):
     log.warning("Invalid CRYPTO_ROUND_TRIP_FEE_RATE value, using default: 0.004")
     CRYPTO_ROUND_TRIP_FEE_RATE = 0.004
@@ -299,7 +315,12 @@ except (ValueError, TypeError):
 # This lets winners run while locking in gains and stopping losses early.
 # Hard-coded: Deprecated - uses CRYPTO_TIER_LEVELS instead
 # Do NOT restore the 37% target - it proved unworkable in live trading
-PROFIT_TARGET_PCT = 0.37  # DEPRECATED - kept for reference only, use CRYPTO_TIER_LEVELS instead
+PROFIT_TARGET_PCT = 0.37  # DEPRECATED - no longer read anywhere in the live exit logic (the
+# TIER 2 exit branches used to be gated on unrealized_pct >= PROFIT_TARGET_PCT on top of their own
+# tier2_hit check, silently blocking every TIER 2 exit since 37% is far beyond what tier2 ever
+# needs; that gate has been removed). Kept only because scripts/sweep_crypto_geometry.py and
+# scripts/backtest_prop_target.py still read bot.PROFIT_TARGET_PCT - safe to delete once those
+# are updated too.
 
 # Previously there was no stop-loss at all - the only exits were the
 # profit target and "RSI recovered to neutral," so a position that never
@@ -1390,7 +1411,7 @@ async def run_crypto_cycle():
         if is_hitting_daily_loss_limit:
             status_suffix += " | ⚠️ DAILY 2% LOSS LIMIT HIT - stopping new trades"
 
-        log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} ({cap_desc}, {tier_desc}) | Target: +{PROFIT_TARGET_PCT*100:.2f}% | Stop: -{STOP_LOSS_PCT*100:.2f}% | Round-trip fee: {CRYPTO_ROUND_TRIP_FEE_RATE*100:.2f}%{status_suffix}")
+        log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} ({cap_desc}, {tier_desc}) | Exits: 3-tier ATR-based (~3/5/10% fallback) | Stop: -{STOP_LOSS_PCT*100:.2f}% | Round-trip fee: {CRYPTO_ROUND_TRIP_FEE_RATE*100:.2f}%{status_suffix}")
 
         # AGGRESSIVE GROWTH MODE: If at floor ($990), maximize position sizing
         if is_at_floor and not is_hitting_daily_loss_limit:
@@ -1490,9 +1511,9 @@ async def run_crypto_cycle():
                 elif tier3_hit:
                     should_exit = True
                     reason = f"TIER 3 @ ${tier3_price:.2f} (+{(price/entry - 1)*100:.2f}%, let winners run)"
-                elif tier2_hit and unrealized_pct >= PROFIT_TARGET_PCT:
+                elif tier2_hit:
                     should_exit = True
-                    reason = f"TIER 2 @ ${tier2_price:.2f} (+{(price/entry - 1)*100:.2f}%, hit 3% target)"
+                    reason = f"TIER 2 @ ${tier2_price:.2f} (+{(price/entry - 1)*100:.2f}%, hit target)"
                 elif tier1_hit:
                     should_exit = True
                     reason = f"TIER 1 @ ${tier1_price:.2f} (+{(price/entry - 1)*100:.2f}%, lock early gain)"
@@ -1608,9 +1629,9 @@ async def run_crypto_cycle():
             elif tier3_hit:
                 should_exit = True
                 reason = f"TIER 3 (ATR) @ ${tier3_price:.2f} (+{(price/entry - 1)*100:.2f}%, let winners run)"
-            elif tier2_hit and unrealized_pct >= PROFIT_TARGET_PCT:
+            elif tier2_hit:
                 should_exit = True
-                reason = f"TIER 2 (ATR) @ ${tier2_price:.2f} (+{(price/entry - 1)*100:.2f}%, hit 3% target)"
+                reason = f"TIER 2 (ATR) @ ${tier2_price:.2f} (+{(price/entry - 1)*100:.2f}%, hit target)"
             elif tier1_hit:
                 should_exit = True
                 reason = f"TIER 1 (ATR) @ ${tier1_price:.2f} (+{(price/entry - 1)*100:.2f}%, lock early gain)"
