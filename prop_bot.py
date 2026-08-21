@@ -12,6 +12,7 @@ import logging
 import math
 import smtplib
 import time
+import traceback
 from email.mime.text import MIMEText
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -1470,15 +1471,33 @@ def run():
     except Exception as e:
         log.error(f"[APEX_589296] Startup equity floor reload failed: {e}")
 
+    # One persistent event loop for this thread's entire life, not a fresh
+    # asyncio.run() per cycle - the same repeated create/destroy pattern
+    # already caused a full thread crash in alpaca_swing_bot.py today
+    # ("Task ... got Future ... attached to a different loop"), traced to
+    # main.py's uvicorn server installing uvloop's event loop policy
+    # process-wide. A single loop, reused via run_until_complete(), avoids it.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     while True:
         if os.getenv("STOP_TRADING", "false").lower() == "true":
             log.warning("STOP_TRADING=true — prop bot paused")
             time.sleep(60)
             continue
         try:
-            asyncio.run(run_prop_cycle())
+            loop.run_until_complete(run_prop_cycle())
+        except RuntimeError as e:
+            if "attached to a different loop" in str(e):
+                log.warning(f"[APEX_589296] Event loop mismatch detected: {e} - recreating event loop")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            else:
+                log.error(f"Prop cycle error: {e}")
+                log.error(f"Traceback: {traceback.format_exc()}")
         except Exception as e:
             log.error(f"Prop cycle error: {e}")
+            log.error(f"Traceback: {traceback.format_exc()}")
         time.sleep(30)
 
 

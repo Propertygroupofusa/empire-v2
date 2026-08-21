@@ -30,6 +30,8 @@ Trades: Indices (MES, MNQ, MYM, M2K) + Commodities (MGC, MCL, SIL)
 import os
 import asyncio
 import logging
+import time
+import traceback
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 import aiohttp
@@ -52,8 +54,12 @@ def get_headers():
     }
 
 def get_base_url():
-    """Alpaca base URL (live vs paper)"""
-    return os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+    """Alpaca base URL (live vs paper). Defaults to live to match
+    prop_bot.py's default and the actual live credentials configured in
+    Railway - ALPACA_BASE_URL was never set there, so this bot was silently
+    talking to the paper server with live-account keys, which can't
+    authenticate against it (account balance fetch failed every time)."""
+    return os.getenv("ALPACA_BASE_URL", "https://api.alpaca.markets")
 
 LIVE_TRADE = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 
@@ -598,10 +604,21 @@ def run():
     log.info(f"DAY: RSI < {INTRADAY_RSI_BUY} intraday entry, max {MAX_CONCURRENT_INTRADAY} positions, {INTRADAY_STOP_LOSS*100:.1f}% hard stop")
     log.info("=" * 70)
 
+    # One persistent event loop for this thread's entire life, not a fresh
+    # asyncio.run() per call. main.py's uvicorn server installs uvloop's
+    # event loop policy process-wide, so repeatedly creating/destroying a
+    # loop in this background thread was intermittently producing
+    # "Task ... got Future ... attached to a different loop" errors -
+    # the exact same bug already diagnosed and fixed the same way in
+    # crypto_coinbase_bot.py. A single loop, reused via run_until_complete(),
+    # removes the repeated create/destroy cycle entirely.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     # Run connectivity test before starting
     log.info("\n🚀 Running pre-flight test before market open...")
     try:
-        test_passed = asyncio.run(test_connectivity())
+        test_passed = loop.run_until_complete(test_connectivity())
         if not test_passed:
             log.error("❌ PRE-FLIGHT TEST FAILED — Bot will not trade until issue is resolved")
             log.error("   Check Alpaca credentials and account settings")
@@ -629,31 +646,35 @@ def run():
             if is_market_open:
                 if now.minute % 15 == 0:  # On 15-min marks (9:30, 9:45, etc)
                     log.info(f"\n⏰ {now.strftime('%H:%M')} — Running intraday check...")
-                    asyncio.run(run_intraday_check())
-                    import time
+                    loop.run_until_complete(run_intraday_check())
                     time.sleep(60)  # Sleep 1 min to avoid duplicate
 
             # Run swing check once per day at market close (4:30pm ET)
             if now.hour == 16 and now.minute == 30:
                 if last_swing_check != now.date():
                     log.info(f"\n📅 Market close — Running swing check...")
-                    asyncio.run(run_swing_check())
+                    loop.run_until_complete(run_swing_check())
                     last_swing_check = now.date()
-                    import time
                     time.sleep(60)
 
             # Sleep 30 seconds between checks
-            import time
             time.sleep(30)
 
         except KeyboardInterrupt:
             log.info("\n⏹️  Bot stopped")
             break
+        except RuntimeError as e:
+            if "attached to a different loop" in str(e):
+                log.warning(f"Event loop mismatch detected: {e} - recreating event loop")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            else:
+                log.error(f"Bot error: {e}")
+                log.error(f"Traceback: {traceback.format_exc()}")
+            time.sleep(30)
         except Exception as e:
-            import traceback
             log.error(f"Bot error: {e}")
             log.error(f"Traceback: {traceback.format_exc()}")
-            import time
             time.sleep(30)
 
 

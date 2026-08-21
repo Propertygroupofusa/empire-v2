@@ -1858,10 +1858,14 @@ async def test_crypto_connectivity():
             return False
         log.info(f"  ✅ Coinbase access verified | Available USD: ${cash:.2f}")
 
-        # Test 2: Check position endpoint
-        log.info("  Testing /api/v3/brokerage/orders endpoint...")
+        # Test 2: Check orders endpoint. GET /api/v3/brokerage/orders is not
+        # a real route (only POST is defined there, for creating orders) -
+        # hitting it with GET returned a real HTTP 501 from Coinbase, not a
+        # credentials problem. The actual "list orders" route is
+        # /api/v3/brokerage/orders/historical/batch.
+        log.info("  Testing /api/v3/brokerage/orders/historical/batch endpoint...")
         try:
-            path = "/api/v3/brokerage/orders"
+            path = "/api/v3/brokerage/orders/historical/batch"
             async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path), timeout=5) as r:
                 if r.status not in (200, 400):  # 400 is OK (invalid params), 200 is OK (order history)
                     log.error(f"  ❌ FAILED: HTTP {r.status}")
