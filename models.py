@@ -101,6 +101,80 @@ class CampaignContact(Base):
         }
 
 
+class FundraiserCampaign(Base):
+    """GoFundMe-style fundraising campaign backed by Stripe payments."""
+    __tablename__ = "fundraiser_campaigns"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, index=True)
+    description = Column(Text, nullable=True)
+    beneficiary_name = Column(String, nullable=True)
+    goal_amount_cents = Column(Integer)
+    amount_raised_cents = Column(Integer, default=0)
+    currency = Column(String, default="usd")
+    is_active = Column(Boolean, default=True, index=True)
+    allow_custom_amount = Column(Boolean, default=True)
+    minimum_donation_cents = Column(Integer, default=500)  # $5 floor
+    ends_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        progress_pct = 0.0
+        if self.goal_amount_cents and self.goal_amount_cents > 0:
+            progress_pct = round((self.amount_raised_cents / self.goal_amount_cents) * 100, 2)
+        return {
+            "id": self.id,
+            "title": self.title,
+            "description": self.description,
+            "beneficiary_name": self.beneficiary_name,
+            "goal_amount_cents": self.goal_amount_cents,
+            "amount_raised_cents": self.amount_raised_cents,
+            "currency": self.currency,
+            "is_active": self.is_active,
+            "allow_custom_amount": self.allow_custom_amount,
+            "minimum_donation_cents": self.minimum_donation_cents,
+            "ends_at": self.ends_at.isoformat() if self.ends_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "progress_pct": progress_pct,
+        }
+
+
+class FundraiserDonation(Base):
+    """Single donation toward a fundraiser campaign."""
+    __tablename__ = "fundraiser_donations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    campaign_id = Column(Integer, ForeignKey("fundraiser_campaigns.id"), index=True)
+    donor_name = Column(String, nullable=True)
+    donor_email = Column(String, nullable=True, index=True)
+    amount_cents = Column(Integer)
+    currency = Column(String, default="usd")
+    status = Column(String, default="pending", index=True)  # pending, paid, failed
+    stripe_session_id = Column(String, nullable=True, index=True)
+    stripe_payment_intent_id = Column(String, nullable=True, index=True)
+    message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    paid_at = Column(DateTime, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "campaign_id": self.campaign_id,
+            "donor_name": self.donor_name,
+            "donor_email": self.donor_email,
+            "amount_cents": self.amount_cents,
+            "currency": self.currency,
+            "status": self.status,
+            "stripe_session_id": self.stripe_session_id,
+            "stripe_payment_intent_id": self.stripe_payment_intent_id,
+            "message": self.message,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "paid_at": self.paid_at.isoformat() if self.paid_at else None,
+        }
+
+
 class ReferralContact(Base):
     """Past customers enrolled in the post-delivery referral campaign
     (email_campaigns.py) - a different thing from CampaignContact above,

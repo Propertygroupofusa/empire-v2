@@ -67,6 +67,7 @@ routers_to_load = {
     'social_dashboard': None,
     'orders': None,
     'subscriptions': None,
+    'fundraiser': None,
     'trading_signals': None,
     'outreach': None,
     'study': None,
@@ -102,6 +103,7 @@ revenue_automation = routers_to_load['revenue_automation']
 social_dashboard = routers_to_load['social_dashboard']
 orders = routers_to_load['orders']
 subscriptions = routers_to_load['subscriptions']
+fundraiser = routers_to_load['fundraiser']
 trading_signals = routers_to_load['trading_signals']
 outreach = routers_to_load['outreach']
 study = routers_to_load['study']
@@ -1282,6 +1284,7 @@ routers_list = [
     (revenue_automation, "/revenue", "Revenue Automation"),
     (orders, "/orders", "Video Orders"),
     (subscriptions, "/subscriptions", "Subscriptions"),
+    (fundraiser, "/fundraiser", "Fundraiser"),
     (trading_signals, "/trading", "Trading Signals"),
     (outreach, "/outreach", "Outreach & Campaigns"),
     (study, "/study", "Study Assistant"),

@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fundraiser Donation</title>
+    <script src="https://js.stripe.com/v3/"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; background: #f3f4f6; color: #111827; }
+        .container { max-width: 700px; margin: 32px auto; background: #fff; border-radius: 12px; padding: 24px; box-shadow: 0 8px 25px rgba(0,0,0,0.08); }
+        h1 { margin-top: 0; }
+        .muted { color: #6b7280; }
+        .progress-wrap { width: 100%; height: 14px; background: #e5e7eb; border-radius: 99px; overflow: hidden; margin: 12px 0 16px; }
+        .progress { height: 14px; background: #2563eb; width: 0%; }
+        label { display: block; font-weight: 600; margin-top: 12px; }
+        input, textarea { width: 100%; padding: 10px; border: 1px solid #d1d5db; border-radius: 8px; margin-top: 6px; box-sizing: border-box; }
+        button { margin-top: 16px; padding: 12px 16px; border: 0; border-radius: 8px; background: #2563eb; color: #fff; font-weight: 700; cursor: pointer; width: 100%; }
+        button:disabled { background: #9ca3af; cursor: not-allowed; }
+        .status { margin-top: 10px; font-size: 14px; }
+        .ok { color: #059669; }
+        .err { color: #dc2626; }
+        .donation-row { display: flex; justify-content: space-between; border-bottom: 1px solid #eee; padding: 8px 0; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 id="title">Loading fundraiser...</h1>
+        <p class="muted" id="description"></p>
+        <p><strong>Beneficiary:</strong> <span id="beneficiary">—</span></p>
+        <p><strong>Raised:</strong> <span id="raised">$0.00</span> of <span id="goal">$0.00</span></p>
+        <div class="progress-wrap"><div class="progress" id="progress"></div></div>
+
+        <form id="donationForm">
+            <label for="donor_name">Name (optional)</label>
+            <input id="donor_name" type="text" placeholder="Anonymous donor" />
+
+            <label for="donor_email">Email</label>
+            <input id="donor_email" type="email" required placeholder="you@example.com" />
+
+            <label for="amount">Donation amount (USD)</label>
+            <input id="amount" type="number" min="1" step="0.01" required value="25.00" />
+
+            <label for="message">Message (optional)</label>
+            <textarea id="message" rows="3" placeholder="You can do this!"></textarea>
+
+            <button id="donateBtn" type="submit">Donate with Stripe</button>
+            <div id="status" class="status"></div>
+        </form>
+
+        <h3 style="margin-top:28px;">Recent Donations</h3>
+        <div id="donations"></div>
+    </div>
+
+    <script>
+        const params = new URLSearchParams(window.location.search);
+        const campaignId = params.get("campaign_id");
+        let stripe = null;
+        let campaign = null;
+
+        const $ = (id) => document.getElementById(id);
+        const formatUsd = (cents) => `$${(cents / 100).toFixed(2)}`;
+
+        function setStatus(msg, ok = false) {
+            const node = $("status");
+            node.textContent = msg;
+            node.className = `status ${ok ? "ok" : "err"}`;
+        }
+
+        async function loadStripe() {
+            const res = await fetch("/fundraiser/stripe-key");
+            const data = await res.json();
+            if (!data.publishable_key) throw new Error("Stripe key missing");
+            stripe = Stripe(data.publishable_key);
+        }
+
+        async function loadCampaign() {
+            if (!campaignId) throw new Error("Missing campaign_id in URL");
+            const res = await fetch(`/fundraiser/campaigns/${campaignId}`);
+            if (!res.ok) throw new Error("Campaign not found");
+            const data = await res.json();
+            campaign = data.campaign;
+
+            $("title").textContent = campaign.title;
+            $("description").textContent = campaign.description || "";
+            $("beneficiary").textContent = campaign.beneficiary_name || "Not specified";
+            $("raised").textContent = formatUsd(campaign.amount_raised_cents);
+            $("goal").textContent = formatUsd(campaign.goal_amount_cents);
+            $("progress").style.width = `${Math.min(100, campaign.progress_pct || 0)}%`;
+
+            const min = campaign.minimum_donation_cents || 100;
+            $("amount").min = (min / 100).toFixed(2);
+
+            const box = $("donations");
+            box.innerHTML = "";
+            (data.recent_donations || []).forEach((d) => {
+                const row = document.createElement("div");
+                row.className = "donation-row";
+                row.innerHTML = `<span>${d.donor_name}</span><strong>${formatUsd(d.amount_cents)}</strong>`;
+                box.appendChild(row);
+            });
+            if (!box.children.length) box.innerHTML = `<p class="muted">No donations yet.</p>`;
+        }
+
+        $("donationForm").addEventListener("submit", async (e) => {
+            e.preventDefault();
+            try {
+                $("donateBtn").disabled = true;
+                setStatus("Starting secure checkout...", true);
+
+                const payload = {
+                    donor_name: $("donor_name").value || null,
+                    donor_email: $("donor_email").value,
+                    amount_cents: Math.round(parseFloat($("amount").value) * 100),
+                    message: $("message").value || null,
+                };
+
+                const res = await fetch(`/fundraiser/campaigns/${campaignId}/checkout`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || "Checkout failed");
+
+                if (data.session_id) {
+                    const result = await stripe.redirectToCheckout({ sessionId: data.session_id });
+                    if (result.error) throw new Error(result.error.message);
+                } else if (data.checkout_url) {
+                    window.location.href = data.checkout_url;
+                } else {
+                    throw new Error("No checkout URL returned");
+                }
+            } catch (err) {
+                setStatus(err.message || "Unable to proceed with checkout");
+                $("donateBtn").disabled = false;
+            }
+        });
+
+        (async () => {
+            try {
+                await loadStripe();
+                await loadCampaign();
+                if (params.get("success")) setStatus("Payment submitted. Thank you for your donation!", true);
+                if (params.get("canceled")) setStatus("Donation canceled.");
+            } catch (err) {
+                setStatus(err.message || "Unable to load fundraiser");
+            }
+        })();
+    </script>
+</body>
+</html>
