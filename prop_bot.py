@@ -790,16 +790,18 @@ async def run_prop_cycle():
                 return
 
         if equity is not None:
-            # AGGRESSIVE GROWTH STRATEGY for $1,000 threshold
-            ALPACA_FLOOR = 990.00  # If drops to $990, aggressive mode
-            ALPACA_PROFIT_ACTIVATION = 1000.15  # When hits $1,000.15+, take $10 profits
+            # AGGRESSIVE GROWTH STRATEGY: Let account compound until real milestone hit
+            # OLD: $1000.15 threshold kept triggering at $1004.77, closing $10, dropping to $994, looping infinitely
+            # NEW: Wait for 50% growth milestone ($1,500+) so profit-taking captures real gains, not noise
+            ALPACA_FLOOR = 700.00  # If drops below $700, switch to strict preservation mode
+            ALPACA_PROFIT_ACTIVATION = 1500.00  # Only take profits after 50%+ growth (avoid infinite loop)
             is_alpaca_at_floor = equity <= ALPACA_FLOOR
             should_alpaca_take_profits = equity >= ALPACA_PROFIT_ACTIVATION
 
             if is_alpaca_at_floor:
-                log.info(f"🚀 ALPACA AGGRESSIVE MODE: ${equity:.2f} ≤ ${ALPACA_FLOOR:.2f} | Climbing to $1,000+")
+                log.info(f"🚀 ALPACA SURVIVAL MODE: ${equity:.2f} ≤ ${ALPACA_FLOOR:.2f} | Protecting capital, minimal risk trades only")
             if should_alpaca_take_profits:
-                log.info(f"💰 ALPACA PROFIT TAKING: ${equity:.2f} ≥ ${ALPACA_PROFIT_ACTIVATION:.2f} | Close $10 trades")
+                log.info(f"💰 ALPACA MILESTONE HIT: ${equity:.2f} ≥ ${ALPACA_PROFIT_ACTIVATION:.2f} | Taking profits on top 10 winners")
                 # Actually close the most profitable positions to lock in gains
                 profit_positions = []
                 for contract, pos in open_prop_positions.items():
