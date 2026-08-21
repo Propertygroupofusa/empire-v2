@@ -1,14 +1,28 @@
 name: Live performance report (on-demand)
 
-# Read-only check against the real Alpaca account - equity, closed trades,
+# Read-only check against a real Alpaca account - equity, closed trades,
 # win rate, profit factor, realized slippage. See scripts/live_performance_report.py
 # for why this exists instead of a backtest: this measures actual execution,
 # not a simulation. Places no orders. Trigger manually from the Actions tab
 # ("Run workflow") or via the GitHub API whenever you want a real answer
 # instead of a guess.
+#
+# "account" picks which set of credentials to read - the live account
+# (ALPACA_API_KEY/ALPACA_SECRET_KEY, api.alpaca.markets) or a paper account
+# (ALPACA_PAPER_API_KEY/ALPACA_PAPER_SECRET_KEY, paper-api.alpaca.markets).
+# Both are separate repo secrets - add whichever ones you need under
+# Settings > Secrets and variables > Actions > Secrets tab.
 on:
   workflow_dispatch:
     inputs:
+      account:
+        description: "Which account to report on"
+        required: true
+        default: "live"
+        type: choice
+        options:
+          - live
+          - paper
       report_days:
         description: "How many days back to pull (use 1 for 'just today')"
         required: false
@@ -29,8 +43,10 @@ jobs:
 
       - name: Pull live performance from Alpaca account history
         env:
-          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
-          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
-          ALPACA_BASE_URL: "https://api.alpaca.markets"
+          ALPACA_API_KEY: ${{ github.event.inputs.account == 'paper' && secrets.ALPACA_PAPER_API_KEY || secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ github.event.inputs.account == 'paper' && secrets.ALPACA_PAPER_SECRET_KEY || secrets.ALPACA_SECRET_KEY }}
+          ALPACA_BASE_URL: ${{ github.event.inputs.account == 'paper' && 'https://paper-api.alpaca.markets' || 'https://api.alpaca.markets' }}
           REPORT_DAYS: ${{ github.event.inputs.report_days }}
-        run: python scripts/live_performance_report.py
+        run: |
+          echo "Reporting on: ${{ github.event.inputs.account }} account"
+          python scripts/live_performance_report.py
