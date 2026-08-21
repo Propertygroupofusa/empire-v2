@@ -1412,7 +1412,23 @@ async def run_crypto_cycle():
         # CRITICAL: Dynamic floor & aggressive growth strategy
         BALANCE_FLOOR = 400.00  # If drops to $400, resume aggressive trading
         PROFIT_LOCK_ACTIVATION = 750.00  # When balance hits $750+, take profits
-        TARGET_TRADE_PROFIT = 2.50  # Close trades with $2.50+ profit when activated
+
+        # DYNAMIC PROFIT TARGETS: Close faster at small account size, let winners run as account grows
+        # At $700: $1 target (easy to hit, reinvest sooner)
+        # At $1,500: $2-3 target
+        # At $5,000: $5-10 target
+        # At $10K+: $20-50 target
+        if balance < 1000:
+            TARGET_TRADE_PROFIT = 1.00   # Small account = small targets = fast compounding
+        elif balance < 2500:
+            TARGET_TRADE_PROFIT = 2.00
+        elif balance < 5000:
+            TARGET_TRADE_PROFIT = 3.50
+        elif balance < 10000:
+            TARGET_TRADE_PROFIT = 10.00
+        else:
+            TARGET_TRADE_PROFIT = 25.00  # Large accounts can let winners run
+
         GROWTH_TARGET = 1000.00  # Seek to grow beyond $1,000
 
         is_at_floor = cash is not None and cash <= BALANCE_FLOOR
