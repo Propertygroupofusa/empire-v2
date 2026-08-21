@@ -21,6 +21,7 @@ from database import AsyncSessionLocal
 from models import BotPosition, Payment
 from bot_mandates import APEX_MANDATE, validate_entry
 from alpaca_mean_reversion import should_exit_position as mr_should_exit, validate_dual_direction
+from profit_tracker import FiveHourProfitTracker
 
 # Measurement system: Trade logging with full signal context
 try:
@@ -208,6 +209,9 @@ checkpoint_alerts_sent = set()  # Track which milestones we've alerted on (avoid
 daily_pnl = 0.0
 daily_account_equity_start = None  # For daily 2% loss limit
 open_prop_positions = {}
+
+# 5-hour rolling profit tracking
+profit_tracker = FiveHourProfitTracker()
 
 BOT_NAME = "prop_apex"
 
@@ -945,7 +949,12 @@ async def run_prop_cycle():
 
         global daily_pnl
         daily_pnl += pnl
-        log.info(f"[APEX_589296] 📤 CLOSE {side.upper()} {contract} ({reason_label}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${pnl:.2f} ({profit_pct:.2f}%)")
+
+        # Track profit in 5-hour rolling window
+        if pnl > 0:
+            profit_tracker.add_profit(pnl, contract, side, reason_label)
+
+        log.info(f"[APEX_589296] 📤 CLOSE {side.upper()} {contract} ({reason_label}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${pnl:.2f} ({profit_pct:.2f}%) | {profit_tracker.get_five_hour_summary()}")
 
         # CRITICAL: Log closed trade to database for audit trail
         await _db_save_closed_trade(contract, side, entry, price, qty, pnl, reason_label)

@@ -60,6 +60,7 @@ from database import AsyncSessionLocal
 from models import BotPosition, TradingBotState, CryptoRSIState, CryptoTradeLog, CryptoSupplementalCapital
 from bot_mandates import CRYPTO_MANDATE
 from network_config import get_cached_response, cache_response, NETWORK_ENV_CONFIG
+from profit_tracker import FiveHourProfitTracker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("crypto_coinbase_bot")
@@ -340,6 +341,9 @@ last_cycle_at = None
 RSI_STATE_CACHE = {}  # {symbol: {"entered_oversold": bool, "armed_rsi": float, "last_rsi": float, "changed": bool}}
 
 BOT_NAME = "crypto_coinbase"
+
+# 5-hour rolling profit tracking
+profit_tracker = FiveHourProfitTracker()
 
 
 async def load_open_positions():
@@ -1560,8 +1564,13 @@ async def run_crypto_cycle():
                     if filled:
                         daily_pnl += unrealized_pnl
                         run_swing_check.realized_profit += unrealized_pnl  # Track realized gain/loss
+
+                        # Track profit in 5-hour rolling window
+                        if unrealized_pnl > 0:
+                            profit_tracker.add_profit(unrealized_pnl, symbol, "long", reason)
+
                         available_cash_after = run_swing_check.initial_cash + run_swing_check.realized_profit - deployed_cost_basis
-                        log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:+.2f} | Available: ${available_cash_after:.2f} | Total Realized: ${run_swing_check.realized_profit:+.2f}")
+                        log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:+.2f} | Available: ${available_cash_after:.2f} | Total Realized: ${run_swing_check.realized_profit:+.2f} | {profit_tracker.get_five_hour_summary()}")
                         send_trade_alert(
                             f"🤖 Crypto bot — {symbol} closed ({reason})",
                             f"Position closed on your Coinbase account:\n\n"
@@ -1666,8 +1675,13 @@ async def run_crypto_cycle():
                 if filled:
                     daily_pnl += unrealized_pnl
                     run_swing_check.realized_profit += unrealized_pnl  # Track realized gain/loss
+
+                    # Track profit in 5-hour rolling window
+                    if unrealized_pnl > 0:
+                        profit_tracker.add_profit(unrealized_pnl, symbol, "long", reason)
+
                     available_cash_after = run_swing_check.initial_cash + run_swing_check.realized_profit - deployed_cost_basis
-                    log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:+.2f} | Available: ${available_cash_after:.2f} | Total Realized: ${run_swing_check.realized_profit:+.2f}")
+                    log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:+.2f} | Available: ${available_cash_after:.2f} | Total Realized: ${run_swing_check.realized_profit:+.2f} | {profit_tracker.get_five_hour_summary()}")
                     # Log trade exit for analytics
                     time_held = (now - position.get("opened_at", now)).total_seconds() // 60 if "opened_at" in position else 0
                     await log_trade_exit(
