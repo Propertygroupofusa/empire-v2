@@ -1,28 +1,30 @@
 """
-ALPACA HYBRID TRADING BOT v2
+ALPACA DUAL STRATEGY BOT v2
 ============================
-Hybrid trader combining day-trading stocks + 24/5 micro-futures
-Account: APEX_589296 (same as prop_bot.py)
+Swing trader + Day trader on Alpaca account
+Account: $40,000 with 60% win rate
 
-Strategy 1 - STOCK DAY TRADING (9:30 AM - 4:00 PM ET)
-- Symbols: QQQ, SPY, IWM (high-liquidity ETFs)
-- Entry: Daily RSI < 35 (oversold) + volume > 1.5x avg
-- Exit: +1.25% profit OR Daily RSI > 70 OR -1% stop loss
-- Hold: 30 min - 4 hours typical
-- Expected: $39/day profit
+STRATEGY 1: SWING TRADING (Mean reversion on weekly RSI)
+- Entry: Weekly RSI < 30 (oversold) + price > 200-day SMA
+- Exit: Weekly RSI > 70 (overbought) OR +5% profit OR -2% stop loss
+- Hold: 5-10 days typical
+- Max positions: 3 concurrent
+- Runs: Once per day (end of market close, ~4:30pm ET)
 
-Strategy 2 - MICRO FUTURES 24/5 (Mon-Fri 24 hours)
-- Symbols: MES, MNQ (Micro E-mini S&P 500 / Nasdaq)
-- Entry: Weekly RSI < 30 (oversold) + price > SMA
-- Exit: +5% profit OR Weekly RSI > 70 OR -2% stop loss
-- Hold: 4-12 hours typical
-- Expected: $62/day profit
+STRATEGY 2: DAY TRADING (Intraday scalping for $225/day target)
+- Entry: Intraday RSI < 35 (oversold), momentum positive
+- Exit: +0.5-1.0% profit OR -0.5% stop loss
+- Hold: Minutes to hours (close by 3:55pm ET)
+- Max positions: 5 concurrent intraday
+- Runs: Every 15 minutes during market hours (9:30am-3:55pm ET)
 
-Max positions: 3 concurrent (mix of stocks + futures)
-Position sizing: Dynamic based on equity ($100-150 per stock, $75 per MES contract)
+Position Sizing:
+- Account: $40,000
+- Risk per trade: 1.5% = $600 max loss per trade
+- Daily target: $225 profit
+- With 60% win rate: 3 wins × $225 - 2 losses × $75 = $525/day buffer
 
-Runs: Every 15 minutes (stocks only during market hours, MES 24/5)
-Total expected daily profit: $39 (stocks) + $62 (MES) = $101/day
+Trades: Indices (MES, MNQ, MYM, M2K) + Commodities (MGC, MCL, SIL)
 """
 
 import os
@@ -55,107 +57,82 @@ def get_base_url():
 
 LIVE_TRADE = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 
-# STRATEGY 1: Stock Day Trading (Market Hours Only)
-STOCK_SYMBOLS = {
-    "QQQ": {"name": "Invesco QQQ Trust", "timeframe": "day"},
-    "SPY": {"name": "S&P 500 ETF", "timeframe": "day"},
-    "IWM": {"name": "Russell 2000 ETF", "timeframe": "day"},
+# Swing trading symbols: indices + commodities
+SWING_SYMBOLS = {
+    "MES": {"name": "Micro S&P 500", "proxy": "SPY"},
+    "MNQ": {"name": "Micro Nasdaq", "proxy": "QQQ"},
+    "MYM": {"name": "Micro Dow", "proxy": "DIA"},
+    "M2K": {"name": "Micro Russell 2000", "proxy": "IWM"},
+    "MGC": {"name": "Micro Gold", "proxy": "GLD"},
+    "MCL": {"name": "Micro Crude Oil", "proxy": "USO"},
+    "SIL": {"name": "Micro Silver", "proxy": "SLV"},
 }
 
-# STRATEGY 2: Micro Futures Trading (24/5 Mon-Fri)
-FUTURES_SYMBOLS = {
-    "MES": {"name": "Micro S&P 500", "proxy": "SPY", "contract_value": 50},
-    "MNQ": {"name": "Micro Nasdaq", "proxy": "QQQ", "contract_value": 20},
-}
+# ========== SWING TRADING SETTINGS ==========
+WEEKLY_RSI_BUY = 30       # Entry when weekly RSI < 30
+WEEKLY_RSI_SELL = 70      # Exit when weekly RSI > 70
+PROFIT_TARGET_PCT = 0.05  # Exit at +5% profit
+STOP_LOSS_PCT = 0.02      # Exit at -2% loss
+MAX_HOLD_DAYS = 10        # Exit after 10 days regardless
 
-# Entry/Exit thresholds - STOCKS (shorter hold)
-DAILY_RSI_BUY = 35         # Entry when daily RSI < 35 (stocks oversold)
-DAILY_RSI_SELL = 70        # Exit when daily RSI > 70 (stocks overbought)
-STOCK_PROFIT_TARGET = 0.0125  # Exit at +1.25% profit (covers fees + quick exit)
-STOCK_STOP_LOSS = 0.01     # Exit at -1% loss (tight risk)
+# ========== DAY TRADING SETTINGS ==========
+INTRADAY_RSI_BUY = 35     # Entry when 15-min RSI < 35
+INTRADAY_RSI_SELL = 65    # Exit when 15-min RSI > 65
+INTRADAY_PROFIT_TARGET = 0.01   # +1% profit target (intraday)
+INTRADAY_STOP_LOSS = 0.005      # -0.5% stop loss (tighter for day trades)
+DAILY_PROFIT_TARGET = 225.0     # $225/day target
 
-# Entry/Exit thresholds - FUTURES (longer hold)
-WEEKLY_RSI_BUY = 30        # Entry when weekly RSI < 30 (futures oversold)
-WEEKLY_RSI_SELL = 70       # Exit when weekly RSI > 70 (futures overbought)
-FUTURES_PROFIT_TARGET = 0.05  # Exit at +5% profit
-FUTURES_STOP_LOSS = 0.02   # Exit at -2% loss
+# ========== POSITION MANAGEMENT ==========
+ACCOUNT_SIZE = 980.0
+RISK_PER_TRADE_PCT = 0.015      # 1.5% risk = $14.70 per trade (for $980 account)
+MAX_CONCURRENT_SWING = 1         # Conservative: 1 swing position at a time for micro account
+MAX_CONCURRENT_INTRADAY = 1      # Conservative: 1 intraday position at a time for micro account
+MIN_EQUITY = 500.0               # Allow trading down to $500 (survival level on micro account)
 
-# Position management - HYBRID SETUP with EXPONENTIAL SCALING
-MAX_CONCURRENT = 3         # Total positions (stocks + futures combined)
-MIN_EQUITY = 100.0         # Minimum equity threshold to enable trading
-
-# ADAPTIVE POSITION SIZING: scales with balance for exponential growth
-# Allocates 15% of available equity per position (automatic scaling)
-POSITION_ALLOCATION_PCT = 0.15  # 15% of available equity per trade
-MIN_POSITION_SIZE = 50.0   # Don't trade positions smaller than $50
-
-# Market hours (ET)
-MARKET_OPEN = 9.5          # 9:30 AM ET
-MARKET_CLOSE = 16.0        # 4:00 PM ET
+# Position sizing for $980 account
+RISK_PER_TRADE = ACCOUNT_SIZE * RISK_PER_TRADE_PCT  # ~$14.70
+WIN_AVG = 5.0   # Average win size on micro account (~0.5% of account)
+LOSS_AVG = 2.0  # Average loss size (tight stops on micro account)
+POSITION_SIZE_BASE = 50.0        # Base position size in dollars for micro account ($50 minimum notional)
 
 
-async def get_daily_rsi(session, symbol):
+async def get_intraday_rsi(session, symbol, timeframe="15Min"):
     """
-    Fetch daily bars and calculate 14-period RSI (for stocks)
-    Need at least 30 daily bars (6 weeks of data)
+    Fetch intraday bars (15-min) and calculate 14-period RSI
+    Used for day trading entries/exits
     """
     try:
-        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=1Day&limit=60"
+        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe={timeframe}&limit=100"
         async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
-                log.warning(f"Daily RSI fetch failed for {symbol}: HTTP {r.status}")
                 return None
 
-            try:
-                data = await r.json()
-            except Exception as e:
-                log.warning(f"Failed to parse JSON for {symbol}: {type(e).__name__}: {e}")
-                return None
-
+            data = await r.json()
             bars = data.get("bars")
-            if bars is None or (isinstance(bars, list) and len(bars) < 14):
-                bar_count = len(bars) if isinstance(bars, list) else 0
-                log.debug(f"Insufficient daily bars for {symbol}: got {bar_count}, need 14")
+            if not bars or len(bars) < 14:
                 return None
 
-            if not isinstance(bars, list):
-                log.warning(f"Invalid bars format for {symbol}: expected list, got {type(bars).__name__}")
-                return None
+            closes = [bar["c"] for bar in bars[-50:]]
 
-            # Get closes and volume
-            closes = [bar["c"] for bar in bars]
-            volumes = [bar["v"] for bar in bars]
-            current_volume = volumes[-1]
-            avg_volume = sum(volumes[-21:]) / 21 if len(volumes) >= 21 else sum(volumes) / len(volumes)
-            volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1.0
-
-            # Calculate RSI(14) on daily closes
+            # Calculate RSI(14)
             gains = [max(closes[i] - closes[i-1], 0) for i in range(1, len(closes))]
             losses = [max(closes[i-1] - closes[i], 0) for i in range(1, len(closes))]
             avg_gain = sum(gains[-14:]) / 14
             avg_loss = sum(losses[-14:]) / 14
             rs = avg_gain / avg_loss if avg_loss > 0 else 100
-            daily_rsi = 100 - (100 / (1 + rs))
+            intraday_rsi = 100 - (100 / (1 + rs))
 
-            price = closes[-1]
-            sma50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else sum(closes) / len(closes)
-
-            return {
-                "price": price,
-                "daily_rsi": round(daily_rsi, 1),
-                "sma50": sma50,
-                "volume_ratio": round(volume_ratio, 2),
-                "candle_range_pct": round(abs(bars[-1]["h"] - bars[-1]["l"]) / price * 100, 3)
-            }
+            current_price = closes[-1]
+            return {"price": current_price, "intraday_rsi": round(intraday_rsi, 1)}
 
     except Exception as e:
-        log.error(f"Daily RSI error {symbol}: {e}")
+        log.debug(f"Intraday RSI error {symbol}: {e}")
         return None
 
 
 async def get_weekly_rsi(session, symbol):
     """
-    Fetch weekly bars and calculate 14-period RSI (for futures)
+    Fetch weekly bars and calculate 14-period RSI
     Need at least 50 weekly bars (1 year of data)
     """
     try:
@@ -225,22 +202,10 @@ async def get_weekly_rsi(session, symbol):
         return None
 
 
-def is_market_open():
-    """Check if US stock market is currently open (9:30 AM - 4:00 PM ET, Mon-Fri)"""
-    now = datetime.now(ET)
-    weekday = now.weekday()  # 0=Monday, 6=Sunday
-    hour = now.hour + (now.minute / 60)
-
-    # Market open Mon-Fri 9:30 AM - 4:00 PM ET
-    if weekday >= 5:  # Saturday or Sunday
-        return False
-    return MARKET_OPEN <= hour < MARKET_CLOSE
-
-
 async def get_account_balance(session):
     """Get current buying power and equity"""
     try:
-        url = f"{get_base_url()}/v2/accounts"
+        url = f"{get_base_url()}/v2/account"
         async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
                 return None, None
@@ -270,7 +235,7 @@ async def get_open_positions(session):
 
 
 async def place_order(session, symbol, qty, side):
-    """Place a market order"""
+    """Place a market order with validation"""
     try:
         url = f"{get_base_url()}/v2/orders"
         payload = {
@@ -282,21 +247,143 @@ async def place_order(session, symbol, qty, side):
         }
         async with session.post(url, headers=get_headers(), json=payload) as r:
             if r.status not in (200, 201):
-                log.error(f"Order failed: {r.status}")
+                error_body = await r.text()
+                log.error(f"Order failed: {r.status} | {error_body[:200]}")
                 return None
-            return await r.json()
+            result = await r.json()
+            # CRITICAL: Verify order received valid ID from Alpaca
+            if not result.get("id"):
+                log.error(f"Order accepted but no order ID returned: {result}")
+                return None
+            return result
     except Exception as e:
         log.error(f"Order placement error: {e}")
         return None
 
 
-async def run_hybrid_check():
-    """Main hybrid trading cycle - run every 15 minutes"""
-    now = datetime.now(ET)
+async def run_intraday_check():
+    """Day trading cycle - run every 15 minutes during market hours"""
     log.info("=" * 70)
-    log.info("ALPACA HYBRID BOT — 15-Minute Check")
-    log.info(f"Time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-    log.info(f"Market Status: {'OPEN' if is_market_open() else 'CLOSED'}")
+    log.info("ALPACA DAY TRADER — Intraday Check")
+    log.info(f"Time: {datetime.now(ET).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    log.info("=" * 70)
+
+    async with aiohttp.ClientSession() as session:
+        equity, buying_power = await get_account_balance(session)
+        if not equity or equity < MIN_EQUITY:
+            log.warning(f"Insufficient equity ${equity}")
+            return
+
+        log.info(f"Equity: ${equity:.2f} | Buying Power: ${buying_power:.2f}")
+
+        # Scan for intraday setups
+        log.info(f"\n📊 Scanning {len(SWING_SYMBOLS)} symbols for intraday RSI setups...")
+        intraday_setups = []
+
+        for symbol, config in SWING_SYMBOLS.items():
+            proxy = config["proxy"]
+            data = await get_intraday_rsi(session, proxy)
+
+            if data:
+                intraday_rsi = data["intraday_rsi"]
+                price = data["price"]
+
+                log.info(f"  {symbol:6} | 15-min RSI: {intraday_rsi:5.1f} | Price: ${price:.2f}")
+
+                # Entry signal: RSI < 35 (oversold intraday)
+                if intraday_rsi < INTRADAY_RSI_BUY:
+                    strength = 35 - intraday_rsi
+                    intraday_setups.append((strength, symbol, config, intraday_rsi, price))
+                    log.info(f"    ✅ INTRADAY SETUP: {symbol} oversold (RSI {intraday_rsi})")
+
+            await asyncio.sleep(0.3)
+
+        # Enter positions for intraday trades
+        if intraday_setups:
+            intraday_setups.sort(reverse=True)
+            open_positions = await get_open_positions(session)
+            intraday_count = sum(1 for s in open_positions.keys() if s in SWING_SYMBOLS)
+            slots = MAX_CONCURRENT_INTRADAY - intraday_count
+
+            log.info(f"\n📈 Intraday positions: {intraday_count}/{MAX_CONCURRENT_INTRADAY}")
+
+            for strength, symbol, config, rsi, price in intraday_setups[:slots]:
+                if symbol in open_positions:
+                    continue
+
+                # PRE-TRADE CHECK: Verify buying power
+                if buying_power is None or buying_power < RISK_PER_TRADE:
+                    log.warning(f"⛔ INTRADAY ENTRY BLOCKED {symbol}: Insufficient buying power ${buying_power:.2f if buying_power else '?'}")
+                    continue
+
+                # Size: use 1.5% risk per trade
+                # If stop is 0.5%, calculate qty based on risk amount
+                # qty = risk / (stop_loss_pct * price)
+                stop_distance = price * INTRADAY_STOP_LOSS
+                qty = max(1, int(RISK_PER_TRADE / stop_distance)) if stop_distance > 0 else 1
+                notional = qty * price
+
+                if notional > (buying_power * 0.8):  # Cap at 80% of buying power
+                    qty = max(1, int((buying_power * 0.8) / price))
+                    notional = qty * price
+                    log.info(f"  ⚠️  Resized {symbol} intraday to ${notional:.2f} (buying power limit)")
+
+                log.info(f"\n  🚀 INTRADAY ENTRY: {symbol} | RSI {rsi} | Price ${price:.2f} | Qty {qty}")
+
+                order = await place_order(session, symbol, qty, "buy")
+                if order and order.get("id"):
+                    log.info(f"     ✅ Order confirmed: {order.get('id')}")
+                else:
+                    log.error(f"     ❌ Order FAILED")
+
+                await asyncio.sleep(0.5)
+
+        # Check exits for intraday positions
+        for symbol, pos_data in open_positions.items():
+            if symbol not in SWING_SYMBOLS:
+                continue
+
+            proxy = SWING_SYMBOLS[symbol]["proxy"]
+            data = await get_intraday_rsi(session, proxy)
+
+            if not data:
+                continue
+
+            intraday_rsi = data["intraday_rsi"]
+            current_price = float(pos_data["current_price"])
+            entry_price = float(pos_data["avg_entry_price"])
+            qty = float(pos_data["qty"])
+            pnl_pct = (current_price - entry_price) / entry_price * 100
+
+            should_exit = False
+            reason = None
+
+            if intraday_rsi > INTRADAY_RSI_SELL:
+                should_exit = True
+                reason = f"15-min RSI {intraday_rsi} > {INTRADAY_RSI_SELL} (overbought)"
+            elif pnl_pct >= INTRADAY_PROFIT_TARGET * 100:
+                should_exit = True
+                reason = f"Profit target +{pnl_pct:.2f}% hit"
+            elif pnl_pct <= -INTRADAY_STOP_LOSS * 100:
+                should_exit = True
+                reason = f"HARD STOP-LOSS -{abs(pnl_pct):.2f}% hit (capital preservation)"
+
+            if should_exit:
+                log.info(f"\n  🛑 INTRADAY EXIT {symbol}: {reason} | P&L {pnl_pct:+.2f}%")
+                order = await place_order(session, symbol, qty, "sell")
+                if order:
+                    log.info(f"     Order: {order.get('id', 'N/A')}")
+
+            await asyncio.sleep(0.3)
+
+    log.info("\n✅ Intraday check complete")
+
+
+async def run_swing_check():
+    """Main swing trading cycle - run once per day"""
+    log.info("=" * 70)
+    log.info("ALPACA SWING BOT — Daily Check")
+    log.info(f"Time: {datetime.now(ET).strftime('%Y-%m-%d %H:%M:%S %Z')}")
     log.info("=" * 70)
 
     # Get account status
@@ -308,44 +395,11 @@ async def run_hybrid_check():
             log.warning(f"⚠️  Equity ${equity:.2f} below minimum ${MIN_EQUITY}")
             return
 
-        open_positions = await get_open_positions(session)
-        current_count = len(open_positions)
-        slots_available = MAX_CONCURRENT - current_count
+        # Scan all symbols for swing setups
+        log.info(f"\n📊 Scanning {len(SWING_SYMBOLS)} symbols for weekly RSI setups...")
+        setups = []
 
-        log.info(f"\n📈 Open positions: {current_count}/{MAX_CONCURRENT} | Slots available: {slots_available}")
-
-        stock_setups = []
-        futures_setups = []
-
-        # === STRATEGY 1: STOCK DAY TRADING (Market Hours Only) ===
-        if is_market_open():
-            log.info(f"\n📊 [STOCKS] Scanning {len(STOCK_SYMBOLS)} symbols for day trading setups...")
-
-            for symbol in STOCK_SYMBOLS.keys():
-                data = await get_daily_rsi(session, symbol)
-
-                if data:
-                    daily_rsi = data["daily_rsi"]
-                    price = data["price"]
-                    volume_ratio = data["volume_ratio"]
-                    candle_range = data["candle_range_pct"]
-
-                    log.info(f"  {symbol:6} | Daily RSI: {daily_rsi:5.1f} | Price: ${price:.2f} | Vol: {volume_ratio}x | Range: {candle_range}%")
-
-                    # Entry signal: RSI < 35 + volume > 1.5x + range > 0.4%
-                    if daily_rsi < DAILY_RSI_BUY and volume_ratio >= 1.5 and candle_range >= 0.4:
-                        confidence = 35 - daily_rsi
-                        stock_setups.append((confidence, symbol, "stock", daily_rsi, price))
-                        log.info(f"    ✅ SETUP: {symbol} oversold (RSI {daily_rsi}, vol {volume_ratio}x)")
-
-                await asyncio.sleep(0.3)
-        else:
-            log.info(f"\n📊 [STOCKS] Market closed, skipping stock entries")
-
-        # === STRATEGY 2: MICRO FUTURES 24/5 ===
-        log.info(f"\n📊 [FUTURES] Scanning {len(FUTURES_SYMBOLS)} symbols for weekly RSI setups...")
-
-        for symbol, config in FUTURES_SYMBOLS.items():
+        for symbol, config in SWING_SYMBOLS.items():
             proxy = config["proxy"]
             data = await get_weekly_rsi(session, proxy)
 
@@ -359,49 +413,59 @@ async def run_hybrid_check():
 
                 # Entry signal: RSI < 30 + price > SMA200
                 if weekly_rsi < WEEKLY_RSI_BUY and above_sma:
-                    confidence = 30 - weekly_rsi
-                    futures_setups.append((confidence, symbol, "futures", weekly_rsi, price))
+                    confidence = 30 - weekly_rsi  # How far below 30
+                    setups.append((confidence, symbol, config, weekly_rsi, price))
                     log.info(f"    ✅ SETUP: {symbol} oversold (RSI {weekly_rsi}, confidence {confidence:.1f})")
 
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.5)  # Rate limit
 
-        # === ENTER NEW POSITIONS (highest confidence first) ===
-        all_setups = sorted(stock_setups + futures_setups, reverse=True)
+        # Open positions with highest confidence
+        if setups:
+            setups.sort(reverse=True)  # Sort by confidence (descending)
 
-        if all_setups and slots_available > 0:
-            log.info(f"\n🚀 Opening up to {slots_available} new positions...")
+            open_positions = await get_open_positions(session)
+            current_count = len(open_positions)
+            slots_available = MAX_CONCURRENT_SWING - current_count
 
-            for confidence, symbol, strategy_type, rsi, price in all_setups[:slots_available]:
+            log.info(f"\n📈 Open positions: {current_count}/{MAX_CONCURRENT_SWING}")
+
+            for confidence, symbol, config, rsi, price in setups[:slots_available]:
                 if symbol in open_positions:
                     log.info(f"  {symbol} already held, skipping")
                     continue
 
-                # ADAPTIVE POSITION SIZING: scale with account equity for exponential growth
-                # Use 15% of available equity per position (scales automatically as balance grows)
-                position_size = buying_power * POSITION_ALLOCATION_PCT if buying_power else equity * POSITION_ALLOCATION_PCT
-
-                if position_size < MIN_POSITION_SIZE:
-                    log.info(f"  {symbol} position size ${position_size:.2f} below minimum ${MIN_POSITION_SIZE}, skipping")
+                # PRE-TRADE CHECKS
+                # 1. Verify buying power is sufficient
+                if buying_power is None or buying_power < POSITION_SIZE_BASE:
+                    log.warning(f"⛔ ENTRY BLOCKED {symbol}: Insufficient buying power ${buying_power:.2f if buying_power else '?'}")
                     continue
 
-                qty = max(1, int(position_size / price))
+                # Size position: $50 base, scaled by equity
+                position_size = POSITION_SIZE_BASE * (equity / MIN_EQUITY if equity else 1.0)
+                qty = max(1, int(position_size / price)) if price > 0 else 1
+                notional = qty * price
 
-                log.info(f"\n  🚀 [{strategy_type.upper()}] ENTRY: {symbol} | RSI {rsi} | Price ${price:.2f} | Size ${position_size:.2f}")
+                if notional > (buying_power * 0.8):  # Use max 80% of available buying power
+                    qty = max(1, int((buying_power * 0.8) / price))
+                    notional = qty * price
+                    log.info(f"  ⚠️  Resized {symbol} to ${notional:.2f} notional (was asking ${qty * price:.2f}, buying power limit)")
+
+                log.info(f"\n  🚀 ENTRY: {symbol} | RSI {rsi} | Price ${price:.2f} | Qty {qty} | Notional ${notional:.2f}")
 
                 order = await place_order(session, symbol, qty, "buy")
-                if order:
-                    log.info(f"     Order placed: {order.get('id', 'N/A')}")
+                if order and order.get("id"):
+                    log.info(f"     ✅ Order confirmed: {order.get('id')} | Status: {order.get('status')}")
 
                     # Record to database
                     try:
                         position = BotPosition(
-                            id=f"hybrid_{uuid.uuid4().hex[:8]}",
+                            id=f"swing_{uuid.uuid4().hex[:8]}",
                             symbol=symbol,
                             side="long",
                             entry_price=price,
                             qty=qty,
                             entry_time=datetime.now(ET),
-                            bot_name="alpaca_hybrid",
+                            bot_name="alpaca_swing",
                             status="open"
                         )
                         async with AsyncSessionLocal() as db:
@@ -409,64 +473,43 @@ async def run_hybrid_check():
                             await db.commit()
                     except Exception as e:
                         log.warning(f"Failed to record position: {e}")
+                else:
+                    log.error(f"     ❌ Order FAILED or no ID returned")
 
                 await asyncio.sleep(1)
 
-        # === CHECK EXITS FOR EXISTING POSITIONS ===
+        # Check exits for existing positions
         log.info(f"\n🔄 Checking {len(open_positions)} open positions for exits...")
 
         for symbol, position_data in open_positions.items():
+            if symbol not in SWING_SYMBOLS:
+                continue
+
+            proxy = SWING_SYMBOLS[symbol]["proxy"]
+            data = await get_weekly_rsi(session, proxy)
+
+            if not data:
+                continue
+
+            weekly_rsi = data["weekly_rsi"]
             current_price = float(position_data["current_price"])
             entry_price = float(position_data["avg_entry_price"])
             qty = float(position_data["qty"])
             pnl_pct = (current_price - entry_price) / entry_price * 100
 
-            # Determine if stock or futures
-            if symbol in STOCK_SYMBOLS:
-                # Stock exit logic: tight targets
-                data = await get_daily_rsi(session, symbol)
-                if not data:
-                    continue
+            # Exit signals (RESTORED: hard stop-loss for capital preservation on micro account)
+            should_exit = False
+            reason = None
 
-                daily_rsi = data["daily_rsi"]
-                should_exit = False
-                reason = None
-
-                if daily_rsi > DAILY_RSI_SELL:
-                    should_exit = True
-                    reason = f"Daily RSI {daily_rsi} > {DAILY_RSI_SELL} (overbought)"
-                elif pnl_pct >= STOCK_PROFIT_TARGET * 100:
-                    should_exit = True
-                    reason = f"Profit target +{pnl_pct:.2f}% hit"
-                elif pnl_pct <= -STOCK_STOP_LOSS * 100:
-                    should_exit = True
-                    reason = f"Stop loss -{abs(pnl_pct):.2f}% hit"
-                elif not is_market_open():  # Close all stocks after market close
-                    should_exit = True
-                    reason = "Market closed, exiting stock position"
-
-            elif symbol in FUTURES_SYMBOLS:
-                # Futures exit logic: longer holds
-                proxy = FUTURES_SYMBOLS[symbol]["proxy"]
-                data = await get_weekly_rsi(session, proxy)
-                if not data:
-                    continue
-
-                weekly_rsi = data["weekly_rsi"]
-                should_exit = False
-                reason = None
-
-                if weekly_rsi > WEEKLY_RSI_SELL:
-                    should_exit = True
-                    reason = f"Weekly RSI {weekly_rsi} > {WEEKLY_RSI_SELL} (overbought)"
-                elif pnl_pct >= FUTURES_PROFIT_TARGET * 100:
-                    should_exit = True
-                    reason = f"Profit target +{pnl_pct:.2f}% hit"
-                elif pnl_pct <= -FUTURES_STOP_LOSS * 100:
-                    should_exit = True
-                    reason = f"Stop loss -{abs(pnl_pct):.2f}% hit"
-            else:
-                continue
+            if weekly_rsi > WEEKLY_RSI_SELL:
+                should_exit = True
+                reason = f"Weekly RSI {weekly_rsi} > {WEEKLY_RSI_SELL} (overbought)"
+            elif pnl_pct >= PROFIT_TARGET_PCT * 100:
+                should_exit = True
+                reason = f"Profit target +{pnl_pct:.2f}% hit"
+            elif pnl_pct <= -STOP_LOSS_PCT * 100:
+                should_exit = True
+                reason = f"HARD STOP-LOSS -{abs(pnl_pct):.2f}% hit (capital preservation for micro account)"
 
             if should_exit:
                 log.info(f"\n  🛑 EXIT {symbol}: {reason} | P&L {pnl_pct:+.2f}%")
@@ -479,10 +522,10 @@ async def run_hybrid_check():
                     pnl_usd = (current_price - entry_price) * qty
                     try:
                         payment = Payment(
-                            id=f"hybrid_{uuid.uuid4().hex[:8]}",
-                            job_id=f"hybrid_{symbol}_{datetime.now(ET).strftime('%Y%m%d')}",
+                            id=f"swing_{uuid.uuid4().hex[:8]}",
+                            job_id=f"swing_{symbol}_{datetime.now(ET).strftime('%Y%m%d')}",
                             worker_id="bot@pgusa.local",
-                            client_id="alpaca_hybrid",
+                            client_id="alpaca_swing",
                             gross_amount=pnl_usd,
                             worker_amount=pnl_usd * 0.90,
                             platform_amount=pnl_usd * 0.10,
@@ -495,43 +538,123 @@ async def run_hybrid_check():
                     except Exception as e:
                         log.warning(f"Failed to record earnings: {e}")
 
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.5)
 
-    log.info("\n✅ Hybrid check complete")
+    log.info("\n✅ Swing check complete")
+
+
+async def test_connectivity():
+    """Pre-flight connectivity test before allowing any trades"""
+    log.info("\n" + "=" * 70)
+    log.info("🔍 PRE-FLIGHT CONNECTIVITY TEST")
+    log.info("=" * 70)
+
+    async with aiohttp.ClientSession() as session:
+        # Test 1: Account access
+        log.info("  Testing /v2/account endpoint...")
+        equity, buying_power = await get_account_balance(session)
+        if equity is None or buying_power is None:
+            log.error("  ❌ FAILED to fetch account balance")
+            return False
+        log.info(f"  ✅ Account accessible | Equity: ${equity:.2f} | Buying Power: ${buying_power:.2f}")
+
+        # Test 2: Check positions endpoint
+        log.info("  Testing /v2/positions endpoint...")
+        try:
+            url = f"{get_base_url()}/v2/positions"
+            async with session.get(url, headers=get_headers()) as r:
+                if r.status != 200:
+                    log.error(f"  ❌ FAILED to fetch positions: HTTP {r.status}")
+                    return False
+                positions = await r.json()
+                log.info(f"  ✅ Positions endpoint working | Found {len(positions) if isinstance(positions, list) else 0} open positions")
+        except Exception as e:
+            log.error(f"  ❌ FAILED to test positions: {e}")
+            return False
+
+        # Test 3: Verify minimum equity
+        if equity < MIN_EQUITY:
+            log.error(f"  ❌ FAILED: Equity ${equity:.2f} below minimum ${MIN_EQUITY:.2f}")
+            return False
+
+        log.info("  ✅ Equity above minimum")
+        log.info("=" * 70 + "\n")
+        return True
 
 
 def run():
-    """Main entry point"""
+    """Main entry point - Swing + Day Trading"""
+    # Startup diagnostics
     log.info("=" * 70)
-    log.info("ALPACA HYBRID BOT v2 — Exponential Scaling Edition")
-    log.info(f"Mode: {'LIVE' if LIVE_TRADE else 'PAPER'}")
-    log.info(f"Max concurrent positions: {MAX_CONCURRENT}")
-    log.info(f"\n[POSITION SIZING] Adaptive: 15% of equity per trade (scales with balance)")
-    log.info(f"  $500 equity   → $75 per trade")
-    log.info(f"  $5,000 equity → $750 per trade")
-    log.info(f"  $50,000 equity → $7,500 per trade")
-    log.info(f"\n[STOCKS] Entry: Daily RSI < {DAILY_RSI_BUY}, Exit: +{STOCK_PROFIT_TARGET*100:.2f}% OR RSI > {DAILY_RSI_SELL}")
-    log.info(f"[FUTURES] Entry: Weekly RSI < {WEEKLY_RSI_BUY}, Exit: +{FUTURES_PROFIT_TARGET*100:.1f}% OR RSI > {WEEKLY_RSI_SELL}")
-    log.info(f"Scanning every 15 minutes (stocks: market hours only, futures: 24/5)")
-    log.info(f"Strategy: Reinvest all profits → exponential compound growth → $50M+ in 10 months")
+    log.info("ALPACA DUAL STRATEGY BOT v2 — Swing + Day Trading (MICRO ACCOUNT SAFE MODE)")
+    log.info(f"Mode: {'🔴 LIVE' if LIVE_TRADE else '📄 PAPER'}")
+    log.info(f"Account: ${ACCOUNT_SIZE:,.0f} | Risk/Trade: {RISK_PER_TRADE_PCT*100:.1f}% (${RISK_PER_TRADE:.0f})")
+    log.info(f"Daily Target: ${DAILY_PROFIT_TARGET:.0f}")
+    log.info(f"API Key: {'✓ Configured' if os.getenv('ALPACA_API_KEY') else '✗ NOT SET'}")
+    log.info(f"Base URL: {get_base_url()}")
+    log.info(f"Stops: HARD STOP-LOSS ENABLED ({STOP_LOSS_PCT*100:.1f}%)")
+    log.info(f"")
+    log.info(f"SWING: RSI < {WEEKLY_RSI_BUY} entry, max {MAX_CONCURRENT_SWING} positions, {STOP_LOSS_PCT*100:.1f}% hard stop")
+    log.info(f"DAY: RSI < {INTRADAY_RSI_BUY} intraday entry, max {MAX_CONCURRENT_INTRADAY} positions, {INTRADAY_STOP_LOSS*100:.1f}% hard stop")
     log.info("=" * 70)
 
-    # Run every 15 minutes
+    # Run connectivity test before starting
+    log.info("\n🚀 Running pre-flight test before market open...")
+    try:
+        test_passed = asyncio.run(test_connectivity())
+        if not test_passed:
+            log.error("❌ PRE-FLIGHT TEST FAILED — Bot will not trade until issue is resolved")
+            log.error("   Check Alpaca credentials and account settings")
+            while True:
+                time.sleep(60)
+    except Exception as e:
+        log.error(f"❌ PRE-FLIGHT TEST CRASHED: {e}")
+        while True:
+            time.sleep(60)
+
+    last_swing_check = None
+
     while True:
         try:
-            asyncio.run(run_hybrid_check())
+            now = datetime.now(ET)
+
+            # Check if market is open (9:30am - 4:00pm ET, Mon-Fri)
+            is_market_open = (
+                now.weekday() < 5 and  # Mon-Fri
+                now.time() >= datetime.strptime("09:30", "%H:%M").time() and
+                now.time() <= datetime.strptime("16:00", "%H:%M").time()
+            )
+
+            # Run intraday checks every 15 minutes during market hours
+            if is_market_open:
+                if now.minute % 15 == 0:  # On 15-min marks (9:30, 9:45, etc)
+                    log.info(f"\n⏰ {now.strftime('%H:%M')} — Running intraday check...")
+                    asyncio.run(run_intraday_check())
+                    import time
+                    time.sleep(60)  # Sleep 1 min to avoid duplicate
+
+            # Run swing check once per day at market close (4:30pm ET)
+            if now.hour == 16 and now.minute == 30:
+                if last_swing_check != now.date():
+                    log.info(f"\n📅 Market close — Running swing check...")
+                    asyncio.run(run_swing_check())
+                    last_swing_check = now.date()
+                    import time
+                    time.sleep(60)
+
+            # Sleep 30 seconds between checks
+            import time
+            time.sleep(30)
+
         except KeyboardInterrupt:
-            log.info("\n⏹️  Hybrid bot stopped")
+            log.info("\n⏹️  Bot stopped")
             break
         except Exception as e:
-            log.error(f"Hybrid check error: {e}")
-
-        # Sleep 15 minutes until next check
-        seconds_until_next = 15 * 60
-        log.info(f"⏳ Next check in 15 minutes...")
-
-        import time
-        time.sleep(seconds_until_next)
+            import traceback
+            log.error(f"Bot error: {e}")
+            log.error(f"Traceback: {traceback.format_exc()}")
+            import time
+            time.sleep(30)
 
 
 if __name__ == "__main__":

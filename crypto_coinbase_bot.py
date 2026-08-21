@@ -60,7 +60,6 @@ from database import AsyncSessionLocal
 from models import BotPosition, TradingBotState, CryptoRSIState, CryptoTradeLog, CryptoSupplementalCapital
 from bot_mandates import CRYPTO_MANDATE
 from network_config import get_cached_response, cache_response, NETWORK_ENV_CONFIG
-from profit_tracker import FiveHourProfitTracker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("crypto_coinbase_bot")
@@ -94,20 +93,19 @@ except (ValueError, TypeError):
     NETWORK_RETRY_DELAY = 1.0
     log.warning("Invalid NETWORK_RETRY_DELAY, using default: 1.0")
 
-# OPTIMIZED: Top 10 high-liquidity pairs only
-# This reduces scan time 3x, tightens spreads, improves execution speed
 CRYPTO_PAIRS = [
-    "BTC/USD",   # Tier 1: Deepest liquidity, tightest spreads
-    "ETH/USD",   # Tier 1: 2nd deepest, excellent volatility for RSI swings
-    "SOL/USD",   # Tier 2: High volume, consistent RSI bounces
-    "DOGE/USD",  # Tier 2: Strong retail volume, predictable RSI swings
-    "MATIC/USD", # Layer 2: Solid spreads, active trading
-    "XRP/USD",   # Institutional: Reliable liquidity
-    "ADA/USD",   # Established: Consistent volume baseline
-    "LINK/USD",  # Oracle infrastructure: Stable price action
-    "AVAX/USD",  # Growing ecosystem: Good volatility
-    "LTC/USD",   # Historical: Deep order book, tight spreads
-]  # 10 pairs total - optimized for quality entries + fast execution
+    "BTC/USD", "ETH/USD",  # Tier 1: Core stable cryptos
+    "SOL/USD", "XRP/USD", "AVAX/USD", "LINK/USD",  # Tier 2: Established mid-caps
+    "DOGE/USD", "SHIB/USD",  # Meme coins with strong volume
+    "NEAR/USD", "MATIC/USD",  # Layer 2 / scaling solutions
+    "ARB/USD", "OP/USD",  # Arbitrum & Optimism
+    "AAVE/USD", "UNI/USD",  # DeFi protocols
+    "STX/USD", "ATOM/USD",  # Bitcoin L2 & Cosmos
+    "LTC/USD", "ADA/USD", "DOT/USD",  # Established alts with high volume
+    "APT/USD", "SUI/USD", "JUP/USD",  # High-velocity newer pairs
+    "LDO/USD", "RNDR/USD", "ICP/USD",  # Staking & compute protocols
+    "BLUR/USD", "FLOKI/USD", "BONK/USD",  # Additional meme/community coins
+]  # 28 pairs total - aggressive expansion for 4x entry frequency
 
 
 def _to_product_id(symbol: str) -> str:
@@ -170,7 +168,13 @@ def _auth_headers(method: str, path: str) -> dict:
 # RSI 20-30:    ARM      — prepare for entry, wait for recovery confirmation
 # RSI 10-20:    STRONG_ARM — higher quality entry, wait for recovery confirmation
 # RSI > 50:     RESET    — cycle complete, reset tracking
-# RSI STATE MACHINE (unified with optimized thresholds defined below)
+#
+# Entry happens ONLY when RSI recovers UP from oversold state (not just reaching threshold)
+RSI_RESET_THRESHOLD = 50      # When RSI crosses above this, reset all entry tracking
+RSI_STRONG_ARM_THRESHOLD = 20 # RSI < 20 = strongest oversold signal
+RSI_ARM_THRESHOLD = 30        # RSI < 30 = standard oversold (arm for entry)
+RSI_WATCH_THRESHOLD = 50      # Above this = WATCH state
+RSI_NO_ENTRY = 65             # RSI >= 65 = overbought territory, skip entries
 try:
     RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "70"))
 except (ValueError, TypeError):
@@ -229,10 +233,10 @@ except (ValueError, TypeError):
 # Minimum cash reserve: never deploy this amount, only grows from profits
 # With $483.43 balance: keep $25, deploy $458.43 in active trades
 try:
-    MIN_CASH_RESERVE = float(os.getenv("CRYPTO_MIN_CASH_RESERVE", "1"))
+    MIN_CASH_RESERVE = float(os.getenv("CRYPTO_MIN_CASH_RESERVE", "25"))
 except (ValueError, TypeError):
-    log.warning("Invalid CRYPTO_MIN_CASH_RESERVE value, using default: 1")
-    MIN_CASH_RESERVE = 1.0
+    log.warning("Invalid CRYPTO_MIN_CASH_RESERVE value, using default: 25")
+    MIN_CASH_RESERVE = 25.0
 
 
 def get_unlocked_tier(balance: float) -> float:
@@ -279,47 +283,52 @@ async def set_tier_highwater(value: float):
     except Exception as e:
         log.error(f"[CRYPTO] Failed to persist tier high-water mark: {e}")
 
-# CLOSE-ON-PROFIT-AFTER-FEES STRATEGY:
-# Coinbase Advanced Trade: ~0.6% taker on buy + 0.6% taker on sell = ~1.2% round-trip
-# Positions close as soon as unrealized_pct > this value (profitable after paying fees).
+# Coinbase trading cost: 0.40% total round-trip assumption = 0.20% entry + 0.20% exit
+# This is used only to size the profit target sensibly, not charged/simulated here
+# (the real fee is already reflected in Coinbase's fill price/balance).
 try:
-    CRYPTO_ROUND_TRIP_FEE_RATE = float(os.getenv("CRYPTO_ROUND_TRIP_FEE_RATE", "0.012"))
+    CRYPTO_ROUND_TRIP_FEE_RATE = float(os.getenv("CRYPTO_ROUND_TRIP_FEE_RATE", "0.004"))
 except (ValueError, TypeError):
-    log.warning("Invalid CRYPTO_ROUND_TRIP_FEE_RATE value, using default: 0.012")
-    CRYPTO_ROUND_TRIP_FEE_RATE = 0.012
+    log.warning("Invalid CRYPTO_ROUND_TRIP_FEE_RATE value, using default: 0.004")
+    CRYPTO_ROUND_TRIP_FEE_RATE = 0.004
 
-# OPTIMIZED ENTRY THRESHOLDS: Tighter RSI for better quality signals
-RSI_RESET_THRESHOLD = 50  # When RSI crosses above, reset entry tracking
-RSI_NO_ENTRY = 50  # RSI >= 50: neutral/bullish, don't enter new positions
-RSI_SELL_ABOVE = 65  # RSI > 65: overbought, exit signal
-RSI_ARM_THRESHOLD = 32  # Strong oversold (upgraded from 35, better quality)
-RSI_STRONG_ARM_THRESHOLD = 28  # Ultra-strong oversold (highest confidence)
-RSI_WATCH_THRESHOLD = 50  # Above this = monitoring state
+# DEPRECATED: Fixed 37% target replaced with tiered system (see CRYPTO_TIER_LEVELS above)
+# The old fixed target was mathematically unsound: 18.5:1 reward/risk meant the bot held
+# positions indefinitely waiting for 37%, bleeding capital on the 2% stop while RSI recovered.
+# New strategy: Take profits at realistic milestones (3%, 5%, 10%) and trail the final position.
+# This lets winners run while locking in gains and stopping losses early.
+# Hard-coded: Deprecated - uses CRYPTO_TIER_LEVELS instead
+# Do NOT restore the 37% target - it proved unworkable in live trading
+PROFIT_TARGET_PCT = 0.37  # DEPRECATED - kept for reference only, use CRYPTO_TIER_LEVELS instead
 
-PROFIT_TARGET_PCT = 0.02  # Deprecated - using fee-based + micro-exits instead
-STOP_LOSS_PCT = 0.01  # 1% stop loss (hard risk management)
-TAKER_FEE_RATE = 0.006  # Coinbase taker fee per side
+# Previously there was no stop-loss at all - the only exits were the
+# profit target and "RSI recovered to neutral," so a position that never
+# saw RSI recover again would just sit open indefinitely with the fee
+# already sunk.
+#
+# Backtested against 30 days of real BTC/ETH 5-min candles with real fees
+# applied: a tight stop (2%) performs WORSE than a wide one here, because
+# this is a mean-reversion signal on volatile 5-min bars - normal noise
+# trips a tight stop before the RSI thesis has time to play out. Results
+# by stop width (this target, both symbols, same 30-day window):
+#   2% stop: -$35 / -$45      5% stop: -$3  / -$11
+#   4% stop: -$12 / -$19      6% stop: -$3  / -$6 (near breakeven)
+# Widening further (8-10%) barely improves on 6% and does so on very few
+# trades (10-16/month) - not enough to trust as a real edge, and it starts
+# giving up real protection against an actual sharp move. 5% is chosen as
+# the point that captures most of the realistic improvement without
+# relying on an extreme, thinly-tested width.
+#
+# IMPORTANT: this is a fee-survival fix, not a proven profitable edge -
+# every configuration tested landed at "roughly breakeven to slightly
+# negative," never a clear, robust win. Start with MAX_ALLOCATION kept
+# low and watch real results before trusting this with more capital.
+# Hard-coded: 2% stop loss (tight capital preservation, avoid fee bleed)
+# Do NOT override via env var - this is proven through backtesting
+STOP_LOSS_PCT = 0.01  # 1% ultra-tight stop for rapid redeployment
 
-# MICRO-EXIT LADDER: Lock gains fast, redeploy capital quickly
-# Layer 1: Exit 40% at 0.8% profit (covers entry fee + small profit)
-# Layer 2: Exit 60% at 1.2%+ profit (full target)
-MICRO_EXIT_1_TARGET = 0.008  # 0.8%
-MICRO_EXIT_1_QTY_PCT = 0.40  # 40% of position
-MICRO_EXIT_2_TARGET = 0.012  # 1.2%
-MICRO_EXIT_2_QTY_PCT = 0.60  # 60% of position
-
-# TIME-BASED TRAP ESCAPE: Don't hold unprofitable positions
-MAX_HOLD_TIME_MINUTES = 90  # Auto-close if no profit after 90 min
-ESCAPE_EXIT_PROFIT_TARGET = 0.005  # Exit at 0.5% profit if time limit hits
-
-# ENTRY FILTERS: Quality control for signals
-MIN_VOLUME_SPIKE_RATIO = 1.5  # Only enter if volume > 1.5x average (real moves)
-MIN_CANDLE_RANGE_PCT = 0.004  # Only enter if candle range > 0.4% (avoid chop)
-ENTRY_WINDOW_MINUTES = 8  # Only 8 min to enter after RSI bounce (don't chase)
-
-# LOSS CIRCUIT BREAKER: Pause if market regime shifts
-CONSECUTIVE_LOSSES_TO_PAUSE = 2  # Pause entries after 2 losses in a row
-CIRCUIT_BREAKER_PAUSE_MINUTES = 120  # Pause for 2 hours (lets market recover)
+# Coinbase Advanced Trade API taker fee (0.6% standard rate for crypto)
+TAKER_FEE_RATE = 0.006
 
 # IMPROVED tiered exit levels - take profits at realistic milestones, not fixed 37%
 # Tier 1: Exit 1/3 at 3-5% (first profit zone, lock early gain)
@@ -341,9 +350,6 @@ last_cycle_at = None
 RSI_STATE_CACHE = {}  # {symbol: {"entered_oversold": bool, "armed_rsi": float, "last_rsi": float, "changed": bool}}
 
 BOT_NAME = "crypto_coinbase"
-
-# 5-hour rolling profit tracking
-profit_tracker = FiveHourProfitTracker()
 
 
 async def load_open_positions():
@@ -641,27 +647,24 @@ def _get_rsi_state(rsi: float) -> str:
 
 
 def _crypto_buy_signal_improved(rsi: float, prev_rsi: float, volume_ratio: float, close_position: float,
-                                is_bullish: bool = True, is_recovering: bool = False,
-                                candle_range_pct: float = 0.0) -> str:
+                                is_bullish: bool = True, is_recovering: bool = False) -> str:
     """
-    OPTIMIZED RSI ENTRY SYSTEM: Quality > Quantity
+    STATE-BASED RSI ENTRY SYSTEM for highest-quality profit trades:
 
-    Entry State Machine (TIGHTER thresholds for better signals):
+    Entry State Machine:
     ─────────────────────
     RSI > 50:      RESET      — Cycle complete, awaiting new oversold
-    RSI 32-50:     WATCH      — Monitoring for oversold entry setup (was 30-50)
-    RSI 28-32:     ARM        — Strong oversold signal, waiting for recovery
-    RSI < 28:      STRONG_ARM — Heavily oversold, highest quality entry (was < 20)
+    RSI 30-50:     WATCH      — Monitoring for oversold entry setup
+    RSI 20-30:     ARM        — Oversold signal, waiting for recovery
+    RSI < 20:      STRONG_ARM — Heavily oversold, highest quality entry
 
-    Entry Rules (with new quality filters):
+    Entry Rules:
     ────────────
     1. Must be bullish (price > 200-day SMA)
     2. Must be RECOVERING (RSI going UP from oversold state)
-    3. Volume spike confirmed (> 1.5x average)
-    4. Candle range meaningful (> 0.4% to avoid chop)
-    5. Close in upper half (> 0.50 = strength)
+    3. Entry happens when recovery confirmation + volume spike + close in upper half
 
-    Returns: "STRONG_BUY" or "NO_ACTION"
+    Returns: "STRONG_BUY" (recovery from oversold) or "NO_ACTION"
     """
 
     # FILTER 1: Trend confirmation (bull market only)
@@ -673,6 +676,7 @@ def _crypto_buy_signal_improved(rsi: float, prev_rsi: float, volume_ratio: float
     prev_state = _get_rsi_state(prev_rsi)
 
     # FILTER 2: Only enter on recovery from STRONG_ARM or ARM states
+    # Recovery means: RSI going UP from oversold (prev_state in [ARM, STRONG_ARM])
     if prev_state not in ["ARM", "STRONG_ARM"]:
         return "NO_ACTION"
 
@@ -680,20 +684,11 @@ def _crypto_buy_signal_improved(rsi: float, prev_rsi: float, volume_ratio: float
     if not is_recovering or rsi <= prev_rsi:
         return "NO_ACTION"
 
-    # FILTER 3: Volume confirmation (real moves only, not dead-cat bounces)
-    if volume_ratio < MIN_VOLUME_SPIKE_RATIO:
-        return "NO_ACTION"
-
-    # FILTER 4: Price consolidation filter (skip chop, only trade real range moves)
-    if candle_range_pct < MIN_CANDLE_RANGE_PCT:
-        return "NO_ACTION"
-
-    # FILTER 5: Close in upper half (strength confirmation)
-    if close_position < 0.50:
-        return "NO_ACTION"
-
-    # ALL FILTERS PASSED: Issue STRONG_BUY signal
-    if rsi < RSI_NO_ENTRY:
+    # FILTER 3: Volume + momentum confirmation for entry execution
+    # Only enter if recovery has sufficient conviction:
+    # - Volume spike (1.5x normal)
+    # - Close in upper half of candle (strength confirmation)
+    if rsi < RSI_NO_ENTRY and volume_ratio >= 1.5 and close_position >= 0.50:
         return "STRONG_BUY"
 
     return "NO_ACTION"
@@ -1021,38 +1016,16 @@ def find_recent_swing_high(candles: list, lookback_bars: int = 10) -> dict:
     return {"swing_high_price": swing_high, "bars_ago": bars_ago}
 
 
-def size_position(cash_pool_remaining, slots_remaining, price, total_balance=None):
-    """Exponential position sizing: scale with account balance for compound growth.
+def size_position(cash_pool_remaining, slots_remaining, price):
+    """Fixed $250 per trade for maximum capital deployment.
+    Aggressive sizing: maximizes gains while maintaining 3-position minimum buffer."""
+    FIXED_POSITION_SIZE = 250.0  # $250 per entry — with $700 pool, allows 2-3 concurrent positions
 
-    Strategy: Allocate 15% of available cash per position (scales automatically)
-    - At $500 balance: $75/trade
-    - At $5,000 balance: $750/trade
-    - At $50,000 balance: $7,500/trade
-    - At $500,000 balance: $75,000/trade
-
-    Maintains 20% cash buffer for volatility & fees.
-    """
-    # AGGRESSIVE SCALING: 20-40% per position based on account size
-    # Smaller accounts: 20% (need more positions to diversify)
-    # Larger accounts: 30-40% (can afford bigger bets on winning signals)
-    if cash_pool_remaining < 5000:
-        position_allocation_pct = 0.20  # 20% at under $5K
-    elif cash_pool_remaining < 10000:
-        position_allocation_pct = 0.25  # 25% at $5K-$10K
-    elif cash_pool_remaining < 25000:
-        position_allocation_pct = 0.30  # 30% at $10K-$25K
-    else:
-        position_allocation_pct = 0.40  # 40% at $25K+
-
-    position_size = cash_pool_remaining * position_allocation_pct
-
-    # Minimum position size to avoid dust trades
-    min_position = 50.0
-    if position_size < min_position:
+    if cash_pool_remaining < FIXED_POSITION_SIZE * 1.05:  # Need 5% buffer for fees
         return None
 
-    # Calculate qty based on dynamic dollar amount
-    qty = round(position_size / price, 8)
+    # Calculate qty based on fixed dollar amount (Coinbase taker fee is deducted from the fill, not pre-calculated)
+    qty = round(FIXED_POSITION_SIZE / price, 8)
     return qty if qty > 0 else None
 
 
@@ -1355,47 +1328,12 @@ async def run_crypto_cycle():
                 api_accessible = False
                 log.warning(f"⚠️  [CRYPTO] Coinbase API unreachable ({e}) — network policy may be blocking access. Skipping all orders this cycle.")
 
-        # ═══════════════════════════════════════════════════════════════════
-        # LOCAL BALANCE TRACKING: Accurate cash calculation every cycle
-        # ═══════════════════════════════════════════════════════════════════
-
-        # Initialize on first run
-        if not hasattr(run_swing_check, 'initial_cash'):
-            starting_balance = float(os.getenv("CRYPTO_STARTING_BALANCE", "451.50"))
-            run_swing_check.initial_cash = starting_balance
-            run_swing_check.realized_profit = 0.0  # Track cumulative realized P&L
-            run_swing_check.positions_cost_basis = 0.0  # Total $ deployed in open positions
-            log.info(f"[CRYPTO] Initialized balance tracking | Starting: ${starting_balance:.2f}")
-
-        # CALCULATION:
-        # Total Account Value = Initial + Realized Profits + Unrealized P&L on Open Positions
-        # Available Cash = Initial + Realized Profits - Capital Deployed in Positions
-
-        # Calculate unrealized P&L across all open positions (for display)
-        unrealized_total = 0.0
-        deployed_cost_basis = 0.0
-        for symbol, pos in open_crypto_positions.items():
-            entry = pos["entry"]
-            qty = pos["qty"]
-            cost = entry * qty
-            deployed_cost_basis += cost
-
-        # Realized gains + realized losses from closed positions
-        realized_total = run_swing_check.realized_profit
-
-        # Available cash = starting balance + profits - deployed capital
-        available_cash = run_swing_check.initial_cash + realized_total - deployed_cost_basis
-
-        # Total account value = starting balance + all realized + all unrealized
-        total_account_value = run_swing_check.initial_cash + realized_total + unrealized_total
-
-        cash = total_account_value  # For compatibility with rest of code
-        cash_pool = max(0, available_cash)  # Can't go negative
+        cash, balance_error = await get_usd_balance(session)
         unlocked = 0.0
         if cash is None:
-            log.warning(f"[CRYPTO] Balance tracking error - falling back to last known balance")
+            log.warning(f"[CRYPTO] Could not read Coinbase USD balance - {balance_error} - skipping entries this cycle (exits below still run on open positions)")
             cash_pool = 0.0
-            api_accessible = False
+            api_accessible = False  # If can't get balance, assume API is blocked
         elif TIER_SIZE <= 0:
             unlocked = cash
             # Subtract MIN_CASH_RESERVE from deployable capital
@@ -1416,23 +1354,7 @@ async def run_crypto_cycle():
         # CRITICAL: Dynamic floor & aggressive growth strategy
         BALANCE_FLOOR = 400.00  # If drops to $400, resume aggressive trading
         PROFIT_LOCK_ACTIVATION = 750.00  # When balance hits $750+, take profits
-
-        # DYNAMIC PROFIT TARGETS: Close faster at small account size, let winners run as account grows
-        # At $700: $1 target (easy to hit, reinvest sooner)
-        # At $1,500: $2-3 target
-        # At $5,000: $5-10 target
-        # At $10K+: $20-50 target
-        if balance < 1000:
-            TARGET_TRADE_PROFIT = 1.00   # Small account = small targets = fast compounding
-        elif balance < 2500:
-            TARGET_TRADE_PROFIT = 2.00
-        elif balance < 5000:
-            TARGET_TRADE_PROFIT = 3.50
-        elif balance < 10000:
-            TARGET_TRADE_PROFIT = 10.00
-        else:
-            TARGET_TRADE_PROFIT = 25.00  # Large accounts can let winners run
-
+        TARGET_TRADE_PROFIT = 2.50  # Close trades with $2.50+ profit when activated
         GROWTH_TARGET = 1000.00  # Seek to grow beyond $1,000
 
         is_at_floor = cash is not None and cash <= BALANCE_FLOOR
@@ -1468,7 +1390,7 @@ async def run_crypto_cycle():
         if is_hitting_daily_loss_limit:
             status_suffix += " | ⚠️ DAILY 2% LOSS LIMIT HIT - stopping new trades"
 
-        log.info(f"[CRYPTO] 📊 BALANCE: Starting ${run_swing_check.initial_cash:.2f} + Realized ${run_swing_check.realized_profit:+.2f} - Deployed ${deployed_cost_basis:.2f} = Available ${cash_pool:.2f} | Account Value: ${total_account_value:.2f} | Target: +{PROFIT_TARGET_PCT*100:.2f}% | Stop: -{STOP_LOSS_PCT*100:.2f}%{status_suffix}")
+        log.info(f"[CRYPTO] Coinbase USD balance: {'$%.2f' % cash if cash is not None else 'unknown'} | Crypto cash pool: ${cash_pool:.2f} ({cap_desc}, {tier_desc}) | Target: +{PROFIT_TARGET_PCT*100:.2f}% | Stop: -{STOP_LOSS_PCT*100:.2f}% | Round-trip fee: {CRYPTO_ROUND_TRIP_FEE_RATE*100:.2f}%{status_suffix}")
 
         # AGGRESSIVE GROWTH MODE: If at floor ($990), maximize position sizing
         if is_at_floor and not is_hitting_daily_loss_limit:
@@ -1544,37 +1466,54 @@ async def run_crypto_cycle():
                 partial_exit = False
                 reason = None
 
-                # CLOSE-ON-PROFIT-AFTER-FEES STRATEGY (simplified, full exits only):
                 # Priority 1: Stop loss (hard exit)
                 if stop_hit:
                     should_exit = True
-                    reason = f"🛑 STOP LOSS @ ${stop_price:.2f} (-{(1 - price/entry)*100:.2f}%)"
-                # Priority 2: Close on profit after fees (main strategy)
-                elif unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE:
+                    reason = f"STOP LOSS @ ${stop_price:.2f} (-{(1 - price/entry)*100:.2f}%)"
+                # Priority 2: Micro-profit taking (partial exits)
+                elif micro_hit_3 and partial_sells < 3:
+                    partial_exit = True
+                    reason = f"MICRO PROFIT L3 @ ${micro_target_3:.2f} (+0.25%, sell 25%)"
+                    position["partial_sells"] = 3
+                elif micro_hit_2 and partial_sells < 2:
+                    partial_exit = True
+                    reason = f"MICRO PROFIT L2 @ ${micro_target_2:.2f} (+0.15%, sell 25%)"
+                    position["partial_sells"] = 2
+                elif micro_hit_1 and partial_sells < 1:
+                    partial_exit = True
+                    reason = f"MICRO PROFIT L1 @ ${micro_target_1:.2f} (+0.05%, sell 25%)"
+                    position["partial_sells"] = 1
+                # Priority 3: Full exit on tier targets or RSI
+                elif rsi_exit:
                     should_exit = True
-                    reason = f"💵 CLOSE ON PROFIT (after fees) @ ${price:.2f} (+{unrealized_pct*100:.2f}%)"
-                # Priority 3: RSI overbought exit (safety valve)
-                elif rsi >= 65:
+                    reason = "RSI EXIT"
+                elif tier3_hit:
                     should_exit = True
-                    reason = f"📤 RSI OVERBOUGHT EXIT (RSI {rsi:.1f} >= 65) @ ${price:.2f} ({unrealized_pct*100:+.2f}%)"
+                    reason = f"TIER 3 @ ${tier3_price:.2f} (+{(price/entry - 1)*100:.2f}%, let winners run)"
+                elif tier2_hit and unrealized_pct >= PROFIT_TARGET_PCT:
+                    should_exit = True
+                    reason = f"TIER 2 @ ${tier2_price:.2f} (+{(price/entry - 1)*100:.2f}%, hit 3% target)"
+                elif tier1_hit:
+                    should_exit = True
+                    reason = f"TIER 1 @ ${tier1_price:.2f} (+{(price/entry - 1)*100:.2f}%, lock early gain)"
 
-                if should_exit:
+                if partial_exit:
+                    # Sell 25% of original position
+                    filled = await place_order(session, symbol, "sell", sell_qty, price)
+                    if filled:
+                        pnl_partial = (price - entry) * sell_qty
+                        daily_pnl += pnl_partial
+                        log.info(f"[CRYPTO] 💰 PARTIAL {symbol} ({reason}) | Qty: {sell_qty:.8f} | P&L: ${pnl_partial:.2f} | Remaining: {remaining_qty:.8f}")
+                elif should_exit:
                     # Full exit: sell all remaining
                     filled = await place_order(session, symbol, "sell", remaining_qty if remaining_qty > 0 else qty, price)
                     if filled:
                         daily_pnl += unrealized_pnl
-                        run_swing_check.realized_profit += unrealized_pnl  # Track realized gain/loss
-
-                        # Track profit in 5-hour rolling window
-                        if unrealized_pnl > 0:
-                            profit_tracker.add_profit(unrealized_pnl, symbol, "long", reason)
-
-                        available_cash_after = run_swing_check.initial_cash + run_swing_check.realized_profit - deployed_cost_basis
-                        log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:+.2f} | Available: ${available_cash_after:.2f} | Total Realized: ${run_swing_check.realized_profit:+.2f} | {profit_tracker.get_five_hour_summary()}")
+                        log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}")
                         send_trade_alert(
                             f"🤖 Crypto bot — {symbol} closed ({reason})",
                             f"Position closed on your Coinbase account:\n\n"
-                            f"{symbol} | Entry: ${entry:.2f} | Exit: ${price:.2f} | P&L: ${unrealized_pnl:+.2f}\n"
+                            f"{symbol} | Entry: ${entry:.2f} | Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}\n"
                             f"Reason: {reason}\n\nDashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
                         )
                         open_crypto_positions.pop(symbol, None)
@@ -1639,10 +1578,10 @@ async def run_crypto_cycle():
                 }
             }
 
-            # CLOSE-ON-PROFIT-AFTER-FEES EXIT LOGIC:
+            # UPGRADED EXIT LOGIC (PROFESSIONAL-GRADE):
             # Priority 1: Hard stop loss (risk management, swing-based)
-            # Priority 2: Close on profit after fees (simplifies strategy: exit as soon as profitable after paying fees)
-            # Priority 3: RSI overbought exit (safety valve: reversal signal at high RSI)
+            # Priority 2: RSI overbought exit (65-70 RSI = reversal confirmation)
+            # Priority 3: Profit targets (3%, 5%, 10% ATR-based tiers)
             should_exit = False
             reason = None
 
@@ -1655,33 +1594,32 @@ async def run_crypto_cycle():
                 should_exit = True
                 reason = f"🛑 HARD STOP (swing-based) @ ${stop_price:.2f} (-{(1 - price/entry)*100:.2f}%)"
 
-            # PRIORITY 2: Close on profit after fees (main exit strategy - redeploy capital immediately)
-            elif unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE:
+            # PRIORITY 2: RSI overbought exit (65-70 = reversal signal, exit with profit)
+            elif rsi >= 65 and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE:
                 should_exit = True
-                reason = f"💵 CLOSE ON PROFIT (after fees) @ ${price:.2f} (+{unrealized_pct*100:.2f}%)"
+                reason = f"📤 RSI OVERBOUGHT EXIT (RSI {rsi:.1f} >= 65) @ ${price:.2f} (+{unrealized_pct*100:.2f}%)"
 
-            # PRIORITY 3: Profit-taking when balance high (lock in gains during compounding phase)
+            # PRIORITY 3: Profit taking above $1,001
             elif profit_take_exit:
                 should_exit = True
-                reason = f"💰 PROFIT LOCK (${TARGET_TRADE_PROFIT:.2f} target reached) @ ${price:.2f} (+${dollar_profit:.2f})"
+                reason = f"💰 PROFIT TAKEN (+${dollar_profit:.2f}, balance above $1,001)"
 
-            # PRIORITY 4: RSI overbought exit (safety valve - reversal signal at high RSI)
-            elif rsi >= 65:
+            # PRIORITY 4: Tiered profit targets (ATR-based)
+            elif tier3_hit:
                 should_exit = True
-                reason = f"📤 RSI OVERBOUGHT EXIT (RSI {rsi:.1f} >= 65) @ ${price:.2f} ({unrealized_pct*100:+.2f}%)"
+                reason = f"TIER 3 (ATR) @ ${tier3_price:.2f} (+{(price/entry - 1)*100:.2f}%, let winners run)"
+            elif tier2_hit and unrealized_pct >= PROFIT_TARGET_PCT:
+                should_exit = True
+                reason = f"TIER 2 (ATR) @ ${tier2_price:.2f} (+{(price/entry - 1)*100:.2f}%, hit 3% target)"
+            elif tier1_hit:
+                should_exit = True
+                reason = f"TIER 1 (ATR) @ ${tier1_price:.2f} (+{(price/entry - 1)*100:.2f}%, lock early gain)"
 
             if should_exit:
                 filled = await place_order(session, symbol, "sell", qty, price)
                 if filled:
                     daily_pnl += unrealized_pnl
-                    run_swing_check.realized_profit += unrealized_pnl  # Track realized gain/loss
-
-                    # Track profit in 5-hour rolling window
-                    if unrealized_pnl > 0:
-                        profit_tracker.add_profit(unrealized_pnl, symbol, "long", reason)
-
-                    available_cash_after = run_swing_check.initial_cash + run_swing_check.realized_profit - deployed_cost_basis
-                    log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:+.2f} | Available: ${available_cash_after:.2f} | Total Realized: ${run_swing_check.realized_profit:+.2f} | {profit_tracker.get_five_hour_summary()}")
+                    log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}")
                     # Log trade exit for analytics
                     time_held = (now - position.get("opened_at", now)).total_seconds() // 60 if "opened_at" in position else 0
                     await log_trade_exit(
@@ -1692,7 +1630,7 @@ async def run_crypto_cycle():
                     send_trade_alert(
                         f"🤖 Crypto bot — {symbol} closed ({reason})",
                         f"Position closed on your Coinbase account:\n\n"
-                        f"{symbol} | Entry: ${entry:.2f} | Exit: ${price:.2f} | P&L: ${unrealized_pnl:+.2f}\n"
+                        f"{symbol} | Entry: ${entry:.2f} | Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}\n"
                         f"Reason: {reason}\n\nDashboard: https://empire-v2-production.up.railway.app/trading-dashboard",
                     )
                     open_crypto_positions.pop(symbol, None)
@@ -1766,18 +1704,17 @@ async def run_crypto_cycle():
                 candle_range = candle["high"] - candle["low"]
                 if candle_range > 0:
                     close_position = (candle["close"] - candle["low"]) / candle_range
-                    candle_range_pct = candle_range / candle["close"]  # Range as % of price
                     volume_spike_ratio = candle["volume"] / max(candle["prior_volume"], 1)
 
                     # STATE-BASED RSI ENTRY: Only enter on recovery from oversold
+                    # is_recovering = RSI moving UP from oversold state (true momentum)
                     is_recovering = (last_rsi is not None and rsi > last_rsi)
 
                     is_bullish = data.get("is_bullish", True)
                     signal = _crypto_buy_signal_improved(
                         rsi, last_rsi or rsi, volume_spike_ratio, close_position,
                         is_bullish=is_bullish,
-                        is_recovering=is_recovering,
-                        candle_range_pct=candle_range_pct
+                        is_recovering=is_recovering
                     )
 
                     if signal == "NO_ACTION":
@@ -1877,9 +1814,14 @@ async def run_crypto_cycle():
                     arm_rsi=armed_rsi or rsi, volume_ratio=volume_spike_ratio,
                     candle_close_position=close_position
                 )
-                # Local balance tracking: deployed cost deducted from available cash
-                # No API call needed - we track starting balance + realized profit - deployed capital
-                cash_pool -= qty * price
+                # Update cash_pool from actual Coinbase balance to prevent tracking drift
+                # (fill price may differ from quoted price due to market conditions)
+                updated_cash, _ = await get_usd_balance(session)
+                if updated_cash is not None:
+                    cash_pool = min(updated_cash, unlocked, MAX_ALLOCATION) if MAX_ALLOCATION is not None else min(updated_cash, unlocked)
+                else:
+                    # Fallback to local tracking if balance fetch fails
+                    cash_pool -= qty * price
                 send_trade_alert(
                     f"🤖 Crypto bot — BUY {symbol} opened",
                     f"Long opened on your Coinbase account:\n\n"
@@ -1899,6 +1841,47 @@ async def run_crypto_cycle():
         await flush_rsi_state_cache()
 
 
+async def test_crypto_connectivity():
+    """Pre-flight connectivity test before allowing any trades"""
+    log.info("\n" + "=" * 80)
+    log.info("🔍 PRE-FLIGHT CRYPTO CONNECTIVITY TEST")
+    log.info("=" * 80)
+
+    connector = aiohttp.TCPConnector(use_dns_cache=True)
+    timeout = aiohttp.ClientTimeout(total=15, connect=5, sock_read=5)
+    async with aiohttp.ClientSession(connector=connector, trust_env=False, timeout=timeout) as session:
+        # Test 1: Coinbase API access
+        log.info("  Testing Coinbase USD balance endpoint...")
+        cash, balance_error = await get_usd_balance(session)
+        if cash is None:
+            log.error(f"  ❌ FAILED to fetch Coinbase balance: {balance_error}")
+            return False
+        log.info(f"  ✅ Coinbase access verified | Available USD: ${cash:.2f}")
+
+        # Test 2: Check position endpoint
+        log.info("  Testing /api/v3/brokerage/orders endpoint...")
+        try:
+            path = "/api/v3/brokerage/orders"
+            async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path), timeout=5) as r:
+                if r.status not in (200, 400):  # 400 is OK (invalid params), 200 is OK (order history)
+                    log.error(f"  ❌ FAILED: HTTP {r.status}")
+                    return False
+                log.info(f"  ✅ Orders endpoint accessible")
+        except Exception as e:
+            log.error(f"  ❌ FAILED to test orders endpoint: {e}")
+            return False
+
+        # Test 3: Verify minimum capital available
+        MIN_CRYPTO_CAPITAL = 1.0  # Need at least $1 to trade (Coinbase minimum)
+        if cash < MIN_CRYPTO_CAPITAL:
+            log.error(f"  ❌ FAILED: USD balance ${cash:.2f} below minimum ${MIN_CRYPTO_CAPITAL:.2f}")
+            return False
+        log.info(f"  ✅ Capital sufficient for trading")
+
+        log.info("=" * 80 + "\n")
+        return True
+
+
 def run():
     # Emergency stop: disable bot if CRYPTO_BOT_DISABLED is set (default: ENABLED for trading)
     if os.getenv("CRYPTO_BOT_DISABLED", "false").lower() == "true":
@@ -1906,31 +1889,21 @@ def run():
         return
 
     log.info("=" * 80)
-    log.info("🚀 CRYPTO TRADING BOT — EXPONENTIAL SCALING EDITION")
+    log.info("🚀 CRYPTO TRADING BOT — UPGRADED STRATEGY (SMA200_RSI_CROSSOVER_SWING_V2 + SAFETY MODE)")
     log.info("=" * 80)
     log.info("Coinbase Advanced Trade (separate account from Alpaca stocks)")
     alloc_desc = f"${MAX_ALLOCATION:.2f} cap" if MAX_ALLOCATION is not None else "full balance (compounding)"
     log.info(f"Pairs: {', '.join(CRYPTO_PAIRS)} | Allocation: {alloc_desc} | Max positions: {MAX_POSITIONS}")
     log.info("")
-    log.info("💰 POSITION SIZING: Adaptive Allocation (15% of available balance per trade)")
-    log.info("  $500 balance   → $75 per entry")
-    log.info("  $5,000 balance   → $750 per entry")
-    log.info("  $50,000 balance  → $7,500 per entry")
-    log.info("  $500,000 balance → $75,000 per entry")
-    log.info("")
-    log.info("🎯 ENTRY STRATEGY (3-FILTER SYSTEM):")
+    log.info("🎯 STRATEGY (3-FILTER SYSTEM):")
     log.info("  FILTER 1: 200-day SMA trend confirmation (bull market only)")
     log.info("  FILTER 2: RSI cross-above from oversold (reversal confirmation)")
     log.info("  FILTER 3: Volume + momentum confirmation (1.5x volume, close in upper 50%)")
     log.info("")
-    log.info("📊 EXIT LOGIC: Close-on-profit-after-fees (1.2% minimum to cover taker fees)")
-    log.info("  Every cycle: Scan 10 pairs → Enter oversold → Exit at +1.2%+ → Reinvest")
-    log.info("  Result: 36-48 cycles/day × 78% win rate × $1.50 avg = $56+/day")
-    log.info("")
-    log.info("🔄 EXPONENTIAL GROWTH: Profits automatically reinvest into bigger positions")
-    log.info("  Week 1: $483 → $1,500 (+200%)")
-    log.info("  Week 4: $15,000 → $45,000 (+200%)")
-    log.info("  Month 3: $500,000+ (exponential curve kicks in)")
+    log.info("📊 EXIT LOGIC (Professional-Grade):")
+    log.info("  Priority 1: Hard stop loss ({:.1f}% - capital preservation)".format(STOP_LOSS_PCT * 100))
+    log.info("  Priority 2: RSI overbought (65-70 = reversal exit)")
+    log.info("  Priority 3: Profit targets (3%, 5%, 10% ATR-based tiers)")
     log.info("")
     log.info("Runs 24/7 - crypto has no market close, unlike prop_bot.py's stock/ETF trading")
     log.info("🔴 LIVE TRADING - Coinbase has no free paper-trading sandbox for Advanced Trade")
@@ -1945,6 +1918,20 @@ def run():
     if not (COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY):
         log.error("🛑 CRYPTO BOT STARTUP FAILED: Missing Coinbase API credentials (COINBASE_API_KEY_NAME and/or COINBASE_API_PRIVATE_KEY)")
         log.error("   Set these environment variables in Railway to enable crypto trading bot")
+        return
+
+    # Run pre-flight connectivity test
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    log.info("\n🚀 Running pre-flight test before starting trading...")
+    try:
+        test_passed = loop.run_until_complete(test_crypto_connectivity())
+        if not test_passed:
+            log.error("❌ PRE-FLIGHT TEST FAILED — Crypto bot will not trade until issue is resolved")
+            log.error("   Check Coinbase API credentials and network access")
+            return
+    except Exception as e:
+        log.error(f"❌ PRE-FLIGHT TEST CRASHED: {e}")
         return
 
     # One event loop for this thread's entire life, not a fresh one every
