@@ -1,0 +1,36 @@
+name: Live performance report (on-demand)
+
+# Read-only check against the real Alpaca account - equity, closed trades,
+# win rate, profit factor, realized slippage. See scripts/live_performance_report.py
+# for why this exists instead of a backtest: this measures actual execution,
+# not a simulation. Places no orders. Trigger manually from the Actions tab
+# ("Run workflow") or via the GitHub API whenever you want a real answer
+# instead of a guess.
+on:
+  workflow_dispatch:
+    inputs:
+      report_days:
+        description: "How many days back to pull (use 1 for 'just today')"
+        required: false
+        default: "1"
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Pull live performance from Alpaca account history
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          ALPACA_BASE_URL: "https://api.alpaca.markets"
+          REPORT_DAYS: ${{ github.event.inputs.report_days }}
+        run: python scripts/live_performance_report.py
