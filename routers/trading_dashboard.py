@@ -1135,3 +1135,93 @@ async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
         log.error(f"Dashboard data fetch failed: {e}")
         log.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/trading-dashboard/logs")
+async def get_trading_logs(limit: int = 50, event_type: str = None):
+    """
+    Get recent trading activity logs with optional filtering.
+
+    Query params:
+    - limit: Max events to return (default 50)
+    - event_type: Filter by type (profit_lock, trade_alert, status, all)
+    """
+    try:
+        from log_monitor import monitor
+
+        if event_type and event_type != "all":
+            events = monitor.get_recent_events(limit=limit, event_type=event_type)
+        else:
+            events = monitor.get_recent_events(limit=limit)
+
+        return {
+            "success": True,
+            "event_count": len(events),
+            "events": events,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except ImportError:
+        return {
+            "success": False,
+            "error": "Log monitor not available",
+            "events": []
+        }
+
+
+@router.get("/api/trading-dashboard/bot-activity")
+async def get_bot_activity():
+    """
+    Get real-time bot activity metrics:
+    - Bot status (active/inactive)
+    - Trade count today
+    - Profit locks today/week
+    - Last profit lock event
+    - Last trade alert
+    """
+    try:
+        from log_monitor import monitor
+
+        return {
+            "success": True,
+            "activity": monitor.get_bot_status(),
+            "summary": monitor.get_summary(),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except ImportError:
+        return {
+            "success": False,
+            "error": "Log monitor not available",
+            "activity": {
+                "crypto_bot": {"status": "unknown"},
+                "alpaca_bot": {"status": "unknown"}
+            }
+        }
+
+
+@router.get("/api/trading-dashboard/profit-locks")
+async def get_profit_locks():
+    """
+    Get all profit-lock events from today and this week.
+    Used for monitoring when trades are being closed and profits locked.
+    """
+    try:
+        from log_monitor import monitor
+
+        profit_lock_events = monitor.get_recent_events(limit=100, event_type="profit_lock")
+
+        return {
+            "success": True,
+            "locks_today": monitor.profit_locks_today,
+            "locks_week": monitor.profit_locks_week,
+            "recent_locks": profit_lock_events,
+            "last_lock": monitor.last_profit_lock.to_dict() if monitor.last_profit_lock else None,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except ImportError:
+        return {
+            "success": False,
+            "error": "Log monitor not available",
+            "locks_today": 0,
+            "locks_week": 0,
+            "recent_locks": []
+        }
