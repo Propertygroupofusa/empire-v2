@@ -126,6 +126,11 @@ def get_dynamic_crypto_stop_loss(scale: float) -> float:
 # Prevents catastrophic losses but allows survival of losing streaks at higher scales
 DAILY_MAX_LOSS_BASE = _safe_float_env("PROP_DAILY_MAX_LOSS_BASE", "10")
 
+# Max hold time before a position is force-exited regardless of price. Was
+# hardcoded to 7200s (2hr) - now configurable, default 1800s (30min) for
+# faster in-and-out turnover.
+PROP_MAX_HOLD_SECONDS = _safe_int_env("PROP_MAX_HOLD_SECONDS", "1800")
+
 # AGGRESSIVE EXIT ON RED — Close any position down 0.5% immediately
 # Don't wait for stop-loss to trigger. Exit fast, preserve capital.
 QUICK_EXIT_LOSS_PCT = _safe_float_env("QUICK_EXIT_LOSS_PCT", "0.005")  # Exit any loser at 0.5% down
@@ -1268,7 +1273,7 @@ async def run_prop_cycle():
                 current_rsi=rsi,
                 position_age_seconds=position_age_seconds,
                 direction=side,
-                max_hold_seconds=7200,  # 2 hours max
+                max_hold_seconds=PROP_MAX_HOLD_SECONDS,
                 stop_loss_pct=0.003,  # 0.3% hard stop (matches get_dynamic_stop_loss base)
                 min_profit_target_pct=0.02,  # 2% minimum profit (KEY: prevents breakeven exits)
                 rsi_profit_threshold_long=60,  # Sell longs when RSI >= 60 (overbought)

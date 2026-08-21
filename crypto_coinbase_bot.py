@@ -348,6 +348,11 @@ PROFIT_TARGET_PCT = 0.37  # DEPRECATED - no longer read anywhere in the live exi
 # Do NOT override via env var - this is proven through backtesting
 STOP_LOSS_PCT = 0.01  # 1% ultra-tight stop for rapid redeployment
 
+# Max hold time before a position is force-exited regardless of price - crypto
+# previously had no time-based exit at all, so a position that stayed between
+# its stop and its profit tiers could sit open indefinitely. 1800s = 30 min.
+CRYPTO_MAX_HOLD_SECONDS = _safe_int_env("CRYPTO_MAX_HOLD_SECONDS", "1800")
+
 # Coinbase Advanced Trade API taker fee (0.6% standard rate for crypto)
 TAKER_FEE_RATE = 0.006
 
@@ -1517,6 +1522,10 @@ async def run_crypto_cycle():
                 elif tier1_hit:
                     should_exit = True
                     reason = f"TIER 1 @ ${tier1_price:.2f} (+{(price/entry - 1)*100:.2f}%, lock early gain)"
+                elif (now - position.get("opened_at", now)).total_seconds() >= CRYPTO_MAX_HOLD_SECONDS:
+                    should_exit = True
+                    held_min = (now - position.get("opened_at", now)).total_seconds() / 60
+                    reason = f"MAX HOLD TIME ({held_min:.0f}min >= {CRYPTO_MAX_HOLD_SECONDS//60}min, {unrealized_pct*100:+.2f}%)"
 
                 if partial_exit:
                     # Sell 25% of original position
@@ -1635,6 +1644,10 @@ async def run_crypto_cycle():
             elif tier1_hit:
                 should_exit = True
                 reason = f"TIER 1 (ATR) @ ${tier1_price:.2f} (+{(price/entry - 1)*100:.2f}%, lock early gain)"
+            elif (now - position.get("opened_at", now)).total_seconds() >= CRYPTO_MAX_HOLD_SECONDS:
+                should_exit = True
+                held_min = (now - position.get("opened_at", now)).total_seconds() / 60
+                reason = f"MAX HOLD TIME ({held_min:.0f}min >= {CRYPTO_MAX_HOLD_SECONDS//60}min, {unrealized_pct*100:+.2f}%)"
 
             if should_exit:
                 filled = await place_order(session, symbol, "sell", qty, price)
