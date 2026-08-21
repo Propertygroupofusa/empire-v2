@@ -9,6 +9,7 @@ Rule: 7 consecutive profitable days before going live
 import os
 import asyncio
 import logging
+import math
 import smtplib
 import time
 from email.mime.text import MIMEText
@@ -214,6 +215,50 @@ open_prop_positions = {}
 profit_tracker = FiveHourProfitTracker()
 
 BOT_NAME = "prop_apex"
+
+# EQUITY FLOOR — a ratchet: once equity crosses a $1K tier, the floor locks
+# to that tier and never goes back down, even across a Railway restart.
+# $500 baseline until equity first reaches $1,000; then $1,000 becomes the
+# floor for good; then $2,000 once reached, and so on. Breaching the floor
+# closes every open position immediately and halts new entries until equity
+# is back above it — same mechanism as the daily circuit breaker, just keyed
+# to the account's all-time high instead of today's start.
+EQUITY_FLOOR_TIER = float(os.getenv("PROP_EQUITY_FLOOR_TIER", "1000"))
+EQUITY_FLOOR_BASE = float(os.getenv("PROP_EQUITY_FLOOR_BASE", "500"))
+EQUITY_FLOOR_STATE_KEY = "prop_apex_equity_floor"
+equity_floor = EQUITY_FLOOR_BASE
+
+
+async def load_equity_floor():
+    """Reload the ratcheted equity floor from the DB at startup, so a
+    Railway restart can't reset the ladder back down to the base level."""
+    global equity_floor
+    try:
+        from models import TradingBotState
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == EQUITY_FLOOR_STATE_KEY))
+            row = result.scalar_one_or_none()
+            if row and row.base_capital is not None:
+                equity_floor = max(EQUITY_FLOOR_BASE, row.base_capital)
+                log.info(f"[APEX_589296] 🪜 Reloaded equity floor from DB: ${equity_floor:,.0f}")
+    except Exception as e:
+        log.error(f"[APEX_589296] Failed to reload equity floor from DB: {e}")
+
+
+async def save_equity_floor(new_floor: float):
+    """Persist a raised equity floor so it survives restarts."""
+    try:
+        from models import TradingBotState
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == EQUITY_FLOOR_STATE_KEY))
+            row = result.scalar_one_or_none()
+            if row:
+                row.base_capital = new_floor
+            else:
+                db.add(TradingBotState(bot_name=EQUITY_FLOOR_STATE_KEY, base_capital=new_floor, starting_capital=EQUITY_FLOOR_BASE))
+            await db.commit()
+    except Exception as e:
+        log.error(f"[APEX_589296] Failed to persist equity floor: {e}")
 
 
 async def load_open_positions():
@@ -1081,17 +1126,32 @@ async def run_prop_cycle():
         log.info(f"[APEX_589296] Equity: {'$%.2f' % equity if equity is not None else 'unknown'} | Scale {scale:.1f}x | Max {dynamic_max_positions} pos | Profit target: ${profit_target:.2f}/position" +
                 (f" | ⚠️ DAILY 2% LOSS LIMIT HIT - stopping new trades" if is_hitting_daily_loss_limit else ""))
 
-        # Circuit breaker: if daily loss exceeds threshold, close ALL open positions immediately
-        # Scales dynamically with position size multiplier to prevent early halt on scaled positions
+        # Daily loss threshold check — the actual position-closing loop runs
+        # further down, after `scans` is populated (referencing it here, before
+        # it exists, used to throw UnboundLocalError the first time this ever
+        # tripped — the safety mechanism would crash instead of firing).
         daily_loss_dollars = (daily_account_equity_start - equity) if daily_account_equity_start and equity else 0
-        if daily_loss_dollars >= dynamic_daily_max_loss:
-            log.warning(f"[APEX_589296] 🛑 CIRCUIT BREAKER: Daily loss ${daily_loss_dollars:.2f} >= ${dynamic_daily_max_loss:.2f} (scale {scale}x) — closing ALL positions")
-            for contract in list(open_prop_positions.keys()):
-                data = scans.get(contract)
-                config = FUTURES[contract]
-                if data:
-                    await close_position(session, contract, config, open_prop_positions[contract],
-                                       data["price"], data["rsi"], data["trend"], "CIRCUIT BREAKER - DAILY LOSS LIMIT")
+        daily_circuit_breaker_tripped = daily_loss_dollars >= dynamic_daily_max_loss
+
+        # EQUITY FLOOR RATCHET — once equity crosses a $1K tier it locks in
+        # as the new floor and can never go back down, even across restarts.
+        global equity_floor
+        if equity is not None and equity >= EQUITY_FLOOR_TIER:
+            candidate_floor = math.floor(equity / EQUITY_FLOOR_TIER) * EQUITY_FLOOR_TIER
+            if candidate_floor > equity_floor:
+                equity_floor = candidate_floor
+                await save_equity_floor(equity_floor)
+                log.info(f"[APEX_589296] 🪜 EQUITY FLOOR RAISED to ${equity_floor:,.0f} — will not trade below this again")
+                send_trade_alert(
+                    f"🪜 EQUITY FLOOR RAISED — ${equity_floor:,.0f}",
+                    f"Account equity crossed ${equity_floor:,.0f}.\n\n"
+                    f"Current equity: ${equity:,.2f}\n"
+                    f"New floor locked in: ${equity_floor:,.0f}\n\n"
+                    f"The bot will halt and close all positions if equity ever drops "
+                    f"back below this floor — it only climbs from here.\n\n"
+                    f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
+                )
+        equity_floor_breached = equity is not None and equity < equity_floor
 
         # Tracked and spent-down across this cycle's entries so dollar-based
         # sizing (see try_open/size_position) reflects money already
@@ -1116,6 +1176,36 @@ async def run_prop_cycle():
                 scans[contract] = data
                 log.info(f"[APEX_589296] {contract} ({config['symbol']}) | ${data['price']:.2f} | RSI:{data['rsi']} | Momentum:{data.get('momentum', 0):+.2f}% | {data['trend']}")
             await asyncio.sleep(0.5)  # 500ms between requests to prevent rate limiting
+
+        # ── Pass 0: circuit breakers — close ALL positions if tripped ────
+        # Daily 2%/dollar loss limit and the equity-floor ratchet both land
+        # here since this is the first point in the cycle `scans` actually
+        # has data to close positions against.
+        if daily_circuit_breaker_tripped:
+            log.warning(f"[APEX_589296] 🛑 CIRCUIT BREAKER: Daily loss ${daily_loss_dollars:.2f} >= ${dynamic_daily_max_loss:.2f} (scale {scale}x) — closing ALL positions")
+            for contract in list(open_prop_positions.keys()):
+                data = scans.get(contract)
+                config = FUTURES[contract]
+                if data:
+                    await close_position(session, contract, config, open_prop_positions[contract],
+                                       data["price"], data["rsi"], data["trend"], "CIRCUIT BREAKER - DAILY LOSS LIMIT")
+
+        if equity_floor_breached:
+            log.warning(f"[APEX_589296] 🛑 EQUITY FLOOR BREACH: ${equity:.2f} < locked floor ${equity_floor:,.0f} — closing ALL positions, halting new entries")
+            send_trade_alert(
+                f"🛑 EQUITY FLOOR BREACH — ${equity_floor:,.0f}",
+                f"Equity dropped below the locked floor of ${equity_floor:,.0f}.\n\n"
+                f"Current equity: ${equity:,.2f}\n\n"
+                f"All open positions are being closed and new entries are halted "
+                f"until equity recovers above ${equity_floor:,.0f}.\n\n"
+                f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
+            )
+            for contract in list(open_prop_positions.keys()):
+                data = scans.get(contract)
+                config = FUTURES[contract]
+                if data:
+                    await close_position(session, contract, config, open_prop_positions[contract],
+                                       data["price"], data["rsi"], data["trend"], "EQUITY FLOOR BREACH")
 
         # ── Pass 1: manage exits for symbols already held ────────────────
         # A long profits as price rises and exits on overbought RSI; a
@@ -1208,6 +1298,12 @@ async def run_prop_cycle():
             # Professional risk management: stop new entries if daily 2% loss limit hit
             if is_hitting_daily_loss_limit:
                 log.info(f"[APEX_589296] 🛑 {side.upper()} {contract} blocked — daily 2% loss limit reached, no new entries")
+                continue
+
+            # Equity floor ratchet: no new entries while equity is below the
+            # locked floor — only resumes once equity recovers above it.
+            if equity_floor_breached:
+                log.info(f"[APEX_589296] 🛑 {side.upper()} {contract} blocked — equity ${equity:.2f} below locked floor ${equity_floor:,.0f}")
                 continue
 
             # Multi-timeframe confluence: don't fight a strong 1-hour
@@ -1368,6 +1464,11 @@ def run():
         asyncio.run(load_open_positions())
     except Exception as e:
         log.error(f"[APEX_589296] Startup position reload failed: {e}")
+
+    try:
+        asyncio.run(load_equity_floor())
+    except Exception as e:
+        log.error(f"[APEX_589296] Startup equity floor reload failed: {e}")
 
     while True:
         if os.getenv("STOP_TRADING", "false").lower() == "true":
