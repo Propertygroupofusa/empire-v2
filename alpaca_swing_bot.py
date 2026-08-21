@@ -83,16 +83,17 @@ INTRADAY_STOP_LOSS = 0.005      # -0.5% stop loss (tighter for day trades)
 DAILY_PROFIT_TARGET = 225.0     # $225/day target
 
 # ========== POSITION MANAGEMENT ==========
-ACCOUNT_SIZE = 40000.0
-RISK_PER_TRADE_PCT = 0.015      # 1.5% risk = $600 per trade
-MAX_CONCURRENT_SWING = 3
-MAX_CONCURRENT_INTRADAY = 5
-MIN_EQUITY = 5000.0
+ACCOUNT_SIZE = 980.0
+RISK_PER_TRADE_PCT = 0.015      # 1.5% risk = $14.70 per trade (for $980 account)
+MAX_CONCURRENT_SWING = 1         # Conservative: 1 swing position at a time for micro account
+MAX_CONCURRENT_INTRADAY = 1      # Conservative: 1 intraday position at a time for micro account
+MIN_EQUITY = 500.0               # Allow trading down to $500 (survival level on micro account)
 
-# Position sizing for $40k account
-RISK_PER_TRADE = ACCOUNT_SIZE * RISK_PER_TRADE_PCT  # $600
-WIN_AVG = 225.0  # Average win size
-LOSS_AVG = 75.0  # Average loss size (stops at 0.5-0.75%)
+# Position sizing for $980 account
+RISK_PER_TRADE = ACCOUNT_SIZE * RISK_PER_TRADE_PCT  # ~$14.70
+WIN_AVG = 5.0   # Average win size on micro account (~0.5% of account)
+LOSS_AVG = 2.0  # Average loss size (tight stops on micro account)
+POSITION_SIZE_BASE = 50.0        # Base position size in dollars for micro account ($50 minimum notional)
 
 
 async def get_intraday_rsi(session, symbol, timeframe="15Min"):
@@ -204,7 +205,7 @@ async def get_weekly_rsi(session, symbol):
 async def get_account_balance(session):
     """Get current buying power and equity"""
     try:
-        url = f"{get_base_url()}/v2/accounts"
+        url = f"{get_base_url()}/v2/account"
         async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
                 return None, None
@@ -234,7 +235,7 @@ async def get_open_positions(session):
 
 
 async def place_order(session, symbol, qty, side):
-    """Place a market order"""
+    """Place a market order with validation"""
     try:
         url = f"{get_base_url()}/v2/orders"
         payload = {
@@ -246,9 +247,15 @@ async def place_order(session, symbol, qty, side):
         }
         async with session.post(url, headers=get_headers(), json=payload) as r:
             if r.status not in (200, 201):
-                log.error(f"Order failed: {r.status}")
+                error_body = await r.text()
+                log.error(f"Order failed: {r.status} | {error_body[:200]}")
                 return None
-            return await r.json()
+            result = await r.json()
+            # CRITICAL: Verify order received valid ID from Alpaca
+            if not result.get("id"):
+                log.error(f"Order accepted but no order ID returned: {result}")
+                return None
+            return result
     except Exception as e:
         log.error(f"Order placement error: {e}")
         return None
@@ -304,17 +311,30 @@ async def run_intraday_check():
                 if symbol in open_positions:
                     continue
 
-                # Size: use 1.5% risk per trade = $600
-                # If stop is 0.5% = $200, can afford more contracts
+                # PRE-TRADE CHECK: Verify buying power
+                if buying_power is None or buying_power < RISK_PER_TRADE:
+                    log.warning(f"⛔ INTRADAY ENTRY BLOCKED {symbol}: Insufficient buying power ${buying_power:.2f if buying_power else '?'}")
+                    continue
+
+                # Size: use 1.5% risk per trade
+                # If stop is 0.5%, calculate qty based on risk amount
                 # qty = risk / (stop_loss_pct * price)
                 stop_distance = price * INTRADAY_STOP_LOSS
-                qty = max(1, int(RISK_PER_TRADE / stop_distance))
+                qty = max(1, int(RISK_PER_TRADE / stop_distance)) if stop_distance > 0 else 1
+                notional = qty * price
+
+                if notional > (buying_power * 0.8):  # Cap at 80% of buying power
+                    qty = max(1, int((buying_power * 0.8) / price))
+                    notional = qty * price
+                    log.info(f"  ⚠️  Resized {symbol} intraday to ${notional:.2f} (buying power limit)")
 
                 log.info(f"\n  🚀 INTRADAY ENTRY: {symbol} | RSI {rsi} | Price ${price:.2f} | Qty {qty}")
 
                 order = await place_order(session, symbol, qty, "buy")
-                if order:
-                    log.info(f"     Order: {order.get('id', 'N/A')}")
+                if order and order.get("id"):
+                    log.info(f"     ✅ Order confirmed: {order.get('id')}")
+                else:
+                    log.error(f"     ❌ Order FAILED")
 
                 await asyncio.sleep(0.5)
 
@@ -346,12 +366,7 @@ async def run_intraday_check():
                 reason = f"Profit target +{pnl_pct:.2f}% hit"
             elif pnl_pct <= -INTRADAY_STOP_LOSS * 100:
                 should_exit = True
-                reason = f"Stop loss -{abs(pnl_pct):.2f}% hit"
-
-            # Skip exit if position is negative (hold through losses)
-            if pnl_pct < 0:
-                log.info(f"  {symbol} at {pnl_pct:+.2f}% — HOLDING (no stop-loss closes)")
-                continue
+                reason = f"HARD STOP-LOSS -{abs(pnl_pct):.2f}% hit (capital preservation)"
 
             if should_exit:
                 log.info(f"\n  🛑 INTRADAY EXIT {symbol}: {reason} | P&L {pnl_pct:+.2f}%")
@@ -410,24 +425,36 @@ async def run_swing_check():
 
             open_positions = await get_open_positions(session)
             current_count = len(open_positions)
-            slots_available = MAX_CONCURRENT - current_count
+            slots_available = MAX_CONCURRENT_SWING - current_count
 
-            log.info(f"\n📈 Open positions: {current_count}/{MAX_CONCURRENT}")
+            log.info(f"\n📈 Open positions: {current_count}/{MAX_CONCURRENT_SWING}")
 
             for confidence, symbol, config, rsi, price in setups[:slots_available]:
                 if symbol in open_positions:
                     log.info(f"  {symbol} already held, skipping")
                     continue
 
-                # Size position: $100 base, scaled by equity
-                position_size = POSITION_SIZE_BASE * (equity / MIN_EQUITY)
-                qty = max(1, int(position_size / price))
+                # PRE-TRADE CHECKS
+                # 1. Verify buying power is sufficient
+                if buying_power is None or buying_power < POSITION_SIZE_BASE:
+                    log.warning(f"⛔ ENTRY BLOCKED {symbol}: Insufficient buying power ${buying_power:.2f if buying_power else '?'}")
+                    continue
 
-                log.info(f"\n  🚀 ENTRY: {symbol} | RSI {rsi} | Price ${price:.2f} | Size {qty} contracts")
+                # Size position: $50 base, scaled by equity
+                position_size = POSITION_SIZE_BASE * (equity / MIN_EQUITY if equity else 1.0)
+                qty = max(1, int(position_size / price)) if price > 0 else 1
+                notional = qty * price
+
+                if notional > (buying_power * 0.8):  # Use max 80% of available buying power
+                    qty = max(1, int((buying_power * 0.8) / price))
+                    notional = qty * price
+                    log.info(f"  ⚠️  Resized {symbol} to ${notional:.2f} notional (was asking ${qty * price:.2f}, buying power limit)")
+
+                log.info(f"\n  🚀 ENTRY: {symbol} | RSI {rsi} | Price ${price:.2f} | Qty {qty} | Notional ${notional:.2f}")
 
                 order = await place_order(session, symbol, qty, "buy")
-                if order:
-                    log.info(f"     Order placed: {order.get('id', 'N/A')}")
+                if order and order.get("id"):
+                    log.info(f"     ✅ Order confirmed: {order.get('id')} | Status: {order.get('status')}")
 
                     # Record to database
                     try:
@@ -446,6 +473,8 @@ async def run_swing_check():
                             await db.commit()
                     except Exception as e:
                         log.warning(f"Failed to record position: {e}")
+                else:
+                    log.error(f"     ❌ Order FAILED or no ID returned")
 
                 await asyncio.sleep(1)
 
@@ -468,7 +497,7 @@ async def run_swing_check():
             qty = float(position_data["qty"])
             pnl_pct = (current_price - entry_price) / entry_price * 100
 
-            # Exit signals (no stop-loss closes — hold through losses)
+            # Exit signals (RESTORED: hard stop-loss for capital preservation on micro account)
             should_exit = False
             reason = None
 
@@ -478,12 +507,9 @@ async def run_swing_check():
             elif pnl_pct >= PROFIT_TARGET_PCT * 100:
                 should_exit = True
                 reason = f"Profit target +{pnl_pct:.2f}% hit"
-            # Removed: elif pnl_pct <= -STOP_LOSS_PCT * 100 (no stop-loss closes)
-
-            # Skip exit if position is negative (hold through losses)
-            if pnl_pct < 0:
-                log.info(f"  {symbol} at {pnl_pct:+.2f}% — HOLDING (no stop-loss closes)")
-                should_exit = False
+            elif pnl_pct <= -STOP_LOSS_PCT * 100:
+                should_exit = True
+                reason = f"HARD STOP-LOSS -{abs(pnl_pct):.2f}% hit (capital preservation for micro account)"
 
             if should_exit:
                 log.info(f"\n  🛑 EXIT {symbol}: {reason} | P&L {pnl_pct:+.2f}%")
@@ -517,20 +543,74 @@ async def run_swing_check():
     log.info("\n✅ Swing check complete")
 
 
+async def test_connectivity():
+    """Pre-flight connectivity test before allowing any trades"""
+    log.info("\n" + "=" * 70)
+    log.info("🔍 PRE-FLIGHT CONNECTIVITY TEST")
+    log.info("=" * 70)
+
+    async with aiohttp.ClientSession() as session:
+        # Test 1: Account access
+        log.info("  Testing /v2/account endpoint...")
+        equity, buying_power = await get_account_balance(session)
+        if equity is None or buying_power is None:
+            log.error("  ❌ FAILED to fetch account balance")
+            return False
+        log.info(f"  ✅ Account accessible | Equity: ${equity:.2f} | Buying Power: ${buying_power:.2f}")
+
+        # Test 2: Check positions endpoint
+        log.info("  Testing /v2/positions endpoint...")
+        try:
+            url = f"{get_base_url()}/v2/positions"
+            async with session.get(url, headers=get_headers()) as r:
+                if r.status != 200:
+                    log.error(f"  ❌ FAILED to fetch positions: HTTP {r.status}")
+                    return False
+                positions = await r.json()
+                log.info(f"  ✅ Positions endpoint working | Found {len(positions) if isinstance(positions, list) else 0} open positions")
+        except Exception as e:
+            log.error(f"  ❌ FAILED to test positions: {e}")
+            return False
+
+        # Test 3: Verify minimum equity
+        if equity < MIN_EQUITY:
+            log.error(f"  ❌ FAILED: Equity ${equity:.2f} below minimum ${MIN_EQUITY:.2f}")
+            return False
+
+        log.info("  ✅ Equity above minimum")
+        log.info("=" * 70 + "\n")
+        return True
+
+
 def run():
     """Main entry point - Swing + Day Trading"""
     # Startup diagnostics
     log.info("=" * 70)
-    log.info("ALPACA DUAL STRATEGY BOT v2 — Swing + Day Trading")
-    log.info(f"Mode: {'LIVE' if LIVE_TRADE else 'PAPER'}")
+    log.info("ALPACA DUAL STRATEGY BOT v2 — Swing + Day Trading (MICRO ACCOUNT SAFE MODE)")
+    log.info(f"Mode: {'🔴 LIVE' if LIVE_TRADE else '📄 PAPER'}")
     log.info(f"Account: ${ACCOUNT_SIZE:,.0f} | Risk/Trade: {RISK_PER_TRADE_PCT*100:.1f}% (${RISK_PER_TRADE:.0f})")
     log.info(f"Daily Target: ${DAILY_PROFIT_TARGET:.0f}")
     log.info(f"API Key: {'✓ Configured' if os.getenv('ALPACA_API_KEY') else '✗ NOT SET'}")
     log.info(f"Base URL: {get_base_url()}")
+    log.info(f"Stops: HARD STOP-LOSS ENABLED ({STOP_LOSS_PCT*100:.1f}%)")
     log.info(f"")
-    log.info(f"SWING: RSI < {WEEKLY_RSI_BUY} entry, max {MAX_CONCURRENT_SWING} positions, hold 5-10 days")
-    log.info(f"DAY: RSI < {INTRADAY_RSI_BUY} intraday entry, max {MAX_CONCURRENT_INTRADAY} positions, close same day")
+    log.info(f"SWING: RSI < {WEEKLY_RSI_BUY} entry, max {MAX_CONCURRENT_SWING} positions, {STOP_LOSS_PCT*100:.1f}% hard stop")
+    log.info(f"DAY: RSI < {INTRADAY_RSI_BUY} intraday entry, max {MAX_CONCURRENT_INTRADAY} positions, {INTRADAY_STOP_LOSS*100:.1f}% hard stop")
     log.info("=" * 70)
+
+    # Run connectivity test before starting
+    log.info("\n🚀 Running pre-flight test before market open...")
+    try:
+        test_passed = asyncio.run(test_connectivity())
+        if not test_passed:
+            log.error("❌ PRE-FLIGHT TEST FAILED — Bot will not trade until issue is resolved")
+            log.error("   Check Alpaca credentials and account settings")
+            while True:
+                time.sleep(60)
+    except Exception as e:
+        log.error(f"❌ PRE-FLIGHT TEST CRASHED: {e}")
+        while True:
+            time.sleep(60)
 
     last_swing_check = None
 
