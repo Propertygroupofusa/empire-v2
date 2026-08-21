@@ -1841,6 +1841,47 @@ async def run_crypto_cycle():
         await flush_rsi_state_cache()
 
 
+async def test_crypto_connectivity():
+    """Pre-flight connectivity test before allowing any trades"""
+    log.info("\n" + "=" * 80)
+    log.info("🔍 PRE-FLIGHT CRYPTO CONNECTIVITY TEST")
+    log.info("=" * 80)
+
+    connector = aiohttp.TCPConnector(use_dns_cache=True)
+    timeout = aiohttp.ClientTimeout(total=15, connect=5, sock_read=5)
+    async with aiohttp.ClientSession(connector=connector, trust_env=False, timeout=timeout) as session:
+        # Test 1: Coinbase API access
+        log.info("  Testing Coinbase USD balance endpoint...")
+        cash, balance_error = await get_usd_balance(session)
+        if cash is None:
+            log.error(f"  ❌ FAILED to fetch Coinbase balance: {balance_error}")
+            return False
+        log.info(f"  ✅ Coinbase access verified | Available USD: ${cash:.2f}")
+
+        # Test 2: Check position endpoint
+        log.info("  Testing /api/v3/brokerage/orders endpoint...")
+        try:
+            path = "/api/v3/brokerage/orders"
+            async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path), timeout=5) as r:
+                if r.status not in (200, 400):  # 400 is OK (invalid params), 200 is OK (order history)
+                    log.error(f"  ❌ FAILED: HTTP {r.status}")
+                    return False
+                log.info(f"  ✅ Orders endpoint accessible")
+        except Exception as e:
+            log.error(f"  ❌ FAILED to test orders endpoint: {e}")
+            return False
+
+        # Test 3: Verify minimum capital available
+        MIN_CRYPTO_CAPITAL = 1.0  # Need at least $1 to trade (Coinbase minimum)
+        if cash < MIN_CRYPTO_CAPITAL:
+            log.error(f"  ❌ FAILED: USD balance ${cash:.2f} below minimum ${MIN_CRYPTO_CAPITAL:.2f}")
+            return False
+        log.info(f"  ✅ Capital sufficient for trading")
+
+        log.info("=" * 80 + "\n")
+        return True
+
+
 def run():
     # Emergency stop: disable bot if CRYPTO_BOT_DISABLED is set (default: ENABLED for trading)
     if os.getenv("CRYPTO_BOT_DISABLED", "false").lower() == "true":
@@ -1848,19 +1889,19 @@ def run():
         return
 
     log.info("=" * 80)
-    log.info("🚀 CRYPTO TRADING BOT — UPGRADED STRATEGY (SMA200_RSI_CROSSOVER_SWING_V2)")
+    log.info("🚀 CRYPTO TRADING BOT — UPGRADED STRATEGY (SMA200_RSI_CROSSOVER_SWING_V2 + SAFETY MODE)")
     log.info("=" * 80)
     log.info("Coinbase Advanced Trade (separate account from Alpaca stocks)")
     alloc_desc = f"${MAX_ALLOCATION:.2f} cap" if MAX_ALLOCATION is not None else "full balance (compounding)"
     log.info(f"Pairs: {', '.join(CRYPTO_PAIRS)} | Allocation: {alloc_desc} | Max positions: {MAX_POSITIONS}")
     log.info("")
-    log.info("🎯 UPGRADED STRATEGY (3-FILTER SYSTEM):")
+    log.info("🎯 STRATEGY (3-FILTER SYSTEM):")
     log.info("  FILTER 1: 200-day SMA trend confirmation (bull market only)")
     log.info("  FILTER 2: RSI cross-above from oversold (reversal confirmation)")
     log.info("  FILTER 3: Volume + momentum confirmation (1.5x volume, close in upper 50%)")
     log.info("")
     log.info("📊 EXIT LOGIC (Professional-Grade):")
-    log.info("  Priority 1: Hard stop loss (swing-based, risk management)")
+    log.info("  Priority 1: Hard stop loss ({:.1f}% - capital preservation)".format(STOP_LOSS_PCT * 100))
     log.info("  Priority 2: RSI overbought (65-70 = reversal exit)")
     log.info("  Priority 3: Profit targets (3%, 5%, 10% ATR-based tiers)")
     log.info("")
@@ -1877,6 +1918,20 @@ def run():
     if not (COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY):
         log.error("🛑 CRYPTO BOT STARTUP FAILED: Missing Coinbase API credentials (COINBASE_API_KEY_NAME and/or COINBASE_API_PRIVATE_KEY)")
         log.error("   Set these environment variables in Railway to enable crypto trading bot")
+        return
+
+    # Run pre-flight connectivity test
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    log.info("\n🚀 Running pre-flight test before starting trading...")
+    try:
+        test_passed = loop.run_until_complete(test_crypto_connectivity())
+        if not test_passed:
+            log.error("❌ PRE-FLIGHT TEST FAILED — Crypto bot will not trade until issue is resolved")
+            log.error("   Check Coinbase API credentials and network access")
+            return
+    except Exception as e:
+        log.error(f"❌ PRE-FLIGHT TEST CRASHED: {e}")
         return
 
     # One event loop for this thread's entire life, not a fresh one every
