@@ -68,11 +68,11 @@ CRYPTO_RSI_SELL_ABOVE = float(os.getenv("CRYPTO_RSI_SELL_ABOVE", "65"))  # MORE 
 # 1.0x scale: 0.3% stop
 # 1.5x scale: 0.2% stop (1.5x scaled position needs tighter exit)
 # 2.0x scale: 0.2% stop (maximum scale = maximum discipline)
-STOP_LOSS_BASE_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.001"))  # Base: 0.1% for stocks/futures
+STOP_LOSS_BASE_PCT = float(os.getenv("PROP_STOP_LOSS_PCT", "0.003"))  # Base: 0.3% for stocks/futures
 
 # Crypto-specific stop-loss: dynamically tightens with scale
 # Base: 0.3%, tightens to 0.2% at 1.5x scale
-CRYPTO_STOP_LOSS_BASE_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.001"))  # Base: 0.1%
+CRYPTO_STOP_LOSS_BASE_PCT = float(os.getenv("CRYPTO_STOP_LOSS_PCT", "0.003"))  # Base: 0.3%
 
 # MULTI-TIMEFRAME CONFIRMATION CONTROL
 # Set to "false" to disable 1H trend checking (let all RSI signals through)
@@ -602,7 +602,9 @@ MIN_POSITION_NOTIONAL = float(os.getenv("PROP_MIN_POSITION_NOTIONAL", "50"))  # 
 MIN_BUYING_POWER_BUFFER = float(os.getenv("PROP_MIN_BUYING_POWER_BUFFER", "150"))
 
 # Maximum percentage of account equity that can be at risk in open positions
-MAX_RISK_PERCENT = float(os.getenv("PROP_MAX_RISK_PERCENT", "0.50"))  # 50% max
+# Lowered from 50% to 20% for micro-account safety - 50% risk-at-once was
+# sized for a much larger evaluation account, not a ~$1K live account.
+MAX_RISK_PERCENT = float(os.getenv("PROP_MAX_RISK_PERCENT", "0.20"))  # 20% max
 
 # Buying power threshold to STOP opening new positions (emergency brake)
 CRITICAL_BUYING_POWER_THRESHOLD = float(os.getenv("PROP_CRITICAL_BP_THRESHOLD", "100"))
