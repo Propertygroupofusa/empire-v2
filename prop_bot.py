@@ -147,25 +147,31 @@ def get_dynamic_max_positions(scale: float) -> int:
     return BASE_MAX_POSITIONS  # 8 positions at baseline 1.0x scale (was 3)
 
 # Profit target, in REAL DOLLARS of profit on the position (not a raw
-# price move on the underlying) - scaled by real account equity. Increased targets
-# to let winners run instead of closing too early. With $1000+ positions, these
-# targets are achievable on 1%+ daily moves that we see in the market.
+# AGGRESSIVE PROFIT LOCKING - Close trades early to compound faster
+# Smaller positions at small equity = quick wins reinvested = exponential growth
+# At $1K: aim for $1-2 per trade (0.75% targets on $130-170 positions)
+# At $5K: aim for $5-15 per trade (1% targets on $500+ positions)
+# At $25K: aim for $50-100 per trade (1% targets on $5,000+ positions)
 PROFIT_TARGET_DOLLARS_MILESTONES = [
-    (0,     999999),    # Unlimited: No profit target cap - let positions run indefinitely
-    (500,   999999),
-    (1000,  999999),
-    (5000,  999999),
-    (10000, 999999),
+    (0,     1.50),      # Under $500: $1.50 target (fast compounding)
+    (500,   2.00),      # $500-$1K: $2 target
+    (1000,  3.00),      # $1K-$5K: $3 target (current account level)
+    (5000,  10.00),     # $5K-$10K: $10 target
+    (10000, 25.00),     # $10K-$25K: $25 target
+    (25000, 75.00),     # $25K+: $75 target
 ]
 
 # Crypto-specific LOWER profit targets for fast compounding & high frequency
-# On $992: aim for $2-3 per trade (hit more targets, reinvest faster)
+# Crypto trades faster, so close positions sooner to reinvest quicker
+# At $1K: aim for $2-3 per trade (1-1.5% on crypto)
+# At $5K: aim for $10-20 per trade
 CRYPTO_PROFIT_TARGET_MILESTONES = [
-    (0,     999999),    # Unlimited: No profit target cap - let positions run indefinitely 24/7
-    (500,   999999),
-    (1000,  999999),
-    (5000,  999999),
-    (10000, 999999),
+    (0,     2.00),      # Under $500: $2 target (very fast compounding)
+    (500,   3.00),      # $500-$1K: $3 target
+    (1000,  5.00),      # $1K-$5K: $5 target (current level)
+    (5000,  15.00),     # $5K-$10K: $15 target
+    (10000, 50.00),     # $10K-$25K: $50 target
+    (25000, 100.00),    # $25K+: $100 target
 ]
 
 # Crypto-specific AGGRESSIVE tiered exits — lock wins faster, reinvest sooner
