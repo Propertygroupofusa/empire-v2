@@ -598,19 +598,43 @@ MAX_RISK_PERCENT = float(os.getenv("PROP_MAX_RISK_PERCENT", "0.50"))  # 50% max
 CRITICAL_BUYING_POWER_THRESHOLD = float(os.getenv("PROP_CRITICAL_BP_THRESHOLD", "100"))
 
 
-def size_position(cash_remaining, slots_remaining, price):
-    """Dollar-based (fractional-share) position sizing with SCALING MULTIPLIER.
-    After each milestone lock, position sizes increase (1.5x for $2K phase, 2.0x for $5K phase).
-    This allows account to compound faster while maintaining capital protection.
-    Returns None if there isn't enough cash left for even one minimum-size position."""
+def size_position(cash_remaining, slots_remaining, price, account_equity=None):
+    """Dollar-based (fractional-share) position sizing with AGGRESSIVE COMPOUNDING.
+
+    Position size scales with account growth:
+    - Under $5K: 20% of remaining cash per slot
+    - $5K-$10K: 25% of remaining cash per slot
+    - $10K-$25K: 30% of remaining cash per slot
+    - $25K+: 35-40% of remaining cash per slot
+
+    Plus POSITION_SCALE_MULTIPLIER from env var (milestone-based scaling).
+    This enables exponential compounding as capital grows.
+    """
     if slots_remaining <= 0 or cash_remaining < MIN_POSITION_NOTIONAL:
         return None
 
-    # Apply scaling multiplier (increases after milestone locks)
-    scale = float(os.getenv("POSITION_SCALE_MULTIPLIER", "1.0"))
+    # Determine allocation percentage based on account equity
+    if account_equity is None:
+        account_equity = cash_remaining
 
-    amount = min(max(cash_remaining / slots_remaining, MIN_POSITION_NOTIONAL), cash_remaining)
+    if account_equity < 5000:
+        allocation_pct = 0.20  # 20% of remaining cash
+    elif account_equity < 10000:
+        allocation_pct = 0.25  # 25% of remaining cash
+    elif account_equity < 25000:
+        allocation_pct = 0.30  # 30% of remaining cash
+    else:
+        allocation_pct = 0.35  # 35% of remaining cash at scale
+
+    # Calculate position size: (cash / slots) with aggressive % allocation
+    amount = (cash_remaining / slots_remaining) * (1.0 + (allocation_pct - 0.15))  # Base 15% + aggressive boost
+    amount = max(amount, MIN_POSITION_NOTIONAL)
+    amount = min(amount, cash_remaining * 0.4)  # Cap at 40% to maintain safety
+
+    # Apply additional scaling multiplier (increases after milestone locks)
+    scale = float(os.getenv("POSITION_SCALE_MULTIPLIER", "1.0"))
     amount = amount * scale  # SCALE UP: bigger positions after milestone
+
     qty = round(amount / price, 6)
     return qty if qty > 0 else None
 
@@ -994,7 +1018,7 @@ async def run_prop_cycle():
             return False
 
         if cash_remaining is not None:
-            qty = size_position(cash_remaining, slots_remaining, price)
+            qty = size_position(cash_remaining, slots_remaining, price, account_equity=equity)
             if qty is None:
                 log.warning(f"[APEX_589296] ⛔ INSUFFICIENT CASH: {contract} {side} skipped — only ${cash_remaining:.2f} left (need ${config.get('min_cash', 1000):.2f})")
                 return False

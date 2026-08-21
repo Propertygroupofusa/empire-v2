@@ -95,29 +95,49 @@ def calculate_position_sizing_stocks(
     entry_price: float,
     stop_loss_pct: float = 0.015,
     risk_per_trade_usd: float = 50.0,
+    account_equity: float = None,
 ) -> float:
     """
-    Calculate position size that limits risk to a fixed amount per trade.
+    Calculate position size that scales with account growth (exponential compounding).
 
-    For stocks (different from crypto):
-    - Risk per trade: $50 (fixed)
-    - Position size: scale based on volatility
-    - Example: SPY at $450 with 1.5% stop = $6.75 risk per share
-      To risk $50: buy 7-8 shares ≈ $3,150 notional
+    Aggressive scaling model:
+    - $1K account: 20% per trade ($200)
+    - $5K account: 25% per trade ($1,250)
+    - $10K account: 30% per trade ($3,000)
+    - $25K account: 35% per trade ($8,750)
+    - $50K+ account: 40% per trade ($20K+)
+
+    This ensures profit-taking generates exponentially larger gains as capital compounds.
 
     Returns: Number of shares to purchase
     """
-    if not cash_available or cash_available < 1000:  # Minimum $1,000 per trade
+    if not cash_available or cash_available < 100:
         return None
 
-    # Use fixed $1,000 position size per trade for stocks (larger than crypto)
-    FIXED_POSITION_SIZE_USD = 1000.0
+    # Determine position size percentage based on account equity
+    if account_equity is None:
+        account_equity = cash_available
 
-    if cash_available < FIXED_POSITION_SIZE_USD * 1.05:  # Need 5% buffer
+    # Dynamic position sizing: scale up as account grows
+    if account_equity < 5000:
+        position_size_pct = 0.20  # 20% at $1K-$5K
+    elif account_equity < 10000:
+        position_size_pct = 0.25  # 25% at $5K-$10K
+    elif account_equity < 25000:
+        position_size_pct = 0.30  # 30% at $10K-$25K
+    elif account_equity < 50000:
+        position_size_pct = 0.35  # 35% at $25K-$50K
+    else:
+        position_size_pct = 0.40  # 40% at $50K+
+
+    position_size = cash_available * position_size_pct
+
+    # Minimum position size to avoid dust trades
+    if position_size < 200:
         return None
 
     # Calculate shares from position size
-    shares = FIXED_POSITION_SIZE_USD / entry_price
+    shares = position_size / entry_price
     return int(shares) if shares >= 1 else None
 
 

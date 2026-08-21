@@ -1028,8 +1028,18 @@ def size_position(cash_pool_remaining, slots_remaining, price, total_balance=Non
 
     Maintains 20% cash buffer for volatility & fees.
     """
-    # Use 15% of available cash per position (scales with growth)
-    position_allocation_pct = 0.15
+    # AGGRESSIVE SCALING: 20-40% per position based on account size
+    # Smaller accounts: 20% (need more positions to diversify)
+    # Larger accounts: 30-40% (can afford bigger bets on winning signals)
+    if cash_pool_remaining < 5000:
+        position_allocation_pct = 0.20  # 20% at under $5K
+    elif cash_pool_remaining < 10000:
+        position_allocation_pct = 0.25  # 25% at $5K-$10K
+    elif cash_pool_remaining < 25000:
+        position_allocation_pct = 0.30  # 30% at $10K-$25K
+    else:
+        position_allocation_pct = 0.40  # 40% at $25K+
+
     position_size = cash_pool_remaining * position_allocation_pct
 
     # Minimum position size to avoid dust trades
