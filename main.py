@@ -483,44 +483,66 @@ async def run_migrations():
                     # Don't skip even if info.get("default") exists - it might
                     # be broken/malformed. Always rebuild from scratch.
                     seq = f"{table_name}_{column.name}_seq"
+                    # Every DDL attempt below runs inside a SAVEPOINT
+                    # (conn.begin_nested()), not directly on the shared
+                    # connection. On Postgres, ANY failed statement aborts
+                    # the whole enclosing transaction - Python catching the
+                    # exception does not undo that at the database level,
+                    # so every migration attempt for every OTHER table later
+                    # in this same loop would then fail too, with a generic
+                    # "current transaction is aborted" error that has
+                    # nothing to do with those tables' own columns. This is
+                    # exactly what silently broke bot_positions.target_price/
+                    # stop_price tonight: something else earlier in this
+                    # loop failed first (Step 5's "DROP DEFAULT" fails
+                    # routinely and by design whenever no DEFAULT existed
+                    # yet - a strong candidate) and poisoned everything
+                    # after it. A savepoint's rollback is scoped to just
+                    # that one attempt, so one table's failure can never
+                    # take down every table processed after it again.
                     try:
-                        # Step 1: Kill any existing sequence (may be broken)
-                        await conn.execute(text(f'DROP SEQUENCE IF EXISTS "{seq}" CASCADE'))
+                        async with conn.begin_nested():
+                            # Step 1: Kill any existing sequence (may be broken)
+                            await conn.execute(text(f'DROP SEQUENCE IF EXISTS "{seq}" CASCADE'))
 
-                        # Step 2: Find current max ID so we don't collide
-                        max_val = 0
-                        try:
-                            result = await conn.execute(text(
-                                f'SELECT COALESCE(MAX("{column.name}"), 0) FROM "{table_name}"'
-                            ))
-                            max_val = result.scalar() or 0
-                        except Exception as query_err:
-                            log.debug(f"Could not query max({column.name}) on {table_name}: {query_err}")
+                            # Step 2: Find current max ID so we don't collide
+                            max_val = 0
+                            try:
+                                async with conn.begin_nested():
+                                    result = await conn.execute(text(
+                                        f'SELECT COALESCE(MAX("{column.name}"), 0) FROM "{table_name}"'
+                                    ))
+                                    max_val = result.scalar() or 0
+                            except Exception as query_err:
+                                log.debug(f"Could not query max({column.name}) on {table_name}: {query_err}")
 
-                        # Step 3: Create fresh sequence
-                        await conn.execute(text(f'CREATE SEQUENCE "{seq}" START {max_val + 1}'))
+                            # Step 3: Create fresh sequence
+                            await conn.execute(text(f'CREATE SEQUENCE "{seq}" START {max_val + 1}'))
 
-                        # Step 4: Own it
-                        await conn.execute(text(
-                            f'ALTER SEQUENCE "{seq}" OWNED BY "{table_name}"."{column.name}"'))
+                            # Step 4: Own it
+                            await conn.execute(text(
+                                f'ALTER SEQUENCE "{seq}" OWNED BY "{table_name}"."{column.name}"'))
 
-                        # Step 5: Drop existing DEFAULT if present (replace it)
-                        try:
+                            # Step 5: Drop existing DEFAULT if present (replace it) -
+                            # own savepoint since this is EXPECTED to fail whenever
+                            # no DEFAULT exists yet, which is the common case.
+                            try:
+                                async with conn.begin_nested():
+                                    await conn.execute(text(
+                                        f'ALTER TABLE "{table_name}" ALTER COLUMN "{column.name}" '
+                                        f'DROP DEFAULT'))
+                            except Exception:
+                                pass  # OK if no DEFAULT existed yet
+
+                            # Step 6: Set new DEFAULT that uses the sequence
                             await conn.execute(text(
                                 f'ALTER TABLE "{table_name}" ALTER COLUMN "{column.name}" '
-                                f'DROP DEFAULT'))
-                        except:
-                            pass  # OK if no DEFAULT existed yet
+                                f'SET DEFAULT nextval(\'{seq}\')'))
 
-                        # Step 6: Set new DEFAULT that uses the sequence
-                        await conn.execute(text(
-                            f'ALTER TABLE "{table_name}" ALTER COLUMN "{column.name}" '
-                            f'SET DEFAULT nextval(\'{seq}\')'))
-
-                        log.info(f"Migration OK: {table_name}.{column.name} "
-                                 f"auto-increment repaired via {seq} (max existing: {max_val}, "
-                                 f"sequence starts: {max_val + 1})")
-                        sequenced += 1
+                            log.info(f"Migration OK: {table_name}.{column.name} "
+                                     f"auto-increment repaired via {seq} (max existing: {max_val}, "
+                                     f"sequence starts: {max_val + 1})")
+                            sequenced += 1
                     except Exception as e:
                         log.error(f"Migration FAILED {table_name}.{column.name} "
                                   f"auto-increment: [{type(e).__name__}] {e}", exc_info=True)
@@ -529,15 +551,21 @@ async def run_migrations():
             for column in table.columns:
                 if column.name not in existing_columns:
                     try:
-                        ddl_type = column.type.compile(dialect=conn.dialect)
-                        # Always added nullable regardless of the model's own
-                        # nullable=False, even for required-looking columns like
-                        # name/email - a NOT NULL ALTER TABLE ADD COLUMN without a
-                        # default fails outright on Postgres if the table already
-                        # has rows, which is exactly the scenario this exists for.
-                        await conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN "{column.name}" {ddl_type}'))
-                        log.info(f"Migration OK: {table_name}.{column.name}")
-                        added += 1
+                        # Savepoint-isolated - see the comment on the
+                        # auto-increment block above for why this matters:
+                        # without it, one table's failed ADD COLUMN poisons
+                        # every other table's migration attempt for the
+                        # rest of this loop.
+                        async with conn.begin_nested():
+                            ddl_type = column.type.compile(dialect=conn.dialect)
+                            # Always added nullable regardless of the model's own
+                            # nullable=False, even for required-looking columns like
+                            # name/email - a NOT NULL ALTER TABLE ADD COLUMN without a
+                            # default fails outright on Postgres if the table already
+                            # has rows, which is exactly the scenario this exists for.
+                            await conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN "{column.name}" {ddl_type}'))
+                            log.info(f"Migration OK: {table_name}.{column.name}")
+                            added += 1
                     except Exception as e:
                         # WARNING, not debug. Reaching here means the column
                         # is genuinely absent from the real table AND the
@@ -585,11 +613,14 @@ async def run_migrations():
                         and not isinstance(column.type, SAEnum)
                         and isinstance(existing_columns[column.name], PGEnum)):
                     try:
-                        await conn.execute(text(
-                            f'ALTER TABLE {table_name} ALTER COLUMN "{column.name}" TYPE VARCHAR USING "{column.name}"::text'
-                        ))
-                        log.info(f"Migration OK: {table_name}.{column.name} converted from enum to VARCHAR")
-                        converted += 1
+                        # Savepoint-isolated - same reasoning as the other
+                        # two DDL blocks in this loop.
+                        async with conn.begin_nested():
+                            await conn.execute(text(
+                                f'ALTER TABLE {table_name} ALTER COLUMN "{column.name}" TYPE VARCHAR USING "{column.name}"::text'
+                            ))
+                            log.info(f"Migration OK: {table_name}.{column.name} converted from enum to VARCHAR")
+                            converted += 1
                     except Exception as e:
                         log.warning(f"Migration FAILED {table_name}.{column.name} type fix: "
                                     f"[{type(e).__name__}] {e}")
