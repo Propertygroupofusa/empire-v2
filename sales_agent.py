@@ -64,14 +64,14 @@ def research_lead(lead: Lead) -> dict:
 
     Based on the company profile, answer:
     1. What are the top 3 pain points this company likely faces?
-    2. Which of our services would be most valuable to them? (video_production, property_group, ai_course)
+    2. Which of our services would be most valuable to them? (video_production, property_group, ai_course, website_building)
     3. What recent activity or signals suggest they need our help now?
     4. Rate their fit on a scale 1-100.
 
     Respond in JSON format:
     {{
         "pain_points": ["...", "...", "..."],
-        "recommended_product": "video_production|property_group|ai_course",
+        "recommended_product": "video_production|property_group|ai_course|website_building",
         "urgency_signals": ["...", "..."],
         "fit_score": 75,
         "research_notes": "..."
@@ -116,12 +116,22 @@ def write_outreach(lead: Lead, outreach_type: OutreachType = OutreachType.INITIA
         product_pitch = """We help property managers and real estate teams automate
         client communication, document management, and lease processing.
         Save 10+ hours per week on administrative work."""
+    elif lead.target_product == "website_building":
+        product_pitch = """We noticed your business doesn't have a website yet. We build
+        professional, mobile-friendly websites for small businesses fast and affordably -
+        so customers searching for you online can actually find you, see what you offer,
+        and contact you, instead of finding nothing or just a social media page."""
     else:  # ai_course
         product_pitch = """We teach founders and developers how to build AI agents
         that automate business operations. Hundreds have built systems generating
         $1K-100K+ monthly revenue."""
 
-    # Mock mode - generate template emails when API key not available
+    # Mock mode - generate template emails when API key not available. Weaves
+    # in the actual product_pitch computed above (not just generic filler),
+    # since this is the branch that actually sends for real right now -
+    # ANTHROPIC_API_KEY isn't configured on this deployment, so every real
+    # send today goes through this template, not the Claude-personalized one.
+    pitch_summary = " ".join(product_pitch.split())
     if not client:
         if outreach_type == OutreachType.INITIAL:
             subject = f"Quick question about {lead.company_name}'s growth"
@@ -129,7 +139,7 @@ def write_outreach(lead: Lead, outreach_type: OutreachType = OutreachType.INITIA
 
 I came across {lead.company_name} and noticed you operate in {lead.industry}.
 
-We've been helping companies like yours with professional solutions in the space.
+{pitch_summary}
 
 Would you be open to a quick 15-minute call to explore if this could be valuable for your team?
 
@@ -139,7 +149,7 @@ Sales Team"""
             subject = f"Following up - {lead.company_name} opportunity"
             body = f"""Hi {lead.first_name},
 
-Just wanted to follow up on my previous message. Many companies in your space have found our solution cuts costs significantly.
+Just wanted to follow up on my previous message. {pitch_summary}
 
 Open to a quick conversation?
 
@@ -417,3 +427,30 @@ async def process_followups_bg():
     """
     async with AsyncSessionLocal() as db:
         await process_followups(db)
+
+
+PROCESSING_INTERVAL_SECONDS = int(os.getenv("SALES_AGENT_INTERVAL_SECONDS", "600"))
+
+
+async def run_periodic_processing():
+    """Runs process_new_leads and process_followups on a fixed interval
+    forever, so importing leads is genuinely hands-off ("fully automatic")
+    rather than requiring a manual POST /sales/process-leads call every
+    time. Started once from main.py's startup via asyncio.create_task -
+    this coroutine runs on the main event loop (sales_agent already uses
+    AsyncSessionLocal, the same async DB layer everything else on that
+    loop uses), not a separate OS thread the way the trading bots run,
+    since there's no blocking I/O here that would need one.
+
+    Any single cycle's failure is caught and logged, not left to kill the
+    loop - a real send failure (Gmail down, a DB hiccup) should not mean
+    every future lead sits unprocessed until the next deploy."""
+    logger.info(f"📧 Sales agent auto-processing started - every {PROCESSING_INTERVAL_SECONDS}s")
+    while True:
+        await asyncio.sleep(PROCESSING_INTERVAL_SECONDS)
+        try:
+            async with AsyncSessionLocal() as db:
+                await process_new_leads(db)
+                await process_followups(db)
+        except Exception as e:
+            logger.error(f"Sales agent auto-processing cycle failed: {e}", exc_info=True)

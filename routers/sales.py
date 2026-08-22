@@ -29,8 +29,15 @@ class LeadCreate(BaseModel):
     company_website: Optional[str] = None
     company_size: Optional[str] = None
     industry: Optional[str] = None
-    target_product: str  # "video_production", "property_group", "ai_course"
+    target_product: str = "website_building"  # "video_production", "property_group", "ai_course", "website_building"
     source: str = "manual"
+
+
+class BulkLeadImportResult(BaseModel):
+    created: int
+    skipped_existing: int
+    skipped_invalid: int
+    total_submitted: int
 
 
 class LeadResponse(BaseModel):
@@ -109,6 +116,53 @@ async def create_lead(lead_data: LeadCreate, db: AsyncSession = Depends(get_db))
         await db.rollback()
         logger.error(f"Failed to create lead: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/leads/bulk", response_model=BulkLeadImportResult)
+async def bulk_import_leads(leads_data: List[LeadCreate], db: AsyncSession = Depends(get_db)):
+    """Import a list of leads you already have (e.g. companies without a
+    website you've sourced yourself) in one call, instead of one-by-one via
+    POST /leads. Duplicates (by email) are skipped, not rejected - the
+    whole batch still goes through even if some entries already exist.
+    Every created lead lands with status=NEW, so the next automatic
+    processing cycle (see sales_agent.run_periodic_processing) picks it
+    up on its own - no separate step needed to start outreach."""
+    created = skipped_existing = skipped_invalid = 0
+
+    for lead_data in leads_data:
+        if not lead_data.email or not lead_data.company_name:
+            skipped_invalid += 1
+            continue
+
+        existing = await db.execute(select(Lead).where(Lead.email == lead_data.email))
+        if existing.scalar_one_or_none():
+            skipped_existing += 1
+            continue
+
+        db.add(Lead(
+            first_name=lead_data.first_name,
+            last_name=lead_data.last_name,
+            email=lead_data.email,
+            phone=lead_data.phone,
+            company_name=lead_data.company_name,
+            company_website=lead_data.company_website,
+            company_size=lead_data.company_size,
+            industry=lead_data.industry,
+            target_product=lead_data.target_product,
+            source=LeadSource.MANUAL,
+            status=LeadStatus.NEW,
+        ))
+        created += 1
+
+    await db.commit()
+    logger.info(f"Bulk lead import: {created} created, {skipped_existing} already existed, {skipped_invalid} invalid (of {len(leads_data)} submitted)")
+
+    return BulkLeadImportResult(
+        created=created,
+        skipped_existing=skipped_existing,
+        skipped_invalid=skipped_invalid,
+        total_submitted=len(leads_data),
+    )
 
 
 @router.get("/leads", response_model=List[LeadResponse])

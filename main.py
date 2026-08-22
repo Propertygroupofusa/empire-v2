@@ -1181,6 +1181,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Payout processor startup failed: {e}")
 
+    try:
+        from sales_agent import run_periodic_processing as run_sales_agent_processing
+        asyncio.create_task(run_sales_agent_processing())
+        log.info("📧 Sales agent auto-processing started (researches + emails new leads on a timer)")
+    except Exception as e:
+        log.warning(f"Sales agent auto-processing startup failed: {e}")
+
     # DISABLED: bot_autoscaler has NULL id constraint errors on Worker creation
     # (not critical for trading bot revenue - crypto/alpaca bots work independently)
     # TODO: Fix Worker ORM auto-increment flushing if job scaling becomes priority
