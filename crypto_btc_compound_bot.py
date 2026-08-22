@@ -34,6 +34,7 @@ that module's own in-memory state or its RSI/tiered-exit logic - the two
 strategies are meant to be swapped, not blended.
 """
 import base64
+import math
 import os
 import asyncio
 import logging
@@ -96,6 +97,24 @@ TARGET_MED_PCT = _safe_float_env("BTC_COMPOUND_TARGET_MED_PCT", "0.025")   # 2.5
 TARGET_HIGH_PCT = _safe_float_env("BTC_COMPOUND_TARGET_HIGH_PCT", "0.04")  # 4%
 
 ROUND_TRIP_FEE_RATE = _safe_float_env("BTC_COMPOUND_ROUND_TRIP_FEE_RATE", "0.008")  # ~0.4% each way, taker
+
+# EQUITY FLOOR RATCHET - same mechanism prop_bot.py uses, and for the same
+# reason: this does NOT make losing impossible (nothing can), but it stops
+# the account from giving back progress past a locked-in checkpoint. Every
+# time total account value (cash + any open position, marked to market)
+# crosses a new $EQUITY_FLOOR_TIER milestone, that milestone becomes the
+# new floor - permanently, it only ever moves up. If total value ever
+# drops below the CURRENT floor, the bot force-sells any open position
+# immediately (crystallizing whatever P&L exists at that instant) and
+# refuses new entries until value recovers back above the floor. There is
+# still a lag between price moving and the bot noticing (it checks once
+# per CYCLE_SECONDS), so a breach can still realize a real loss right at
+# the trigger - the floor bounds how far back you can slide, it doesn't
+# make each individual trade risk-free.
+EQUITY_FLOOR_TIER = _safe_float_env("BTC_COMPOUND_EQUITY_FLOOR_TIER", "50")
+EQUITY_FLOOR_BASE = _safe_float_env("BTC_COMPOUND_EQUITY_FLOOR_BASE", "0")
+EQUITY_FLOOR_STATE_KEY = "crypto_btc_compound_equity_floor"
+equity_floor = EQUITY_FLOOR_BASE
 
 # Module-level status, read by the trading dashboard - mirrors the pattern
 # crypto_coinbase_bot.py uses, so routers/trading_dashboard.py could read
@@ -264,6 +283,38 @@ async def _place_and_confirm(session, path: str, order: dict):
     return None
 
 
+async def load_equity_floor():
+    """Reload the ratcheted equity floor from the DB at startup, so a
+    Railway restart can't reset the ladder back down to the base level."""
+    global equity_floor
+    try:
+        from models import TradingBotState
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == EQUITY_FLOOR_STATE_KEY))
+            row = result.scalar_one_or_none()
+            if row and row.base_capital is not None:
+                equity_floor = max(EQUITY_FLOOR_BASE, row.base_capital)
+                log.info(f"[BTC-COMPOUND] 🪜 Reloaded equity floor from DB: ${equity_floor:,.2f}")
+    except Exception as e:
+        log.error(f"[BTC-COMPOUND] Failed to reload equity floor from DB: {e}")
+
+
+async def save_equity_floor(new_floor: float):
+    """Persist a raised equity floor so it survives restarts."""
+    try:
+        from models import TradingBotState
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == EQUITY_FLOOR_STATE_KEY))
+            row = result.scalar_one_or_none()
+            if row:
+                row.base_capital = new_floor
+            else:
+                db.add(TradingBotState(bot_name=EQUITY_FLOOR_STATE_KEY, base_capital=new_floor, starting_capital=EQUITY_FLOOR_BASE))
+            await db.commit()
+    except Exception as e:
+        log.error(f"[BTC-COMPOUND] Failed to persist equity floor: {e}")
+
+
 async def load_position():
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
@@ -290,8 +341,32 @@ async def clear_position():
             await session.commit()
 
 
+async def _sell_and_settle(session, position, reason: str):
+    """Shared by both the normal target/stop exit and a floor-breach forced
+    exit: place the market sell, confirm the real fill, record P&L, clear
+    the position. Returns True if it actually sold, False if it should be
+    retried next cycle."""
+    global daily_pnl
+    fill = await place_market_sell(session, position.qty)
+    if not fill:
+        log.warning(f"[BTC-COMPOUND] {reason} but sell did not fill - will retry next cycle")
+        return False
+    filled_qty, filled_price = fill
+    gross_pnl = (filled_price - position.entry_price) * filled_qty
+    fees = (position.entry_price * position.qty + filled_price * filled_qty) * (ROUND_TRIP_FEE_RATE / 2)
+    net_pnl = gross_pnl - fees
+    daily_pnl += net_pnl
+    await clear_position()
+    log.info(
+        f"[BTC-COMPOUND] SOLD {filled_qty:.8f} BTC @ ${filled_price:,.2f} ({reason}) | "
+        f"entry ${position.entry_price:,.2f} -> exit ${filled_price:,.2f} | "
+        f"P&L: {'+' if net_pnl >= 0 else ''}${net_pnl:.2f} after est. fees"
+    )
+    return True
+
+
 async def run_cycle():
-    global last_cycle_at, daily_pnl
+    global last_cycle_at, equity_floor
     last_cycle_at = datetime.now(timezone.utc)
 
     if not COINBASE_API_KEY_NAME or not COINBASE_API_PRIVATE_KEY:
@@ -300,17 +375,48 @@ async def run_cycle():
 
     async with aiohttp.ClientSession() as session:
         position = await load_position()
+        balance, balance_err = await get_usd_balance(session)
+        price, atr_pct = await get_price_and_volatility(session)
+
+        # Total account value right now: cash + open position marked to
+        # market. Skipped (not treated as zero) when either leg is
+        # unavailable, so a transient API hiccup can't falsely ratchet the
+        # floor down or falsely trigger a breach - it just waits for the
+        # next cycle when both are available again.
+        equity = None
+        if balance is not None:
+            equity = balance + (position.qty * price if position is not None and price is not None else 0.0)
+
+        if equity is not None and equity >= EQUITY_FLOOR_TIER:
+            candidate_floor = math.floor(equity / EQUITY_FLOOR_TIER) * EQUITY_FLOOR_TIER
+            if candidate_floor > equity_floor:
+                equity_floor = candidate_floor
+                await save_equity_floor(equity_floor)
+                log.info(f"[BTC-COMPOUND] 🪜 EQUITY FLOOR RAISED to ${equity_floor:,.2f} — will not trade below this again")
+
+        breached = equity is not None and equity < equity_floor
+
+        if breached:
+            if position is not None:
+                log.warning(
+                    f"[BTC-COMPOUND] 🛑 EQUITY FLOOR BREACH: ${equity:.2f} < locked floor ${equity_floor:,.2f} "
+                    f"— force-selling open position, pausing new entries"
+                )
+                if price is None:
+                    log.warning("[BTC-COMPOUND] No price available to force-sell - will retry next cycle")
+                    return
+                await _sell_and_settle(session, position, "EQUITY FLOOR BREACH - forced exit")
+            else:
+                log.info(f"[BTC-COMPOUND] 🛑 Equity ${equity:.2f} below locked floor ${equity_floor:,.2f} — new entries paused until it recovers")
+            return
 
         if position is None:
-            balance, err = await get_usd_balance(session)
             if balance is None:
-                log.warning(f"[BTC-COMPOUND] Balance unavailable ({err}) - skipping this cycle")
+                log.warning(f"[BTC-COMPOUND] Balance unavailable ({balance_err}) - skipping this cycle")
                 return
             if balance < MIN_TRADE_USD:
                 log.info(f"[BTC-COMPOUND] Balance ${balance:.2f} below minimum trade size ${MIN_TRADE_USD:.2f} - waiting")
                 return
-
-            price, atr_pct = await get_price_and_volatility(session)
             if price is None:
                 log.warning("[BTC-COMPOUND] Could not fetch BTC price/volatility - skipping this cycle")
                 return
@@ -327,45 +433,26 @@ async def run_cycle():
             log.info(
                 f"[BTC-COMPOUND] BOUGHT {filled_qty:.8f} BTC @ ${filled_price:,.2f} (${balance:.2f} deployed) | "
                 f"ATR volatility: {atr_pct*100:.2f}% -> target +{target_pct*100:.2f}% (${target_price:,.2f}) | "
-                f"stop -{STOP_LOSS_PCT*100:.2f}% (${stop_price:,.2f})"
+                f"stop -{STOP_LOSS_PCT*100:.2f}% (${stop_price:,.2f}) | floor ${equity_floor:,.2f}"
             )
             return
 
-        # Position open - check for target/stop, otherwise just report status.
-        price, _ = await get_price_and_volatility(session)
+        # Position open, not breached - check for target/stop, otherwise report status.
         if price is None:
             log.warning("[BTC-COMPOUND] Could not fetch current price - holding, will re-check next cycle")
             return
 
         unrealized_pct = (price / position.entry_price - 1) * 100
         if price >= position.target_price:
-            reason = "TARGET HIT"
+            await _sell_and_settle(session, position, "TARGET HIT")
         elif price <= position.stop_price:
-            reason = "STOP HIT"
+            await _sell_and_settle(session, position, "STOP HIT")
         else:
             log.info(
                 f"[BTC-COMPOUND] HOLDING {position.qty:.8f} BTC | entry ${position.entry_price:,.2f} | "
                 f"now ${price:,.2f} ({unrealized_pct:+.2f}%) | target ${position.target_price:,.2f} | "
-                f"stop ${position.stop_price:,.2f}"
+                f"stop ${position.stop_price:,.2f} | equity ${equity:.2f} | floor ${equity_floor:,.2f}"
             )
-            return
-
-        fill = await place_market_sell(session, position.qty)
-        if not fill:
-            log.warning(f"[BTC-COMPOUND] {reason} but sell did not fill - will retry next cycle")
-            return
-        filled_qty, filled_price = fill
-        gross_pnl = (filled_price - position.entry_price) * filled_qty
-        fees = (position.entry_price * position.qty + filled_price * filled_qty) * (ROUND_TRIP_FEE_RATE / 2)
-        net_pnl = gross_pnl - fees
-        daily_pnl += net_pnl
-        await clear_position()
-        log.info(
-            f"[BTC-COMPOUND] SOLD {filled_qty:.8f} BTC @ ${filled_price:,.2f} ({reason}) | "
-            f"entry ${position.entry_price:,.2f} -> exit ${filled_price:,.2f} | "
-            f"P&L: {'+' if net_pnl >= 0 else ''}${net_pnl:.2f} after est. fees | "
-            f"next cycle buys again with the resulting balance"
-        )
 
 
 def run():
@@ -373,6 +460,8 @@ def run():
     log.info("BTC COMPOUNDING LOOP BOT — single-position, adaptive target")
     log.info(f"Stop-loss: -{STOP_LOSS_PCT*100:.1f}% | Targets: {TARGET_LOW_PCT*100:.1f}%/{TARGET_MED_PCT*100:.1f}%/{TARGET_HIGH_PCT*100:.1f}% "
               f"(quiet/normal/volatile, by ATR%) | Min trade: ${MIN_TRADE_USD:.2f} | Cycle: {CYCLE_SECONDS}s")
+    log.info(f"Equity floor ratchet: locks in every ${EQUITY_FLOOR_TIER:,.0f} milestone, force-sells + pauses new "
+              f"entries if total value drops below the current floor (starts at ${EQUITY_FLOOR_BASE:,.2f})")
     log.info("=" * 60)
 
     # One persistent event loop for this thread's whole lifetime, not a new
@@ -380,6 +469,7 @@ def run():
     # under uvicorn's process-wide uvloop policy corrupts cross-cycle state).
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    loop.run_until_complete(load_equity_floor())
 
     while True:
         try:
