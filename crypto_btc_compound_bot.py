@@ -86,6 +86,17 @@ CYCLE_SECONDS = _safe_int_env("BTC_COMPOUND_CYCLE_SECONDS", "30")
 MIN_TRADE_USD = _safe_float_env("BTC_COMPOUND_MIN_TRADE_USD", "5.00")
 STOP_LOSS_PCT = _safe_float_env("BTC_COMPOUND_STOP_LOSS_PCT", "0.02")  # -2% default
 
+# Breakeven stop ratchet, per the account owner: a fresh position keeps the
+# full -STOP_LOSS_PCT room to work (pinning the stop at entry from tick one
+# would trip on ordinary bid/ask noise almost immediately, and still costs
+# the real ~ROUND_TRIP_FEE_RATE fee every time it does - more losing trades,
+# not fewer). Once a position has moved into profit by this much, its stop
+# is raised to its own entry price so it can never close below (about)
+# breakeven again - the account owner explicitly accepted eating the
+# round-trip fee on those as the cost of cutting off the rest of the
+# downside. Only ever moves up, checked every cycle.
+BREAKEVEN_TRIGGER_PCT = _safe_float_env("BTC_COMPOUND_BREAKEVEN_TRIGGER_PCT", "0.01")  # +1% default
+
 # Adaptive profit-target tiers, chosen by current ATR% (volatility):
 #   ATR% < VOL_LOW_THRESHOLD          -> TARGET_LOW_PCT   (quiet market)
 #   VOL_LOW_THRESHOLD..VOL_HIGH_THRESHOLD -> TARGET_MED_PCT (normal)
@@ -414,6 +425,17 @@ async def save_position(entry_price: float, qty: float, target_price: float, sto
         await session.commit()
 
 
+async def _raise_stop_to_breakeven(entry_price: float):
+    """Only ever moves the open position's stop UP to its own entry price -
+    never down, never past entry. See BREAKEVEN_TRIGGER_PCT."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
+        pos = result.scalar_one_or_none()
+        if pos and pos.stop_price is not None and pos.stop_price < entry_price:
+            pos.stop_price = entry_price
+            await session.commit()
+
+
 async def clear_position():
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
@@ -530,6 +552,14 @@ async def run_cycle():
         elif price <= position.stop_price:
             await _sell_and_settle(session, position, "STOP HIT")
         else:
+            if (position.stop_price is not None and position.stop_price < position.entry_price
+                    and price >= position.entry_price * (1 + BREAKEVEN_TRIGGER_PCT)):
+                await _raise_stop_to_breakeven(position.entry_price)
+                position.stop_price = position.entry_price
+                log.info(
+                    f"[BTC-COMPOUND] 🔒 stop raised to breakeven ${position.entry_price:,.2f} "
+                    f"(up {unrealized_pct:+.2f}%) - can no longer close below (about) even from here"
+                )
             log.info(
                 f"[BTC-COMPOUND] HOLDING {position.qty:.8f} BTC | entry ${position.entry_price:,.2f} | "
                 f"now ${price:,.2f} ({unrealized_pct:+.2f}%) | target ${position.target_price:,.2f} | "

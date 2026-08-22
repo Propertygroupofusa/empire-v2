@@ -108,6 +108,7 @@ MIN_TRADE_USD = engine.MIN_TRADE_USD
 CYCLE_SECONDS = engine.CYCLE_SECONDS
 STOP_LOSS_PCT = engine.STOP_LOSS_PCT
 ROUND_TRIP_FEE_RATE = engine.ROUND_TRIP_FEE_RATE
+BREAKEVEN_TRIGGER_PCT = engine.BREAKEVEN_TRIGGER_PCT  # see crypto_btc_compound_bot.py for the reasoning
 
 # Ordered eligibility list - BTC is the root, not in this list. Approximate
 # real launch year noted per entry; order is fixed and walked through once,
@@ -368,6 +369,17 @@ async def _save_branch_position(bot_name, product_id, entry_price, qty, target_p
             opened_at=datetime.utcnow(),
         ))
         await db.commit()
+
+
+async def _raise_branch_stop_to_breakeven(bot_name: str, entry_price: float):
+    """Only ever moves a position's stop UP to its own entry price - never
+    down, never past entry. See BREAKEVEN_TRIGGER_PCT."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(BotPosition).where(BotPosition.bot == bot_name))
+        pos = result.scalar_one_or_none()
+        if pos and pos.stop_price is not None and pos.stop_price < entry_price:
+            pos.stop_price = entry_price
+            await db.commit()
 
 
 async def _clear_branch_position(bot_name: str):
@@ -778,6 +790,14 @@ async def run_branch_cycle(bot_name: str) -> bool:
             # waiting for the next scheduled cycle.
             return await run_branch_cycle(bot_name)
         else:
+            if (position.stop_price is not None and position.stop_price < position.entry_price
+                    and price >= position.entry_price * (1 + BREAKEVEN_TRIGGER_PCT)):
+                await _raise_branch_stop_to_breakeven(bot_name, position.entry_price)
+                position.stop_price = position.entry_price
+                log.info(
+                    f"[TREE] 🔒 {bot_name} stop raised to breakeven ${position.entry_price:,.2f} "
+                    f"(up {unrealized_pct:+.2f}%) - can no longer close below (about) even from here"
+                )
             log.info(
                 f"[TREE] {bot_name} HOLDING {position.qty:.8f} {branch.product_id} | entry ${position.entry_price:,.2f} | "
                 f"now ${price:,.2f} ({unrealized_pct:+.2f}%) | target ${position.target_price:,.2f} | "

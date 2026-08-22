@@ -192,6 +192,19 @@
     .sell-btn:hover { background: var(--red); color: #fff; }
     .sell-btn:disabled { opacity: 0.5; cursor: default; }
 
+    .breakeven-badge {
+        display: inline-block;
+        font-size: 0.72em;
+        font-weight: 700;
+        vertical-align: middle;
+        margin-left: 4px;
+        padding: 1px 7px;
+        border-radius: 10px;
+        background: var(--green-bg);
+        color: var(--green);
+        border: 1px solid var(--green);
+    }
+
     .empty {
         text-align: center;
         color: var(--text-dim);
@@ -378,7 +391,14 @@ function branchCardHtml(b) {
         const p = b.position;
         const target = p.target_price != null ? fmtUsd(p.target_price) : '—';
         const stop = p.stop_price != null ? fmtUsd(p.stop_price) : '—';
-        posHtml = `<div class="node-position">📈 Entry ${fmtUsd(p.entry_price)} → target <span class="v pos">${target}</span> / stop <span class="v neg">${stop}</span></div>`;
+        // Once a position is up enough, its stop gets ratcheted up to entry
+        // price server-side (see BREAKEVEN_TRIGGER_PCT in
+        // crypto_family_tree_bot.py) so it can't close for a real loss
+        // beyond the round-trip fee - stop_price >= entry_price is exactly
+        // that state, computed the same way here as it is server-side.
+        const atBreakeven = p.stop_price != null && p.stop_price >= p.entry_price;
+        const breakevenTag = atBreakeven ? ' <span class="breakeven-badge">🔒 BREAKEVEN</span>' : '';
+        posHtml = `<div class="node-position">📈 Entry ${fmtUsd(p.entry_price)} → target <span class="v pos">${target}</span> / stop <span class="v neg">${stop}</span>${breakevenTag}</div>`;
         // Sells the CURRENT open position right now, at market, via the same
         // real exit path an automatic TARGET/STOP hit uses (see
         // sellBranch()) - the branch then automatically picks a new coin
