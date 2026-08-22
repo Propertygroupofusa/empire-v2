@@ -1519,6 +1519,19 @@ async def serve_family_tree_dashboard():
     return FileResponse(dashboard_path, media_type="text/html")
 
 
+@app.get("/alpaca-dashboard")
+async def serve_alpaca_dashboard():
+    """Serve the prop_bot.py (Alpaca) overview dashboard - same focused,
+    at-a-glance style as /family-tree-dashboard, gated by X-Admin-Key on
+    the /api/trading-dashboard/alpaca-overview endpoint it calls. A
+    simpler, read-only companion to the older /trading-dashboard, which
+    also handles withdrawal-request bookkeeping this page doesn't touch."""
+    dashboard_path = os.path.join(os.path.dirname(__file__), "alpaca_dashboard.html")
+    if not os.path.exists(dashboard_path):
+        raise HTTPException(status_code=404, detail="Alpaca dashboard not found")
+    return FileResponse(dashboard_path, media_type="text/html")
+
+
 @app.get("/api/orchestrator/stats")
 async def get_orchestrator_stats(db = Depends(lambda: None)):
     """Aggregate all earnings: video production + trading (prop + crypto)"""

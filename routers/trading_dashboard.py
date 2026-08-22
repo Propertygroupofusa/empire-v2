@@ -588,6 +588,78 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     }
 
 
+@router.get("/alpaca-overview", dependencies=[Depends(require_admin_key)])
+async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
+    """Real Alpaca account snapshot for a focused, at-a-glance dashboard:
+    equity, each bot_N bucket's capital/profit, every real open position,
+    and the same $1M-goal auto-scale progress prop_bot.py itself logs
+    every cycle (AUTO-SCALE: Equity $X -> Scale Yx | Progress to $1M: Z%).
+    Backs alpaca_dashboard.html - distinct from the older, denser /status
+    endpoint above, which this reuses the same bot-bucket helpers as but
+    doesn't overlap with (no withdrawal-request bookkeeping here)."""
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        raise HTTPException(status_code=500, detail="Alpaca credentials not configured")
+
+    async with aiohttp.ClientSession() as session:
+        account = await _fetch_alpaca_account(session)
+        positions = await _fetch_alpaca_positions(session)
+
+    try:
+        equity = float(account.get("equity", 0))
+        cash = float(account.get("cash", 0))
+        last_equity = float(account.get("last_equity", equity))
+    except (ValueError, TypeError) as e:
+        log.error(f"Failed to parse account fields: {e}")
+        raise HTTPException(status_code=502, detail="Invalid account data from Alpaca")
+
+    session_pl = equity - last_equity
+    session_pl_pct = (session_pl / last_equity * 100) if last_equity > 0 else 0.0
+
+    # Mirrors prop_bot.py's own get_auto_scale formula exactly (1.0x at
+    # $1K, scaling +0.01x per $1K earned, capped at 5.0x) - not importable
+    # directly since it's a local closure inside prop_bot's run loop, not
+    # a module-level function.
+    scale = round(min(1.0 + (equity / 100000.0), 5.0), 2)
+    goal = 1_000_000.0
+    progress_to_goal_pct = round(min(100.0, (equity / goal) * 100), 4)
+
+    # prop_bot's real in-memory ratchet, same read-only-module-state
+    # pattern /crypto-coinbase-status above already uses.
+    equity_floor = round(getattr(prop_bot_module, "equity_floor", 0.0), 2) if prop_bot_module else 0.0
+
+    bots = await _get_or_init_bots(db, equity)
+    rebalanced = _rebalance_bots(bots, equity)
+    if rebalanced != 0.0:
+        await db.commit()
+        for bot in bots:
+            await db.refresh(bot)
+
+    return {
+        "equity": round(equity, 2),
+        "cash": round(cash, 2),
+        "session_pl": round(session_pl, 2),
+        "session_pl_pct": round(session_pl_pct, 2),
+        "equity_floor": equity_floor,
+        "scale": scale,
+        "goal": goal,
+        "progress_to_goal_pct": progress_to_goal_pct,
+        "bots": [{"name": b.bot_name, "capital": round(b.base_capital, 2), "profit": round(_bot_profit(b), 2)} for b in bots],
+        "positions": [
+            {
+                "symbol": p.get("symbol"),
+                "side": p.get("side"),
+                "qty": p.get("qty"),
+                "avg_entry_price": p.get("avg_entry_price"),
+                "current_price": p.get("current_price"),
+                "market_value": p.get("market_value"),
+                "unrealized_pl": p.get("unrealized_pl"),
+                "unrealized_plpc": p.get("unrealized_plpc"),
+            }
+            for p in positions
+        ],
+    }
+
+
 # Chart-eligible symbols only - an explicit allowlist, checked before the
 # symbol is ever interpolated into an outbound URL, so this endpoint can
 # never be turned into an open SSRF proxy via an arbitrary path param.

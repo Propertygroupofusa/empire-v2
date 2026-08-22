@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>📈 Alpaca Dashboard - Prop Bot Overview</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+        font-family: 'Courier New', monospace;
+        background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+        color: #00ff00;
+        min-height: 100vh;
+        padding: 20px;
+    }
+
+    .container { max-width: 1200px; margin: 0 auto; }
+
+    .header {
+        text-align: center;
+        margin-bottom: 24px;
+        border-bottom: 2px solid #00ff00;
+        padding-bottom: 16px;
+    }
+    .header h1 { font-size: 2em; text-shadow: 0 0 10px #00ff00; margin-bottom: 6px; }
+    .header p { opacity: 0.7; font-size: 0.9em; }
+
+    .summary {
+        display: flex;
+        justify-content: center;
+        gap: 24px;
+        margin-bottom: 24px;
+        flex-wrap: wrap;
+    }
+    .summary .stat {
+        border: 1px solid #00ff0055;
+        background: #00ff0011;
+        padding: 14px 20px;
+        border-radius: 6px;
+        text-align: center;
+        min-width: 140px;
+    }
+    .summary .stat .label { font-size: 0.72em; opacity: 0.7; text-transform: uppercase; letter-spacing: 1px; }
+    .summary .stat .value { font-size: 1.5em; font-weight: bold; margin-top: 4px; }
+    .summary .stat .value.pos { color: #00ff88; }
+    .summary .stat .value.neg { color: #ff5566; }
+
+    #status { text-align: center; margin-bottom: 20px; opacity: 0.6; font-size: 0.85em; }
+    #status.error { color: #ff5555; opacity: 1; }
+
+    .section-title {
+        font-size: 1.1em;
+        margin: 24px 0 12px;
+        opacity: 0.85;
+        border-left: 3px solid #00ff00;
+        padding-left: 10px;
+    }
+
+    .goal-box {
+        border: 1px solid #ffcc0055;
+        background: #ffcc0011;
+        border-radius: 8px;
+        padding: 16px 18px;
+        margin-bottom: 10px;
+    }
+    .goal-top { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 0.9em; }
+    .goal-top .label { opacity: 0.7; }
+    .goal-top .value { font-weight: bold; color: #ffcc00; }
+    .progress-bar-bg {
+        width: 100%; height: 12px; background: #ffffff11;
+        border-radius: 6px; overflow: hidden; border: 1px solid #ffcc0033;
+    }
+    .progress-bar-fill {
+        height: 100%; background: linear-gradient(90deg, #ffcc00, #ff9900);
+        box-shadow: 0 0 6px #ffcc0088;
+        transition: width 0.4s ease;
+    }
+
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
+
+    .card {
+        border: 1px solid #00ff0055;
+        background: #05050f;
+        border-radius: 8px;
+        padding: 14px 16px;
+    }
+    .bot-name { font-size: 1.05em; font-weight: bold; margin-bottom: 8px; }
+    .row { display: flex; justify-content: space-between; font-size: 0.88em; margin: 3px 0; }
+    .row .k { opacity: 0.65; }
+    .row .v { font-weight: bold; }
+    .v.pos { color: #00ff88; }
+    .v.neg { color: #ff5566; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.88em; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #00ff0022; }
+    th { opacity: 0.7; text-transform: uppercase; font-size: 0.8em; letter-spacing: 0.5px; }
+    tr:last-child td { border-bottom: none; }
+
+    .empty { text-align: center; opacity: 0.6; padding: 30px; font-style: italic; }
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1>📈 Alpaca — Prop Bot Overview</h1>
+        <p>Real account data · auto-refreshes every 15s</p>
+    </div>
+
+    <div class="summary">
+        <div class="stat"><div class="label">Equity</div><div class="value" id="stat-equity">—</div></div>
+        <div class="stat"><div class="label">Cash</div><div class="value" id="stat-cash">—</div></div>
+        <div class="stat"><div class="label">Session P&amp;L</div><div class="value" id="stat-pl">—</div></div>
+        <div class="stat"><div class="label">Scale</div><div class="value" id="stat-scale">—</div></div>
+        <div class="stat"><div class="label">Floor</div><div class="value" id="stat-floor">—</div></div>
+    </div>
+
+    <div id="status">Loading…</div>
+
+    <div class="goal-box">
+        <div class="goal-top"><span class="label">Progress to $1,000,000 goal</span><span class="value" id="goal-pct">—</span></div>
+        <div class="progress-bar-bg"><div class="progress-bar-fill" id="goal-fill" style="width:0%"></div></div>
+    </div>
+
+    <div class="section-title">Buckets</div>
+    <div class="grid" id="bots"></div>
+
+    <div class="section-title">Open Positions</div>
+    <div id="positions"></div>
+</div>
+
+<script>
+const API_BASE = 'https://empire-v2-production.up.railway.app/api/trading-dashboard';
+const KEY_STORAGE = 'bmb_admin_key';
+let adminKey = localStorage.getItem(KEY_STORAGE) || '';
+
+function getAdminKey() {
+    if (!adminKey) {
+        adminKey = prompt('Enter admin key to load real Alpaca data:') || '';
+        if (adminKey) localStorage.setItem(KEY_STORAGE, adminKey);
+    }
+    return adminKey;
+}
+
+async function apiGet(path) {
+    const key = getAdminKey();
+    const res = await fetch(API_BASE + path, { headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' } });
+    if (res.status === 401 || res.status === 403) {
+        localStorage.removeItem(KEY_STORAGE);
+        adminKey = '';
+        throw new Error('Admin key rejected - refresh the page to re-enter it');
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+}
+
+function fmtUsd(n) {
+    return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function fmtPct(n) {
+    const v = Number(n);
+    return (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
+}
+
+function renderBots(bots) {
+    if (!bots.length) return '<div class="empty">No buckets yet</div>';
+    return bots.map(b => `
+        <div class="card">
+            <div class="bot-name">${b.name}</div>
+            <div class="row"><span class="k">Capital</span><span class="v">${fmtUsd(b.capital)}</span></div>
+            <div class="row"><span class="k">Profit</span><span class="v ${b.profit >= 0 ? 'pos' : 'neg'}">${fmtUsd(b.profit)}</span></div>
+        </div>`).join('');
+}
+
+function renderPositions(positions) {
+    if (!positions.length) return '<div class="empty">No open positions right now</div>';
+    const rows = positions.map(p => {
+        const pl = Number(p.unrealized_pl || 0);
+        const plpc = Number(p.unrealized_plpc || 0) * 100;
+        return `<tr>
+            <td>${p.symbol}</td>
+            <td>${p.side}</td>
+            <td>${p.qty}</td>
+            <td>${fmtUsd(p.avg_entry_price)}</td>
+            <td>${fmtUsd(p.current_price)}</td>
+            <td class="${pl >= 0 ? 'pos' : 'neg'}" style="font-weight:bold">${fmtUsd(pl)} (${fmtPct(plpc)})</td>
+        </tr>`;
+    }).join('');
+    return `<table>
+        <thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>Unrealized P&amp;L</th></tr></thead>
+        <tbody>${rows}</tbody>
+    </table>`;
+}
+
+async function refresh() {
+    const statusEl = document.getElementById('status');
+    try {
+        const data = await apiGet('/alpaca-overview');
+        document.getElementById('stat-equity').textContent = fmtUsd(data.equity);
+        document.getElementById('stat-cash').textContent = fmtUsd(data.cash);
+        const plEl = document.getElementById('stat-pl');
+        plEl.textContent = fmtUsd(data.session_pl) + ' (' + fmtPct(data.session_pl_pct) + ')';
+        plEl.className = 'value ' + (data.session_pl >= 0 ? 'pos' : 'neg');
+        document.getElementById('stat-scale').textContent = data.scale + 'x';
+        document.getElementById('stat-floor').textContent = fmtUsd(data.equity_floor);
+
+        document.getElementById('goal-pct').textContent = data.progress_to_goal_pct.toFixed(2) + '% of ' + fmtUsd(data.goal);
+        document.getElementById('goal-fill').style.width = Math.max(0.5, data.progress_to_goal_pct) + '%';
+
+        document.getElementById('bots').innerHTML = renderBots(data.bots);
+        document.getElementById('positions').innerHTML = renderPositions(data.positions);
+
+        statusEl.textContent = 'Last updated ' + new Date().toLocaleTimeString();
+        statusEl.className = '';
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    }
+}
+
+refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>
