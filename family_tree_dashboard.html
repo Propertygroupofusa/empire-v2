@@ -4,63 +4,118 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>🌳 Family Tree Dashboard - Coinbase Compounding</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
-    body {
-        font-family: 'Courier New', monospace;
-        background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
-        color: #00ff00;
-        min-height: 100vh;
-        padding: 20px;
+    :root {
+        --bg: #f3f5f9;
+        --panel: #ffffff;
+        --border: #e3e7ef;
+        --text: #16233f;
+        --text-dim: #6b7488;
+        --green: #009845;
+        --green-bg: #e8f6ee;
+        --red: #d6455a;
+        --red-bg: #fbe9ec;
+        --gold: #c9860a;
+        --gold-bg: #fbf1de;
+        --navy: #1f3864;
+        --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 2px 8px rgba(16,24,40,0.06);
     }
 
-    .container { max-width: 1200px; margin: 0 auto; }
+    body {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        min-height: 100vh;
+        padding: 24px;
+    }
+
+    .container { max-width: 1280px; margin: 0 auto; }
 
     .header {
-        text-align: center;
-        margin-bottom: 24px;
-        border-bottom: 2px solid #00ff00;
-        padding-bottom: 16px;
-    }
-    .header h1 { font-size: 2em; text-shadow: 0 0 10px #00ff00; margin-bottom: 6px; }
-    .header p { opacity: 0.7; font-size: 0.9em; }
-
-    .summary {
         display: flex;
-        justify-content: center;
-        gap: 30px;
-        margin-bottom: 24px;
+        justify-content: space-between;
+        align-items: flex-end;
+        margin-bottom: 22px;
         flex-wrap: wrap;
+        gap: 10px;
     }
-    .summary .stat {
-        border: 1px solid #00ff0055;
-        background: #00ff0011;
-        padding: 14px 22px;
-        border-radius: 6px;
-        text-align: center;
-        min-width: 150px;
+    .header h1 { font-size: 1.5em; font-weight: 800; color: var(--navy); }
+    .header p { color: var(--text-dim); font-size: 0.85em; margin-top: 2px; }
+    #status { color: var(--text-dim); font-size: 0.8em; }
+    #status.error { color: var(--red); font-weight: 600; }
+
+    .kpi-row {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 14px;
+        margin-bottom: 22px;
     }
-    .summary .stat .label { font-size: 0.75em; opacity: 0.7; text-transform: uppercase; letter-spacing: 1px; }
-    .summary .stat .value { font-size: 1.6em; font-weight: bold; margin-top: 4px; }
+    .kpi {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 16px 18px;
+        box-shadow: var(--shadow);
+    }
+    .kpi .label { font-size: 0.72em; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+    .kpi .value { font-size: 1.6em; font-weight: 800; color: var(--navy); margin-top: 4px; }
+    .kpi.gold .value { color: var(--gold); }
+    .kpi.gold { border-color: #f0dcae; background: var(--gold-bg); }
 
-    #status { text-align: center; margin-bottom: 20px; opacity: 0.6; font-size: 0.85em; }
-    #status.error { color: #ff5555; opacity: 1; }
+    .section-title {
+        font-size: 1.02em;
+        font-weight: 700;
+        color: var(--navy);
+        margin: 26px 0 12px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .section-title::before {
+        content: '';
+        width: 4px; height: 16px;
+        background: var(--green);
+        border-radius: 2px;
+        display: inline-block;
+    }
 
-    .tree { display: flex; flex-direction: column; gap: 14px; }
+    .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 18px 20px;
+        box-shadow: var(--shadow);
+        margin-bottom: 22px;
+    }
+    .panel-title { font-size: 0.95em; font-weight: 700; color: var(--navy); margin-bottom: 4px; }
+    .panel-sub { font-size: 0.78em; color: var(--text-dim); margin-bottom: 14px; }
+
+    .bar-list { display: flex; flex-direction: column; gap: 10px; }
+    .bar-row { display: grid; grid-template-columns: 110px 1fr 90px; align-items: center; gap: 10px; font-size: 0.82em; }
+    .bar-row .bar-label { color: var(--text-dim); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bar-track { background: #eef1f6; border-radius: 5px; height: 10px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 5px; background: linear-gradient(90deg, #ffcf5e, var(--gold)); }
+    .bar-row .bar-value { text-align: right; font-weight: 700; color: var(--navy); }
+
+    .tree { display: flex; flex-direction: column; gap: 12px; }
 
     .branch-row { display: flex; align-items: stretch; gap: 0; }
-    .branch-indent { flex-shrink: 0; }
 
     .card {
-        border: 1px solid #00ff0055;
-        background: #05050f;
-        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--panel);
+        border-radius: 10px;
         padding: 16px 18px;
         flex: 1;
         min-width: 0;
+        box-shadow: var(--shadow);
     }
-    .card.root { border-color: #ffcc00; background: #ffcc0011; }
+    .card.root { border-color: #f0dcae; background: var(--gold-bg); }
 
     .card-top {
         display: flex;
@@ -70,73 +125,74 @@
         gap: 8px;
         margin-bottom: 10px;
     }
-    .coin { font-size: 1.3em; font-weight: bold; }
+    .coin { font-size: 1.15em; font-weight: 800; color: var(--navy); }
     .coin .badge {
-        font-size: 0.55em;
+        font-size: 0.5em;
         vertical-align: middle;
         margin-left: 8px;
         padding: 2px 8px;
         border-radius: 10px;
-        border: 1px solid #ffcc00;
-        color: #ffcc00;
+        border: 1px solid var(--gold);
+        color: var(--gold);
+        font-weight: 700;
     }
-    .bot-name { font-size: 0.75em; opacity: 0.55; }
+    .bot-name { font-size: 0.72em; color: var(--text-dim); }
 
-    .row { display: flex; justify-content: space-between; font-size: 0.9em; margin: 3px 0; flex-wrap: wrap; gap: 6px; }
-    .row .k { opacity: 0.65; }
-    .row .v { font-weight: bold; }
-    .v.pos { color: #00ff88; }
-    .v.neg { color: #ff5566; }
+    .row { display: flex; justify-content: space-between; font-size: 0.85em; margin: 3px 0; flex-wrap: wrap; gap: 6px; }
+    .row .k { color: var(--text-dim); }
+    .row .v { font-weight: 700; color: var(--navy); }
+    .v.pos { color: var(--green); }
+    .v.neg { color: var(--red); }
 
     .progress-wrap { margin-top: 10px; }
-    .progress-label { display: flex; justify-content: space-between; font-size: 0.75em; opacity: 0.7; margin-bottom: 3px; }
+    .progress-label { display: flex; justify-content: space-between; font-size: 0.72em; color: var(--text-dim); margin-bottom: 3px; }
     .progress-bar-bg {
-        width: 100%; height: 10px; background: #ffffff11;
-        border-radius: 5px; overflow: hidden; border: 1px solid #00ff0033;
+        width: 100%; height: 9px; background: #eef1f6;
+        border-radius: 5px; overflow: hidden;
     }
     .progress-bar-fill {
-        height: 100%; background: linear-gradient(90deg, #00ff88, #00ff00);
-        box-shadow: 0 0 6px #00ff0088;
+        height: 100%; background: linear-gradient(90deg, var(--green), #00c46a);
         transition: width 0.4s ease;
     }
 
     .position-box {
         margin-top: 12px;
         padding: 10px 12px;
-        background: #00000055;
+        background: #f7f9fc;
         border-radius: 6px;
-        border-left: 3px solid #00ff00;
+        border-left: 3px solid var(--green);
     }
     .position-box.none {
-        border-left-color: #666;
-        opacity: 0.55;
+        border-left-color: #c7cede;
+        color: var(--text-dim);
         font-style: italic;
         font-size: 0.85em;
+        background: transparent;
     }
 
     .connector {
         width: 30px;
         position: relative;
-        opacity: 0.4;
+        opacity: 0.5;
     }
     .connector::before {
         content: '';
         position: absolute;
         left: 14px; top: -12px; bottom: 50%;
         width: 1px;
-        background: #00ff00;
+        background: #c7cede;
     }
     .connector::after {
         content: '';
         position: absolute;
         left: 14px; top: 50%;
         width: 14px; height: 1px;
-        background: #00ff00;
+        background: #c7cede;
     }
 
     .empty {
         text-align: center;
-        opacity: 0.6;
+        color: var(--text-dim);
         padding: 40px;
         font-style: italic;
     }
@@ -145,18 +201,27 @@
 <body>
 <div class="container">
     <div class="header">
-        <h1>🌳 Family Tree — Coinbase Compounding</h1>
-        <p>Live from the database · one card per branch, indented under its parent</p>
+        <div>
+            <h1>🌳 Family Tree — Coinbase Compounding</h1>
+            <p>Live from the database · one card per branch, indented under its parent</p>
+        </div>
+        <div id="status">Loading…</div>
     </div>
 
-    <div class="summary">
-        <div class="stat"><div class="label">Branches / Coins</div><div class="value" id="stat-count">—</div></div>
-        <div class="stat"><div class="label">Total Allocated</div><div class="value" id="stat-total">—</div></div>
-        <div class="stat" style="border-color:#ffcc0055;background:#ffcc0011"><div class="label">🔒 Locked Profit</div><div class="value" id="stat-locked" style="color:#ffcc00">—</div></div>
-        <div class="stat"><div class="label">Refreshed</div><div class="value" id="stat-refreshed" style="font-size:1em">—</div></div>
+    <div class="kpi-row">
+        <div class="kpi"><div class="label">Branches / Coins</div><div class="value" id="stat-count">—</div></div>
+        <div class="kpi"><div class="label">Total Allocated</div><div class="value" id="stat-total">—</div></div>
+        <div class="kpi gold"><div class="label">🔒 Locked Profit</div><div class="value" id="stat-locked">—</div></div>
+        <div class="kpi"><div class="label">Refreshed</div><div class="value" id="stat-refreshed" style="font-size:1em">—</div></div>
     </div>
 
-    <div id="status">Loading…</div>
+    <div class="panel">
+        <div class="panel-title">Branch Ranking by Allocated Balance</div>
+        <div class="panel-sub">Real per-branch USD, largest first - the same numbers behind the tree below</div>
+        <div id="branches-bar" class="bar-list"></div>
+    </div>
+
+    <div class="section-title">Tree</div>
     <div class="tree" id="tree"></div>
 </div>
 
@@ -187,6 +252,20 @@ async function apiGet(path) {
 
 function fmtUsd(n) {
     return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function renderBarList(containerId, items) {
+    const el = document.getElementById(containerId);
+    if (!items.length) { el.innerHTML = '<div class="empty">No branches yet</div>'; return; }
+    const max = Math.max(1, ...items.map(i => i.value));
+    el.innerHTML = items.slice().sort((a, b) => b.value - a.value).map(i => {
+        const pct = (i.value / max) * 100;
+        return `<div class="bar-row">
+            <span class="bar-label">${i.label}</span>
+            <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+            <span class="bar-value">${fmtUsd(i.value)}</span>
+        </div>`;
+    }).join('');
 }
 
 function branchCard(b) {
@@ -250,7 +329,10 @@ async function refresh() {
         document.getElementById('stat-total').textContent = fmtUsd(data.total_allocated_usd);
         document.getElementById('stat-locked').textContent = fmtUsd(data.locked_usd || 0);
         document.getElementById('stat-refreshed').textContent = new Date().toLocaleTimeString();
-        document.getElementById('tree').innerHTML = renderTree(data.branches);
+
+        const branches = data.branches || [];
+        renderBarList('branches-bar', branches.map(b => ({ label: b.product_id.replace('-USD', ''), value: b.allocated_usd })));
+        document.getElementById('tree').innerHTML = renderTree(branches);
         statusEl.textContent = '';
         statusEl.className = '';
     } catch (e) {

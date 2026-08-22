@@ -4,148 +4,203 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>📈 Alpaca Dashboard - Prop Bot Overview</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
-    body {
-        font-family: 'Courier New', monospace;
-        background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
-        color: #00ff00;
-        min-height: 100vh;
-        padding: 20px;
+    :root {
+        --bg: #f3f5f9;
+        --panel: #ffffff;
+        --border: #e3e7ef;
+        --text: #16233f;
+        --text-dim: #6b7488;
+        --green: #009845;
+        --green-bg: #e8f6ee;
+        --red: #d6455a;
+        --red-bg: #fbe9ec;
+        --orange: #e8752c;
+        --navy: #1f3864;
+        --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 2px 8px rgba(16,24,40,0.06);
     }
 
-    .container { max-width: 1200px; margin: 0 auto; }
+    body {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        min-height: 100vh;
+        padding: 24px;
+    }
+
+    .container { max-width: 1280px; margin: 0 auto; }
 
     .header {
-        text-align: center;
-        margin-bottom: 24px;
-        border-bottom: 2px solid #00ff00;
-        padding-bottom: 16px;
-    }
-    .header h1 { font-size: 2em; text-shadow: 0 0 10px #00ff00; margin-bottom: 6px; }
-    .header p { opacity: 0.7; font-size: 0.9em; }
-
-    .summary {
         display: flex;
-        justify-content: center;
-        gap: 24px;
-        margin-bottom: 24px;
+        justify-content: space-between;
+        align-items: flex-end;
+        margin-bottom: 22px;
         flex-wrap: wrap;
+        gap: 10px;
     }
-    .summary .stat {
-        border: 1px solid #00ff0055;
-        background: #00ff0011;
-        padding: 14px 20px;
-        border-radius: 6px;
-        text-align: center;
-        min-width: 140px;
-    }
-    .summary .stat .label { font-size: 0.72em; opacity: 0.7; text-transform: uppercase; letter-spacing: 1px; }
-    .summary .stat .value { font-size: 1.5em; font-weight: bold; margin-top: 4px; }
-    .summary .stat .value.pos { color: #00ff88; }
-    .summary .stat .value.neg { color: #ff5566; }
+    .header h1 { font-size: 1.5em; font-weight: 800; color: var(--navy); }
+    .header p { color: var(--text-dim); font-size: 0.85em; margin-top: 2px; }
+    #status { color: var(--text-dim); font-size: 0.8em; }
+    #status.error { color: var(--red); font-weight: 600; }
 
-    #status { text-align: center; margin-bottom: 20px; opacity: 0.6; font-size: 0.85em; }
-    #status.error { color: #ff5555; opacity: 1; }
+    .kpi-row {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 14px;
+        margin-bottom: 22px;
+    }
+    .kpi {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 16px 18px;
+        box-shadow: var(--shadow);
+    }
+    .kpi .label { font-size: 0.72em; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+    .kpi .value { font-size: 1.6em; font-weight: 800; color: var(--navy); margin-top: 4px; }
+    .kpi .value.pos { color: var(--green); }
+    .kpi .value.neg { color: var(--red); }
 
     .section-title {
-        font-size: 1.1em;
-        margin: 24px 0 12px;
-        opacity: 0.85;
-        border-left: 3px solid #00ff00;
-        padding-left: 10px;
+        font-size: 1.02em;
+        font-weight: 700;
+        color: var(--navy);
+        margin: 26px 0 12px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .section-title::before {
+        content: '';
+        width: 4px; height: 16px;
+        background: var(--green);
+        border-radius: 2px;
+        display: inline-block;
     }
 
-    .goal-box {
-        border: 1px solid #ffcc0055;
-        background: #ffcc0011;
-        border-radius: 8px;
-        padding: 16px 18px;
-        margin-bottom: 10px;
+    .grid-2 {
+        display: grid;
+        grid-template-columns: 1.3fr 1fr;
+        gap: 16px;
+        align-items: start;
     }
-    .goal-top { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 0.9em; }
-    .goal-top .label { opacity: 0.7; }
-    .goal-top .value { font-weight: bold; color: #ffcc00; }
-    .progress-bar-bg {
-        width: 100%; height: 12px; background: #ffffff11;
-        border-radius: 6px; overflow: hidden; border: 1px solid #ffcc0033;
-    }
-    .progress-bar-fill {
-        height: 100%; background: linear-gradient(90deg, #ffcc00, #ff9900);
-        box-shadow: 0 0 6px #ffcc0088;
-        transition: width 0.4s ease;
-    }
+    @media (max-width: 860px) { .grid-2 { grid-template-columns: 1fr; } }
 
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
+    .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 18px 20px;
+        box-shadow: var(--shadow);
+    }
+    .panel-title { font-size: 0.95em; font-weight: 700; color: var(--navy); margin-bottom: 4px; }
+    .panel-sub { font-size: 0.78em; color: var(--text-dim); margin-bottom: 14px; }
 
+    /* Gauge */
+    .gauge-wrap { display: flex; flex-direction: column; align-items: center; }
+    .gauge-value { font-size: 1.7em; font-weight: 800; color: var(--navy); margin-top: 6px; }
+    .gauge-caption { font-size: 0.78em; color: var(--text-dim); margin-top: 2px; }
+
+    /* Horizontal bar list */
+    .bar-list { display: flex; flex-direction: column; gap: 10px; }
+    .bar-row { display: grid; grid-template-columns: 70px 1fr 70px; align-items: center; gap: 10px; font-size: 0.82em; }
+    .bar-row .bar-label { color: var(--text-dim); font-weight: 600; }
+    .bar-track { background: #eef1f6; border-radius: 5px; height: 10px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 5px; background: linear-gradient(90deg, var(--green), #00c46a); }
+    .bar-fill.neg { background: linear-gradient(90deg, var(--red), #f0798a); }
+    .bar-row .bar-value { text-align: right; font-weight: 700; color: var(--navy); }
+
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; }
     .card {
-        border: 1px solid #00ff0055;
-        background: #05050f;
-        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--panel);
+        border-radius: 10px;
         padding: 14px 16px;
+        box-shadow: var(--shadow);
     }
-    .bot-name { font-size: 1.05em; font-weight: bold; margin-bottom: 8px; }
-    .row { display: flex; justify-content: space-between; font-size: 0.88em; margin: 3px 0; }
-    .row .k { opacity: 0.65; }
-    .row .v { font-weight: bold; }
-    .v.pos { color: #00ff88; }
-    .v.neg { color: #ff5566; }
+    .bot-name { font-size: 0.85em; font-weight: 700; color: var(--navy); margin-bottom: 8px; }
+    .row { display: flex; justify-content: space-between; font-size: 0.85em; margin: 3px 0; }
+    .row .k { color: var(--text-dim); }
+    .row .v { font-weight: 700; color: var(--navy); }
+    .v.pos { color: var(--green); }
+    .v.neg { color: var(--red); }
 
-    table { width: 100%; border-collapse: collapse; font-size: 0.88em; }
-    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #00ff0022; }
-    th { opacity: 0.7; text-transform: uppercase; font-size: 0.8em; letter-spacing: 0.5px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+    th, td { text-align: left; padding: 10px 10px; border-bottom: 1px solid var(--border); }
+    th { color: var(--text-dim); text-transform: uppercase; font-size: 0.72em; letter-spacing: 0.4px; font-weight: 700; }
     tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #fafbfd; }
 
-    .empty { text-align: center; opacity: 0.6; padding: 30px; font-style: italic; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 0.78em; font-weight: 700; }
+    .pill.pos { background: var(--green-bg); color: var(--green); }
+    .pill.neg { background: var(--red-bg); color: var(--red); }
 
     .close-btn {
-        font-family: 'Courier New', monospace;
-        background: #ff556622;
-        border: 1px solid #ff5566;
-        color: #ff5566;
+        font-family: inherit;
+        background: var(--red-bg);
+        border: 1px solid var(--red);
+        color: var(--red);
         padding: 5px 12px;
-        border-radius: 4px;
+        border-radius: 6px;
         cursor: pointer;
-        font-size: 0.85em;
+        font-size: 0.82em;
+        font-weight: 600;
     }
-    .close-btn:hover { background: #ff556644; }
+    .close-btn:hover { background: var(--red); color: #fff; }
     .close-btn:disabled { opacity: 0.5; cursor: default; }
-    .no-date { opacity: 0.5; font-style: italic; }
+    .no-date { color: var(--text-dim); font-style: italic; }
+
+    .empty { text-align: center; color: var(--text-dim); padding: 30px; font-style: italic; }
 </style>
 </head>
 <body>
 <div class="container">
     <div class="header">
-        <h1>📈 Alpaca — Prop Bot Overview</h1>
-        <p>Real account data · auto-refreshes every 15s</p>
+        <div>
+            <h1>📈 Alpaca — Prop Bot Overview</h1>
+            <p>Real account data · auto-refreshes every 15s</p>
+        </div>
+        <div id="status">Loading…</div>
     </div>
 
-    <div class="summary">
-        <div class="stat"><div class="label">Equity</div><div class="value" id="stat-equity">—</div></div>
-        <div class="stat"><div class="label">Cash</div><div class="value" id="stat-cash">—</div></div>
-        <div class="stat"><div class="label">Session P&amp;L</div><div class="value" id="stat-pl">—</div></div>
-        <div class="stat"><div class="label">Scale</div><div class="value" id="stat-scale">—</div></div>
-        <div class="stat"><div class="label">Floor</div><div class="value" id="stat-floor">—</div></div>
+    <div class="kpi-row">
+        <div class="kpi"><div class="label">Equity</div><div class="value" id="stat-equity">—</div></div>
+        <div class="kpi"><div class="label">Cash</div><div class="value" id="stat-cash">—</div></div>
+        <div class="kpi"><div class="label">Session P&amp;L</div><div class="value" id="stat-pl">—</div></div>
+        <div class="kpi"><div class="label">Scale</div><div class="value" id="stat-scale">—</div></div>
+        <div class="kpi"><div class="label">Floor</div><div class="value" id="stat-floor">—</div></div>
     </div>
 
-    <div id="status">Loading…</div>
-
-    <div class="goal-box">
-        <div class="goal-top"><span class="label">Progress to $1,000,000 goal</span><span class="value" id="goal-pct">—</span></div>
-        <div class="progress-bar-bg"><div class="progress-bar-fill" id="goal-fill" style="width:0%"></div></div>
+    <div class="grid-2">
+        <div class="panel">
+            <div class="panel-title">Progress to $1,000,000 Goal</div>
+            <div class="panel-sub">Current equity vs. the long-run target</div>
+            <div id="goal-gauge" class="gauge-wrap"></div>
+        </div>
+        <div class="panel">
+            <div class="panel-title">Bucket Profit Ranking</div>
+            <div class="panel-sub">Each bot_N bucket's real gain since it started tracking</div>
+            <div id="bots-bar" class="bar-list"></div>
+        </div>
     </div>
 
     <div class="section-title">Buckets</div>
     <div class="grid" id="bots"></div>
 
     <div class="section-title">Open Positions</div>
-    <p style="opacity:0.55; font-size:0.8em; margin-bottom:10px;">
+    <p class="panel-sub" style="margin-bottom:10px;">
         Opened = real fill time of the order that opened the position. No bot enforces a scheduled close
         date - each position exits on its own trigger (RSI overbought, profit target, or stop loss), not a
         calendar date. Use Close to exit manually before that happens.
     </p>
-    <div id="positions"></div>
+    <div class="panel" style="padding:0; overflow-x:auto;">
+        <div id="positions" style="padding: 8px 20px;"></div>
+    </div>
 </div>
 
 <script>
@@ -181,6 +236,38 @@ function fmtPct(n) {
     return (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
 }
 
+// Semi-circle SVG gauge - real, computed value, no third-party chart lib.
+function renderGauge(containerId, pct, caption) {
+    const clamped = Math.max(0, Math.min(100, pct));
+    const r = 70, cx = 90, cy = 90;
+    const startAngle = Math.PI, endAngle = Math.PI - (clamped / 100) * Math.PI;
+    const x1 = cx + r * Math.cos(startAngle), y1 = cy + r * Math.sin(startAngle);
+    const x2 = cx + r * Math.cos(endAngle), y2 = cy + r * Math.sin(endAngle);
+    const largeArc = clamped > 50 ? 1 : 0;
+    const svg = `
+        <svg width="180" height="100" viewBox="0 0 180 100">
+            <path d="M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}" fill="none" stroke="#eef1f6" stroke-width="16" stroke-linecap="round"/>
+            <path d="M ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2}" fill="none" stroke="#009845" stroke-width="16" stroke-linecap="round"/>
+        </svg>`;
+    document.getElementById(containerId).innerHTML = svg +
+        `<div class="gauge-value">${clamped.toFixed(2)}%</div><div class="gauge-caption">${caption}</div>`;
+}
+
+function renderBarList(containerId, items) {
+    const el = document.getElementById(containerId);
+    if (!items.length) { el.innerHTML = '<div class="empty">No data yet</div>'; return; }
+    const maxAbs = Math.max(1, ...items.map(i => Math.abs(i.value)));
+    el.innerHTML = items.map(i => {
+        const pct = (Math.abs(i.value) / maxAbs) * 100;
+        const neg = i.value < 0 ? ' neg' : '';
+        return `<div class="bar-row">
+            <span class="bar-label">${i.label}</span>
+            <div class="bar-track"><div class="bar-fill${neg}" style="width:${pct}%"></div></div>
+            <span class="bar-value">${fmtUsd(i.value)}</span>
+        </div>`;
+    }).join('');
+}
+
 function renderBots(bots) {
     if (!bots.length) return '<div class="empty">No buckets yet</div>';
     return bots.map(b => `
@@ -204,12 +291,12 @@ function renderPositions(positions) {
         const pl = Number(p.unrealized_pl || 0);
         const plpc = Number(p.unrealized_plpc || 0) * 100;
         return `<tr>
-            <td>${p.symbol}</td>
+            <td><strong>${p.symbol}</strong></td>
             <td>${p.side}</td>
             <td>${p.qty}</td>
             <td>${fmtUsd(p.avg_entry_price)}</td>
             <td>${fmtUsd(p.current_price)}</td>
-            <td class="${pl >= 0 ? 'pos' : 'neg'}" style="font-weight:bold">${fmtUsd(pl)} (${fmtPct(plpc)})</td>
+            <td><span class="pill ${pl >= 0 ? 'pos' : 'neg'}">${fmtUsd(pl)} (${fmtPct(plpc)})</span></td>
             <td>${fmtOpenedAt(p.opened_at)}</td>
             <td><button class="close-btn" onclick="closePosition('${p.symbol}', this)">Close</button></td>
         </tr>`;
@@ -253,10 +340,11 @@ async function refresh() {
         document.getElementById('stat-scale').textContent = data.scale + 'x';
         document.getElementById('stat-floor').textContent = fmtUsd(data.equity_floor);
 
-        document.getElementById('goal-pct').textContent = data.progress_to_goal_pct.toFixed(2) + '% of ' + fmtUsd(data.goal);
-        document.getElementById('goal-fill').style.width = Math.max(0.5, data.progress_to_goal_pct) + '%';
+        renderGauge('goal-gauge', data.progress_to_goal_pct, fmtUsd(data.equity) + ' of ' + fmtUsd(data.goal));
 
-        document.getElementById('bots').innerHTML = renderBots(data.bots);
+        const bots = data.bots || [];
+        renderBarList('bots-bar', bots.map(b => ({ label: b.name, value: b.profit })));
+        document.getElementById('bots').innerHTML = renderBots(bots);
         document.getElementById('positions').innerHTML = renderPositions(data.positions);
 
         statusEl.textContent = 'Last updated ' + new Date().toLocaleTimeString();
