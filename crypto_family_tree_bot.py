@@ -146,9 +146,10 @@ async def get_next_eligible_product_id():
 async def find_most_volatile_unclaimed_coin(session):
     """Among the family-tree coins not already claimed by any existing
     branch, finds the most volatile coin that's ALSO currently bullish
-    (price up over the ~25-hour candle window) - used only when a branch
-    takes a real loss past its floor and switches coins rather than
-    continuing to grind the one that just cost it money. Requiring bullish
+    (price up over the ~25-hour candle window) - called after every branch
+    exit (a TARGET HIT, a STOP HIT, or a floor-breach forced exit) so a
+    branch moves on to a new coin instead of repeatedly re-buying the one
+    it just traded. Requiring bullish
     first means it's chasing a coin that's actually trending in a useful
     direction, not just one that's swinging randomly; volatility as the
     tiebreaker among bullish candidates means more chances for the
@@ -398,16 +399,13 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
 
     await _clear_branch_position(bot_name)
 
-    # After a real loss forces the floor-breach exit, look for a currently
-    # unclaimed coin with higher volatility rather than automatically
-    # re-buying the same coin that just cost money. Looked up before the
-    # update transaction below opens, using the DB's still-current claimed
-    # set (this branch's own coin included), so it can never "switch" to
-    # itself. A normal TARGET/STOP HIT exit never triggers this - a branch
-    # that isn't floor-breached keeps trading whatever's been assigned to it.
-    new_product_id = new_product_atr = None
-    if reason.startswith("EQUITY FLOOR BREACH"):
-        new_product_id, new_product_atr = await find_most_volatile_unclaimed_coin(session)
+    # Every exit - a profitable TARGET HIT, a STOP HIT, or a floor-breach
+    # forced exit - now looks for a new coin to move to rather than
+    # automatically re-buying the same one just traded. Looked up before
+    # the update transaction below opens, using the DB's still-current
+    # claimed set (this branch's own coin included), so it can never
+    # "switch" to itself.
+    new_product_id, new_product_atr = await find_most_volatile_unclaimed_coin(session)
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
@@ -430,9 +428,9 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
                 log.info(f"[TREE] 🪜 {bot_name} floor lowered ${row.equity_floor:,.2f} -> ${new_tier_floor:,.2f} to match post-sale balance ${new_allocated:.2f}")
                 row.equity_floor = new_tier_floor
             if new_product_id:
-                log.info(f"[TREE] 🔀 {bot_name} switching {row.product_id} -> {new_product_id} (ATR {new_product_atr*100:.2f}%) after floor-breach loss")
+                log.info(f"[TREE] 🔀 {bot_name} switching {row.product_id} -> {new_product_id} (ATR {new_product_atr*100:.2f}%) after {reason}")
                 row.product_id = new_product_id
-            elif reason.startswith("EQUITY FLOOR BREACH"):
+            else:
                 log.info(f"[TREE] {bot_name}: no unclaimed coin available to switch to - staying on {row.product_id}")
             await db.commit()
 
@@ -533,10 +531,14 @@ async def run_branch_cycle(bot_name: str) -> bool:
             return True
 
         unrealized_pct = (price / position.entry_price - 1) * 100
-        if price >= position.target_price:
-            await _branch_sell_and_settle(session, bot_name, branch.product_id, position, "TARGET HIT")
-        elif price <= position.stop_price:
-            await _branch_sell_and_settle(session, bot_name, branch.product_id, position, "STOP HIT")
+        if price >= position.target_price or price <= position.stop_price:
+            exit_reason = "TARGET HIT" if price >= position.target_price else "STOP HIT"
+            await _branch_sell_and_settle(session, bot_name, branch.product_id, position, exit_reason)
+            # _branch_sell_and_settle already picked the branch's next coin -
+            # re-run immediately (same reasoning as the floor-breach path
+            # above) so the rebuy happens in this same pass instead of
+            # waiting for the next scheduled cycle.
+            return await run_branch_cycle(bot_name)
         else:
             log.info(
                 f"[TREE] {bot_name} HOLDING {position.qty:.8f} {branch.product_id} | entry ${position.entry_price:,.2f} | "
