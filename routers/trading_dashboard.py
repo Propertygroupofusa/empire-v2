@@ -158,8 +158,19 @@ def _bot_profit(bot: TradingBotState) -> float:
     never-updated starting_capital snapshot, floored at 0 (a bucket that's
     currently underwater has no profit to withdraw, even though its
     base_capital is still its own whole withdrawable balance)."""
+    return max(0.0, _bot_pl(bot))
+
+
+def _bot_pl(bot: TradingBotState) -> float:
+    """Same delta as _bot_profit but NOT floored at 0 - the real signed
+    gain or loss since this bucket started. _bot_profit's floor exists for
+    withdrawal eligibility (you can't withdraw a loss), which is a
+    different question from "is this bucket actually up or down" - a
+    waterfall/bridge chart needs the real signed number, not the
+    withdrawal-eligible one, or a bucket that's underwater would silently
+    show as flat instead of red."""
     baseline = bot.starting_capital if bot.starting_capital is not None else bot.base_capital
-    return max(0.0, bot.base_capital - baseline)
+    return bot.base_capital - baseline
 
 
 async def _fetch_dividend_activities(session: aiohttp.ClientSession) -> list:
@@ -358,7 +369,7 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
         "session_pl_pct": round(session_pl_pct, 2),
         "active_positions": len(positions),
         "todays_trade_count": len(todays_orders),
-        "bots": [{"name": b.bot_name, "capital": round(b.base_capital, 2), "profit": round(_bot_profit(b), 2)} for b in bots],
+        "bots": [{"name": b.bot_name, "capital": round(b.base_capital, 2), "profit": round(_bot_profit(b), 2), "pl": round(_bot_pl(b), 2)} for b in bots],
         "total_committed_capital": round(total_committed, 2),
         "rebalanced_this_check": round(rebalanced, 2),
         "total_withdrawn": round(total_withdrawn, 2),
@@ -682,7 +693,7 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
         "scale": scale,
         "goal": goal,
         "progress_to_goal_pct": progress_to_goal_pct,
-        "bots": [{"name": b.bot_name, "capital": round(b.base_capital, 2), "profit": round(_bot_profit(b), 2)} for b in bots],
+        "bots": [{"name": b.bot_name, "capital": round(b.base_capital, 2), "profit": round(_bot_profit(b), 2), "pl": round(_bot_pl(b), 2)} for b in bots],
         "positions": [
             {
                 "symbol": p.get("symbol"),

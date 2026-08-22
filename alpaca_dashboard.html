@@ -156,6 +156,19 @@
     .no-date { color: var(--text-dim); font-style: italic; }
 
     .empty { text-align: center; color: var(--text-dim); padding: 30px; font-style: italic; }
+
+    .narrative {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 18px;
+        box-shadow: var(--shadow);
+        margin-bottom: 22px;
+        font-size: 0.92em;
+        color: var(--text);
+        line-height: 1.5;
+    }
+    .narrative::before { content: '💡 '; }
 </style>
 </head>
 <body>
@@ -167,6 +180,8 @@
         </div>
         <div id="status">Loading…</div>
     </div>
+
+    <div class="narrative" id="narrative">Loading account summary…</div>
 
     <div class="kpi-row">
         <div class="kpi"><div class="label">Equity</div><div class="value" id="stat-equity">—</div></div>
@@ -188,6 +203,15 @@
             <div id="bots-bar" class="bar-list"></div>
         </div>
     </div>
+
+    <div class="section-title">Bucket Profit Bridge</div>
+    <p class="panel-sub" style="margin-bottom:10px;">
+        Real signed gain/loss per bucket - starting capital on the left, current equity on the right,
+        each bucket's own change floating in between. A bucket underwater shows red here even though it's
+        still fully withdrawable (the Buckets cards below floor a loss at $0.00, since you can't withdraw
+        a negative amount).
+    </p>
+    <div class="panel"><div id="waterfall"></div></div>
 
     <div class="section-title">Buckets</div>
     <div class="grid" id="bots"></div>
@@ -268,6 +292,63 @@ function renderBarList(containerId, items) {
     }).join('');
 }
 
+// Floating-bar waterfall/bridge chart: steps[0] and steps[last] are solid
+// "total" bars drawn from 0, everything between floats from the running
+// cumulative total - same shape as the Qlik "Actuals Compared to Forecast
+// Variance" bridge chart. Pure CSS/JS, no chart library, real signed data
+// (see routers/trading_dashboard.py's _bot_pl - NOT the floored "profit"
+// field, which would hide a bucket's real loss as $0.00).
+function renderWaterfall(containerId, steps) {
+    const el = document.getElementById(containerId);
+    if (!steps.length) { el.innerHTML = '<div class="empty">No data yet</div>'; return; }
+
+    const H = 190;
+    let running = 0;
+    const bars = steps.map(s => {
+        if (s.type === 'total') {
+            running = s.value;
+            return { label: s.label, from: 0, to: s.value, kind: 'total', value: s.value };
+        }
+        const from = running;
+        const to = running + s.value;
+        running = to;
+        return { label: s.label, from: Math.min(from, to), to: Math.max(from, to), kind: s.value >= 0 ? 'pos' : 'neg', value: s.value };
+    });
+
+    const allVals = bars.flatMap(b => [b.from, b.to]).concat([0]);
+    const maxVal = Math.max(...allVals);
+    const minVal = Math.min(...allVals);
+    const range = Math.max(1, maxVal - minVal);
+    const scale = H / range;
+    const colorFor = k => k === 'total' ? '#1f3864' : (k === 'pos' ? 'var(--green)' : 'var(--red)');
+
+    el.innerHTML = `<div style="display:flex; align-items:flex-end; gap:8px; height:${H + 40}px; padding-top:24px;">` +
+        bars.map(b => {
+            const topPx = (maxVal - b.to) * scale;
+            const heightPx = Math.max(2, (b.to - b.from) * scale);
+            return `<div style="flex:1; min-width:0; text-align:center; position:relative; height:${H}px;">
+                <div style="position:absolute; top:-22px; left:0; right:0; font-weight:700; color:var(--navy); font-size:0.8em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${fmtUsd(b.value)}</div>
+                <div style="position:absolute; top:${topPx}px; height:${heightPx}px; left:8%; right:8%; background:${colorFor(b.kind)}; border-radius:3px;"></div>
+                <div style="position:absolute; bottom:-22px; left:0; right:0; font-size:0.72em; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${b.label}</div>
+            </div>`;
+        }).join('') +
+    `</div>`;
+}
+
+function renderNarrative(data) {
+    const bots = (data.bots || []).map(b => ({ name: b.name, pl: b.pl != null ? b.pl : b.profit }));
+    let best = null, worst = null;
+    bots.forEach(b => {
+        if (!best || b.pl > best.pl) best = b;
+        if (!worst || b.pl < worst.pl) worst = b;
+    });
+    const dir = data.session_pl >= 0 ? 'up' : 'down';
+    let sentence = `Equity is ${fmtUsd(data.equity)}, ${dir} ${fmtUsd(Math.abs(data.session_pl))} (${fmtPct(data.session_pl_pct)}) this session.`;
+    if (best && best.pl > 0.01) sentence += ` ${best.name} leads the buckets at +${fmtUsd(best.pl)}.`;
+    if (worst && worst.pl < -0.01) sentence += ` ${worst.name} is the only one underwater, down ${fmtUsd(Math.abs(worst.pl))}.`;
+    document.getElementById('narrative').textContent = sentence;
+}
+
 function renderBots(bots) {
     if (!bots.length) return '<div class="empty">No buckets yet</div>';
     return bots.map(b => `
@@ -346,6 +427,15 @@ async function refresh() {
         renderBarList('bots-bar', bots.map(b => ({ label: b.name, value: b.profit })));
         document.getElementById('bots').innerHTML = renderBots(bots);
         document.getElementById('positions').innerHTML = renderPositions(data.positions);
+        renderNarrative(data);
+
+        const totalStart = bots.reduce((sum, b) => sum + (b.capital - (b.pl != null ? b.pl : b.profit)), 0);
+        const totalCurrent = bots.reduce((sum, b) => sum + b.capital, 0);
+        renderWaterfall('waterfall', [
+            { label: 'Starting Capital', value: totalStart, type: 'total' },
+            ...bots.map(b => ({ label: b.name, value: b.pl != null ? b.pl : b.profit })),
+            { label: 'Current Equity', value: totalCurrent, type: 'total' },
+        ]);
 
         statusEl.textContent = 'Last updated ' + new Date().toLocaleTimeString();
         statusEl.className = '';

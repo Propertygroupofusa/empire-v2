@@ -196,6 +196,32 @@
         padding: 40px;
         font-style: italic;
     }
+
+    .narrative {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 18px;
+        box-shadow: var(--shadow);
+        margin-bottom: 22px;
+        font-size: 0.92em;
+        color: var(--text);
+        line-height: 1.5;
+    }
+    .narrative::before { content: '💡 '; }
+
+    .treemap { position: relative; }
+    .treemap-cell {
+        position: absolute;
+        border-radius: 6px;
+        border: 2px solid var(--panel);
+        color: #fff;
+        padding: 8px 10px;
+        overflow: hidden;
+        box-sizing: border-box;
+    }
+    .treemap-cell .tm-label { font-size: 0.8em; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .treemap-cell .tm-value { font-size: 0.72em; opacity: 0.9; margin-top: 2px; }
 </style>
 </head>
 <body>
@@ -208,6 +234,8 @@
         <div id="status">Loading…</div>
     </div>
 
+    <div class="narrative" id="narrative">Loading tree summary…</div>
+
     <div class="kpi-row">
         <div class="kpi"><div class="label">Branches / Coins</div><div class="value" id="stat-count">—</div></div>
         <div class="kpi"><div class="label">Total Allocated</div><div class="value" id="stat-total">—</div></div>
@@ -215,10 +243,17 @@
         <div class="kpi"><div class="label">Refreshed</div><div class="value" id="stat-refreshed" style="font-size:1em">—</div></div>
     </div>
 
-    <div class="panel">
-        <div class="panel-title">Branch Ranking by Allocated Balance</div>
-        <div class="panel-sub">Real per-branch USD, largest first - the same numbers behind the tree below</div>
-        <div id="branches-bar" class="bar-list"></div>
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
+        <div class="panel">
+            <div class="panel-title">Branch Ranking by Allocated Balance</div>
+            <div class="panel-sub">Real per-branch USD, largest first - the same numbers behind the tree below</div>
+            <div id="branches-bar" class="bar-list"></div>
+        </div>
+        <div class="panel">
+            <div class="panel-title">Branch Sizes at a Glance</div>
+            <div class="panel-sub">Same numbers as the ranking, area-proportional instead of length-proportional</div>
+            <div id="branches-treemap" class="treemap" style="height:220px;"></div>
+        </div>
     </div>
 
     <div class="section-title">Tree</div>
@@ -266,6 +301,68 @@ function renderBarList(containerId, items) {
             <span class="bar-value">${fmtUsd(i.value)}</span>
         </div>`;
     }).join('');
+}
+
+// Classic squarified treemap layout (Bruls/Huizing/van Wijk), area
+// proportional to value - same visual idea as the Qlik "Balance by
+// investment type" mosaic. Small N (branch counts are typically single
+// digits) so this stays cheap to lay out on every refresh.
+const TREEMAP_COLORS = ['#009845', '#1f78d1', '#c9860a', '#d6455a', '#7a5cc9', '#1f3864', '#00a3a3', '#b5651d'];
+
+function squarify(items, x, y, w, h, out) {
+    if (!items.length) return;
+    if (items.length === 1) {
+        out.push({ item: items[0], x, y, w, h });
+        return;
+    }
+    const total = items.reduce((s, i) => s + i.value, 0);
+    let acc = 0, splitIdx = 1;
+    for (let i = 0; i < items.length; i++) {
+        acc += items[i].value;
+        if (acc >= total / 2) { splitIdx = Math.max(1, i + 1); break; }
+    }
+    const group1 = items.slice(0, splitIdx);
+    const group2 = items.slice(splitIdx);
+    const g1Total = group1.reduce((s, i) => s + i.value, 0);
+    const frac = total > 0 ? g1Total / total : 0.5;
+
+    if (w >= h) {
+        const w1 = w * frac;
+        squarify(group1, x, y, w1, h, out);
+        squarify(group2, x + w1, y, w - w1, h, out);
+    } else {
+        const h1 = h * frac;
+        squarify(group1, x, y, w, h1, out);
+        squarify(group2, x, y + h1, w, h - h1, out);
+    }
+}
+
+function renderTreemap(containerId, items) {
+    const el = document.getElementById(containerId);
+    const W = el.clientWidth || 500, H = el.clientHeight || 220;
+    const sorted = items.filter(i => i.value > 0).sort((a, b) => b.value - a.value);
+    if (!sorted.length) { el.innerHTML = '<div class="empty">No branches yet</div>'; return; }
+
+    const cells = [];
+    squarify(sorted, 0, 0, W, H, cells);
+    el.innerHTML = cells.map((c, i) => `
+        <div class="treemap-cell" style="left:${c.x}px; top:${c.y}px; width:${c.w}px; height:${c.h}px; background:${TREEMAP_COLORS[i % TREEMAP_COLORS.length]};">
+            <div class="tm-label">${c.item.label}</div>
+            <div class="tm-value">${fmtUsd(c.item.value)}</div>
+        </div>`).join('');
+}
+
+function renderNarrative(data) {
+    const branches = data.branches || [];
+    const el = document.getElementById('narrative');
+    if (!branches.length) { el.textContent = 'No branches yet — the root should appear within a minute of the bot starting.'; return; }
+    const top = branches.slice().sort((a, b) => b.allocated_usd - a.allocated_usd)[0];
+    const openCount = branches.filter(b => b.position).length;
+    const coin = p => p.replace('-USD', '');
+    let sentence = `${data.branch_count} branch${data.branch_count === 1 ? '' : 'es'} tracking $${data.total_allocated_usd.toFixed(2)} total, ${openCount} currently holding a position.`;
+    sentence += ` ${coin(top.product_id)} is the largest at ${fmtUsd(top.allocated_usd)}.`;
+    if (data.locked_usd > 0.01) sentence += ` $${data.locked_usd.toFixed(2)} has been permanently skimmed into the locked-profit ledger, out of the compounding loop.`;
+    el.textContent = sentence;
 }
 
 function branchCard(b) {
@@ -332,6 +429,8 @@ async function refresh() {
 
         const branches = data.branches || [];
         renderBarList('branches-bar', branches.map(b => ({ label: b.product_id.replace('-USD', ''), value: b.allocated_usd })));
+        renderTreemap('branches-treemap', branches.map(b => ({ label: b.product_id.replace('-USD', ''), value: b.allocated_usd })));
+        renderNarrative(data);
         document.getElementById('tree').innerHTML = renderTree(branches);
         statusEl.textContent = '';
         statusEl.className = '';
