@@ -723,53 +723,67 @@ async def initialize_bot():
     # copy of the same two lines.
     from worker_auth import hash_password
     from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
     import stripe
 
     stripe_key = os.getenv("STRIPE_SECRET_KEY")
     if stripe_key:
         stripe.api_key = stripe_key
 
+    # Checked and inserted per-bot-email (not "any bot exists, skip all"),
+    # each insert wrapped in its own IntegrityError catch. Real production
+    # symptom this fixes: on every single boot, the batch LIKE-pattern
+    # check ("%bot%pgusa.local") found zero existing rows even though
+    # bot@pgusa.local genuinely already existed from an earlier boot, so
+    # this crashed on that row's real UNIQUE constraint every time -
+    # logged as "Bot initialization FAILED - no bot workers will exist"
+    # forever, and (worse) since the loop's exception propagated out
+    # immediately, a conflict on bot1 silently prevented bot2 from ever
+    # being checked or created too. Checking each email exactly, and
+    # treating a conflict on the insert itself as "already exists" rather
+    # than a fatal error, fixes both: idempotent regardless of why the
+    # batch check missed a row, and one bot's conflict can't block another.
+    created = 0
     async with AsyncSessionLocal() as session:
-        # Check existing bots
-        result = await session.execute(
-            select(Worker).where(Worker.email.like("%bot%pgusa.local"))
-        )
-        existing_bots = result.scalars().all()
+        for i in range(1, 3):
+            bot_email = f"bot{i if i > 1 else ''}@pgusa.local"
+            result = await session.execute(select(Worker).where(Worker.email == bot_email))
+            if result.scalar_one_or_none():
+                continue
 
-        # If no bots exist, create initial fleet of 2
-        if not existing_bots:
-            created = 0
-            for i in range(1, 3):
-                bot_email = f"bot{i if i > 1 else ''}@pgusa.local"
-                worker = Worker(
-                    email=bot_email,
-                    name=f"Job Bot {i}",
-                    status="active",
-                    password_hash=hash_password("auto_bot_password_123"),
-                )
-                session.add(worker)
+            worker = Worker(
+                email=bot_email,
+                name=f"Job Bot {i}",
+                status="active",
+                password_hash=hash_password("auto_bot_password_123"),
+            )
+            session.add(worker)
+            try:
                 await session.flush()
-                created += 1
-                log.info(f"🤖 Bot worker created: {bot_email}")
+            except IntegrityError:
+                await session.rollback()
+                log.info(f"🤖 Bot worker {bot_email} already exists (raced with another init path) - skipping")
+                continue
 
-                if stripe_key:
-                    try:
-                        account = stripe.Account.create(
-                            type="express",
-                            email=bot_email,
-                            capabilities={"transfers": {"requested": True}},
-                        )
-                        worker.stripe_account_id = account.id
-                        log.info(f"💳 Stripe Connect account created: {account.id}")
-                    except Exception as e:
-                        log.warning(f"Stripe Connect setup failed for {bot_email}: {e}")
+            created += 1
+            log.info(f"🤖 Bot worker created: {bot_email}")
 
+            if stripe_key:
+                try:
+                    account = stripe.Account.create(
+                        type="express",
+                        email=bot_email,
+                        capabilities={"transfers": {"requested": True}},
+                    )
+                    worker.stripe_account_id = account.id
+                    log.info(f"💳 Stripe Connect account created: {account.id}")
+                except Exception as e:
+                    log.warning(f"Stripe Connect setup failed for {bot_email}: {e}")
+
+        if created:
             await session.commit()
-            # Count what was actually created, not len(range(1, 3)) - that
-            # is the constant 2 regardless of what happened in the loop.
-            log.info(f"✅ Initialized {created} bot workers")
-        else:
-            log.info(f"✅ {len(existing_bots)} bot workers already exist")
+
+    log.info(f"✅ {created} new bot worker(s) created" if created else "✅ bot workers already exist")
 
 
 async def start_job_bot():
