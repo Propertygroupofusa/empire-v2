@@ -181,6 +181,21 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import crypto_coinbase_bot: {e}")
 
+crypto_btc_compound_bot_module = None
+try:
+    import crypto_btc_compound_bot
+    crypto_btc_compound_bot_module = crypto_btc_compound_bot
+except Exception as e:
+    logging.warning(f"Failed to import crypto_btc_compound_bot: {e}")
+
+# Which Coinbase strategy actually runs - "btc_compound" (single-position,
+# adaptive-target BTC loop) or "multi_pair" (crypto_coinbase_bot.py's
+# original 28-pair RSI strategy). Only one runs at a time; both share the
+# same Coinbase account/balance, so running both together would have them
+# fight over the same funds. Switch back by setting this Railway variable
+# to "multi_pair" and redeploying - no code change needed either way.
+CRYPTO_STRATEGY_MODE = os.getenv("CRYPTO_STRATEGY_MODE", "btc_compound")
+
 alpaca_swing_bot_module = None
 try:
     import alpaca_swing_bot
@@ -1158,17 +1173,24 @@ async def lifespan(app: FastAPI):
         log.warning(f"Notary bot failed to start: {e}")
 
     try:
-        if crypto_coinbase_bot_module is not None:
-            import threading
-            log.info("📡 Starting Crypto (Coinbase) bot daemon thread...")
-            print("[LIFESPAN] Starting crypto bot thread...", flush=True)
+        import threading
+        if CRYPTO_STRATEGY_MODE == "btc_compound" and crypto_btc_compound_bot_module is not None:
+            log.info("📡 Starting Crypto (Coinbase) bot daemon thread — BTC compounding loop strategy...")
+            print("[LIFESPAN] Starting crypto bot thread (btc_compound)...", flush=True)
+            bot_thread = threading.Thread(target=crypto_btc_compound_bot_module.run, daemon=True)
+            bot_thread.start()
+            print("[LIFESPAN] ✓ Crypto bot thread started", flush=True)
+            log.info("✓ Crypto (Coinbase) bot thread started | BTC-only | single position | adaptive profit target | 24/7 trading")
+        elif CRYPTO_STRATEGY_MODE != "btc_compound" and crypto_coinbase_bot_module is not None:
+            log.info("📡 Starting Crypto (Coinbase) bot daemon thread — multi-pair RSI strategy...")
+            print("[LIFESPAN] Starting crypto bot thread (multi_pair)...", flush=True)
             bot_thread = threading.Thread(target=crypto_coinbase_bot_module.run, daemon=True)
             bot_thread.start()
             print("[LIFESPAN] ✓ Crypto bot thread started", flush=True)
             log.info("✓ Crypto (Coinbase) bot thread started | 28 pairs × 12 positions | 24/7 trading | Capital: $700 USD")
             log.info("💰 Strategy: 24/7 crypto + market hours stock scalping = constant opportunities and taking profits")
         else:
-            log.warning("⚠️ crypto_coinbase_bot module failed to import - bot will not run")
+            log.warning(f"⚠️ Coinbase bot module for CRYPTO_STRATEGY_MODE={CRYPTO_STRATEGY_MODE!r} failed to import - bot will not run")
     except Exception as e:
         log.error(f"🛑 Crypto (Coinbase) bot thread startup failed: {e}")
 

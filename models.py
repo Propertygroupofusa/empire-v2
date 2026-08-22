@@ -912,6 +912,12 @@ class BotPosition(Base):
     # readers treat None as "no peak recorded yet".
     peak_pct = Column(Float, nullable=True)
 
+    # Fixed at entry time by crypto_btc_compound_bot.py so a restart doesn't
+    # let a re-measured, possibly-shifted volatility silently move a
+    # position's exit points. Nullable/unused by every other bot's rows.
+    target_price = Column(Float, nullable=True)
+    stop_price = Column(Float, nullable=True)
+
     # ── Signal snapshot at the moment of entry ───────────────────────────
     #
     # Both bots already compute these to DECIDE the trade and then throw
