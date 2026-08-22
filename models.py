@@ -147,11 +147,14 @@ class ReferralContact(Base):
 
 
 class Worker(Base):
-    """Worker/contractor profile. Fields below (w9_*, credentials_*,
-    notary_*, ron_*) mirror the raw ALTER TABLE columns main.py's
-    run_migrations() adds to the real "workers" table - declared here too
-    so the ORM can actually read/write them (previously these existed only
-    as orphaned raw DB columns nothing in the code touched)."""
+    """Worker/contractor profile. Also doubles as the identity the trading
+    bots (prop_bot.py, alpaca_swing_bot.py) use to record their own real
+    earnings via worker_id="bot@pgusa.local" - see main.py's
+    initialize_bot(). Fields below (w9_*, credentials_*) mirror the raw
+    ALTER TABLE columns main.py's run_migrations() adds to the real
+    "workers" table - declared here too so the ORM can actually read/write
+    them (previously these existed only as orphaned raw DB columns nothing
+    in the code touched)."""
     __tablename__ = "workers"
 
     id = Column(Integer, primary_key=True, autoincrement=True, index=True)
@@ -178,16 +181,6 @@ class Worker(Base):
     credentials_submitted = Column(Boolean, default=False)
     credentials_verified = Column(Boolean, default=False)
 
-    # Notary-specific credentials. A worker can be a notary, a tax
-    # preparer, or a legal-doc processor (this platform's other
-    # advertised verticals) - these fields are simply unused/null for
-    # non-notary workers rather than needing a separate table per role.
-    notary_commission_number = Column(String, nullable=True)
-    notary_commission_state = Column(String, nullable=True)
-    notary_commission_expires = Column(String, nullable=True)  # ISO date string
-    ron_authorized = Column(Boolean, default=False)  # Remote Online Notarization
-    ron_authorization_state = Column(String, nullable=True)
-
     # Stripe Connect account for automated payouts
     stripe_account_id = Column(String, nullable=True)
 
@@ -207,11 +200,6 @@ class Worker(Base):
             "w9_tin_last4": self.w9_tin_last4,
             "credentials_submitted": self.credentials_submitted,
             "credentials_verified": self.credentials_verified,
-            "notary_commission_number": self.notary_commission_number,
-            "notary_commission_state": self.notary_commission_state,
-            "notary_commission_expires": self.notary_commission_expires,
-            "ron_authorized": self.ron_authorized,
-            "ron_authorization_state": self.ron_authorization_state,
         }
 
 
@@ -244,17 +232,18 @@ class Client(Base):
 
 
 class Job(Base):
-    """A service request from a client (starts with job_type='notarization'
-    but the shape is generic enough for this platform's other advertised
-    verticals - tax prep, legal docs - without needing a separate table
-    per service type)."""
+    """A billable unit of work performed for a client - currently used by
+    the video production flow (routers/orders.py creates one per paid
+    VideoQuoteOrder, job_type="video_production", for bot-earnings
+    tracking); the shape stays generic enough to reuse for another
+    vertical without a separate table per service type."""
     __tablename__ = "jobs"
 
     id = Column(Integer, primary_key=True, index=True)
-    job_type = Column(String, index=True)  # "notarization", ...
+    job_type = Column(String, index=True)  # "video_production", ...
     client_id = Column(Integer, ForeignKey("clients.id"), index=True)
     worker_id = Column(Integer, ForeignKey("workers.id"), nullable=True, index=True)
-    state = Column(String, index=True)  # US state jurisdiction the job must be handled in
+    state = Column(String, index=True)  # US state jurisdiction the job must be handled in, if relevant
     description = Column(Text, nullable=True)
     status = Column(String, default="requested", index=True)  # requested, matched, scheduled, completed, cancelled
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
@@ -263,11 +252,8 @@ class Job(Base):
     completed_at = Column(DateTime, nullable=True)
     custom_metadata = Column(JSON, nullable=True)
 
-    # Payment - see routers/jobs.py's SERVICE_TIERS for the actual price
-    # list. Client pays upfront via Stripe Checkout at request time (not
-    # on completion) so a notary never does the work before it's paid for.
-    service_tier = Column(String, nullable=True)  # key into SERVICE_TIERS, e.g. "standard", "ron"
-    price = Column(Float, nullable=True)  # USD, snapshotted at request time so a later SERVICE_TIERS price change never rewrites an existing job's price
+    service_tier = Column(String, nullable=True)  # e.g. a pricing tier key, if the vertical uses one
+    price = Column(Float, nullable=True)  # USD, snapshotted at request/creation time
     paid = Column(Boolean, default=False)
     stripe_session_id = Column(String, nullable=True)
 
@@ -288,36 +274,6 @@ class Job(Base):
             "service_tier": self.service_tier,
             "price": self.price,
             "paid": self.paid,
-        }
-
-
-class Booking(Base):
-    """A scheduled appointment for a matched job (e.g. a RON session)."""
-    __tablename__ = "bookings"
-
-    id = Column(Integer, primary_key=True, index=True)
-    job_id = Column(Integer, ForeignKey("jobs.id"), index=True)
-    worker_id = Column(Integer, ForeignKey("workers.id"), index=True)
-    client_id = Column(Integer, ForeignKey("clients.id"), index=True)
-    scheduled_start = Column(DateTime)
-    scheduled_end = Column(DateTime, nullable=True)
-    status = Column(String, default="scheduled", index=True)  # scheduled, completed, cancelled, no_show
-    meeting_link = Column(String, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "job_id": self.job_id,
-            "worker_id": self.worker_id,
-            "client_id": self.client_id,
-            "scheduled_start": self.scheduled_start.isoformat() if self.scheduled_start else None,
-            "scheduled_end": self.scheduled_end.isoformat() if self.scheduled_end else None,
-            "status": self.status,
-            "meeting_link": self.meeting_link,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
 
@@ -522,51 +478,6 @@ class WithdrawalRequest(Base):
             "status": self.status,
             "requested_at": self.requested_at.isoformat() if self.requested_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
-        }
-
-
-class NotaryPayout(Base):
-    """What's owed to a notary after they complete a paid job - same
-    bookkeeping-ledger pattern as WithdrawalRequest above: this app has no
-    programmatic way to actually move money into a notary's bank account,
-    so this tracks that a payout is owed/requested/paid, not a real
-    automated transfer. The admin sends the money manually (Zelle/PayPal/
-    check/ACH) and marks it paid here once done.
-
-    One row is created per completed job (see routers/jobs.py and
-    routers/workers.py's complete-job endpoints), for NOTARY_PAYOUT_SHARE
-    (0.80 by default - the notary keeps 80%, the platform keeps 20%) of
-    that job's price, snapshotted at completion time so a later change to
-    the split or to SERVICE_TIERS pricing never rewrites an already-earned
-    payout."""
-    __tablename__ = "notary_payouts"
-
-    id = Column(Integer, primary_key=True, index=True)
-    # VARCHAR, not Integer: jobs.id and workers.id are VARCHAR primary keys
-    # in production (see Job/Worker models / migrations/
-    # 0002_fix_notary_payouts_job_id_type.py), so Integer columns here make
-    # these FKs impossible to create - "foreign key constraint
-    # notary_payouts_<col>_fkey cannot be implemented / Key columns
-    # incompatible types: integer and character varying", raised straight
-    # out of Base.metadata.create_all() at startup.
-    job_id = Column(String, ForeignKey("jobs.id"), index=True)
-    worker_id = Column(String, ForeignKey("workers.id"), index=True)
-    amount = Column(Float)  # USD, the notary's cut
-    status = Column(String, default="owed", index=True)  # owed, requested, paid
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
-    requested_at = Column(DateTime, nullable=True)
-    paid_at = Column(DateTime, nullable=True)
-
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "job_id": self.job_id,
-            "worker_id": self.worker_id,
-            "amount": self.amount,
-            "status": self.status,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "requested_at": self.requested_at.isoformat() if self.requested_at else None,
-            "paid_at": self.paid_at.isoformat() if self.paid_at else None,
         }
 
 

@@ -53,10 +53,7 @@ class BotStatusRequest(BaseModel):
 
 # Load routers gracefully to prevent import errors from crashing startup
 routers_to_load = {
-    'workers': None,
     'clients': None,
-    'jobs': None,
-    'bookings': None,
     'payments': None,
     'admin': None,
     'whitelabel': None,
@@ -88,10 +85,7 @@ for router_name in routers_to_load:
         logging.warning(f"Failed to import router {router_name}: {e}")
 
 # Extract routers for app registration
-workers = routers_to_load['workers']
 clients = routers_to_load['clients']
-jobs = routers_to_load['jobs']
-bookings = routers_to_load['bookings']
 payments = routers_to_load['payments']
 admin = routers_to_load['admin']
 whitelabel = routers_to_load['whitelabel']
@@ -166,13 +160,6 @@ try:
     prop_bot_module = prop_bot
 except Exception as e:
     logging.warning(f"Failed to import prop_bot: {e}")
-
-notary_bot_module = None
-try:
-    import notary_bot
-    notary_bot_module = notary_bot
-except Exception as e:
-    logging.warning(f"Failed to import notary_bot: {e}")
 
 crypto_coinbase_bot_module = None
 try:
@@ -658,10 +645,8 @@ async def run_migrations():
 
 async def validate_foreign_keys():
     """Validate that all required tables exist and have correct foreign key constraints.
-
-    NotaryPayout table in particular sometimes fails to create on PostgreSQL due to
-    foreign key constraint ordering issues. This function detects and repairs such issues.
-    """
+    Some tables have historically failed to create on PostgreSQL due to foreign key
+    constraint ordering issues. This function detects and repairs such issues."""
     from database import Base
     import models  # noqa: F401
 
@@ -690,14 +675,6 @@ async def validate_foreign_keys():
                         log.warning(f"Foreign key validation: Could not create {table.name}: {e}")
         else:
             log.info(f"Foreign key validation: All {len(Base.metadata.sorted_tables)} tables exist")
-
-        # Verify NotaryPayout specifically
-        if "notary_payouts" in existing_tables:
-            constraints = inspector.get_foreign_keys("notary_payouts")
-            if constraints:
-                log.info(f"Foreign key validation: notary_payouts has {len(constraints)} FK constraints")
-            else:
-                log.warning("Foreign key validation: notary_payouts exists but has NO foreign key constraints - this is unexpected")
 
 
 # ── Bot Earnings System ──────────────────────────────────────
@@ -784,127 +761,6 @@ async def initialize_bot():
             await session.commit()
 
     log.info(f"✅ {created} new bot worker(s) created" if created else "✅ bot workers already exist")
-
-
-async def start_job_bot():
-    """DEMO ONLY - off unless DEMO_JOB_BOT_ENABLED=true.
-
-    Claims jobs, marks them complete two seconds later, and books a
-    payment. It is a demo of the marketplace mechanics, not the
-    marketplace: no notarization actually happens.
-
-    WHY IT IS GATED
-    ---------------
-    It selects on `Job.status == "requested"` with NO filter on `paid`,
-    and then sets `job.paid = True` itself. The real notarization flow
-    depends on that flag: routers/jobs.py opens a job with paid=False and
-    routes the client to Stripe checkout, and notary_bot.py plus
-    POST /{job_id}/match both refuse to match a job that is not paid.
-    This loop bypasses that gate and overwrites the flag.
-
-    So a real customer submitting a notarization request would have their
-    job claimed within 10 seconds - before they entered a card - stamped
-    paid, marked completed 2 seconds later, and turned into a payout
-    obligation for the full price. No work performed, no money collected.
-
-    That was harmless only because two other bugs kept it inert: there
-    were no bot workers (passlib, #129) and no jobs (nothing creates them
-    but real intake and a seeder nothing runs). #129 and #131 removed the
-    first protection, so this needs a deliberate one.
-
-    Turning it on is safe when the only jobs in the table came from
-    seed_bot_jobs.py. It is not safe while real client intake is open."""
-    if os.getenv("DEMO_JOB_BOT_ENABLED", "false").strip().lower() != "true":
-        log.info("Demo job bot disabled (DEMO_JOB_BOT_ENABLED not set to true) "
-                 "- jobs will not be auto-claimed or auto-completed")
-        return
-
-    try:
-        from database import AsyncSessionLocal
-        from models import Job, Worker, Payment
-        from sqlalchemy import select
-        import uuid
-
-        log.warning("🚀 Demo Job Bot ARMED - DEMO_JOB_BOT_ENABLED=true. It will "
-                    "claim ANY job in 'requested' status, including unpaid real "
-                    "client jobs, mark it paid and completed, and book a payout.")
-
-        while True:
-            try:
-                async with AsyncSessionLocal() as session:
-                    # Get ALL bot workers (any worker with email containing "bot")
-                    bot_result = await session.execute(
-                        select(Worker).where(Worker.email.like("%bot%pgusa.local"))
-                    )
-                    bot_workers = bot_result.scalars().all()
-
-                    if not bot_workers:
-                        log.warning("No bot workers found, skipping cycle")
-                        await asyncio.sleep(10)
-                        continue
-
-                    log.info(f"🤖 Running {len(bot_workers)} bot workers")
-
-                    # Get all open jobs
-                    result = await session.execute(
-                        select(Job).where(Job.status == "requested")
-                    )
-                    available_jobs = result.scalars().all()
-
-                    if available_jobs:
-                        log.info(f"📋 Found {len(available_jobs)} available jobs for {len(bot_workers)} bots")
-
-                        # Distribute jobs among available bots
-                        jobs_per_bot = max(1, len(available_jobs) // len(bot_workers))
-                        job_idx = 0
-
-                        for bot_worker in bot_workers:
-                            for _ in range(jobs_per_bot):
-                                if job_idx >= len(available_jobs):
-                                    break
-
-                                job = available_jobs[job_idx]
-                                job_idx += 1
-
-                                try:
-                                    # Claim the job
-                                    job.status = "matched"
-                                    job.worker_id = bot_worker.id
-                                    job.paid = True
-                                    await session.commit()
-                                    log.info(f"✅ {bot_worker.email} CLAIMED: {job.description} (${job.price:.2f})")
-
-                                    # Complete the job after a moment
-                                    await asyncio.sleep(2)
-                                    job.status = "completed"
-                                    job.completed_at = datetime.utcnow()
-                                    await session.commit()
-
-                                    # Create payment for bot
-                                    payment = Payment(
-                                        id=str(uuid.uuid4()),
-                                        job_id=str(job.id),
-                                        worker_id=str(bot_worker.id),
-                                        client_id=job.client_id,
-                                        gross_amount=job.price * 1.2,
-                                        worker_amount=job.price,
-                                        platform_amount=job.price * 0.2,
-                                        payout_status="pending",
-                                    )
-                                    session.add(payment)
-                                    await session.commit()
-                                    log.info(f"💰 {bot_worker.email} earned: ${job.price:.2f}")
-
-                                except Exception as e:
-                                    log.error(f"Job processing error for {bot_worker.email}: {e}")
-
-                    await asyncio.sleep(10)  # Poll every 10 seconds
-            except Exception as e:
-                log.warning(f"Job bot cycle error: {e}")
-                await asyncio.sleep(10)
-
-    except Exception as e:
-        log.warning(f"Job bot error: {e}")
 
 
 async def process_payouts_periodically():
@@ -1093,21 +949,6 @@ async def lifespan(app: FastAPI):
         print(f"[LIFESPAN] ✗ Database init failed: {e}", flush=True)
         log.warning(f"Database init failed: {e}")
 
-    # TEMPORARILY DISABLED: notary_payouts migration was causing startup timeout
-    # Will re-enable once migration system is refactored
-    # try:
-    #     import importlib.util
-    #     _spec = importlib.util.spec_from_file_location(
-    #         "fix_notary_payouts_job_id_type",
-    #         os.path.join(os.path.dirname(__file__), "migrations",
-    #                      "0002_fix_notary_payouts_job_id_type.py"),
-    #     )
-    #     _mod = importlib.util.module_from_spec(_spec)
-    #     _spec.loader.exec_module(_mod)
-    #     await _mod.migrate()
-    # except Exception as e:
-    #     log.warning(f"notary_payouts job_id/worker_id type migration failed: {e}")
-
     print("[LIFESPAN] Creating monitor tables...", flush=True)
     try:
         await asyncio.wait_for(create_monitor_tables(), timeout=30.0)
@@ -1170,12 +1011,6 @@ async def lifespan(app: FastAPI):
         log.error(f"Earnings bot worker initialization failed: [{type(e).__name__}] {e}", exc_info=True)
 
     try:
-        asyncio.create_task(start_job_bot())
-        log.info("🤖 Job bot background task started")
-    except Exception as e:
-        log.warning(f"Job bot startup failed: {e}")
-
-    try:
         asyncio.create_task(process_payouts_periodically())
         log.info("💳 Automatic payout processor started")
     except Exception as e:
@@ -1187,16 +1022,6 @@ async def lifespan(app: FastAPI):
         log.info("📧 Sales agent auto-processing started (researches + emails new leads on a timer)")
     except Exception as e:
         log.warning(f"Sales agent auto-processing startup failed: {e}")
-
-    # DISABLED: bot_autoscaler has NULL id constraint errors on Worker creation
-    # (not critical for trading bot revenue - crypto/alpaca bots work independently)
-    # TODO: Fix Worker ORM auto-increment flushing if job scaling becomes priority
-    # try:
-    #     from bot_autoscaler import auto_scale_bots
-    #     asyncio.create_task(auto_scale_bots())
-    #     log.info("📈 Bot auto-scaler started - will create bots based on demand")
-    # except Exception as e:
-    #     log.warning(f"Bot auto-scaler startup failed: {e}")
 
     try:
         if payee_worker is not None:
@@ -1243,14 +1068,6 @@ async def lifespan(app: FastAPI):
             log.info("💰 Strategy: Market hours stock scalping + 24/7 crypto = constant opportunities and taking profits")
     except Exception as e:
         log.warning(f"Prop bot failed to start: {e}")
-
-    try:
-        if notary_bot_module is not None:
-            import threading
-            threading.Thread(target=notary_bot_module.run, daemon=True).start()
-            log.info("🖋️ Notary matching bot started (background thread)")
-    except Exception as e:
-        log.warning(f"Notary bot failed to start: {e}")
 
     try:
         import threading
@@ -1376,7 +1193,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Property Group USA Documents Platform API",
-    description="SaaS backend for notary, tax prep, and legal document services",
+    description="SaaS backend for video production, trading automation, and client/order management",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -1397,10 +1214,7 @@ if os.path.exists(static_dir):
 # ── Routers ──────────────────────────────────────────────────
 routers_list = [
     (auth, "/auth", "Auth"),
-    (workers, "/workers", "Workers"),
     (clients, "/clients", "Clients"),
-    (jobs, "/jobs", "Jobs"),
-    (bookings, "/bookings", "Bookings"),
     (payments, "/payments", "Payments"),
     (admin, "/admin", "Admin"),
     (whitelabel, "/whitelabel", "White Label"),
@@ -1839,49 +1653,6 @@ async def serve_orchestrator_dashboard():
     return HTMLResponse(content=html_content)
 
 
-@app.get("/notary-portal")
-async def serve_notary_portal():
-    """Serve the notary partner self-service portal. Until now, /workers,
-    /jobs, and /bookings only existed as bare JSON APIs - real notaries had
-    no page to actually register, log in, submit credentials, or see jobs
-    matched to them on. This is per-worker login (their own email+password,
-    see worker_auth.py), not the shared admin key the trading/social
-    dashboards use."""
-    portal_path = os.path.join(os.path.dirname(__file__), "notary_portal.html")
-    if not os.path.exists(portal_path):
-        raise HTTPException(status_code=404, detail="Notary portal not found")
-    return FileResponse(portal_path, media_type="text/html")
-
-
-@app.get("/get-notarized")
-async def serve_notary_request():
-    """Public, no-auth client-facing intake page for POST
-    /jobs/notarization/request - the other half of the same gap the notary
-    portal fixed. Without this, the only way a real client could ever
-    submit a notarization job was hand-crafting a raw JSON POST - there was
-    no marketplace demand side at all, just a backend API nobody outside
-    this codebase could actually use."""
-    request_path = os.path.join(os.path.dirname(__file__), "notary_request.html")
-    if not os.path.exists(request_path):
-        raise HTTPException(status_code=404, detail="Notarization request page not found")
-    return FileResponse(request_path, media_type="text/html")
-
-
-@app.get("/notary-admin")
-async def serve_notary_admin():
-    """Admin-only (gated by X-Admin-Key on every API call it makes, same
-    pattern as /trading-dashboard) panel to review pending notary
-    credential submissions and approve/reject them, and to manually match
-    'requested' jobs to an eligible verified notary. Verification is
-    deliberately not self-service (see routers/workers.py) since these are
-    real legal credentials - this page is what makes that admin step
-    actually usable instead of requiring a raw curl command."""
-    admin_path = os.path.join(os.path.dirname(__file__), "notary_admin.html")
-    if not os.path.exists(admin_path):
-        raise HTTPException(status_code=404, detail="Notary admin panel not found")
-    return FileResponse(admin_path, media_type="text/html")
-
-
 @app.get("/quote")
 async def serve_quote_form():
     """Serve the subscription-aware video quote form"""
@@ -1998,10 +1769,7 @@ async def root():
         "status": "online",
         "endpoints": {
             "docs": "/docs",
-            "workers": "/workers",
             "clients": "/clients",
-            "jobs": "/jobs",
-            "bookings": "/bookings",
             "admin": "/admin",
             "whitelabel": "/whitelabel",
             "partners": "/partners",
