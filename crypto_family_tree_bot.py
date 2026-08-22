@@ -359,6 +359,21 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
         row = result.scalar_one_or_none()
         if row:
             row.allocated_usd = new_allocated
+            # The floor ratchet only ever raises the floor as gains are
+            # banked - but a forced exit (or a stop-loss that dipped below
+            # the floor in the gap between cycle checks) can leave the
+            # balance below a floor that was set before the loss. Without
+            # this, the branch would compare its new, lower balance against
+            # that same too-high floor forever, stay "breached" forever, and
+            # never trade again since trading is the only thing that could
+            # raise the balance back over it - a permanent stall, not a
+            # pause. Reset the floor down to match the new balance's own
+            # tier so the branch can resume trading immediately; it will
+            # only ratchet back up again from here as it earns real gains.
+            new_tier_floor = math.floor(new_allocated / BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER
+            if new_tier_floor < row.equity_floor:
+                log.info(f"[TREE] 🪜 {bot_name} floor lowered ${row.equity_floor:,.2f} -> ${new_tier_floor:,.2f} to match post-sale balance ${new_allocated:.2f}")
+                row.equity_floor = new_tier_floor
             await db.commit()
 
     log.info(
