@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from admin_auth import require_admin_key
-from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition
+from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment
 
 NUM_BOTS = int(os.getenv("PROP_NUM_BOTS", "8"))
 if NUM_BOTS <= 0:
@@ -189,6 +189,29 @@ async def _fetch_alpaca_positions(session: aiohttp.ClientSession) -> list:
         if r.status != 200:
             return []
         return await r.json()
+
+
+async def _fetch_position_opened_at(session: aiohttp.ClientSession, symbol: str) -> str:
+    """Real fill time of the most recent buy order for this symbol - the
+    trade that actually opened the position currently held. Alpaca's
+    /v2/positions doesn't include an open date itself, so this is
+    reconstructed from real order history (same source /trades/closed
+    above already trusts) rather than guessed or read from any bot's own
+    bookkeeping - not every position open in the account was necessarily
+    opened by code in this repo, so a bot's own tables aren't a reliable
+    source here."""
+    params = {"status": "closed", "symbols": symbol, "direction": "desc", "limit": "50"}
+    async with session.get(f"{ALPACA_BASE_URL}/v2/orders", headers=ALPACA_HEADERS, params=params) as r:
+        if r.status != 200:
+            return None
+        try:
+            orders = await r.json()
+        except Exception:
+            return None
+    for o in orders:
+        if isinstance(o, dict) and o.get("side") == "buy" and o.get("filled_at"):
+            return o["filled_at"]
+    return None
 
 
 async def _fetch_todays_filled_orders(session: aiohttp.ClientSession) -> list:
@@ -614,6 +637,11 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
     async with aiohttp.ClientSession() as session:
         account = await _fetch_alpaca_account(session)
         positions = await _fetch_alpaca_positions(session)
+        opened_at_by_symbol = {}
+        for p in positions:
+            sym = p.get("symbol")
+            if sym:
+                opened_at_by_symbol[sym] = await _fetch_position_opened_at(session, sym)
 
     try:
         equity = float(account.get("equity", 0))
@@ -665,10 +693,66 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
                 "market_value": p.get("market_value"),
                 "unrealized_pl": p.get("unrealized_pl"),
                 "unrealized_plpc": p.get("unrealized_plpc"),
+                "opened_at": opened_at_by_symbol.get(p.get("symbol")),
             }
             for p in positions
         ],
     }
+
+
+@router.post("/alpaca-overview/close/{symbol}", dependencies=[Depends(require_admin_key)])
+async def close_alpaca_position(symbol: str, db: AsyncSession = Depends(get_db)):
+    """Manually close one real open Alpaca position at market price - the
+    same DELETE /v2/positions/{symbol} Alpaca's own app uses, so this is a
+    real order, not a dashboard-only toggle. No bot enforces a scheduled
+    close date on these positions today (exits are signal-based - RSI,
+    profit target, stop loss - not calendar-based), so this is the only
+    way to close one on demand before its own exit signal fires. Records
+    the realized P&L as a real Payment row using the same worker/split the
+    bots' own automatic exits use, so a manual close still shows up in
+    earnings tracking like any other close."""
+    symbol = symbol.upper()
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        raise HTTPException(status_code=500, detail="Alpaca credentials not configured")
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{ALPACA_BASE_URL}/v2/positions/{symbol}", headers=ALPACA_HEADERS) as r:
+            if r.status != 200:
+                raise HTTPException(status_code=404, detail=f"No open position for {symbol}")
+            position = await r.json()
+
+        async with session.delete(f"{ALPACA_BASE_URL}/v2/positions/{symbol}", headers=ALPACA_HEADERS) as r:
+            if r.status not in (200, 207):
+                body = await r.text()
+                raise HTTPException(status_code=502, detail=f"Alpaca close failed ({r.status}): {body}")
+            close_result = await r.json()
+
+    try:
+        qty = float(position.get("qty", 0))
+        entry_price = float(position.get("avg_entry_price", 0))
+        current_price = float(position.get("current_price", entry_price))
+        pnl = (current_price - entry_price) * qty
+    except (ValueError, TypeError):
+        qty, pnl = 0.0, 0.0
+
+    try:
+        payment = Payment(
+            id=f"manual_close_{uuid.uuid4().hex[:8]}",
+            job_id=f"manual_close_{symbol}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+            worker_id="bot@pgusa.local",
+            client_id="alpaca_manual_close",
+            gross_amount=pnl,
+            worker_amount=pnl * 0.90,
+            platform_amount=pnl * 0.10,
+            payout_status="pending" if pnl > 0 else "completed",
+        )
+        db.add(payment)
+        await db.commit()
+    except Exception as e:
+        log.warning(f"Failed to record manual-close earnings for {symbol}: {e}")
+
+    log.info(f"Manually closed {symbol} via dashboard: qty={qty}, realized_pnl=${pnl:.2f}")
+    return {"status": "closed", "symbol": symbol, "qty": qty, "realized_pnl": round(pnl, 2), "order": close_result}
 
 
 # Chart-eligible symbols only - an explicit allowlist, checked before the

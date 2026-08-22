@@ -98,6 +98,20 @@
     tr:last-child td { border-bottom: none; }
 
     .empty { text-align: center; opacity: 0.6; padding: 30px; font-style: italic; }
+
+    .close-btn {
+        font-family: 'Courier New', monospace;
+        background: #ff556622;
+        border: 1px solid #ff5566;
+        color: #ff5566;
+        padding: 5px 12px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 0.85em;
+    }
+    .close-btn:hover { background: #ff556644; }
+    .close-btn:disabled { opacity: 0.5; cursor: default; }
+    .no-date { opacity: 0.5; font-style: italic; }
 </style>
 </head>
 <body>
@@ -126,6 +140,11 @@
     <div class="grid" id="bots"></div>
 
     <div class="section-title">Open Positions</div>
+    <p style="opacity:0.55; font-size:0.8em; margin-bottom:10px;">
+        Opened = real fill time of the order that opened the position. No bot enforces a scheduled close
+        date - each position exits on its own trigger (RSI overbought, profit target, or stop loss), not a
+        calendar date. Use Close to exit manually before that happens.
+    </p>
     <div id="positions"></div>
 </div>
 
@@ -172,6 +191,13 @@ function renderBots(bots) {
         </div>`).join('');
 }
 
+function fmtOpenedAt(iso) {
+    if (!iso) return '<span class="no-date">unknown</span>';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '<span class="no-date">unknown</span>';
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 function renderPositions(positions) {
     if (!positions.length) return '<div class="empty">No open positions right now</div>';
     const rows = positions.map(p => {
@@ -184,12 +210,35 @@ function renderPositions(positions) {
             <td>${fmtUsd(p.avg_entry_price)}</td>
             <td>${fmtUsd(p.current_price)}</td>
             <td class="${pl >= 0 ? 'pos' : 'neg'}" style="font-weight:bold">${fmtUsd(pl)} (${fmtPct(plpc)})</td>
+            <td>${fmtOpenedAt(p.opened_at)}</td>
+            <td><button class="close-btn" onclick="closePosition('${p.symbol}', this)">Close</button></td>
         </tr>`;
     }).join('');
     return `<table>
-        <thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>Unrealized P&amp;L</th></tr></thead>
+        <thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>Unrealized P&amp;L</th><th>Opened</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
     </table>`;
+}
+
+async function closePosition(symbol, btn) {
+    if (!confirm(`Close ${symbol} at market price right now? This places a real order and can't be undone.`)) return;
+    btn.disabled = true;
+    btn.textContent = 'Closing…';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-overview/close/' + encodeURIComponent(symbol), {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        alert(`${symbol} closed. Realized P&L: ${fmtUsd(data.realized_pnl)}`);
+        refresh();
+    } catch (e) {
+        alert('Close failed: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = 'Close';
+    }
 }
 
 async function refresh() {
