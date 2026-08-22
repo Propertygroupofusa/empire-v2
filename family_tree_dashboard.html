@@ -102,20 +102,24 @@
     .bar-fill { height: 100%; border-radius: 5px; background: linear-gradient(90deg, #ffcf5e, var(--gold)); }
     .bar-row .bar-value { text-align: right; font-weight: 700; color: var(--navy); }
 
-    .tree { display: flex; flex-direction: column; gap: 12px; }
+    .tree-canvas { overflow-x: auto; padding: 10px 4px 30px; }
+    .tree-canvas-inner { position: relative; margin: 0 auto; }
+    .tree-lines { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
+    .tree-line { stroke: #c3cadb; stroke-width: 2; fill: none; }
 
-    .branch-row { display: flex; align-items: stretch; gap: 0; }
+    .tree-node { position: absolute; }
 
     .card {
         border: 1px solid var(--border);
         background: var(--panel);
         border-radius: 10px;
-        padding: 16px 18px;
-        flex: 1;
+        padding: 14px 16px;
         min-width: 0;
         box-shadow: var(--shadow);
+        height: 100%;
+        box-sizing: border-box;
     }
-    .card.root { border-color: #f0dcae; background: var(--gold-bg); }
+    .card.root { border-color: #f0dcae; background: var(--gold-bg); box-shadow: 0 0 0 3px rgba(201,134,10,0.12), var(--shadow); }
 
     .card-top {
         display: flex;
@@ -155,39 +159,21 @@
         transition: width 0.4s ease;
     }
 
-    .position-box {
-        margin-top: 12px;
-        padding: 10px 12px;
+    .node-position {
+        margin-top: 10px;
+        padding: 7px 9px;
         background: #f7f9fc;
         border-radius: 6px;
         border-left: 3px solid var(--green);
+        font-size: 0.74em;
+        color: var(--text);
+        line-height: 1.4;
     }
-    .position-box.none {
+    .node-position.none {
         border-left-color: #c7cede;
         color: var(--text-dim);
         font-style: italic;
-        font-size: 0.85em;
         background: transparent;
-    }
-
-    .connector {
-        width: 30px;
-        position: relative;
-        opacity: 0.5;
-    }
-    .connector::before {
-        content: '';
-        position: absolute;
-        left: 14px; top: -12px; bottom: 50%;
-        width: 1px;
-        background: #c7cede;
-    }
-    .connector::after {
-        content: '';
-        position: absolute;
-        left: 14px; top: 50%;
-        width: 14px; height: 1px;
-        background: #c7cede;
     }
 
     .empty {
@@ -229,7 +215,7 @@
     <div class="header">
         <div>
             <h1>🌳 Family Tree — Coinbase Compounding</h1>
-            <p>Live from the database · one card per branch, indented under its parent</p>
+            <p>Live from the database · branches drawn as a real family tree, root at top</p>
         </div>
         <div id="status">Loading…</div>
     </div>
@@ -257,7 +243,7 @@
     </div>
 
     <div class="section-title">Tree</div>
-    <div class="tree" id="tree"></div>
+    <div class="tree-canvas"><div class="tree-canvas-inner" id="tree"></div></div>
 </div>
 
 <script>
@@ -365,57 +351,109 @@ function renderNarrative(data) {
     el.textContent = sentence;
 }
 
-function branchCard(b) {
+function branchCardHtml(b) {
     const isRoot = !b.parent_bot_name;
     const pct = b.next_unlock_tier > 0 ? Math.min(100, (b.allocated_usd / b.next_unlock_tier) * 100) : 0;
     const coin = b.product_id.replace('-USD', '');
 
-    let posHtml = '<div class="position-box none">Flat — no open position, waiting to buy</div>';
+    let posHtml = '<div class="node-position none">Flat — waiting to buy</div>';
     if (b.position) {
         const p = b.position;
-        posHtml = `
-            <div class="position-box">
-                <div class="row"><span class="k">Entry</span><span class="v">${fmtUsd(p.entry_price)}</span></div>
-                <div class="row"><span class="k">Qty</span><span class="v">${p.qty}</span></div>
-                <div class="row"><span class="k">Target</span><span class="v pos">${p.target_price != null ? fmtUsd(p.target_price) : '—'}</span></div>
-                <div class="row"><span class="k">Stop</span><span class="v neg">${p.stop_price != null ? fmtUsd(p.stop_price) : '—'}</span></div>
-            </div>`;
+        const target = p.target_price != null ? fmtUsd(p.target_price) : '—';
+        const stop = p.stop_price != null ? fmtUsd(p.stop_price) : '—';
+        posHtml = `<div class="node-position">📈 Entry ${fmtUsd(p.entry_price)} → target <span class="v pos">${target}</span> / stop <span class="v neg">${stop}</span></div>`;
     }
 
     return `
         <div class="card ${isRoot ? 'root' : ''}">
-            <div class="card-top">
+            <div class="card-top" style="margin-bottom:2px;">
                 <div class="coin">${coin} ${isRoot ? '<span class="badge">ROOT</span>' : ''}</div>
-                <div class="bot-name">${b.bot_name}</div>
             </div>
+            <div class="bot-name" style="margin-bottom:8px;">${b.bot_name}</div>
             <div class="row"><span class="k">Balance</span><span class="v">${fmtUsd(b.allocated_usd)}</span></div>
             <div class="row"><span class="k">Floor</span><span class="v">${fmtUsd(b.equity_floor)}</span></div>
             <div class="progress-wrap">
-                <div class="progress-label"><span>Progress to next spawn</span><span>${fmtUsd(b.allocated_usd)} / ${fmtUsd(b.next_unlock_tier)}</span></div>
+                <div class="progress-label"><span>Next spawn</span><span>${pct.toFixed(0)}%</span></div>
                 <div class="progress-bar-bg"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
             </div>
             ${posHtml}
         </div>`;
 }
 
-function renderTree(branches) {
+// Real node-link tree layout (classic "place leaves left-to-right, put a
+// parent above the midpoint of its children" recursion) - genuinely
+// branches root-to-child with connecting lines, not just indentation.
+// Branch counts here are small (single digits), so this simple version is
+// plenty; a squarified/Reingold-Tilford layout would be overkill.
+const TREE_NODE_W = 230;
+const TREE_NODE_H = 210;
+const TREE_SIBLING_GAP = 28;
+const TREE_LEVEL_GAP = 46;
+
+function layoutTree(branches) {
     const byParent = {};
     branches.forEach(b => {
         const key = b.parent_bot_name || '__root__';
         (byParent[key] = byParent[key] || []).push(b);
     });
 
-    let html = '';
-    function walk(parentKey, depth) {
-        (byParent[parentKey] || []).forEach(b => {
-            html += `<div class="branch-row">`;
-            for (let i = 0; i < depth; i++) html += `<div class="connector" style="width:30px"></div>`;
-            html += `<div style="flex:1">${branchCard(b)}</div></div>`;
-            walk(b.bot_name, depth + 1);
-        });
+    const positions = {};
+    let cursorX = 0;
+    let maxDepth = 0;
+
+    function place(node, depth) {
+        maxDepth = Math.max(maxDepth, depth);
+        const children = byParent[node.bot_name] || [];
+        const y = depth * (TREE_NODE_H + TREE_LEVEL_GAP);
+
+        if (!children.length) {
+            const x = cursorX;
+            cursorX += TREE_NODE_W + TREE_SIBLING_GAP;
+            positions[node.bot_name] = { x, y, node };
+            return x + TREE_NODE_W / 2;
+        }
+
+        const centers = children.map(c => place(c, depth + 1));
+        const center = (centers[0] + centers[centers.length - 1]) / 2;
+        positions[node.bot_name] = { x: center - TREE_NODE_W / 2, y, node };
+        return center;
     }
-    walk('__root__', 0);
-    return html || '<div class="empty">No branches yet — the root should appear within a minute of the bot starting.</div>';
+
+    (byParent['__root__'] || []).forEach(r => place(r, 0));
+
+    const width = Math.max(TREE_NODE_W, cursorX - TREE_SIBLING_GAP);
+    const height = (maxDepth + 1) * (TREE_NODE_H + TREE_LEVEL_GAP) - TREE_LEVEL_GAP;
+    return { positions, width, height, byParent };
+}
+
+function renderTree(branches) {
+    const container = document.getElementById('tree');
+    if (!branches.length) {
+        container.innerHTML = '<div class="empty">No branches yet — the root should appear within a minute of the bot starting.</div>';
+        return;
+    }
+
+    const { positions, width, height, byParent } = layoutTree(branches);
+
+    let lines = '';
+    Object.values(positions).forEach(({ x, y, node }) => {
+        (byParent[node.bot_name] || []).forEach(child => {
+            const c = positions[child.bot_name];
+            const px = x + TREE_NODE_W / 2, py = y + TREE_NODE_H;
+            const cx = c.x + TREE_NODE_W / 2, cy = c.y;
+            const my = (py + cy) / 2;
+            lines += `<path class="tree-line" d="M ${px} ${py} C ${px} ${my} ${cx} ${my} ${cx} ${cy}" />`;
+        });
+    });
+
+    const nodes = Object.values(positions).map(({ x, y, node }) =>
+        `<div class="tree-node" style="left:${x}px; top:${y}px; width:${TREE_NODE_W}px; height:${TREE_NODE_H}px;">${branchCardHtml(node)}</div>`
+    ).join('');
+
+    container.style.width = width + 'px';
+    container.style.height = height + 'px';
+    container.innerHTML =
+        `<svg class="tree-lines" width="${width}" height="${height}">${lines}</svg>` + nodes;
 }
 
 async function refresh() {
@@ -431,7 +469,7 @@ async function refresh() {
         renderBarList('branches-bar', branches.map(b => ({ label: b.product_id.replace('-USD', ''), value: b.allocated_usd })));
         renderTreemap('branches-treemap', branches.map(b => ({ label: b.product_id.replace('-USD', ''), value: b.allocated_usd })));
         renderNarrative(data);
-        document.getElementById('tree').innerHTML = renderTree(branches);
+        renderTree(branches);
         statusEl.textContent = '';
         statusEl.className = '';
     } catch (e) {
