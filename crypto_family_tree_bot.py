@@ -56,7 +56,8 @@ import time
 import traceback
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from database import AsyncSessionLocal
 from models import BotPosition, CryptoTreeBranch, TradingBotState
 
@@ -141,6 +142,49 @@ async def get_next_eligible_product_id():
         if product_id not in claimed:
             return product_id
     return None
+
+
+async def _ensure_product_id_unique_index():
+    """One-time safety migration, safe to call on every startup: adds a
+    real DB-level UNIQUE index on crypto_tree_branches.product_id.
+
+    Every branch runs as its own thread with its own independent cycle
+    timer - nothing coordinates them against each other. Two branches can
+    exit at close enough to the same moment that both read the "unclaimed
+    coins" set before either has written its own pick back, and without a
+    real constraint, both could commit the same coin as their new pick -
+    two branches silently trading the identical coin at once, breaking the
+    "only unclaimed coins" rule this whole feature was built around. A
+    Python-level check alone can't close that window (both checks can pass
+    before either write lands); only the database itself, rejecting the
+    second write outright, actually guarantees it never happens.
+
+    If duplicate product_id rows already exist (shouldn't happen, but
+    would make the index impossible to create), or the index can't be
+    created for any other reason, this logs a warning and leaves the
+    constraint absent rather than blocking startup - the coin-switch code
+    still catches that failure mode at the point of use (see
+    _branch_sell_and_settle) so a missing index degrades to "the race is
+    possible but rare," not a crash."""
+    try:
+        async with AsyncSessionLocal() as db:
+            dupes = await db.execute(text(
+                "SELECT product_id, COUNT(*) FROM crypto_tree_branches "
+                "GROUP BY product_id HAVING COUNT(*) > 1"
+            ))
+            dupe_rows = dupes.fetchall()
+            if dupe_rows:
+                log.warning(f"[TREE] duplicate product_id rows already exist ({dupe_rows}) - "
+                            f"skipping unique index, coin-claim races are NOT prevented at the DB level yet")
+                return
+            await db.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_crypto_tree_branches_product_id_unique "
+                "ON crypto_tree_branches (product_id)"
+            ))
+            await db.commit()
+        log.info("[TREE] product_id uniqueness enforced at the DB level - two branches can never claim the same coin")
+    except Exception as e:
+        log.warning(f"[TREE] could not add product_id uniqueness constraint: {e} - coin-claim races are not yet prevented at the DB level")
 
 
 async def find_most_volatile_unclaimed_coin(session):
@@ -427,12 +471,34 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
             if new_tier_floor < row.equity_floor:
                 log.info(f"[TREE] 🪜 {bot_name} floor lowered ${row.equity_floor:,.2f} -> ${new_tier_floor:,.2f} to match post-sale balance ${new_allocated:.2f}")
                 row.equity_floor = new_tier_floor
-            if new_product_id:
-                log.info(f"[TREE] 🔀 {bot_name} switching {row.product_id} -> {new_product_id} (ATR {new_product_atr*100:.2f}%) after {reason}")
-                row.product_id = new_product_id
-            else:
-                log.info(f"[TREE] {bot_name}: no unclaimed coin available to switch to - staying on {row.product_id}")
             await db.commit()
+
+    # The coin switch commits separately, in its own transaction, so a
+    # conflict here (see below) can never roll back the balance/floor
+    # update above - that part is correct and final either way.
+    if row is not None and new_product_id:
+        old_product_id = row.product_id
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
+                fresh = result.scalar_one_or_none()
+                if fresh:
+                    fresh.product_id = new_product_id
+                    await db.commit()
+            row.product_id = new_product_id
+            log.info(f"[TREE] 🔀 {bot_name} switching {old_product_id} -> {new_product_id} (ATR {new_product_atr*100:.2f}%) after {reason}")
+        except IntegrityError:
+            # Another branch's thread claimed this exact coin first, in the
+            # gap between find_most_volatile_unclaimed_coin's read and this
+            # write - only the DB-level unique index (see
+            # _ensure_product_id_unique_index) actually catches this; a
+            # Python-only check can't, since both branches' reads can pass
+            # before either write lands. Stay on the old coin for this
+            # cycle rather than retrying inline - the next cycle re-runs
+            # the whole search fresh, against whatever's unclaimed by then.
+            log.warning(f"[TREE] {bot_name}: {new_product_id} was claimed by another branch first (race) - staying on {old_product_id} this cycle")
+    elif row is not None:
+        log.info(f"[TREE] {bot_name}: no unclaimed coin available to switch to - staying on {row.product_id}")
 
     log.info(
         f"[TREE] {bot_name} SOLD {filled_qty:.8f} {product_id} @ ${filled_price:,.2f} ({reason}) | "
@@ -593,6 +659,7 @@ def run():
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    loop.run_until_complete(_ensure_product_id_unique_index())
 
     async def _scan():
         async with engine.aiohttp.ClientSession() as session:
