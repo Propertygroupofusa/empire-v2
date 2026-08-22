@@ -433,9 +433,28 @@ async def run_migrations():
     # tuple produced no output at all. Silence read exactly like success.
     scanned = added = converted = failed = sequenced = 0
 
-    async with engine.begin() as conn:
-        for table in Base.metadata.sorted_tables:
-            table_name = table.name
+    for table in Base.metadata.sorted_tables:
+        table_name = table.name
+        # Each table migrates in its OWN transaction, committed the moment
+        # this table's work finishes - not one shared transaction for
+        # every table. Discovered live tonight: run_migrations() is
+        # wrapped in asyncio.wait_for(..., timeout=60.0) at its call site;
+        # against Railway's real networked Postgres (not a fast local
+        # connection), checking and migrating 40+ tables can exceed that
+        # 60s window. When the timeout cancels this coroutine mid-loop,
+        # the cancellation propagates out through whatever `async with
+        # engine.begin()` block is currently open - and if that block
+        # wraps the ENTIRE loop, its __aexit__ sees the cancellation as an
+        # exception and rolls back the WHOLE transaction, undoing every
+        # table already migrated in this run, including ones that had
+        # already logged "Migration OK". Confirmed live: bot_positions.
+        # target_price logged success, then every following query still
+        # saw the column as missing - the ADD COLUMN was rolled back
+        # seconds later along with everything processed after it, once
+        # the 60s timeout fired further down the loop. A transaction
+        # scoped to one table can only ever lose THAT table's work to a
+        # timeout, never anything already committed for tables before it.
+        async with engine.begin() as conn:
             try:
                 raw_columns = await conn.run_sync(
                     lambda sync_conn, t=table_name: inspect(sync_conn).get_columns(t)
