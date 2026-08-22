@@ -145,28 +145,45 @@ async def get_next_eligible_product_id():
 
 async def find_most_volatile_unclaimed_coin(session):
     """Among the family-tree coins not already claimed by any existing
-    branch, finds the one with the highest current volatility (ATR% of
-    price). Used only when a branch takes a real loss past its floor and
-    switches coins rather than continuing to grind the one that just cost
-    it money - higher volatility isn't free upside (the fixed stop-loss %
-    can get hit faster too), but it does mean more chances for the
-    adaptive profit target to actually fire instead of the price sitting
-    flat. Returns (product_id, atr_pct), or (None, None) if every coin is
-    already claimed or none have usable price data right now."""
+    branch, finds the most volatile coin that's ALSO currently bullish
+    (price up over the ~25-hour candle window) - used only when a branch
+    takes a real loss past its floor and switches coins rather than
+    continuing to grind the one that just cost it money. Requiring bullish
+    first means it's chasing a coin that's actually trending in a useful
+    direction, not just one that's swinging randomly; volatility as the
+    tiebreaker among bullish candidates means more chances for the
+    adaptive profit target to fire rather than the price sitting flat.
+    Higher volatility is still not free upside - the fixed stop-loss % can
+    get hit faster on a bigger swing too.
+
+    If no unclaimed coin is currently bullish, falls back to the highest
+    volatility overall rather than doing nothing. Returns (product_id,
+    atr_pct), or (None, None) if every coin is already claimed or none
+    have usable price data right now."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoTreeBranch.product_id))
         claimed = set(result.scalars().all())
     candidates = [p for p in COIN_FAMILY_TREE if p not in claimed]
 
-    best_product_id, best_atr = None, -1.0
+    best_bullish_id, best_bullish_atr = None, -1.0
+    best_any_id, best_any_atr = None, -1.0
     for product_id in candidates:
-        price, atr_pct = await engine.get_price_and_volatility(session, product_id)
+        price, atr_pct, is_bullish = await engine.get_price_volatility_and_trend(session, product_id)
         if price is None or atr_pct is None:
             continue
-        if atr_pct > best_atr:
-            best_atr = atr_pct
-            best_product_id = product_id
-    return (best_product_id, best_atr) if best_product_id else (None, None)
+        if atr_pct > best_any_atr:
+            best_any_atr = atr_pct
+            best_any_id = product_id
+        if is_bullish and atr_pct > best_bullish_atr:
+            best_bullish_atr = atr_pct
+            best_bullish_id = product_id
+
+    if best_bullish_id:
+        return best_bullish_id, best_bullish_atr
+    if best_any_id:
+        log.info("[TREE] no unclaimed coin is currently bullish - falling back to highest volatility overall")
+        return best_any_id, best_any_atr
+    return None, None
 
 
 async def _load_branch_position(bot_name: str):

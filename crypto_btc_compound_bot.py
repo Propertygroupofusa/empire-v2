@@ -208,42 +208,71 @@ async def get_product_size_decimals(session, product_id: str) -> int:
         return 8
 
 
-async def get_price_and_volatility(session, product_id: str = PRODUCT_ID) -> tuple:
-    """Current price and ATR% (volatility as a fraction of price) for any
-    Coinbase product, from 5-minute candles on Coinbase's public
-    market-data endpoint (no auth needed - same endpoint
-    crypto_coinbase_bot.py uses for its own ATR). Returns (price, atr_pct)
-    or (None, None) on failure. product_id defaults to BTC-USD so this
-    bot's own run_cycle doesn't need to change; crypto_family_tree_bot.py
-    passes each branch's own product_id explicitly."""
+async def _fetch_candles(session, product_id: str):
+    """Fetches ~25 hours of 5-minute candles (Coinbase's public,
+    unauthenticated market-data endpoint - same one crypto_coinbase_bot.py
+    uses for its own ATR). Returns (closes, highs, lows), oldest-first, or
+    None on any failure or insufficient data."""
     url = f"https://api.exchange.coinbase.com/products/{product_id}/candles?granularity=300"
     try:
         async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
             if r.status != 200:
-                return None, None
+                return None
             data = await r.json()
             if not data or len(data) < 20:
-                return None, None
+                return None
             # Coinbase returns newest-first: [time, low, high, open, close, volume]
             candles = list(reversed(data))
             closes = [float(c[4]) for c in candles]
             highs = [float(c[2]) for c in candles]
             lows = [float(c[1]) for c in candles]
-            price = closes[-1]
-
-            period = 14
-            if len(closes) < period + 1:
-                return price, 0.0
-            true_ranges = []
-            for i in range(1, len(closes)):
-                tr = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
-                true_ranges.append(tr)
-            atr = sum(true_ranges[-period:]) / period
-            atr_pct = atr / price if price else 0.0
-            return price, atr_pct
+            return closes, highs, lows
     except Exception as e:
-        log.warning(f"[BTC-COMPOUND] Price/volatility fetch failed: {e}")
+        log.warning(f"[BTC-COMPOUND] Candle fetch failed for {product_id}: {e}")
+        return None
+
+
+def _atr_pct_from_candles(closes, highs, lows) -> float:
+    price = closes[-1]
+    period = 14
+    if len(closes) < period + 1:
+        return 0.0
+    true_ranges = []
+    for i in range(1, len(closes)):
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+        true_ranges.append(tr)
+    atr = sum(true_ranges[-period:]) / period
+    return atr / price if price else 0.0
+
+
+async def get_price_and_volatility(session, product_id: str = PRODUCT_ID) -> tuple:
+    """Current price and ATR% (volatility as a fraction of price) for any
+    Coinbase product. Returns (price, atr_pct) or (None, None) on failure.
+    product_id defaults to BTC-USD so this bot's own run_cycle doesn't need
+    to change; crypto_family_tree_bot.py passes each branch's own
+    product_id explicitly."""
+    candles = await _fetch_candles(session, product_id)
+    if candles is None:
         return None, None
+    closes, highs, lows = candles
+    return closes[-1], _atr_pct_from_candles(closes, highs, lows)
+
+
+async def get_price_volatility_and_trend(session, product_id: str = PRODUCT_ID) -> tuple:
+    """Same as get_price_and_volatility, plus whether the coin is currently
+    bullish - price now higher than it was at the start of the same
+    ~25-hour candle window used for the ATR calculation. Only used by
+    find_most_volatile_unclaimed_coin() in crypto_family_tree_bot.py to
+    pick a coin after a floor-breach loss; every other caller keeps using
+    plain get_price_and_volatility, unaffected by this. Returns
+    (price, atr_pct, is_bullish) or (None, None, None) on failure."""
+    candles = await _fetch_candles(session, product_id)
+    if candles is None:
+        return None, None, None
+    closes, highs, lows = candles
+    atr_pct = _atr_pct_from_candles(closes, highs, lows)
+    is_bullish = closes[-1] > closes[0]
+    return closes[-1], atr_pct, is_bullish
 
 
 def pick_target_pct(atr_pct: float) -> float:
