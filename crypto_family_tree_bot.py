@@ -449,7 +449,13 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
     # the update transaction below opens, using the DB's still-current
     # claimed set (this branch's own coin included), so it can never
     # "switch" to itself.
-    new_product_id, new_product_atr = await find_most_volatile_unclaimed_coin(session)
+    #
+    # The root (BTC) is the one exception: it's the permanent foundation
+    # the whole tree grows out of, not a branch that wanders - per the
+    # account owner, it always stays on BTC-USD regardless of how it exits.
+    new_product_id = new_product_atr = None
+    if bot_name != ROOT_BOT_NAME:
+        new_product_id, new_product_atr = await find_most_volatile_unclaimed_coin(session)
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
@@ -497,6 +503,8 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
             # cycle rather than retrying inline - the next cycle re-runs
             # the whole search fresh, against whatever's unclaimed by then.
             log.warning(f"[TREE] {bot_name}: {new_product_id} was claimed by another branch first (race) - staying on {old_product_id} this cycle")
+    elif row is not None and bot_name == ROOT_BOT_NAME:
+        log.info(f"[TREE] {bot_name}: root stays on {row.product_id} by design (the tree's permanent foundation)")
     elif row is not None:
         log.info(f"[TREE] {bot_name}: no unclaimed coin available to switch to - staying on {row.product_id}")
 
