@@ -93,6 +93,17 @@ COORDINATOR_SCAN_SECONDS = engine._safe_int_env("TREE_COORDINATOR_SCAN_SECONDS",
 PROFIT_SKIM_PCT = engine._safe_float_env("TREE_PROFIT_SKIM_PCT", "0.10")
 LOCKED_PROFIT_STATE_KEY = "crypto_family_tree_locked_usd"
 
+# Real spendable cash (real_balance - locked_usd) below MIN_TRADE_USD just
+# sits there forever on its own - no branch can ever spend less than
+# MIN_TRADE_USD on a buy, so it isn't profit and run_branch_cycle's
+# trading logic can never touch it. Per the account owner's request: if
+# that stranded amount hasn't moved for this many hours (nothing sold to
+# top it up, no branch could spend it), sweep it into the same
+# locked-profit ledger the 10% skim uses - see _check_and_sweep_stranded_dust().
+DUST_STUCK_HOURS = engine._safe_float_env("TREE_DUST_STUCK_HOURS", "24")
+DUST_CHECK_INTERVAL_SECONDS = engine._safe_int_env("TREE_DUST_CHECK_INTERVAL_SECONDS", "900")
+DUST_TRACKER_KEY = "crypto_family_tree_dust_tracker"
+
 MIN_TRADE_USD = engine.MIN_TRADE_USD
 CYCLE_SECONDS = engine.CYCLE_SECONDS
 STOP_LOSS_PCT = engine.STOP_LOSS_PCT
@@ -163,6 +174,65 @@ async def _add_locked_usd(amount: float):
         else:
             db.add(TradingBotState(bot_name=LOCKED_PROFIT_STATE_KEY, base_capital=amount, starting_capital=0.0))
         await db.commit()
+
+
+_last_dust_check_at = 0.0
+
+
+async def _check_and_sweep_stranded_dust():
+    """If the real spendable balance has been stuck below MIN_TRADE_USD
+    and unchanged for DUST_STUCK_HOURS, sweep it into locked_usd instead
+    of leaving it dead forever. If it grows before that (a sale added
+    proceeds) or crosses MIN_TRADE_USD (a branch can now spend it), the
+    clock resets - this only ever catches money that's genuinely never
+    going anywhere on its own.
+
+    Runs from the single-threaded coordinator loop (see run()'s _scan()),
+    never from a per-branch thread: multiple branches share the same real
+    balance, so checking this per-branch would let several branches race
+    to sweep the same stranded dollars multiple times over."""
+    async with engine.aiohttp.ClientSession() as session:
+        real_balance, err = await engine.get_usd_balance(session)
+    if real_balance is None:
+        log.debug(f"[TREE] dust check: real balance unavailable ({err}) - skipping")
+        return
+
+    locked_usd = await get_locked_usd()
+    spendable = max(0.0, real_balance - locked_usd)
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == DUST_TRACKER_KEY))
+        tracker = result.scalar_one_or_none()
+
+        if spendable <= 0 or spendable >= MIN_TRADE_USD:
+            # Nothing stranded, or a branch can spend it now - clear any tracking.
+            if tracker is not None and tracker.base_capital != 0.0:
+                tracker.base_capital = 0.0
+                await db.commit()
+            return
+
+        if tracker is None:
+            db.add(TradingBotState(bot_name=DUST_TRACKER_KEY, base_capital=spendable, starting_capital=0.0))
+            await db.commit()
+            log.info(f"[TREE] 💤 Tracking ${spendable:.2f} stranded below the ${MIN_TRADE_USD:.2f} minimum trade "
+                     f"- will lock it away if it's still stuck in {DUST_STUCK_HOURS:.0f}h")
+            return
+
+        if abs(tracker.base_capital - spendable) > 0.005:
+            # Changed since the last check (grew or shrank) - real cash
+            # moved, so this isn't dead money yet. Restart the clock.
+            tracker.base_capital = spendable
+            await db.commit()
+            log.info(f"[TREE] 💤 Stranded dust changed (now ${spendable:.2f}) - restarting the {DUST_STUCK_HOURS:.0f}h clock")
+            return
+
+        stuck_hours = (datetime.utcnow() - tracker.updated_at).total_seconds() / 3600.0
+        if stuck_hours >= DUST_STUCK_HOURS:
+            await _add_locked_usd(spendable)
+            tracker.base_capital = 0.0
+            await db.commit()
+            log.info(f"[TREE] 🔒 Swept ${spendable:.2f} of stranded dust (stuck {stuck_hours:.1f}h below the "
+                     f"${MIN_TRADE_USD:.2f} minimum trade) into locked profit - permanently out of the compounding loop")
 
 
 async def load_all_branches():
@@ -774,6 +844,15 @@ def run():
                     t = threading.Thread(target=_branch_thread_main, args=(branch.bot_name,), daemon=True)
                     _running_threads[branch.bot_name] = t
                     t.start()
+
+        global _last_dust_check_at
+        now = time.time()
+        if now - _last_dust_check_at >= DUST_CHECK_INTERVAL_SECONDS:
+            _last_dust_check_at = now
+            try:
+                await _check_and_sweep_stranded_dust()
+            except Exception as e:
+                log.warning(f"[TREE] dust sweep check failed: {e}")
 
     while True:
         try:
