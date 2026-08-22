@@ -188,7 +188,13 @@ def _auth_headers(method: str, path: str) -> dict:
 # Entry happens ONLY when RSI recovers UP from oversold state (not just reaching threshold)
 RSI_RESET_THRESHOLD = 50      # When RSI crosses above this, reset all entry tracking
 RSI_STRONG_ARM_THRESHOLD = 20 # RSI < 20 = strongest oversold signal
-RSI_ARM_THRESHOLD = 30        # RSI < 30 = standard oversold (arm for entry)
+# Loosened from 30 -> 40 by request: arms on a shallower dip, so more setups
+# qualify. Real tradeoff, not free - weaker-conviction entries, more trades
+# that don't pan out, in exchange for not sitting out as long waiting for a
+# deep oversold read. CRYPTO_RSI_BUY_BELOW was a dead env var (defined,
+# never read by the actual entry logic) - this is the one that was actually
+# gating entries the whole time.
+RSI_ARM_THRESHOLD = _safe_float_env("CRYPTO_RSI_ARM_THRESHOLD", "40")  # RSI < this = oversold (arm for entry)
 RSI_WATCH_THRESHOLD = 50      # Above this = WATCH state
 RSI_NO_ENTRY = 65             # RSI >= 65 = overbought territory, skip entries
 try:
