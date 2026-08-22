@@ -143,6 +143,32 @@ async def get_next_eligible_product_id():
     return None
 
 
+async def find_most_volatile_unclaimed_coin(session):
+    """Among the family-tree coins not already claimed by any existing
+    branch, finds the one with the highest current volatility (ATR% of
+    price). Used only when a branch takes a real loss past its floor and
+    switches coins rather than continuing to grind the one that just cost
+    it money - higher volatility isn't free upside (the fixed stop-loss %
+    can get hit faster too), but it does mean more chances for the
+    adaptive profit target to actually fire instead of the price sitting
+    flat. Returns (product_id, atr_pct), or (None, None) if every coin is
+    already claimed or none have usable price data right now."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoTreeBranch.product_id))
+        claimed = set(result.scalars().all())
+    candidates = [p for p in COIN_FAMILY_TREE if p not in claimed]
+
+    best_product_id, best_atr = None, -1.0
+    for product_id in candidates:
+        price, atr_pct = await engine.get_price_and_volatility(session, product_id)
+        if price is None or atr_pct is None:
+            continue
+        if atr_pct > best_atr:
+            best_atr = atr_pct
+            best_product_id = product_id
+    return (best_product_id, best_atr) if best_product_id else (None, None)
+
+
 async def _load_branch_position(bot_name: str):
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(BotPosition).where(BotPosition.bot == bot_name))
@@ -354,6 +380,18 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
     pnl = new_allocated - (position.entry_price * position.qty)
 
     await _clear_branch_position(bot_name)
+
+    # After a real loss forces the floor-breach exit, look for a currently
+    # unclaimed coin with higher volatility rather than automatically
+    # re-buying the same coin that just cost money. Looked up before the
+    # update transaction below opens, using the DB's still-current claimed
+    # set (this branch's own coin included), so it can never "switch" to
+    # itself. A normal TARGET/STOP HIT exit never triggers this - a branch
+    # that isn't floor-breached keeps trading whatever's been assigned to it.
+    new_product_id = new_product_atr = None
+    if reason.startswith("EQUITY FLOOR BREACH"):
+        new_product_id, new_product_atr = await find_most_volatile_unclaimed_coin(session)
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
         row = result.scalar_one_or_none()
@@ -374,6 +412,11 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
             if new_tier_floor < row.equity_floor:
                 log.info(f"[TREE] 🪜 {bot_name} floor lowered ${row.equity_floor:,.2f} -> ${new_tier_floor:,.2f} to match post-sale balance ${new_allocated:.2f}")
                 row.equity_floor = new_tier_floor
+            if new_product_id:
+                log.info(f"[TREE] 🔀 {bot_name} switching {row.product_id} -> {new_product_id} (ATR {new_product_atr*100:.2f}%) after floor-breach loss")
+                row.product_id = new_product_id
+            elif reason.startswith("EQUITY FLOOR BREACH"):
+                log.info(f"[TREE] {bot_name}: no unclaimed coin available to switch to - staying on {row.product_id}")
             await db.commit()
 
     log.info(
