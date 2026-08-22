@@ -1506,6 +1506,19 @@ async def serve_live_dashboard():
     return FileResponse(dashboard_path, media_type="text/html")
 
 
+@app.get("/family-tree-dashboard")
+async def serve_family_tree_dashboard():
+    """Serve the crypto_family_tree_bot.py dashboard (admin-only data,
+    gated by X-Admin-Key on the /api/trading-dashboard/family-tree-status
+    endpoint it calls) - unlike /trading-dashboard and /live-dashboard,
+    this reads real DB rows (CryptoTreeBranch/BotPosition), not an
+    in-memory module dict, since each branch runs as its own thread."""
+    dashboard_path = os.path.join(os.path.dirname(__file__), "family_tree_dashboard.html")
+    if not os.path.exists(dashboard_path):
+        raise HTTPException(status_code=404, detail="Family tree dashboard not found")
+    return FileResponse(dashboard_path, media_type="text/html")
+
+
 @app.get("/api/orchestrator/stats")
 async def get_orchestrator_stats(db = Depends(lambda: None)):
     """Aggregate all earnings: video production + trading (prop + crypto)"""

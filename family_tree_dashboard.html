@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🌳 Family Tree Dashboard - Coinbase Compounding</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+        font-family: 'Courier New', monospace;
+        background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+        color: #00ff00;
+        min-height: 100vh;
+        padding: 20px;
+    }
+
+    .container { max-width: 1200px; margin: 0 auto; }
+
+    .header {
+        text-align: center;
+        margin-bottom: 24px;
+        border-bottom: 2px solid #00ff00;
+        padding-bottom: 16px;
+    }
+    .header h1 { font-size: 2em; text-shadow: 0 0 10px #00ff00; margin-bottom: 6px; }
+    .header p { opacity: 0.7; font-size: 0.9em; }
+
+    .summary {
+        display: flex;
+        justify-content: center;
+        gap: 30px;
+        margin-bottom: 24px;
+        flex-wrap: wrap;
+    }
+    .summary .stat {
+        border: 1px solid #00ff0055;
+        background: #00ff0011;
+        padding: 14px 22px;
+        border-radius: 6px;
+        text-align: center;
+        min-width: 150px;
+    }
+    .summary .stat .label { font-size: 0.75em; opacity: 0.7; text-transform: uppercase; letter-spacing: 1px; }
+    .summary .stat .value { font-size: 1.6em; font-weight: bold; margin-top: 4px; }
+
+    #status { text-align: center; margin-bottom: 20px; opacity: 0.6; font-size: 0.85em; }
+    #status.error { color: #ff5555; opacity: 1; }
+
+    .tree { display: flex; flex-direction: column; gap: 14px; }
+
+    .branch-row { display: flex; align-items: stretch; gap: 0; }
+    .branch-indent { flex-shrink: 0; }
+
+    .card {
+        border: 1px solid #00ff0055;
+        background: #05050f;
+        border-radius: 8px;
+        padding: 16px 18px;
+        flex: 1;
+        min-width: 0;
+    }
+    .card.root { border-color: #ffcc00; background: #ffcc0011; }
+
+    .card-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 10px;
+    }
+    .coin { font-size: 1.3em; font-weight: bold; }
+    .coin .badge {
+        font-size: 0.55em;
+        vertical-align: middle;
+        margin-left: 8px;
+        padding: 2px 8px;
+        border-radius: 10px;
+        border: 1px solid #ffcc00;
+        color: #ffcc00;
+    }
+    .bot-name { font-size: 0.75em; opacity: 0.55; }
+
+    .row { display: flex; justify-content: space-between; font-size: 0.9em; margin: 3px 0; flex-wrap: wrap; gap: 6px; }
+    .row .k { opacity: 0.65; }
+    .row .v { font-weight: bold; }
+    .v.pos { color: #00ff88; }
+    .v.neg { color: #ff5566; }
+
+    .progress-wrap { margin-top: 10px; }
+    .progress-label { display: flex; justify-content: space-between; font-size: 0.75em; opacity: 0.7; margin-bottom: 3px; }
+    .progress-bar-bg {
+        width: 100%; height: 10px; background: #ffffff11;
+        border-radius: 5px; overflow: hidden; border: 1px solid #00ff0033;
+    }
+    .progress-bar-fill {
+        height: 100%; background: linear-gradient(90deg, #00ff88, #00ff00);
+        box-shadow: 0 0 6px #00ff0088;
+        transition: width 0.4s ease;
+    }
+
+    .position-box {
+        margin-top: 12px;
+        padding: 10px 12px;
+        background: #00000055;
+        border-radius: 6px;
+        border-left: 3px solid #00ff00;
+    }
+    .position-box.none {
+        border-left-color: #666;
+        opacity: 0.55;
+        font-style: italic;
+        font-size: 0.85em;
+    }
+
+    .connector {
+        width: 30px;
+        position: relative;
+        opacity: 0.4;
+    }
+    .connector::before {
+        content: '';
+        position: absolute;
+        left: 14px; top: -12px; bottom: 50%;
+        width: 1px;
+        background: #00ff00;
+    }
+    .connector::after {
+        content: '';
+        position: absolute;
+        left: 14px; top: 50%;
+        width: 14px; height: 1px;
+        background: #00ff00;
+    }
+
+    .empty {
+        text-align: center;
+        opacity: 0.6;
+        padding: 40px;
+        font-style: italic;
+    }
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1>🌳 Family Tree — Coinbase Compounding</h1>
+        <p>Live from the database · one card per branch, indented under its parent</p>
+    </div>
+
+    <div class="summary">
+        <div class="stat"><div class="label">Branches / Coins</div><div class="value" id="stat-count">—</div></div>
+        <div class="stat"><div class="label">Total Allocated</div><div class="value" id="stat-total">—</div></div>
+        <div class="stat"><div class="label">Refreshed</div><div class="value" id="stat-refreshed" style="font-size:1em">—</div></div>
+    </div>
+
+    <div id="status">Loading…</div>
+    <div class="tree" id="tree"></div>
+</div>
+
+<script>
+const API_BASE = 'https://empire-v2-production.up.railway.app/api/trading-dashboard';
+const KEY_STORAGE = 'bmb_admin_key';
+let adminKey = localStorage.getItem(KEY_STORAGE) || '';
+
+function getAdminKey() {
+    if (!adminKey) {
+        adminKey = prompt('Enter admin key to load real family tree data:') || '';
+        if (adminKey) localStorage.setItem(KEY_STORAGE, adminKey);
+    }
+    return adminKey;
+}
+
+async function apiGet(path) {
+    const key = getAdminKey();
+    const res = await fetch(API_BASE + path, { headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' } });
+    if (res.status === 401 || res.status === 403) {
+        localStorage.removeItem(KEY_STORAGE);
+        adminKey = '';
+        throw new Error('Admin key rejected - refresh the page to re-enter it');
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+}
+
+function fmtUsd(n) {
+    return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function branchCard(b) {
+    const isRoot = !b.parent_bot_name;
+    const pct = b.next_unlock_tier > 0 ? Math.min(100, (b.allocated_usd / b.next_unlock_tier) * 100) : 0;
+    const coin = b.product_id.replace('-USD', '');
+
+    let posHtml = '<div class="position-box none">Flat — no open position, waiting to buy</div>';
+    if (b.position) {
+        const p = b.position;
+        posHtml = `
+            <div class="position-box">
+                <div class="row"><span class="k">Entry</span><span class="v">${fmtUsd(p.entry_price)}</span></div>
+                <div class="row"><span class="k">Qty</span><span class="v">${p.qty}</span></div>
+                <div class="row"><span class="k">Target</span><span class="v pos">${p.target_price != null ? fmtUsd(p.target_price) : '—'}</span></div>
+                <div class="row"><span class="k">Stop</span><span class="v neg">${p.stop_price != null ? fmtUsd(p.stop_price) : '—'}</span></div>
+            </div>`;
+    }
+
+    return `
+        <div class="card ${isRoot ? 'root' : ''}">
+            <div class="card-top">
+                <div class="coin">${coin} ${isRoot ? '<span class="badge">ROOT</span>' : ''}</div>
+                <div class="bot-name">${b.bot_name}</div>
+            </div>
+            <div class="row"><span class="k">Balance</span><span class="v">${fmtUsd(b.allocated_usd)}</span></div>
+            <div class="row"><span class="k">Floor</span><span class="v">${fmtUsd(b.equity_floor)}</span></div>
+            <div class="progress-wrap">
+                <div class="progress-label"><span>Progress to next spawn</span><span>${fmtUsd(b.allocated_usd)} / ${fmtUsd(b.next_unlock_tier)}</span></div>
+                <div class="progress-bar-bg"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
+            </div>
+            ${posHtml}
+        </div>`;
+}
+
+function renderTree(branches) {
+    const byParent = {};
+    branches.forEach(b => {
+        const key = b.parent_bot_name || '__root__';
+        (byParent[key] = byParent[key] || []).push(b);
+    });
+
+    let html = '';
+    function walk(parentKey, depth) {
+        (byParent[parentKey] || []).forEach(b => {
+            html += `<div class="branch-row">`;
+            for (let i = 0; i < depth; i++) html += `<div class="connector" style="width:30px"></div>`;
+            html += `<div style="flex:1">${branchCard(b)}</div></div>`;
+            walk(b.bot_name, depth + 1);
+        });
+    }
+    walk('__root__', 0);
+    return html || '<div class="empty">No branches yet — the root should appear within a minute of the bot starting.</div>';
+}
+
+async function refresh() {
+    const statusEl = document.getElementById('status');
+    try {
+        const data = await apiGet('/family-tree-status');
+        document.getElementById('stat-count').textContent = data.branch_count;
+        document.getElementById('stat-total').textContent = fmtUsd(data.total_allocated_usd);
+        document.getElementById('stat-refreshed').textContent = new Date().toLocaleTimeString();
+        document.getElementById('tree').innerHTML = renderTree(data.branches);
+        statusEl.textContent = '';
+        statusEl.className = '';
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    }
+}
+
+refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>

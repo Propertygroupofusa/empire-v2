@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from admin_auth import require_admin_key
-from models import TradingBotState, WithdrawalRequest
+from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition
 
 NUM_BOTS = int(os.getenv("PROP_NUM_BOTS", "8"))
 if NUM_BOTS <= 0:
@@ -539,6 +539,52 @@ async def get_crypto_coinbase_status():
         "rsi_buy_below": crypto_coinbase_bot_module.RSI_BUY_BELOW,
         "rsi_sell_above": crypto_coinbase_bot_module.RSI_SELL_ABOVE,
         "signals": crypto_coinbase_bot_module.latest_signals,
+    }
+
+
+@router.get("/family-tree-status", dependencies=[Depends(require_admin_key)])
+async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
+    """Real DB state of every crypto_family_tree_bot.py branch. Unlike
+    /crypto-coinbase-status above, there's no single in-memory module dict
+    to read here - each branch runs as its own independent thread, so the
+    CryptoTreeBranch/BotPosition rows in the database are the only place a
+    branch's live state actually exists. Backs family_tree_dashboard.html."""
+    branches_result = await db.execute(select(CryptoTreeBranch).order_by(CryptoTreeBranch.created_at))
+    branches = list(branches_result.scalars().all())
+
+    positions_by_bot = {}
+    if branches:
+        positions_result = await db.execute(
+            select(BotPosition).where(BotPosition.bot.in_([b.bot_name for b in branches]))
+        )
+        for p in positions_result.scalars().all():
+            positions_by_bot[p.bot] = p
+
+    out = []
+    for b in branches:
+        pos = positions_by_bot.get(b.bot_name)
+        out.append({
+            "bot_name": b.bot_name,
+            "product_id": b.product_id,
+            "parent_bot_name": b.parent_bot_name,
+            "allocated_usd": round(b.allocated_usd, 2),
+            "equity_floor": round(b.equity_floor, 2),
+            "next_unlock_tier": round(b.next_unlock_tier, 2),
+            "created_at": b.created_at.isoformat() if b.created_at else None,
+            "position": None if pos is None else {
+                "symbol": pos.symbol,
+                "entry_price": pos.entry_price,
+                "qty": pos.qty,
+                "target_price": pos.target_price,
+                "stop_price": pos.stop_price,
+                "opened_at": pos.opened_at.isoformat() if pos.opened_at else None,
+            },
+        })
+
+    return {
+        "branches": out,
+        "branch_count": len(out),
+        "total_allocated_usd": round(sum(b["allocated_usd"] for b in out), 2),
     }
 
 
