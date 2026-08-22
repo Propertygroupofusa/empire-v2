@@ -204,16 +204,30 @@ async def find_most_volatile_unclaimed_coin(session):
     If no unclaimed coin is currently bullish, falls back to the highest
     volatility overall rather than doing nothing. Returns (product_id,
     atr_pct), or (None, None) if every coin is already claimed or none
-    have usable price data right now."""
+    have usable price data right now.
+
+    Looks up every candidate concurrently rather than one at a time: with
+    up to 27 coins and a 15s timeout per request, a sequential loop's
+    worst case was minutes (a branch just sitting there, not trading,
+    while it worked through the whole list) - running them all at once
+    caps the whole search at whatever the single slowest request takes."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoTreeBranch.product_id))
         claimed = set(result.scalars().all())
     candidates = [p for p in COIN_FAMILY_TREE if p not in claimed]
 
+    results = await asyncio.gather(
+        *(engine.get_price_volatility_and_trend(session, product_id) for product_id in candidates),
+        return_exceptions=True,
+    )
+
     best_bullish_id, best_bullish_atr = None, -1.0
     best_any_id, best_any_atr = None, -1.0
-    for product_id in candidates:
-        price, atr_pct, is_bullish = await engine.get_price_volatility_and_trend(session, product_id)
+    for product_id, result in zip(candidates, results):
+        if isinstance(result, Exception):
+            log.warning(f"[TREE] volatility lookup failed for {product_id}: {result}")
+            continue
+        price, atr_pct, is_bullish = result
         if price is None or atr_pct is None:
             continue
         if atr_pct > best_any_atr:
@@ -368,18 +382,29 @@ async def adopt_orphaned_positions(session):
         stop_price = price * (1 - STOP_LOSS_PCT)
         position_value = position.qty * price
 
-        async with AsyncSessionLocal() as db:
-            db.add(CryptoTreeBranch(
-                bot_name=bot_name, product_id=product_id, parent_bot_name=None,
-                allocated_usd=position_value, next_unlock_tier=UNLOCK_TIER_USD, equity_floor=0.0,
-            ))
-            result = await db.execute(select(BotPosition).where(BotPosition.id == position.id))
-            row = result.scalar_one_or_none()
-            if row:
-                row.bot = bot_name
-                row.target_price = target_price
-                row.stop_price = stop_price
-            await db.commit()
+        try:
+            async with AsyncSessionLocal() as db:
+                db.add(CryptoTreeBranch(
+                    bot_name=bot_name, product_id=product_id, parent_bot_name=None,
+                    allocated_usd=position_value, next_unlock_tier=UNLOCK_TIER_USD, equity_floor=0.0,
+                ))
+                result = await db.execute(select(BotPosition).where(BotPosition.id == position.id))
+                row = result.scalar_one_or_none()
+                if row:
+                    row.bot = bot_name
+                    row.target_price = target_price
+                    row.stop_price = stop_price
+                await db.commit()
+        except IntegrityError:
+            # Vanishingly unlikely (another branch would have to switch
+            # INTO this exact orphaned coin in the instant between the
+            # already_claimed check above and this commit), but the same
+            # DB-level unique index that protects normal coin switches
+            # (see _ensure_product_id_unique_index) covers this path too -
+            # skip this scan, the position is still sitting under the old
+            # bot's name and gets picked up again next coordinator scan.
+            log.warning(f"[TREE] Orphaned {product_id} position: another branch claimed this coin first (race) - will retry adopting next scan")
+            continue
 
         unrealized_pct = (price / position.entry_price - 1) * 100
         log.info(
@@ -407,22 +432,33 @@ async def _maybe_spawn_child(branch):
 
     child_name = f"crypto_tree_{next_product.lower().replace('-', '_')}"
     milestone = branch.next_unlock_tier
-    async with AsyncSessionLocal() as db:
-        # Re-check against a fresh row under this transaction, so the
-        # coordinator's scan and this branch's own cycle can't both spawn
-        # a child for the same crossing.
-        result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == branch.bot_name))
-        fresh = result.scalar_one_or_none()
-        if not fresh or fresh.allocated_usd < fresh.next_unlock_tier:
-            return
-        fresh.allocated_usd -= SEED_USD
-        fresh.next_unlock_tier += UNLOCK_TIER_USD
-        db.add(CryptoTreeBranch(
-            bot_name=child_name, product_id=next_product, parent_bot_name=branch.bot_name,
-            allocated_usd=SEED_USD, next_unlock_tier=UNLOCK_TIER_USD, equity_floor=0.0,
-        ))
-        await db.commit()
-        remaining = fresh.allocated_usd
+    try:
+        async with AsyncSessionLocal() as db:
+            # Re-check against a fresh row under this transaction, so the
+            # coordinator's scan and this branch's own cycle can't both spawn
+            # a child for the same crossing.
+            result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == branch.bot_name))
+            fresh = result.scalar_one_or_none()
+            if not fresh or fresh.allocated_usd < fresh.next_unlock_tier:
+                return
+            fresh.allocated_usd -= SEED_USD
+            fresh.next_unlock_tier += UNLOCK_TIER_USD
+            db.add(CryptoTreeBranch(
+                bot_name=child_name, product_id=next_product, parent_bot_name=branch.bot_name,
+                allocated_usd=SEED_USD, next_unlock_tier=UNLOCK_TIER_USD, equity_floor=0.0,
+            ))
+            await db.commit()
+            remaining = fresh.allocated_usd
+    except IntegrityError:
+        # Another branch crossed its own tier at nearly the same moment and
+        # claimed this exact coin first - same DB-level unique index that
+        # protects the coin-switch path (see _ensure_product_id_unique_index).
+        # The parent's own allocated_usd/next_unlock_tier update rolled back
+        # together with the failed insert (same transaction), so nothing is
+        # stuck half-applied - this crossing just gets retried next cycle,
+        # against whatever's unclaimed by then.
+        log.info(f"[TREE] {branch.bot_name} crossed ${milestone:,.0f} but {next_product} was claimed by another branch first (race) - will retry next cycle")
+        return
 
     log.info(
         f"[TREE] 🌱 {branch.bot_name} crossed ${milestone:,.0f} - spawned {child_name} ({next_product}) "
