@@ -26,7 +26,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database import get_db
+from database import get_db, AsyncSessionLocal
 from admin_auth import require_admin_key
 from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment
 
@@ -59,6 +59,26 @@ ALPACA_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 ALPACA_HEADERS = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+
+# Real, unattended position management - per the account owner's explicit
+# request. No bot enforces either of these today: exits were otherwise
+# only RSI/profit-target/stop-loss driven per-bot, and several real open
+# positions (e.g. AMZD, YUM) don't even match a known bot's symbol
+# universe (see _fetch_position_opened_at's docstring) - so this acts on
+# every real open Alpaca position account-wide, not inside any one bot's
+# already-narrow logic. 8% chosen over the 33% first floated: the swing
+# bot's own declared convention for this kind of hold is 5%, and 33%
+# would essentially never fire in a 10-day window for these symbols,
+# making the max-hold timeout do all the work instead of ever taking a
+# real profit early.
+ALPACA_AUTO_CLOSE_PROFIT_PCT = float(os.getenv("ALPACA_AUTO_CLOSE_PROFIT_PCT", "0.08"))
+ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS = float(os.getenv("ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS", "10"))
+ALPACA_AUTO_CLOSE_CHECK_INTERVAL_SECONDS = int(os.getenv("ALPACA_AUTO_CLOSE_CHECK_INTERVAL_SECONDS", "900"))
+# Same 10%-of-realized-profit pattern crypto_family_tree_bot.py uses (never
+# on a loss) - the other 90% + principal just returns to the account's
+# real buying power on close, no reinvestment decision made here.
+ALPACA_PROFIT_SKIM_PCT = float(os.getenv("ALPACA_PROFIT_SKIM_PCT", "0.10"))
+ALPACA_LOCKED_PROFIT_KEY = "alpaca_locked_usd"
 
 # Pre-8-bot names, kept only to migrate whatever they were already
 # tracking into the new bot_N buckets the first time this runs.
@@ -684,6 +704,8 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
         for bot in bots:
             await db.refresh(bot)
 
+    locked_usd = round(await get_alpaca_locked_usd(), 2)
+
     return {
         "equity": round(equity, 2),
         "cash": round(cash, 2),
@@ -693,6 +715,9 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
         "scale": scale,
         "goal": goal,
         "progress_to_goal_pct": progress_to_goal_pct,
+        "locked_usd": locked_usd,
+        "auto_close_profit_pct": ALPACA_AUTO_CLOSE_PROFIT_PCT,
+        "auto_close_max_hold_days": ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS,
         "bots": [{"name": b.bot_name, "capital": round(b.base_capital, 2), "profit": round(_bot_profit(b), 2), "pl": round(_bot_pl(b), 2)} for b in bots],
         "positions": [
             {
@@ -764,6 +789,117 @@ async def close_alpaca_position(symbol: str, db: AsyncSession = Depends(get_db))
 
     log.info(f"Manually closed {symbol} via dashboard: qty={qty}, realized_pnl=${pnl:.2f}")
     return {"status": "closed", "symbol": symbol, "qty": qty, "realized_pnl": round(pnl, 2), "order": close_result}
+
+
+async def get_alpaca_locked_usd() -> float:
+    """Running total of profit skimmed by check_and_auto_close_positions -
+    same generic per-key bucket table (TradingBotState) the bot-bucket
+    tracking and crypto_family_tree_bot.py's own locked ledger both use,
+    just a different key so the two accounts' locked profit never mixes."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == ALPACA_LOCKED_PROFIT_KEY))
+        row = result.scalar_one_or_none()
+        return row.base_capital if row else 0.0
+
+
+async def check_and_auto_close_positions():
+    """Real, unattended enforcement, per the account owner's explicit
+    request: closes any open Alpaca position once it either hits
+    ALPACA_AUTO_CLOSE_PROFIT_PCT unrealized gain, or has been open
+    ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS or longer, whichever comes first.
+    Skims ALPACA_PROFIT_SKIM_PCT of realized gain into the locked ledger
+    on every close (never on a loss) - the rest returns to the account's
+    real buying power automatically on close; nothing here decides what
+    to buy next, that's a separate, unbuilt decision.
+
+    Runs from a single asyncio task (see run_auto_close_periodically,
+    started once from main.py) rather than per-bot, since this acts on
+    every real open position account-wide regardless of which bot (if
+    any) is nominally trading that symbol."""
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        return
+
+    async with aiohttp.ClientSession() as session:
+        positions = await _fetch_alpaca_positions(session)
+        if not positions:
+            return
+
+        for p in positions:
+            symbol = p.get("symbol")
+            if not symbol:
+                continue
+            try:
+                qty = float(p.get("qty", 0))
+                entry_price = float(p.get("avg_entry_price", 0))
+                current_price = float(p.get("current_price", entry_price))
+                unrealized_plpc = float(p.get("unrealized_plpc", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+
+            age_days = None
+            opened_at_iso = await _fetch_position_opened_at(session, symbol)
+            if opened_at_iso:
+                try:
+                    opened_dt = datetime.fromisoformat(opened_at_iso.replace("Z", "+00:00"))
+                    age_days = (datetime.now(timezone.utc) - opened_dt).total_seconds() / 86400.0
+                except ValueError:
+                    age_days = None
+
+            hit_profit_target = unrealized_plpc >= ALPACA_AUTO_CLOSE_PROFIT_PCT
+            hit_max_hold = age_days is not None and age_days >= ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS
+            if not (hit_profit_target or hit_max_hold):
+                continue
+            reason = "profit target" if hit_profit_target else "max hold"
+
+            async with session.delete(f"{ALPACA_BASE_URL}/v2/positions/{symbol}", headers=ALPACA_HEADERS) as r:
+                if r.status not in (200, 207):
+                    body = await r.text()
+                    log.warning(f"[AUTO-CLOSE] {symbol} close failed ({reason}): HTTP {r.status} {body[:200]}")
+                    continue
+
+            pnl = (current_price - entry_price) * qty
+            skim = round(pnl * ALPACA_PROFIT_SKIM_PCT, 2) if pnl > 0 else 0.0
+            age_note = f" | aged {age_days:.1f}d" if age_days is not None else ""
+            log.info(f"[AUTO-CLOSE] {symbol} closed ({reason}) | qty={qty} | unrealized {unrealized_plpc*100:+.1f}% | "
+                     f"realized_pnl=${pnl:.2f}{age_note}")
+
+            try:
+                async with AsyncSessionLocal() as db:
+                    payment = Payment(
+                        id=f"auto_close_{uuid.uuid4().hex[:8]}",
+                        job_id=f"auto_close_{symbol}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+                        worker_id="bot@pgusa.local",
+                        client_id="alpaca_auto_close",
+                        gross_amount=pnl,
+                        worker_amount=(pnl - skim) if pnl > 0 else pnl,
+                        platform_amount=skim,
+                        payout_status="pending" if pnl > 0 else "completed",
+                    )
+                    db.add(payment)
+
+                    if skim > 0:
+                        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == ALPACA_LOCKED_PROFIT_KEY))
+                        row = result.scalar_one_or_none()
+                        if row:
+                            row.base_capital += skim
+                        else:
+                            db.add(TradingBotState(bot_name=ALPACA_LOCKED_PROFIT_KEY, base_capital=skim, starting_capital=0.0))
+                        log.info(f"[AUTO-CLOSE] 🔒 Locked ${skim:.2f} (10% of {symbol}'s ${pnl:.2f} profit)")
+
+                    await db.commit()
+            except Exception as e:
+                log.warning(f"[AUTO-CLOSE] Failed to record earnings for {symbol}: {e}")
+
+
+async def run_auto_close_periodically():
+    log.info(f"Alpaca auto-close loop started: profit target {ALPACA_AUTO_CLOSE_PROFIT_PCT*100:.0f}%, "
+             f"max hold {ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS:.0f}d, checking every {ALPACA_AUTO_CLOSE_CHECK_INTERVAL_SECONDS}s")
+    while True:
+        try:
+            await check_and_auto_close_positions()
+        except Exception as e:
+            log.warning(f"Alpaca auto-close cycle failed: {e}")
+        await asyncio.sleep(ALPACA_AUTO_CLOSE_CHECK_INTERVAL_SECONDS)
 
 
 # Chart-eligible symbols only - an explicit allowlist, checked before the

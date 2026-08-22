@@ -1024,6 +1024,13 @@ async def lifespan(app: FastAPI):
         log.warning(f"Sales agent auto-processing startup failed: {e}")
 
     try:
+        from routers.trading_dashboard import run_auto_close_periodically
+        asyncio.create_task(run_auto_close_periodically())
+        log.info("⏱️ Alpaca auto-close loop started (8% profit target / 10-day max hold, 10% skim to locked profit)")
+    except Exception as e:
+        log.warning(f"Alpaca auto-close loop startup failed: {e}")
+
+    try:
         if payee_worker is not None:
             import asyncio
             asyncio.create_task(payee_worker())

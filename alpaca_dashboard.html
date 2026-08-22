@@ -21,6 +21,8 @@
         --red: #d6455a;
         --red-bg: #fbe9ec;
         --orange: #e8752c;
+        --gold: #c9860a;
+        --gold-bg: #fbf1de;
         --navy: #1f3864;
         --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 2px 8px rgba(16,24,40,0.06);
     }
@@ -65,6 +67,8 @@
     .kpi .value { font-size: 1.6em; font-weight: 800; color: var(--navy); margin-top: 4px; }
     .kpi .value.pos { color: var(--green); }
     .kpi .value.neg { color: var(--red); }
+    .kpi.gold .value { color: var(--gold); }
+    .kpi.gold { border-color: #f0dcae; background: var(--gold-bg); }
 
     .section-title {
         font-size: 1.02em;
@@ -189,6 +193,7 @@
         <div class="kpi"><div class="label">Session P&amp;L</div><div class="value" id="stat-pl">—</div></div>
         <div class="kpi"><div class="label">Scale</div><div class="value" id="stat-scale">—</div></div>
         <div class="kpi"><div class="label">Floor</div><div class="value" id="stat-floor">—</div></div>
+        <div class="kpi gold"><div class="label">🔒 Locked Profit</div><div class="value" id="stat-locked">—</div></div>
     </div>
 
     <div class="grid-2">
@@ -208,10 +213,10 @@
     <div class="grid" id="bots"></div>
 
     <div class="section-title">Open Positions</div>
-    <p class="panel-sub" style="margin-bottom:10px;">
-        Opened = real fill time of the order that opened the position. No bot enforces a scheduled close
-        date - each position exits on its own trigger (RSI overbought, profit target, or stop loss), not a
-        calendar date. Use Close to exit manually before that happens.
+    <p class="panel-sub" id="positions-note" style="margin-bottom:10px;">
+        Opened = real fill time of the order that opened the position. A background check closes any position
+        automatically once it hits the profit target or the max hold time, whichever comes first — you can
+        still Close one manually before that happens.
     </p>
     <div class="panel" style="padding:0; overflow-x:auto;">
         <div id="positions" style="padding: 8px 20px;"></div>
@@ -368,6 +373,15 @@ async function refresh() {
         plEl.className = 'value ' + (data.session_pl >= 0 ? 'pos' : 'neg');
         document.getElementById('stat-scale').textContent = data.scale + 'x';
         document.getElementById('stat-floor').textContent = fmtUsd(data.equity_floor);
+        document.getElementById('stat-locked').textContent = fmtUsd(data.locked_usd || 0);
+
+        if (data.auto_close_profit_pct != null && data.auto_close_max_hold_days != null) {
+            document.getElementById('positions-note').textContent =
+                `Opened = real fill time of the order that opened the position. A background check auto-closes ` +
+                `any position once it hits +${(data.auto_close_profit_pct * 100).toFixed(0)}% profit or has been ` +
+                `open ${data.auto_close_max_hold_days.toFixed(0)} days, whichever comes first (10% of realized ` +
+                `profit locks away, same as the crypto bot). You can still Close one manually before that happens.`;
+        }
 
         renderGauge('goal-gauge', data.progress_to_goal_pct, fmtUsd(data.equity) + ' of ' + fmtUsd(data.goal));
 
