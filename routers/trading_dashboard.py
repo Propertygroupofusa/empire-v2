@@ -757,7 +757,13 @@ async def close_alpaca_position(symbol: str, db: AsyncSession = Depends(get_db))
                 raise HTTPException(status_code=404, detail=f"No open position for {symbol}")
             position = await r.json()
 
-        async with session.delete(f"{ALPACA_BASE_URL}/v2/positions/{symbol}", headers=ALPACA_HEADERS) as r:
+        # cancel_orders=true: without it, an existing open order on this
+        # symbol (e.g. a stop-loss/take-profit leg another bot placed)
+        # holds the shares Alpaca considers "available", and the close
+        # order this endpoint places gets rejected with a 403 (error body
+        # shape {"available":..,"existing_qty":..,"held_for_orders":..}) -
+        # real production symptom this fixes, not a hypothetical.
+        async with session.delete(f"{ALPACA_BASE_URL}/v2/positions/{symbol}?cancel_orders=true", headers=ALPACA_HEADERS) as r:
             if r.status not in (200, 207):
                 body = await r.text()
                 raise HTTPException(status_code=502, detail=f"Alpaca close failed ({r.status}): {body}")
@@ -851,7 +857,12 @@ async def check_and_auto_close_positions():
                 continue
             reason = "profit target" if hit_profit_target else "max hold"
 
-            async with session.delete(f"{ALPACA_BASE_URL}/v2/positions/{symbol}", headers=ALPACA_HEADERS) as r:
+            # cancel_orders=true - see close_alpaca_position's comment above;
+            # this is the exact real failure this feature hit on its first
+            # live run (AMZD/YUM both 403'd with an "available"/"existing_qty"/
+            # "held_for_orders" body, meaning another open order was holding
+            # the shares).
+            async with session.delete(f"{ALPACA_BASE_URL}/v2/positions/{symbol}?cancel_orders=true", headers=ALPACA_HEADERS) as r:
                 if r.status not in (200, 207):
                     body = await r.text()
                     log.warning(f"[AUTO-CLOSE] {symbol} close failed ({reason}): HTTP {r.status} {body[:200]}")
