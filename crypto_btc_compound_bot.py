@@ -153,8 +153,9 @@ def _auth_headers(method: str, path: str) -> dict:
     return {"Authorization": f"Bearer {_build_jwt(method, path)}", "Content-Type": "application/json"}
 
 
-async def get_usd_balance(session) -> tuple:
-    """Real available USD balance. Returns (balance, None) or (None, reason)."""
+async def get_asset_balance(session, currency: str) -> tuple:
+    """Real available balance of a given asset currency (e.g. 'USD', 'DOT',
+    'LDO'). Returns (balance, None) or (None, reason)."""
     path = "/api/v3/brokerage/accounts"
     cursor = None
     try:
@@ -168,18 +169,43 @@ async def get_usd_balance(session) -> tuple:
                     return None, f"HTTP {r.status}: {body}"
                 data = await r.json()
                 for account in data.get("accounts", []):
-                    if account.get("currency") == "USD":
+                    if account.get("currency") == currency:
                         return float(account["available_balance"]["value"]), None
                 if not data.get("has_next") or not data.get("cursor"):
                     break
                 cursor = data.get("cursor")
-        return None, "no USD account found on this key"
+        return None, f"no {currency} account found on this key"
     except asyncio.TimeoutError:
         return None, "Coinbase API timeout"
     except aiohttp.ClientError as e:
         return None, f"Coinbase connection failed: {type(e).__name__}"
     except Exception as e:
         return None, f"{type(e).__name__}: {str(e)[:150]}"
+
+
+async def get_usd_balance(session) -> tuple:
+    """Real available USD balance. Returns (balance, None) or (None, reason)."""
+    return await get_asset_balance(session, "USD")
+
+
+async def get_product_size_decimals(session, product_id: str) -> int:
+    """How many decimal places Coinbase allows for order size on this
+    product, from its base_increment (e.g. BTC-USD allows 8 decimals but a
+    lower-priced/higher-supply coin like LDO-USD may allow only 2 or 4).
+    Selling with more decimals than the product allows is rejected outright
+    (INVALID_SIZE_PRECISION) - defaults to 8 (the most permissive real
+    value seen on Coinbase) if the lookup fails, matching prior behavior."""
+    path = f"/api/v3/brokerage/products/{product_id}"
+    try:
+        async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path), timeout=15) as r:
+            if r.status != 200:
+                return 8
+            data = await r.json()
+            increment = data.get("base_increment", "0.00000001")
+            return len(increment.split(".")[1]) if "." in increment else 0
+    except Exception as e:
+        log.warning(f"[BTC-COMPOUND] size-precision fetch failed for {product_id}, defaulting to 8 decimals: {e}")
+        return 8
 
 
 async def get_price_and_volatility(session, product_id: str = PRODUCT_ID) -> tuple:
@@ -241,13 +267,37 @@ async def place_market_buy(session, usd_amount: float, product_id: str = PRODUCT
 
 
 async def place_market_sell(session, qty: float, product_id: str = PRODUCT_ID):
-    """Sells qty of product_id at market. Returns (filled_qty, filled_price) or None."""
+    """Sells qty of product_id at market. Returns (filled_qty, filled_price) or None.
+
+    Before placing, clamps qty to the real held balance and rounds it down
+    to the product's allowed decimal precision. Both guard against a rejected
+    order that would otherwise retry forever with the exact same bad size:
+    the tracked position qty can drift above the real balance (fees taken in
+    the asset itself, dust from an old bot, rounding on an adopted position),
+    which Coinbase rejects as INSUFFICIENT_FUND; and different assets allow
+    different size precision (BTC-USD allows 8 decimals, others fewer), which
+    Coinbase rejects as INVALID_SIZE_PRECISION if exceeded.
+    """
+    base_currency = product_id.split("-")[0]
+    real_balance, _ = await get_asset_balance(session, base_currency)
+    if real_balance is not None and real_balance < qty:
+        log.info(f"[BTC-COMPOUND] {product_id}: clamping sell qty {qty:.8f} -> real held balance {real_balance:.8f}")
+        qty = real_balance
+
+    decimals = await get_product_size_decimals(session, product_id)
+    factor = 10 ** decimals
+    qty = math.floor(qty * factor) / factor
+
+    if qty <= 0:
+        log.warning(f"[BTC-COMPOUND] {product_id}: nothing sellable after balance/precision clamp (qty was {qty})")
+        return None
+
     path = "/api/v3/brokerage/orders"
     order = {
         "client_order_id": str(uuid.uuid4()),
         "product_id": product_id,
         "side": "SELL",
-        "order_configuration": {"market_market_ioc": {"base_size": f"{qty:.8f}"}},
+        "order_configuration": {"market_market_ioc": {"base_size": f"{qty:.{decimals}f}"}},
     }
     return await _place_and_confirm(session, path, order)
 
