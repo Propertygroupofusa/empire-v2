@@ -253,14 +253,31 @@ async def adopt_orphaned_positions(session):
             continue
 
         # This position was bought by the old bot, not this cycle, so
-        # there's no "just now" fill to compute a target/stop from - use
-        # its real entry_price the same way a fresh buy would, so it gets
-        # the same adaptive target/stop every other position gets, not a
-        # position with target_price/stop_price left NULL (which would
-        # crash the very first comparison against them next cycle).
+        # there's no "just now" fill to compute a target/stop from. Target
+        # and stop are deliberately anchored to DIFFERENT prices here:
+        #
+        # - target stays anchored to the REAL original entry_price, so it
+        #   only sells once it's an actual profit versus what was really
+        #   paid - not a lower bar just because adoption happened later.
+        #
+        # - stop is anchored to the CURRENT price at adoption time, not
+        #   the old entry_price. Anchoring the stop to a stale entry would
+        #   retroactively punish the position for whatever it did BEFORE
+        #   this system ever started watching it - if it had already
+        #   drifted down since the original buy, a stop derived from that
+        #   old entry could sit at or above the current price and force an
+        #   immediate loss on literally the first cycle after adoption,
+        #   for a decline this system had no part in and no chance to
+        #   react to. Anchoring to "now" instead means: protect it from
+        #   HERE forward. One real side effect worth knowing - if it's
+        #   already sitting on a gain at adoption time, this stop sits
+        #   ABOVE the original entry, so it can't round-trip all the way
+        #   back to a loss without hitting the profit target first. If
+        #   it's currently underwater, this does not erase that - a
+        #   further decline from here is still a real, possible loss.
         target_pct = engine.pick_target_pct(atr_pct)
         target_price = position.entry_price * (1 + target_pct)
-        stop_price = position.entry_price * (1 - STOP_LOSS_PCT)
+        stop_price = price * (1 - STOP_LOSS_PCT)
         position_value = position.qty * price
 
         async with AsyncSessionLocal() as db:
