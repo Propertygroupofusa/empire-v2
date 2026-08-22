@@ -808,6 +808,23 @@ async def get_alpaca_locked_usd() -> float:
         return row.base_capital if row else 0.0
 
 
+async def _is_market_open(session: aiohttp.ClientSession) -> bool:
+    """Real check against Alpaca's own clock, not a guess - defaults to
+    False (closed) on any failure, since the two possible mistakes here
+    aren't symmetric: wrongly skipping a close just waits one more cycle,
+    but wrongly attempting one performs a real, hard-to-undo cancel (see
+    check_and_auto_close_positions' docstring) for nothing."""
+    try:
+        async with session.get(f"{ALPACA_BASE_URL}/v2/clock", headers=ALPACA_HEADERS) as r:
+            if r.status != 200:
+                return False
+            data = await r.json()
+            return bool(data.get("is_open", False))
+    except Exception as e:
+        log.warning(f"[AUTO-CLOSE] Market clock check failed, assuming closed: {e}")
+        return False
+
+
 async def check_and_auto_close_positions():
     """Real, unattended enforcement, per the account owner's explicit
     request: closes any open Alpaca position once it either hits
@@ -821,11 +838,25 @@ async def check_and_auto_close_positions():
     Runs from a single asyncio task (see run_auto_close_periodically,
     started once from main.py) rather than per-bot, since this acts on
     every real open position account-wide regardless of which bot (if
-    any) is nominally trading that symbol."""
+    any) is nominally trading that symbol.
+
+    Only ever runs while the market is actually open (see
+    _is_market_open). The close request uses cancel_orders=true, which
+    cancels any existing protective order (stop-loss/take-profit) BEFORE
+    placing the new closing order - real production symptom this
+    discovered: if the market is closed, that cancel can succeed while
+    the replacement closing order can't actually fill, leaving the
+    position with no protection at all until the next session. Skipping
+    the whole attempt while closed is the only way to guarantee that
+    never happens; the position just waits, still protected by whatever
+    order it already had, until the next check after market open."""
     if not (ALPACA_KEY and ALPACA_SECRET):
         return
 
     async with aiohttp.ClientSession() as session:
+        if not await _is_market_open(session):
+            return
+
         positions = await _fetch_alpaca_positions(session)
         if not positions:
             return
