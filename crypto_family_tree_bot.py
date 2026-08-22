@@ -488,6 +488,14 @@ async def run_branch_cycle(bot_name: str) -> bool:
                     return True
                 log.warning(f"[TREE] 🛑 {bot_name} EQUITY FLOOR BREACH: ${equity:.2f} < floor ${branch.equity_floor:,.2f} - force-selling, pausing entries")
                 await _branch_sell_and_settle(session, bot_name, branch.product_id, position, "EQUITY FLOOR BREACH - forced exit")
+                # _branch_sell_and_settle already picked a new coin (if
+                # bullish/volatile enough) and reset the floor to match the
+                # post-sale balance, so the branch is no longer breached -
+                # don't make it sit idle until the next scheduled cycle
+                # (up to CYCLE_SECONDS away) to act on that; re-run the
+                # cycle immediately so it buys into the new coin right now,
+                # in this same pass, using everything it just decided.
+                return await run_branch_cycle(bot_name)
             else:
                 log.info(f"[TREE] 🛑 {bot_name}: ${equity:.2f} below floor ${branch.equity_floor:,.2f} - entries paused until it recovers")
             return True
