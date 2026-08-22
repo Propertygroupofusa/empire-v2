@@ -741,13 +741,7 @@
                 Every real gain or loss is split proportionally across all 8, so they all compound together - and
                 each one is individually withdrawable below without freezing the rest.
             </p>
-            <div id="botsBar" class="bar-list" style="margin-bottom: 20px;"></div>
-            <p style="color: var(--text-dim); font-size: 0.8em; margin-bottom: 6px;">
-                Profit bridge - real signed gain/loss per bucket (a bucket underwater shows red here even
-                though the ranking above and the list below floor its loss at $0.00, since that's the
-                withdrawal-eligible number, not the real one).
-            </p>
-            <div id="botsWaterfall" style="margin-bottom: 16px;"></div>
+            <div id="botsBar" class="bar-list" style="margin-bottom: 16px;"></div>
             <div id="botsList">Loading...</div>
         </div>
 
@@ -877,48 +871,6 @@
                     <span class="bar-value">$${i.value.toFixed(2)}</span>
                 </div>`;
             }).join('');
-        }
-
-        // Floating-bar waterfall/bridge chart - same component as the
-        // Alpaca dashboard. Real signed data only (see the "pl" field
-        // routers/trading_dashboard.py's _bot_pl adds - NOT "profit",
-        // which floors a loss at $0.00 for withdrawal-eligibility).
-        function renderWaterfall(containerId, steps) {
-            const el = document.getElementById(containerId);
-            if (!el) return;
-            if (!steps.length) { el.innerHTML = ''; return; }
-
-            const H = 190;
-            let running = 0;
-            const bars = steps.map(s => {
-                if (s.type === 'total') {
-                    running = s.value;
-                    return { label: s.label, from: 0, to: s.value, kind: 'total', value: s.value };
-                }
-                const from = running;
-                const to = running + s.value;
-                running = to;
-                return { label: s.label, from: Math.min(from, to), to: Math.max(from, to), kind: s.value >= 0 ? 'pos' : 'neg', value: s.value };
-            });
-
-            const allVals = bars.flatMap(b => [b.from, b.to]).concat([0]);
-            const maxVal = Math.max(...allVals);
-            const minVal = Math.min(...allVals);
-            const range = Math.max(1, maxVal - minVal);
-            const scale = H / range;
-            const colorFor = k => k === 'total' ? '#1f3864' : (k === 'pos' ? '#009845' : '#d6455a');
-
-            el.innerHTML = `<div style="display:flex; align-items:flex-end; gap:8px; height:${H + 40}px; padding-top:24px;">` +
-                bars.map(b => {
-                    const topPx = (maxVal - b.to) * scale;
-                    const heightPx = Math.max(2, (b.to - b.from) * scale);
-                    return `<div style="flex:1; min-width:0; text-align:center; position:relative; height:${H}px;">
-                        <div style="position:absolute; top:-22px; left:0; right:0; font-weight:700; color:var(--navy); font-size:0.8em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">$${b.value.toFixed(2)}</div>
-                        <div style="position:absolute; top:${topPx}px; height:${heightPx}px; left:8%; right:8%; background:${colorFor(b.kind)}; border-radius:3px;"></div>
-                        <div style="position:absolute; bottom:-22px; left:0; right:0; font-size:0.72em; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${b.label}</div>
-                    </div>`;
-                }).join('') +
-            `</div>`;
         }
 
         function renderNarrative(status) {
@@ -1124,14 +1076,6 @@
             const bots = status.bots || [];
 
             renderBarList('botsBar', bots.map(b => ({ label: b.name.replace('_', ' #'), value: b.profit || 0 })));
-
-            const totalStart = bots.reduce((sum, b) => sum + (b.capital - (b.pl != null ? b.pl : b.profit || 0)), 0);
-            const totalCurrent = bots.reduce((sum, b) => sum + b.capital, 0);
-            renderWaterfall('botsWaterfall', [
-                { label: 'Starting Capital', value: totalStart, type: 'total' },
-                ...bots.map(b => ({ label: b.name.replace('_', ' #'), value: b.pl != null ? b.pl : (b.profit || 0) })),
-                { label: 'Current Equity', value: totalCurrent, type: 'total' },
-            ]);
 
             container.innerHTML = bots.map(b => `
                 <div class="pair">
