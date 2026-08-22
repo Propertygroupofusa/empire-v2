@@ -235,7 +235,13 @@ class ComprehensiveHealthMonitor:
             try:
                 import httpx
                 async with httpx.AsyncClient(timeout=5) as client:
-                    response = await client.get(f"http://localhost:{port}{endpoint}", headers=headers)
+                    # 127.0.0.1, not localhost: in containerized environments
+                    # (Railway included) "localhost" can resolve to an IPv6
+                    # address that nothing is bound to, even though the app
+                    # is listening fine on IPv4 - that produced a permanent
+                    # false "All connection attempts failed" alarm here while
+                    # the app was actually up and serving real traffic.
+                    response = await client.get(f"http://127.0.0.1:{port}{endpoint}", headers=headers)
                     results[endpoint] = {
                         "ok": response.status_code < 500,
                         "status_code": response.status_code
