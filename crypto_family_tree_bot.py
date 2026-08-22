@@ -212,6 +212,79 @@ async def ensure_root_exists(session):
     log.info(f"[TREE] 🌳 Root branch seeded: {ROOT_BOT_NAME} with ${starting_equity:.2f} ({detail}) | inherited floor ${inherited_floor:,.2f}")
 
 
+# Only this exact bot_name - crypto_coinbase_bot.py's own BOT_NAME constant
+# - is ever eligible for adoption. Deliberately not "any position with no
+# matching branch": BotPosition is shared with prop_bot.py too
+# (bot="prop_apex", trading Alpaca stock/futures-proxy symbols) - treating
+# one of ITS positions as a Coinbase product_id would try to place a real
+# crypto order for a stock ticker. Only the one legacy bot this system
+# actually replaced is safe to fold in.
+ORPHAN_SOURCE_BOT_NAME = "crypto_coinbase"
+
+
+async def adopt_orphaned_positions(session):
+    """Finds real open positions still sitting under the old multi-pair
+    bot's name (crypto_coinbase) with no branch managing them - true
+    orphans, since that bot's thread stopped running the moment
+    CRYPTO_STRATEGY_MODE moved away from "multi_pair", but the real
+    position never closed. Confirmed live: an LDO-USD position bought
+    before tonight's switch was left with no stop-loss, no target, no
+    thread checking on it at all. Folds each one into the tree as its own
+    branch running the same engine everything else here runs - not a
+    special case, just a branch whose first "buy" was actually inherited
+    instead of placed fresh."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(BotPosition).where(BotPosition.bot == ORPHAN_SOURCE_BOT_NAME))
+        orphans = result.scalars().all()
+
+    for position in orphans:
+        product_id = position.symbol.replace("/", "-")
+        bot_name = f"crypto_tree_{product_id.lower().replace('-', '_')}"
+
+        already_claimed = await load_branch(bot_name)
+        if already_claimed is not None:
+            log.warning(f"[TREE] Orphaned {product_id} position exists but {bot_name} is already a branch - "
+                        f"leaving it under '{ORPHAN_SOURCE_BOT_NAME}', unmanaged. Needs a manual look.")
+            continue
+
+        price, atr_pct = await engine.get_price_and_volatility(session, product_id)
+        if price is None:
+            log.warning(f"[TREE] Could not fetch price for orphaned {product_id} position - will retry adopting next scan")
+            continue
+
+        # This position was bought by the old bot, not this cycle, so
+        # there's no "just now" fill to compute a target/stop from - use
+        # its real entry_price the same way a fresh buy would, so it gets
+        # the same adaptive target/stop every other position gets, not a
+        # position with target_price/stop_price left NULL (which would
+        # crash the very first comparison against them next cycle).
+        target_pct = engine.pick_target_pct(atr_pct)
+        target_price = position.entry_price * (1 + target_pct)
+        stop_price = position.entry_price * (1 - STOP_LOSS_PCT)
+        position_value = position.qty * price
+
+        async with AsyncSessionLocal() as db:
+            db.add(CryptoTreeBranch(
+                bot_name=bot_name, product_id=product_id, parent_bot_name=None,
+                allocated_usd=position_value, next_unlock_tier=UNLOCK_TIER_USD, equity_floor=0.0,
+            ))
+            result = await db.execute(select(BotPosition).where(BotPosition.id == position.id))
+            row = result.scalar_one_or_none()
+            if row:
+                row.bot = bot_name
+                row.target_price = target_price
+                row.stop_price = stop_price
+            await db.commit()
+
+        unrealized_pct = (price / position.entry_price - 1) * 100
+        log.info(
+            f"[TREE] 🌿 ADOPTED orphaned {product_id} position from the old bot: {position.qty:.8f} @ "
+            f"entry ${position.entry_price:,.2f} | now ${price:,.2f} ({unrealized_pct:+.2f}%) | "
+            f"now managed as {bot_name} - target +{target_pct*100:.2f}% (${target_price:,.2f}) | "
+            f"stop -{STOP_LOSS_PCT*100:.2f}% (${stop_price:,.2f})"
+        )
+
+
 async def _maybe_spawn_child(branch):
     """Called right after a branch's allocated_usd is updated (always right
     after a real sell, when the number is freshly accurate). If it just
@@ -422,6 +495,7 @@ def run():
     async def _scan():
         async with engine.aiohttp.ClientSession() as session:
             await ensure_root_exists(session)
+            await adopt_orphaned_positions(session)
         branches = await load_all_branches()
         with _threads_lock:
             for branch in branches:
