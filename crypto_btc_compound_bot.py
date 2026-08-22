@@ -182,12 +182,15 @@ async def get_usd_balance(session) -> tuple:
         return None, f"{type(e).__name__}: {str(e)[:150]}"
 
 
-async def get_price_and_volatility(session) -> tuple:
-    """Current BTC price and ATR% (volatility as a fraction of price), from
-    5-minute candles on Coinbase's public market-data endpoint (no auth
-    needed - same endpoint crypto_coinbase_bot.py uses for its own ATR).
-    Returns (price, atr_pct) or (None, None) on failure."""
-    url = f"https://api.exchange.coinbase.com/products/{PRODUCT_ID}/candles?granularity=300"
+async def get_price_and_volatility(session, product_id: str = PRODUCT_ID) -> tuple:
+    """Current price and ATR% (volatility as a fraction of price) for any
+    Coinbase product, from 5-minute candles on Coinbase's public
+    market-data endpoint (no auth needed - same endpoint
+    crypto_coinbase_bot.py uses for its own ATR). Returns (price, atr_pct)
+    or (None, None) on failure. product_id defaults to BTC-USD so this
+    bot's own run_cycle doesn't need to change; crypto_family_tree_bot.py
+    passes each branch's own product_id explicitly."""
+    url = f"https://api.exchange.coinbase.com/products/{product_id}/candles?granularity=300"
     try:
         async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
             if r.status != 200:
@@ -225,24 +228,24 @@ def pick_target_pct(atr_pct: float) -> float:
     return TARGET_HIGH_PCT
 
 
-async def place_market_buy(session, usd_amount: float):
-    """Spends usd_amount on BTC at market. Returns (filled_qty, filled_price) or None."""
+async def place_market_buy(session, usd_amount: float, product_id: str = PRODUCT_ID):
+    """Spends usd_amount on product_id at market. Returns (filled_qty, filled_price) or None."""
     path = "/api/v3/brokerage/orders"
     order = {
         "client_order_id": str(uuid.uuid4()),
-        "product_id": PRODUCT_ID,
+        "product_id": product_id,
         "side": "BUY",
         "order_configuration": {"market_market_ioc": {"quote_size": f"{usd_amount:.2f}"}},
     }
     return await _place_and_confirm(session, path, order)
 
 
-async def place_market_sell(session, qty: float):
-    """Sells qty BTC at market. Returns (filled_qty, filled_price) or None."""
+async def place_market_sell(session, qty: float, product_id: str = PRODUCT_ID):
+    """Sells qty of product_id at market. Returns (filled_qty, filled_price) or None."""
     path = "/api/v3/brokerage/orders"
     order = {
         "client_order_id": str(uuid.uuid4()),
-        "product_id": PRODUCT_ID,
+        "product_id": product_id,
         "side": "SELL",
         "order_configuration": {"market_market_ioc": {"base_size": f"{qty:.8f}"}},
     }

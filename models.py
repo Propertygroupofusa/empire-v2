@@ -938,6 +938,46 @@ class BotPosition(Base):
     entry_atr_pct = Column(Float, nullable=True)     # ATR as a fraction of price
 
 
+class CryptoTreeBranch(Base):
+    """One branch of crypto_family_tree_bot.py's compounding tree - BTC is
+    the root (parent_bot_name NULL), and each child is a single-position
+    engine (same one crypto_btc_compound_bot.py runs) trading its own coin.
+
+    All branches share ONE real Coinbase account/USD wallet - there is no
+    such thing as a real per-branch sub-account. allocated_usd is this
+    branch's VIRTUAL slice of that one real pool: what it's currently
+    holding, whether that's sitting in cash or marked-to-market in an open
+    position (see BotPosition, keyed by this row's bot_name). A branch only
+    ever spends up to its own allocated_usd (capped again by whatever the
+    real account balance actually allows, as a hard safety backstop) - so
+    two branches can never both try to deploy the same real dollars, the
+    way they would if each one sized its buys off the whole real balance.
+
+    Spawning a child is a pure bookkeeping transfer, not a trade: the
+    parent's allocated_usd drops by the seed amount, a new row is inserted
+    for the child with that seed amount, and both numbers still sum to the
+    same real dollars sitting in the one real wallet - nothing needs to be
+    bought or sold to make that split real, since real money never moved
+    accounts to begin with."""
+    __tablename__ = "crypto_tree_branches"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot_name = Column(String, unique=True, index=True)  # e.g. "crypto_tree_btc", "crypto_tree_litecoin_usd"
+    product_id = Column(String)  # Coinbase product id, e.g. "BTC-USD"
+    parent_bot_name = Column(String, nullable=True, index=True)  # NULL for the root (BTC)
+
+    allocated_usd = Column(Float)  # this branch's current virtual slice, cash-equivalent
+    next_unlock_tier = Column(Float)  # the next allocated_usd milestone that spawns a child (starts at 1000, then 2000, ...)
+
+    # Mirrors BotPosition/crypto_btc_compound_bot.py's equity floor ratchet,
+    # but scoped to this branch's own allocated_usd rather than the whole
+    # account - each branch protects its own banked progress independently.
+    equity_floor = Column(Float, default=0.0)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class ClosedTrade(Base):
     """One completed round trip, with the conditions that caused it.
 

@@ -188,13 +188,22 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import crypto_btc_compound_bot: {e}")
 
-# Which Coinbase strategy actually runs - "btc_compound" (single-position,
-# adaptive-target BTC loop) or "multi_pair" (crypto_coinbase_bot.py's
-# original 28-pair RSI strategy). Only one runs at a time; both share the
-# same Coinbase account/balance, so running both together would have them
-# fight over the same funds. Switch back by setting this Railway variable
-# to "multi_pair" and redeploying - no code change needed either way.
-CRYPTO_STRATEGY_MODE = os.getenv("CRYPTO_STRATEGY_MODE", "btc_compound")
+crypto_family_tree_bot_module = None
+try:
+    import crypto_family_tree_bot
+    crypto_family_tree_bot_module = crypto_family_tree_bot
+except Exception as e:
+    logging.warning(f"Failed to import crypto_family_tree_bot: {e}")
+
+# Which Coinbase strategy actually runs - "family_tree" (multiple branches,
+# each the same single-position adaptive-target engine, growing one new
+# coin at a time as branches cross $1,000), "btc_compound" (that same
+# engine, BTC-only, no branching), or "multi_pair" (crypto_coinbase_bot.py's
+# original 28-pair RSI strategy). Only one runs at a time; all three share
+# the same real Coinbase account/balance, so running more than one together
+# would have them fight over the same funds. Revert to either earlier mode
+# by setting this Railway variable and redeploying - no code change needed.
+CRYPTO_STRATEGY_MODE = os.getenv("CRYPTO_STRATEGY_MODE", "family_tree")
 
 alpaca_swing_bot_module = None
 try:
@@ -1174,14 +1183,21 @@ async def lifespan(app: FastAPI):
 
     try:
         import threading
-        if CRYPTO_STRATEGY_MODE == "btc_compound" and crypto_btc_compound_bot_module is not None:
+        if CRYPTO_STRATEGY_MODE == "family_tree" and crypto_family_tree_bot_module is not None:
+            log.info("📡 Starting Crypto (Coinbase) bot daemon thread — family tree strategy (coordinator)...")
+            print("[LIFESPAN] Starting crypto bot thread (family_tree)...", flush=True)
+            bot_thread = threading.Thread(target=crypto_family_tree_bot_module.run, daemon=True)
+            bot_thread.start()
+            print("[LIFESPAN] ✓ Crypto bot thread started", flush=True)
+            log.info("✓ Crypto (Coinbase) bot thread started | family tree coordinator | BTC root + branches spawn as they cross $1,000 | 24/7 trading")
+        elif CRYPTO_STRATEGY_MODE == "btc_compound" and crypto_btc_compound_bot_module is not None:
             log.info("📡 Starting Crypto (Coinbase) bot daemon thread — BTC compounding loop strategy...")
             print("[LIFESPAN] Starting crypto bot thread (btc_compound)...", flush=True)
             bot_thread = threading.Thread(target=crypto_btc_compound_bot_module.run, daemon=True)
             bot_thread.start()
             print("[LIFESPAN] ✓ Crypto bot thread started", flush=True)
             log.info("✓ Crypto (Coinbase) bot thread started | BTC-only | single position | adaptive profit target | 24/7 trading")
-        elif CRYPTO_STRATEGY_MODE != "btc_compound" and crypto_coinbase_bot_module is not None:
+        elif CRYPTO_STRATEGY_MODE == "multi_pair" and crypto_coinbase_bot_module is not None:
             log.info("📡 Starting Crypto (Coinbase) bot daemon thread — multi-pair RSI strategy...")
             print("[LIFESPAN] Starting crypto bot thread (multi_pair)...", flush=True)
             bot_thread = threading.Thread(target=crypto_coinbase_bot_module.run, daemon=True)
