@@ -653,6 +653,56 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     }
 
 
+@router.post("/family-tree-status/close/{bot_name}", dependencies=[Depends(require_admin_key)])
+async def close_family_tree_branch(bot_name: str):
+    """Manually force one branch to sell its open position right now, at
+    market - a real Coinbase order via the exact same
+    _branch_sell_and_settle() every automatic TARGET/STOP/floor-breach exit
+    already uses, so a manual sell behaves identically: real P&L, the same
+    10%-of-profit skim into locked_usd on a win, the same floor-reset-on-
+    loss logic, and the same "pick a new coin and rebuy" handoff - nothing
+    about this path is dashboard-only or simulated.
+
+    Each branch also runs its own always-on background thread
+    (_branch_thread_main) that can independently decide to sell the same
+    position at any moment. This endpoint doesn't lock against that thread -
+    it doesn't need to: place_market_sell() re-checks the REAL Coinbase
+    balance immediately before selling and clamps to whatever's actually
+    still held, so if the branch's own thread already sold first, this call
+    finds nothing left to sell and safely no-ops instead of double-selling.
+    """
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+
+    branch = await crypto_family_tree_bot_module.load_branch(bot_name)
+    if branch is None:
+        raise HTTPException(status_code=404, detail=f"No branch named {bot_name}")
+
+    position = await crypto_family_tree_bot_module._load_branch_position(bot_name)
+    if position is None:
+        raise HTTPException(status_code=400, detail=f"{bot_name} has no open position to sell")
+
+    engine = crypto_family_tree_bot_module.engine
+    async with engine.aiohttp.ClientSession() as session:
+        await crypto_family_tree_bot_module._branch_sell_and_settle(
+            session, bot_name, branch.product_id, position, "MANUAL SELL (dashboard)"
+        )
+
+    # Same reasoning as the automatic exit paths in run_branch_cycle: the
+    # branch's next coin was already picked inside _branch_sell_and_settle
+    # above, so re-run its cycle immediately to place the rebuy now instead
+    # of leaving it idle until the branch's own thread wakes up next.
+    await crypto_family_tree_bot_module.run_branch_cycle(bot_name)
+
+    updated = await crypto_family_tree_bot_module.load_branch(bot_name)
+    return {
+        "status": "sold",
+        "bot_name": bot_name,
+        "allocated_usd": round(updated.allocated_usd, 2) if updated else None,
+        "product_id": updated.product_id if updated else None,
+    }
+
+
 @router.get("/alpaca-overview", dependencies=[Depends(require_admin_key)])
 async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
     """Real Alpaca account snapshot for a focused, at-a-glance dashboard:

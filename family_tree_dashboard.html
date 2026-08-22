@@ -176,6 +176,22 @@
         background: transparent;
     }
 
+    .sell-btn {
+        font-family: inherit;
+        width: 100%;
+        margin-top: 8px;
+        background: var(--red-bg);
+        border: 1px solid var(--red);
+        color: var(--red);
+        padding: 5px 10px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.76em;
+        font-weight: 600;
+    }
+    .sell-btn:hover { background: var(--red); color: #fff; }
+    .sell-btn:disabled { opacity: 0.5; cursor: default; }
+
     .empty {
         text-align: center;
         color: var(--text-dim);
@@ -357,11 +373,17 @@ function branchCardHtml(b) {
     const coin = b.product_id.replace('-USD', '');
 
     let posHtml = '<div class="node-position none">Flat — waiting to buy</div>';
+    let sellBtnHtml = '';
     if (b.position) {
         const p = b.position;
         const target = p.target_price != null ? fmtUsd(p.target_price) : '—';
         const stop = p.stop_price != null ? fmtUsd(p.stop_price) : '—';
         posHtml = `<div class="node-position">📈 Entry ${fmtUsd(p.entry_price)} → target <span class="v pos">${target}</span> / stop <span class="v neg">${stop}</span></div>`;
+        // Sells the CURRENT open position right now, at market, via the same
+        // real exit path an automatic TARGET/STOP hit uses (see
+        // sellBranch()) - the branch then automatically picks a new coin
+        // and rebuys, same as any other exit.
+        sellBtnHtml = `<button class="sell-btn" onclick="sellBranch('${b.bot_name}', this)">Sell now &amp; find next coin</button>`;
     }
 
     return `
@@ -377,7 +399,29 @@ function branchCardHtml(b) {
                 <div class="progress-bar-bg"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
             </div>
             ${posHtml}
+            ${sellBtnHtml}
         </div>`;
+}
+
+async function sellBranch(botName, btn) {
+    if (!confirm(`Sell ${botName}'s open position at market price right now? This places a real order and can't be undone. The system will then automatically pick a new coin and rebuy.`)) return;
+    btn.disabled = true;
+    btn.textContent = 'Selling…';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/family-tree-status/close/' + encodeURIComponent(botName), {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        alert(`${botName} sold. New balance: ${fmtUsd(data.allocated_usd)}. Now on ${data.product_id}.`);
+        refresh();
+    } catch (e) {
+        alert('Sell failed: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = 'Sell now & find next coin';
+    }
 }
 
 // Real node-link tree layout (classic "place leaves left-to-right, put a
@@ -386,7 +430,7 @@ function branchCardHtml(b) {
 // Branch counts here are small (single digits), so this simple version is
 // plenty; a squarified/Reingold-Tilford layout would be overkill.
 const TREE_NODE_W = 230;
-const TREE_NODE_H = 210;
+const TREE_NODE_H = 246;
 const TREE_SIBLING_GAP = 28;
 const TREE_LEVEL_GAP = 46;
 
