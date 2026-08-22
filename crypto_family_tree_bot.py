@@ -69,7 +69,12 @@ ROOT_BOT_NAME = "crypto_btc_compound"  # same name the single-bot version used t
 ROOT_PRODUCT_ID = "BTC-USD"
 
 SEED_USD = engine._safe_float_env("TREE_SEED_USD", "50")
-UNLOCK_TIER_USD = engine._safe_float_env("TREE_UNLOCK_TIER_USD", "1000")
+# Lowered from the original $1,000 spec at the account owner's request:
+# starting from a $50 seed, a $1,000 bar meant realistically no branch
+# would spawn for a long time. $300 trades a real cost (each $50 seed is a
+# bigger bite out of a smaller milestone, so branches start thinner) for
+# branches actually spawning instead of the tree never growing.
+UNLOCK_TIER_USD = engine._safe_float_env("TREE_UNLOCK_TIER_USD", "300")
 BRANCH_FLOOR_TIER = engine._safe_float_env("TREE_BRANCH_FLOOR_TIER", "50")
 COORDINATOR_SCAN_SECONDS = engine._safe_int_env("TREE_COORDINATOR_SCAN_SECONDS", "20")
 
