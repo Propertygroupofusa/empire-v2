@@ -497,7 +497,7 @@ async def adopt_orphaned_positions(session):
         #   back to a loss without hitting the profit target first. If
         #   it's currently underwater, this does not erase that - a
         #   further decline from here is still a real, possible loss.
-        target_pct = engine.pick_target_pct(atr_pct)
+        target_pct = max(engine.pick_target_pct(atr_pct), engine.min_profit_target_pct(position.qty * position.entry_price))
         target_price = position.entry_price * (1 + target_pct)
         stop_price = price * (1 - STOP_LOSS_PCT)
         position_value = position.qty * price
@@ -760,7 +760,7 @@ async def run_branch_cycle(bot_name: str) -> bool:
                 log.warning(f"[TREE] {bot_name}: could not fetch price/volatility - skipping this cycle")
                 return True
 
-            target_pct = engine.pick_target_pct(atr_pct)
+            target_pct = max(engine.pick_target_pct(atr_pct), engine.min_profit_target_pct(spend))
             fill = await engine.place_market_buy(session, spend, branch.product_id)
             if not fill:
                 log.warning(f"[TREE] {bot_name}: buy did not fill - will retry next cycle")
@@ -771,7 +771,7 @@ async def run_branch_cycle(bot_name: str) -> bool:
             await _save_branch_position(bot_name, branch.product_id, filled_price, filled_qty, target_price, stop_price)
             log.info(
                 f"[TREE] {bot_name} BOUGHT {filled_qty:.8f} {branch.product_id} @ ${filled_price:,.2f} (${spend:.2f} deployed) | "
-                f"ATR {atr_pct*100:.2f}% -> target +{target_pct*100:.2f}% (${target_price:,.2f}) | "
+                f"ATR {atr_pct*100:.2f}% -> target +{target_pct*100:.2f}% (${target_price:,.2f}, min ${engine.MIN_PROFIT_USD:.2f} net) | "
                 f"stop -{STOP_LOSS_PCT*100:.2f}% (${stop_price:,.2f}) | branch total ${branch.allocated_usd:.2f} | floor ${branch.equity_floor:,.2f}"
             )
             return True

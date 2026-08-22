@@ -109,6 +109,38 @@ TARGET_HIGH_PCT = _safe_float_env("BTC_COMPOUND_TARGET_HIGH_PCT", "0.04")  # 4%
 
 ROUND_TRIP_FEE_RATE = _safe_float_env("BTC_COMPOUND_ROUND_TRIP_FEE_RATE", "0.008")  # ~0.4% each way, taker
 
+# Per the account owner: a percentage-only target can "hit" on a small
+# position and still barely clear the real sell-side fee, or lose to it
+# outright - e.g. a 1.5% target on a fresh $50 branch nets under $0.55
+# after the ~0.8% round-trip fee, which isn't a real win. Every TARGET-HIT
+# exit must clear at least MIN_PROFIT_USD of real net profit, in dollars,
+# not just percent.
+#
+# min_profit_target_pct() is the exact inverse of the net-P&L formula
+# _sell_and_settle/_branch_sell_and_settle use (pnl = qty*T*(1-fee_rate/2)
+# - qty*entry), solved for the target_pct that makes that pnl equal
+# MIN_PROFIT_USD on a position of a given size. The buy path then uses
+# max(pick_target_pct(atr_pct), min_profit_target_pct(spend)) - so this
+# only ever RAISES the target on positions too small for the adaptive
+# ATR target to clear the dollar floor on its own; a big-enough branch
+# (whose normal target already nets well over MIN_PROFIT_USD) is
+# untouched, since pick_target_pct's result already wins the max().
+#
+# The real tradeoff, and it's a structural one no percentage tweak
+# removes: a small branch now needs a bigger price move to ever reach
+# TARGET, so it holds longer and is more likely to hit its stop first
+# instead. That's the actual cost of insisting every declared "win" be a
+# real one - the account owner explicitly chose that trade-off over a
+# thin/negative "win" that fees eat.
+MIN_PROFIT_USD = _safe_float_env("BTC_COMPOUND_MIN_PROFIT_USD", "2.50")
+
+
+def min_profit_target_pct(spend_usd: float) -> float:
+    if spend_usd <= 0:
+        return 0.0
+    k = 1 - (ROUND_TRIP_FEE_RATE / 2)
+    return max(0.0, (1 + MIN_PROFIT_USD / spend_usd) / k - 1)
+
 # EQUITY FLOOR RATCHET - same mechanism prop_bot.py uses, and for the same
 # reason: this does NOT make losing impossible (nothing can), but it stops
 # the account from giving back progress past a locked-in checkpoint. Every
@@ -525,7 +557,7 @@ async def run_cycle():
                 log.warning("[BTC-COMPOUND] Could not fetch BTC price/volatility - skipping this cycle")
                 return
 
-            target_pct = pick_target_pct(atr_pct)
+            target_pct = max(pick_target_pct(atr_pct), min_profit_target_pct(balance))
             fill = await place_market_buy(session, balance)
             if not fill:
                 log.warning("[BTC-COMPOUND] Buy did not fill - will retry next cycle")
@@ -536,7 +568,7 @@ async def run_cycle():
             await save_position(filled_price, filled_qty, target_price, stop_price)
             log.info(
                 f"[BTC-COMPOUND] BOUGHT {filled_qty:.8f} BTC @ ${filled_price:,.2f} (${balance:.2f} deployed) | "
-                f"ATR volatility: {atr_pct*100:.2f}% -> target +{target_pct*100:.2f}% (${target_price:,.2f}) | "
+                f"ATR volatility: {atr_pct*100:.2f}% -> target +{target_pct*100:.2f}% (${target_price:,.2f}, min ${MIN_PROFIT_USD:.2f} net) | "
                 f"stop -{STOP_LOSS_PCT*100:.2f}% (${stop_price:,.2f}) | floor ${equity_floor:,.2f}"
             )
             return
