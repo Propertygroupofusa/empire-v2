@@ -49,6 +49,12 @@ except Exception as e:
     log.warning(f"crypto_coinbase_bot not importable, /crypto-coinbase-status will report unavailable: {e}")
     crypto_coinbase_bot_module = None
 
+try:
+    import crypto_family_tree_bot as crypto_family_tree_bot_module
+except Exception as e:
+    log.warning(f"crypto_family_tree_bot not importable, /family-tree-status won't include locked profit: {e}")
+    crypto_family_tree_bot_module = None
+
 ALPACA_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
@@ -581,10 +587,15 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
             },
         })
 
+    locked_usd = 0.0
+    if crypto_family_tree_bot_module is not None:
+        locked_usd = round(await crypto_family_tree_bot_module.get_locked_usd(), 2)
+
     return {
         "branches": out,
         "branch_count": len(out),
         "total_allocated_usd": round(sum(b["allocated_usd"] for b in out), 2),
+        "locked_usd": locked_usd,
     }
 
 

@@ -79,6 +79,20 @@ UNLOCK_TIER_USD = engine._safe_float_env("TREE_UNLOCK_TIER_USD", "300")
 BRANCH_FLOOR_TIER = engine._safe_float_env("TREE_BRANCH_FLOOR_TIER", "50")
 COORDINATOR_SCAN_SECONDS = engine._safe_int_env("TREE_COORDINATOR_SCAN_SECONDS", "20")
 
+# Per the account owner: 10% of every branch's REALIZED PROFIT (not the
+# whole balance, and never on a loss) gets permanently pulled out of the
+# compounding loop on every profitable exit, root BTC included. "Locked
+# away" here means walled off from ever being redeployed by ANY bot - the
+# real dollars stay sitting in the one real Coinbase USD balance (visible
+# directly in the Coinbase app), not physically transferred to a bank
+# account; Coinbase's Advanced Trade API doesn't expose a programmatic ACH
+# withdrawal endpoint the way this app could drive automatically (same
+# limitation prop_bot.py/trading_dashboard.py already document for
+# Alpaca) - an actual bank withdrawal would be a manual step, or a
+# separate, bigger integration if ever wanted.
+PROFIT_SKIM_PCT = engine._safe_float_env("TREE_PROFIT_SKIM_PCT", "0.10")
+LOCKED_PROFIT_STATE_KEY = "crypto_family_tree_locked_usd"
+
 MIN_TRADE_USD = engine.MIN_TRADE_USD
 CYCLE_SECONDS = engine.CYCLE_SECONDS
 STOP_LOSS_PCT = engine.STOP_LOSS_PCT
@@ -125,6 +139,30 @@ async def load_branch(bot_name: str):
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
         return result.scalar_one_or_none()
+
+
+async def get_locked_usd() -> float:
+    """The running total of skimmed profit walled off from ever being
+    redeployed by any branch - see PROFIT_SKIM_PCT. Reusing TradingBotState
+    (the same generic per-key bucket table prop_bot.py's own equity floor
+    and bot_N buckets already use) rather than a new table."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == LOCKED_PROFIT_STATE_KEY))
+        row = result.scalar_one_or_none()
+        return row.base_capital if row else 0.0
+
+
+async def _add_locked_usd(amount: float):
+    if amount <= 0:
+        return
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == LOCKED_PROFIT_STATE_KEY))
+        row = result.scalar_one_or_none()
+        if row:
+            row.base_capital += amount
+        else:
+            db.add(TradingBotState(bot_name=LOCKED_PROFIT_STATE_KEY, base_capital=amount, starting_capital=0.0))
+        await db.commit()
 
 
 async def load_all_branches():
@@ -477,6 +515,17 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
     new_allocated = gross_value - fee
     pnl = new_allocated - (position.entry_price * position.qty)
 
+    # 10% of REALIZED PROFIT ONLY - never touches principal, never fires on
+    # a loss - gets pulled out of this branch's own tracked balance and
+    # walled off in the shared locked-USD ledger (see PROFIT_SKIM_PCT).
+    # Deducted from new_allocated before it's saved as this branch's new
+    # balance, so the skimmed amount can never be redeployed by this
+    # branch OR any other - see the real_balance/locked_usd clamp in
+    # run_branch_cycle's buy path.
+    skim = round(pnl * PROFIT_SKIM_PCT, 2) if pnl > 0 else 0.0
+    if skim > 0:
+        new_allocated -= skim
+
     await _clear_branch_position(bot_name)
 
     # Every exit - a profitable TARGET HIT, a STOP HIT, or a floor-breach
@@ -549,6 +598,9 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
         f"entry ${position.entry_price:,.2f} -> exit ${filled_price:,.2f} | "
         f"P&L: {'+' if pnl >= 0 else ''}${pnl:.2f} after est. fees | branch now ${new_allocated:.2f}"
     )
+    if skim > 0:
+        await _add_locked_usd(skim)
+        log.info(f"[TREE] 🔒 {bot_name} locked away ${skim:.2f} (10% of this trade's ${pnl:.2f} profit) - permanently out of the compounding loop")
     if row is not None:
         await _maybe_spawn_child(row)
 
@@ -612,7 +664,13 @@ async def run_branch_cycle(bot_name: str) -> bool:
             if real_balance is None:
                 log.warning(f"[TREE] {bot_name}: real balance unavailable ({real_balance_err}) - skipping this cycle")
                 return True
-            spend = min(branch.allocated_usd, real_balance)
+            # Locked/skimmed profit (see PROFIT_SKIM_PCT) is walled off from
+            # the real balance here so it can never be redeployed by this
+            # branch or any other - this is what actually makes "locked
+            # away" real, since every branch shares one real Coinbase pool.
+            locked_usd = await get_locked_usd()
+            spendable_balance = max(0.0, real_balance - locked_usd)
+            spend = min(branch.allocated_usd, spendable_balance)
             if spend < MIN_TRADE_USD:
                 log.info(f"[TREE] {bot_name}: allocated ${branch.allocated_usd:.2f} below minimum trade ${MIN_TRADE_USD:.2f} - waiting")
                 return True

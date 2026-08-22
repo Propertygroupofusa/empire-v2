@@ -152,6 +152,7 @@
     <div class="summary">
         <div class="stat"><div class="label">Branches / Coins</div><div class="value" id="stat-count">—</div></div>
         <div class="stat"><div class="label">Total Allocated</div><div class="value" id="stat-total">—</div></div>
+        <div class="stat" style="border-color:#ffcc0055;background:#ffcc0011"><div class="label">🔒 Locked Profit</div><div class="value" id="stat-locked" style="color:#ffcc00">—</div></div>
         <div class="stat"><div class="label">Refreshed</div><div class="value" id="stat-refreshed" style="font-size:1em">—</div></div>
     </div>
 
@@ -247,6 +248,7 @@ async function refresh() {
         const data = await apiGet('/family-tree-status');
         document.getElementById('stat-count').textContent = data.branch_count;
         document.getElementById('stat-total').textContent = fmtUsd(data.total_allocated_usd);
+        document.getElementById('stat-locked').textContent = fmtUsd(data.locked_usd || 0);
         document.getElementById('stat-refreshed').textContent = new Date().toLocaleTimeString();
         document.getElementById('tree').innerHTML = renderTree(data.branches);
         statusEl.textContent = '';
