@@ -86,9 +86,13 @@ ROUND_TRIP_FEE_RATE = engine.ROUND_TRIP_FEE_RATE
 # Ordered eligibility list - BTC is the root, not in this list. Approximate
 # real launch year noted per entry; order is fixed and walked through once,
 # front to back, as branches earn the right to spawn the next one.
+# XRP and SHIB moved to #2/#3 at the account owner's explicit request,
+# ahead of where their launch year alone would place them - everything
+# else keeps its original relative order.
 COIN_FAMILY_TREE = [
     "LTC-USD",    # 2011
     "XRP-USD",    # 2012
+    "SHIB-USD",   # 2020 - moved up to #3 by request
     "DOGE-USD",   # 2013
     "ETH-USD",    # 2015
     "LINK-USD",   # 2017
@@ -103,7 +107,6 @@ COIN_FAMILY_TREE = [
     "AVAX-USD",   # 2020
     "NEAR-USD",   # 2020
     "MATIC-USD",  # 2020
-    "SHIB-USD",   # 2020
     "LDO-USD",    # 2021
     "ICP-USD",    # 2021
     "FLOKI-USD",  # 2021
