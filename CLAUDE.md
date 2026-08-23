@@ -530,6 +530,51 @@ peak-profit giveback cap (`0.5%`). Return signature is a 4-tuple
 must be persisted by the caller (`prop_bot.py` does this via
 `_db_update_peak_pct`, storing into `BotPosition.peak_pct`).
 
+### Downtrend profit via 1x inverse ETFs (no shorting/margin)
+
+Per the account owner's explicit request to profit when the market is
+falling, without taking on margin or shorting risk: `prop_bot.py`'s
+`FUTURES` dict and `alpaca_swing_bot.py`'s `SWING_SYMBOLS` dict both now
+also carry `SH`, `PSQ`, `DOG`, `RWM` - real, liquid **1x** (non-leveraged)
+inverse ETFs, one per index already traded (inverse of SPY, QQQ, DIA,
+IWM respectively). These are bought **LONG**, through the exact same
+entry/exit code every other symbol already uses (`validate_dual_direction`,
+`should_exit_position`, position sizing, order placement) - zero new code
+path. An inverse ETF just moves opposite its index, so a normal long
+entry on SH profits when SPY falls; the bot never actually shorts
+anything or touches margin. Deliberately the 1x versions, not the 2x/3x
+leveraged ones (SDS, SQQQ, SDOW, SRTY) - those add leveraged-decay risk
+that wasn't asked for. `routers/trading_dashboard.py`'s
+`CHART_STOCK_SYMBOLS` SSRF allowlist was extended to match, so the
+dashboard can chart these too.
+
+(Real shorting already exists as dormant, gated code in
+`alpaca_mean_reversion.py`/`prop_bot.py` - `validate_dual_direction` can
+return `"short"`, but `get_account_shorting_enabled()` checks the real
+Alpaca account first and every short entry has been failing in
+production with "account is not allowed to short" - a real account-level
+restriction, not a bug. The inverse-ETF approach above sidesteps that
+restriction entirely rather than requiring a margin-enabled account.)
+
+**A real, previously-undiscovered production bug found and fixed while
+adding this**: `APEX_MANDATE["universe"]["commodities"]` (in
+`bot_mandates.py`) listed the underlying tickers (`GLD`, `USO`, `SLV`)
+instead of the **contract codes** (`MGC`, `MCL`, `SIL`) - the same
+identifier space `"futures"` (`MES`/`MNQ`/`MYM`/`M2K`) correctly uses,
+and the same one `prop_bot.py`'s `MANDATE CHECK 1` and `validate_entry`
+(`MANDATE CHECK 2`) both actually compare against (`contract`, the
+`FUTURES` dict key - never the underlying symbol). A ticker can never
+equal a contract code, so every gold/oil/silver signal has been silently
+rejected at `MANDATE CHECK 1` with "NOT in approved universe - SKIPPING"
+since this mandate existed - those three symbols have never once been
+able to place a real order. Separately, `validate_entry`'s own internal
+universe check never included `"commodities"` at all (only
+`futures`/`crypto`/`approved`/`approved_pairs`), which would have
+independently re-blocked them at `MANDATE CHECK 2` even after the first
+fix. Both fixed: `commodities` now holds `["MGC", "MCL", "SIL"]`, and
+`validate_entry` now includes both `commodities` and the new
+`inverse_etfs` category in its approved-symbols check.
+
 ---
 
 ## Common Tasks

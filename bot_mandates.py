@@ -30,7 +30,26 @@ APEX_MANDATE = {
     "universe": {
         "futures": ["MES", "MNQ", "MYM", "M2K"],
         "crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "DOGE/USD"],
-        "commodities": ["GLD", "USO", "SLV"],
+        # THE REAL BUG: this used to list the underlying tickers ("GLD",
+        # "USO", "SLV"), but prop_bot.py's MANDATE CHECK 1 (and
+        # validate_entry, MANDATE CHECK 2) both compare against the
+        # CONTRACT CODE - the FUTURES dict key ("MGC", "MCL", "SIL"), the
+        # same identifier space "futures" above already correctly uses.
+        # A ticker can never equal a contract code, so every commodity
+        # signal has been silently rejected at MANDATE CHECK 1 with "NOT
+        # in approved universe - SKIPPING" since this mandate existed -
+        # gold/oil/silver have never actually been able to place a real
+        # order. Fixed to use contract codes, matching "futures".
+        "commodities": ["MGC", "MCL", "SIL"],
+        # 1x (non-leveraged) inverse ETFs, one per index already traded
+        # above - per the account owner's explicit request to profit on
+        # downtrends without taking on margin/shorting risk. These are
+        # bought LONG like any other symbol here; they just move opposite
+        # their underlying index, so a long entry on SH profits when SPY
+        # falls. Deliberately NOT the 2x/3x leveraged versions (SDS, SQQQ,
+        # SDOW, SRTY) - those add leveraged-decay risk the account owner
+        # didn't ask for.
+        "inverse_etfs": ["SH", "PSQ", "DOG", "RWM"],  # inverse of SPY, QQQ, DIA, IWM
         "restriction": "No other symbols allowed"
     },
 
@@ -356,8 +375,17 @@ def validate_entry(bot_name: str, symbol: str, rsi: float, volume_ratio: float,
 
     # Check universe
     if "universe" in mandate:
+        # NOTE: "commodities" was missing from this list until it was
+        # caught here - MANDATE CHECK 1 in prop_bot.py already allowed
+        # MGC/MCL/SIL (gold/oil/silver) through via its own separate
+        # futures+crypto+commodities concat, but this independent check
+        # only ever recognized futures/crypto/approved/approved_pairs, so
+        # every commodity entry was silently rejected right here with
+        # "not in prop_bot's approved universe" - real trades never placed.
         approved = (mandate["universe"].get("futures", []) +
                    mandate["universe"].get("crypto", []) +
+                   mandate["universe"].get("commodities", []) +
+                   mandate["universe"].get("inverse_etfs", []) +
                    mandate["universe"].get("approved", []) +
                    mandate["universe"].get("approved_pairs", []))
         if approved and symbol not in approved:

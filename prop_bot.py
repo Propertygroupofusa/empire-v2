@@ -152,6 +152,15 @@ FUTURES = {
     "MGC": {"name": "Micro Gold",           "qty": 1, "symbol": "GLD"},
     "MCL": {"name": "Micro Crude Oil",      "qty": 1, "symbol": "USO"},
     "SIL": {"name": "Micro Silver",         "qty": 1, "symbol": "SLV"},
+    # 1x inverse ETFs - bought LONG like everything else here, but they
+    # move opposite their index, so this is how the bot profits on a
+    # downtrend without shorting or margin. No futures-proxy contract code
+    # exists for these, so the ETF ticker is used as both the key and the
+    # traded symbol.
+    "SH":  {"name": "Short S&P 500 (inverse of SPY)",   "qty": 1, "symbol": "SH"},
+    "PSQ": {"name": "Short Nasdaq (inverse of QQQ)",    "qty": 1, "symbol": "PSQ"},
+    "DOG": {"name": "Short Dow 30 (inverse of DIA)",    "qty": 1, "symbol": "DOG"},
+    "RWM": {"name": "Short Russell 2000 (inverse of IWM)", "qty": 1, "symbol": "RWM"},
 }
 
 # Max concurrent open positions. Explicit request: don't cap this below
@@ -1100,7 +1109,8 @@ async def run_prop_cycle():
         approved_universe = (
             APEX_MANDATE["universe"]["futures"] +
             APEX_MANDATE["universe"]["crypto"] +
-            APEX_MANDATE["universe"]["commodities"]
+            APEX_MANDATE["universe"]["commodities"] +
+            APEX_MANDATE["universe"]["inverse_etfs"]
         )
         if contract not in approved_universe:
             log.warning(f"[MANDATE] {contract} NOT in approved universe - SKIPPING")

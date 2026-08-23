@@ -72,6 +72,14 @@ SWING_SYMBOLS = {
     "MGC": {"name": "Micro Gold", "proxy": "GLD"},
     "MCL": {"name": "Micro Crude Oil", "proxy": "USO"},
     "SIL": {"name": "Micro Silver", "proxy": "SLV"},
+    # 1x inverse ETFs - bought LONG like everything else here; they move
+    # opposite their index, so this is how the bot profits on a downtrend
+    # without shorting or margin (this bot is long-only). No futures-proxy
+    # contract code exists for these, so the ETF ticker is its own key.
+    "SH":  {"name": "Short S&P 500 (inverse)", "proxy": "SH"},
+    "PSQ": {"name": "Short Nasdaq (inverse)", "proxy": "PSQ"},
+    "DOG": {"name": "Short Dow 30 (inverse)", "proxy": "DOG"},
+    "RWM": {"name": "Short Russell 2000 (inverse)", "proxy": "RWM"},
 }
 
 # ========== SWING TRADING SETTINGS ==========
