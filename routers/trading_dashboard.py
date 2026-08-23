@@ -620,9 +620,26 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         for p in positions_result.scalars().all():
             positions_by_bot[p.bot] = p
 
+    # Real live price per open position, so the dashboard can show a real
+    # unrealized P&L and - per the account owner - only ever offer the
+    # manual "Sell now" button on a position that's ACTUALLY in profit
+    # right now, not just one that's still holding. entry_price/target/stop
+    # alone can't answer that; the position needs to be marked to the
+    # current real market price like every other unrealized-P&L figure
+    # elsewhere in this file already is.
+    current_price_by_bot = {}
+    if positions_by_bot and crypto_family_tree_bot_module is not None:
+        engine = crypto_family_tree_bot_module.engine
+        async with engine.aiohttp.ClientSession() as session:
+            for bot_name, pos in positions_by_bot.items():
+                price, _atr_pct = await engine.get_price_and_volatility(session, pos.symbol)
+                if price is not None:
+                    current_price_by_bot[bot_name] = price
+
     out = []
     for b in branches:
         pos = positions_by_bot.get(b.bot_name)
+        current_price = current_price_by_bot.get(b.bot_name) if pos else None
         out.append({
             "bot_name": b.bot_name,
             "product_id": b.product_id,
@@ -638,6 +655,8 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
                 "target_price": pos.target_price,
                 "stop_price": pos.stop_price,
                 "opened_at": pos.opened_at.isoformat() if pos.opened_at else None,
+                "current_price": current_price,
+                "unrealized_pct": round((current_price / pos.entry_price - 1) * 100, 2) if current_price else None,
             },
         })
 
@@ -684,6 +703,19 @@ async def close_family_tree_branch(bot_name: str):
 
     engine = crypto_family_tree_bot_module.engine
     async with engine.aiohttp.ClientSession() as session:
+        # Per the account owner: a manual sell must never be allowed to lock
+        # in a real loss - only offered/accepted while genuinely in profit
+        # right now, marked to the real live price. Re-checked here against
+        # the real market, not just trusting whatever the dashboard button
+        # last showed (that could be stale by the time this request lands).
+        current_price, _atr_pct = await engine.get_price_and_volatility(session, branch.product_id)
+        if current_price is None:
+            raise HTTPException(status_code=503, detail="Could not fetch a live price to confirm this sell would be a real profit - try again")
+        if current_price <= position.entry_price:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{bot_name} is not currently in profit (entry ${position.entry_price:,.2f}, now ${current_price:,.2f}) - manual sell refused to avoid locking in a loss",
+            )
         await crypto_family_tree_bot_module._branch_sell_and_settle(
             session, bot_name, branch.product_id, position, "MANUAL SELL (dashboard)"
         )

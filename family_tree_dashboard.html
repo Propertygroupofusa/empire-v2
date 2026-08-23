@@ -192,6 +192,20 @@
     .sell-btn:hover { background: var(--red); color: #fff; }
     .sell-btn:disabled { opacity: 0.5; cursor: default; }
 
+    .sell-disabled-note {
+        width: 100%;
+        margin-top: 8px;
+        padding: 5px 10px;
+        border-radius: 6px;
+        font-size: 0.76em;
+        font-weight: 600;
+        text-align: center;
+        color: var(--text-dim);
+        background: #f4f5f8;
+        border: 1px solid var(--border);
+        box-sizing: border-box;
+    }
+
     .breakeven-badge {
         display: inline-block;
         font-size: 0.72em;
@@ -398,12 +412,22 @@ function branchCardHtml(b) {
         // that state, computed the same way here as it is server-side.
         const atBreakeven = p.stop_price != null && p.stop_price >= p.entry_price;
         const breakevenTag = atBreakeven ? ' <span class="breakeven-badge">🔒 BREAKEVEN</span>' : '';
-        posHtml = `<div class="node-position">📈 Entry ${fmtUsd(p.entry_price)} → target <span class="v pos">${target}</span> / stop <span class="v neg">${stop}</span>${breakevenTag}</div>`;
-        // Sells the CURRENT open position right now, at market, via the same
-        // real exit path an automatic TARGET/STOP hit uses (see
-        // sellBranch()) - the branch then automatically picks a new coin
-        // and rebuys, same as any other exit.
-        sellBtnHtml = `<button class="sell-btn" onclick="sellBranch('${b.bot_name}', this)">Sell now &amp; find next coin</button>`;
+        const livePct = p.unrealized_pct != null ? ` <span class="v ${p.unrealized_pct >= 0 ? 'pos' : 'neg'}">(now ${fmtUsd(p.current_price)}, ${p.unrealized_pct >= 0 ? '+' : ''}${p.unrealized_pct.toFixed(2)}%)</span>` : '';
+        posHtml = `<div class="node-position">📈 Entry ${fmtUsd(p.entry_price)} → target <span class="v pos">${target}</span> / stop <span class="v neg">${stop}</span>${breakevenTag}${livePct}</div>`;
+        // Per the account owner: only ever offer the manual sell when the
+        // position is ACTUALLY in profit right now, marked to the real
+        // live price fetched server-side (unrealized_pct) - not just any
+        // open position. Selling now while behind entry would lock in a
+        // real loss, which is exactly what this button must never make
+        // easy to do by accident. Sells via the same real exit path an
+        // automatic TARGET/STOP hit uses (see sellBranch()) - the branch
+        // then automatically picks a new coin and rebuys, same as any
+        // other exit.
+        if (p.unrealized_pct != null && p.unrealized_pct > 0) {
+            sellBtnHtml = `<button class="sell-btn" onclick="sellBranch('${b.bot_name}', this)">Sell now &amp; find next coin</button>`;
+        } else {
+            sellBtnHtml = `<div class="sell-disabled-note">${p.unrealized_pct == null ? 'Live price unavailable — sell disabled' : 'Not in profit yet — sell disabled'}</div>`;
+        }
     }
 
     return `
