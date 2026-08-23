@@ -328,20 +328,22 @@ async def _compute_auto_excluded_coins() -> set:
 
 async def _manually_excluded_still_excluded() -> set:
     """Per the account owner's later explicit choice: MANUAL_EXCLUDED_COINS
-    is no longer a one-way permanent blacklist. A coin in that starting
-    set stays excluded only until it clears the SAME bar an auto-excluded
-    coin needs to self-heal - its last AUTO_EXCLUDE_RUN_WINDOW real
-    backtest runs all positive-ROI - at which point it becomes tradable
-    again, same as anything else in this system.
+    is no longer a one-way permanent blacklist. Per a further explicit
+    follow-up ("if it become profitable faster than that allow it to
+    break free"), a manually-excluded coin now heals on the SAME bar an
+    auto-excluded coin does - the instant its single most recent real
+    backtest run turns positive-ROI, not a run of several in a row. This
+    was deliberately the slower bar originally (matching
+    AUTO_EXCLUDE_RUN_WINDOW), but the account owner asked for parity with
+    the faster auto-heal rule instead.
 
-    The default is deliberately the OPPOSITE of _compute_auto_excluded_coins:
-    a manually-excluded coin with fewer than AUTO_EXCLUDE_RUN_WINDOW real
-    runs on record STAYS excluded (not enough evidence yet to lift the
-    original decision), whereas a coin with no history at all is never
-    auto-excluded in the first place. Nothing here is a one-way verdict
-    either direction: a coin that heals out of this set can still get
-    caught by _compute_auto_excluded_coins later if its performance turns
-    negative again, exactly like any other coin."""
+    A coin with no real runs on record at all STAYS excluded (not enough
+    evidence yet to lift the original decision) - this is still the
+    opposite default from _compute_auto_excluded_coins, where a coin with
+    no history is never excluded in the first place. Nothing here is a
+    one-way verdict either direction: a coin that heals out of this set
+    can still get caught by _compute_auto_excluded_coins later if its
+    performance turns negative again, exactly like any other coin."""
     still_excluded = set()
     async with AsyncSessionLocal() as db:
         for product_id in MANUAL_EXCLUDED_COINS:
@@ -349,10 +351,10 @@ async def _manually_excluded_still_excluded() -> set:
                 select(CryptoBacktestRun.roi_pct_of_spend)
                 .where(CryptoBacktestRun.product_id == product_id)
                 .order_by(desc(CryptoBacktestRun.run_at))
-                .limit(AUTO_EXCLUDE_RUN_WINDOW)
+                .limit(1)
             )
-            recent = result.scalars().all()
-            healed = len(recent) >= AUTO_EXCLUDE_RUN_WINDOW and all(roi > 0 for roi in recent)
+            most_recent = result.scalar_one_or_none()
+            healed = most_recent is not None and most_recent > 0
             if not healed:
                 still_excluded.add(product_id)
     return still_excluded

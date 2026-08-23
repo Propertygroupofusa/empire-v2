@@ -948,17 +948,24 @@ and `get_next_eligible_product_id()` before either ever runs):
    first backtest run (STX-USD was dead last: -44.1% ROI, 21.6% win
    rate). Per a LATER explicit choice, this is not a one-way permanent
    blacklist either - see `_manually_excluded_still_excluded()`: a coin
-   in this starting set stays excluded only until it clears the SAME
-   bar the automatic layer below needs to self-heal (its last
-   `AUTO_EXCLUDE_RUN_WINDOW` real backtest runs all positive-ROI), then
-   becomes tradable again. The default is the opposite of the automatic
-   rule's default though: a coin here with fewer than the window's
-   worth of real runs on record STAYS excluded (the original decision
-   needs real positive evidence to be lifted, not just an absence of
-   bad evidence) - whereas a coin the automatic rule has never flagged
-   is never excluded in the first place just for lacking history. The
-   starting SET itself (which 4 coins begin excluded) still only ever
-   changes via another explicit decision like the original one.
+   in this starting set stays excluded only until it clears a real bar.
+   That bar was originally the SAME one the automatic layer below needs
+   to self-heal (its last `AUTO_EXCLUDE_RUN_WINDOW` runs all
+   positive-ROI) - per a FURTHER explicit follow-up ("if it become
+   profitable faster than that allow it to break free"), it's now the
+   SAME single-run bar the automatic layer itself uses: the instant a
+   manually-excluded coin's most recent real backtest run turns
+   positive, it's tradable again - confirmed against STX-USD's real
+   live numbers (-19.1% ROI, worst performer) still correctly excluded,
+   since even the faster rule needs a genuinely positive run, not just a
+   less-negative one. The default is still the opposite of the automatic
+   rule's default though: a coin here with zero real runs on record
+   STAYS excluded (the original decision needs real positive evidence to
+   be lifted, not just an absence of bad evidence) - whereas a coin the
+   automatic rule has never flagged is never excluded in the first place
+   just for lacking history. The starting SET itself (which 4 coins
+   begin excluded) still only ever changes via another explicit decision
+   like the original one.
 2. **Automatic layer** - per the account owner's explicit choice
    ("fully automatic... hands-off, no check before it takes effect"),
    the coordinator (`run()`'s `_scan()`) re-runs the real backtest on
