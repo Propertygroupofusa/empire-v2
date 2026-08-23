@@ -965,7 +965,34 @@ async def run_branch_cycle(bot_name: str) -> bool:
                 await _record_floor_breach(bot_name)
                 return True
             else:
-                log.info(f"[TREE] 🛑 {bot_name}: ${equity:.2f} below floor ${branch.equity_floor:,.2f} - entries paused until it recovers")
+                # A flat branch's own allocated_usd should never end up
+                # below its ratcheted floor on its own - the real path that
+                # produces this: _maybe_spawn_child() pulls the $50 seed for
+                # a new child right after the floor was ratcheted up to
+                # match the pre-spawn balance, leaving the parent flat and
+                # permanently stuck - it can never trade its way back over
+                # the floor, because trading is the only thing that could
+                # raise its balance, and that's exactly what "breached"
+                # blocks. Without this, it would compare its real balance
+                # against that now-too-high floor forever. Self-heal by
+                # lowering the floor to match this branch's own real,
+                # current tier - the same reset _branch_sell_and_settle
+                # already applies right after a sale - instead of leaving
+                # real money frozen waiting for a balance it can't earn.
+                new_tier_floor = math.floor(equity / BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER
+                if new_tier_floor < branch.equity_floor:
+                    async with AsyncSessionLocal() as db:
+                        result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
+                        row = result.scalar_one_or_none()
+                        if row:
+                            row.equity_floor = new_tier_floor
+                            await db.commit()
+                    log.info(
+                        f"[TREE] 🪜 {bot_name} floor lowered ${branch.equity_floor:,.2f} -> ${new_tier_floor:,.2f} "
+                        f"to match its own real balance ${equity:.2f} - entries resume next cycle"
+                    )
+                else:
+                    log.info(f"[TREE] 🛑 {bot_name}: ${equity:.2f} below floor ${branch.equity_floor:,.2f} - entries paused until it recovers")
             return True
 
         if position is None:
