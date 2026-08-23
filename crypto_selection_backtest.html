@@ -46,12 +46,19 @@
     table { width: 100%; border-collapse: collapse; margin-top: 20px; background: var(--panel); border-radius: 10px; overflow: hidden; box-shadow: var(--shadow); }
     th, td { padding: 10px 14px; text-align: right; border-bottom: 1px solid var(--border); font-size: 0.88em; }
     th:first-child, td:first-child { text-align: left; }
+    th:last-child, td:last-child { text-align: center; }
     th { background: #eef1f7; color: var(--text-dim); font-weight: 700; text-transform: uppercase; font-size: 0.72em; letter-spacing: 0.4px; }
     tr.stx-row { background: var(--gold-bg); }
     .pos { color: var(--green); font-weight: 700; }
     .neg { color: var(--red); font-weight: 700; }
     .skipped { margin-top: 20px; font-size: 0.8em; color: var(--text-dim); }
     .skipped summary { cursor: pointer; font-weight: 600; }
+    .trade-btn {
+        padding: 6px 12px; border: none; border-radius: 6px; font-size: 0.82em; font-weight: 700;
+        cursor: pointer; background: var(--green); color: #fff; white-space: nowrap;
+    }
+    .trade-btn:disabled { opacity: 0.55; cursor: default; }
+    .trade-note { font-size: 0.78em; color: var(--text-dim); margin-top: 20px; }
 </style>
 </head>
 <body>
@@ -134,13 +141,15 @@ function renderResults(data) {
         const isStx = r.product_id === 'STX-USD';
         const pnlClass = r.total_pnl >= 0 ? 'pos' : 'neg';
         const roiClass = r.roi_pct_of_spend >= 0 ? 'pos' : 'neg';
-        return `<tr class="${isStx ? 'stx-row' : ''}">
+        const rowId = 'row-' + r.product_id.replace(/[^A-Z0-9]/gi, '-');
+        return `<tr class="${isStx ? 'stx-row' : ''}" id="${rowId}">
             <td>${r.product_id}${isStx ? ' 👈' : ''}</td>
             <td>${r.num_trades}</td>
             <td>${r.win_rate.toFixed(1)}%</td>
             <td class="${pnlClass}">${fmtUsd(r.total_pnl)}</td>
             <td class="${roiClass}">${r.roi_pct_of_spend >= 0 ? '+' : ''}${r.roi_pct_of_spend.toFixed(1)}%</td>
             <td>${r.avg_trade_pct >= 0 ? '+' : ''}${r.avg_trade_pct.toFixed(2)}%</td>
+            <td><button class="trade-btn" onclick="tradeCoin('${r.product_id}', this)">Trade this</button></td>
         </tr>`;
     }).join('');
 
@@ -153,12 +162,43 @@ function renderResults(data) {
     resultsEl.innerHTML = `
         <table>
             <thead><tr>
-                <th>Coin</th><th>Trades</th><th>Win rate</th><th>Total P&amp;L</th><th>ROI on $${data.spend_per_trade}</th><th>Avg / trade</th>
+                <th>Coin</th><th>Trades</th><th>Win rate</th><th>Total P&amp;L</th><th>ROI on $${data.spend_per_trade}</th><th>Avg / trade</th><th>Action</th>
             </tr></thead>
             <tbody>${rows}</tbody>
         </table>
+        <p class="trade-note">"Trade this" starts a real new $50 branch on that coin right now, using your actual unallocated Coinbase cash - same as the dashboard's "Start new $50 branch" button, just pointed at a coin you picked instead of the bot's auto-pick. Refused if the coin is already held by another branch, currently excluded, or there isn't enough real free cash.</p>
         ${skippedHtml}
     `;
+}
+
+async function tradeCoin(productId, btn) {
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Starting...';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/family-tree-status/spawn-branch/' + encodeURIComponent(productId), {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+        btn.textContent = '✓ Started';
+        btn.style.background = 'var(--navy)';
+        const row = document.getElementById('row-' + productId.replace(/[^A-Z0-9]/gi, '-'));
+        if (row) {
+            const note = document.createElement('div');
+            note.style.cssText = 'font-size:0.78em;color:var(--text-dim);margin-top:2px;';
+            note.textContent = `$${data.seed_usd} branch started (${data.bot_name})`;
+            row.querySelector('td:last-child').appendChild(note);
+        }
+    } catch (e) {
+        btn.disabled = false;
+        btn.textContent = originalText;
+        alert('Could not start a branch on ' + productId + ': ' + e.message);
+    }
 }
 </script>
 </body>

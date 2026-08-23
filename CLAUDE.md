@@ -397,6 +397,20 @@ endpoint it calls (see `routers/trading_dashboard.py`).
   trading fee, otherwise invisible - baked into the position's qty, not
   shown as its own line item anywhere else).
 
+- **"Trade this" button on the backtest page**
+  (`crypto_selection_backtest.html`, `POST
+  /api/trading-dashboard/family-tree-status/spawn-branch/{product_id}`):
+  per the account owner's explicit request, lets them act directly on a
+  coin that ranks well in the backtest (e.g. DOGE-USD/XRP-USD) instead of
+  only linking back to the dashboard. Starts a real $50 branch on exactly
+  that coin, funded from the same real-unallocated-cash pool as the
+  existing auto-pick "Start new $50 branch" endpoint - refuses with a
+  clear reason if the coin isn't one the bot trades, is currently
+  excluded (manual or auto layer), is already claimed by another branch,
+  or there isn't enough real free cash. This is a real trade, not a
+  simulation - it's the same $50-seed/root-child mechanism every organic
+  or auto-spawned branch uses.
+
 ### Two real production bugs found and fixed (2026-08-22/23)
 
 1. **Manual spawn-branch affordability bug**: the endpoint computed

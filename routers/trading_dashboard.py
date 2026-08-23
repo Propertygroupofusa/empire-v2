@@ -864,6 +864,86 @@ async def spawn_family_tree_branch(db: AsyncSession = Depends(get_db)):
     }
 
 
+@router.post("/family-tree-status/spawn-branch/{product_id}", dependencies=[Depends(require_admin_key)])
+async def spawn_family_tree_branch_on_coin(product_id: str, db: AsyncSession = Depends(get_db)):
+    """Same real $50-seed spawn as spawn_family_tree_branch() above, except
+    the caller picks the coin directly instead of the bot auto-selecting via
+    get_next_eligible_product_id(). Backs the "Trade this coin" button on
+    crypto_selection_backtest.html, per the account owner's explicit request
+    to act on a coin that ranks well in the backtest (e.g. DOGE-USD/XRP-USD)
+    without waiting for the bot's own coin search to reach it on its own.
+
+    Funded from the same real-unallocated-cash pool as the auto-pick spawn
+    endpoint, and subject to the same exclusion list as every other
+    coin-selection path - a coin on get_effective_excluded_coins() can't be
+    manually spawned into either, for the same real reason the bot itself
+    won't auto-pick it."""
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+
+    tree = crypto_family_tree_bot_module
+    engine = tree.engine
+    product_id = product_id.upper()
+
+    if product_id not in tree.COIN_FAMILY_TREE:
+        raise HTTPException(status_code=400, detail=f"{product_id} is not a coin the family tree bot trades")
+
+    excluded = await tree.get_effective_excluded_coins()
+    if product_id in excluded:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{product_id} is currently excluded (real backtest results) - can't manually start a branch on it",
+        )
+
+    branches_result = await db.execute(select(CryptoTreeBranch))
+    branches = list(branches_result.scalars().all())
+    if any(b.product_id == product_id for b in branches):
+        raise HTTPException(status_code=409, detail=f"{product_id} is already claimed by an existing branch")
+
+    positions_result = await db.execute(
+        select(BotPosition.bot).where(BotPosition.bot.in_([b.bot_name for b in branches]))
+    ) if branches else None
+    bots_with_open_position = set(positions_result.scalars().all()) if positions_result is not None else set()
+    flat_allocated_sum = sum(b.allocated_usd for b in branches if b.bot_name not in bots_with_open_position)
+
+    async with engine.aiohttp.ClientSession() as session:
+        real_balance, err = await engine.get_usd_balance(session)
+    if real_balance is None:
+        raise HTTPException(status_code=503, detail=f"Could not fetch the real Coinbase balance to confirm funds ({err}) - try again")
+
+    locked_usd = await tree.get_locked_usd()
+    unallocated = real_balance - locked_usd - flat_allocated_sum
+    if unallocated < tree.SEED_USD:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Not enough real unallocated cash to seed a new ${tree.SEED_USD:.0f} branch - only "
+                f"${unallocated:.2f} is currently free (real balance ${real_balance:.2f} - locked "
+                f"${locked_usd:.2f} - already allocated across flat branches ${flat_allocated_sum:.2f})"
+            ),
+        )
+
+    child_name = f"crypto_tree_{product_id.lower().replace('-', '_')}"
+    db.add(CryptoTreeBranch(
+        bot_name=child_name, product_id=product_id, parent_bot_name=tree.ROOT_BOT_NAME,
+        allocated_usd=tree.SEED_USD, next_unlock_tier=tree.UNLOCK_TIER_USD, equity_floor=0.0,
+    ))
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=f"{product_id} was just claimed by another branch - try again")
+
+    log.info(f"[dashboard] 🌱 Manually spawned {child_name} ({product_id}) with ${tree.SEED_USD:.2f} seed from the backtest page, funded from real unallocated cash")
+    return {
+        "status": "spawned",
+        "bot_name": child_name,
+        "product_id": product_id,
+        "seed_usd": round(tree.SEED_USD, 2),
+        "remaining_unallocated": round(unallocated - tree.SEED_USD, 2),
+    }
+
+
 @router.post("/crypto-selection-backtest", dependencies=[Depends(require_admin_key)])
 async def run_crypto_selection_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders,
