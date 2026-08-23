@@ -115,7 +115,7 @@ FLOOR_BREACH_COOLDOWN_KEY_PREFIX = "crypto_family_tree_floor_breach_cooldown_"
 # same real sell/skim/coin-switch path as TARGET HIT or STOP HIT. Only
 # ever engages after real profit has actually been reached - a position
 # still underwater is governed by the ordinary stop, not this.
-MAX_PROFIT_GIVEBACK_USD = engine._safe_float_env("TREE_MAX_PROFIT_GIVEBACK_USD", "5.00")
+MAX_PROFIT_GIVEBACK_USD = engine._safe_float_env("TREE_MAX_PROFIT_GIVEBACK_USD", "3.75")
 
 # Per the account owner (a king/throne model, corrected after an earlier
 # "permanent once earned" version): BTC (the root) is King - always stays
