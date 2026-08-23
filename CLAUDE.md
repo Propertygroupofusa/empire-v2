@@ -960,6 +960,45 @@ peak-profit giveback cap (`0.5%`). Return signature is a 4-tuple
 must be persisted by the caller (`prop_bot.py` does this via
 `_db_update_peak_pct`, storing into `BotPosition.peak_pct`).
 
+### Alpaca-side auto-exclusion, mirroring the crypto family tree's two-layer system
+
+Per the account owner's explicit follow-up after being shown a real
+`alpaca_selection_backtest.py` run live on the dashboard (`USO` +21.6%
+ROI/73.1% win rate down to the 1x inverse ETFs `PSQ`/`SH`/`RWM`/`DOG` all
+net-negative, since the real 30-day sample wasn't an actual downtrend):
+"we can use that as part of the filter." The backtest tool already
+existed in shadow mode, but nothing previously read its results
+automatically - a symbol could sit at deep negative real backtested ROI
+and `prop_bot.py` would still be willing to enter it on the next
+RSI-oversold signal. This ports the crypto side's automatic exclusion
+layer (not the manual starting-list layer - not requested here) onto the
+stock/ETF side:
+
+- New `AlpacaBacktestRun` model (`models.py`), the direct counterpart to
+  `CryptoBacktestRun` - one row per symbol per real backtest run,
+  `product_id` holding the real ticker (e.g. `"USO"`), matching
+  `alpaca_selection_backtest.py`'s own field name.
+- `get_effective_excluded_symbols()` (`prop_bot.py`): a symbol
+  auto-excludes once its last `AUTO_EXCLUDE_RUN_WINDOW` (3) real runs
+  were ALL negative-ROI, and un-excludes the instant its most recent run
+  turns positive - contestable/self-healing, same philosophy as the
+  crypto side, never a one-way verdict. A symbol with fewer than 3 real
+  runs on record is never excluded - not enough evidence yet.
+- `_run_scheduled_backtest_and_update_exclusions()`: called from
+  `run_prop_cycle()` itself (throttled to once per
+  `AUTO_BACKTEST_INTERVAL_SECONDS`, 24h default, same as the crypto
+  side's coordinator-loop pattern - `prop_bot.py` has no separate
+  coordinator, so the check lives inline in its own cycle instead),
+  re-runs the exact real backtest the manual dashboard button triggers
+  and persists every symbol's result.
+- Enforced in two places: the automatic entry path (`try_open()`'s new
+  "MANDATE CHECK 1.5", right after the existing universe-enforcement
+  check) and the manual `POST /alpaca-overview/trade-this/{ticker}`
+  endpoint (refuses a currently-excluded symbol with a clear reason,
+  matching the crypto side's manual spawn-branch endpoint doing the
+  same) - so a real, deeply-underperforming symbol can't be entered
+  either automatically or on demand while it's excluded.
+
 ### Downtrend profit via 1x inverse ETFs (no shorting/margin)
 
 Per the account owner's explicit request to profit when the market is

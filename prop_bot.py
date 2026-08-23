@@ -18,9 +18,9 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import aiohttp
 import uuid
-from sqlalchemy import select
+from sqlalchemy import select, desc
 from database import AsyncSessionLocal
-from models import BotPosition, Payment
+from models import BotPosition, Payment, AlpacaBacktestRun
 from bot_mandates import APEX_MANDATE, validate_entry
 from alpaca_mean_reversion import should_exit_position as mr_should_exit, validate_dual_direction
 from profit_tracker import FiveHourProfitTracker
@@ -656,6 +656,85 @@ async def get_account_shorting_enabled(session):
 _SYMBOL_TO_CONTRACT = {config["symbol"]: contract for contract, config in FUTURES.items()}
 
 
+# Per the account owner's explicit request, mirroring the crypto family
+# tree's own two-layer coin exclusion (see crypto_family_tree_bot.py):
+# the real alpaca_selection_backtest.py results shown on the dashboard
+# already exist, but nothing previously READ them automatically - a
+# symbol could sit at deeply negative real backtested ROI (e.g. the
+# inverse ETFs PSQ/SH/RWM/DOG on a real 30-day window where the market
+# didn't actually fall) and prop_bot.py would still be willing to enter
+# it on the next RSI-oversold signal. This closes that gap: the
+# coordinator re-runs the real backtest on its own every
+# AUTO_BACKTEST_INTERVAL_SECONDS and auto-excludes a symbol once its
+# last AUTO_EXCLUDE_RUN_WINDOW real runs were ALL negative-ROI,
+# un-excluding it the instant its most recent run turns positive again -
+# contestable/self-healing, never a one-way verdict, same philosophy as
+# the crypto side. Requiring several consecutive bad runs (not one) is
+# deliberate, same reasoning as the crypto side: a single 30-day window
+# is noisy enough that one bad run alone shouldn't blacklist a symbol.
+AUTO_BACKTEST_INTERVAL_SECONDS = _safe_int_env("PROP_AUTO_BACKTEST_INTERVAL_SECONDS", str(24 * 60 * 60))
+AUTO_EXCLUDE_RUN_WINDOW = _safe_int_env("PROP_AUTO_EXCLUDE_RUN_WINDOW", "3")
+
+_last_auto_backtest_at = 0.0
+
+
+async def get_effective_excluded_symbols() -> set:
+    """Real tickers (e.g. "PSQ", not a contract code) currently excluded
+    from new entries - both the automatic path (try_open's MANDATE CHECK)
+    and the manual "Trade this" endpoint check this before acting. A
+    symbol with fewer than AUTO_EXCLUDE_RUN_WINDOW real backtest runs on
+    record is never excluded - there isn't enough evidence yet."""
+    excluded = set()
+    async with AsyncSessionLocal() as db:
+        for symbol in {config["symbol"] for config in FUTURES.values()}:
+            result = await db.execute(
+                select(AlpacaBacktestRun.roi_pct_of_spend)
+                .where(AlpacaBacktestRun.product_id == symbol)
+                .order_by(desc(AlpacaBacktestRun.run_at))
+                .limit(AUTO_EXCLUDE_RUN_WINDOW)
+            )
+            recent = result.scalars().all()
+            if len(recent) >= AUTO_EXCLUDE_RUN_WINDOW and all(roi < 0 for roi in recent):
+                excluded.add(symbol)
+    return excluded
+
+
+async def _run_scheduled_backtest_and_update_exclusions():
+    """Called from run_prop_cycle(), throttled to once per
+    AUTO_BACKTEST_INTERVAL_SECONDS. Runs the exact same real backtest the
+    manual dashboard button triggers, persists every symbol's result, then
+    logs the resulting auto-excluded set so it's visible in the real
+    deploy logs without needing the dashboard."""
+    try:
+        # Deferred import - alpaca_selection_backtest.py imports FUTURES
+        # etc. from this module, so importing it at the top of this file
+        # would be a circular import. By the time this function actually
+        # runs, both modules are already fully loaded.
+        import alpaca_selection_backtest
+    except Exception as e:
+        log.warning(f"[APEX_589296] scheduled backtest skipped - alpaca_selection_backtest not available ({e})")
+        return
+    log.info("[APEX_589296] 🔄 running the scheduled real symbol-selection backtest...")
+    try:
+        output = await alpaca_selection_backtest.run_full_backtest()
+    except Exception as e:
+        log.warning(f"[APEX_589296] scheduled backtest failed: {e}")
+        return
+    async with AsyncSessionLocal() as db:
+        for r in output["ranked"]:
+            db.add(AlpacaBacktestRun(
+                product_id=r["product_id"], num_trades=r["num_trades"],
+                win_rate=r["win_rate"], roi_pct_of_spend=r["roi_pct_of_spend"],
+            ))
+        await db.commit()
+    auto_excluded = await get_effective_excluded_symbols()
+    log.info(
+        f"[APEX_589296] 🔄 scheduled backtest done - {output['coins_with_results']} symbols scored. "
+        f"Auto-excluded (last {AUTO_EXCLUDE_RUN_WINDOW} runs all negative): "
+        f"{sorted(auto_excluded) if auto_excluded else 'none'}"
+    )
+
+
 async def reconcile_positions_with_broker(session):
     """Confirmed in production: a real Alpaca position (USO/MCL) sat at
     -4.9% - more than double STOP_LOSS_PCT - completely unmanaged, because
@@ -919,6 +998,15 @@ async def run_prop_cycle():
                 log.critical(f"[KILL CONDITION] Halting bot: {halt_reason}")
                 return
 
+        global _last_auto_backtest_at
+        now_ts = time.time()
+        if now_ts - _last_auto_backtest_at >= AUTO_BACKTEST_INTERVAL_SECONDS:
+            _last_auto_backtest_at = now_ts
+            try:
+                await _run_scheduled_backtest_and_update_exclusions()
+            except Exception as e:
+                log.warning(f"[APEX_589296] scheduled backtest/exclusion update failed: {e}")
+
         if equity is not None:
             # AGGRESSIVE GROWTH STRATEGY: Let account compound until real milestone hit
             # OLD: $1000.15 threshold kept triggering at $1004.77, closing $10, dropping to $994, looping infinitely
@@ -1140,6 +1228,15 @@ async def run_prop_cycle():
         )
         if contract not in approved_universe:
             log.warning(f"[MANDATE] {contract} NOT in approved universe - SKIPPING")
+            return False
+
+        # MANDATE CHECK 1.5: real-backtest auto-exclusion (see
+        # get_effective_excluded_symbols) - a symbol whose last
+        # AUTO_EXCLUDE_RUN_WINDOW real backtest runs were all negative-ROI
+        # is skipped here, same as the crypto side's coin exclusion.
+        excluded_symbols = await get_effective_excluded_symbols()
+        if config["symbol"] in excluded_symbols:
+            log.warning(f"[MANDATE] {contract} ({config['symbol']}) auto-excluded - last {AUTO_EXCLUDE_RUN_WINDOW} backtest runs all negative ROI - SKIPPING")
             return False
 
         # MANDATE CHECK 2: Entry conditions validation

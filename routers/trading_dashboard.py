@@ -1395,6 +1395,13 @@ async def manual_open_prop_position(ticker: str):
     if contract not in approved_universe:
         raise HTTPException(status_code=400, detail=f"{contract} ({ticker}) is not in the approved trading universe")
 
+    excluded_symbols = await pb.get_effective_excluded_symbols()
+    if ticker in excluded_symbols:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{ticker} is currently auto-excluded - its last {pb.AUTO_EXCLUDE_RUN_WINDOW} real backtest runs were all negative ROI",
+        )
+
     async with aiohttp.ClientSession() as session:
         equity = await pb.get_account_equity(session)
         if equity is None:

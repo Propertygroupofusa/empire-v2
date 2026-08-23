@@ -1278,6 +1278,24 @@ class CryptoBacktestRun(Base):
     roi_pct_of_spend = Column(Float)
 
 
+class AlpacaBacktestRun(Base):
+    """The Alpaca/stock-side counterpart to CryptoBacktestRun above - one
+    symbol's result from one run of alpaca_selection_backtest.py,
+    persisted so prop_bot.py's automatic symbol-exclusion rule can look at
+    a symbol's ROI across multiple recent runs rather than reacting to a
+    single, possibly noisy, 30-day window. product_id here holds the real
+    ticker (e.g. "USO"), matching alpaca_selection_backtest.py's own
+    field name, not a futures contract code."""
+    __tablename__ = "alpaca_backtest_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(String, index=True)
+    run_at = Column(DateTime, default=datetime.utcnow, index=True)
+    num_trades = Column(Integer)
+    win_rate = Column(Float)
+    roi_pct_of_spend = Column(Float)
+
+
 class BotStatus(Base):
     """Snapshots of trading bot performance metrics."""
     __tablename__ = "bot_statuses"
