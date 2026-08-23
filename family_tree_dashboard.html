@@ -409,6 +409,12 @@ function branchCardHtml(b) {
     // real ticker, not a static number, so a real decision to hit Sell can
     // be timed against it as it moves.
     let profitRowHtml = '<div class="row"><span class="k">Profit</span><span class="v" style="color:var(--text-dim)">—</span></div>';
+    // Coinbase takes its real trading fee out of the crypto received on a
+    // buy - it's not a separate transaction, it's baked into the position's
+    // qty already, so this is an estimate (same math the server uses to
+    // estimate the sell-side fee) of what it actually cost to get into this
+    // coin, shown so it's not invisible.
+    let feeRowHtml = '';
     if (b.position) {
         const p = b.position;
         const target = p.target_price != null ? fmtUsd(p.target_price) : '—';
@@ -418,6 +424,9 @@ function branchCardHtml(b) {
             const profitClass = profitUsd >= 0 ? 'pos' : 'neg';
             const profitSign = profitUsd >= 0 ? '+' : '-';
             profitRowHtml = `<div class="row"><span class="k">Profit</span><span class="v ${profitClass}">${profitSign}${fmtUsd(Math.abs(profitUsd))}</span></div>`;
+        }
+        if (p.entry_fee_usd != null) {
+            feeRowHtml = `<div class="row"><span class="k">Fee to enter</span><span class="v" style="color:var(--text-dim)">${fmtUsd(p.entry_fee_usd)}</span></div>`;
         }
         // Once a position is up enough, its stop gets ratcheted up to entry
         // price server-side (see BREAKEVEN_TRIGGER_PCT in
@@ -453,6 +462,7 @@ function branchCardHtml(b) {
             <div class="row"><span class="k">Balance</span><span class="v">${fmtUsd(b.allocated_usd)}</span></div>
             <div class="row"><span class="k">Floor</span><span class="v">${fmtUsd(b.equity_floor)}</span></div>
             ${profitRowHtml}
+            ${feeRowHtml}
             <div class="progress-wrap">
                 <div class="progress-label"><span>Next spawn</span><span>${pct.toFixed(0)}%</span></div>
                 <div class="progress-bar-bg"><div class="progress-bar-fill" style="width:${pct}%"></div></div>

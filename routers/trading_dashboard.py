@@ -666,6 +666,16 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
                 "opened_at": pos.opened_at.isoformat() if pos.opened_at else None,
                 "current_price": current_price,
                 "unrealized_pct": round((current_price / pos.entry_price - 1) * 100, 2) if current_price else None,
+                # Coinbase takes its real trading fee out of the crypto you
+                # get back on a buy - it's not a separate line item anywhere,
+                # it's baked into pos.qty already. This is the same estimate
+                # _branch_sell_and_settle uses for the sell-side fee (half
+                # of ROUND_TRIP_FEE_RATE applied to the trade's dollar
+                # value), so the dashboard can show what it actually cost to
+                # get into this coin.
+                "entry_fee_usd": round(
+                    pos.entry_price * pos.qty * (crypto_family_tree_bot_module.ROUND_TRIP_FEE_RATE / 2), 2
+                ) if crypto_family_tree_bot_module is not None else None,
             },
         })
 
