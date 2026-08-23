@@ -944,6 +944,65 @@ async def spawn_family_tree_branch_on_coin(product_id: str, db: AsyncSession = D
     }
 
 
+class UnlockProfitRequest(BaseModel):
+    amount: float
+    bot_name: str | None = None  # omit to release as free spendable cash; set to add directly into that branch's balance
+
+
+@router.post("/family-tree-status/unlock-profit", dependencies=[Depends(require_admin_key)])
+async def unlock_locked_profit(payload: UnlockProfitRequest, db: AsyncSession = Depends(get_db)):
+    """Manually releases real money back OUT of the crypto family tree's
+    locked-profit ledger (see PROFIT_SKIM_PCT / the dust sweep in
+    crypto_family_tree_bot.py). Per the account owner's explicit choice:
+    a deliberate reversal of the "permanently out of the compounding
+    loop" design everywhere else in this system - only ever happens via
+    this explicit manual action, never automatically.
+
+    Two modes, both real:
+    - bot_name omitted: released as free spendable cash - locked_usd
+      drops, so it's immediately available again to whichever branch's
+      own cycle next wants to buy (or the account owner can withdraw it
+      directly from Coinbase themselves, same as any other real cash).
+    - bot_name given: added directly into that ONE branch's
+      allocated_usd - a pure bookkeeping transfer (no Coinbase order
+      needed, real dollars never left the account) exactly like a spawn's
+      parent-deduct/child-add. No restriction on which branch - winning
+      or losing, any existing branch, per the account owner's explicit
+      choice ("all can be an option")."""
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+    tree = crypto_family_tree_bot_module
+
+    if payload.amount <= 0:
+        raise HTTPException(status_code=400, detail="amount must be positive")
+
+    branch = None
+    if payload.bot_name:
+        result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == payload.bot_name))
+        branch = result.scalar_one_or_none()
+        if branch is None:
+            raise HTTPException(status_code=404, detail=f"No branch named {payload.bot_name}")
+
+    current_locked = await tree.get_locked_usd()
+    if payload.amount > current_locked + 0.005:
+        raise HTTPException(status_code=400, detail=f"Only ${current_locked:.2f} is currently locked - can't unlock ${payload.amount:.2f}")
+
+    released = await tree._subtract_locked_usd(payload.amount)
+
+    if branch is not None:
+        branch.allocated_usd += released
+        await db.commit()
+        log.info(f"[dashboard] 🔓 Unlocked ${released:.2f} of locked profit and added it to {branch.bot_name}'s balance (now ${branch.allocated_usd:.2f})")
+        return {
+            "status": "added_to_branch", "amount": round(released, 2),
+            "bot_name": branch.bot_name, "branch_new_balance": round(branch.allocated_usd, 2),
+            "new_locked_usd": round(current_locked - released, 2),
+        }
+
+    log.info(f"[dashboard] 🔓 Unlocked ${released:.2f} of locked profit back into free spendable cash")
+    return {"status": "cashed_out", "amount": round(released, 2), "new_locked_usd": round(current_locked - released, 2)}
+
+
 @router.post("/crypto-selection-backtest", dependencies=[Depends(require_admin_key)])
 async def run_crypto_selection_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders,

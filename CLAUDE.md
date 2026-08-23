@@ -411,6 +411,36 @@ endpoint it calls (see `routers/trading_dashboard.py`).
   simulation - it's the same $50-seed/root-child mechanism every organic
   or auto-spawned branch uses.
 
+### Manual unlock of locked profit
+
+Per the account owner's explicit request: locked profit (the 10% skim +
+the stranded-dust sweep, both above) is deliberately one-way everywhere
+else in this system - "permanently out of the compounding loop." This
+adds the one and only manual override, via the dashboard's 🔓 Unlock
+button on the Locked Profit card and `POST
+/api/trading-dashboard/family-tree-status/unlock-profit`
+(`{amount, bot_name?}`):
+
+- `bot_name` omitted → **cash out**: `locked_usd` drops by the real
+  amount, immediately available again as free spendable cash to
+  whichever branch's own cycle next wants to buy (or withdrawable
+  directly from Coinbase by the account owner - it was always real
+  money in the account, just virtually earmarked).
+- `bot_name` given → **add to branch**: same `locked_usd` decrease, plus
+  that exact amount added directly into the named branch's
+  `allocated_usd` - a pure bookkeeping transfer (no Coinbase order,
+  real dollars never left the account), same mechanism a spawn's
+  parent-deduct/child-add uses. No restriction on which branch - winning
+  or losing, any existing branch - per the account owner's explicit
+  choice ("all can be an option").
+
+Refuses cleanly (400) if the amount isn't positive or exceeds what's
+actually locked, and (404) if the named branch doesn't exist -
+`locked_usd` is left untouched on any refusal. `_subtract_locked_usd()`
+in `crypto_family_tree_bot.py` is the reverse of the existing
+`_add_locked_usd()`, clamped so it can never release more than genuinely
+exists.
+
 ### Stranded-dust sweep speed, and a real USDC blind spot found
 
 `_check_and_sweep_stranded_dust()` locks genuinely-too-small-to-trade

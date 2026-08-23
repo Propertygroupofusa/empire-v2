@@ -372,6 +372,27 @@ async def _add_locked_usd(amount: float):
         await db.commit()
 
 
+async def _subtract_locked_usd(amount: float) -> float:
+    """Reverse of _add_locked_usd - releases real money back OUT of the
+    locked-profit ledger. Per the account owner's explicit choice, this
+    is a real, deliberate reversal of the "permanently out of the
+    compounding loop" design everywhere else in this system (the 10%
+    skim, the dust sweep) - it only ever happens via an explicit manual
+    dashboard action (see unlock_locked_profit in
+    routers/trading_dashboard.py), never automatically. Clamps to
+    whatever's actually there and returns the real amount released, so
+    the caller can never release more than genuinely exists."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == LOCKED_PROFIT_STATE_KEY))
+        row = result.scalar_one_or_none()
+        current = row.base_capital if row else 0.0
+        released = min(max(amount, 0.0), current)
+        if row:
+            row.base_capital = current - released
+        await db.commit()
+        return released
+
+
 _last_dust_check_at = 0.0
 
 

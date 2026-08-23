@@ -192,6 +192,21 @@
     .sell-btn:hover { background: var(--red); color: #fff; }
     .sell-btn:disabled { opacity: 0.5; cursor: default; }
 
+    .unlock-btn {
+        font-family: inherit;
+        margin-top: 8px;
+        background: #fff;
+        border: 1px solid var(--gold);
+        color: var(--gold);
+        padding: 5px 10px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.76em;
+        font-weight: 700;
+    }
+    .unlock-btn:hover { background: var(--gold); color: #fff; }
+    .unlock-btn:disabled { opacity: 0.5; cursor: default; }
+
     .sell-disabled-note {
         width: 100%;
         margin-top: 8px;
@@ -269,7 +284,11 @@
     <div class="kpi-row">
         <div class="kpi"><div class="label">Branches / Coins</div><div class="value" id="stat-count">—</div></div>
         <div class="kpi"><div class="label">Total Allocated</div><div class="value" id="stat-total">—</div></div>
-        <div class="kpi gold"><div class="label">🔒 Locked Profit</div><div class="value" id="stat-locked">—</div></div>
+        <div class="kpi gold">
+            <div class="label">🔒 Locked Profit</div>
+            <div class="value" id="stat-locked">—</div>
+            <button id="unlock-profit-btn" class="unlock-btn" onclick="unlockProfit(this)" disabled title="Loading...">🔓 Unlock</button>
+        </div>
         <div class="kpi"><div class="label">Refreshed</div><div class="value" id="stat-refreshed" style="font-size:1em">—</div></div>
     </div>
 
@@ -542,6 +561,79 @@ async function spawnBranch(btn) {
     }
 }
 
+function updateUnlockButtonState(data) {
+    const btn = document.getElementById('unlock-profit-btn');
+    if (!btn) return;
+    const locked = data.locked_usd || 0;
+    if (locked < 0.01) {
+        btn.disabled = true;
+        btn.title = 'Nothing locked yet';
+    } else {
+        btn.disabled = false;
+        btn.title = `${fmtUsd(locked)} currently locked`;
+    }
+}
+
+// Per the account owner's explicit request: locked profit (the 10% skim
+// + stranded-dust sweep - see crypto_family_tree_bot.py) is real money
+// that's been deliberately walled off from ever being redeployed
+// automatically. This is the one and only manual override of that -
+// cash it out as free spendable cash, or add it directly into one
+// specific branch's balance (any branch, winning or losing - no
+// restriction). Uses the same lightweight prompt()/confirm() pattern as
+// the rest of this dashboard rather than a custom modal.
+async function unlockProfit(btn) {
+    const statusData = await apiGet('/family-tree-status');
+    const locked = statusData.locked_usd || 0;
+    if (locked < 0.01) { alert('Nothing is currently locked.'); return; }
+
+    const amountStr = prompt(`How much of the ${fmtUsd(locked)} locked profit do you want to unlock?`, locked.toFixed(2));
+    if (amountStr === null) return;
+    const amount = parseFloat(amountStr);
+    if (!amount || amount <= 0) { alert('Enter a positive dollar amount.'); return; }
+
+    const branchNames = (statusData.branches || []).map(b => `${b.bot_name} (${b.product_id})`).join('\n');
+    const addToBranch = confirm(
+        `Add this $${amount.toFixed(2)} directly into one specific branch's balance instead of cashing it out as free spendable cash?\n\n` +
+        `OK = add to a branch\nCancel = cash out as free spendable cash`
+    );
+
+    let botName = null;
+    if (addToBranch) {
+        botName = prompt(`Which branch? (exact bot_name)\n\n${branchNames}`);
+        if (!botName) return;
+        botName = botName.trim();
+    }
+
+    const confirmMsg = addToBranch
+        ? `Unlock $${amount.toFixed(2)} and add it to ${botName}'s balance? This is real and can't be undone.`
+        : `Unlock $${amount.toFixed(2)} back into free spendable cash? This is real and can't be undone.`;
+    if (!confirm(confirmMsg)) return;
+
+    btn.disabled = true;
+    btn.textContent = 'Unlocking…';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/family-tree-status/unlock-profit', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ amount, bot_name: botName }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        if (data.status === 'added_to_branch') {
+            alert(`Unlocked ${fmtUsd(data.amount)} and added it to ${data.bot_name} (new balance ${fmtUsd(data.branch_new_balance)}). Locked profit remaining: ${fmtUsd(data.new_locked_usd)}.`);
+        } else {
+            alert(`Unlocked ${fmtUsd(data.amount)} back into free spendable cash. Locked profit remaining: ${fmtUsd(data.new_locked_usd)}.`);
+        }
+    } catch (e) {
+        alert('Could not unlock profit: ' + e.message);
+    } finally {
+        btn.textContent = '🔓 Unlock';
+        await refresh();
+    }
+}
+
 // Real node-link tree layout (classic "place leaves left-to-right, put a
 // parent above the midpoint of its children" recursion) - genuinely
 // branches root-to-child with connecting lines, not just indentation.
@@ -627,6 +719,7 @@ async function refresh() {
         document.getElementById('stat-locked').textContent = fmtUsd(data.locked_usd || 0);
         document.getElementById('stat-refreshed').textContent = new Date().toLocaleTimeString();
         updateSpawnButtonState(data);
+        updateUnlockButtonState(data);
 
         const branches = data.branches || [];
         renderBarList('branches-bar', branches.map(b => ({ label: b.product_id.replace('-USD', ''), value: b.allocated_usd })));
