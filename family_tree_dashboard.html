@@ -207,6 +207,51 @@
     .unlock-btn:hover { background: var(--gold); color: #fff; }
     .unlock-btn:disabled { opacity: 0.5; cursor: default; }
 
+    .modal-overlay {
+        position: fixed; inset: 0; background: rgba(15,23,42,0.55);
+        display: none; align-items: center; justify-content: center;
+        z-index: 1000; padding: 20px;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal-card {
+        background: var(--panel); border-radius: 14px; padding: 24px;
+        width: 100%; max-width: 420px; box-shadow: 0 10px 40px rgba(0,0,0,0.25);
+        max-height: 90vh; overflow-y: auto;
+    }
+    .modal-title { font-size: 1.15em; font-weight: 800; color: var(--navy); }
+    .modal-sub { font-size: 0.82em; color: var(--text-dim); margin-top: 4px; margin-bottom: 16px; }
+    .modal-label { display: block; font-size: 0.78em; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 6px; }
+    .modal-input {
+        width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+        font-size: 1em; font-family: inherit; color: var(--text);
+    }
+    .mode-toggle { display: flex; flex-direction: column; gap: 8px; }
+    .mode-btn {
+        font-family: inherit; text-align: left; padding: 10px 12px; border-radius: 8px;
+        border: 1.5px solid var(--border); background: #fff; color: var(--text);
+        cursor: pointer; font-size: 0.88em; font-weight: 600;
+    }
+    .mode-btn.selected { border-color: var(--navy); background: #eef2fb; color: var(--navy); }
+    .branch-pick-list { display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto; }
+    .branch-pick-btn {
+        font-family: inherit; text-align: left; padding: 9px 12px; border-radius: 8px;
+        border: 1.5px solid var(--border); background: #fff; color: var(--text);
+        cursor: pointer; font-size: 0.85em;
+    }
+    .branch-pick-btn .coin-name { font-weight: 700; }
+    .branch-pick-btn .bot-id { color: var(--text-dim); font-size: 0.85em; margin-left: 6px; }
+    .branch-pick-btn.selected { border-color: var(--green); background: var(--green-bg); }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+    .modal-btn-secondary {
+        font-family: inherit; padding: 9px 16px; border-radius: 8px; border: 1px solid var(--border);
+        background: #fff; color: var(--text-dim); cursor: pointer; font-weight: 600; font-size: 0.9em;
+    }
+    .modal-btn-primary {
+        font-family: inherit; padding: 9px 18px; border-radius: 8px; border: none;
+        background: var(--gold); color: #fff; cursor: pointer; font-weight: 700; font-size: 0.9em;
+    }
+    .modal-btn-primary:disabled { opacity: 0.5; cursor: default; }
+
     .sell-disabled-note {
         width: 100%;
         margin-top: 8px;
@@ -287,7 +332,7 @@
         <div class="kpi gold">
             <div class="label">🔒 Locked Profit</div>
             <div class="value" id="stat-locked">—</div>
-            <button id="unlock-profit-btn" class="unlock-btn" onclick="unlockProfit(this)" disabled title="Loading...">🔓 Unlock</button>
+            <button id="unlock-profit-btn" class="unlock-btn" onclick="unlockProfit()" disabled title="Loading...">🔓 Unlock</button>
         </div>
         <div class="kpi"><div class="label">Refreshed</div><div class="value" id="stat-refreshed" style="font-size:1em">—</div></div>
     </div>
@@ -310,6 +355,32 @@
         <button id="spawn-branch-btn" class="sell-btn" style="width:auto; margin-top:0;" onclick="spawnBranch(this)" disabled title="Checking real free cash...">🌱 Start new $50 branch</button>
     </div>
     <div class="tree-canvas"><div class="tree-canvas-inner" id="tree"></div></div>
+</div>
+
+<div class="modal-overlay" id="unlock-modal-overlay">
+    <div class="modal-card">
+        <div class="modal-title">🔓 Unlock Locked Profit</div>
+        <div class="modal-sub" id="unlock-modal-sub">—</div>
+
+        <label class="modal-label">Amount to unlock</label>
+        <input type="number" id="unlock-amount-input" class="modal-input" step="0.01" min="0.01">
+
+        <label class="modal-label" style="margin-top:16px;">What do you want to do with it?</label>
+        <div class="mode-toggle">
+            <button type="button" class="mode-btn selected" id="mode-cashout-btn" onclick="selectUnlockMode('cash_out')">💵 Cash out (free spendable cash)</button>
+            <button type="button" class="mode-btn" id="mode-addbranch-btn" onclick="selectUnlockMode('add_to_branch')">🌿 Add to a branch</button>
+        </div>
+
+        <div id="branch-pick-wrap" style="display:none;">
+            <label class="modal-label" style="margin-top:16px;">Which branch? (tap to select)</label>
+            <div id="branch-pick-list" class="branch-pick-list"></div>
+        </div>
+
+        <div class="modal-actions">
+            <button type="button" class="modal-btn-secondary" onclick="closeUnlockModal()">Cancel</button>
+            <button type="button" class="modal-btn-primary" id="unlock-confirm-btn" onclick="confirmUnlockProfit()">Unlock</button>
+        </div>
+    </div>
 </div>
 
 <script>
@@ -580,38 +651,70 @@ function updateUnlockButtonState(data) {
 // automatically. This is the one and only manual override of that -
 // cash it out as free spendable cash, or add it directly into one
 // specific branch's balance (any branch, winning or losing - no
-// restriction). Uses the same lightweight prompt()/confirm() pattern as
-// the rest of this dashboard rather than a custom modal.
-async function unlockProfit(btn) {
+// restriction). Real, tappable UI (per the account owner's explicit
+// request - typing an exact bot_name into a text prompt() was too
+// error-prone/fiddly on mobile) instead of the original prompt()-chain.
+let unlockModal = { locked: 0, branches: [], mode: 'cash_out', selectedBot: null };
+
+async function unlockProfit() {
     const statusData = await apiGet('/family-tree-status');
     const locked = statusData.locked_usd || 0;
     if (locked < 0.01) { alert('Nothing is currently locked.'); return; }
 
-    const amountStr = prompt(`How much of the ${fmtUsd(locked)} locked profit do you want to unlock?`, locked.toFixed(2));
-    if (amountStr === null) return;
-    const amount = parseFloat(amountStr);
+    unlockModal = { locked, branches: statusData.branches || [], mode: 'cash_out', selectedBot: null };
+
+    document.getElementById('unlock-modal-sub').textContent = `${fmtUsd(locked)} currently locked`;
+    const amountInput = document.getElementById('unlock-amount-input');
+    amountInput.value = locked.toFixed(2);
+    amountInput.max = locked.toFixed(2);
+
+    selectUnlockMode('cash_out');
+
+    const listEl = document.getElementById('branch-pick-list');
+    listEl.innerHTML = unlockModal.branches.map(b => `
+        <button type="button" class="branch-pick-btn" data-bot="${b.bot_name}" onclick="selectUnlockBranch('${b.bot_name}', this)">
+            <span class="coin-name">${b.product_id.replace('-USD', '')}</span>
+            <span class="bot-id">${b.bot_name} · ${fmtUsd(b.allocated_usd)}</span>
+        </button>
+    `).join('');
+
+    document.getElementById('unlock-modal-overlay').classList.add('open');
+}
+
+function selectUnlockMode(mode) {
+    unlockModal.mode = mode;
+    document.getElementById('mode-cashout-btn').classList.toggle('selected', mode === 'cash_out');
+    document.getElementById('mode-addbranch-btn').classList.toggle('selected', mode === 'add_to_branch');
+    document.getElementById('branch-pick-wrap').style.display = mode === 'add_to_branch' ? 'block' : 'none';
+}
+
+function selectUnlockBranch(botName, btnEl) {
+    unlockModal.selectedBot = botName;
+    document.querySelectorAll('.branch-pick-btn').forEach(el => el.classList.remove('selected'));
+    btnEl.classList.add('selected');
+}
+
+function closeUnlockModal() {
+    document.getElementById('unlock-modal-overlay').classList.remove('open');
+}
+
+async function confirmUnlockProfit() {
+    const amount = parseFloat(document.getElementById('unlock-amount-input').value);
     if (!amount || amount <= 0) { alert('Enter a positive dollar amount.'); return; }
+    if (amount > unlockModal.locked + 0.005) { alert(`Only ${fmtUsd(unlockModal.locked)} is currently locked.`); return; }
 
-    const branchNames = (statusData.branches || []).map(b => `${b.bot_name} (${b.product_id})`).join('\n');
-    const addToBranch = confirm(
-        `Add this $${amount.toFixed(2)} directly into one specific branch's balance instead of cashing it out as free spendable cash?\n\n` +
-        `OK = add to a branch\nCancel = cash out as free spendable cash`
-    );
-
-    let botName = null;
-    if (addToBranch) {
-        botName = prompt(`Which branch? (exact bot_name)\n\n${branchNames}`);
-        if (!botName) return;
-        botName = botName.trim();
-    }
+    const addToBranch = unlockModal.mode === 'add_to_branch';
+    if (addToBranch && !unlockModal.selectedBot) { alert('Tap a branch to select it first.'); return; }
+    const botName = addToBranch ? unlockModal.selectedBot : null;
 
     const confirmMsg = addToBranch
         ? `Unlock $${amount.toFixed(2)} and add it to ${botName}'s balance? This is real and can't be undone.`
         : `Unlock $${amount.toFixed(2)} back into free spendable cash? This is real and can't be undone.`;
     if (!confirm(confirmMsg)) return;
 
-    btn.disabled = true;
-    btn.textContent = 'Unlocking…';
+    const confirmBtn = document.getElementById('unlock-confirm-btn');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Unlocking…';
     try {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/family-tree-status/unlock-profit', {
@@ -621,6 +724,7 @@ async function unlockProfit(btn) {
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        closeUnlockModal();
         if (data.status === 'added_to_branch') {
             alert(`Unlocked ${fmtUsd(data.amount)} and added it to ${data.bot_name} (new balance ${fmtUsd(data.branch_new_balance)}). Locked profit remaining: ${fmtUsd(data.new_locked_usd)}.`);
         } else {
@@ -629,7 +733,8 @@ async function unlockProfit(btn) {
     } catch (e) {
         alert('Could not unlock profit: ' + e.message);
     } finally {
-        btn.textContent = '🔓 Unlock';
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Unlock';
         await refresh();
     }
 }
