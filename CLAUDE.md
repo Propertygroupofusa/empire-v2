@@ -509,6 +509,31 @@ also reads/uses USDC" or "convert back to USD, the bot's view is
 correct as-is." Account owner's choice, for now: convert back to USD
 manually when this happens.
 
+### BTC root is never manually sellable, and the ROOT badge fix
+
+Per the account owner's explicit request, spotted from the dashboard
+showing three "ROOT"-badged, gold-styled cards (BTC, plus two adopted
+legacy positions) and asking to lock down the real root while leaving
+the other two alone. Two real fixes:
+
+1. **Dashboard ROOT badge/gold styling** (`family_tree_dashboard.html`)
+   used to key off `!b.parent_bot_name`, which is true both for BTC AND
+   for any position adopted from the old pre-family-tree bot (see orphan
+   adoption above) - those adopted branches aren't actually
+   root-protected, they coin-switch and sell exactly like any other
+   branch, so showing them identically to BTC was misleading. Now keyed
+   off `b.bot_name === 'crypto_btc_compound'` specifically - only the
+   real root gets the badge and gold card.
+2. **BTC can never be manually sold** - `POST
+   /family-tree-status/close/{bot_name}` now refuses outright
+   (`400`) when `bot_name == ROOT_BOT_NAME`, matching BTC's existing
+   automatic-exit behavior ("root stays on BTC-USD by design"). Enforced
+   server-side, not just hidden in the UI, so it can't be bypassed by
+   calling the endpoint directly - the dashboard shows "🔒 Permanent
+   root — never sold manually" in place of the Sell button. Every other
+   branch (including adopted-orphan ones) is completely unaffected and
+   still sells normally when genuinely in profit.
+
 ### Catch-up spawn check, every cycle (not just right after a sell)
 
 Per the account owner's real observation: the dashboard's "Next spawn"

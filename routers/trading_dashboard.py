@@ -740,6 +740,18 @@ async def close_family_tree_branch(bot_name: str):
     if crypto_family_tree_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
 
+    # Per the account owner's explicit request: BTC (the tree's real,
+    # permanent root - never any adopted legacy position, see the ROOT
+    # badge fix in family_tree_dashboard.html) can never be manually sold,
+    # matching its existing "root stays on BTC-USD by design" behavior on
+    # automatic exits. Enforced here, not just hidden in the UI, so it
+    # can't be bypassed by calling this endpoint directly.
+    if bot_name == crypto_family_tree_bot_module.ROOT_BOT_NAME:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{bot_name} is the tree's permanent root - it can never be manually sold",
+        )
+
     branch = await crypto_family_tree_bot_module.load_branch(bot_name)
     if branch is None:
         raise HTTPException(status_code=404, detail=f"No branch named {bot_name}")

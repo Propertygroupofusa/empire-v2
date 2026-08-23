@@ -488,8 +488,17 @@ function renderNarrative(data) {
     el.textContent = sentence;
 }
 
+// Only the tree's real, permanent root (crypto_btc_compound) - NOT just
+// "has no parent_bot_name in the DB," which is also true for any legacy
+// position adopted from the old bot (see the orphan-adoption note in
+// CLAUDE.md). Those adopted branches aren't actually root-protected -
+// they coin-switch and can be manually sold exactly like any other
+// branch - so showing them with the same ROOT badge/gold styling as BTC
+// was misleading, per the account owner's explicit request to fix it.
+const REAL_ROOT_BOT_NAME = 'crypto_btc_compound';
+
 function branchCardHtml(b) {
-    const isRoot = !b.parent_bot_name;
+    const isRoot = b.bot_name === REAL_ROOT_BOT_NAME;
     const pct = b.next_unlock_tier > 0 ? Math.min(100, (b.allocated_usd / b.next_unlock_tier) * 100) : 0;
     const coin = b.product_id.replace('-USD', '');
 
@@ -537,7 +546,15 @@ function branchCardHtml(b) {
         // automatic TARGET/STOP hit uses (see sellBranch()) - the branch
         // then automatically picks a new coin and rebuys, same as any
         // other exit.
-        if (p.unrealized_pct != null && p.unrealized_pct > 0) {
+        if (isRoot) {
+            // Per the account owner's explicit request: BTC is the tree's
+            // permanent foundation and can never be manually sold - same
+            // rule the automatic exit path already follows ("root stays on
+            // BTC-USD by design"), now also enforced server-side on this
+            // endpoint (see close_family_tree_branch in
+            // routers/trading_dashboard.py) so this isn't just cosmetic.
+            sellBtnHtml = `<div class="sell-disabled-note">🔒 Permanent root — never sold manually</div>`;
+        } else if (p.unrealized_pct != null && p.unrealized_pct > 0) {
             sellBtnHtml = `<button class="sell-btn" onclick="sellBranch('${b.bot_name}', this)">Sell now &amp; find next coin</button>`;
         } else {
             sellBtnHtml = `<div class="sell-disabled-note">${p.unrealized_pct == null ? 'Live price unavailable — sell disabled' : 'Not in profit yet — sell disabled'}</div>`;
