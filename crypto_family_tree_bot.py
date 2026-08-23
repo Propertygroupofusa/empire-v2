@@ -850,8 +850,21 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
     # COIN_LOCK_KEY_PREFIX / _check_and_lock_strongest_siblings) behaves
     # the same way for as long as it holds it: stays on its current coin -
     # but unlike root, that's contestable, not forever.
+    # A throne lock means "don't make this branch hop coins" - it was
+    # never meant to override an explicit EXCLUDED_COINS decision. Real
+    # bug caught live: crypto_tree_ldo_usd held the throne while sitting
+    # on BLUR-USD (now excluded) - a manual sell just sold and instantly
+    # rebought the identical excluded coin, because the lock check short-
+    # circuited before ever reaching find_most_volatile_unclaimed_coin()
+    # (where EXCLUDED_COINS is actually filtered). The lock still holds
+    # for everything else; it just can't keep a branch parked on a coin
+    # that's been explicitly excluded.
     new_product_id = new_product_atr = None
-    branch_is_locked = bot_name != ROOT_BOT_NAME and await _is_coin_locked(bot_name)
+    branch_is_locked = (
+        bot_name != ROOT_BOT_NAME
+        and product_id not in EXCLUDED_COINS
+        and await _is_coin_locked(bot_name)
+    )
     if bot_name != ROOT_BOT_NAME and not branch_is_locked:
         new_product_id, new_product_atr = await find_most_volatile_unclaimed_coin(session)
 
