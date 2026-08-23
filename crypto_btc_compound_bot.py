@@ -111,20 +111,29 @@ ROUND_TRIP_FEE_RATE = _safe_float_env("BTC_COMPOUND_ROUND_TRIP_FEE_RATE", "0.008
 
 # Per the account owner: a percentage-only target can "hit" on a small
 # position and still barely clear the real sell-side fee, or lose to it
-# outright - e.g. a 1.5% target on a fresh $50 branch nets under $0.55
-# after the ~0.8% round-trip fee, which isn't a real win. Every TARGET-HIT
-# exit must clear at least MIN_PROFIT_USD of real net profit, in dollars,
-# not just percent.
+# outright - e.g. the old flat 1.5% target on a fresh $50 branch nets
+# under $0.55 after the ~0.8% round-trip fee, which isn't a real win.
+# Every TARGET-HIT exit must clear a minimum of real net profit, in
+# dollars, not just percent.
+#
+# That dollar floor is tiered by the SAME ATR% volatility bands
+# pick_target_pct() already uses, per the account owner: a highly
+# volatile coin can genuinely swing far enough to be worth demanding a
+# bigger real dollar win for, but pinning every coin to that same high
+# bar would make TARGET unreachable on a quiet, barely-moving coin -
+# pick_min_profit_usd() mirrors pick_target_pct()'s own tiering so a
+# quiet coin keeps the low, easily-reachable floor.
 #
 # min_profit_target_pct() is the exact inverse of the net-P&L formula
 # _sell_and_settle/_branch_sell_and_settle use (pnl = qty*T*(1-fee_rate/2)
-# - qty*entry), solved for the target_pct that makes that pnl equal
-# MIN_PROFIT_USD on a position of a given size. The buy path then uses
-# max(pick_target_pct(atr_pct), min_profit_target_pct(spend)) - so this
-# only ever RAISES the target on positions too small for the adaptive
-# ATR target to clear the dollar floor on its own; a big-enough branch
-# (whose normal target already nets well over MIN_PROFIT_USD) is
-# untouched, since pick_target_pct's result already wins the max().
+# - qty*entry), solved for the target_pct that makes that pnl equal the
+# picked dollar floor on a position of a given size. The buy path then
+# uses max(pick_target_pct(atr_pct), min_profit_target_pct(spend,
+# atr_pct)) - so this only ever RAISES the target on positions too small
+# for the adaptive ATR target to clear the dollar floor on its own; a
+# big-enough branch (whose normal target already nets well over its
+# floor) is untouched, since pick_target_pct's result already wins the
+# max().
 #
 # The real tradeoff, and it's a structural one no percentage tweak
 # removes: a small branch now needs a bigger price move to ever reach
@@ -132,14 +141,25 @@ ROUND_TRIP_FEE_RATE = _safe_float_env("BTC_COMPOUND_ROUND_TRIP_FEE_RATE", "0.008
 # instead. That's the actual cost of insisting every declared "win" be a
 # real one - the account owner explicitly chose that trade-off over a
 # thin/negative "win" that fees eat.
-MIN_PROFIT_USD = _safe_float_env("BTC_COMPOUND_MIN_PROFIT_USD", "2.50")
+MIN_PROFIT_USD_LOW = _safe_float_env("BTC_COMPOUND_MIN_PROFIT_USD_LOW", "2.50")    # quiet coins (ATR < VOL_LOW_THRESHOLD)
+MIN_PROFIT_USD_MED = _safe_float_env("BTC_COMPOUND_MIN_PROFIT_USD_MED", "4.00")    # normal coins
+MIN_PROFIT_USD_HIGH = _safe_float_env("BTC_COMPOUND_MIN_PROFIT_USD_HIGH", "6.00")  # volatile coins (ATR >= VOL_HIGH_THRESHOLD)
 
 
-def min_profit_target_pct(spend_usd: float) -> float:
+def pick_min_profit_usd(atr_pct: float) -> float:
+    if atr_pct < VOL_LOW_THRESHOLD:
+        return MIN_PROFIT_USD_LOW
+    if atr_pct < VOL_HIGH_THRESHOLD:
+        return MIN_PROFIT_USD_MED
+    return MIN_PROFIT_USD_HIGH
+
+
+def min_profit_target_pct(spend_usd: float, atr_pct: float) -> float:
     if spend_usd <= 0:
         return 0.0
+    min_profit_usd = pick_min_profit_usd(atr_pct)
     k = 1 - (ROUND_TRIP_FEE_RATE / 2)
-    return max(0.0, (1 + MIN_PROFIT_USD / spend_usd) / k - 1)
+    return max(0.0, (1 + min_profit_usd / spend_usd) / k - 1)
 
 # EQUITY FLOOR RATCHET - same mechanism prop_bot.py uses, and for the same
 # reason: this does NOT make losing impossible (nothing can), but it stops
@@ -557,7 +577,7 @@ async def run_cycle():
                 log.warning("[BTC-COMPOUND] Could not fetch BTC price/volatility - skipping this cycle")
                 return
 
-            target_pct = max(pick_target_pct(atr_pct), min_profit_target_pct(balance))
+            target_pct = max(pick_target_pct(atr_pct), min_profit_target_pct(balance, atr_pct))
             fill = await place_market_buy(session, balance)
             if not fill:
                 log.warning("[BTC-COMPOUND] Buy did not fill - will retry next cycle")
@@ -568,7 +588,7 @@ async def run_cycle():
             await save_position(filled_price, filled_qty, target_price, stop_price)
             log.info(
                 f"[BTC-COMPOUND] BOUGHT {filled_qty:.8f} BTC @ ${filled_price:,.2f} (${balance:.2f} deployed) | "
-                f"ATR volatility: {atr_pct*100:.2f}% -> target +{target_pct*100:.2f}% (${target_price:,.2f}, min ${MIN_PROFIT_USD:.2f} net) | "
+                f"ATR volatility: {atr_pct*100:.2f}% -> target +{target_pct*100:.2f}% (${target_price:,.2f}, min ${pick_min_profit_usd(atr_pct):.2f} net) | "
                 f"stop -{STOP_LOSS_PCT*100:.2f}% (${stop_price:,.2f}) | floor ${equity_floor:,.2f}"
             )
             return
