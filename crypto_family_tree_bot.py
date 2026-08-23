@@ -117,20 +117,20 @@ FLOOR_BREACH_COOLDOWN_KEY_PREFIX = "crypto_family_tree_floor_breach_cooldown_"
 # still underwater is governed by the ordinary stop, not this.
 MAX_PROFIT_GIVEBACK_USD = engine._safe_float_env("TREE_MAX_PROFIT_GIVEBACK_USD", "5.00")
 
-# Per the account owner: BTC (the root) already stays on BTC-USD forever
-# by design - see the ROOT_BOT_NAME check in _branch_sell_and_settle. The
-# same idea now extends down the tree: among any group of siblings (same
-# parent_bot_name), whichever one is currently carrying the highest real
-# balance has "proven itself" and gets locked onto its current coin
-# permanently - it will never coin-switch again on any future exit,
-# exactly like root. This is a ONE-WAY, PERMANENT lock: once a branch
-# earns it, it keeps it even if a sibling later grows bigger (the account
-# owner explicitly chose "permanent once earned" over "follows whoever's
-# currently biggest"). Checked periodically by the coordinator (see
+# Per the account owner (a king/throne model, corrected after an earlier
+# "permanent once earned" version): BTC (the root) is King - always stays
+# on BTC-USD, never contested, never changes - see the ROOT_BOT_NAME check
+# in _branch_sell_and_settle. Among any group of siblings (same
+# parent_bot_name) under it, whichever one currently carries the highest
+# real balance holds the throne for that group and stays locked onto its
+# current coin - but the throne is CONTESTABLE: the moment another
+# sibling in the same group grows bigger, it dethrones the current
+# holder (who resumes normal coin-switching) and takes the lock for
+# itself. Checked periodically by the coordinator (see
 # _check_and_lock_strongest_siblings) rather than per-branch-cycle, since
 # it needs to see every sibling at once to compare them. A parent with
-# only one child has nothing to prove itself against yet, so no lock is
-# granted until there are real siblings to be the strongest among.
+# only one child has nothing to contest yet, so no lock is granted until
+# there are real siblings to compare against.
 COIN_LOCK_KEY_PREFIX = "crypto_family_tree_coin_locked_"
 
 # Per the account owner: 10% of every branch's REALIZED PROFIT (not the
@@ -291,9 +291,10 @@ async def _check_and_sweep_stranded_dust():
 
 
 async def _is_coin_locked(bot_name: str) -> bool:
-    """True once this branch has ever been granted a permanent coin-lock -
-    see COIN_LOCK_KEY_PREFIX. Presence of the row IS the lock; it's never
-    removed once created."""
+    """True while this branch currently holds the throne for its sibling
+    group - see COIN_LOCK_KEY_PREFIX. Presence of the row IS the lock;
+    contestable - _check_and_lock_strongest_siblings() removes it the
+    moment a sibling overtakes it."""
     key = COIN_LOCK_KEY_PREFIX + bot_name
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == key))
@@ -309,12 +310,25 @@ async def _lock_branch_coin(bot_name: str):
             await db.commit()
 
 
+async def _unlock_branch_coin(bot_name: str):
+    key = COIN_LOCK_KEY_PREFIX + bot_name
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == key))
+        row = result.scalar_one_or_none()
+        if row:
+            await db.delete(row)
+            await db.commit()
+
+
 async def _check_and_lock_strongest_siblings():
     """Once per coordinator scan: groups every non-root branch by its
-    parent_bot_name, and for any group with 2+ siblings, permanently locks
-    the current highest-balance one onto its current coin (if not already
-    locked) - see COIN_LOCK_KEY_PREFIX for the full reasoning. A group
-    with only one child is skipped - nothing to prove itself against yet."""
+    parent_bot_name, and for any group with 2+ siblings, makes sure the
+    current highest-balance one - and only it - holds the throne (see
+    COIN_LOCK_KEY_PREFIX for the full reasoning). Contestable: if a
+    different sibling now outranks whoever currently holds the lock, the
+    old holder is dethroned (unlocked, resumes normal coin-switching) and
+    the new leader is crowned. A group with only one child is skipped -
+    nothing to contest yet."""
     branches = await load_all_branches()
     by_parent = {}
     for b in branches:
@@ -325,18 +339,25 @@ async def _check_and_lock_strongest_siblings():
     for parent, siblings in by_parent.items():
         if len(siblings) < 2:
             continue
-        # Once ANY sibling in this group already holds the permanent lock,
-        # the group is settled for good - must not re-evaluate "who's
-        # currently strongest" again, or a later-growing sibling would
-        # wrongly steal a lock that's supposed to be permanent.
-        if any([await _is_coin_locked(s.bot_name) for s in siblings]):
-            continue
         strongest = max(siblings, key=lambda b: b.allocated_usd)
+        currently_locked = [s for s in siblings if await _is_coin_locked(s.bot_name)]
+
+        if len(currently_locked) == 1 and currently_locked[0].bot_name == strongest.bot_name:
+            continue  # already correctly held - nothing to do
+
+        for holder in currently_locked:
+            if holder.bot_name != strongest.bot_name:
+                await _unlock_branch_coin(holder.bot_name)
+                log.info(
+                    f"[TREE] 👑💥 {holder.bot_name} dethroned by {strongest.bot_name} "
+                    f"(${strongest.allocated_usd:,.2f} vs ${holder.allocated_usd:,.2f}) - resumes normal coin-switching"
+                )
+
         await _lock_branch_coin(strongest.bot_name)
         log.info(
-            f"[TREE] 🔒🌟 {strongest.bot_name} ({strongest.product_id}) proved itself the strongest of "
-            f"{len(siblings)} siblings under {parent} at ${strongest.allocated_usd:,.2f} - permanently "
-            f"locked on {strongest.product_id}, will never coin-switch again"
+            f"[TREE] 🔒🌟 {strongest.bot_name} ({strongest.product_id}) holds the throne among "
+            f"{len(siblings)} siblings under {parent} at ${strongest.allocated_usd:,.2f} - locked "
+            f"on {strongest.product_id} until dethroned"
         )
 
 
@@ -812,10 +833,10 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
     # The root (BTC) is the permanent foundation the whole tree grows out
     # of, not a branch that wanders - per the account owner, it always
     # stays on BTC-USD regardless of how it exits. A non-root branch that
-    # has separately earned a permanent coin-lock (see COIN_LOCK_KEY_PREFIX
-    # / _check_and_lock_strongest_siblings - it proved itself the
-    # strongest of its siblings at some point) behaves the same way from
-    # here on: it stays on its current coin forever too.
+    # currently holds the throne among its siblings (see
+    # COIN_LOCK_KEY_PREFIX / _check_and_lock_strongest_siblings) behaves
+    # the same way for as long as it holds it: stays on its current coin -
+    # but unlike root, that's contestable, not forever.
     new_product_id = new_product_atr = None
     branch_is_locked = bot_name != ROOT_BOT_NAME and await _is_coin_locked(bot_name)
     if bot_name != ROOT_BOT_NAME and not branch_is_locked:
@@ -870,7 +891,7 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
     elif row is not None and bot_name == ROOT_BOT_NAME:
         log.info(f"[TREE] {bot_name}: root stays on {row.product_id} by design (the tree's permanent foundation)")
     elif row is not None and branch_is_locked:
-        log.info(f"[TREE] {bot_name}: stays on {row.product_id} - permanently locked in as the strongest of its siblings")
+        log.info(f"[TREE] {bot_name}: stays on {row.product_id} - currently holds the throne as the strongest of its siblings")
     elif row is not None:
         log.info(f"[TREE] {bot_name}: no unclaimed coin available to switch to - staying on {row.product_id}")
 
