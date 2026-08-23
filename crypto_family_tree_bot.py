@@ -56,10 +56,10 @@ import time
 import traceback
 from datetime import datetime, timezone
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, desc
 from sqlalchemy.exc import IntegrityError
 from database import AsyncSessionLocal
-from models import BotPosition, CryptoTreeBranch, TradingBotState
+from models import BotPosition, CryptoTreeBranch, TradingBotState, CryptoBacktestRun
 
 import crypto_btc_compound_bot as engine
 
@@ -204,13 +204,91 @@ COIN_FAMILY_TREE = [
 # bot's own actual rules against 30 real days of Coinbase history) showed
 # these four as the worst performers of the whole family - STX-USD dead
 # last at -44.1% ROI with a 21.6% win rate, followed by BLUR/UNI/DOT all
-# similarly deep negative. Per the account owner's explicit choice, these
-# are excluded from all future coin SELECTION (find_most_volatile_unclaimed_coin
-# and get_next_eligible_product_id) - a branch already holding one of
-# these when this shipped is NOT force-sold; it keeps running under its
-# own normal target/stop/breakeven/giveback rules and simply won't be
-# offered one of these coins again once it exits.
-EXCLUDED_COINS = {"STX-USD", "BLUR-USD", "UNI-USD", "DOT-USD"}
+# similarly deep negative. Per the account owner's explicit, one-time
+# choice, these are PERMANENTLY excluded - never reconsidered by the
+# automatic rule below, only ever changed by another explicit decision
+# like this one.
+MANUAL_EXCLUDED_COINS = {"STX-USD", "BLUR-USD", "UNI-USD", "DOT-USD"}
+
+# Per the account owner's explicit choice: the coordinator (see run()'s
+# _scan()) now re-runs the real backtest on its own every
+# AUTO_BACKTEST_INTERVAL_SECONDS and grows/shrinks this automatic layer
+# on top of MANUAL_EXCLUDED_COINS with NO human check before it takes
+# effect - a coin is auto-excluded once its last AUTO_EXCLUDE_RUN_WINDOW
+# real backtest runs have ALL been negative-ROI, and un-excluded again
+# the moment its most recent run turns positive (contestable/self-
+# healing, same philosophy as the strongest-sibling throne and the
+# floor self-heal - never a one-way, permanent verdict). Requiring
+# several consecutive bad runs (not just one) is deliberate: DOT-USD and
+# UNI-USD swung from -38.8%/-40.0% to -14.2%/-12.4% in the same
+# afternoon in real testing, so a single run is too noisy to act on
+# alone.
+AUTO_BACKTEST_INTERVAL_SECONDS = engine._safe_int_env("TREE_AUTO_BACKTEST_INTERVAL_SECONDS", str(24 * 60 * 60))
+AUTO_EXCLUDE_RUN_WINDOW = engine._safe_int_env("TREE_AUTO_EXCLUDE_RUN_WINDOW", "3")
+
+_last_auto_backtest_at = 0.0
+
+
+async def _compute_auto_excluded_coins() -> set:
+    """Reads CryptoBacktestRun history (most recent AUTO_EXCLUDE_RUN_WINDOW
+    rows per coin) and returns the set of coins whose last
+    AUTO_EXCLUDE_RUN_WINDOW real runs were ALL negative ROI. A coin with
+    fewer than AUTO_EXCLUDE_RUN_WINDOW runs on record yet is never
+    auto-excluded - there isn't enough evidence."""
+    auto_excluded = set()
+    async with AsyncSessionLocal() as db:
+        for product_id in COIN_FAMILY_TREE:
+            result = await db.execute(
+                select(CryptoBacktestRun.roi_pct_of_spend)
+                .where(CryptoBacktestRun.product_id == product_id)
+                .order_by(desc(CryptoBacktestRun.run_at))
+                .limit(AUTO_EXCLUDE_RUN_WINDOW)
+            )
+            recent = result.scalars().all()
+            if len(recent) >= AUTO_EXCLUDE_RUN_WINDOW and all(roi < 0 for roi in recent):
+                auto_excluded.add(product_id)
+    return auto_excluded
+
+
+async def get_effective_excluded_coins() -> set:
+    """The real, live set of coins no branch will ever be offered right
+    now - MANUAL_EXCLUDED_COINS (permanent, only changed by an explicit
+    human decision) unioned with whatever the automatic backtest rule
+    currently flags (contestable - can add or remove coins on every
+    scheduled run, see _compute_auto_excluded_coins)."""
+    return MANUAL_EXCLUDED_COINS | await _compute_auto_excluded_coins()
+
+
+async def _run_scheduled_backtest_and_update_exclusions():
+    """Called from the coordinator's own scan loop, throttled to once per
+    AUTO_BACKTEST_INTERVAL_SECONDS (see run()'s _scan()). Runs the exact
+    same real backtest the manual dashboard button triggers, persists
+    every coin's result, then logs the resulting auto-excluded set so
+    it's visible in the real deploy logs without needing the dashboard."""
+    try:
+        # Deferred import - crypto_selection_backtest.py itself imports
+        # COIN_FAMILY_TREE etc. from this module, so importing it at the
+        # top of this file would be a circular import. By the time this
+        # function actually runs, both modules are already fully loaded.
+        import crypto_selection_backtest
+    except Exception as e:
+        log.warning(f"[TREE] scheduled backtest skipped - crypto_selection_backtest not available ({e})")
+        return
+    log.info("[TREE] 🔄 running the scheduled real coin-selection backtest...")
+    output = await crypto_selection_backtest.run_full_backtest()
+    async with AsyncSessionLocal() as db:
+        for r in output["ranked"]:
+            db.add(CryptoBacktestRun(
+                product_id=r["product_id"], num_trades=r["num_trades"],
+                win_rate=r["win_rate"], roi_pct_of_spend=r["roi_pct_of_spend"],
+            ))
+        await db.commit()
+    auto_excluded = await _compute_auto_excluded_coins()
+    log.info(
+        f"[TREE] 🔄 scheduled backtest done - {output['coins_with_results']} coins scored. "
+        f"Auto-excluded (last {AUTO_EXCLUDE_RUN_WINDOW} runs all negative): "
+        f"{sorted(auto_excluded) if auto_excluded else 'none'}"
+    )
 
 
 async def load_branch(bot_name: str):
@@ -417,12 +495,13 @@ async def load_all_branches():
 
 async def get_next_eligible_product_id():
     """First coin in COIN_FAMILY_TREE not already claimed by an existing
-    branch and not in EXCLUDED_COINS (see its docstring)."""
+    branch and not currently excluded (see get_effective_excluded_coins)."""
+    excluded = await get_effective_excluded_coins()
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoTreeBranch.product_id))
         claimed = set(result.scalars().all())
     for product_id in COIN_FAMILY_TREE:
-        if product_id not in claimed and product_id not in EXCLUDED_COINS:
+        if product_id not in claimed and product_id not in excluded:
             return product_id
     return None
 
@@ -533,10 +612,11 @@ async def find_most_volatile_unclaimed_coin(session):
     worst case was minutes (a branch just sitting there, not trading,
     while it worked through the whole list) - running them all at once
     caps the whole search at whatever the single slowest request takes."""
+    excluded = await get_effective_excluded_coins()
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoTreeBranch.product_id))
         claimed = set(result.scalars().all())
-    candidates = [p for p in COIN_FAMILY_TREE if p not in claimed and p not in EXCLUDED_COINS]
+    candidates = [p for p in COIN_FAMILY_TREE if p not in claimed and p not in excluded]
 
     results = await asyncio.gather(
         *(engine.get_price_volatility_and_trend(session, product_id) for product_id in candidates),
@@ -862,7 +942,7 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
     new_product_id = new_product_atr = None
     branch_is_locked = (
         bot_name != ROOT_BOT_NAME
-        and product_id not in EXCLUDED_COINS
+        and product_id not in await get_effective_excluded_coins()
         and await _is_coin_locked(bot_name)
     )
     if bot_name != ROOT_BOT_NAME and not branch_is_locked:
@@ -1205,6 +1285,14 @@ def run():
                 await _check_and_sweep_stranded_dust()
             except Exception as e:
                 log.warning(f"[TREE] dust sweep check failed: {e}")
+
+        global _last_auto_backtest_at
+        if now - _last_auto_backtest_at >= AUTO_BACKTEST_INTERVAL_SECONDS:
+            _last_auto_backtest_at = now
+            try:
+                await _run_scheduled_backtest_and_update_exclusions()
+            except Exception as e:
+                log.warning(f"[TREE] scheduled backtest failed: {e}")
 
         # Cheap (one DB read, no external calls) and idempotent once a
         # branch is locked - safe to check every scan rather than on a

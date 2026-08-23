@@ -1261,6 +1261,23 @@ class TelegramMessage(Base):
         }
 
 
+class CryptoBacktestRun(Base):
+    """One coin's result from one run of crypto_selection_backtest.py -
+    persisted so the automatic coin-exclusion rule (see
+    crypto_family_tree_bot.py's EXCLUDED_COINS / auto-exclusion check) can
+    look at a coin's ROI across multiple recent runs rather than reacting
+    to a single, possibly noisy, 30-day window. Also backs the manual
+    /crypto-selection-backtest-view page's history."""
+    __tablename__ = "crypto_backtest_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(String, index=True)
+    run_at = Column(DateTime, default=datetime.utcnow, index=True)
+    num_trades = Column(Integer)
+    win_rate = Column(Float)
+    roi_pct_of_spend = Column(Float)
+
+
 class BotStatus(Base):
     """Snapshots of trading bot performance metrics."""
     __tablename__ = "bot_statuses"

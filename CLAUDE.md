@@ -382,8 +382,9 @@ endpoint it calls (see `routers/trading_dashboard.py`).
   (price now higher than ~25 hours ago). This is a coarse, medium-term
   check with **no short-term overbought/extended signal** (unlike
   `prop_bot.py`'s RSI < 30 entry filter on the Alpaca side) - a real,
-  known gap, not yet fixed. See the shadow-mode backtest tool below for
-  the first real data on whether this actually hurts specific coins.
+  known gap, not yet fixed. See the coin-selection backtest section
+  below - candidates are now also filtered through a real exclusion
+  list before this function even runs.
 - **Manual controls on the dashboard**: a "Sell now" button per branch,
   only enabled when the position is genuinely in profit right now
   (re-checked server-side too, so it can't be bypassed by calling the
@@ -439,27 +440,71 @@ numbers from production logs/screenshots before shipping, plus a full
 offline regression suite (not committed to the repo - built and run
 from the session scratchpad each time).
 
-### Shadow-mode coin-selection backtest (crypto_selection_backtest.py)
+### Coin-selection backtest and exclusion (crypto_selection_backtest.py)
 
-Read-only diagnostic, explicitly **does not touch live trading or place
-any orders**, and no bot reads its output. Built to test whether the
-25-hour "bullish" coin-selection check (above) is actually buying at bad
-moments: pulls each family-tree coin's real historical Coinbase hourly
-candles and replays the bot's own real target/stop/breakeven/giveback
-rules (importing the live functions directly, not reimplementing them)
-to rank coins by real backtested ROI.
+Built to test whether the 25-hour "bullish" coin-selection check (above)
+is actually buying at bad moments: pulls each family-tree coin's real
+historical Coinbase hourly candles and replays the bot's own real
+target/stop/breakeven/giveback rules (importing the live functions
+directly, not reimplementing them) to rank coins by real backtested ROI.
+The backtest run itself never places an order - but its *results* now
+feed a real coin-exclusion system that DOES change what the live bot
+buys (see below), so this is no longer purely a shadow-mode diagnostic.
 
-- Endpoint: `POST /api/trading-dashboard/crypto-selection-backtest`
+- Manual run: `POST /api/trading-dashboard/crypto-selection-backtest`
   (admin-key gated, ~30-90s - pulls ~27 coins' history concurrently from
-  Coinbase's public candles endpoint).
-- Viewer: `/crypto-selection-backtest-view` (reuses the same saved admin
-  key as the family tree dashboard).
+  Coinbase's public candles endpoint) and its viewer,
+  `/crypto-selection-backtest-view` (reuses the same saved admin key as
+  the family tree dashboard).
 - Requires outbound access to `api.exchange.coinbase.com` - works from
   Railway (the live bot already depends on this exact host every cycle)
   but may be blocked from a locked-down dev sandbox.
+- Every run (manual button-press or the scheduled automatic one below)
+  persists each coin's result to the `crypto_backtest_runs` table
+  (`CryptoBacktestRun` model) - this history is what the automatic
+  exclusion rule reads.
 - Next phase (not started): the same idea for the Alpaca/stock side,
   which needs different historical data access and a different exit-rule
   set (`alpaca_mean_reversion.py`'s `should_exit_position`).
+
+**Two-layer coin exclusion** (`get_effective_excluded_coins()` in
+`crypto_family_tree_bot.py`, checked by both `find_most_volatile_unclaimed_coin()`
+and `get_next_eligible_product_id()` before either ever runs):
+
+1. **`MANUAL_EXCLUDED_COINS`** - `{STX-USD, BLUR-USD, UNI-USD, DOT-USD}`,
+   set once by the account owner's explicit real-money decision after
+   the first backtest run (STX-USD was dead last: -44.1% ROI, 21.6% win
+   rate). Permanent - the automatic rule below never touches this set;
+   only another explicit decision like this one can.
+2. **Automatic layer** - per the account owner's explicit choice
+   ("fully automatic... hands-off, no check before it takes effect"),
+   the coordinator (`run()`'s `_scan()`) re-runs the real backtest on
+   its own every `AUTO_BACKTEST_INTERVAL_SECONDS` (24h default) via
+   `_run_scheduled_backtest_and_update_exclusions()`. A coin is
+   auto-excluded once its last `AUTO_EXCLUDE_RUN_WINDOW` (3) real runs
+   were ALL negative-ROI, and un-excluded the instant its most recent
+   run turns positive - contestable/self-healing, same philosophy as
+   the strongest-sibling throne and the floor self-heal, never a
+   one-way verdict. Requiring several consecutive bad runs (not one) is
+   deliberate: DOT-USD and UNI-USD swung from -38.8%/-40.0% to
+   -14.2%/-12.4% in the same afternoon in real testing - a single run
+   is too noisy to act on alone.
+
+A branch already holding a coin at the moment it becomes excluded
+(manually or automatically) is never force-sold - it keeps running
+under its own normal rules and simply won't be offered that coin again
+once it exits.
+
+**Third real production bug found and fixed**: the strongest-sibling
+throne lock (`_is_coin_locked`) short-circuits `_branch_sell_and_settle`'s
+coin-switch decision *before* it ever reaches the exclusion check -
+confirmed live: `crypto_tree_ldo_usd` held the throne while sitting on
+newly-excluded BLUR-USD, and a manual sell sold BLUR and instantly
+rebought the identical excluded coin, because the throne lock never
+even looked at the exclusion list. Fixed: the throne lock no longer
+applies when the branch's current coin is on the (combined manual +
+automatic) exclusion set - it still holds for every other exit exactly
+as before.
 
 ### Alpaca (prop_bot.py) parity
 
