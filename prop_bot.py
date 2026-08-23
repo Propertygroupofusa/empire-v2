@@ -14,7 +14,7 @@ import smtplib
 import time
 import traceback
 from email.mime.text import MIMEText
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import aiohttp
 import uuid

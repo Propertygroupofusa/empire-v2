@@ -1230,6 +1230,101 @@ async def unlock_alpaca_locked_profit(payload: AlpacaUnlockProfitRequest):
     return {"status": "cashed_out", "amount": round(released, 2), "new_locked_usd": round(current_locked - released, 2)}
 
 
+@router.post("/alpaca-overview/trade-this/{ticker}", dependencies=[Depends(require_admin_key)])
+async def manual_open_prop_position(ticker: str):
+    """Manually opens a real long position on prop_bot.py's real funded-
+    account evaluation - the "Trade this" action on the stock/ETF
+    backtest page, per the account owner's explicit request to match the
+    crypto side's. This is NOT a shortcut around the account's real
+    risk rules: it reuses the EXACT same real functions the automatic
+    entry path calls (get_price_rsi, validate_entry/APEX_MANDATE's
+    universe check, check_kill_conditions, check_margin_safety,
+    size_position, execute_futures_trade) rather than reimplementing any
+    of them, so a manual entry gets the same real protection an
+    automatic one does - it's just triggered on demand instead of by a
+    live RSI signal. Long-only, matching everything else prop_bot.py can
+    actually execute today (shorting is disabled on the real account -
+    see get_account_shorting_enabled)."""
+    if prop_bot_module is None:
+        raise HTTPException(status_code=500, detail="prop_bot module not available")
+    pb = prop_bot_module
+    ticker = ticker.upper()
+
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        raise HTTPException(status_code=400, detail="STOP_TRADING is set - all entries (manual or automatic) are paused")
+
+    symbol_to_contract = {cfg["symbol"]: code for code, cfg in pb.FUTURES.items()}
+    contract = symbol_to_contract.get(ticker)
+    if contract is None:
+        raise HTTPException(status_code=400, detail=f"{ticker} is not a symbol prop_bot trades")
+
+    if contract in pb.open_prop_positions:
+        raise HTTPException(status_code=409, detail=f"Already holding a position in {contract} ({ticker})")
+
+    approved_universe = (
+        pb.APEX_MANDATE["universe"]["futures"] +
+        pb.APEX_MANDATE["universe"]["crypto"] +
+        pb.APEX_MANDATE["universe"]["commodities"] +
+        pb.APEX_MANDATE["universe"]["inverse_etfs"]
+    )
+    if contract not in approved_universe:
+        raise HTTPException(status_code=400, detail=f"{contract} ({ticker}) is not in the approved trading universe")
+
+    async with aiohttp.ClientSession() as session:
+        equity = await pb.get_account_equity(session)
+        if equity is None:
+            raise HTTPException(status_code=503, detail="Could not fetch real account equity - try again")
+        buying_power = await pb.get_account_buying_power(session)
+
+        should_halt, halt_reason = pb.check_kill_conditions(
+            buying_power=buying_power, equity=equity, daily_loss=pb.daily_pnl,
+            open_position_count=len(pb.open_prop_positions),
+        )
+        if should_halt:
+            raise HTTPException(status_code=400, detail=f"Trading halted by kill condition: {halt_reason}")
+
+        price_data = await pb.get_price_rsi(session, ticker)
+        if price_data is None:
+            raise HTTPException(status_code=503, detail=f"Could not fetch a live price/RSI for {ticker} - try again")
+        price, rsi, trend = price_data["price"], price_data["rsi"], price_data["trend"]
+
+        total_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in pb.open_prop_positions.values())
+        is_valid, mandate_reason = pb.validate_entry(
+            bot_name="prop_bot", symbol=contract, rsi=rsi, volume_ratio=1.0,
+            buying_power=buying_power, open_positions=len(pb.open_prop_positions),
+            total_notional=total_notional, equity=equity,
+        )
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=f"Mandate check failed: {mandate_reason}")
+
+        is_safe, safety_reason = pb.check_margin_safety(buying_power, equity, len(pb.open_prop_positions))
+        if not is_safe:
+            raise HTTPException(status_code=400, detail=f"Margin safety check failed: {safety_reason}")
+
+        scale = pb._safe_float_env("POSITION_SCALE_MULTIPLIER", "1.0")
+        max_positions = pb.get_dynamic_max_positions(scale)
+        slots_remaining = max(1, max_positions - len(pb.open_prop_positions))
+        qty = pb.size_position(buying_power, slots_remaining, price, account_equity=equity)
+        if qty is None:
+            raise HTTPException(status_code=400, detail="Position size would be below the minimum notional - not enough real buying power")
+
+        filled = await pb.execute_futures_trade(
+            session, contract, "BUY", qty, price, rsi, trend,
+            stop_loss=price * 0.98, target=price * 1.03,
+        )
+        if not filled:
+            raise HTTPException(status_code=502, detail="Alpaca order failed - see server logs")
+
+        pb.open_prop_positions[contract] = {"side": "long", "entry": price, "qty": qty, "open_time": datetime.now(pb.ET)}
+        await pb._db_save_open(contract, "long", price, qty)
+
+    log.info(f"[dashboard] 🌱 Manually opened LONG {qty} {contract} ({ticker}) @ ${price:.2f}")
+    return {
+        "status": "opened", "contract": contract, "symbol": ticker,
+        "qty": qty, "entry_price": round(price, 4), "rsi": rsi,
+    }
+
+
 async def get_alpaca_locked_usd() -> float:
     """Running total of profit skimmed by check_and_auto_close_positions -
     same generic per-key bucket table (TradingBotState) the bot-bucket

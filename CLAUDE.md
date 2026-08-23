@@ -665,9 +665,45 @@ branch.
   `/alpaca-selection-backtest-view` (reuses the same saved admin key as
   the Alpaca dashboard). Cross-linked with the crypto backtest page and
   both dashboards, same pattern as the crypto side.
-- Shadow mode only - never places a real order, and nothing currently
-  reads its results automatically (no auto-exclusion layer on this side
-  yet, unlike the crypto side's two-layer system above).
+- The backtest run itself is shadow mode only - never places a real
+  order, and nothing currently reads its results automatically (no
+  auto-exclusion layer on this side yet, unlike the crypto side's
+  two-layer system above).
+
+**"Trade this" button on the backtest page** (`POST
+/api/trading-dashboard/alpaca-overview/trade-this/{ticker}`): per the
+account owner's explicit request, matching the crypto side's equivalent -
+found missing and called out directly ("no stocks options to sell
+anything on this dashboard... maybe you just didn't do it at all").
+Places a REAL long market order on `prop_bot.py`'s real funded-account
+evaluation, right now, on demand - but NOT a shortcut around the
+account's real risk rules. It reuses the exact same real functions the
+automatic entry path calls (`get_price_rsi`, `validate_entry`/
+`APEX_MANDATE`'s universe check, `check_kill_conditions`,
+`check_margin_safety`, `size_position`, `execute_futures_trade`) rather
+than reimplementing any of them, so a manual entry gets the same real
+protection an automatic one does - refused if you're already holding
+that contract, `STOP_TRADING` is set, a real kill condition is active
+(daily loss limit, critical buying power, equity below survival), or the
+mandate/margin-safety checks fail (e.g. RSI not oversold, insufficient
+buying power, real risk-limit exceeded). Long-only, matching everything
+else `prop_bot.py` can actually execute today. On success, updates the
+live `open_prop_positions` dict directly (not just the DB) so the
+bot's own automatic exit cycle picks up and manages the new position on
+its very next scan - the same reasoning `load_open_positions()` exists
+for at startup.
+
+**A real, previously-undiscovered bug found and fixed while building
+this**: `_db_save_open()`'s measurement-system logging branch has always
+called `datetime.now(timezone.utc)`, but `timezone` was never imported
+in `prop_bot.py` (only bare `datetime`) - every real position opened by
+this bot (automatic or manual) has been silently failing to log to the
+trade-measurement system this whole time (`NameError`, caught and
+logged as "Failed to persist opened position", never crashing the bot).
+The actual position-tracking DB write (the real `BotPosition` row) was
+never affected - that commits in its own block before this broken code
+runs - so no real trading data was lost, only analytics logging. Fixed
+by adding the missing import.
 
 **Two-layer coin exclusion** (`get_effective_excluded_coins()` in
 `crypto_family_tree_bot.py`, checked by both `find_most_volatile_unclaimed_coin()`

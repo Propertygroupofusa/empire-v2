@@ -47,10 +47,17 @@
     th, td { padding: 10px 14px; text-align: right; border-bottom: 1px solid var(--border); font-size: 0.88em; }
     th:first-child, td:first-child { text-align: left; }
     th { background: #eef1f7; color: var(--text-dim); font-weight: 700; text-transform: uppercase; font-size: 0.72em; letter-spacing: 0.4px; }
+    th:last-child, td:last-child { text-align: center; }
     .pos { color: var(--green); font-weight: 700; }
     .neg { color: var(--red); font-weight: 700; }
     .skipped { margin-top: 20px; font-size: 0.8em; color: var(--text-dim); }
     .skipped summary { cursor: pointer; font-weight: 600; }
+    .trade-btn {
+        padding: 6px 12px; border: none; border-radius: 6px; font-size: 0.82em; font-weight: 700;
+        cursor: pointer; background: var(--green); color: #fff; white-space: nowrap;
+    }
+    .trade-btn:disabled { opacity: 0.55; cursor: default; }
+    .trade-note { font-size: 0.78em; color: var(--text-dim); margin-top: 20px; }
 </style>
 </head>
 <body>
@@ -133,13 +140,15 @@ function renderResults(data) {
     let rows = data.ranked.map(r => {
         const pnlClass = r.total_pnl >= 0 ? 'pos' : 'neg';
         const roiClass = r.roi_pct_of_spend >= 0 ? 'pos' : 'neg';
-        return `<tr>
+        const rowId = 'row-' + r.product_id.replace(/[^A-Z0-9]/gi, '-');
+        return `<tr id="${rowId}">
             <td>${r.product_id}</td>
             <td>${r.num_trades}</td>
             <td>${r.win_rate.toFixed(1)}%</td>
             <td class="${pnlClass}">${fmtUsd(r.total_pnl)}</td>
             <td class="${roiClass}">${r.roi_pct_of_spend >= 0 ? '+' : ''}${r.roi_pct_of_spend.toFixed(1)}%</td>
             <td>${r.avg_trade_pct >= 0 ? '+' : ''}${r.avg_trade_pct.toFixed(2)}%</td>
+            <td><button class="trade-btn" onclick="tradeThisStock('${r.product_id}', this)">Trade this</button></td>
         </tr>`;
     }).join('');
 
@@ -152,12 +161,44 @@ function renderResults(data) {
     resultsEl.innerHTML = `
         <table>
             <thead><tr>
-                <th>Symbol</th><th>Trades</th><th>Win rate</th><th>Total P&amp;L</th><th>ROI on $${data.spend_per_trade}</th><th>Avg / trade</th>
+                <th>Symbol</th><th>Trades</th><th>Win rate</th><th>Total P&amp;L</th><th>ROI on $${data.spend_per_trade}</th><th>Avg / trade</th><th>Action</th>
             </tr></thead>
             <tbody>${rows}</tbody>
         </table>
+        <p class="trade-note">"Trade this" places a real long market order on that symbol right now, on prop_bot.py's real funded-account evaluation - it runs through the exact same real risk checks (buying power, margin safety, mandate universe/notional limits) the automatic entries already use, not a shortcut around them. Refused if you're already holding a position in it, a real kill condition or STOP_TRADING is active, or any of those real checks fail.</p>
         ${skippedHtml}
     `;
+}
+
+async function tradeThisStock(ticker, btn) {
+    if (!confirm(`Place a real long market order on ${ticker} right now, on the real Alpaca account? This runs through the same real risk checks the automatic entries use, but places a real trade and can't be undone.`)) return;
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Placing...';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-overview/trade-this/' + encodeURIComponent(ticker), {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+        btn.textContent = '✓ Opened';
+        btn.style.background = 'var(--navy)';
+        const row = document.getElementById('row-' + ticker.replace(/[^A-Z0-9]/gi, '-'));
+        if (row) {
+            const note = document.createElement('div');
+            note.style.cssText = 'font-size:0.78em;color:var(--text-dim);margin-top:2px;';
+            note.textContent = `${data.qty} shares @ ${fmtUsd(data.entry_price)} (${data.contract})`;
+            row.querySelector('td:last-child').appendChild(note);
+        }
+    } catch (e) {
+        btn.disabled = false;
+        btn.textContent = originalText;
+        alert('Could not place a trade on ' + ticker + ': ' + e.message);
+    }
 }
 </script>
 </body>
