@@ -100,7 +100,13 @@ COORDINATOR_SCAN_SECONDS = engine._safe_int_env("TREE_COORDINATOR_SCAN_SECONDS",
 # branch from re-entering at all for a real cooldown window after a floor
 # breach, so an ordinary price wobble right after re-entry can't
 # immediately re-trigger the same safety net.
-FLOOR_BREACH_COOLDOWN_SECONDS = engine._safe_int_env("TREE_FLOOR_BREACH_COOLDOWN_SECONDS", "1800")  # 30 min default
+#
+# Lowered from the original 30 min to 5 min per the account owner's
+# explicit choice, after being told what this protects against (an
+# immediate re-breach spiral). Still real protection, just thinner - a
+# branch gets back to trading much faster, at the cost of somewhat less
+# cushion before it's allowed to risk hitting the same wall again.
+FLOOR_BREACH_COOLDOWN_SECONDS = engine._safe_int_env("TREE_FLOOR_BREACH_COOLDOWN_SECONDS", "300")  # 5 min default
 FLOOR_BREACH_COOLDOWN_KEY_PREFIX = "crypto_family_tree_floor_breach_cooldown_"
 
 # Per the account owner: once a position has ever shown a real profit, it

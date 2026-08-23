@@ -365,11 +365,16 @@ endpoint it calls (see `routers/trading_dashboard.py`).
 - **Equity floor ratchet** (`BRANCH_FLOOR_TIER`, $50 steps): each
   branch's floor only ever ratchets UP as it earns real gains. Two real
   bugs in this mechanism were found and fixed in production (see below).
-- **Floor-breach cooldown** (`FLOOR_BREACH_COOLDOWN_SECONDS`, 30 min):
-  after a floor-breach forced exit, the branch stays in cash for a real
-  cooldown instead of instantly rebuying into a new coin (the original
-  bug this fixed: AAVE → STOP HIT → instant rebuy XRP → breach again →
-  instant rebuy BONK, three real losses in a row).
+- **Floor-breach cooldown** (`FLOOR_BREACH_COOLDOWN_SECONDS`, 5 min -
+  lowered from the original 30 min per the account owner's explicit
+  choice, after being told what it protects against): after a
+  floor-breach forced exit, the branch stays in cash for a real cooldown
+  instead of instantly rebuying into a new coin (the original bug this
+  fixed: AAVE → STOP HIT → instant rebuy XRP → breach again → instant
+  rebuy BONK, three real losses in a row). Still real protection at 5
+  min, just thinner than the original 30 - back to trading faster, at
+  the cost of somewhat less cushion before it can risk hitting the same
+  wall again.
 - **Contestable strongest-sibling coin lock** (the "throne" model,
   `COIN_LOCK_KEY_PREFIX`): among 2+ siblings under the same parent, the
   one with the current highest `allocated_usd` holds its coin instead of
