@@ -867,6 +867,24 @@ Green when positive, red when negative - the same two lenses the rest
 of the dashboard already shows separately, just added into one real
 top-line number.
 
+### Total Profit KPI on the Alpaca dashboard too
+
+Per the account owner's explicit follow-up ("show me the profit the
+bots are doing as well"), the same "💰 Total Profit" card was added to
+`alpaca_dashboard.html`'s KPI row, first card again. The formula is
+simpler here than the crypto side's realized+unrealized sum: each
+`bot_N` bucket's `pl` (`_bot_pl()` in `routers/trading_dashboard.py` -
+already returned per bucket by `/alpaca-overview`) is the real signed
+delta between its current `base_capital` and its `starting_capital`
+snapshot, and `_rebalance_bots()` keeps every bucket's `base_capital`
+continuously synced against the real Alpaca account `equity` - which
+already includes unrealized P&L on open positions. So `bots[].pl`
+already captures both realized and unrealized profit for that bucket;
+Total Profit is just `sum(bots[].pl)` across all 8 buckets, computed
+client-side from data the page already fetches. Deliberately does NOT
+also add `positions[].unrealized_pl` on top - that would double-count
+the unrealized portion already folded into each bucket's `pl`.
+
 ### Coin-selection backtest and exclusion (crypto_selection_backtest.py)
 
 Built to test whether the 25-hour "bullish" coin-selection check (above)

@@ -69,6 +69,8 @@
     .kpi .value.neg { color: var(--red); }
     .kpi.gold .value { color: var(--gold); }
     .kpi.gold { border-color: #f0dcae; background: var(--gold-bg); }
+    .kpi.profit.pos { border-color: #b7e4c7; background: var(--green-bg); }
+    .kpi.profit.neg { border-color: #f3c6cd; background: var(--red-bg); }
 
     .unlock-btn {
         font-family: inherit; margin-top: 8px; background: #fff; border: 1px solid var(--gold);
@@ -225,6 +227,7 @@
     <div class="narrative" id="narrative">Loading account summary…</div>
 
     <div class="kpi-row">
+        <div class="kpi profit" id="stat-profit-card"><div class="label">💰 Total Profit</div><div class="value" id="stat-profit">—</div></div>
         <div class="kpi"><div class="label">Equity</div><div class="value" id="stat-equity">—</div></div>
         <div class="kpi"><div class="label">Cash</div><div class="value" id="stat-cash">—</div></div>
         <div class="kpi"><div class="label">Session P&amp;L</div><div class="value" id="stat-pl">—</div></div>
@@ -420,6 +423,14 @@ async function refresh() {
     const statusEl = document.getElementById('status');
     try {
         const data = await apiGet('/alpaca-overview');
+        const totalProfit = (data.bots || []).reduce((sum, b) => sum + (b.pl || 0), 0);
+        const profitCard = document.getElementById('stat-profit-card');
+        const profitEl = document.getElementById('stat-profit');
+        const profitCls = totalProfit >= 0 ? 'pos' : 'neg';
+        profitEl.className = 'value ' + profitCls;
+        profitEl.textContent = (totalProfit >= 0 ? '+' : '-') + fmtUsd(Math.abs(totalProfit));
+        profitCard.classList.remove('pos', 'neg');
+        profitCard.classList.add(profitCls);
         document.getElementById('stat-equity').textContent = fmtUsd(data.equity);
         document.getElementById('stat-cash').textContent = fmtUsd(data.cash);
         const plEl = document.getElementById('stat-pl');
