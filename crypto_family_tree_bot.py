@@ -90,6 +90,19 @@ PRIOR_UNLOCK_TIER_USD = 300.0
 BRANCH_FLOOR_TIER = engine._safe_float_env("TREE_BRANCH_FLOOR_TIER", "50")
 COORDINATOR_SCAN_SECONDS = engine._safe_int_env("TREE_COORDINATOR_SCAN_SECONDS", "20")
 
+# A floor-breach forced exit resets the floor down to only ~3-4% below the
+# fresh post-sale balance (see the tier-reset in _branch_sell_and_settle) -
+# real, but thin. Confirmed live tonight on crypto_tree_dot_usd: AAVE ->
+# STOP HIT -> instantly rebought XRP -> breached again within its first
+# few cycles -> instantly rebought BONK -> breached again - three real
+# losses in a row because nothing stopped it from immediately betting
+# again on a cushion that thin. FLOOR_BREACH_COOLDOWN_SECONDS blocks a
+# branch from re-entering at all for a real cooldown window after a floor
+# breach, so an ordinary price wobble right after re-entry can't
+# immediately re-trigger the same safety net.
+FLOOR_BREACH_COOLDOWN_SECONDS = engine._safe_int_env("TREE_FLOOR_BREACH_COOLDOWN_SECONDS", "1800")  # 30 min default
+FLOOR_BREACH_COOLDOWN_KEY_PREFIX = "crypto_family_tree_floor_breach_cooldown_"
+
 # Per the account owner: 10% of every branch's REALIZED PROFIT (not the
 # whole balance, and never on a loss) gets permanently pulled out of the
 # compounding loop on every profitable exit, root BTC included. "Locked
@@ -245,6 +258,42 @@ async def _check_and_sweep_stranded_dust():
             await db.commit()
             log.info(f"[TREE] 🔒 Swept ${spendable:.2f} of stranded dust (stuck {stuck_hours:.1f}h below the "
                      f"${MIN_TRADE_USD:.2f} minimum trade) into locked profit - permanently out of the compounding loop")
+
+
+async def _record_floor_breach(bot_name: str):
+    """Marks right now as this branch's most recent floor-breach time, so
+    _floor_breach_cooldown_active() can block it from re-entering for a
+    while. Reuses TradingBotState as a generic per-branch timestamp store
+    (same pattern DUST_TRACKER_KEY uses) - updated_at is what actually
+    matters here, base_capital is unused.
+
+    Always deletes and re-inserts rather than updating an existing row in
+    place: updated_at's onupdate only fires when SQLAlchemy detects an
+    actual attribute change, so overwriting an existing row with the same
+    base_capital value (0.0 -> 0.0, on a second breach after the first
+    cooldown already expired) would silently fail to refresh the
+    timestamp. A fresh INSERT always gets a fresh default=datetime.utcnow,
+    with no such edge case."""
+    key = FLOOR_BREACH_COOLDOWN_KEY_PREFIX + bot_name
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == key))
+        row = result.scalar_one_or_none()
+        if row:
+            await db.delete(row)
+            await db.flush()
+        db.add(TradingBotState(bot_name=key, base_capital=0.0, starting_capital=0.0))
+        await db.commit()
+
+
+async def _floor_breach_cooldown_active(bot_name: str) -> bool:
+    key = FLOOR_BREACH_COOLDOWN_KEY_PREFIX + bot_name
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == key))
+        row = result.scalar_one_or_none()
+        if row is None:
+            return False
+        elapsed = (datetime.utcnow() - row.updated_at).total_seconds()
+        return elapsed < FLOOR_BREACH_COOLDOWN_SECONDS
 
 
 async def load_all_branches():
@@ -780,19 +829,28 @@ async def run_branch_cycle(bot_name: str) -> bool:
                     return True
                 log.warning(f"[TREE] 🛑 {bot_name} EQUITY FLOOR BREACH: ${equity:.2f} < floor ${branch.equity_floor:,.2f} - force-selling, pausing entries")
                 await _branch_sell_and_settle(session, bot_name, branch.product_id, position, "EQUITY FLOOR BREACH - forced exit")
-                # _branch_sell_and_settle already picked a new coin (if
-                # bullish/volatile enough) and reset the floor to match the
-                # post-sale balance, so the branch is no longer breached -
-                # don't make it sit idle until the next scheduled cycle
-                # (up to CYCLE_SECONDS away) to act on that; re-run the
-                # cycle immediately so it buys into the new coin right now,
-                # in this same pass, using everything it just decided.
-                return await run_branch_cycle(bot_name)
+                # Per the account owner, after real evidence of this
+                # exact loop happening live (crypto_tree_dot_usd: AAVE ->
+                # STOP HIT -> instant rebuy into XRP -> breached again ->
+                # instant rebuy into BONK -> breached again, three real
+                # losses in a row): _branch_sell_and_settle's reset floor
+                # sits only ~3-4% below the fresh balance, so instantly
+                # rebuying right back into a new coin used to gamble that
+                # thin cushion against ordinary price noise almost
+                # immediately. Record the breach and stop here instead of
+                # recursing into an instant rebuy - _floor_breach_cooldown_active()
+                # blocks this branch from entering anything for a real
+                # cooldown window, checked below.
+                await _record_floor_breach(bot_name)
+                return True
             else:
                 log.info(f"[TREE] 🛑 {bot_name}: ${equity:.2f} below floor ${branch.equity_floor:,.2f} - entries paused until it recovers")
             return True
 
         if position is None:
+            if await _floor_breach_cooldown_active(bot_name):
+                log.info(f"[TREE] {bot_name}: cooling down after a recent floor breach - entries paused a bit longer")
+                return True
             if real_balance is None:
                 log.warning(f"[TREE] {bot_name}: real balance unavailable ({real_balance_err}) - skipping this cycle")
                 return True
