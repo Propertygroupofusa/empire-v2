@@ -1020,6 +1020,32 @@ async def run_branch_cycle(bot_name: str) -> bool:
     if branch is None:
         return False
 
+    # Catch-up spawn check, every cycle - not just right after a sell.
+    # _maybe_spawn_child() is also called directly inside
+    # _branch_sell_and_settle() at the moment a sale crosses the tier, but
+    # that's the ONLY other place it ran: a branch that crossed its tier
+    # and then couldn't spawn right then (e.g. every eligible coin was
+    # claimed at that exact moment) had no other chance until its NEXT
+    # sell - which could be a long wait while it's holding a healthy
+    # position (the dashboard's "Next spawn" bar would sit at 100% the
+    # whole time, misleadingly implying it was about to happen). Also
+    # covers a branch adopted from the old bot already above its tier at
+    # adoption time (see orphan adoption above), which never got a spawn
+    # check at all before this. Cheap when not yet eligible - the first
+    # line inside is a synchronous comparison against the already-loaded
+    # branch, no DB query happens unless it's actually crossed.
+    await _maybe_spawn_child(branch)
+    # _maybe_spawn_child() deducts the $50 seed from a FRESH row it loads
+    # internally, not from this already-in-memory `branch` object - reload
+    # so every use of branch.allocated_usd below (most importantly the
+    # buy-sizing "spend = min(branch.allocated_usd, ...)" further down)
+    # reflects the real post-spawn balance. Without this, a branch that
+    # spawns this cycle would double-count the seed: transferred for real
+    # to the child, then spent again here off the stale pre-spawn figure.
+    branch = await load_branch(bot_name)
+    if branch is None:
+        return False
+
     if not engine.COINBASE_API_KEY_NAME or not engine.COINBASE_API_PRIVATE_KEY:
         log.error(f"[TREE] {bot_name}: Coinbase credentials not set - cannot trade")
         return True

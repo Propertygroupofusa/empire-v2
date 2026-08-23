@@ -411,6 +411,42 @@ endpoint it calls (see `routers/trading_dashboard.py`).
   simulation - it's the same $50-seed/root-child mechanism every organic
   or auto-spawned branch uses.
 
+### Catch-up spawn check, every cycle (not just right after a sell)
+
+Per the account owner's real observation: the dashboard's "Next spawn"
+progress bar could sit at 100% (a branch's `allocated_usd` already at or
+above its `next_unlock_tier`) indefinitely without ever actually
+spawning a child. Root cause: `_maybe_spawn_child()` used to be called
+from exactly one place - inside `_branch_sell_and_settle()`, at the
+moment a sale settles. A branch that crossed its tier but couldn't spawn
+right then (every eligible coin already claimed at that exact instant),
+or one adopted from the old pre-family-tree bot already above its tier
+at adoption time (see orphan adoption above - this is also why some
+branches show a "ROOT" badge on the dashboard despite not being the BTC
+root: `isRoot` means "no parent," which is true both for BTC and for any
+adopted legacy position, not a bug), had no other chance until its
+*next* sell - which could be a long wait while it's holding a healthy,
+not-yet-exited position.
+
+Fixed: `run_branch_cycle()` now also calls `_maybe_spawn_child(branch)`
+once at the top of every cycle, for every branch, not just after a sell.
+Cheap when not eligible - the first line inside is a synchronous
+comparison against the already-loaded branch, no DB query unless it's
+actually crossed.
+
+**A real bug caught by this fix's own test before it ever shipped**:
+`_maybe_spawn_child()` deducts the $50 seed from a *fresh* row it loads
+internally, not from the `branch` object `run_branch_cycle()` already
+had in memory - so without reloading, every later use of
+`branch.allocated_usd` in that same cycle (most importantly the buy-sizing
+`spend = min(branch.allocated_usd, ...)` further down) would still see
+the stale, pre-spawn balance, double-counting the $50 seed (transferred
+for real to the child, then spent again off the old number on the
+parent's own next buy). Fixed by reloading `branch` from the DB
+immediately after the catch-up spawn check, before anything else uses
+it. Confirmed via a test that asserts the exact dollar amount of the
+following real buy.
+
 ### Two real production bugs found and fixed (2026-08-22/23)
 
 1. **Manual spawn-branch affordability bug**: the endpoint computed
