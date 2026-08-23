@@ -526,6 +526,24 @@ leaves only a $50 buffer in the parent after each spawn (thinner than
 the $150 tier's $100 buffer) but is still real - a branch can't go
 net-negative from spawning, just closer to its own floor.
 
+### Coin universe expanded, 26 → 37, after the tree hit its real ceiling
+
+A direct consequence of the $100 spawn threshold above actually working:
+the tree grew enough that every coin in the original `COIN_FAMILY_TREE`
+(26 coins, 4 of them permanently in `MANUAL_EXCLUDED_COINS`) ended up
+either claimed by an existing branch or excluded. A real "Start new $50
+branch" click then failed with "Could not start a new branch: No
+eligible coin left unclaimed to start a new branch on" -
+`get_next_eligible_product_id()` working exactly as designed, just
+genuinely out of room. Fixed by adding 10 more real, liquid pairs
+already tradeable on Coinbase Advanced Trade - `BCH-USD`, `ETC-USD`,
+`XLM-USD`, `ALGO-USD`, `FIL-USD`, `INJ-USD`, `SEI-USD`, `TIA-USD`,
+`PEPE-USD`, `WIF-USD` - same onboarding as every coin already in the
+list, nothing about the spawn/exclusion logic itself changed. Confirmed
+against a reproduction of the exact real state that produced the error
+(every original coin claimed or excluded) - a new branch can now spawn
+on one of the 10 new coins.
+
 ### BTC root is never manually sellable, and the ROOT badge fix
 
 Per the account owner's explicit request, spotted from the dashboard

@@ -227,6 +227,23 @@ COIN_FAMILY_TREE = [
     "SUI-USD",    # 2023
     "BLUR-USD",   # 2023
     "JUP-USD",    # 2024
+    # Added per the account owner's explicit request after the tree hit
+    # its real ceiling - every coin above was already claimed by an
+    # existing branch or excluded, so a real "Start new $50 branch"
+    # click had nowhere left to go ("No eligible coin left unclaimed to
+    # start a new branch on"). These are all real, liquid pairs already
+    # tradeable on Coinbase Advanced Trade - same onboarding as every
+    # coin above, nothing else about the spawn/exclusion logic changes.
+    "BCH-USD",    # 2017
+    "ETC-USD",    # 2016
+    "XLM-USD",    # 2014
+    "ALGO-USD",   # 2019
+    "FIL-USD",    # 2020
+    "INJ-USD",    # 2021
+    "SEI-USD",    # 2023
+    "TIA-USD",    # 2023
+    "PEPE-USD",   # 2023
+    "WIF-USD",    # 2023
 ]
 
 # Real backtested evidence (crypto_selection_backtest.py, replaying this
