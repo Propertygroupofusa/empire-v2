@@ -66,6 +66,10 @@
     .kpi .value { font-size: 1.6em; font-weight: 800; color: var(--navy); margin-top: 4px; }
     .kpi.gold .value { color: var(--gold); }
     .kpi.gold { border-color: #f0dcae; background: var(--gold-bg); }
+    .kpi.profit .value.pos { color: var(--green); }
+    .kpi.profit .value.neg { color: var(--red); }
+    .kpi.profit.pos { border-color: #b7e4c7; background: var(--green-bg); }
+    .kpi.profit.neg { border-color: #f3c6cd; background: var(--red-bg); }
 
     .section-title {
         font-size: 1.02em;
@@ -358,6 +362,10 @@
     <div class="narrative" id="narrative">Loading tree summary…</div>
 
     <div class="kpi-row">
+        <div class="kpi profit" id="stat-profit-card">
+            <div class="label">💰 Total Profit</div>
+            <div class="value" id="stat-profit">—</div>
+        </div>
         <div class="kpi"><div class="label">Branches / Coins</div><div class="value" id="stat-count">—</div></div>
         <div class="kpi"><div class="label">Total Allocated</div><div class="value" id="stat-total">—</div></div>
         <div class="kpi gold">
@@ -962,6 +970,31 @@ function toggleCoinTrades(i) {
     document.getElementById('coin-trades-' + i).classList.toggle('open');
 }
 
+let lastUnrealizedProfit = null;
+let lastRealizedProfit = null;
+
+function renderTotalProfit() {
+    const card = document.getElementById('stat-profit-card');
+    const valueEl = document.getElementById('stat-profit');
+    if (lastUnrealizedProfit === null && lastRealizedProfit === null) {
+        valueEl.textContent = '—';
+        return;
+    }
+    // Real total profit = every dollar ever realized on a completed sell
+    // (CryptoCoinTradeHistory, across every coin and branch) plus
+    // whatever's unrealized right now on currently open positions - the
+    // same two lenses the rest of this dashboard already shows
+    // separately (Coin Trade History's Total P&L column, and each
+    // branch card's own live Profit row), just added together into one
+    // real top-line number.
+    const total = (lastUnrealizedProfit || 0) + (lastRealizedProfit || 0);
+    const cls = total >= 0 ? 'pos' : 'neg';
+    valueEl.className = 'value ' + cls;
+    valueEl.textContent = (total >= 0 ? '+' : '-') + fmtUsd(Math.abs(total));
+    card.classList.remove('pos', 'neg');
+    card.classList.add(cls);
+}
+
 async function refresh() {
     const statusEl = document.getElementById('status');
     try {
@@ -974,6 +1007,13 @@ async function refresh() {
         updateUnlockButtonState(data);
 
         const branches = data.branches || [];
+        lastUnrealizedProfit = branches.reduce((sum, b) => {
+            const p = b.position;
+            if (!p || p.current_price == null) return sum;
+            return sum + p.qty * (p.current_price - p.entry_price);
+        }, 0);
+        renderTotalProfit();
+
         renderBarList('branches-bar', branches.map(b => ({ label: b.product_id.replace('-USD', ''), value: b.allocated_usd })));
         renderTreemap('branches-treemap', branches.map(b => ({ label: b.product_id.replace('-USD', ''), value: b.allocated_usd })));
         renderNarrative(data);
@@ -988,6 +1028,8 @@ async function refresh() {
     try {
         const coinData = await apiGet('/family-tree-status/coin-history');
         renderCoinHistory(coinData);
+        lastRealizedProfit = (coinData.coins || []).reduce((sum, c) => sum + c.total_pnl, 0);
+        renderTotalProfit();
     } catch (e) {
         document.getElementById('coin-history-wrap').innerHTML = `<div class="coin-history-empty">Could not load coin history: ${e.message}</div>`;
     }

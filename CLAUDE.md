@@ -852,6 +852,21 @@ individual trades (up to the 500 most recent overall) underneath.
 the aggregate table, tap a coin to expand its individual trades
 (timestamp, branch, entry, exit, P&L, exit reason).
 
+### Total Profit KPI, front of the dashboard
+
+Per the account owner's explicit request ("how much is my profit in
+all, put that at the top of the dashboard"): a new "💰 Total Profit"
+card, first in the KPI row so it's the first number seen. Computed
+entirely client-side from data the page already fetches, no new
+endpoint - real realized profit (every dollar from every completed sell
+ever recorded, summed across all of `/family-tree-status/coin-history`'s
+per-coin `total_pnl`) plus real unrealized profit (summed live across
+every branch's currently open position, the same `qty * (current_price -
+entry_price)` each branch card's own Profit row already computes).
+Green when positive, red when negative - the same two lenses the rest
+of the dashboard already shows separately, just added into one real
+top-line number.
+
 ### Coin-selection backtest and exclusion (crypto_selection_backtest.py)
 
 Built to test whether the 25-hour "bullish" coin-selection check (above)
