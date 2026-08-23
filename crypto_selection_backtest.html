@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>📊 Coin Selection Backtest - Shadow Mode</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+        --bg: #f3f5f9;
+        --panel: #ffffff;
+        --border: #e3e7ef;
+        --text: #16233f;
+        --text-dim: #6b7488;
+        --green: #009845;
+        --green-bg: #e8f6ee;
+        --red: #d6455a;
+        --red-bg: #fbe9ec;
+        --gold: #c9860a;
+        --gold-bg: #fbf1de;
+        --navy: #1f3864;
+        --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 2px 8px rgba(16,24,40,0.06);
+    }
+    body {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        background: var(--bg); color: var(--text); min-height: 100vh; padding: 24px;
+    }
+    .container { max-width: 1000px; margin: 0 auto; }
+    .header h1 { font-size: 1.4em; font-weight: 800; color: var(--navy); }
+    .header p { color: var(--text-dim); font-size: 0.85em; margin-top: 4px; }
+    .note {
+        background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+        padding: 14px 18px; margin: 18px 0; box-shadow: var(--shadow); font-size: 0.85em; color: var(--text-dim);
+    }
+    .note strong { color: var(--text); }
+    .run-btn {
+        margin-top: 18px; padding: 12px 22px; border: none; border-radius: 8px;
+        background: var(--navy); color: #fff; font-weight: 700; font-size: 0.95em; cursor: pointer;
+    }
+    .run-btn:disabled { opacity: 0.6; cursor: default; }
+    #status { margin-top: 12px; font-size: 0.85em; color: var(--text-dim); }
+    #status.error { color: var(--red); font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; margin-top: 20px; background: var(--panel); border-radius: 10px; overflow: hidden; box-shadow: var(--shadow); }
+    th, td { padding: 10px 14px; text-align: right; border-bottom: 1px solid var(--border); font-size: 0.88em; }
+    th:first-child, td:first-child { text-align: left; }
+    th { background: #eef1f7; color: var(--text-dim); font-weight: 700; text-transform: uppercase; font-size: 0.72em; letter-spacing: 0.4px; }
+    tr.stx-row { background: var(--gold-bg); }
+    .pos { color: var(--green); font-weight: 700; }
+    .neg { color: var(--red); font-weight: 700; }
+    .skipped { margin-top: 20px; font-size: 0.8em; color: var(--text-dim); }
+    .skipped summary { cursor: pointer; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1>📊 Coin Selection Backtest</h1>
+        <p>SHADOW MODE — replays the live bot's real target/stop/breakeven/giveback rules against each coin's real Coinbase history. Does not touch live trading or place any orders.</p>
+    </div>
+
+    <div class="note">
+        <strong>What this measures:</strong> for each coin the family tree bot is eligible to trade, this pulls real historical hourly candles from Coinbase and simulates buying/selling using the exact same rules the live bot uses (target %, -2% stop, breakeven ratchet, $3.75 peak-profit giveback, real fees) — then ranks coins by what that strategy would actually have returned. This does not change what the live bot buys; it's a read-only report to inform that decision.
+    </div>
+
+    <button class="run-btn" id="runBtn" onclick="runBacktest()">▶ Run Backtest (real data, ~30-90 seconds)</button>
+    <div id="status"></div>
+
+    <div id="results"></div>
+</div>
+
+<script>
+const API_BASE = 'https://empire-v2-production.up.railway.app/api/trading-dashboard';
+const KEY_STORAGE = 'bmb_admin_key';
+let adminKey = localStorage.getItem(KEY_STORAGE) || '';
+
+function getAdminKey() {
+    if (!adminKey) {
+        adminKey = prompt('Enter admin key:') || '';
+        if (adminKey) localStorage.setItem(KEY_STORAGE, adminKey);
+    }
+    return adminKey;
+}
+
+function fmtUsd(n) {
+    const sign = n < 0 ? '-' : '';
+    return sign + '$' + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+async function runBacktest() {
+    const btn = document.getElementById('runBtn');
+    const statusEl = document.getElementById('status');
+    const resultsEl = document.getElementById('results');
+    btn.disabled = true;
+    btn.textContent = 'Running... (pulling real Coinbase history for ~27 coins)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/crypto-selection-backtest', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        renderResults(data);
+        statusEl.textContent = `Tested ${data.coins_tested} coins over ${data.backtest_days} days, ${data.coins_with_results} produced real trades, $${data.spend_per_trade} redeployed per trade.`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Backtest (real data, ~30-90 seconds)';
+    }
+}
+
+function renderResults(data) {
+    const resultsEl = document.getElementById('results');
+    if (!data.ranked || data.ranked.length === 0) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No coins produced usable backtest results.</p>';
+        return;
+    }
+    let rows = data.ranked.map(r => {
+        const isStx = r.product_id === 'STX-USD';
+        const pnlClass = r.total_pnl >= 0 ? 'pos' : 'neg';
+        const roiClass = r.roi_pct_of_spend >= 0 ? 'pos' : 'neg';
+        return `<tr class="${isStx ? 'stx-row' : ''}">
+            <td>${r.product_id}${isStx ? ' 👈' : ''}</td>
+            <td>${r.num_trades}</td>
+            <td>${r.win_rate.toFixed(1)}%</td>
+            <td class="${pnlClass}">${fmtUsd(r.total_pnl)}</td>
+            <td class="${roiClass}">${r.roi_pct_of_spend >= 0 ? '+' : ''}${r.roi_pct_of_spend.toFixed(1)}%</td>
+            <td>${r.avg_trade_pct >= 0 ? '+' : ''}${r.avg_trade_pct.toFixed(2)}%</td>
+        </tr>`;
+    }).join('');
+
+    let skippedHtml = '';
+    if (data.skipped && data.skipped.length > 0) {
+        const items = data.skipped.map(s => `<li>${s.product_id}: ${s.reason}</li>`).join('');
+        skippedHtml = `<details class="skipped"><summary>${data.skipped.length} coin(s) skipped</summary><ul>${items}</ul></details>`;
+    }
+
+    resultsEl.innerHTML = `
+        <table>
+            <thead><tr>
+                <th>Coin</th><th>Trades</th><th>Win rate</th><th>Total P&amp;L</th><th>ROI on $${data.spend_per_trade}</th><th>Avg / trade</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+        ${skippedHtml}
+    `;
+}
+</script>
+</body>
+</html>

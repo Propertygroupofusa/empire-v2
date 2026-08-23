@@ -1361,6 +1361,19 @@ async def serve_family_tree_dashboard():
     return FileResponse(dashboard_path, media_type="text/html")
 
 
+@app.get("/crypto-selection-backtest-view")
+async def serve_crypto_selection_backtest():
+    """Serve the shadow-mode coin-selection backtest page - a read-only
+    diagnostic that replays the live bot's own real rules against real
+    historical Coinbase data to rank coins by backtested ROI. Gated by
+    X-Admin-Key on the /api/trading-dashboard/crypto-selection-backtest
+    endpoint it calls. Does not touch live trading."""
+    page_path = os.path.join(os.path.dirname(__file__), "crypto_selection_backtest.html")
+    if not os.path.exists(page_path):
+        raise HTTPException(status_code=404, detail="Backtest page not found")
+    return FileResponse(page_path, media_type="text/html")
+
+
 @app.get("/alpaca-dashboard")
 async def serve_alpaca_dashboard():
     """Serve the prop_bot.py (Alpaca) overview dashboard - same focused,

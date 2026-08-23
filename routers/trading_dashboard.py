@@ -56,6 +56,12 @@ except Exception as e:
     log.warning(f"crypto_family_tree_bot not importable, /family-tree-status won't include locked profit: {e}")
     crypto_family_tree_bot_module = None
 
+try:
+    import crypto_selection_backtest as crypto_selection_backtest_module
+except Exception as e:
+    log.warning(f"crypto_selection_backtest not importable, /crypto-selection-backtest will report unavailable: {e}")
+    crypto_selection_backtest_module = None
+
 ALPACA_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
@@ -856,6 +862,29 @@ async def spawn_family_tree_branch(db: AsyncSession = Depends(get_db)):
         "seed_usd": round(tree.SEED_USD, 2),
         "remaining_unallocated": round(unallocated - tree.SEED_USD, 2),
     }
+
+
+@router.post("/crypto-selection-backtest", dependencies=[Depends(require_admin_key)])
+async def run_crypto_selection_backtest():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders,
+    and no bot reads this result. Answers a real question raised about
+    the family-tree bot's coin selection: find_most_volatile_unclaimed_coin()
+    only checks whether a coin is up over a ~25-hour window before buying
+    it, with no sense of whether that move already happened and the coin
+    is now extended - a real gap, not a guess. This replays the bot's own
+    real target/stop/breakeven/giveback rules (crypto_selection_backtest.py,
+    importing the actual live functions rather than reimplementing them)
+    against every family-tree coin's real historical Coinbase candles, and
+    ranks them by what that strategy would actually have returned on each
+    one - so coin selection can eventually be informed by real backtested
+    results instead of only the 25-hour up/down check.
+
+    Pulls real historical data from Coinbase's public candles endpoint
+    concurrently across ~27 coins - can take 30-90 seconds depending on
+    that endpoint's response time."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_full_backtest()
 
 
 @router.get("/alpaca-overview", dependencies=[Depends(require_admin_key)])
