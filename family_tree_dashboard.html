@@ -404,10 +404,21 @@ function branchCardHtml(b) {
 
     let posHtml = '<div class="node-position none">Flat — waiting to buy</div>';
     let sellBtnHtml = '';
+    // Real-time unrealized $ on the CURRENT open position, refreshed every
+    // time the dashboard polls (see setInterval(refresh,...) below) - a
+    // real ticker, not a static number, so a real decision to hit Sell can
+    // be timed against it as it moves.
+    let profitRowHtml = '<div class="row"><span class="k">Profit</span><span class="v" style="color:var(--text-dim)">—</span></div>';
     if (b.position) {
         const p = b.position;
         const target = p.target_price != null ? fmtUsd(p.target_price) : '—';
         const stop = p.stop_price != null ? fmtUsd(p.stop_price) : '—';
+        if (p.current_price != null) {
+            const profitUsd = p.qty * (p.current_price - p.entry_price);
+            const profitClass = profitUsd >= 0 ? 'pos' : 'neg';
+            const profitSign = profitUsd >= 0 ? '+' : '-';
+            profitRowHtml = `<div class="row"><span class="k">Profit</span><span class="v ${profitClass}">${profitSign}${fmtUsd(Math.abs(profitUsd))}</span></div>`;
+        }
         // Once a position is up enough, its stop gets ratcheted up to entry
         // price server-side (see BREAKEVEN_TRIGGER_PCT in
         // crypto_family_tree_bot.py) so it can't close for a real loss
@@ -441,6 +452,7 @@ function branchCardHtml(b) {
             <div class="bot-name" style="margin-bottom:8px;">${b.bot_name}</div>
             <div class="row"><span class="k">Balance</span><span class="v">${fmtUsd(b.allocated_usd)}</span></div>
             <div class="row"><span class="k">Floor</span><span class="v">${fmtUsd(b.equity_floor)}</span></div>
+            ${profitRowHtml}
             <div class="progress-wrap">
                 <div class="progress-label"><span>Next spawn</span><span>${pct.toFixed(0)}%</span></div>
                 <div class="progress-bar-bg"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
