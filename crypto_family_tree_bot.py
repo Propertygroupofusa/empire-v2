@@ -103,6 +103,20 @@ COORDINATOR_SCAN_SECONDS = engine._safe_int_env("TREE_COORDINATOR_SCAN_SECONDS",
 FLOOR_BREACH_COOLDOWN_SECONDS = engine._safe_int_env("TREE_FLOOR_BREACH_COOLDOWN_SECONDS", "1800")  # 30 min default
 FLOOR_BREACH_COOLDOWN_KEY_PREFIX = "crypto_family_tree_floor_breach_cooldown_"
 
+# Per the account owner: once a position has ever shown a real profit, it
+# should never be allowed to give more than this many real dollars back
+# from its best point before locking in whatever's left and moving on to
+# a new coin - independent of the fixed target/stop prices set at buy
+# time. Tracked every cycle a position is held: whenever unrealized
+# profit reaches a new high, that high is saved as the peak (reusing
+# BotPosition.peak_pct - unused by this bot otherwise - as a dollar
+# figure, not a percent, purely for this); once (peak - current) reaches
+# MAX_PROFIT_GIVEBACK_USD, that's a real exit ("PEAK PROFIT GIVEBACK"),
+# same real sell/skim/coin-switch path as TARGET HIT or STOP HIT. Only
+# ever engages after real profit has actually been reached - a position
+# still underwater is governed by the ordinary stop, not this.
+MAX_PROFIT_GIVEBACK_USD = engine._safe_float_env("TREE_MAX_PROFIT_GIVEBACK_USD", "5.00")
+
 # Per the account owner: 10% of every branch's REALIZED PROFIT (not the
 # whole balance, and never on a loss) gets permanently pulled out of the
 # compounding loop on every profitable exit, root BTC included. "Locked
@@ -478,6 +492,19 @@ async def _raise_branch_stop_to_breakeven(bot_name: str, entry_price: float):
         pos = result.scalar_one_or_none()
         if pos and pos.stop_price is not None and pos.stop_price < entry_price:
             pos.stop_price = entry_price
+            await db.commit()
+
+
+async def _update_branch_position_peak(bot_name: str, new_peak_usd: float):
+    """Persists a new high-water mark for a position's unrealized dollar
+    profit - see MAX_PROFIT_GIVEBACK_USD. Reuses BotPosition.peak_pct as a
+    dollar figure for this bot only; only ever called with a value higher
+    than what's already stored."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(BotPosition).where(BotPosition.bot == bot_name))
+        pos = result.scalar_one_or_none()
+        if pos:
+            pos.peak_pct = new_peak_usd
             await db.commit()
 
 
@@ -889,8 +916,31 @@ async def run_branch_cycle(bot_name: str) -> bool:
             return True
 
         unrealized_pct = (price / position.entry_price - 1) * 100
-        if price >= position.target_price or price <= position.stop_price:
-            exit_reason = "TARGET HIT" if price >= position.target_price else "STOP HIT"
+
+        # Peak-profit giveback tracking (see MAX_PROFIT_GIVEBACK_USD): once
+        # this position has ever shown a real profit, it can never give
+        # back more than that many dollars from its best point without
+        # being force-sold - independent of the fixed target/stop prices.
+        unrealized_usd = position.qty * (price - position.entry_price)
+        stored_peak = position.peak_pct or 0.0
+        if unrealized_usd > stored_peak:
+            await _update_branch_position_peak(bot_name, unrealized_usd)
+            position.peak_pct = unrealized_usd
+            stored_peak = unrealized_usd
+        peak_giveback = stored_peak - unrealized_usd
+        giveback_exceeded = stored_peak > 0 and peak_giveback >= MAX_PROFIT_GIVEBACK_USD
+
+        if price >= position.target_price or price <= position.stop_price or giveback_exceeded:
+            if price >= position.target_price:
+                exit_reason = "TARGET HIT"
+            elif price <= position.stop_price:
+                exit_reason = "STOP HIT"
+            else:
+                exit_reason = "PEAK PROFIT GIVEBACK - locking in gains"
+                log.warning(
+                    f"[TREE] 💰 {bot_name} gave back ${peak_giveback:.2f} from its ${stored_peak:.2f} peak "
+                    f"profit - force-selling to lock in what's left"
+                )
             await _branch_sell_and_settle(session, bot_name, branch.product_id, position, exit_reason)
             # _branch_sell_and_settle already picked the branch's next coin -
             # re-run immediately (same reasoning as the floor-breach path
@@ -909,7 +959,7 @@ async def run_branch_cycle(bot_name: str) -> bool:
             log.info(
                 f"[TREE] {bot_name} HOLDING {position.qty:.8f} {branch.product_id} | entry ${position.entry_price:,.2f} | "
                 f"now ${price:,.2f} ({unrealized_pct:+.2f}%) | target ${position.target_price:,.2f} | "
-                f"stop ${position.stop_price:,.2f} | equity ${equity:.2f} | floor ${branch.equity_floor:,.2f}"
+                f"stop ${position.stop_price:,.2f} | peak profit ${stored_peak:.2f} | equity ${equity:.2f} | floor ${branch.equity_floor:,.2f}"
             )
         return True
 
