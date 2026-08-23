@@ -200,6 +200,18 @@ COIN_FAMILY_TREE = [
     "JUP-USD",    # 2024
 ]
 
+# Real backtested evidence (crypto_selection_backtest.py, replaying this
+# bot's own actual rules against 30 real days of Coinbase history) showed
+# these four as the worst performers of the whole family - STX-USD dead
+# last at -44.1% ROI with a 21.6% win rate, followed by BLUR/UNI/DOT all
+# similarly deep negative. Per the account owner's explicit choice, these
+# are excluded from all future coin SELECTION (find_most_volatile_unclaimed_coin
+# and get_next_eligible_product_id) - a branch already holding one of
+# these when this shipped is NOT force-sold; it keeps running under its
+# own normal target/stop/breakeven/giveback rules and simply won't be
+# offered one of these coins again once it exits.
+EXCLUDED_COINS = {"STX-USD", "BLUR-USD", "UNI-USD", "DOT-USD"}
+
 
 async def load_branch(bot_name: str):
     async with AsyncSessionLocal() as db:
@@ -404,12 +416,13 @@ async def load_all_branches():
 
 
 async def get_next_eligible_product_id():
-    """First coin in COIN_FAMILY_TREE not already claimed by an existing branch."""
+    """First coin in COIN_FAMILY_TREE not already claimed by an existing
+    branch and not in EXCLUDED_COINS (see its docstring)."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoTreeBranch.product_id))
         claimed = set(result.scalars().all())
     for product_id in COIN_FAMILY_TREE:
-        if product_id not in claimed:
+        if product_id not in claimed and product_id not in EXCLUDED_COINS:
             return product_id
     return None
 
@@ -523,7 +536,7 @@ async def find_most_volatile_unclaimed_coin(session):
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoTreeBranch.product_id))
         claimed = set(result.scalars().all())
-    candidates = [p for p in COIN_FAMILY_TREE if p not in claimed]
+    candidates = [p for p in COIN_FAMILY_TREE if p not in claimed and p not in EXCLUDED_COINS]
 
     results = await asyncio.gather(
         *(engine.get_price_volatility_and_trend(session, product_id) for product_id in candidates),
