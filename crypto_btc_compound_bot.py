@@ -394,16 +394,46 @@ async def place_market_sell(session, qty: float, product_id: str = PRODUCT_ID):
     return await _place_and_confirm(session, path, order)
 
 
+_last_order_error = {}
+
+
+def _describe_order_rejection(resp: dict) -> str:
+    """Pulls the real reason out of a Coinbase order-rejection response.
+    The useful part (error code, message) lives nested under
+    error_response - logging the raw resp dict directly (the old
+    behavior) got the important part cut off by Railway's log-line
+    truncation on mobile, e.g. "{'error': 'INVALID_ARG..." with the
+    actual code and message never visible. This flattens it into one
+    short line so it survives truncation, and gets persisted to
+    _last_order_error either way for the dashboard to show directly."""
+    err = resp.get("error_response") if isinstance(resp, dict) else None
+    if isinstance(err, dict):
+        code = err.get("error") or resp.get("failure_reason") or "UNKNOWN"
+        message = err.get("message") or err.get("error_details") or ""
+        return f"{code}: {message}" if message else str(code)
+    if isinstance(resp, dict) and resp.get("failure_reason"):
+        return str(resp["failure_reason"])
+    return str(resp)
+
+
 async def _place_and_confirm(session, path: str, order: dict):
+    product_id = order.get("product_id")
     try:
         async with session.post(COINBASE_BASE_URL + path, headers=_auth_headers("POST", path), json=order, timeout=15) as r:
             resp = await r.json()
             if r.status not in (200, 201) or not resp.get("success"):
-                log.warning(f"[BTC-COMPOUND] Order not accepted: {resp}")
+                reason = _describe_order_rejection(resp)
+                log.warning(f"[BTC-COMPOUND] Order not accepted ({product_id}, {order.get('side')}): {reason}")
+                if product_id:
+                    _last_order_error[product_id] = reason
                 return None
             order_id = resp["success_response"]["order_id"]
+            if product_id:
+                _last_order_error.pop(product_id, None)
     except Exception as e:
         log.warning(f"[BTC-COMPOUND] Order placement failed: {e}")
+        if product_id:
+            _last_order_error[product_id] = f"{type(e).__name__}: {e}"
         return None
 
     # Poll briefly for the fill to settle so we record a real fill price -

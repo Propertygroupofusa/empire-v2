@@ -630,6 +630,40 @@ numbers from production logs/screenshots before shipping, plus a full
 offline regression suite (not committed to the repo - built and run
 from the session scratchpad each time).
 
+### Real order-rejection reason now visible on the dashboard, not just a truncated Railway log line
+
+The account owner shared Railway log screenshots showing real order
+failures - `crypto_btc_compound_bot:[BTC-COMPOUND] Order not accepted:
+{'error': 'INVALID_ARG...` and a separate `{'error': 'PERMISSION_...`,
+both affecting real buy attempts (`crypto_tree_ltc_usd`,
+`crypto_tree_ldo_usd`, `crypto_tree_dot_usd` all logging "buy did not
+fill - will retry"). The actual error code/message was never visible in
+either screenshot - Railway's mobile log view truncates long single
+lines, and the useful part (nested under `error_response` in Coinbase's
+response) was exactly what got cut off both times.
+
+Root cause of the *invisibility*, not the rejection itself (Coinbase's
+real reason for rejecting these specific orders is still unknown - could
+be anything from a bad size/precision to a real permission issue on the
+API key): `_place_and_confirm()` in `crypto_btc_compound_bot.py` (shared
+by every branch's buy/sell) logged the raw `resp` dict directly, and
+`place_market_buy()`'s only return on failure was bare `None` - so the
+only place the real reason ever existed was that one truncated log line.
+
+Fixed both ends of this:
+1. `_describe_order_rejection()` pulls the real reason out of
+   `resp["error_response"]` (`error` code + `message`) into one short,
+   flat string that's far less likely to hit Railway's truncation limit
+   than the full nested dict repr.
+2. That reason is now persisted per `product_id` in the module-level
+   `_last_order_error` dict (cleared the moment an order on that same
+   coin succeeds), and `/api/trading-dashboard/family-tree-status`
+   returns it per branch as `last_order_error`. `family_tree_dashboard.html`
+   shows it directly on the branch's card (`⚠️ Last order rejected: ...`)
+   when present - so the *next* real rejection is readable straight from
+   the dashboard already open on the account owner's phone, no Railway
+   log navigation or screenshot-and-hope-it's-not-cut-off required.
+
 ### Coin-selection backtest and exclusion (crypto_selection_backtest.py)
 
 Built to test whether the 25-hour "bullish" coin-selection check (above)

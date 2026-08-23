@@ -661,6 +661,16 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     for b in branches:
         pos = positions_by_bot.get(b.bot_name)
         current_price = current_price_by_bot.get(b.bot_name) if pos else None
+        # Real reason the branch's last order was rejected by Coinbase (if
+        # any), e.g. "INVALID_ARGUMENT: ..." or "PERMISSION_DENIED: ..." -
+        # only ever set when a real buy/sell attempt on this exact
+        # product_id failed, cleared the moment one succeeds. Surfaced here
+        # so a real order-rejection is visible directly on the dashboard,
+        # not just in a Railway log line that gets truncated on mobile.
+        last_order_error = (
+            crypto_family_tree_bot_module.engine._last_order_error.get(b.product_id)
+            if crypto_family_tree_bot_module is not None else None
+        )
         out.append({
             "bot_name": b.bot_name,
             "product_id": b.product_id,
@@ -669,6 +679,7 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
             "equity_floor": round(b.equity_floor, 2),
             "next_unlock_tier": round(b.next_unlock_tier, 2),
             "created_at": b.created_at.isoformat() if b.created_at else None,
+            "last_order_error": last_order_error,
             "position": None if pos is None else {
                 "symbol": pos.symbol,
                 "entry_price": pos.entry_price,

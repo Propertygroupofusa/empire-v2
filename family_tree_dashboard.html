@@ -265,6 +265,20 @@
         border: 1px solid var(--border);
         box-sizing: border-box;
     }
+    .order-error-note {
+        width: 100%;
+        margin-top: 8px;
+        padding: 6px 10px;
+        border-radius: 6px;
+        font-size: 0.74em;
+        font-weight: 600;
+        text-align: left;
+        color: var(--red);
+        background: var(--red-bg);
+        border: 1px solid var(--red);
+        box-sizing: border-box;
+        word-break: break-word;
+    }
 
     .breakeven-badge {
         display: inline-block;
@@ -561,6 +575,16 @@ function branchCardHtml(b) {
         }
     }
 
+    // Real reason this branch's last buy/sell attempt was rejected by
+    // Coinbase (if any) - see _last_order_error in crypto_btc_compound_bot.py.
+    // Shown directly here so a real order-rejection error is readable on
+    // the dashboard instead of needing to expand a truncated Railway log
+    // line on mobile. Cleared server-side the moment an order on this
+    // exact coin succeeds, so this only ever shows a REAL, current problem.
+    const orderErrorHtml = b.last_order_error
+        ? `<div class="order-error-note">⚠️ Last order rejected: ${b.last_order_error}</div>`
+        : '';
+
     return `
         <div class="card ${isRoot ? 'root' : ''}">
             <div class="card-top" style="margin-bottom:2px;">
@@ -577,6 +601,7 @@ function branchCardHtml(b) {
             </div>
             ${posHtml}
             ${sellBtnHtml}
+            ${orderErrorHtml}
         </div>`;
 }
 
