@@ -37,13 +37,20 @@ def should_exit_position(
     min_profit_target_pct: float = 0.02,  # 2% minimum
     rsi_profit_threshold_long: float = 60,  # Take profit on rally
     rsi_profit_threshold_short: float = 40,  # Take profit on bounce
-) -> Tuple[bool, str, str]:
+    peak_pnl_pct: float = 0.0,  # highest unrealized % this position has ever reached - caller persists this (see BotPosition.peak_pct)
+    breakeven_trigger_pct: float = 0.01,  # once peak reaches +1%, the stop can no longer go below breakeven
+    max_giveback_pct: float = 0.005,  # once ANY real profit has been reached, cap how much of the peak can be given back before forcing an exit
+) -> Tuple[bool, str, str, float]:
     """
     Decide whether to exit a position (long or short) based on mean reversion rules.
 
     Returns:
-        (should_exit: bool, reason: str, exit_type: str)
-        exit_type: "profit", "stop_loss", "rsi_exit", "timeout", "hold"
+        (should_exit: bool, reason: str, exit_type: str, new_peak_pnl_pct: float)
+        exit_type: "profit", "stop_loss", "rsi_exit", "timeout", "trail", "hold"
+        new_peak_pnl_pct: the caller MUST persist this (see BotPosition.peak_pct) and
+        pass it back in as peak_pnl_pct on the next call - a Railway restart wiping an
+        in-memory-only peak would silently disarm both new rules below on exactly the
+        positions that had run up the most.
     """
 
     if direction == "long":
@@ -53,41 +60,68 @@ def should_exit_position(
         unrealized_pnl_pct = (entry_price - current_price) / entry_price
         rsi_exit_threshold = rsi_profit_threshold_short
     else:
-        return False, f"Unknown direction: {direction}", "error"
+        return False, f"Unknown direction: {direction}", "error", peak_pnl_pct
 
-    # ========== RULE 1: Stop Loss (Absolute) ==========
-    if unrealized_pnl_pct <= -stop_loss_pct:
-        reason = f"Stop loss hit: {unrealized_pnl_pct*100:.2f}% loss (limit: {stop_loss_pct*100:.2f}%)"
+    new_peak_pnl_pct = max(peak_pnl_pct, unrealized_pnl_pct)
+
+    # ========== RULE 0: Breakeven ratchet ==========
+    # Once this position has ever been up by breakeven_trigger_pct or more,
+    # the hard stop can no longer be allowed to close it below its own
+    # entry price - only the peak-giveback rule below governs a pullback
+    # from there. A position that's never reached the trigger keeps the
+    # full, unmodified stop_loss_pct room to work.
+    effective_stop_loss_pct = 0.0 if new_peak_pnl_pct >= breakeven_trigger_pct else stop_loss_pct
+
+    # ========== RULE 1: Stop Loss (Absolute / Breakeven) ==========
+    if unrealized_pnl_pct <= -effective_stop_loss_pct:
+        if effective_stop_loss_pct == 0.0:
+            reason = f"Breakeven stop hit: {unrealized_pnl_pct*100:.2f}% (was up {new_peak_pnl_pct*100:.2f}% at peak, can't close below breakeven)"
+        else:
+            reason = f"Stop loss hit: {unrealized_pnl_pct*100:.2f}% loss (limit: {stop_loss_pct*100:.2f}%)"
         log.info(f"  🛑 {symbol} ({direction.upper()}): {reason}")
-        return True, reason, "stop_loss"
+        return True, reason, "stop_loss", new_peak_pnl_pct
+
+    # ========== RULE 1b: Peak-profit giveback ==========
+    # Once this position has ever shown a real profit, it can't give back
+    # more than max_giveback_pct from its best point without forcing an
+    # exit - independent of whether min_profit_target_pct or an RSI exit
+    # has fired yet. Catches exactly the case a fixed stop/target alone
+    # misses: up 1.8%, never quite reaching the 2% target, then reversing
+    # hard - previously rode all the way down to -stop_loss_pct, giving
+    # back the entire gain plus more.
+    peak_giveback = new_peak_pnl_pct - unrealized_pnl_pct
+    if new_peak_pnl_pct > 0 and peak_giveback >= max_giveback_pct:
+        reason = f"Peak profit giveback: gave back {peak_giveback*100:.2f}% from a {new_peak_pnl_pct*100:.2f}% peak (limit: {max_giveback_pct*100:.2f}%)"
+        log.info(f"  💰 {symbol} ({direction.upper()}): {reason}")
+        return True, reason, "trail", new_peak_pnl_pct
 
     # ========== RULE 2: Minimum Profit Target ==========
     if unrealized_pnl_pct >= min_profit_target_pct:
         reason = f"Hit minimum profit target: {unrealized_pnl_pct*100:.2f}% (required: {min_profit_target_pct*100:.2f}%)"
         log.info(f"  ✅ {symbol} ({direction.upper()}): {reason}")
-        return True, reason, "profit"
+        return True, reason, "profit", new_peak_pnl_pct
 
     # ========== RULE 3: RSI Exit Signal ==========
     if direction == "long" and current_rsi >= rsi_exit_threshold and unrealized_pnl_pct > 0:
         # Long: Sell on rally when RSI gets hot
         reason = f"RSI exit signal at {current_rsi:.1f} (threshold: {rsi_exit_threshold}); profit taken at +{unrealized_pnl_pct*100:.2f}%"
         log.info(f"  📈 {symbol} (LONG): {reason}")
-        return True, reason, "rsi_exit"
+        return True, reason, "rsi_exit", new_peak_pnl_pct
     elif direction == "short" and current_rsi <= rsi_exit_threshold and unrealized_pnl_pct > 0:
         # Short: Cover on bounce when RSI recovers
         reason = f"RSI exit signal at {current_rsi:.1f} (threshold: {rsi_exit_threshold}); profit taken at +{unrealized_pnl_pct*100:.2f}%"
         log.info(f"  📉 {symbol} (SHORT): {reason}")
-        return True, reason, "rsi_exit"
+        return True, reason, "rsi_exit", new_peak_pnl_pct
 
     # ========== RULE 4: Max Hold Time ==========
     if position_age_seconds >= max_hold_seconds:
         reason = f"Max hold time exceeded: {position_age_seconds}s >= {max_hold_seconds}s"
         log.info(f"  ⏱️  {symbol} ({direction.upper()}): {reason}")
-        return True, reason, "timeout"
+        return True, reason, "timeout", new_peak_pnl_pct
 
     # ========== NO EXIT: HOLD ==========
     reason = f"Hold: P&L {unrealized_pnl_pct*100:.2f}% (waiting for +{min_profit_target_pct*100:.1f}% target or RSI exit)"
-    return False, reason, "hold"
+    return False, reason, "hold", new_peak_pnl_pct
 
 
 def calculate_position_sizing_stocks(
@@ -254,7 +288,7 @@ def example_stock_trade():
     """
 
     # Check if we should exit the long
-    should_exit, reason, exit_type = should_exit_position(
+    should_exit, reason, exit_type, _peak = should_exit_position(
         symbol="SPY",
         entry_price=450.00,
         current_price=459.50,  # +2.1%
@@ -276,7 +310,7 @@ def example_stock_trade():
     # Target 1: $446 (-2%)
     # Target 2: $432 (-5%)
 
-    should_exit_short, reason_short, exit_type_short = should_exit_position(
+    should_exit_short, reason_short, exit_type_short, _peak_short = should_exit_position(
         symbol="SPY",
         entry_price=455.00,
         current_price=446.00,  # -1.98%

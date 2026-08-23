@@ -302,7 +302,7 @@ async def load_open_positions():
             result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
             rows = result.scalars().all()
             for row in rows:
-                open_prop_positions[row.symbol] = {"side": row.side, "entry": row.entry_price, "qty": row.qty, "open_time": row.opened_at}
+                open_prop_positions[row.symbol] = {"side": row.side, "entry": row.entry_price, "qty": row.qty, "open_time": row.opened_at, "peak_pnl_pct": row.peak_pct or 0.0}
             if rows:
                 log.info(f"[APEX_589296] Reloaded {len(rows)} open position(s) from DB: {list(open_prop_positions.keys())}")
     except Exception as e:
@@ -337,6 +337,23 @@ async def _db_save_open(contract: str, side: str, entry: float, qty: float):
             )
     except Exception as e:
         log.error(f"[APEX_589296] Failed to persist opened position {contract}: {e}")
+
+
+async def _db_update_peak_pct(contract: str, peak_pnl_pct: float):
+    """Persists a position's new high-water mark for its unrealized %
+    return - see should_exit_position's breakeven-ratchet/peak-giveback
+    rules. Without this, a Railway restart would wipe the in-memory peak
+    and silently disarm both rules on exactly the positions that had run
+    up the most - same reasoning as _db_save_open existing at all."""
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME, BotPosition.symbol == contract))
+            row = result.scalar_one_or_none()
+            if row:
+                row.peak_pct = peak_pnl_pct
+                await db.commit()
+    except Exception as e:
+        log.error(f"[APEX_589296] Failed to persist peak_pct for {contract}: {e}")
 
 
 async def _db_delete_open(contract: str):
@@ -1265,8 +1282,13 @@ async def run_prop_cycle():
             position_open_time = position.get("open_time", now)
             position_age_seconds = int((now - position_open_time).total_seconds())
 
-            # Mean Reversion Exit Decision — enforces 4 rules: stop loss, min profit, RSI exit, timeout
-            should_exit, reason, exit_type = mr_should_exit(
+            # Mean Reversion Exit Decision — enforces 6 rules: breakeven
+            # ratchet, peak-profit giveback cap, stop loss, min profit, RSI
+            # exit, timeout. peak_pnl_pct is this position's real
+            # high-water mark, persisted to BotPosition.peak_pct so a
+            # Railway restart can't wipe it and silently disarm the first
+            # two rules on exactly the positions that ran up the most.
+            should_exit, reason, exit_type, new_peak_pnl_pct = mr_should_exit(
                 symbol=contract,
                 entry_price=entry,
                 current_price=price,
@@ -1278,7 +1300,13 @@ async def run_prop_cycle():
                 min_profit_target_pct=0.02,  # 2% minimum profit (KEY: prevents breakeven exits)
                 rsi_profit_threshold_long=60,  # Sell longs when RSI >= 60 (overbought)
                 rsi_profit_threshold_short=40,  # Cover shorts when RSI <= 40 (oversold)
+                peak_pnl_pct=position.get("peak_pnl_pct", 0.0),
+                breakeven_trigger_pct=0.01,  # +1% - matches the crypto side's ratchet trigger
+                max_giveback_pct=0.005,  # can't give back more than 0.5% from its peak once ever profitable
             )
+            if new_peak_pnl_pct > position.get("peak_pnl_pct", 0.0):
+                position["peak_pnl_pct"] = new_peak_pnl_pct
+                await _db_update_peak_pct(contract, new_peak_pnl_pct)
 
             if should_exit:
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
