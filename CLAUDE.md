@@ -544,6 +544,31 @@ against a reproduction of the exact real state that produced the error
 (every original coin claimed or excluded) - a new branch can now spawn
 on one of the 10 new coins.
 
+### Real one-cycle sale cooldown per coin, so nothing can instantly rebuy what it (or another branch) just sold
+
+Per the account owner's explicit follow-up: a coin becoming "claimed or
+excluded temporarily" (the state above) should release again "one cycle
+after it was bought and sold" if it's still bullish - previously nothing
+enforced that gap. A coin became fully "unclaimed" the instant its
+selling branch's row committed the new `product_id`, with nothing
+stopping an immediate re-buy on the very next check - by a different
+branch, or even the same branch on a near-simultaneous cycle.
+
+Fixed with a real, short-lived, in-memory cooldown (`_coin_last_sold_at`
+in `crypto_family_tree_bot.py`, all branches run as threads in the same
+process so this doesn't need to survive a restart): `_branch_sell_and_
+settle()` now records the moment a coin is sold, before it even looks
+for a new coin to switch to. `_coin_sale_cooldown_active(product_id)`
+checks whether less than one real `CYCLE_SECONDS` (30s default) has
+passed since that coin was last sold - both `get_next_eligible_product_
+id()` (manual/auto branch spawning) and `find_most_volatile_unclaimed_
+coin()` (the coin-switch-after-exit path) now skip a coin still in that
+window, on top of the existing claimed/excluded checks. After exactly
+one cycle, if the coin is still bullish, it's a completely normal
+candidate again - the existing bullish-first/volatility-tiebreak filter
+in `find_most_volatile_unclaimed_coin()` is unchanged, this only adds a
+timing gate in front of it.
+
 ### BTC root is never manually sellable, and the ROOT badge fix
 
 Per the account owner's explicit request, spotted from the dashboard

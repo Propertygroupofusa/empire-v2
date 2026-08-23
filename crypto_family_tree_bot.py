@@ -119,6 +119,27 @@ COORDINATOR_SCAN_SECONDS = engine._safe_int_env("TREE_COORDINATOR_SCAN_SECONDS",
 FLOOR_BREACH_COOLDOWN_SECONDS = engine._safe_int_env("TREE_FLOOR_BREACH_COOLDOWN_SECONDS", "300")  # 5 min default
 FLOOR_BREACH_COOLDOWN_KEY_PREFIX = "crypto_family_tree_floor_breach_cooldown_"
 
+# Per the account owner's explicit request: a coin a branch just sold
+# becomes "unclaimed" the instant that branch's row commits its new
+# product_id - with nothing else blocking it, a different branch (or
+# even the same one, on a near-simultaneous cycle) could buy straight
+# back into a coin that was sold moments ago. This gives every coin a
+# real one-cycle cooldown after being sold before ANY branch can claim
+# it again - after that single cycle, if it's still bullish (the normal
+# find_most_volatile_unclaimed_coin() filter, unchanged), it's fair game
+# again like any other coin. Tracked in-memory (all branches run as
+# threads in the same process) rather than in the DB - this is a real
+# but short-lived timing guard, not something that needs to survive a
+# restart.
+_coin_last_sold_at: dict = {}
+
+
+def _coin_sale_cooldown_active(product_id: str) -> bool:
+    last_sold = _coin_last_sold_at.get(product_id)
+    if last_sold is None:
+        return False
+    return (time.time() - last_sold) < CYCLE_SECONDS
+
 # Per the account owner: once a position has ever shown a real profit, it
 # should never be allowed to give more than this many real dollars back
 # from its best point before locking in whatever's left and moving on to
@@ -600,13 +621,15 @@ async def load_all_branches():
 
 async def get_next_eligible_product_id():
     """First coin in COIN_FAMILY_TREE not already claimed by an existing
-    branch and not currently excluded (see get_effective_excluded_coins)."""
+    branch, not currently excluded (see get_effective_excluded_coins), and
+    not still cooling down from having been sold within the last cycle
+    (see _coin_sale_cooldown_active)."""
     excluded = await get_effective_excluded_coins()
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoTreeBranch.product_id))
         claimed = set(result.scalars().all())
     for product_id in COIN_FAMILY_TREE:
-        if product_id not in claimed and product_id not in excluded:
+        if product_id not in claimed and product_id not in excluded and not _coin_sale_cooldown_active(product_id):
             return product_id
     return None
 
@@ -712,8 +735,14 @@ async def find_most_volatile_unclaimed_coin(session):
     atr_pct), or (None, None) if every coin is already claimed or none
     have usable price data right now.
 
+    A coin sold within the last CYCLE_SECONDS (see
+    _coin_sale_cooldown_active) is skipped too - a real one-cycle cooldown
+    so a branch (this one or another) can't immediately buy straight back
+    into a coin that was just sold. After that single cycle, if it's
+    still bullish, it's a normal candidate again like any other coin.
+
     Looks up every candidate concurrently rather than one at a time: with
-    up to 27 coins and a 15s timeout per request, a sequential loop's
+    up to 37 coins and a 15s timeout per request, a sequential loop's
     worst case was minutes (a branch just sitting there, not trading,
     while it worked through the whole list) - running them all at once
     caps the whole search at whatever the single slowest request takes."""
@@ -721,7 +750,10 @@ async def find_most_volatile_unclaimed_coin(session):
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoTreeBranch.product_id))
         claimed = set(result.scalars().all())
-    candidates = [p for p in COIN_FAMILY_TREE if p not in claimed and p not in excluded]
+    candidates = [
+        p for p in COIN_FAMILY_TREE
+        if p not in claimed and p not in excluded and not _coin_sale_cooldown_active(p)
+    ]
 
     results = await asyncio.gather(
         *(engine.get_price_volatility_and_trend(session, product_id) for product_id in candidates),
@@ -1003,6 +1035,11 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
         log.warning(f"[TREE] {bot_name}: {reason} but sell did not fill - will retry next cycle")
         return
     filled_qty, filled_price = fill
+    # Starts this coin's one-cycle cooldown (see _coin_sale_cooldown_active)
+    # right away, before find_most_volatile_unclaimed_coin() runs a few
+    # lines down - so this branch itself can't immediately buy straight
+    # back into the coin it just sold, same as any other branch.
+    _coin_last_sold_at[product_id] = time.time()
     gross_value = filled_price * filled_qty
     fee = gross_value * (ROUND_TRIP_FEE_RATE / 2)
     new_allocated = gross_value - fee
