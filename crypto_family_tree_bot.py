@@ -154,7 +154,20 @@ LOCKED_PROFIT_STATE_KEY = "crypto_family_tree_locked_usd"
 # that stranded amount hasn't moved for this many hours (nothing sold to
 # top it up, no branch could spend it), sweep it into the same
 # locked-profit ledger the 10% skim uses - see _check_and_sweep_stranded_dust().
-DUST_STUCK_HOURS = engine._safe_float_env("TREE_DUST_STUCK_HOURS", "24")
+#
+# Lowered from the original 24h to 0.25h (15 min) per the account owner's
+# explicit follow-up ("needs to go into the lock profit ASAP"). 15 min
+# isn't an arbitrary "as fast as possible" - it's the fastest value that
+# still means something: DUST_CHECK_INTERVAL_SECONDS below only runs this
+# check every 15 min regardless, so anything shorter than that has zero
+# effect (the next check is still 15 min away either way), while a
+# literal zero-wait sweep would risk catching cash that's only
+# momentarily below the trade minimum mid-cycle - e.g. the few seconds
+# between a sell settling and its own rebuy - which isn't stranded, just
+# in flight. This still requires the balance to have been genuinely
+# unchanged across at least one full check interval, preserving that
+# protection while sweeping about as fast as the system can actually see.
+DUST_STUCK_HOURS = engine._safe_float_env("TREE_DUST_STUCK_HOURS", "0.25")
 DUST_CHECK_INTERVAL_SECONDS = engine._safe_int_env("TREE_DUST_CHECK_INTERVAL_SECONDS", "900")
 DUST_TRACKER_KEY = "crypto_family_tree_dust_tracker"
 
@@ -398,7 +411,7 @@ async def _check_and_sweep_stranded_dust():
             db.add(TradingBotState(bot_name=DUST_TRACKER_KEY, base_capital=spendable, starting_capital=0.0))
             await db.commit()
             log.info(f"[TREE] 💤 Tracking ${spendable:.2f} stranded below the ${MIN_TRADE_USD:.2f} minimum trade "
-                     f"- will lock it away if it's still stuck in {DUST_STUCK_HOURS:.0f}h")
+                     f"- will lock it away if it's still stuck in {DUST_STUCK_HOURS:.2f}h")
             return
 
         if abs(tracker.base_capital - spendable) > 0.005:
@@ -406,7 +419,7 @@ async def _check_and_sweep_stranded_dust():
             # moved, so this isn't dead money yet. Restart the clock.
             tracker.base_capital = spendable
             await db.commit()
-            log.info(f"[TREE] 💤 Stranded dust changed (now ${spendable:.2f}) - restarting the {DUST_STUCK_HOURS:.0f}h clock")
+            log.info(f"[TREE] 💤 Stranded dust changed (now ${spendable:.2f}) - restarting the {DUST_STUCK_HOURS:.2f}h clock")
             return
 
         stuck_hours = (datetime.utcnow() - tracker.updated_at).total_seconds() / 3600.0

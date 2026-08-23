@@ -411,6 +411,43 @@ endpoint it calls (see `routers/trading_dashboard.py`).
   simulation - it's the same $50-seed/root-child mechanism every organic
   or auto-spawned branch uses.
 
+### Stranded-dust sweep speed, and a real USDC blind spot found
+
+`_check_and_sweep_stranded_dust()` locks genuinely-too-small-to-trade
+real cash (below `MIN_TRADE_USD`, unchanged) into `locked_usd` instead
+of leaving it dead forever - see `DUST_STUCK_HOURS`. Per the account
+owner's explicit follow-up ("needs to go into the lock profit ASAP"),
+lowered from the original 24h default to **0.25h (15 min)** - the
+fastest value that's actually meaningful, since `DUST_CHECK_INTERVAL_SECONDS`
+(15 min) is how often this check even runs; anything shorter has no
+effect, while a literal zero-wait sweep would risk catching cash that's
+only momentarily below the minimum mid-cycle (e.g. the few seconds
+between a sell settling and its own rebuy), not genuinely stranded.
+
+**Important distinction for reading the dashboard**: this only ever
+sweeps real, un-deployed cash sitting idle below `MIN_TRADE_USD` - it
+has nothing to do with the cents in numbers like "Total Allocated
+$458.67". That `.67` is just the real, live sum of every branch's
+actively-compounding balance (real fills produce non-round numbers) -
+not stranded dust, and sweeping it would mean draining real capital out
+of live positions, the opposite of the point.
+
+**A real gap found while investigating this (not yet fixed - needs the
+account owner's input)**: `get_usd_balance()`/`get_asset_balance()` in
+`crypto_btc_compound_bot.py` only ever reads the literal "USD" Coinbase
+account - there is zero USDC awareness anywhere in this codebase. If a
+meaningful chunk of the account's cash sits in USDC (Coinbase's
+"Earn X% APY by converting USD to USDC" prompt, or its own auto-rewards
+enrollment, can do this), the bot's `real_balance` figure - and every
+downstream real-cash calculation (`spendable_for_spawn`, buy sizing, the
+dust sweep above) - is blind to it. Not yet fixed: unclear whether
+Coinbase's Advanced Trade API can fund a `BTC-USD`-style market order
+directly from a USDC balance, or whether it needs converting back to USD
+first - needs confirming before deciding whether the fix is "the bot
+also reads/uses USDC" or "convert back to USD, the bot's view is
+correct as-is." Account owner's choice, for now: convert back to USD
+manually when this happens.
+
 ### Catch-up spawn check, every cycle (not just right after a sell)
 
 Per the account owner's real observation: the dashboard's "Next spawn"
