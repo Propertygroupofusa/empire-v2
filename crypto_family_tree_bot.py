@@ -117,6 +117,22 @@ FLOOR_BREACH_COOLDOWN_KEY_PREFIX = "crypto_family_tree_floor_breach_cooldown_"
 # still underwater is governed by the ordinary stop, not this.
 MAX_PROFIT_GIVEBACK_USD = engine._safe_float_env("TREE_MAX_PROFIT_GIVEBACK_USD", "5.00")
 
+# Per the account owner: BTC (the root) already stays on BTC-USD forever
+# by design - see the ROOT_BOT_NAME check in _branch_sell_and_settle. The
+# same idea now extends down the tree: among any group of siblings (same
+# parent_bot_name), whichever one is currently carrying the highest real
+# balance has "proven itself" and gets locked onto its current coin
+# permanently - it will never coin-switch again on any future exit,
+# exactly like root. This is a ONE-WAY, PERMANENT lock: once a branch
+# earns it, it keeps it even if a sibling later grows bigger (the account
+# owner explicitly chose "permanent once earned" over "follows whoever's
+# currently biggest"). Checked periodically by the coordinator (see
+# _check_and_lock_strongest_siblings) rather than per-branch-cycle, since
+# it needs to see every sibling at once to compare them. A parent with
+# only one child has nothing to prove itself against yet, so no lock is
+# granted until there are real siblings to be the strongest among.
+COIN_LOCK_KEY_PREFIX = "crypto_family_tree_coin_locked_"
+
 # Per the account owner: 10% of every branch's REALIZED PROFIT (not the
 # whole balance, and never on a loss) gets permanently pulled out of the
 # compounding loop on every profitable exit, root BTC included. "Locked
@@ -272,6 +288,56 @@ async def _check_and_sweep_stranded_dust():
             await db.commit()
             log.info(f"[TREE] 🔒 Swept ${spendable:.2f} of stranded dust (stuck {stuck_hours:.1f}h below the "
                      f"${MIN_TRADE_USD:.2f} minimum trade) into locked profit - permanently out of the compounding loop")
+
+
+async def _is_coin_locked(bot_name: str) -> bool:
+    """True once this branch has ever been granted a permanent coin-lock -
+    see COIN_LOCK_KEY_PREFIX. Presence of the row IS the lock; it's never
+    removed once created."""
+    key = COIN_LOCK_KEY_PREFIX + bot_name
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == key))
+        return result.scalar_one_or_none() is not None
+
+
+async def _lock_branch_coin(bot_name: str):
+    key = COIN_LOCK_KEY_PREFIX + bot_name
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == key))
+        if result.scalar_one_or_none() is None:
+            db.add(TradingBotState(bot_name=key, base_capital=0.0, starting_capital=0.0))
+            await db.commit()
+
+
+async def _check_and_lock_strongest_siblings():
+    """Once per coordinator scan: groups every non-root branch by its
+    parent_bot_name, and for any group with 2+ siblings, permanently locks
+    the current highest-balance one onto its current coin (if not already
+    locked) - see COIN_LOCK_KEY_PREFIX for the full reasoning. A group
+    with only one child is skipped - nothing to prove itself against yet."""
+    branches = await load_all_branches()
+    by_parent = {}
+    for b in branches:
+        if b.bot_name == ROOT_BOT_NAME:
+            continue  # root is permanently locked by design already - see _branch_sell_and_settle
+        by_parent.setdefault(b.parent_bot_name, []).append(b)
+
+    for parent, siblings in by_parent.items():
+        if len(siblings) < 2:
+            continue
+        # Once ANY sibling in this group already holds the permanent lock,
+        # the group is settled for good - must not re-evaluate "who's
+        # currently strongest" again, or a later-growing sibling would
+        # wrongly steal a lock that's supposed to be permanent.
+        if any([await _is_coin_locked(s.bot_name) for s in siblings]):
+            continue
+        strongest = max(siblings, key=lambda b: b.allocated_usd)
+        await _lock_branch_coin(strongest.bot_name)
+        log.info(
+            f"[TREE] 🔒🌟 {strongest.bot_name} ({strongest.product_id}) proved itself the strongest of "
+            f"{len(siblings)} siblings under {parent} at ${strongest.allocated_usd:,.2f} - permanently "
+            f"locked on {strongest.product_id}, will never coin-switch again"
+        )
 
 
 async def _record_floor_breach(bot_name: str):
@@ -743,11 +809,16 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
     # claimed set (this branch's own coin included), so it can never
     # "switch" to itself.
     #
-    # The root (BTC) is the one exception: it's the permanent foundation
-    # the whole tree grows out of, not a branch that wanders - per the
-    # account owner, it always stays on BTC-USD regardless of how it exits.
+    # The root (BTC) is the permanent foundation the whole tree grows out
+    # of, not a branch that wanders - per the account owner, it always
+    # stays on BTC-USD regardless of how it exits. A non-root branch that
+    # has separately earned a permanent coin-lock (see COIN_LOCK_KEY_PREFIX
+    # / _check_and_lock_strongest_siblings - it proved itself the
+    # strongest of its siblings at some point) behaves the same way from
+    # here on: it stays on its current coin forever too.
     new_product_id = new_product_atr = None
-    if bot_name != ROOT_BOT_NAME:
+    branch_is_locked = bot_name != ROOT_BOT_NAME and await _is_coin_locked(bot_name)
+    if bot_name != ROOT_BOT_NAME and not branch_is_locked:
         new_product_id, new_product_atr = await find_most_volatile_unclaimed_coin(session)
 
     async with AsyncSessionLocal() as db:
@@ -798,6 +869,8 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
             log.warning(f"[TREE] {bot_name}: {new_product_id} was claimed by another branch first (race) - staying on {old_product_id} this cycle")
     elif row is not None and bot_name == ROOT_BOT_NAME:
         log.info(f"[TREE] {bot_name}: root stays on {row.product_id} by design (the tree's permanent foundation)")
+    elif row is not None and branch_is_locked:
+        log.info(f"[TREE] {bot_name}: stays on {row.product_id} - permanently locked in as the strongest of its siblings")
     elif row is not None:
         log.info(f"[TREE] {bot_name}: no unclaimed coin available to switch to - staying on {row.product_id}")
 
@@ -1032,6 +1105,14 @@ def run():
                 await _check_and_sweep_stranded_dust()
             except Exception as e:
                 log.warning(f"[TREE] dust sweep check failed: {e}")
+
+        # Cheap (one DB read, no external calls) and idempotent once a
+        # branch is locked - safe to check every scan rather than on a
+        # separate throttle timer.
+        try:
+            await _check_and_lock_strongest_siblings()
+        except Exception as e:
+            log.warning(f"[TREE] strongest-sibling lock check failed: {e}")
 
     while True:
         try:
