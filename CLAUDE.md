@@ -509,6 +509,20 @@ also reads/uses USDC" or "convert back to USD, the bot's view is
 correct as-is." Account owner's choice, for now: convert back to USD
 manually when this happens.
 
+### Spawn threshold lowered again, $150 → $100
+
+Per the account owner's real observation ("I need more than just 5 up
+here... add to the tree"): only 5 branches existed and none had crossed
+the $150 spawn tier yet, so nothing new had spawned in a while.
+`UNLOCK_TIER_USD` dropped to $100 (2x the $50 seed) - `PRIOR_UNLOCK_TIER_USD`
+updated to $150 so the existing `_lower_existing_unlock_tiers()`
+migration (built for the earlier $300→$150 drop) retroactively applies
+the new tier to any branch still waiting on the old $150 bar for its
+first spawn, without touching one that already progressed past it. This
+leaves only a $50 buffer in the parent after each spawn (thinner than
+the $150 tier's $100 buffer) but is still real - a branch can't go
+net-negative from spawning, just closer to its own floor.
+
 ### BTC root is never manually sellable, and the ROOT badge fix
 
 Per the account owner's explicit request, spotted from the dashboard

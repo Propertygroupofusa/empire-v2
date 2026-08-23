@@ -79,14 +79,24 @@ SEED_USD = engine._safe_float_env("TREE_SEED_USD", "50")
 # wins for STX/BTC to cross - weeks, not days. $150 (3x the $50 seed
 # instead of 6x) roughly halves that, while still leaving the parent a real
 # $100 buffer after each spawn, not a razor-thin one.
-UNLOCK_TIER_USD = engine._safe_float_env("TREE_UNLOCK_TIER_USD", "150")
+#
+# Lowered again to $100 (2x the $50 seed) per the account owner's
+# explicit request ("I need more than just 5 up here... add to the
+# tree") - only 5 branches existed and none had crossed $150 yet, so
+# nothing was spawning. $100 leaves only a $50 buffer after each spawn
+# (exactly the seed amount) - thinner than the $150 tier's $100 buffer,
+# but still real: a branch can't go net-negative from spawning, just
+# closer to its own floor. Real branches sitting at the old $150 tier
+# get migrated down automatically on next startup (see
+# _lower_existing_unlock_tiers) rather than waiting for their next sale.
+UNLOCK_TIER_USD = engine._safe_float_env("TREE_UNLOCK_TIER_USD", "100")
 # The value being replaced above - used once at coordinator startup (see
 # _lower_existing_unlock_tiers) to retroactively apply the new, lower tier
 # to branches that already exist and are still waiting to cross their
-# ORIGINAL $300 threshold. Only ever a one-time backstop for branches
-# created before this change; never touches a branch that already crossed
-# its first tier (its next_unlock_tier would no longer be exactly $300).
-PRIOR_UNLOCK_TIER_USD = 300.0
+# PRIOR threshold. Only ever a one-time backstop for branches created
+# before this change; never touches a branch that already crossed its
+# first tier (its next_unlock_tier would no longer be exactly this value).
+PRIOR_UNLOCK_TIER_USD = 150.0
 BRANCH_FLOOR_TIER = engine._safe_float_env("TREE_BRANCH_FLOOR_TIER", "50")
 COORDINATOR_SCAN_SECONDS = engine._safe_int_env("TREE_COORDINATOR_SCAN_SECONDS", "20")
 
