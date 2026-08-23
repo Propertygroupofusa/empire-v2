@@ -24,6 +24,7 @@ import aiohttp
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db, AsyncSessionLocal
@@ -732,6 +733,78 @@ async def close_family_tree_branch(bot_name: str):
         "bot_name": bot_name,
         "allocated_usd": round(updated.allocated_usd, 2) if updated else None,
         "product_id": updated.product_id if updated else None,
+    }
+
+
+@router.post("/family-tree-status/spawn-branch", dependencies=[Depends(require_admin_key)])
+async def spawn_family_tree_branch(db: AsyncSession = Depends(get_db)):
+    """Manually starts a brand-new $50 branch right now, on demand -
+    per the account owner, the same "$50 in, let it grow, swap coins,
+    repeat" cycle every branch already runs, just kicked off immediately
+    instead of waiting for an existing branch to organically earn its way
+    to the next spawn tier.
+
+    Funded from real currently-UNALLOCATED cash only (real Coinbase
+    balance minus locked_usd minus every existing branch's own tracked
+    allocated_usd) - never carved out of an existing branch's balance the
+    way an organic parent-triggered spawn is. Refuses outright if there
+    isn't at least SEED_USD of real free cash sitting around, rather than
+    silently shorting an existing branch to make up the difference.
+
+    The new branch is inserted as a root-level child (same as any organic
+    spawn from BTC) and immediately eligible to contest the throne against
+    its siblings - see _check_and_lock_strongest_siblings(). No thread
+    needs to be started here: the coordinator's own scan loop picks up any
+    branch row without a running thread within COORDINATOR_SCAN_SECONDS."""
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+
+    tree = crypto_family_tree_bot_module
+    engine = tree.engine
+
+    branches_result = await db.execute(select(CryptoTreeBranch))
+    branches = list(branches_result.scalars().all())
+    allocated_sum = sum(b.allocated_usd for b in branches)
+
+    async with engine.aiohttp.ClientSession() as session:
+        real_balance, err = await engine.get_usd_balance(session)
+    if real_balance is None:
+        raise HTTPException(status_code=503, detail=f"Could not fetch the real Coinbase balance to confirm funds ({err}) - try again")
+
+    locked_usd = await tree.get_locked_usd()
+    unallocated = real_balance - locked_usd - allocated_sum
+    if unallocated < tree.SEED_USD:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Not enough real unallocated cash to seed a new ${tree.SEED_USD:.0f} branch - only "
+                f"${unallocated:.2f} is currently free (real balance ${real_balance:.2f} - locked "
+                f"${locked_usd:.2f} - already allocated across branches ${allocated_sum:.2f})"
+            ),
+        )
+
+    next_product = await tree.get_next_eligible_product_id()
+    if next_product is None:
+        raise HTTPException(status_code=400, detail="No eligible coin left unclaimed to start a new branch on")
+
+    child_name = f"crypto_tree_{next_product.lower().replace('-', '_')}"
+    db.add(CryptoTreeBranch(
+        bot_name=child_name, product_id=next_product, parent_bot_name=tree.ROOT_BOT_NAME,
+        allocated_usd=tree.SEED_USD, next_unlock_tier=tree.UNLOCK_TIER_USD, equity_floor=0.0,
+    ))
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=f"{next_product} was just claimed by another branch - try again")
+
+    log.info(f"[dashboard] 🌱 Manually spawned {child_name} ({next_product}) with ${tree.SEED_USD:.2f} seed, funded from real unallocated cash")
+    return {
+        "status": "spawned",
+        "bot_name": child_name,
+        "product_id": next_product,
+        "seed_usd": round(tree.SEED_USD, 2),
+        "remaining_unallocated": round(unallocated - tree.SEED_USD, 2),
     }
 
 

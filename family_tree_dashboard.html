@@ -285,7 +285,10 @@
         </div>
     </div>
 
-    <div class="section-title">Tree</div>
+    <div class="section-title" style="display:flex; justify-content:space-between; align-items:center;">
+        <span>Tree</span>
+        <button class="sell-btn" style="width:auto; margin-top:0;" onclick="spawnBranch(this)">🌱 Start new $50 branch</button>
+    </div>
     <div class="tree-canvas"><div class="tree-canvas-inner" id="tree"></div></div>
 </div>
 
@@ -465,6 +468,29 @@ async function sellBranch(botName, btn) {
         alert('Sell failed: ' + e.message);
         btn.disabled = false;
         btn.textContent = 'Sell now & find next coin';
+    }
+}
+
+async function spawnBranch(btn) {
+    if (!confirm('Start a brand-new $50 branch right now, on demand? This is funded from real currently-unallocated cash only (never taken from an existing branch), and places a real trade once it buys in.')) return;
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Starting…';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/family-tree-status/spawn-branch', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        alert(`New branch started: ${data.bot_name} on ${data.product_id}, seeded with ${fmtUsd(data.seed_usd)}. It'll appear in the tree within about 20 seconds once its thread starts.`);
+        refresh();
+    } catch (e) {
+        alert('Could not start a new branch: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
     }
 }
 
