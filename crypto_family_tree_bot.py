@@ -70,12 +70,23 @@ ROOT_BOT_NAME = "crypto_btc_compound"  # same name the single-bot version used t
 ROOT_PRODUCT_ID = "BTC-USD"
 
 SEED_USD = engine._safe_float_env("TREE_SEED_USD", "50")
-# Lowered from the original $1,000 spec at the account owner's request:
-# starting from a $50 seed, a $1,000 bar meant realistically no branch
-# would spawn for a long time. $300 trades a real cost (each $50 seed is a
-# bigger bite out of a smaller milestone, so branches start thinner) for
-# branches actually spawning instead of the tree never growing.
-UNLOCK_TIER_USD = engine._safe_float_env("TREE_UNLOCK_TIER_USD", "300")
+# Lowered twice now, both times at the account owner's request, both times
+# for the same reason: too high a bar and branches take too long between
+# real wins to ever cross it, so the tree stops growing new coins. Original
+# spec was $1,000; that came down to $300; with the min-profit-dollar-floor
+# change also slowing how fast a small branch's balance grows (bigger
+# average win needed per trade), $300 was projected to take ~40-60 real
+# wins for STX/BTC to cross - weeks, not days. $150 (3x the $50 seed
+# instead of 6x) roughly halves that, while still leaving the parent a real
+# $100 buffer after each spawn, not a razor-thin one.
+UNLOCK_TIER_USD = engine._safe_float_env("TREE_UNLOCK_TIER_USD", "150")
+# The value being replaced above - used once at coordinator startup (see
+# _lower_existing_unlock_tiers) to retroactively apply the new, lower tier
+# to branches that already exist and are still waiting to cross their
+# ORIGINAL $300 threshold. Only ever a one-time backstop for branches
+# created before this change; never touches a branch that already crossed
+# its first tier (its next_unlock_tier would no longer be exactly $300).
+PRIOR_UNLOCK_TIER_USD = 300.0
 BRANCH_FLOOR_TIER = engine._safe_float_env("TREE_BRANCH_FLOOR_TIER", "50")
 COORDINATOR_SCAN_SECONDS = engine._safe_int_env("TREE_COORDINATOR_SCAN_SECONDS", "20")
 
@@ -294,6 +305,45 @@ async def _ensure_product_id_unique_index():
         log.info("[TREE] product_id uniqueness enforced at the DB level - two branches can never claim the same coin")
     except Exception as e:
         log.warning(f"[TREE] could not add product_id uniqueness constraint: {e} - coin-claim races are not yet prevented at the DB level")
+
+
+async def _lower_existing_unlock_tiers():
+    """One-time backstop, safe to call on every startup: applies the new,
+    lower UNLOCK_TIER_USD to branches that were created under the old
+    PRIOR_UNLOCK_TIER_USD and are still waiting to cross it for their
+    FIRST spawn. Without this, only branches spawned AFTER this code
+    deploys would ever see the lower tier - every branch that already
+    existed (BTC, and whatever else was running before tonight) would
+    keep waiting on the old, higher bar forever, since next_unlock_tier is
+    a real value stored per-branch, not re-read from the env var each
+    cycle.
+
+    Deliberately only touches rows still sitting at exactly
+    PRIOR_UNLOCK_TIER_USD - a branch that already crossed its first tier
+    has a next_unlock_tier reflecting real further progress (e.g. $600,
+    from $300 + $300), and this must never claw that back down; it only
+    ever helps a branch that hasn't spawned yet reach its first spawn
+    sooner."""
+    if UNLOCK_TIER_USD >= PRIOR_UNLOCK_TIER_USD:
+        return
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(CryptoTreeBranch).where(CryptoTreeBranch.next_unlock_tier == PRIOR_UNLOCK_TIER_USD)
+            )
+            rows = result.scalars().all()
+            if not rows:
+                return
+            for row in rows:
+                row.next_unlock_tier = UNLOCK_TIER_USD
+            await db.commit()
+        log.info(
+            f"[TREE] 🪜 lowered {len(rows)} existing branch(es) still waiting on the old "
+            f"${PRIOR_UNLOCK_TIER_USD:,.0f} spawn tier down to the new ${UNLOCK_TIER_USD:,.0f}: "
+            f"{', '.join(r.bot_name for r in rows)}"
+        )
+    except Exception as e:
+        log.warning(f"[TREE] could not lower existing unlock tiers: {e}")
 
 
 async def find_most_volatile_unclaimed_coin(session):
@@ -852,6 +902,7 @@ def run():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(_ensure_product_id_unique_index())
+    loop.run_until_complete(_lower_existing_unlock_tiers())
 
     async def _scan():
         async with engine.aiohttp.ClientSession() as session:
