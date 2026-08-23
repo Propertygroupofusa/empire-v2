@@ -1285,7 +1285,8 @@ async def manual_open_prop_position(ticker: str):
 
         price_data = await pb.get_price_rsi(session, ticker)
         if price_data is None:
-            raise HTTPException(status_code=503, detail=f"Could not fetch a live price/RSI for {ticker} - try again")
+            reason = pb._price_rsi_last_failure.get(ticker, "unknown reason")
+            raise HTTPException(status_code=503, detail=f"Could not fetch a live price/RSI for {ticker}: {reason} - try again")
         price, rsi, trend = price_data["price"], price_data["rsi"], price_data["trend"]
 
         total_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in pb.open_prop_positions.values())

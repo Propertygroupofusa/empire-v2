@@ -446,33 +446,57 @@ def send_trade_alert(subject: str, body: str):
         log.warning(f"Trade alert email failed: {e}")
 
 
+_price_rsi_last_failure = {}
+
+
 async def get_price_rsi(session, symbol):
-    """Get price and RSI for futures proxy symbol, including SMA50 for mean reversion validation"""
+    """Get price and RSI for futures proxy symbol, including SMA50 for mean reversion validation.
+
+    Records the specific reason for the last failure per symbol in
+    _price_rsi_last_failure (HTTP status, bar count, etc.) - the automatic
+    scan cycle only ever checks truthiness of the return value and doesn't
+    need this, but the manual "Trade this" endpoint surfaces it in its
+    error response so a real fetch failure is diagnosable from the
+    dashboard itself, without needing server log access.
+    """
     try:
-        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=5Min&limit=50"
+        # feed=iex matches get_higher_tf_trend below - without an explicit
+        # feed, Alpaca's default depends on the account's data
+        # subscription tier, which previously made this endpoint
+        # inconsistent with the (working) 1-hour trend check right below it.
+        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=5Min&limit=50&feed=iex"
         async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
-                log.warning(f"Alpaca API error for {symbol}: HTTP {r.status}")
+                try:
+                    error_text = await r.text()
+                except Exception:
+                    error_text = "(could not read response)"
+                log.warning(f"Alpaca API error for {symbol}: HTTP {r.status}: {error_text[:200]}")
+                _price_rsi_last_failure[symbol] = f"Alpaca returned HTTP {r.status}: {error_text[:200]}"
                 return None
 
             try:
                 data = await r.json()
             except Exception as e:
                 log.warning(f"Failed to parse JSON for {symbol}: {type(e).__name__}: {e}")
+                _price_rsi_last_failure[symbol] = f"Could not parse Alpaca's response: {type(e).__name__}"
                 return None
 
             if not isinstance(data, dict):
                 log.warning(f"Invalid API response for {symbol}: expected dict, got {type(data).__name__}")
+                _price_rsi_last_failure[symbol] = f"Unexpected response shape from Alpaca: {type(data).__name__}"
                 return None
 
             bars = data.get("bars")
             if bars is None or (isinstance(bars, list) and len(bars) < 50):
                 bar_count = len(bars) if isinstance(bars, list) else 0
                 log.debug(f"Insufficient bars for {symbol}: got {bar_count}, need 50")
+                _price_rsi_last_failure[symbol] = f"Only {bar_count} of the required 50 5-min bars are available right now"
                 return None
 
             if not isinstance(bars, list):
                 log.warning(f"Invalid bars format for {symbol}: expected list, got {type(bars).__name__}")
+                _price_rsi_last_failure[symbol] = f"Unexpected bars format from Alpaca: {type(bars).__name__}"
                 return None
 
             closes = [b["c"] for b in bars]
@@ -493,9 +517,11 @@ async def get_price_rsi(session, symbol):
             # Momentum: price change over last 3 bars (shows direction/strength)
             momentum = ((price - closes[-3]) / closes[-3]) * 100 if closes[-3] > 0 else 0
 
+            _price_rsi_last_failure.pop(symbol, None)
             return {"price": price, "rsi": round(rsi, 1), "trend": trend, "momentum": round(momentum, 2), "sma50": sma50}
     except Exception as e:
         log.error(f"Price error {symbol}: {e}")
+        _price_rsi_last_failure[symbol] = f"{type(e).__name__}: {e}"
         return None
 
 

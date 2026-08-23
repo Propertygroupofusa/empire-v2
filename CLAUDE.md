@@ -722,6 +722,33 @@ never affected - that commits in its own block before this broken code
 runs - so no real trading data was lost, only analytics logging. Fixed
 by adding the missing import.
 
+**Real bug found and fixed: "Trade this" failed on USO with "Could not
+fetch a live price/RSI"**. Root cause was in `get_price_rsi()` in
+`prop_bot.py`, the function both the automatic scan cycle and the
+manual "Trade this" endpoint call: its request to Alpaca's 5-min bars
+endpoint never passed an explicit `feed` parameter, unlike its sibling
+`get_higher_tf_trend()` right below it (which passes `feed=iex` and was
+never seen to fail) - so its behavior depended on whatever feed Alpaca's
+default resolves to for the account's data-subscription tier, instead of
+being deterministic. Thinner-volume symbols like USO/GLD/SLV are far
+more likely to come up short of the required 50 five-minute bars on
+whichever feed that turned out to be than a heavily-traded symbol like
+SPY/QQQ. Fixed by adding `feed=iex` explicitly, matching the working
+sibling function.
+
+Separately, and regardless of the root cause above: `get_price_rsi()`'s
+failure path only ever returned bare `None` - the automatic cycle never
+needed more than that, but it meant the manual endpoint's error could
+only ever say "could not fetch," with the real reason (HTTP status, bar
+count, parse error) sitting in a Railway log this account owner has no
+way to hand over easily. Fixed by having `get_price_rsi()` record the
+specific reason for its last failure per symbol in the module-level
+`_price_rsi_last_failure` dict (cleared on the next success), which
+`POST /alpaca-overview/trade-this/{ticker}` now includes in its 503
+detail - so a future fetch failure is diagnosable straight from the
+dashboard's error alert, e.g. "Only 12 of the required 50 5-min bars are
+available right now" instead of a generic message.
+
 **Two-layer coin exclusion** (`get_effective_excluded_coins()` in
 `crypto_family_tree_bot.py`, checked by both `find_most_volatile_unclaimed_coin()`
 and `get_next_eligible_product_id()` before either ever runs):
