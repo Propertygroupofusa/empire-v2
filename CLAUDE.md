@@ -452,6 +452,47 @@ real branches that highlights on selection), not a chain of browser
 `prompt()` dialogs - per the account owner's explicit follow-up that
 typing an exact `bot_name` into a text prompt was too fiddly on mobile.
 
+### Real production crash found and fixed: duplicate locked-profit rows (MultipleResultsFound)
+
+A real Railway traceback surfaced this: `sqlalchemy.exc.MultipleResultsFound:
+Multiple rows were found when one or none was required`, raised from
+`scalar_one_or_none()`. Root cause: `_add_locked_usd()` did a plain
+"select, then insert-or-update" against the shared `trading_bot_state`
+table with no real DB-level uniqueness backing it - the model has
+always declared `bot_name = Column(String, unique=True, ...)`, but
+`Base.metadata.create_all()` only applies that constraint when CREATING
+a brand-new table; it's a no-op against `trading_bot_state`, which
+already existed from long before this locked-profit feature was added.
+Every branch runs as its own thread, and two branches skimming profit
+close enough together both saw "no row yet" and both inserted a real
+row for the same `LOCKED_PROFIT_STATE_KEY` - after that, every read of
+`locked_usd` (`get_locked_usd`, `_add_locked_usd`, `_subtract_locked_usd`
+- all `scalar_one_or_none()`) started crashing, which meant every
+branch's buy path (they all check `real_balance - locked_usd` before
+sizing a trade) could be failing on this same line.
+
+Fixed with three parts, each independently tested against the real
+crash scenario:
+1. `_dedupe_locked_profit_state()` - a one-time startup migration that
+   merges any existing duplicate rows by **summing** them (every dollar
+   in every duplicate row is real skimmed profit; discarding one would
+   make real money vanish from the ledger), keeping the oldest row as
+   the survivor.
+2. `_ensure_trading_bot_state_unique_index()` - adds the real DB-level
+   unique index the model always claimed to have, run right after the
+   dedupe above (a unique index can't be created while real duplicates
+   still exist) - protects every `TradingBotState.bot_name` key across
+   the whole app from this exact race recurring, not just locked profit.
+   If some other, unrelated key also has real duplicates this migration
+   doesn't know how to safely merge, it logs a warning and leaves the
+   constraint absent rather than guessing at a merge for data it
+   doesn't understand - same defensive pattern already used for
+   `crypto_tree_branches.product_id`'s own unique index.
+3. `_add_locked_usd()` itself now catches the real `IntegrityError` a
+   genuine race produces (once the index exists) and retries as a real
+   update against whichever row actually won the race, instead of
+   silently creating a second row.
+
 ### Alpaca-side unlock: cash-out only, no "add to a bucket"
 
 `alpaca_dashboard.html` has the same 🔓 Unlock button and

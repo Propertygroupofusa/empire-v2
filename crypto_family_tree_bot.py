@@ -418,6 +418,18 @@ async def get_locked_usd() -> float:
 
 
 async def _add_locked_usd(amount: float):
+    """Every branch runs as its own thread, and several can skim profit
+    into this same shared row within the same instant (confirmed live:
+    two real skims landing close enough together produced two rows with
+    the same bot_name, and every later scalar_one_or_none() read of this
+    key started raising MultipleResultsFound - see
+    _dedupe_locked_profit_state() below for the one-time cleanup this
+    caused). Now that a real DB-level unique index exists on
+    trading_bot_state.bot_name (see _ensure_trading_bot_state_unique_index),
+    a genuine race here raises IntegrityError on the second INSERT instead
+    of silently creating a duplicate row - caught below and retried as a
+    real update against whichever row actually won, so no dollars are
+    lost either way."""
     if amount <= 0:
         return
     async with AsyncSessionLocal() as db:
@@ -425,9 +437,21 @@ async def _add_locked_usd(amount: float):
         row = result.scalar_one_or_none()
         if row:
             row.base_capital += amount
-        else:
-            db.add(TradingBotState(bot_name=LOCKED_PROFIT_STATE_KEY, base_capital=amount, starting_capital=0.0))
-        await db.commit()
+            await db.commit()
+            return
+        db.add(TradingBotState(bot_name=LOCKED_PROFIT_STATE_KEY, base_capital=amount, starting_capital=0.0))
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            async with AsyncSessionLocal() as db2:
+                result2 = await db2.execute(select(TradingBotState).where(TradingBotState.bot_name == LOCKED_PROFIT_STATE_KEY))
+                row2 = result2.scalar_one_or_none()
+                if row2:
+                    row2.base_capital += amount
+                    await db2.commit()
+                else:
+                    log.warning(f"[TREE] _add_locked_usd race: lost ${amount:.2f} - row vanished between retry attempts")
 
 
 async def _subtract_locked_usd(amount: float) -> float:
@@ -718,6 +742,86 @@ async def _lower_existing_unlock_tiers():
         )
     except Exception as e:
         log.warning(f"[TREE] could not lower existing unlock tiers: {e}")
+
+
+async def _dedupe_locked_profit_state():
+    """One-time cleanup, safe to call on every startup: a real production
+    crash confirmed this actually happened - multiple branches (each its
+    own thread) can call _add_locked_usd() close enough together that
+    both read "no row yet" before either commit lands, and both insert a
+    real trading_bot_state row for LOCKED_PROFIT_STATE_KEY. From that
+    point every read of this key (get_locked_usd, _add_locked_usd,
+    _subtract_locked_usd - all scalar_one_or_none()) started raising
+    sqlalchemy.exc.MultipleResultsFound, which is not caught anywhere
+    upstream, so it took down whatever branch cycle touched it.
+
+    Every dollar in every duplicate row is real skimmed profit, so the
+    fix is a real sum, not "pick one and discard the rest" - discarding
+    would make real money vanish from the locked-profit ledger. Keeps the
+    oldest row (lowest id) as the survivor with the summed total,
+    deletes the rest."""
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(TradingBotState)
+                .where(TradingBotState.bot_name == LOCKED_PROFIT_STATE_KEY)
+                .order_by(TradingBotState.id)
+            )
+            rows = result.scalars().all()
+            if len(rows) <= 1:
+                return
+            total = sum(r.base_capital for r in rows)
+            survivor, dupes = rows[0], rows[1:]
+            individual = ", ".join(f"${r.base_capital:.2f}" for r in rows)
+            survivor.base_capital = total
+            for dupe in dupes:
+                await db.delete(dupe)
+            await db.commit()
+        log.warning(
+            f"[TREE] 🔧 real duplicate locked-profit rows found and merged ({individual} -> "
+            f"${total:.2f} total, no dollars lost) - this is what was crashing get_locked_usd()"
+        )
+    except Exception as e:
+        log.warning(f"[TREE] could not dedupe locked-profit state: {e}")
+
+
+async def _ensure_trading_bot_state_unique_index():
+    """One-time safety migration, safe to call on every startup: the
+    TradingBotState model has always declared bot_name unique=True, but
+    Base.metadata.create_all() only applies that to a table at CREATE
+    time - it never retroactively adds a missing constraint to a table
+    that already existed, which is exactly why the real duplicate rows
+    _dedupe_locked_profit_state() just cleaned up were able to exist in
+    the first place. Adds the real DB-level index the model always
+    claimed to have, so the same race can never recreate a duplicate for
+    ANY bot_name in this shared table again - not just the locked-profit
+    key, every caller across the app that keys off TradingBotState.bot_name.
+
+    Run this AFTER the dedupe above - a unique index cannot be created
+    while real duplicates still exist. If some other, unrelated bot_name
+    also has duplicates this migration doesn't know how to safely merge,
+    this logs a warning and leaves the constraint absent rather than
+    guessing at a merge for data it doesn't understand - same defensive
+    pattern as _ensure_product_id_unique_index above."""
+    try:
+        async with AsyncSessionLocal() as db:
+            dupes = await db.execute(text(
+                "SELECT bot_name, COUNT(*) FROM trading_bot_state "
+                "GROUP BY bot_name HAVING COUNT(*) > 1"
+            ))
+            dupe_rows = dupes.fetchall()
+            if dupe_rows:
+                log.warning(f"[TREE] duplicate trading_bot_state rows still exist for other keys ({dupe_rows}) - "
+                            f"skipping unique index, this exact race is still possible for those keys")
+                return
+            await db.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_trading_bot_state_bot_name_unique "
+                "ON trading_bot_state (bot_name)"
+            ))
+            await db.commit()
+        log.info("[TREE] trading_bot_state.bot_name uniqueness enforced at the DB level - this exact crash can't recur")
+    except Exception as e:
+        log.warning(f"[TREE] could not add trading_bot_state uniqueness constraint: {e}")
 
 
 async def _migrate_matic_to_pol():
@@ -1484,6 +1588,8 @@ def run():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(_ensure_product_id_unique_index())
+    loop.run_until_complete(_dedupe_locked_profit_state())
+    loop.run_until_complete(_ensure_trading_bot_state_unique_index())
     loop.run_until_complete(_migrate_matic_to_pol())
     loop.run_until_complete(_lower_existing_unlock_tiers())
 
