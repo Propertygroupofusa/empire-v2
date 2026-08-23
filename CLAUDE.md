@@ -522,10 +522,21 @@ buys (see below), so this is no longer purely a shadow-mode diagnostic.
 and `get_next_eligible_product_id()` before either ever runs):
 
 1. **`MANUAL_EXCLUDED_COINS`** - `{STX-USD, BLUR-USD, UNI-USD, DOT-USD}`,
-   set once by the account owner's explicit real-money decision after
-   the first backtest run (STX-USD was dead last: -44.1% ROI, 21.6% win
-   rate). Permanent - the automatic rule below never touches this set;
-   only another explicit decision like this one can.
+   the account owner's explicit real-money starting decision after the
+   first backtest run (STX-USD was dead last: -44.1% ROI, 21.6% win
+   rate). Per a LATER explicit choice, this is not a one-way permanent
+   blacklist either - see `_manually_excluded_still_excluded()`: a coin
+   in this starting set stays excluded only until it clears the SAME
+   bar the automatic layer below needs to self-heal (its last
+   `AUTO_EXCLUDE_RUN_WINDOW` real backtest runs all positive-ROI), then
+   becomes tradable again. The default is the opposite of the automatic
+   rule's default though: a coin here with fewer than the window's
+   worth of real runs on record STAYS excluded (the original decision
+   needs real positive evidence to be lifted, not just an absence of
+   bad evidence) - whereas a coin the automatic rule has never flagged
+   is never excluded in the first place just for lacking history. The
+   starting SET itself (which 4 coins begin excluded) still only ever
+   changes via another explicit decision like the original one.
 2. **Automatic layer** - per the account owner's explicit choice
    ("fully automatic... hands-off, no check before it takes effect"),
    the coordinator (`run()`'s `_scan()`) re-runs the real backtest on
@@ -538,7 +549,9 @@ and `get_next_eligible_product_id()` before either ever runs):
    one-way verdict. Requiring several consecutive bad runs (not one) is
    deliberate: DOT-USD and UNI-USD swung from -38.8%/-40.0% to
    -14.2%/-12.4% in the same afternoon in real testing - a single run
-   is too noisy to act on alone.
+   is too noisy to act on alone. This same rule can also re-exclude a
+   coin that healed out of the manual list above if it turns bad again
+   later - nothing in either layer is a one-way verdict.
 
 A branch already holding a coin at the moment it becomes excluded
 (manually or automatically) is never force-sold - it keeps running

@@ -204,10 +204,15 @@ COIN_FAMILY_TREE = [
 # bot's own actual rules against 30 real days of Coinbase history) showed
 # these four as the worst performers of the whole family - STX-USD dead
 # last at -44.1% ROI with a 21.6% win rate, followed by BLUR/UNI/DOT all
-# similarly deep negative. Per the account owner's explicit, one-time
-# choice, these are PERMANENTLY excluded - never reconsidered by the
-# automatic rule below, only ever changed by another explicit decision
-# like this one.
+# similarly deep negative. Per the account owner's original explicit
+# choice these started out excluded - but per a later explicit choice,
+# NOT a permanent blacklist: a coin in this set becomes tradable again
+# once it clears the same bar an auto-excluded coin needs to self-heal
+# (see _manually_excluded_still_excluded() below) - same contestable
+# philosophy as everything else in this system, just starting from
+# "excluded" instead of "included" by default. This set itself never
+# shrinks or grows on its own though - only another explicit decision
+# adds or removes a coin from the starting list.
 MANUAL_EXCLUDED_COINS = {"STX-USD", "BLUR-USD", "UNI-USD", "DOT-USD"}
 
 # Per the account owner's explicit choice: the coordinator (see run()'s
@@ -250,13 +255,46 @@ async def _compute_auto_excluded_coins() -> set:
     return auto_excluded
 
 
+async def _manually_excluded_still_excluded() -> set:
+    """Per the account owner's later explicit choice: MANUAL_EXCLUDED_COINS
+    is no longer a one-way permanent blacklist. A coin in that starting
+    set stays excluded only until it clears the SAME bar an auto-excluded
+    coin needs to self-heal - its last AUTO_EXCLUDE_RUN_WINDOW real
+    backtest runs all positive-ROI - at which point it becomes tradable
+    again, same as anything else in this system.
+
+    The default is deliberately the OPPOSITE of _compute_auto_excluded_coins:
+    a manually-excluded coin with fewer than AUTO_EXCLUDE_RUN_WINDOW real
+    runs on record STAYS excluded (not enough evidence yet to lift the
+    original decision), whereas a coin with no history at all is never
+    auto-excluded in the first place. Nothing here is a one-way verdict
+    either direction: a coin that heals out of this set can still get
+    caught by _compute_auto_excluded_coins later if its performance turns
+    negative again, exactly like any other coin."""
+    still_excluded = set()
+    async with AsyncSessionLocal() as db:
+        for product_id in MANUAL_EXCLUDED_COINS:
+            result = await db.execute(
+                select(CryptoBacktestRun.roi_pct_of_spend)
+                .where(CryptoBacktestRun.product_id == product_id)
+                .order_by(desc(CryptoBacktestRun.run_at))
+                .limit(AUTO_EXCLUDE_RUN_WINDOW)
+            )
+            recent = result.scalars().all()
+            healed = len(recent) >= AUTO_EXCLUDE_RUN_WINDOW and all(roi > 0 for roi in recent)
+            if not healed:
+                still_excluded.add(product_id)
+    return still_excluded
+
+
 async def get_effective_excluded_coins() -> set:
     """The real, live set of coins no branch will ever be offered right
-    now - MANUAL_EXCLUDED_COINS (permanent, only changed by an explicit
-    human decision) unioned with whatever the automatic backtest rule
-    currently flags (contestable - can add or remove coins on every
-    scheduled run, see _compute_auto_excluded_coins)."""
-    return MANUAL_EXCLUDED_COINS | await _compute_auto_excluded_coins()
+    now - whichever of MANUAL_EXCLUDED_COINS hasn't yet healed (see
+    _manually_excluded_still_excluded) unioned with whatever the
+    automatic backtest rule currently flags on any coin (contestable -
+    can add or remove coins on every scheduled run, see
+    _compute_auto_excluded_coins)."""
+    return await _manually_excluded_still_excluded() | await _compute_auto_excluded_coins()
 
 
 async def _run_scheduled_backtest_and_update_exclusions():
