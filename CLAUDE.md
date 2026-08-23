@@ -589,6 +589,35 @@ buys (see below), so this is no longer purely a shadow-mode diagnostic.
   which needs different historical data access and a different exit-rule
   set (`alpaca_mean_reversion.py`'s `should_exit_position`).
 
+### Stock/ETF selection backtest (alpaca_selection_backtest.py)
+
+The Alpaca-side counterpart to the crypto backtest above, per the
+account owner's explicit request. Same "replay the bot's own real rules
+on real history" approach - pulls real historical 15-min bars from
+Alpaca's market-data API for every symbol `prop_bot.py`/
+`alpaca_swing_bot.py` actually trade (`SPY`, `QQQ`, `DIA`, `IWM`, `GLD`,
+`USO`, `SLV`, plus the new 1x inverse ETFs `SH`/`PSQ`/`DOG`/`RWM`) and
+replays `alpaca_mean_reversion.py`'s real `should_exit_position()` -
+importing the live function, not reimplementing it.
+
+**Long-only, deliberately**: `validate_dual_direction()` can also flag a
+SHORT entry, but shorting is disabled on the real Alpaca account
+(`get_account_shorting_enabled()` in `prop_bot.py` - every real short
+attempt has failed live with "account is not allowed to short"). A
+short-side backtest would be purely hypothetical and couldn't inform any
+real decision, so this only replays what's genuinely executable today -
+entries trigger on RSI < 40, matching `validate_dual_direction`'s long
+branch.
+
+- Manual run: `POST /api/trading-dashboard/alpaca-selection-backtest`
+  (admin-key gated, ~30-60s) and its viewer,
+  `/alpaca-selection-backtest-view` (reuses the same saved admin key as
+  the Alpaca dashboard). Cross-linked with the crypto backtest page and
+  both dashboards, same pattern as the crypto side.
+- Shadow mode only - never places a real order, and nothing currently
+  reads its results automatically (no auto-exclusion layer on this side
+  yet, unlike the crypto side's two-layer system above).
+
 **Two-layer coin exclusion** (`get_effective_excluded_coins()` in
 `crypto_family_tree_bot.py`, checked by both `find_most_volatile_unclaimed_coin()`
 and `get_next_eligible_product_id()` before either ever runs):

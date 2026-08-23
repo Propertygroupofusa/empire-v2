@@ -62,6 +62,12 @@ except Exception as e:
     log.warning(f"crypto_selection_backtest not importable, /crypto-selection-backtest will report unavailable: {e}")
     crypto_selection_backtest_module = None
 
+try:
+    import alpaca_selection_backtest as alpaca_selection_backtest_module
+except Exception as e:
+    log.warning(f"alpaca_selection_backtest not importable, /alpaca-selection-backtest will report unavailable: {e}")
+    alpaca_selection_backtest_module = None
+
 ALPACA_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
@@ -1024,6 +1030,25 @@ async def run_crypto_selection_backtest():
     if crypto_selection_backtest_module is None:
         raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
     return await crypto_selection_backtest_module.run_full_backtest()
+
+
+@router.post("/alpaca-selection-backtest", dependencies=[Depends(require_admin_key)])
+async def run_alpaca_selection_backtest():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    The Alpaca-side counterpart to /crypto-selection-backtest above, per
+    the account owner's explicit request. Replays alpaca_mean_reversion.py's
+    own real target/stop/breakeven/giveback rules (importing the actual
+    live function, not reimplementing it) against real historical Alpaca
+    bars for every symbol prop_bot.py/alpaca_swing_bot.py actually trade
+    (SPY, QQQ, DIA, IWM, GLD, USO, SLV, plus the 1x inverse ETFs
+    SH/PSQ/DOG/RWM), long-only - shorting is disabled on the real
+    account, so a short-side backtest would be purely hypothetical.
+
+    Pulls real historical data from Alpaca's market-data API concurrently
+    across 11 symbols - can take up to ~60 seconds."""
+    if alpaca_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+    return await alpaca_selection_backtest_module.run_full_backtest()
 
 
 @router.get("/alpaca-overview", dependencies=[Depends(require_admin_key)])

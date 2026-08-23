@@ -1374,6 +1374,21 @@ async def serve_crypto_selection_backtest():
     return FileResponse(page_path, media_type="text/html")
 
 
+@app.get("/alpaca-selection-backtest-view")
+async def serve_alpaca_selection_backtest():
+    """Serve the Alpaca-side counterpart to /crypto-selection-backtest-view -
+    a read-only diagnostic that replays prop_bot.py/alpaca_swing_bot.py's
+    own real rules against real historical Alpaca data (SPY, QQQ, DIA,
+    IWM, GLD, USO, SLV, plus the 1x inverse ETFs) to rank them by
+    backtested ROI. Gated by X-Admin-Key on the
+    /api/trading-dashboard/alpaca-selection-backtest endpoint it calls.
+    Does not touch live trading."""
+    page_path = os.path.join(os.path.dirname(__file__), "alpaca_selection_backtest.html")
+    if not os.path.exists(page_path):
+        raise HTTPException(status_code=404, detail="Backtest page not found")
+    return FileResponse(page_path, media_type="text/html")
+
+
 @app.get("/alpaca-dashboard")
 async def serve_alpaca_dashboard():
     """Serve the prop_bot.py (Alpaca) overview dashboard - same focused,

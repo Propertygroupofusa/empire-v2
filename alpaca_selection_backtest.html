@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>📊 Coin Selection Backtest - Shadow Mode</title>
+<title>📊 Stock/ETF Selection Backtest - Shadow Mode</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -46,35 +46,27 @@
     table { width: 100%; border-collapse: collapse; margin-top: 20px; background: var(--panel); border-radius: 10px; overflow: hidden; box-shadow: var(--shadow); }
     th, td { padding: 10px 14px; text-align: right; border-bottom: 1px solid var(--border); font-size: 0.88em; }
     th:first-child, td:first-child { text-align: left; }
-    th:last-child, td:last-child { text-align: center; }
     th { background: #eef1f7; color: var(--text-dim); font-weight: 700; text-transform: uppercase; font-size: 0.72em; letter-spacing: 0.4px; }
-    tr.stx-row { background: var(--gold-bg); }
     .pos { color: var(--green); font-weight: 700; }
     .neg { color: var(--red); font-weight: 700; }
     .skipped { margin-top: 20px; font-size: 0.8em; color: var(--text-dim); }
     .skipped summary { cursor: pointer; font-weight: 600; }
-    .trade-btn {
-        padding: 6px 12px; border: none; border-radius: 6px; font-size: 0.82em; font-weight: 700;
-        cursor: pointer; background: var(--green); color: #fff; white-space: nowrap;
-    }
-    .trade-btn:disabled { opacity: 0.55; cursor: default; }
-    .trade-note { font-size: 0.78em; color: var(--text-dim); margin-top: 20px; }
 </style>
 </head>
 <body>
 <div class="container">
     <div class="header">
-        <h1>📊 Coin Selection Backtest</h1>
-        <p>SHADOW MODE — replays the live bot's real target/stop/breakeven/giveback rules against each coin's real Coinbase history. Does not touch live trading or place any orders.</p>
-        <p style="margin-top: 8px;"><a href="/family-tree-dashboard" style="color: var(--navy); font-weight: 600;">🌳 Go to the live Family Tree dashboard →</a> for real balances, live profit, and the Sell button on your actual open positions - this page only tests hypothetical historical trades across all 27 candidate coins, most of which aren't currently held.</p>
-        <p style="margin-top: 4px; font-size: 0.85em;"><a href="/alpaca-selection-backtest-view" style="color: var(--navy);">📈 Stock/ETF selection backtest →</a></p>
+        <h1>📊 Stock/ETF Selection Backtest</h1>
+        <p>SHADOW MODE — replays prop_bot.py/alpaca_swing_bot.py's real target/stop/breakeven/giveback rules, long-only, against each symbol's real Alpaca history. Does not touch live trading or place any orders.</p>
+        <p style="margin-top: 8px;"><a href="/alpaca-dashboard" style="color: var(--navy); font-weight: 600;">📈 Go to the live Alpaca dashboard →</a> for real balances, live positions, and Close buttons on your actual open trades - this page only tests hypothetical historical trades.</p>
+        <p style="margin-top: 4px; font-size: 0.85em;"><a href="/crypto-selection-backtest-view" style="color: var(--navy);">📊 Coin selection backtest →</a></p>
     </div>
 
     <div class="note">
-        <strong>What this measures:</strong> for each coin the family tree bot is eligible to trade, this pulls real historical hourly candles from Coinbase and simulates buying/selling using the exact same rules the live bot uses (target %, -2% stop, breakeven ratchet, $3.75 peak-profit giveback, real fees) — then ranks coins by what that strategy would actually have returned. This does not change what the live bot buys; it's a read-only report to inform that decision.
+        <strong>What this measures:</strong> for each stock/ETF prop_bot.py and alpaca_swing_bot.py are eligible to trade — SPY, QQQ, DIA, IWM, GLD, USO, SLV, plus the 1x inverse ETFs SH/PSQ/DOG/RWM — this pulls real historical 15-minute bars from Alpaca and simulates buying/selling using the exact same rules the live bot uses (RSI &lt; 40 entry, +2% target, -1.5% stop, breakeven ratchet, 0.5% peak-profit giveback), then ranks them by what that strategy would actually have returned. <strong>Long-only</strong>: shorting is disabled on the real account, so a short-side backtest would be purely hypothetical. This does not change what the live bot buys; it's a read-only report.
     </div>
 
-    <button class="run-btn" id="runBtn" onclick="runBacktest()">▶ Run Backtest (real data, ~30-90 seconds)</button>
+    <button class="run-btn" id="runBtn" onclick="runBacktest()">▶ Run Backtest (real data, ~30-60 seconds)</button>
     <div id="status"></div>
 
     <div id="results"></div>
@@ -103,14 +95,14 @@ async function runBacktest() {
     const statusEl = document.getElementById('status');
     const resultsEl = document.getElementById('results');
     btn.disabled = true;
-    btn.textContent = 'Running... (pulling real Coinbase history for ~27 coins)';
+    btn.textContent = 'Running... (pulling real Alpaca history for 11 symbols)';
     statusEl.textContent = '';
     statusEl.className = '';
     resultsEl.innerHTML = '';
 
     try {
         const key = getAdminKey();
-        const res = await fetch(API_BASE + '/crypto-selection-backtest', {
+        const res = await fetch(API_BASE + '/alpaca-selection-backtest', {
             method: 'POST',
             headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
         });
@@ -122,84 +114,50 @@ async function runBacktest() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         renderResults(data);
-        statusEl.textContent = `Tested ${data.coins_tested} coins over ${data.backtest_days} days, ${data.coins_with_results} produced real trades, $${data.spend_per_trade} redeployed per trade.`;
+        statusEl.textContent = `Tested ${data.coins_tested} symbols over ${data.backtest_days} days, ${data.coins_with_results} produced real trades, $${data.spend_per_trade} redeployed per trade.`;
     } catch (e) {
         statusEl.textContent = 'Error: ' + e.message;
         statusEl.className = 'error';
     } finally {
         btn.disabled = false;
-        btn.textContent = '▶ Run Backtest (real data, ~30-90 seconds)';
+        btn.textContent = '▶ Run Backtest (real data, ~30-60 seconds)';
     }
 }
 
 function renderResults(data) {
     const resultsEl = document.getElementById('results');
     if (!data.ranked || data.ranked.length === 0) {
-        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No coins produced usable backtest results.</p>';
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No symbols produced usable backtest results.</p>';
         return;
     }
     let rows = data.ranked.map(r => {
-        const isStx = r.product_id === 'STX-USD';
         const pnlClass = r.total_pnl >= 0 ? 'pos' : 'neg';
         const roiClass = r.roi_pct_of_spend >= 0 ? 'pos' : 'neg';
-        const rowId = 'row-' + r.product_id.replace(/[^A-Z0-9]/gi, '-');
-        return `<tr class="${isStx ? 'stx-row' : ''}" id="${rowId}">
-            <td>${r.product_id}${isStx ? ' 👈' : ''}</td>
+        return `<tr>
+            <td>${r.product_id}</td>
             <td>${r.num_trades}</td>
             <td>${r.win_rate.toFixed(1)}%</td>
             <td class="${pnlClass}">${fmtUsd(r.total_pnl)}</td>
             <td class="${roiClass}">${r.roi_pct_of_spend >= 0 ? '+' : ''}${r.roi_pct_of_spend.toFixed(1)}%</td>
             <td>${r.avg_trade_pct >= 0 ? '+' : ''}${r.avg_trade_pct.toFixed(2)}%</td>
-            <td><button class="trade-btn" onclick="tradeCoin('${r.product_id}', this)">Trade this</button></td>
         </tr>`;
     }).join('');
 
     let skippedHtml = '';
     if (data.skipped && data.skipped.length > 0) {
         const items = data.skipped.map(s => `<li>${s.product_id}: ${s.reason}</li>`).join('');
-        skippedHtml = `<details class="skipped"><summary>${data.skipped.length} coin(s) skipped</summary><ul>${items}</ul></details>`;
+        skippedHtml = `<details class="skipped"><summary>${data.skipped.length} symbol(s) skipped</summary><ul>${items}</ul></details>`;
     }
 
     resultsEl.innerHTML = `
         <table>
             <thead><tr>
-                <th>Coin</th><th>Trades</th><th>Win rate</th><th>Total P&amp;L</th><th>ROI on $${data.spend_per_trade}</th><th>Avg / trade</th><th>Action</th>
+                <th>Symbol</th><th>Trades</th><th>Win rate</th><th>Total P&amp;L</th><th>ROI on $${data.spend_per_trade}</th><th>Avg / trade</th>
             </tr></thead>
             <tbody>${rows}</tbody>
         </table>
-        <p class="trade-note">"Trade this" starts a real new $50 branch on that coin right now, using your actual unallocated Coinbase cash - same as the dashboard's "Start new $50 branch" button, just pointed at a coin you picked instead of the bot's auto-pick. Refused if the coin is already held by another branch, currently excluded, or there isn't enough real free cash.</p>
         ${skippedHtml}
     `;
-}
-
-async function tradeCoin(productId, btn) {
-    const originalText = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = 'Starting...';
-    try {
-        const key = getAdminKey();
-        const res = await fetch(API_BASE + '/family-tree-status/spawn-branch/' + encodeURIComponent(productId), {
-            method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
-        });
-        const data = await res.json();
-        if (!res.ok) {
-            throw new Error(data.detail || `HTTP ${res.status}`);
-        }
-        btn.textContent = '✓ Started';
-        btn.style.background = 'var(--navy)';
-        const row = document.getElementById('row-' + productId.replace(/[^A-Z0-9]/gi, '-'));
-        if (row) {
-            const note = document.createElement('div');
-            note.style.cssText = 'font-size:0.78em;color:var(--text-dim);margin-top:2px;';
-            note.textContent = `$${data.seed_usd} branch started (${data.bot_name})`;
-            row.querySelector('td:last-child').appendChild(note);
-        }
-    } catch (e) {
-        btn.disabled = false;
-        btn.textContent = originalText;
-        alert('Could not start a branch on ' + productId + ': ' + e.message);
-    }
 }
 </script>
 </body>
