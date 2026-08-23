@@ -477,13 +477,16 @@ knowing about, not yet changed).
 `_check_and_sweep_stranded_dust()` locks genuinely-too-small-to-trade
 real cash (below `MIN_TRADE_USD`, unchanged) into `locked_usd` instead
 of leaving it dead forever - see `DUST_STUCK_HOURS`. Per the account
-owner's explicit follow-up ("needs to go into the lock profit ASAP"),
-lowered from the original 24h default to **0.25h (15 min)** - the
-fastest value that's actually meaningful, since `DUST_CHECK_INTERVAL_SECONDS`
-(15 min) is how often this check even runs; anything shorter has no
-effect, while a literal zero-wait sweep would risk catching cash that's
-only momentarily below the minimum mid-cycle (e.g. the few seconds
-between a sell settling and its own rebuy), not genuinely stranded.
+owner's explicit follow-up requests, lowered twice: 24h → 15 min →
+**6 min (0.1h)**. The second drop required `DUST_CHECK_INTERVAL_SECONDS`
+to come down too (15 min → 5 min) - a stuck-threshold change alone would
+have been meaningless, since the check itself still only runs on its own
+interval regardless of how low the threshold goes. With a 5-min check
+interval, dust stuck for 6 min gets caught on the next check after
+crossing that mark - still never a literal zero-wait sweep, which would
+risk catching cash that's only momentarily below the minimum mid-cycle
+(e.g. the few seconds between a sell settling and its own rebuy), not
+genuinely stranded.
 
 **Important distinction for reading the dashboard**: this only ever
 sweeps real, un-deployed cash sitting idle below `MIN_TRADE_USD` - it

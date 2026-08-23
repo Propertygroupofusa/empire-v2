@@ -171,20 +171,20 @@ LOCKED_PROFIT_STATE_KEY = "crypto_family_tree_locked_usd"
 # top it up, no branch could spend it), sweep it into the same
 # locked-profit ledger the 10% skim uses - see _check_and_sweep_stranded_dust().
 #
-# Lowered from the original 24h to 0.25h (15 min) per the account owner's
-# explicit follow-up ("needs to go into the lock profit ASAP"). 15 min
-# isn't an arbitrary "as fast as possible" - it's the fastest value that
-# still means something: DUST_CHECK_INTERVAL_SECONDS below only runs this
-# check every 15 min regardless, so anything shorter than that has zero
-# effect (the next check is still 15 min away either way), while a
-# literal zero-wait sweep would risk catching cash that's only
-# momentarily below the trade minimum mid-cycle - e.g. the few seconds
-# between a sell settling and its own rebuy - which isn't stranded, just
-# in flight. This still requires the balance to have been genuinely
-# unchanged across at least one full check interval, preserving that
-# protection while sweeping about as fast as the system can actually see.
-DUST_STUCK_HOURS = engine._safe_float_env("TREE_DUST_STUCK_HOURS", "0.25")
-DUST_CHECK_INTERVAL_SECONDS = engine._safe_int_env("TREE_DUST_CHECK_INTERVAL_SECONDS", "900")
+# Lowered from 24h to 15 min, then again to 6 min (0.1h) per the account
+# owner's explicit follow-up requests. 6 min isn't just DUST_STUCK_HOURS
+# alone - DUST_CHECK_INTERVAL_SECONDS below had to come down too, from
+# 15 min to 5 min, or the stuck-threshold change would have been
+# meaningless (the check itself would still only run every 15 min
+# regardless of how low the threshold went). With a 5-min check
+# interval, dust stuck for 6 min gets caught on the very next check
+# after crossing that mark - two checks apart, not one, so it's still
+# never a literal zero-wait sweep (which would risk catching cash that's
+# only momentarily below the trade minimum mid-cycle, e.g. the few
+# seconds between a sell settling and its own rebuy - not genuinely
+# stranded).
+DUST_STUCK_HOURS = engine._safe_float_env("TREE_DUST_STUCK_HOURS", "0.1")
+DUST_CHECK_INTERVAL_SECONDS = engine._safe_int_env("TREE_DUST_CHECK_INTERVAL_SECONDS", "300")
 DUST_TRACKER_KEY = "crypto_family_tree_dust_tracker"
 
 MIN_TRADE_USD = engine.MIN_TRADE_USD
