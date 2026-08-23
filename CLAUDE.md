@@ -764,6 +764,38 @@ directly and never re-reads `COIN_FAMILY_TREE` at buy time. Added
 `_lower_existing_unlock_tiers()`) that moves any branch still on the dead
 pair straight to `POL-USD` - the same coin, its real current identifier.
 
+### A stuck branch now switches coins instead of retrying a doomed order forever
+
+Per the account owner's explicit request, after continuing to see the
+same real rejections on the dashboard ("remove this from showing up,
+stop this from happening"): RNDR-USD's `PERMISSION_DENIED` and
+JUP-USD's `Invalid product_id` are real Coinbase rejections that can
+never succeed no matter how many more times the identical order is
+retried - RNDR because the account/API key genuinely lacks trading
+permission on that orderbook (a real Coinbase-side setting, not fixable
+in this code), JUP for a reason as yet unconfirmed (unlike MATIC-USD,
+there's no public migration notice - it may simply not be listed for
+this account/tier). Previously a flat branch hitting either just logged
+"buy did not fill - will retry next cycle" forever, staying permanently
+stuck and showing the same red rejection on the dashboard indefinitely.
+
+`crypto_btc_compound_bot.py`'s new `_is_permanent_order_rejection()`
+recognizes these two real, confirmed-live patterns specifically (not a
+guess at every possible Coinbase error code - only ones actually
+observed in production) and is checked in `run_branch_cycle()`'s flat-
+branch buy path: on a permanent rejection, the branch switches to a
+different coin immediately via the same real `find_most_volatile_
+unclaimed_coin()` search every other coin-switch already uses, instead
+of retrying the same dead order. The dashboard's red "Last order
+rejected" banner clears itself naturally once this happens - it's
+looked up by the branch's *current* `product_id`, which is now a
+different, working coin with no error history.
+
+A transient-looking failure (insufficient funds, a network hiccup, an
+unrecognized reason) is deliberately left alone - only these two
+specific, confirmed-permanent patterns trigger a switch, so a real but
+temporary issue still just retries normally next cycle.
+
 ### BTC "Take profit now" - a real, root-safe carve-out from the manual-sell lockdown
 
 Per the account owner's explicit follow-up request: a way to cash in

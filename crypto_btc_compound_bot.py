@@ -416,6 +416,28 @@ def _describe_order_rejection(resp: dict) -> str:
     return str(resp)
 
 
+# Real, confirmed-live rejection patterns that can NEVER succeed on retry -
+# a fixed account-level permission ("PERMISSION_DENIED", confirmed on
+# RNDR-USD) or a dead/never-listed pair ("Invalid product_id", confirmed
+# on MATIC-USD before its POL-USD migration, and on JUP-USD) - as opposed
+# to something that might resolve on its own (insufficient funds, a rate
+# limit, a network hiccup). Deliberately narrow: only patterns actually
+# observed in real production rejections, not a guess at every possible
+# Coinbase error code.
+_PERMANENT_REJECTION_PATTERNS = ("PERMISSION_DENIED", "Invalid product_id")
+
+
+def _is_permanent_order_rejection(reason: str) -> bool:
+    """True if a real order-rejection reason (see _describe_order_rejection)
+    means this exact product_id can never fill for this account, no matter
+    how many times the same order is retried - used by
+    crypto_family_tree_bot.py to stop a flat branch from retrying a
+    doomed buy forever and switch to a different coin instead."""
+    if not reason:
+        return False
+    return any(pattern in reason for pattern in _PERMANENT_REJECTION_PATTERNS)
+
+
 async def _place_and_confirm(session, path: str, order: dict):
     product_id = order.get("product_id")
     try:

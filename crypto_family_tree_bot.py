@@ -1478,7 +1478,36 @@ async def run_branch_cycle(bot_name: str) -> bool:
             target_pct = max(engine.pick_target_pct(atr_pct), engine.min_profit_target_pct(spend, atr_pct))
             fill = await engine.place_market_buy(session, spend, branch.product_id)
             if not fill:
-                log.warning(f"[TREE] {bot_name}: buy did not fill - will retry next cycle")
+                # A real, confirmed-live rejection (PERMISSION_DENIED on
+                # RNDR-USD, "Invalid product_id" on MATIC-USD/JUP-USD)
+                # means this exact coin can NEVER fill for this account,
+                # no matter how many more cycles retry the identical
+                # order - previously this branch would sit flat forever,
+                # retrying the same doomed buy every 30s and showing the
+                # same red rejection on the dashboard permanently. Switch
+                # to a different coin right away instead, same real
+                # search every other coin-switch already uses.
+                stuck_reason = engine._last_order_error.get(branch.product_id, "")
+                if engine._is_permanent_order_rejection(stuck_reason):
+                    new_product_id, new_atr = await find_most_volatile_unclaimed_coin(session)
+                    if new_product_id:
+                        try:
+                            async with AsyncSessionLocal() as db:
+                                result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
+                                fresh = result.scalar_one_or_none()
+                                if fresh:
+                                    fresh.product_id = new_product_id
+                                    await db.commit()
+                            log.warning(
+                                f"[TREE] {bot_name}: {branch.product_id} can never fill ({stuck_reason}) - "
+                                f"switching to {new_product_id} (ATR {new_atr*100:.2f}%) instead of retrying forever"
+                            )
+                        except IntegrityError:
+                            log.warning(f"[TREE] {bot_name}: {new_product_id} was claimed by another branch first (race) - will retry next cycle")
+                    else:
+                        log.warning(f"[TREE] {bot_name}: {branch.product_id} can never fill ({stuck_reason}) but no other coin is currently available to switch to")
+                else:
+                    log.warning(f"[TREE] {bot_name}: buy did not fill - will retry next cycle")
                 return True
             filled_qty, filled_price = fill
             target_price = filled_price * (1 + target_pct)
