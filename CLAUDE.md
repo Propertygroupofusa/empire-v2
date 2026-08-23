@@ -329,6 +329,150 @@ But the dashboard Settings approach (step 1-2 above) is the primary mechanism.
 
 ---
 
+## Crypto Family Tree Bot (crypto_family_tree_bot.py)
+
+Real-money Coinbase crypto trading system, separate from the older
+`crypto_coinbase_bot.py`. Each "branch" is an independently-running
+thread that trades one coin at a time, tracked as a `CryptoTreeBranch`
+row (bot_name, product_id, allocated_usd, equity_floor, next_unlock_tier)
+plus a `BotPosition` row while holding. The root branch (`crypto_btc_compound`,
+always BTC-USD) is the permanent foundation the tree grows from; every
+other branch can switch coins on exit and can spawn a $50-seed child
+once it crosses its `next_unlock_tier`. Shared buy/sell/fee/target math
+lives in `crypto_btc_compound_bot.py` (imported as `engine` by the
+family-tree module, not duplicated).
+
+Dashboard: `family_tree_dashboard.html`, served at `/family-tree-dashboard`,
+gated by `X-Admin-Key` on the `/api/trading-dashboard/family-tree-status`
+endpoint it calls (see `routers/trading_dashboard.py`).
+
+### Real-money protections (per-branch)
+
+- **-2% stop-loss** (`STOP_LOSS_PCT`) on every position - the hard floor
+  on any single trade.
+- **Breakeven ratchet** (`BREAKEVEN_TRIGGER_PCT`, 1%): once a position
+  has ever been up 1%, its stop is raised to entry price - it can no
+  longer close for a real loss beyond the round-trip fee, from that
+  point on.
+- **Peak-profit giveback cap** (`MAX_PROFIT_GIVEBACK_USD`, $3.75
+  default): once a position has shown real profit, if it gives back
+  more than that many dollars from its best point, it force-exits to
+  lock in what's left - independent of the fixed target/stop.
+- **Volatility-tiered minimum-profit floor** (`MIN_PROFIT_USD_LOW/MED/HIGH`,
+  $2.50/$4.00/$6.00 by ATR band): a TARGET exit has to clear real fees
+  plus this floor, not just barely break even - `min_profit_target_pct()`
+  in `crypto_btc_compound_bot.py`.
+- **Equity floor ratchet** (`BRANCH_FLOOR_TIER`, $50 steps): each
+  branch's floor only ever ratchets UP as it earns real gains. Two real
+  bugs in this mechanism were found and fixed in production (see below).
+- **Floor-breach cooldown** (`FLOOR_BREACH_COOLDOWN_SECONDS`, 30 min):
+  after a floor-breach forced exit, the branch stays in cash for a real
+  cooldown instead of instantly rebuying into a new coin (the original
+  bug this fixed: AAVE → STOP HIT → instant rebuy XRP → breach again →
+  instant rebuy BONK, three real losses in a row).
+- **Contestable strongest-sibling coin lock** (the "throne" model,
+  `COIN_LOCK_KEY_PREFIX`): among 2+ siblings under the same parent, the
+  one with the current highest `allocated_usd` holds its coin instead of
+  coin-switching on exit - but loses that lock the instant a different
+  sibling in the group grows bigger (checked every coordinator scan).
+  Root (BTC) is always exempt - it never switches coins, contestable or
+  not.
+- **Coin selection**: `find_most_volatile_unclaimed_coin()` picks the
+  highest-ATR coin among unclaimed candidates that's also "bullish"
+  (price now higher than ~25 hours ago). This is a coarse, medium-term
+  check with **no short-term overbought/extended signal** (unlike
+  `prop_bot.py`'s RSI < 30 entry filter on the Alpaca side) - a real,
+  known gap, not yet fixed. See the shadow-mode backtest tool below for
+  the first real data on whether this actually hurts specific coins.
+- **Manual controls on the dashboard**: a "Sell now" button per branch,
+  only enabled when the position is genuinely in profit right now
+  (re-checked server-side too, so it can't be bypassed by calling the
+  API directly) - selling behind entry is refused. A "Start new $50
+  branch" button, greyed out automatically unless there's real
+  unallocated cash to fund it (`spendable_for_spawn`/`can_spawn` in the
+  `/family-tree-status` response - see the spawn-branch bug below for
+  why this calculation is non-trivial). Each open position also shows a
+  live "Profit" ticker and a "Fee to enter" estimate (Coinbase's real
+  trading fee, otherwise invisible - baked into the position's qty, not
+  shown as its own line item anywhere else).
+
+### Two real production bugs found and fixed (2026-08-22/23)
+
+1. **Manual spawn-branch affordability bug**: the endpoint computed
+   "real unallocated cash" by subtracting *every* branch's
+   `allocated_usd` from the real Coinbase cash balance - but
+   `get_usd_balance()` is cash-only and doesn't include money currently
+   deployed in an open position. With most branches holding positions,
+   this produced nonsense negative "free cash" figures (e.g. real
+   balance $254.21, computed as -$267.06 free) and blocked spawns that
+   were actually affordable. Fixed: only subtract **flat** branches'
+   `allocated_usd` (the only ones actually competing for the shared cash
+   pool).
+
+2. **Stuck-flat-branch floor freeze**: a branch could end up flat with
+   its real balance below its own ratcheted floor (root cause:
+   `_maybe_spawn_child()` pulls the $50 seed for a new child right after
+   the floor was ratcheted up to match the *pre-spawn* balance, leaving
+   the parent flat and below its own now-stale floor) - and since a flat
+   branch can only raise its balance BY trading, and trading is exactly
+   what "below floor" blocks, this was a **permanent stall**, not a
+   pause. Confirmed live: `crypto_tree_ldo_usd` sat at $155.05 vs. a
+   $200.00 floor, logging "entries paused until it recovers" every cycle
+   for 11+ minutes straight. Fixed: a flat branch found below its own
+   floor now self-heals the floor down to match its real balance's tier
+   immediately, then resumes trading the next cycle - self-heals ANY
+   branch in this state automatically, not just a one-off patch.
+
+   A related fix in the same area: **EQUITY FLOOR BREACH no longer
+   overrides a healthy held position.** The floor-breach check used to
+   run *before* the target/stop/breakeven/giveback logic and force-sold
+   a held position unconditionally whenever branch equity dropped below
+   its floor - even if that specific position was still above its own
+   stop (possibly already breakeven-protected). Now it only force-sells
+   via the floor-breach path when the position's own stop has *also*
+   already failed; otherwise the position is left to run under its own
+   protection, and the branch-level breach only continues to block new
+   entries elsewhere.
+
+All of the above were verified against reproductions of the exact real
+numbers from production logs/screenshots before shipping, plus a full
+offline regression suite (not committed to the repo - built and run
+from the session scratchpad each time).
+
+### Shadow-mode coin-selection backtest (crypto_selection_backtest.py)
+
+Read-only diagnostic, explicitly **does not touch live trading or place
+any orders**, and no bot reads its output. Built to test whether the
+25-hour "bullish" coin-selection check (above) is actually buying at bad
+moments: pulls each family-tree coin's real historical Coinbase hourly
+candles and replays the bot's own real target/stop/breakeven/giveback
+rules (importing the live functions directly, not reimplementing them)
+to rank coins by real backtested ROI.
+
+- Endpoint: `POST /api/trading-dashboard/crypto-selection-backtest`
+  (admin-key gated, ~30-90s - pulls ~27 coins' history concurrently from
+  Coinbase's public candles endpoint).
+- Viewer: `/crypto-selection-backtest-view` (reuses the same saved admin
+  key as the family tree dashboard).
+- Requires outbound access to `api.exchange.coinbase.com` - works from
+  Railway (the live bot already depends on this exact host every cycle)
+  but may be blocked from a locked-down dev sandbox.
+- Next phase (not started): the same idea for the Alpaca/stock side,
+  which needs different historical data access and a different exit-rule
+  set (`alpaca_mean_reversion.py`'s `should_exit_position`).
+
+### Alpaca (prop_bot.py) parity
+
+`alpaca_mean_reversion.py`'s `should_exit_position()` carries the same
+two protections as the crypto side: a breakeven ratchet (`+1%` trigger,
+percentage-based to match Alpaca's existing convention) and a
+peak-profit giveback cap (`0.5%`). Return signature is a 4-tuple
+`(should_exit, reason, exit_type, new_peak_pnl_pct)` - the 4th value
+must be persisted by the caller (`prop_bot.py` does this via
+`_db_update_peak_pct`, storing into `BotPosition.peak_pct`).
+
+---
+
 ## Common Tasks
 
 **Add new video type:**
