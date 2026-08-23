@@ -628,14 +628,22 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     # alone can't answer that; the position needs to be marked to the
     # current real market price like every other unrealized-P&L figure
     # elsewhere in this file already is.
+    #
+    # Also fetch the real Coinbase cash balance here (same session) so the
+    # dashboard can show the real spendable-for-a-new-branch figure and
+    # grey out the "Start new $50 branch" button BEFORE it's clicked,
+    # instead of only failing after - see spawn_family_tree_branch() below
+    # for why this can't just subtract every branch's allocated_usd.
     current_price_by_bot = {}
-    if positions_by_bot and crypto_family_tree_bot_module is not None:
+    real_balance = None
+    if crypto_family_tree_bot_module is not None:
         engine = crypto_family_tree_bot_module.engine
         async with engine.aiohttp.ClientSession() as session:
             for bot_name, pos in positions_by_bot.items():
                 price, _atr_pct = await engine.get_price_and_volatility(session, pos.symbol)
                 if price is not None:
                     current_price_by_bot[bot_name] = price
+            real_balance, _err = await engine.get_usd_balance(session)
 
     out = []
     for b in branches:
@@ -665,11 +673,27 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     if crypto_family_tree_bot_module is not None:
         locked_usd = round(await crypto_family_tree_bot_module.get_locked_usd(), 2)
 
+    # Real spendable-for-a-new-branch figure: only FLAT branches (no open
+    # position) are actually competing for the shared real cash pool right
+    # now - a branch holding an open position has already deployed its
+    # allocated_usd into crypto, so subtracting it again here would be
+    # comparing cash-only balance against money that isn't cash anymore.
+    spendable_for_spawn = None
+    can_spawn = False
+    seed_usd = round(crypto_family_tree_bot_module.SEED_USD, 2) if crypto_family_tree_bot_module is not None else None
+    if real_balance is not None:
+        flat_allocated_sum = sum(b.allocated_usd for b in branches if b.bot_name not in positions_by_bot)
+        spendable_for_spawn = round(real_balance - locked_usd - flat_allocated_sum, 2)
+        can_spawn = seed_usd is not None and spendable_for_spawn >= seed_usd
+
     return {
         "branches": out,
         "branch_count": len(out),
         "total_allocated_usd": round(sum(b["allocated_usd"] for b in out), 2),
         "locked_usd": locked_usd,
+        "spendable_for_spawn": spendable_for_spawn,
+        "seed_usd": seed_usd,
+        "can_spawn": can_spawn,
     }
 
 
@@ -745,11 +769,22 @@ async def spawn_family_tree_branch(db: AsyncSession = Depends(get_db)):
     to the next spawn tier.
 
     Funded from real currently-UNALLOCATED cash only (real Coinbase
-    balance minus locked_usd minus every existing branch's own tracked
-    allocated_usd) - never carved out of an existing branch's balance the
-    way an organic parent-triggered spawn is. Refuses outright if there
-    isn't at least SEED_USD of real free cash sitting around, rather than
-    silently shorting an existing branch to make up the difference.
+    balance minus locked_usd minus every existing FLAT branch's own
+    tracked allocated_usd) - never carved out of an existing branch's
+    balance the way an organic parent-triggered spawn is. Refuses outright
+    if there isn't at least SEED_USD of real free cash sitting around,
+    rather than silently shorting an existing branch to make up the
+    difference.
+
+    Only branches with NO open position are subtracted here. get_usd_balance()
+    returns real, LIQUID cash only - it does not include the value of any
+    branch's currently-open crypto position. A branch holding an open
+    position has already deployed its allocated_usd into crypto, so it
+    isn't sitting in that cash figure and competing for it; subtracting it
+    again would be comparing cash-only balance against money that isn't
+    cash anymore (this was a real bug: with most branches holding open
+    positions, this used to compute a wildly wrong negative "unallocated"
+    figure and block spawns that were actually affordable).
 
     The new branch is inserted as a root-level child (same as any organic
     spawn from BTC) and immediately eligible to contest the throne against
@@ -764,7 +799,12 @@ async def spawn_family_tree_branch(db: AsyncSession = Depends(get_db)):
 
     branches_result = await db.execute(select(CryptoTreeBranch))
     branches = list(branches_result.scalars().all())
-    allocated_sum = sum(b.allocated_usd for b in branches)
+
+    positions_result = await db.execute(
+        select(BotPosition.bot).where(BotPosition.bot.in_([b.bot_name for b in branches]))
+    ) if branches else None
+    bots_with_open_position = set(positions_result.scalars().all()) if positions_result is not None else set()
+    flat_allocated_sum = sum(b.allocated_usd for b in branches if b.bot_name not in bots_with_open_position)
 
     async with engine.aiohttp.ClientSession() as session:
         real_balance, err = await engine.get_usd_balance(session)
@@ -772,14 +812,14 @@ async def spawn_family_tree_branch(db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=503, detail=f"Could not fetch the real Coinbase balance to confirm funds ({err}) - try again")
 
     locked_usd = await tree.get_locked_usd()
-    unallocated = real_balance - locked_usd - allocated_sum
+    unallocated = real_balance - locked_usd - flat_allocated_sum
     if unallocated < tree.SEED_USD:
         raise HTTPException(
             status_code=400,
             detail=(
                 f"Not enough real unallocated cash to seed a new ${tree.SEED_USD:.0f} branch - only "
                 f"${unallocated:.2f} is currently free (real balance ${real_balance:.2f} - locked "
-                f"${locked_usd:.2f} - already allocated across branches ${allocated_sum:.2f})"
+                f"${locked_usd:.2f} - already allocated across flat branches ${flat_allocated_sum:.2f})"
             ),
         )
 

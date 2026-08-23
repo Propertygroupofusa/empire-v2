@@ -287,7 +287,7 @@
 
     <div class="section-title" style="display:flex; justify-content:space-between; align-items:center;">
         <span>Tree</span>
-        <button class="sell-btn" style="width:auto; margin-top:0;" onclick="spawnBranch(this)">🌱 Start new $50 branch</button>
+        <button id="spawn-branch-btn" class="sell-btn" style="width:auto; margin-top:0;" onclick="spawnBranch(this)" disabled title="Checking real free cash...">🌱 Start new $50 branch</button>
     </div>
     <div class="tree-canvas"><div class="tree-canvas-inner" id="tree"></div></div>
 </div>
@@ -483,6 +483,32 @@ async function sellBranch(botName, btn) {
     }
 }
 
+// Real spendable-for-a-new-branch figure comes from /family-tree-status
+// (spendable_for_spawn / seed_usd / can_spawn) - only FLAT branches'
+// allocated_usd is subtracted from the real cash balance there, since a
+// branch holding an open position has already deployed its money into
+// crypto and isn't sitting in that cash figure. Grey the button out
+// proactively on every 15s refresh instead of letting it be clicked and
+// fail every time there isn't actually enough real free money.
+function updateSpawnButtonState(data) {
+    const btn = document.getElementById('spawn-branch-btn');
+    if (!btn) return;
+    const spendable = data.spendable_for_spawn;
+    const seedUsd = data.seed_usd;
+    if (spendable == null || seedUsd == null) {
+        btn.disabled = true;
+        btn.title = 'Could not confirm real free cash - try refreshing';
+        return;
+    }
+    if (data.can_spawn) {
+        btn.disabled = false;
+        btn.title = `${fmtUsd(spendable)} real free cash available`;
+    } else {
+        btn.disabled = true;
+        btn.title = `Not enough real free cash yet - only ${fmtUsd(spendable)} free, need ${fmtUsd(seedUsd)}`;
+    }
+}
+
 async function spawnBranch(btn) {
     if (!confirm('Start a brand-new $50 branch right now, on demand? This is funded from real currently-unallocated cash only (never taken from an existing branch), and places a real trade once it buys in.')) return;
     const originalText = btn.textContent;
@@ -497,12 +523,11 @@ async function spawnBranch(btn) {
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
         alert(`New branch started: ${data.bot_name} on ${data.product_id}, seeded with ${fmtUsd(data.seed_usd)}. It'll appear in the tree within about 20 seconds once its thread starts.`);
-        refresh();
     } catch (e) {
         alert('Could not start a new branch: ' + e.message);
     } finally {
-        btn.disabled = false;
         btn.textContent = originalText;
+        await refresh();
     }
 }
 
@@ -590,6 +615,7 @@ async function refresh() {
         document.getElementById('stat-total').textContent = fmtUsd(data.total_allocated_usd);
         document.getElementById('stat-locked').textContent = fmtUsd(data.locked_usd || 0);
         document.getElementById('stat-refreshed').textContent = new Date().toLocaleTimeString();
+        updateSpawnButtonState(data);
 
         const branches = data.branches || [];
         renderBarList('branches-bar', branches.map(b => ({ label: b.product_id.replace('-USD', ''), value: b.allocated_usd })));
