@@ -943,11 +943,26 @@ async def run_branch_cycle(bot_name: str) -> bool:
 
         breached = equity < branch.equity_floor
 
-        if breached:
-            if position is not None:
-                if price is None:
-                    log.warning(f"[TREE] {bot_name}: floor breach but no price available to force-sell - retry next cycle")
-                    return True
+        if breached and position is not None:
+            if price is None:
+                log.warning(f"[TREE] {bot_name}: floor breach but no price available to force-sell - retry next cycle")
+                return True
+            # The branch-level floor is a compounding checkpoint unrelated
+            # to THIS position's own entry price - it has no idea whether
+            # the position is still healthy. Forcing an exit here
+            # unconditionally could cut short a position that's still above
+            # its own stop (possibly already breakeven-ratcheted, or
+            # heading to target), realizing a loss the position's own
+            # protections were specifically built to prevent. Only force
+            # the floor-breach exit when the position's OWN stop has
+            # ALSO already failed (price <= stop_price) - at that point
+            # it's exiting anyway, so nothing is lost by labeling it a
+            # floor breach and applying the rebuy cooldown. Otherwise,
+            # leave the position alone and let it run under its own
+            # target/stop/breakeven/giveback protection below - the floor
+            # stays breached (still blocks new entries elsewhere) but this
+            # held position isn't punished for an unrelated milestone.
+            if price <= position.stop_price:
                 log.warning(f"[TREE] 🛑 {bot_name} EQUITY FLOOR BREACH: ${equity:.2f} < floor ${branch.equity_floor:,.2f} - force-selling, pausing entries")
                 await _branch_sell_and_settle(session, bot_name, branch.product_id, position, "EQUITY FLOOR BREACH - forced exit")
                 # Per the account owner, after real evidence of this
@@ -964,35 +979,46 @@ async def run_branch_cycle(bot_name: str) -> bool:
                 # cooldown window, checked below.
                 await _record_floor_breach(bot_name)
                 return True
+            log.info(
+                f"[TREE] {bot_name}: floor breached (${equity:.2f} < ${branch.equity_floor:,.2f}) but this position "
+                f"is still above its own stop ${position.stop_price:,.2f} - letting it run under its own "
+                f"protection instead of forcing an early exit"
+            )
+            # Fall through (not returning here) into the normal
+            # target/stop/breakeven/giveback logic further below, exactly
+            # as if the branch hadn't breached at all - new entries
+            # elsewhere are still blocked by the breach, but this position
+            # gets to keep running on its own merits.
+
+        if breached and position is None:
+            # A flat branch's own allocated_usd should never end up
+            # below its ratcheted floor on its own - the real path that
+            # produces this: _maybe_spawn_child() pulls the $50 seed for
+            # a new child right after the floor was ratcheted up to
+            # match the pre-spawn balance, leaving the parent flat and
+            # permanently stuck - it can never trade its way back over
+            # the floor, because trading is the only thing that could
+            # raise its balance, and that's exactly what "breached"
+            # blocks. Without this, it would compare its real balance
+            # against that now-too-high floor forever. Self-heal by
+            # lowering the floor to match this branch's own real,
+            # current tier - the same reset _branch_sell_and_settle
+            # already applies right after a sale - instead of leaving
+            # real money frozen waiting for a balance it can't earn.
+            new_tier_floor = math.floor(equity / BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER
+            if new_tier_floor < branch.equity_floor:
+                async with AsyncSessionLocal() as db:
+                    result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
+                    row = result.scalar_one_or_none()
+                    if row:
+                        row.equity_floor = new_tier_floor
+                        await db.commit()
+                log.info(
+                    f"[TREE] 🪜 {bot_name} floor lowered ${branch.equity_floor:,.2f} -> ${new_tier_floor:,.2f} "
+                    f"to match its own real balance ${equity:.2f} - entries resume next cycle"
+                )
             else:
-                # A flat branch's own allocated_usd should never end up
-                # below its ratcheted floor on its own - the real path that
-                # produces this: _maybe_spawn_child() pulls the $50 seed for
-                # a new child right after the floor was ratcheted up to
-                # match the pre-spawn balance, leaving the parent flat and
-                # permanently stuck - it can never trade its way back over
-                # the floor, because trading is the only thing that could
-                # raise its balance, and that's exactly what "breached"
-                # blocks. Without this, it would compare its real balance
-                # against that now-too-high floor forever. Self-heal by
-                # lowering the floor to match this branch's own real,
-                # current tier - the same reset _branch_sell_and_settle
-                # already applies right after a sale - instead of leaving
-                # real money frozen waiting for a balance it can't earn.
-                new_tier_floor = math.floor(equity / BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER
-                if new_tier_floor < branch.equity_floor:
-                    async with AsyncSessionLocal() as db:
-                        result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
-                        row = result.scalar_one_or_none()
-                        if row:
-                            row.equity_floor = new_tier_floor
-                            await db.commit()
-                    log.info(
-                        f"[TREE] 🪜 {bot_name} floor lowered ${branch.equity_floor:,.2f} -> ${new_tier_floor:,.2f} "
-                        f"to match its own real balance ${equity:.2f} - entries resume next cycle"
-                    )
-                else:
-                    log.info(f"[TREE] 🛑 {bot_name}: ${equity:.2f} below floor ${branch.equity_floor:,.2f} - entries paused until it recovers")
+                log.info(f"[TREE] 🛑 {bot_name}: ${equity:.2f} below floor ${branch.equity_floor:,.2f} - entries paused until it recovers")
             return True
 
         if position is None:
