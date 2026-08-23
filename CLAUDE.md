@@ -707,6 +707,78 @@ Fixed both ends of this:
    the dashboard already open on the account owner's phone, no Railway
    log navigation or screenshot-and-hope-it's-not-cut-off required.
 
+### MATIC-USD → POL-USD: a real dead trading pair, found via the order-rejection visibility fix above
+
+The very next real rejection surfaced by the fix above was
+`INVALID_ARGUMENT: Invalid product_id` on the branch holding MATIC-USD -
+not a code bug, a real, permanent Coinbase change: Polygon migrated its
+token from MATIC to POL, and Coinbase disabled MATIC-USD trading outright
+on Oct 14, 2025, converting all balances to POL 1:1 by Oct 17 (confirmed
+via Coinbase's own migration help page, not a guess). `MATIC-USD` in
+`COIN_FAMILY_TREE` is now `POL-USD` - but renaming the list alone doesn't
+unstick a branch that already exists with `product_id = "MATIC-USD"` in
+the database, since a branch buys against its own stored `product_id`
+directly and never re-reads `COIN_FAMILY_TREE` at buy time. Added
+`_migrate_matic_to_pol()`, a startup migration (same pattern as
+`_lower_existing_unlock_tiers()`) that moves any branch still on the dead
+pair straight to `POL-USD` - the same coin, its real current identifier.
+
+### BTC "Take profit now" - a real, root-safe carve-out from the manual-sell lockdown
+
+Per the account owner's explicit follow-up request: a way to cash in
+BTC's profit on demand, while BTC keeps its permanent root/parent spot -
+"let it still keep its spot being a big dog being a parent and start all
+over again... every time I hit that profit I wanted to take it." Since
+BTC is otherwise completely locked out of manual selling (see "BTC root
+is never manually sellable" above, at the account owner's own earlier
+explicit request), this needed to be a deliberate, narrow carve-out, not
+a bypass of that rule.
+
+`POST /api/trading-dashboard/family-tree-status/root-take-profit`
+(dashboard button: "🔒 Take profit now (stays BTC)", shown only when
+BTC's position is genuinely in profit right now, same live-price check
+`close_family_tree_branch` already uses) reuses the exact same
+`_branch_sell_and_settle()` every automatic TARGET/STOP exit already
+calls - root's own existing "stays on BTC-USD by design" logic inside
+that function means this can never actually make BTC leave BTC-USD or
+stop being root: it sells 100% at market, skims the same 10%-of-profit
+into `locked_usd` every other exit already uses, and immediately rebuys
+BTC-USD with the rest at the new price, same as any other branch's
+normal win - then re-runs the cycle immediately (same reasoning
+`close_family_tree_branch` already uses) so the rebuy happens in the same
+call, not the next scheduled one. `_maybe_spawn_child()` still runs
+afterward exactly as before, so BTC keeps spawning children normally.
+This is purely an on-demand trigger for a cycle that already runs
+automatically at BTC's computed target - `close_family_tree_branch`'s
+root refusal (BTC can never be fully CLOSED/switched away) is completely
+unaffected by this and still applies.
+
+### Per-coin trade history, tracked across branches and repeat trades
+
+Per the account owner's explicit request: "if I sell a coin and wind up
+buying that same coin back, it'll start gaining its history... the third
+time he bought Sol he sold it for this price and so far the profit has
+been whatever it equals up to." New table `CryptoCoinTradeHistory`
+(`models.py`) - one row per real completed sell, written inside
+`_branch_sell_and_settle()` right where P&L is already computed.
+Deliberately scoped by `product_id`, not by branch: since branches
+switch coins over time and different branches can independently trade
+the same coin at different points, a coin's history keeps accumulating
+across all of that rather than resetting every time some branch happens
+to hold it - buying SOL back after having sold it before picks up right
+where its history left off. Append-only, never deleted, same reasoning
+as the existing `ClosedTrade` model (a different table, for the
+Alpaca/crypto-coinbase bots' ML training data - this one is family-tree-
+specific and coin-scoped, not branch-scoped, so it wasn't a fit to reuse).
+
+`GET /api/trading-dashboard/family-tree-status/coin-history` aggregates
+real `trade_count`/`total_pnl`/`avg_pnl`/`win_rate` per coin (via a real
+SQL `GROUP BY product_id`, not computed in Python) and nests each coin's
+individual trades (up to the 500 most recent overall) underneath.
+`family_tree_dashboard.html`'s new "📜 Coin Trade History" section shows
+the aggregate table, tap a coin to expand its individual trades
+(timestamp, branch, entry, exit, P&L, exit reason).
+
 ### Coin-selection backtest and exclusion (crypto_selection_backtest.py)
 
 Built to test whether the 25-hour "bullish" coin-selection check (above)

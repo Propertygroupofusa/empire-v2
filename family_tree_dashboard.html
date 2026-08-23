@@ -95,6 +95,23 @@
     .panel-title { font-size: 0.95em; font-weight: 700; color: var(--navy); margin-bottom: 4px; }
     .panel-sub { font-size: 0.78em; color: var(--text-dim); margin-bottom: 14px; }
 
+    .coin-history-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+    .coin-history-table th, .coin-history-table td { padding: 9px 10px; text-align: right; border-bottom: 1px solid var(--border); }
+    .coin-history-table th:first-child, .coin-history-table td:first-child { text-align: left; }
+    .coin-history-table th { color: var(--text-dim); font-weight: 700; text-transform: uppercase; font-size: 0.72em; letter-spacing: 0.4px; }
+    .coin-history-table tbody tr.coin-row { cursor: pointer; }
+    .coin-history-table tbody tr.coin-row:hover { background: var(--bg); }
+    .coin-history-table .pos { color: var(--green); font-weight: 700; }
+    .coin-history-table .neg { color: var(--red); font-weight: 700; }
+    .coin-trades-detail { display: none; }
+    .coin-trades-detail.open { display: table-row; }
+    .coin-trades-detail td { padding: 0; border-bottom: 1px solid var(--border); }
+    .coin-trades-inner { padding: 8px 10px 12px 24px; background: var(--bg); }
+    .coin-trades-inner table { width: 100%; border-collapse: collapse; font-size: 0.92em; }
+    .coin-trades-inner th, .coin-trades-inner td { padding: 5px 8px; text-align: right; color: var(--text-dim); }
+    .coin-trades-inner th:first-child, .coin-trades-inner td:first-child { text-align: left; }
+    .coin-history-empty { font-size: 0.85em; color: var(--text-dim); padding: 8px 0; }
+
     .bar-list { display: flex; flex-direction: column; gap: 10px; }
     .bar-row { display: grid; grid-template-columns: 110px 1fr 90px; align-items: center; gap: 10px; font-size: 0.82em; }
     .bar-row .bar-label { color: var(--text-dim); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -369,6 +386,12 @@
         <button id="spawn-branch-btn" class="sell-btn" style="width:auto; margin-top:0;" onclick="spawnBranch(this)" disabled title="Checking real free cash...">🌱 Start new $50 branch</button>
     </div>
     <div class="tree-canvas"><div class="tree-canvas-inner" id="tree"></div></div>
+
+    <div class="section-title">📜 Coin Trade History</div>
+    <div class="panel">
+        <div class="panel-sub">Real trade count and P&amp;L per coin, tracked across every branch and every time it's been bought and sold - buying a coin back after selling it picks up right where its history left off. Tap a coin to see its individual trades.</div>
+        <div id="coin-history-wrap"><div class="coin-history-empty">Loading…</div></div>
+    </div>
 </div>
 
 <div class="modal-overlay" id="unlock-modal-overlay">
@@ -562,12 +585,19 @@ function branchCardHtml(b) {
         // other exit.
         if (isRoot) {
             // Per the account owner's explicit request: BTC is the tree's
-            // permanent foundation and can never be manually sold - same
-            // rule the automatic exit path already follows ("root stays on
-            // BTC-USD by design"), now also enforced server-side on this
-            // endpoint (see close_family_tree_branch in
-            // routers/trading_dashboard.py) so this isn't just cosmetic.
-            sellBtnHtml = `<div class="sell-disabled-note">🔒 Permanent root — never sold manually</div>`;
+            // permanent foundation and can never be manually CLOSED/sold
+            // away - still true, enforced server-side (see
+            // close_family_tree_branch in routers/trading_dashboard.py).
+            // But per a later explicit request, a real "Take profit" button
+            // is offered instead: same real sell + rebuy cycle every
+            // automatic TARGET hit already runs, root already always stays
+            // on BTC-USD either way, so this is just triggering that same
+            // real cycle on demand rather than waiting for the target price.
+            if (p.unrealized_pct != null && p.unrealized_pct > 0) {
+                sellBtnHtml = `<button class="sell-btn" onclick="takeRootProfit(this)">🔒 Take profit now (stays BTC)</button>`;
+            } else {
+                sellBtnHtml = `<div class="sell-disabled-note">${p.unrealized_pct == null ? 'Live price unavailable — take-profit disabled' : 'Not in profit yet — take-profit disabled'}</div>`;
+            }
         } else if (p.unrealized_pct != null && p.unrealized_pct > 0) {
             sellBtnHtml = `<button class="sell-btn" onclick="sellBranch('${b.bot_name}', this)">Sell now &amp; find next coin</button>`;
         } else {
@@ -623,6 +653,27 @@ async function sellBranch(botName, btn) {
         alert('Sell failed: ' + e.message);
         btn.disabled = false;
         btn.textContent = 'Sell now & find next coin';
+    }
+}
+
+async function takeRootProfit(btn) {
+    if (!confirm(`Take BTC's profit right now at market price? This sells 100% and immediately rebuys BTC-USD with the rest at the new price - BTC stays the tree's permanent root either way, this just cashes in the current gain instead of waiting for the target. Real order, can't be undone.`)) return;
+    btn.disabled = true;
+    btn.textContent = 'Taking profit…';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/family-tree-status/root-take-profit', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        alert(`BTC profit taken. New balance: ${fmtUsd(data.allocated_usd)}, rebought ${data.product_id} right away.`);
+        refresh();
+    } catch (e) {
+        alert('Take profit failed: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = '🔒 Take profit now (stays BTC)';
     }
 }
 
@@ -857,6 +908,60 @@ function renderTree(branches) {
         `<svg class="tree-lines" width="${width}" height="${height}">${lines}</svg>` + nodes;
 }
 
+function renderCoinHistory(data) {
+    const wrap = document.getElementById('coin-history-wrap');
+    const coins = data.coins || [];
+    if (coins.length === 0) {
+        wrap.innerHTML = '<div class="coin-history-empty">No completed trades yet - history builds up as branches sell.</div>';
+        return;
+    }
+    const rows = coins.map((c, i) => {
+        const pnlClass = c.total_pnl >= 0 ? 'pos' : 'neg';
+        const avgClass = c.avg_pnl >= 0 ? 'pos' : 'neg';
+        const coinLabel = c.product_id.replace('-USD', '');
+        const tradeRows = (c.trades || []).map(t => {
+            const tClass = t.pnl >= 0 ? 'pos' : 'neg';
+            const when = t.closed_at ? new Date(t.closed_at).toLocaleString() : '—';
+            return `<tr>
+                <td>${when}</td>
+                <td>${t.bot_name}</td>
+                <td>${fmtUsd(t.entry_price)}</td>
+                <td>${fmtUsd(t.exit_price)}</td>
+                <td class="${tClass}">${t.pnl >= 0 ? '+' : ''}${fmtUsd(t.pnl)}</td>
+                <td>${t.exit_reason || '—'}</td>
+            </tr>`;
+        }).join('');
+        return `
+            <tr class="coin-row" onclick="toggleCoinTrades(${i})">
+                <td>${coinLabel}</td>
+                <td>${c.trade_count}</td>
+                <td>${c.win_rate.toFixed(0)}%</td>
+                <td class="${avgClass}">${c.avg_pnl >= 0 ? '+' : ''}${fmtUsd(c.avg_pnl)}</td>
+                <td class="${pnlClass}">${c.total_pnl >= 0 ? '+' : ''}${fmtUsd(c.total_pnl)}</td>
+            </tr>
+            <tr class="coin-trades-detail" id="coin-trades-${i}">
+                <td colspan="5">
+                    <div class="coin-trades-inner">
+                        <table>
+                            <thead><tr><th>Closed</th><th>Branch</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Reason</th></tr></thead>
+                            <tbody>${tradeRows}</tbody>
+                        </table>
+                    </div>
+                </td>
+            </tr>`;
+    }).join('');
+
+    wrap.innerHTML = `
+        <table class="coin-history-table">
+            <thead><tr><th>Coin</th><th>Trades</th><th>Win rate</th><th>Avg P&amp;L</th><th>Total P&amp;L</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+}
+
+function toggleCoinTrades(i) {
+    document.getElementById('coin-trades-' + i).classList.toggle('open');
+}
+
 async function refresh() {
     const statusEl = document.getElementById('status');
     try {
@@ -878,6 +983,13 @@ async function refresh() {
     } catch (e) {
         statusEl.textContent = 'Error: ' + e.message;
         statusEl.className = 'error';
+    }
+
+    try {
+        const coinData = await apiGet('/family-tree-status/coin-history');
+        renderCoinHistory(coinData);
+    } catch (e) {
+        document.getElementById('coin-history-wrap').innerHTML = `<div class="coin-history-empty">Could not load coin history: ${e.message}</div>`;
     }
 }
 

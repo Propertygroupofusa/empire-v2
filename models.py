@@ -1313,3 +1313,46 @@ class BotStatus(Base):
             "win_count": self.win_count,
             "loss_count": self.loss_count,
         }
+
+
+class CryptoCoinTradeHistory(Base):
+    """One row per completed round-trip trade in the crypto family tree
+    (crypto_family_tree_bot.py) - a real sell, with what it made or lost.
+
+    Per the account owner's explicit request: since branches switch coins
+    over time and different branches can independently trade the SAME
+    coin at different points, this is scoped by product_id (not by
+    branch), so buying SOL back after having sold it before picks up
+    right where its history left off - "the third time he bought Sol he
+    sold it for this price, and so far the profit has been X" - rather
+    than starting a fresh, disconnected count each time some branch
+    happens to hold it. Deliberately append-only and never deleted, same
+    reasoning as ClosedTrade above - the value is in the accumulated
+    history, and it's cheap to keep all of it.
+    """
+    __tablename__ = "crypto_coin_trade_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(String, index=True)
+    bot_name = Column(String, index=True)
+    entry_price = Column(Float)
+    exit_price = Column(Float)
+    qty = Column(Float)
+    pnl = Column(Float, index=True)
+    exit_reason = Column(String)
+    opened_at = Column(DateTime, nullable=True)
+    closed_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "product_id": self.product_id,
+            "bot_name": self.bot_name,
+            "entry_price": self.entry_price,
+            "exit_price": self.exit_price,
+            "qty": self.qty,
+            "pnl": self.pnl,
+            "exit_reason": self.exit_reason,
+            "opened_at": self.opened_at.isoformat() if self.opened_at else None,
+            "closed_at": self.closed_at.isoformat() if self.closed_at else None,
+        }

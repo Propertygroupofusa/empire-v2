@@ -59,7 +59,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, text, desc
 from sqlalchemy.exc import IntegrityError
 from database import AsyncSessionLocal
-from models import BotPosition, CryptoTreeBranch, TradingBotState, CryptoBacktestRun
+from models import BotPosition, CryptoTreeBranch, TradingBotState, CryptoBacktestRun, CryptoCoinTradeHistory
 
 import crypto_btc_compound_bot as engine
 
@@ -237,7 +237,11 @@ COIN_FAMILY_TREE = [
     "SOL-USD",    # 2020
     "AVAX-USD",   # 2020
     "NEAR-USD",   # 2020
-    "MATIC-USD",  # 2020
+    "POL-USD",    # 2020 - was MATIC-USD; Coinbase permanently disabled MATIC
+                  # trading Oct 14, 2025 and completed the 1:1 migration to
+                  # POL by Oct 17 (Polygon's real token upgrade, not a bug on
+                  # our end) - see _migrate_matic_to_pol() below for the
+                  # branch already stuck on the dead MATIC-USD product_id
     "LDO-USD",    # 2021
     "ICP-USD",    # 2021
     "FLOKI-USD",  # 2021
@@ -716,6 +720,40 @@ async def _lower_existing_unlock_tiers():
         log.warning(f"[TREE] could not lower existing unlock tiers: {e}")
 
 
+async def _migrate_matic_to_pol():
+    """One-time backstop, safe to call on every startup: Coinbase
+    permanently disabled MATIC-USD trading on Oct 14, 2025 and migrated
+    everything to POL-USD (Polygon's real token upgrade - confirmed via
+    Coinbase's own migration help page, not a guess) - a branch already
+    holding "MATIC-USD" as its product_id would be stuck flat forever,
+    retrying a buy against a product_id Coinbase no longer recognizes
+    ("INVALID_ARGUMENT: Invalid product_id" on every attempt, confirmed
+    live). Renaming COIN_FAMILY_TREE's entry alone doesn't fix an
+    already-stuck branch - a branch buys against its own stored
+    product_id directly, never re-reading COIN_FAMILY_TREE at buy time -
+    so this migrates any row still on the dead pair straight to POL-USD,
+    the same coin under its real current identifier."""
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(CryptoTreeBranch).where(CryptoTreeBranch.product_id == "MATIC-USD")
+            )
+            rows = result.scalars().all()
+            if not rows:
+                return
+            for row in rows:
+                row.product_id = "POL-USD"
+            await db.commit()
+        log.info(
+            f"[TREE] 🔄 migrated {len(rows)} branch(es) off the dead MATIC-USD product_id to POL-USD "
+            f"(Coinbase's real token migration): {', '.join(r.bot_name for r in rows)}"
+        )
+    except IntegrityError:
+        log.warning("[TREE] could not migrate MATIC-USD -> POL-USD: another branch already holds POL-USD")
+    except Exception as e:
+        log.warning(f"[TREE] could not migrate MATIC-USD -> POL-USD: {e}")
+
+
 async def find_most_volatile_unclaimed_coin(session):
     """Among the family-tree coins not already claimed by any existing
     branch, finds the most volatile coin that's ALSO currently bullish
@@ -1044,6 +1082,21 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
     fee = gross_value * (ROUND_TRIP_FEE_RATE / 2)
     new_allocated = gross_value - fee
     pnl = new_allocated - (position.entry_price * position.qty)
+
+    # Per the account owner's explicit request: a real, permanent record
+    # of every round-trip trade on this coin - scoped by product_id (not
+    # branch), so a coin's history keeps accumulating across different
+    # branches and across being bought and sold multiple times over. This
+    # is what /family-tree-status/coin-history reads to show each coin's
+    # trade count, total P&L, and average P&L on the dashboard.
+    async with AsyncSessionLocal() as db:
+        db.add(CryptoCoinTradeHistory(
+            product_id=product_id, bot_name=bot_name,
+            entry_price=position.entry_price, exit_price=filled_price,
+            qty=filled_qty, pnl=round(pnl, 2), exit_reason=reason,
+            opened_at=position.opened_at,
+        ))
+        await db.commit()
 
     # 10% of REALIZED PROFIT ONLY - never touches principal, never fires on
     # a loss - gets pulled out of this branch's own tracked balance and
@@ -1431,6 +1484,7 @@ def run():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(_ensure_product_id_unique_index())
+    loop.run_until_complete(_migrate_matic_to_pol())
     loop.run_until_complete(_lower_existing_unlock_tiers())
 
     async def _scan():

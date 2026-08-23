@@ -23,13 +23,13 @@ from datetime import datetime, timezone, timedelta
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, func, case
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db, AsyncSessionLocal
 from admin_auth import require_admin_key
-from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment
+from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory
 
 NUM_BOTS = int(os.getenv("PROP_NUM_BOTS", "8"))
 if NUM_BOTS <= 0:
@@ -727,6 +727,120 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         "spendable_for_spawn": spendable_for_spawn,
         "seed_usd": seed_usd,
         "can_spawn": can_spawn,
+    }
+
+
+@router.get("/family-tree-status/coin-history", dependencies=[Depends(require_admin_key)])
+async def get_coin_trade_history(db: AsyncSession = Depends(get_db)):
+    """Real per-coin trade history and P&L, per the account owner's
+    explicit request: since branches switch coins over time and different
+    branches can independently trade the SAME coin at different points,
+    this is grouped by product_id (not by branch) - buying SOL back after
+    having sold it before picks up right where its history left off
+    ("the third time he bought Sol he sold it for this price, and so far
+    the profit has been X") rather than resetting every time some branch
+    happens to hold it. Backed by CryptoCoinTradeHistory, written once per
+    real completed sell in crypto_family_tree_bot.py's
+    _branch_sell_and_settle(). Coins with no trades yet simply don't
+    appear - there's nothing real to show for them."""
+    agg_result = await db.execute(
+        select(
+            CryptoCoinTradeHistory.product_id,
+            func.count(CryptoCoinTradeHistory.id).label("trade_count"),
+            func.sum(CryptoCoinTradeHistory.pnl).label("total_pnl"),
+            func.avg(CryptoCoinTradeHistory.pnl).label("avg_pnl"),
+            func.sum(case((CryptoCoinTradeHistory.pnl > 0, 1), else_=0)).label("win_count"),
+        ).group_by(CryptoCoinTradeHistory.product_id)
+    )
+    coins = []
+    for row in agg_result.all():
+        trade_count = row.trade_count
+        win_count = row.win_count or 0
+        coins.append({
+            "product_id": row.product_id,
+            "trade_count": trade_count,
+            "total_pnl": round(row.total_pnl or 0.0, 2),
+            "avg_pnl": round(row.avg_pnl or 0.0, 2),
+            "win_count": win_count,
+            "win_rate": round(100.0 * win_count / trade_count, 1) if trade_count else 0.0,
+        })
+    coins.sort(key=lambda c: abs(c["total_pnl"]), reverse=True)
+
+    # Individual trades, most recent first - the dashboard shows these
+    # nested under each coin so a real history like "3rd SOL trade, sold
+    # at $X, running total $Y" is readable, not just the aggregate.
+    trades_result = await db.execute(
+        select(CryptoCoinTradeHistory).order_by(CryptoCoinTradeHistory.closed_at.desc()).limit(500)
+    )
+    trades_by_coin = {}
+    for t in trades_result.scalars().all():
+        trades_by_coin.setdefault(t.product_id, []).append(t.to_dict())
+    for coin in coins:
+        coin["trades"] = trades_by_coin.get(coin["product_id"], [])
+
+    return {"coins": coins, "coin_count": len(coins)}
+
+
+@router.post("/family-tree-status/root-take-profit", dependencies=[Depends(require_admin_key)])
+async def take_root_profit():
+    """Manually cash in BTC's (the tree's permanent root) profit right
+    now, on demand - per the account owner's explicit request, since BTC
+    is otherwise locked down from ANY manual sell (see
+    close_family_tree_branch's root refusal below). This is NOT a
+    carve-out of that protection: it reuses the exact same
+    _branch_sell_and_settle() every automatic TARGET/STOP exit already
+    uses, and root's own existing behavior in that function means it can
+    never actually leave BTC-USD - it sells 100% at market, skims the
+    same 10%-of-profit into locked_usd every other exit uses, and
+    immediately rebuys BTC-USD with the rest at the new price. BTC never
+    stops being the tree's root/parent (still able to spawn a child via
+    _maybe_spawn_child, exactly as before) - this only lets that same
+    real cycle be triggered on demand instead of waiting for the
+    computed ATR target to be hit.
+
+    Refused (400) if BTC has no open position, or isn't genuinely in
+    profit right now against the real live price - same "never lock in
+    a real loss" rule close_family_tree_branch already enforces for
+    every other branch's manual sell.
+    """
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+
+    root_bot_name = crypto_family_tree_bot_module.ROOT_BOT_NAME
+    branch = await crypto_family_tree_bot_module.load_branch(root_bot_name)
+    if branch is None:
+        raise HTTPException(status_code=404, detail="Root branch not found")
+
+    position = await crypto_family_tree_bot_module._load_branch_position(root_bot_name)
+    if position is None:
+        raise HTTPException(status_code=400, detail="BTC has no open position to take profit on right now")
+
+    engine = crypto_family_tree_bot_module.engine
+    async with engine.aiohttp.ClientSession() as session:
+        current_price, _atr_pct = await engine.get_price_and_volatility(session, branch.product_id)
+        if current_price is None:
+            raise HTTPException(status_code=503, detail="Could not fetch a live BTC price to confirm this would be a real profit - try again")
+        if current_price <= position.entry_price:
+            raise HTTPException(
+                status_code=400,
+                detail=f"BTC is not currently in profit (entry ${position.entry_price:,.2f}, now ${current_price:,.2f}) - refused to avoid locking in a loss",
+            )
+        await crypto_family_tree_bot_module._branch_sell_and_settle(
+            session, root_bot_name, branch.product_id, position, "MANUAL PROFIT TAKE (dashboard)"
+        )
+
+    # Same reasoning as close_family_tree_branch below: the rebuy was
+    # already decided inside _branch_sell_and_settle above (root always
+    # stays on BTC-USD), so re-run the cycle immediately to place it now
+    # instead of leaving BTC flat until its own thread wakes up next.
+    await crypto_family_tree_bot_module.run_branch_cycle(root_bot_name)
+
+    updated = await crypto_family_tree_bot_module.load_branch(root_bot_name)
+    return {
+        "status": "profit_taken",
+        "bot_name": root_bot_name,
+        "allocated_usd": round(updated.allocated_usd, 2) if updated else None,
+        "product_id": updated.product_id if updated else None,
     }
 
 
