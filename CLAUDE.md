@@ -446,6 +446,32 @@ in `crypto_family_tree_bot.py` is the reverse of the existing
 `_add_locked_usd()`, clamped so it can never release more than genuinely
 exists.
 
+The dashboard UI is a real tappable modal (amount field, a cash-out/
+add-to-branch toggle, and - when adding to a branch - a tappable list of
+real branches that highlights on selection), not a chain of browser
+`prompt()` dialogs - per the account owner's explicit follow-up that
+typing an exact `bot_name` into a text prompt was too fiddly on mobile.
+
+### Alpaca-side unlock: cash-out only, no "add to a bucket"
+
+`alpaca_dashboard.html` has the same 🔓 Unlock button and
+`POST /api/trading-dashboard/alpaca-overview/unlock-profit`
+(`{amount}`) - but per the account owner's own explicit reasoning,
+**cash-out only, no "add to a bucket" mode**. The two locked-profit
+systems aren't the same shape under the hood: crypto branches are
+independent principal pools, so adding unlocked money to one is a real,
+meaningful bookkeeping transfer. The 8 `bot_N` buckets here are instead
+proportional *shares* of one real Alpaca equity - `_rebalance_bots()`
+re-derives every bucket's share from the real account balance on every
+single load, so manually bumping one bucket's `base_capital` would just
+get silently smeared back across all 8 on the very next refresh. There
+was nothing meaningful an "add to a bucket" action could actually do
+here, so it was never built - this also means Alpaca's `locked_usd` is
+purely a tracked number today, not real protection the way crypto's is
+(the bot buckets already rebalance against the FULL real equity,
+`locked_usd` included - a real difference from the crypto side worth
+knowing about, not yet changed).
+
 ### Stranded-dust sweep speed, and a real USDC blind spot found
 
 `_check_and_sweep_stranded_dust()` locks genuinely-too-small-to-trade

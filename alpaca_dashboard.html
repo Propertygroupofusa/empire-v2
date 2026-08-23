@@ -70,6 +70,42 @@
     .kpi.gold .value { color: var(--gold); }
     .kpi.gold { border-color: #f0dcae; background: var(--gold-bg); }
 
+    .unlock-btn {
+        font-family: inherit; margin-top: 8px; background: #fff; border: 1px solid var(--gold);
+        color: var(--gold); padding: 5px 10px; border-radius: 6px; cursor: pointer;
+        font-size: 0.76em; font-weight: 700;
+    }
+    .unlock-btn:hover { background: var(--gold); color: #fff; }
+    .unlock-btn:disabled { opacity: 0.5; cursor: default; }
+
+    .modal-overlay {
+        position: fixed; inset: 0; background: rgba(15,23,42,0.55);
+        display: none; align-items: center; justify-content: center;
+        z-index: 1000; padding: 20px;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal-card {
+        background: var(--panel); border-radius: 14px; padding: 24px;
+        width: 100%; max-width: 380px; box-shadow: 0 10px 40px rgba(0,0,0,0.25);
+    }
+    .modal-title { font-size: 1.15em; font-weight: 800; color: var(--navy); }
+    .modal-sub { font-size: 0.82em; color: var(--text-dim); margin-top: 4px; margin-bottom: 16px; }
+    .modal-label { display: block; font-size: 0.78em; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 6px; }
+    .modal-input {
+        width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+        font-size: 1em; font-family: inherit; color: var(--text);
+    }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+    .modal-btn-secondary {
+        font-family: inherit; padding: 9px 16px; border-radius: 8px; border: 1px solid var(--border);
+        background: #fff; color: var(--text-dim); cursor: pointer; font-weight: 600; font-size: 0.9em;
+    }
+    .modal-btn-primary {
+        font-family: inherit; padding: 9px 18px; border-radius: 8px; border: none;
+        background: var(--gold); color: #fff; cursor: pointer; font-weight: 700; font-size: 0.9em;
+    }
+    .modal-btn-primary:disabled { opacity: 0.5; cursor: default; }
+
     .section-title {
         font-size: 1.02em;
         font-weight: 700;
@@ -194,7 +230,24 @@
         <div class="kpi"><div class="label">Session P&amp;L</div><div class="value" id="stat-pl">—</div></div>
         <div class="kpi"><div class="label">Scale</div><div class="value" id="stat-scale">—</div></div>
         <div class="kpi"><div class="label">Floor</div><div class="value" id="stat-floor">—</div></div>
-        <div class="kpi gold"><div class="label">🔒 Locked Profit</div><div class="value" id="stat-locked">—</div></div>
+        <div class="kpi gold">
+            <div class="label">🔒 Locked Profit</div>
+            <div class="value" id="stat-locked">—</div>
+            <button id="unlock-profit-btn" class="unlock-btn" onclick="openUnlockModal()" disabled title="Loading...">🔓 Unlock</button>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="unlock-modal-overlay">
+        <div class="modal-card">
+            <div class="modal-title">🔓 Unlock Locked Profit</div>
+            <div class="modal-sub" id="unlock-modal-sub">—</div>
+            <label class="modal-label">Amount to unlock</label>
+            <input type="number" id="unlock-amount-input" class="modal-input" step="0.01" min="0.01">
+            <div class="modal-actions">
+                <button type="button" class="modal-btn-secondary" onclick="closeUnlockModal()">Cancel</button>
+                <button type="button" class="modal-btn-primary" id="unlock-confirm-btn" onclick="confirmUnlockProfit()">Unlock</button>
+            </div>
+        </div>
     </div>
 
     <div class="grid-2">
@@ -375,6 +428,8 @@ async function refresh() {
         document.getElementById('stat-scale').textContent = data.scale + 'x';
         document.getElementById('stat-floor').textContent = fmtUsd(data.equity_floor);
         document.getElementById('stat-locked').textContent = fmtUsd(data.locked_usd || 0);
+        currentLockedUsd = data.locked_usd || 0;
+        updateUnlockButtonState();
 
         if (data.auto_close_profit_pct != null && data.auto_close_max_hold_days != null) {
             document.getElementById('positions-note').textContent =
@@ -397,6 +452,67 @@ async function refresh() {
     } catch (e) {
         statusEl.textContent = 'Error: ' + e.message;
         statusEl.className = 'error';
+    }
+}
+
+// Per the account owner's explicit choice: cash-out ONLY, no "add to a
+// bucket" mode - unlike the crypto family tree, the 8 bot_N buckets are
+// proportional shares of one real equity, continuously rebalanced, not
+// independent principal pools, so there's nothing meaningful an
+// "add to a bucket" action could do here.
+let currentLockedUsd = 0;
+
+function updateUnlockButtonState() {
+    const btn = document.getElementById('unlock-profit-btn');
+    if (!btn) return;
+    if (currentLockedUsd < 0.01) {
+        btn.disabled = true;
+        btn.title = 'Nothing locked yet';
+    } else {
+        btn.disabled = false;
+        btn.title = `${fmtUsd(currentLockedUsd)} currently locked`;
+    }
+}
+
+function openUnlockModal() {
+    if (currentLockedUsd < 0.01) { alert('Nothing is currently locked.'); return; }
+    document.getElementById('unlock-modal-sub').textContent = `${fmtUsd(currentLockedUsd)} currently locked`;
+    const amountInput = document.getElementById('unlock-amount-input');
+    amountInput.value = currentLockedUsd.toFixed(2);
+    amountInput.max = currentLockedUsd.toFixed(2);
+    document.getElementById('unlock-modal-overlay').classList.add('open');
+}
+
+function closeUnlockModal() {
+    document.getElementById('unlock-modal-overlay').classList.remove('open');
+}
+
+async function confirmUnlockProfit() {
+    const amount = parseFloat(document.getElementById('unlock-amount-input').value);
+    if (!amount || amount <= 0) { alert('Enter a positive dollar amount.'); return; }
+    if (amount > currentLockedUsd + 0.005) { alert(`Only ${fmtUsd(currentLockedUsd)} is currently locked.`); return; }
+    if (!confirm(`Unlock $${amount.toFixed(2)} back into free spendable cash? This is real and can't be undone.`)) return;
+
+    const confirmBtn = document.getElementById('unlock-confirm-btn');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Unlocking…';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-overview/unlock-profit', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ amount }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        closeUnlockModal();
+        alert(`Unlocked ${fmtUsd(data.amount)} back into free spendable cash. Locked profit remaining: ${fmtUsd(data.new_locked_usd)}.`);
+    } catch (e) {
+        alert('Could not unlock profit: ' + e.message);
+    } finally {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Unlock';
+        await refresh();
     }
 }
 

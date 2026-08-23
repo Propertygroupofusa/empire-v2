@@ -1195,6 +1195,29 @@ async def close_alpaca_position(symbol: str, db: AsyncSession = Depends(get_db))
     return {"status": "closed", "symbol": symbol, "qty": qty, "realized_pnl": round(pnl, 2), "order": close_result}
 
 
+class AlpacaUnlockProfitRequest(BaseModel):
+    amount: float
+
+
+@router.post("/alpaca-overview/unlock-profit", dependencies=[Depends(require_admin_key)])
+async def unlock_alpaca_locked_profit(payload: AlpacaUnlockProfitRequest):
+    """Cash-out ONLY, per the account owner's explicit choice - no
+    "add to a bucket" mode (see _subtract_alpaca_locked_usd's docstring
+    for why that wouldn't do anything meaningful here, unlike the crypto
+    side). Just releases real tracked profit back out of the locked
+    ledger."""
+    if payload.amount <= 0:
+        raise HTTPException(status_code=400, detail="amount must be positive")
+
+    current_locked = await get_alpaca_locked_usd()
+    if payload.amount > current_locked + 0.005:
+        raise HTTPException(status_code=400, detail=f"Only ${current_locked:.2f} is currently locked - can't unlock ${payload.amount:.2f}")
+
+    released = await _subtract_alpaca_locked_usd(payload.amount)
+    log.info(f"[dashboard] 🔓 Unlocked ${released:.2f} of Alpaca locked profit")
+    return {"status": "cashed_out", "amount": round(released, 2), "new_locked_usd": round(current_locked - released, 2)}
+
+
 async def get_alpaca_locked_usd() -> float:
     """Running total of profit skimmed by check_and_auto_close_positions -
     same generic per-key bucket table (TradingBotState) the bot-bucket
@@ -1204,6 +1227,29 @@ async def get_alpaca_locked_usd() -> float:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == ALPACA_LOCKED_PROFIT_KEY))
         row = result.scalar_one_or_none()
         return row.base_capital if row else 0.0
+
+
+async def _subtract_alpaca_locked_usd(amount: float) -> float:
+    """Reverse of the skim in check_and_auto_close_positions. Per the
+    account owner's explicit choice: unlike the crypto side, this is
+    cash-out ONLY - no "add to a specific bucket" mode. The 8 bot_N
+    buckets aren't independent principal pools the way crypto branches
+    are; they're proportional SHARES of one real Alpaca equity, and
+    _rebalance_bots() re-derives every bucket's share from the real
+    account balance on every load. Manually bumping one bucket's
+    base_capital would just get smeared back across all 8 on the very
+    next rebalance, so there's nothing meaningful an "add to a bucket"
+    mode could do here. Clamps to whatever's actually there and returns
+    the real amount released."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == ALPACA_LOCKED_PROFIT_KEY))
+        row = result.scalar_one_or_none()
+        current = row.base_capital if row else 0.0
+        released = min(max(amount, 0.0), current)
+        if row:
+            row.base_capital = current - released
+        await db.commit()
+        return released
 
 
 async def _is_market_open(session: aiohttp.ClientSession) -> bool:
