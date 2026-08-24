@@ -2319,6 +2319,45 @@ change in this file.
 
 ---
 
+## Real bug found and fixed: get_price_rsi() blocked every symbol for the first ~4 hours of every trading day
+
+Confirmed live: clicking "Trade this" on USO - its own real 30-day backtest
+ranking was the best on the whole board, 69.2% win rate, +16.5% ROI -
+failed with `Could not fetch a live price/RSI for USO: Only 23 of the
+required 50 5-min bars are available right now`. Root cause:
+`get_price_rsi()` in `prop_bot.py` hard-required 50 real 5-min bars before
+returning anything at all - but the function only NEEDS 50 bars for one of
+its four outputs (`sma50`), and the 14-period RSI it also computes only
+needs 15 closes. The real effect: for roughly the first ~4 hours of every
+trading day (250 minutes = 50 real 5-min bars since the session opened),
+`get_price_rsi()` returned `None` outright - the automatic scanner skipped
+every symbol and the manual "Trade this" endpoint refused every click,
+real signal or real cash irrelevant, purely because the trading day was
+still young. 23 of 50 bars lines up almost exactly with ~1h53m elapsed
+since a 8:30 CDT open, confirming this wasn't a data-fetch failure, just
+an overly strict floor.
+
+Fixed by lowering the hard floor to `MIN_BARS_FOR_RSI = 15` (the real
+minimum the RSI calculation needs) and making `sma50` optional -
+`None` below 50 real bars, a real computed value at or above it. The one
+caller that reads `sma50` (`try_open`'s entry validation) was already
+written to tolerate it being unavailable, via `data.get("sma50", price)` -
+except that fallback only catches a *missing* key, not an explicit `None`,
+which is what `get_price_rsi()` now always returns as a key even when
+sma50 itself isn't available. Fixed that call site too:
+`data.get("sma50") or price`, so an explicit `None` falls back to `price`
+the same way a missing key always did.
+
+Verified offline: the exact real 23-bar count from the live USO failure
+now succeeds (previously hard-refused); a genuinely too-thin count (10
+bars, below the real 15-bar RSI floor) still correctly refuses - this
+isn't a removed safety check, just a floor lowered to what's actually
+needed; 50+ bars still produce a real `sma50`, unchanged from before; and
+the entry-validation call site's fallback correctly substitutes `price`
+for an explicit `None`, not just a missing key.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

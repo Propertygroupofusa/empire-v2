@@ -504,15 +504,34 @@ async def get_price_rsi(session, symbol):
                 return None
 
             bars = data.get("bars")
-            if bars is None or (isinstance(bars, list) and len(bars) < 50):
-                bar_count = len(bars) if isinstance(bars, list) else 0
-                log.debug(f"Insufficient bars for {symbol}: got {bar_count}, need 50")
-                _price_rsi_last_failure[symbol] = f"Only {bar_count} of the required 50 5-min bars are available right now"
-                return None
-
             if not isinstance(bars, list):
                 log.warning(f"Invalid bars format for {symbol}: expected list, got {type(bars).__name__}")
                 _price_rsi_last_failure[symbol] = f"Unexpected bars format from Alpaca: {type(bars).__name__}"
+                return None
+
+            # Real bug found live: this used to hard-require 50 bars before
+            # returning anything at all, because sma50 needs all 50 - but
+            # the 14-period RSI itself only needs 15 closes, and the entry
+            # validator (validate_dual_direction, called from try_open) was
+            # already written to tolerate a missing sma50 via
+            # data.get("sma50", price). The practical effect: for roughly
+            # the first ~4 hours of every single trading day (until 50 real
+            # 5-min bars exist), get_price_rsi() returned None outright -
+            # the scanner skipped every symbol and "Trade this" refused
+            # every manual click with "Only N of the required 50 5-min bars
+            # are available right now", real signal or real cash be damned.
+            # Confirmed live: USO's own real 69.2%-win-rate backtest ranking
+            # was unusable this morning purely because the session was only
+            # ~2 hours old (23 of 50 bars). Lowered the hard floor to what
+            # RSI actually needs; sma50 is now None below 50 real bars
+            # (letting the existing downstream fallback take over, same as
+            # it already did for a hard failure) rather than blocking
+            # everything else on it too.
+            MIN_BARS_FOR_RSI = 15
+            if len(bars) < MIN_BARS_FOR_RSI:
+                bar_count = len(bars)
+                log.debug(f"Insufficient bars for {symbol}: got {bar_count}, need at least {MIN_BARS_FOR_RSI}")
+                _price_rsi_last_failure[symbol] = f"Only {bar_count} of the required {MIN_BARS_FOR_RSI} 5-min bars are available right now"
                 return None
 
             closes = [b["c"] for b in bars]
@@ -525,13 +544,13 @@ async def get_price_rsi(session, symbol):
             rs = avg_gain / avg_loss if avg_loss > 0 else 100
             rsi = 100 - (100 / (1 + rs))
 
-            sma5 = sum(closes[-5:]) / 5
-            sma10 = sum(closes[-10:]) / 10
-            sma50 = sum(closes[-50:]) / 50
+            sma5 = sum(closes[-5:]) / 5 if len(closes) >= 5 else price
+            sma10 = sum(closes[-10:]) / 10 if len(closes) >= 10 else price
+            sma50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else None
             trend = "bullish" if sma5 > sma10 else "bearish"
 
             # Momentum: price change over last 3 bars (shows direction/strength)
-            momentum = ((price - closes[-3]) / closes[-3]) * 100 if closes[-3] > 0 else 0
+            momentum = ((price - closes[-3]) / closes[-3]) * 100 if len(closes) >= 3 and closes[-3] > 0 else 0
 
             _price_rsi_last_failure.pop(symbol, None)
             return {"price": price, "rsi": round(rsi, 1), "trend": trend, "momentum": round(momentum, 2), "sma50": sma50}
@@ -1484,7 +1503,11 @@ async def run_prop_cycle():
             momentum = data.get("momentum", 0)
 
             # Mean Reversion Entry Validation — check both long and short directions
-            sma50 = data.get("sma50", price)  # fallback to price if SMA50 unavailable
+            # get_price_rsi() now returns sma50=None (not just an absent
+            # key) once fewer than 50 real bars exist - `or` catches that
+            # explicit None the same way `.get(..., price)` caught a
+            # missing key before.
+            sma50 = data.get("sma50") or price  # fallback to price if SMA50 unavailable
 
             direction, should_enter, reason = validate_dual_direction(
                 symbol=contract,
