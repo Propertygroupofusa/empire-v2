@@ -316,7 +316,53 @@ MANUAL_EXCLUDED_COINS = {"STX-USD", "BLUR-USD", "UNI-USD", "DOT-USD", "PEPE-USD"
 AUTO_BACKTEST_INTERVAL_SECONDS = engine._safe_int_env("TREE_AUTO_BACKTEST_INTERVAL_SECONDS", str(24 * 60 * 60))
 AUTO_EXCLUDE_RUN_WINDOW = engine._safe_int_env("TREE_AUTO_EXCLUDE_RUN_WINDOW", "3")
 
+# Per the account owner's explicit request ("doing 15 for now out of 28
+# and rotate them as it goes... if it's more profitable then it jumps up
+# there and be able to get in this place"): rather than every
+# non-excluded coin in COIN_FAMILY_TREE being a candidate, the tree now
+# concentrates on a smaller, actively-rotating set of its real
+# best-performing coins - the top TOP_N_ELIGIBLE_COINS by latest real
+# backtest ROI (see _compute_top_ranked_coins). A coin ranks in the
+# instant its latest real backtest run puts it in the top N, and ranks
+# back out the instant a fresher run drops it below the cut - same
+# contestable, never-one-way philosophy as the exclusion layers below,
+# just working from a rank cut instead of a good/bad verdict.
+TOP_N_ELIGIBLE_COINS = engine._safe_int_env("TREE_TOP_N_ELIGIBLE_COINS", "15")
+
 _last_auto_backtest_at = 0.0
+
+
+async def _compute_top_ranked_coins():
+    """Real, live ranking by latest CryptoBacktestRun.roi_pct_of_spend per
+    coin - the exact same real backtest data the exclusion layers below
+    and crypto_selection_backtest.html's own table already read, not a
+    new or separately-computed number. Returns the set of the top
+    TOP_N_ELIGIBLE_COINS coins by ROI, or None if fewer than
+    TOP_N_ELIGIBLE_COINS coins have ANY real backtest run yet - a
+    deliberate cold-start guard: with too little real evidence to
+    meaningfully fill a top-N cut, get_effective_excluded_coins() skips
+    this filter entirely rather than accidentally excluding every coin in
+    the tree because most of them still show as "unranked". A coin with
+    no real run yet is simply never in the ranked set until it has one -
+    same "needs real evidence" default MANUAL_EXCLUDED_COINS already
+    uses. One query regardless of how many coins are in COIN_FAMILY_TREE
+    (ordered by run_at descending, first row per product_id kept) rather
+    than one query per coin, since this is on the hot path for every
+    coin-selection call."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(CryptoBacktestRun.product_id, CryptoBacktestRun.roi_pct_of_spend)
+            .order_by(CryptoBacktestRun.product_id, desc(CryptoBacktestRun.run_at))
+        )
+        rows = result.all()
+    latest_roi = {}
+    for product_id, roi in rows:
+        if product_id not in latest_roi:
+            latest_roi[product_id] = roi
+    if len(latest_roi) < TOP_N_ELIGIBLE_COINS:
+        return None
+    ranked = sorted(latest_roi.items(), key=lambda kv: kv[1], reverse=True)
+    return {product_id for product_id, _roi in ranked[:TOP_N_ELIGIBLE_COINS]}
 
 
 async def _compute_auto_excluded_coins() -> set:
@@ -380,8 +426,15 @@ async def get_effective_excluded_coins() -> set:
     _manually_excluded_still_excluded) unioned with whatever the
     automatic backtest rule currently flags on any coin (contestable -
     can add or remove coins on every scheduled run, see
-    _compute_auto_excluded_coins)."""
-    return await _manually_excluded_still_excluded() | await _compute_auto_excluded_coins()
+    _compute_auto_excluded_coins), unioned with every coin currently
+    OUTSIDE the real top-TOP_N_ELIGIBLE_COINS ranking by backtest ROI
+    (see _compute_top_ranked_coins) - skipped entirely during the
+    cold-start case where there isn't yet enough real ranking data."""
+    excluded = await _manually_excluded_still_excluded() | await _compute_auto_excluded_coins()
+    top_ranked = await _compute_top_ranked_coins()
+    if top_ranked is not None:
+        excluded |= {p for p in COIN_FAMILY_TREE if p not in top_ranked}
+    return excluded
 
 
 async def get_latest_backtest_result(product_id: str):

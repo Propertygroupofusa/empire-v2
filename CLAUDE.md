@@ -1780,6 +1780,55 @@ alongside it.
 
 ---
 
+## Top-N rotating coin pool - the tree now concentrates on its real best performers
+
+Per the account owner's explicit request, right after seeing the real
+36-coin backtest table: "doing 15 for now out of 28 and rotate them as
+it goes... if it's more profitable then it jumps up there and be able to
+get in this place and then we make money off of it." Rather than every
+non-excluded coin in `COIN_FAMILY_TREE` being a candidate, the tree now
+concentrates spawns and coin-switches on the real top
+`TOP_N_ELIGIBLE_COINS` (15 default, env-overridable) coins by latest
+backtest ROI - a coin ranks IN the instant a real backtest run puts it in
+the top 15, and ranks back OUT the instant a fresher run (the existing
+daily automatic run, or a manual "Run Backtest" click) drops it below the
+cut. Live, not a snapshot - `_compute_top_ranked_coins()` re-reads
+`CryptoBacktestRun` fresh on every call, so a new run's effect is visible
+on the very next coin-selection call.
+
+Implementation: `_compute_top_ranked_coins()` reads the single latest
+real ROI per coin (one query, ordered by `run_at` descending, first row
+per `product_id` kept - deliberately not one query per coin, since this
+sits on the hot path for every spawn/coin-switch call across every
+branch) and returns the top-N set, or `None` if fewer than
+`TOP_N_ELIGIBLE_COINS` coins have any real backtest run yet. That `None`
+is a deliberate cold-start guard: `get_effective_excluded_coins()` skips
+the rank filter entirely in that case, rather than accidentally excluding
+every coin in the tree because most of them still show as "unranked" -
+the filter only ever activates once there's real evidence to fill a
+top-N cut. Wired into the existing `get_effective_excluded_coins()`
+(unioned on top of the manual and auto-exclusion layers, not replacing
+them) - both `get_next_eligible_product_id()` and
+`find_most_volatile_unclaimed_coin()` already read that one function, so
+no other call site needed to change. A coin manually or auto-excluded for
+other real reasons stays excluded even if it ranks in the top 15 by ROI
+alone - the layers stack, they don't override each other. A branch
+already holding a coin that rotates out of the top 15 is never
+force-sold, same as every other exclusion layer - it keeps running under
+its own rules and simply won't be offered that coin again once it exits.
+
+Verified offline: the cold-start guard correctly skips the filter with
+fewer than 15 ranked coins (would otherwise lock the whole tree out of
+spawning); a real top-N ranking correctly excludes the bottom performers
+once enough real data exists; a fresh backtest run immediately rotates
+the eligible set on the very next call (a coin jumping to the best ROI
+rotates in, bumping the previous bottom-of-top-N coin out); and the
+manual exclusion layer still holds a coin out even when it would
+otherwise rank inside the top N by ROI alone. Full existing regression
+suite (15 prior scratch test files) re-run clean alongside it.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
