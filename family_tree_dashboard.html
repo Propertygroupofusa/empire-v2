@@ -127,8 +127,9 @@
     .bar-list { display: flex; flex-direction: column; gap: 10px; }
     .bar-row { display: grid; grid-template-columns: 110px 1fr 90px; align-items: center; gap: 10px; font-size: 0.82em; }
     .bar-row .bar-label { color: var(--text-dim); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .bar-track { background: #eef1f6; border-radius: 5px; height: 10px; overflow: hidden; }
+    .bar-track { background: #eef1f6; border-radius: 5px; height: 16px; overflow: hidden; position: relative; }
     .bar-fill { height: 100%; border-radius: 5px; background: linear-gradient(90deg, #ffcf5e, var(--gold)); }
+    .bar-spawn-pct { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 0.72em; font-weight: 800; letter-spacing: 0.2px; text-shadow: 0 0 3px #fff, 0 0 3px #fff, 0 0 3px #fff; white-space: nowrap; }
     .bar-row .bar-value { text-align: right; font-weight: 700; color: var(--navy); }
 
     .tree-canvas { overflow-x: auto; padding: 10px 4px 30px; }
@@ -512,15 +513,29 @@ function fmtUsd(n) {
     return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+function spawnPctColor(pct) {
+    // Interpolates from gold (low progress) to green (near/at 100%),
+    // so a branch closing in on its next spawn stands out at a glance.
+    const gold = [201, 134, 10];
+    const green = [0, 152, 69];
+    const t = Math.max(0, Math.min(1, pct / 100));
+    const rgb = gold.map((v, i) => Math.round(v + (green[i] - v) * t));
+    return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+}
+
 function renderBarList(containerId, items) {
     const el = document.getElementById(containerId);
     if (!items.length) { el.innerHTML = '<div class="empty">No branches yet</div>'; return; }
     const max = Math.max(1, ...items.map(i => i.value));
     el.innerHTML = items.slice().sort((a, b) => b.value - a.value).map(i => {
         const pct = (i.value / max) * 100;
+        const spawnPct = i.spawnPct != null ? Math.round(Math.max(0, Math.min(100, i.spawnPct))) : null;
+        const spawnBadge = spawnPct != null
+            ? `<span class="bar-spawn-pct" style="color:${spawnPctColor(spawnPct)}">${spawnPct}%</span>`
+            : '';
         return `<div class="bar-row">
             <span class="bar-label">${i.label}</span>
-            <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+            <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div>${spawnBadge}</div>
             <span class="bar-value">${fmtUsd(i.value)}</span>
         </div>`;
     }).join('');
@@ -1136,7 +1151,11 @@ async function refresh() {
         }, 0);
         renderTotalProfit();
 
-        renderBarList('branches-bar', branches.map(b => ({ label: b.product_id.replace('-USD', ''), value: b.allocated_usd })));
+        renderBarList('branches-bar', branches.map(b => ({
+            label: b.product_id.replace('-USD', ''),
+            value: b.allocated_usd,
+            spawnPct: b.next_unlock_tier > 0 ? Math.min(100, (b.allocated_usd / b.next_unlock_tier) * 100) : 0,
+        })));
         renderTreemap('branches-treemap', branches.map(b => ({ label: b.product_id.replace('-USD', ''), value: b.allocated_usd })));
         renderNarrative(data);
         renderTree(branches);
