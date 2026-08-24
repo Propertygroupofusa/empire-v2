@@ -2497,6 +2497,48 @@ shadow-mode only; nothing here changes what the live bot buys.
 
 ---
 
+## Live "what's bullish right now" coin watchlist (real-time, not backtested)
+
+The account owner looked at the 30-day backtest table on
+`crypto_selection_backtest.html` and asked directly: "this is [30-day]
+stuff, I need to know what's bullish right now." A real, fair
+distinction - the backtest replays 30 days of history to rank coins by
+strategy performance; it was never meant to answer "which coins are
+trending well at this exact moment."
+
+- **`get_live_coin_snapshot()`** (`crypto_family_tree_bot.py`) - reuses
+  the exact same real, live checks `find_most_volatile_unclaimed_coin()`
+  already runs at the moment a branch needs to pick a coin (same ~25h
+  bullish/ATR/RSI lookup via `engine.get_price_volatility_and_trend()`,
+  same `engine.ENTRY_MAX_RSI` overbought filter, same BTC-relative-
+  strength alpha check with the same fail-open behavior on a missing
+  BTC-USD lookup, same `get_effective_excluded_coins()` and
+  `_coin_sale_cooldown_active()` checks) - just reports every coin's
+  live status instead of only returning the single best pick. Read-only,
+  never places an order.
+- New route `GET /api/trading-dashboard/family-tree-status/coin-watchlist`
+  (admin-key gated) and a new "🟢 What's bullish right now" panel at the
+  TOP of `crypto_selection_backtest.html` (above the 30-day backtest
+  section), auto-loaded on page open plus a manual refresh button. Each
+  row shows live trend/25h return/RSI/ATR%/BTC-relative alpha and an
+  "✅ Eligible now" badge when a branch exiting its current coin at this
+  exact instant would actually be allowed to buy that coin - or the
+  specific real reason it's blocked (excluded, cooling down, overbought,
+  trailing BTC) when it isn't.
+
+Verified offline (no live network access in this sandbox - the same
+documented gap as every backtest tool in this file): a coin that's
+bullish/not-overbought/beating-BTC is correctly eligible now; an
+overbought coin is blocked even while bullish; a coin trailing BTC's own
+real return is blocked; an excluded coin and a cooling-down coin are both
+blocked regardless of otherwise-good numbers; a coin with a real fetch
+failure is reported with `price=None` without crashing the rest of the
+snapshot; a failed BTC-USD lookup fails open (never blocks on a missing
+benchmark, matching the live picker's own documented behavior); and
+eligible-now coins sort first in the returned list.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

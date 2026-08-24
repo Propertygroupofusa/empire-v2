@@ -1412,6 +1412,80 @@ async def find_most_volatile_unclaimed_coin(session):
     return None, None
 
 
+async def get_live_coin_snapshot():
+    """Real-time (NOT backtested) view of every family-tree coin's current
+    status - built per the account owner's explicit request after looking
+    at the 30-day backtest table and asking "I need to know what's bullish
+    right now." That table replays 30 days of history; this instead reuses
+    the exact same real, live checks find_most_volatile_unclaimed_coin()
+    runs at the moment a branch actually needs to pick a coin - same
+    ~25-hour bullish/ATR/RSI/BTC-relative-strength lookup, same exclusion
+    and cooldown checks, same engine.ENTRY_MAX_RSI threshold - just
+    reporting every coin's status instead of only returning the single
+    best pick. Read-only, never places an order.
+
+    Returns {"btc_return_25h": ..., "coins": [...]}, one row per coin in
+    COIN_FAMILY_TREE, sorted eligible-right-now first, then by ATR%
+    descending (the same volatility tiebreak the live picker uses)."""
+    excluded = await get_effective_excluded_coins()
+    async with engine.aiohttp.ClientSession() as session:
+        results = await asyncio.gather(
+            engine.get_price_volatility_and_trend(session, "BTC-USD"),
+            *(engine.get_price_volatility_and_trend(session, product_id) for product_id in COIN_FAMILY_TREE),
+            return_exceptions=True,
+        )
+    btc_result, coin_results = results[0], results[1:]
+    btc_return = None
+    if isinstance(btc_result, Exception):
+        log.warning(f"[TREE] live snapshot: BTC-USD lookup failed ({btc_result}) - BTC-relative filter shown as N/A")
+    else:
+        _, _, _, _, btc_return = btc_result
+
+    snapshot = []
+    for product_id, result in zip(COIN_FAMILY_TREE, coin_results):
+        row = {
+            "product_id": product_id,
+            "excluded": product_id in excluded,
+            "cooldown": _coin_sale_cooldown_active(product_id),
+        }
+        if isinstance(result, Exception) or result is None:
+            row.update({
+                "price": None, "atr_pct": None, "is_bullish": None, "rsi": None,
+                "coin_return": None, "btc_return": btc_return, "alpha": None,
+                "overbought": None, "beats_btc": None, "eligible_now": False,
+                "error": str(result) if isinstance(result, Exception) else "no real price data available",
+            })
+            snapshot.append(row)
+            continue
+
+        price, atr_pct, is_bullish, rsi, coin_return = result
+        if price is None or atr_pct is None:
+            row.update({
+                "price": None, "atr_pct": None, "is_bullish": None, "rsi": None,
+                "coin_return": None, "btc_return": btc_return, "alpha": None,
+                "overbought": None, "beats_btc": None, "eligible_now": False,
+                "error": "no real price data available",
+            })
+            snapshot.append(row)
+            continue
+
+        overbought = rsi is not None and rsi >= engine.ENTRY_MAX_RSI
+        alpha = (coin_return - btc_return) if (coin_return is not None and btc_return is not None) else None
+        beats_btc = alpha is None or alpha > 0  # fails open, matching the live picker's own documented behavior
+        eligible_now = (
+            not row["excluded"] and not row["cooldown"] and not overbought and beats_btc
+        )
+        row.update({
+            "price": price, "atr_pct": atr_pct, "is_bullish": is_bullish, "rsi": rsi,
+            "coin_return": coin_return, "btc_return": btc_return, "alpha": alpha,
+            "overbought": overbought, "beats_btc": beats_btc, "eligible_now": eligible_now,
+        })
+        snapshot.append(row)
+
+    snapshot.sort(key=lambda r: (not r["eligible_now"], not r["is_bullish"], -(r["atr_pct"] or -1)))
+    return {"btc_return_25h": btc_return, "coins": snapshot}
+
+
 async def _load_branch_position(bot_name: str):
     """A real production crash (sqlalchemy.exc.MultipleResultsFound) hit
     crypto_tree_xrp_usd's thread on every single cycle once two BotPosition

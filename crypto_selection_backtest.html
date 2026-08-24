@@ -59,6 +59,9 @@
     }
     .trade-btn:disabled { opacity: 0.55; cursor: default; }
     .trade-note { font-size: 0.78em; color: var(--text-dim); margin-top: 20px; }
+    .wl-badge { display: inline-block; padding: 3px 9px; border-radius: 20px; font-size: 0.82em; font-weight: 700; white-space: nowrap; }
+    .wl-eligible { background: var(--green-bg); color: var(--green); }
+    .wl-blocked { background: #eef1f6; color: var(--text-dim); }
 </style>
 </head>
 <body>
@@ -71,6 +74,13 @@
     </div>
 
     <div class="note">
+        <strong>🟢 What's bullish right now:</strong> live, real-time status for every coin — not a historical replay. Reuses the exact same real checks the bot itself uses at this instant to pick a coin (25h bullish check, RSI overbought filter, BTC-relative-strength alpha) — so "Eligible now" here means a branch exiting its current coin THIS SECOND would actually be allowed to buy that coin.
+    </div>
+    <button class="run-btn" id="wlBtn" onclick="loadWatchlist()">🔄 Refresh live status</button>
+    <div id="wlStatus"></div>
+    <div id="wlResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
         <strong>What this measures:</strong> for each coin the family tree bot is eligible to trade, this pulls real historical hourly candles from Coinbase and simulates buying/selling using the exact same rules the live bot uses (target %, -2% stop, breakeven ratchet, $3.75 peak-profit giveback, real fees) — then ranks coins by what that strategy would actually have returned. This does not change what the live bot buys; it's a read-only report to inform that decision.
     </div>
 
@@ -111,6 +121,99 @@ function fmtUsd(n) {
     const sign = n < 0 ? '-' : '';
     return sign + '$' + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
+
+async function loadWatchlist() {
+    const btn = document.getElementById('wlBtn');
+    const statusEl = document.getElementById('wlStatus');
+    const resultsEl = document.getElementById('wlResults');
+    btn.disabled = true;
+    btn.textContent = 'Loading live status...';
+    statusEl.textContent = '';
+    statusEl.className = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/family-tree-status/coin-watchlist', {
+            method: 'GET',
+            headers: { 'X-Admin-Key': key },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        renderWatchlist(data);
+        const btcTxt = data.btc_return_25h != null ? `${(data.btc_return_25h * 100).toFixed(2)}%` : 'unavailable';
+        statusEl.textContent = `Live as of now. BTC-USD's own 25h return: ${btcTxt}.`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+        resultsEl.innerHTML = '';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '🔄 Refresh live status';
+    }
+}
+
+function renderWatchlist(data) {
+    const resultsEl = document.getElementById('wlResults');
+    const coins = data.coins || [];
+    if (!coins.length) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No live data available.</p>';
+        return;
+    }
+    const rows = coins.map(c => {
+        if (c.price == null) {
+            return `<tr>
+                <td>${c.product_id}</td>
+                <td colspan="5" style="color:var(--text-dim)">${c.error || 'no live data'}</td>
+                <td><span class="wl-badge wl-blocked">Unavailable</span></td>
+            </tr>`;
+        }
+        const bullishHtml = c.is_bullish ? '<span class="pos">🟢 Bullish</span>' : '<span style="color:var(--text-dim)">🔴 Not bullish</span>';
+        const retHtml = c.coin_return != null ? `${c.coin_return >= 0 ? '+' : ''}${(c.coin_return * 100).toFixed(2)}%` : '—';
+        const rsiHtml = c.rsi != null ? c.rsi.toFixed(1) + (c.overbought ? ' 🔥' : '') : '—';
+        const alphaHtml = c.alpha != null
+            ? `<span class="${c.alpha > 0 ? 'pos' : 'neg'}">${c.alpha >= 0 ? '+' : ''}${(c.alpha * 100).toFixed(2)}pp</span>`
+            : '<span style="color:var(--text-dim)">n/a</span>';
+
+        let badge;
+        if (c.eligible_now) {
+            badge = '<span class="wl-badge wl-eligible">✅ Eligible now</span>';
+        } else {
+            let reason = 'Blocked';
+            if (c.excluded) reason = 'Excluded';
+            else if (c.cooldown) reason = 'Cooling down';
+            else if (c.overbought) reason = 'Overbought';
+            else if (c.beats_btc === false) reason = 'Trailing BTC';
+            badge = `<span class="wl-badge wl-blocked">${reason}</span>`;
+        }
+
+        return `<tr>
+            <td>${c.product_id}</td>
+            <td>${bullishHtml}</td>
+            <td>${retHtml}</td>
+            <td>${rsiHtml}</td>
+            <td>${c.atr_pct != null ? c.atr_pct.toFixed(2) + '%' : '—'}</td>
+            <td>${alphaHtml}</td>
+            <td>${badge}</td>
+        </tr>`;
+    }).join('');
+
+    resultsEl.innerHTML = `
+        <table>
+            <thead><tr>
+                <th>Coin</th><th>Trend</th><th>25h return</th><th>RSI</th><th>ATR%</th><th>vs BTC</th><th>Status</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+        <p class="trade-note">Sorted eligible-now first, then bullish, then by volatility (ATR%) — the same order the bot's own live coin picker would consider them in. "vs BTC" is this coin's real ~25h return minus BTC-USD's own real ~25h return over the identical window; positive means it's genuinely outperforming BTC, not just moving up in isolation.</p>
+    `;
+}
+
+window.addEventListener('DOMContentLoaded', loadWatchlist);
 
 async function runBacktest() {
     const btn = document.getElementById('runBtn');

@@ -1160,6 +1160,21 @@ async def unlock_locked_profit(payload: UnlockProfitRequest, db: AsyncSession = 
     return {"status": "cashed_out", "amount": round(released, 2), "new_locked_usd": round(current_locked - released, 2)}
 
 
+@router.get("/family-tree-status/coin-watchlist", dependencies=[Depends(require_admin_key)])
+async def family_tree_coin_watchlist():
+    """Real-time (NOT backtested) view of every family-tree coin's live
+    bullish/overbought/BTC-relative-strength status, per the account
+    owner's explicit request after looking at the 30-day backtest table
+    and asking "what's bullish right now" - the backtest replays history,
+    this reads the exact same real, live checks the bot itself uses right
+    now to pick a coin (crypto_family_tree_bot.get_live_coin_snapshot()),
+    just reporting every coin instead of only the single best pick.
+    Read-only, never places an order."""
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+    return await crypto_family_tree_bot_module.get_live_coin_snapshot()
+
+
 @router.post("/crypto-selection-backtest", dependencies=[Depends(require_admin_key)])
 async def run_crypto_selection_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders,
