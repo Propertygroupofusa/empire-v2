@@ -662,62 +662,78 @@ async def load_all_branches():
         return result.scalars().all()
 
 
+async def _unique_child_bot_name(product_id: str) -> str:
+    """A branch's bot_name has always been derived directly from its
+    coin (crypto_tree_{coin}) - that was fine when product_id itself was
+    unique, but per the account owner's explicit choice, multiple
+    branches can now share the same coin, and bot_name still needs to be
+    unique (it's the real per-branch thread/identity key everywhere else
+    in this system). Appends _2, _3, ... until landing on a name nothing
+    already uses, so a second (or third) branch on an already-claimed
+    coin still gets a real, distinct identity instead of colliding with
+    the existing one."""
+    base = f"crypto_tree_{product_id.lower().replace('-', '_')}"
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoTreeBranch.bot_name))
+        existing = set(result.scalars().all())
+    if base not in existing:
+        return base
+    n = 2
+    while f"{base}_{n}" in existing:
+        n += 1
+    return f"{base}_{n}"
+
+
 async def get_next_eligible_product_id():
-    """First coin in COIN_FAMILY_TREE not already claimed by an existing
-    branch, not currently excluded (see get_effective_excluded_coins), and
-    not still cooling down from having been sold within the last cycle
-    (see _coin_sale_cooldown_active)."""
+    """Picks a coin for a brand-new $50 branch to start on - not currently
+    excluded (see get_effective_excluded_coins), not still cooling down
+    from having been sold within the last cycle (see
+    _coin_sale_cooldown_active).
+
+    Per the account owner's explicit choice, no longer REQUIRES the coin
+    to be unclaimed - multiple branches can now hold the same coin at
+    once. Still prefers spreading out where possible though: among all
+    eligible coins, picks whichever currently has the FEWEST branches
+    already on it (ties broken by COIN_FAMILY_TREE order) - a coin with
+    zero branches always wins first, same practical result as the old
+    "must be unclaimed" rule in the common case, but this degrades to
+    piling onto the least-crowded coin instead of returning None once
+    every coin has at least one branch, rather than hard-blocking new
+    branches from spawning at all."""
     excluded = await get_effective_excluded_coins()
+    eligible = [
+        p for p in COIN_FAMILY_TREE
+        if p not in excluded and not _coin_sale_cooldown_active(p)
+    ]
+    if not eligible:
+        return None
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoTreeBranch.product_id))
-        claimed = set(result.scalars().all())
-    for product_id in COIN_FAMILY_TREE:
-        if product_id not in claimed and product_id not in excluded and not _coin_sale_cooldown_active(product_id):
-            return product_id
-    return None
+        held = list(result.scalars().all())
+    counts = {p: held.count(p) for p in eligible}
+    return min(eligible, key=lambda p: (counts[p], eligible.index(p)))
 
 
-async def _ensure_product_id_unique_index():
-    """One-time safety migration, safe to call on every startup: adds a
-    real DB-level UNIQUE index on crypto_tree_branches.product_id.
-
-    Every branch runs as its own thread with its own independent cycle
-    timer - nothing coordinates them against each other. Two branches can
-    exit at close enough to the same moment that both read the "unclaimed
-    coins" set before either has written its own pick back, and without a
-    real constraint, both could commit the same coin as their new pick -
-    two branches silently trading the identical coin at once, breaking the
-    "only unclaimed coins" rule this whole feature was built around. A
-    Python-level check alone can't close that window (both checks can pass
-    before either write lands); only the database itself, rejecting the
-    second write outright, actually guarantees it never happens.
-
-    If duplicate product_id rows already exist (shouldn't happen, but
-    would make the index impossible to create), or the index can't be
-    created for any other reason, this logs a warning and leaves the
-    constraint absent rather than blocking startup - the coin-switch code
-    still catches that failure mode at the point of use (see
-    _branch_sell_and_settle) so a missing index degrades to "the race is
-    possible but rare," not a crash."""
+async def _drop_product_id_unique_index():
+    """One-time reversal, safe to call on every startup: per the account
+    owner's explicit choice, branches are no longer required to each
+    trade a different coin - multiple branches can now hold the same
+    coin at once. The real DB-level UNIQUE index this same startup
+    sequence used to create (ix_crypto_tree_branches_product_id_unique)
+    would reject that outright at the database layer regardless of what
+    the Python-level "claimed" checks say (already removed from
+    get_next_eligible_product_id(), find_most_volatile_unclaimed_coin(),
+    and the manual spawn-branch endpoint), so it has to come off too, on
+    any deployment that already created it in an earlier session.
+    Harmless to call on a deployment that never had it - DROP INDEX IF
+    EXISTS is a no-op there."""
     try:
         async with AsyncSessionLocal() as db:
-            dupes = await db.execute(text(
-                "SELECT product_id, COUNT(*) FROM crypto_tree_branches "
-                "GROUP BY product_id HAVING COUNT(*) > 1"
-            ))
-            dupe_rows = dupes.fetchall()
-            if dupe_rows:
-                log.warning(f"[TREE] duplicate product_id rows already exist ({dupe_rows}) - "
-                            f"skipping unique index, coin-claim races are NOT prevented at the DB level yet")
-                return
-            await db.execute(text(
-                "CREATE UNIQUE INDEX IF NOT EXISTS ix_crypto_tree_branches_product_id_unique "
-                "ON crypto_tree_branches (product_id)"
-            ))
+            await db.execute(text("DROP INDEX IF EXISTS ix_crypto_tree_branches_product_id_unique"))
             await db.commit()
-        log.info("[TREE] product_id uniqueness enforced at the DB level - two branches can never claim the same coin")
+        log.info("[TREE] product_id uniqueness constraint removed - branches can now share the same coin")
     except Exception as e:
-        log.warning(f"[TREE] could not add product_id uniqueness constraint: {e} - coin-claim races are not yet prevented at the DB level")
+        log.warning(f"[TREE] could not drop product_id uniqueness constraint: {e}")
 
 
 async def _lower_existing_unlock_tiers():
@@ -932,8 +948,9 @@ async def _migrate_matic_to_pol():
 
 
 async def find_most_volatile_unclaimed_coin(session):
-    """Among the family-tree coins not already claimed by any existing
-    branch, finds the most volatile coin that's ALSO currently bullish
+    """Among the eligible family-tree coins (not excluded, not still
+    cooling down from a recent sale), finds the most volatile coin that's
+    ALSO currently bullish
     (price up over the ~25-hour candle window) - called after every branch
     exit (a TARGET HIT, a STOP HIT, or a floor-breach forced exit) so a
     branch moves on to a new coin instead of repeatedly re-buying the one
@@ -957,17 +974,25 @@ async def find_most_volatile_unclaimed_coin(session):
     (too little price history) is still eligible - this only excludes a
     confirmed-overbought reading, it doesn't require one.
 
-    If no unclaimed, non-overbought coin is currently bullish, falls back
-    to the highest volatility among the remaining non-overbought
-    candidates rather than doing nothing. Returns (product_id, atr_pct),
-    or (None, None) if every coin is already claimed, overbought, or none
-    have usable price data right now.
+    If no non-overbought coin is currently bullish, falls back to the
+    highest volatility among the remaining non-overbought candidates
+    rather than doing nothing. Returns (product_id, atr_pct), or
+    (None, None) if every coin is excluded, overbought, or none have
+    usable price data right now.
+
+    Per the account owner's explicit choice, no longer excludes a coin
+    just because another branch already holds it - multiple branches can
+    trade the same coin at once, so this always picks the objectively
+    best real-time candidate (by trend/volatility/RSI) rather than
+    steering away from a coin that's already proving itself elsewhere in
+    the tree.
 
     A coin sold within the last CYCLE_SECONDS (see
-    _coin_sale_cooldown_active) is skipped too - a real one-cycle cooldown
-    so a branch (this one or another) can't immediately buy straight back
-    into a coin that was just sold. After that single cycle, if it's
-    still bullish, it's a normal candidate again like any other coin.
+    _coin_sale_cooldown_active) is still skipped though - a real
+    one-cycle cooldown so a branch (this one or another) can't
+    immediately buy straight back into a coin that was JUST sold. After
+    that single cycle, if it's still bullish, it's a normal candidate
+    again like any other coin.
 
     Looks up every candidate concurrently rather than one at a time: with
     up to 37 coins and a 15s timeout per request, a sequential loop's
@@ -975,12 +1000,9 @@ async def find_most_volatile_unclaimed_coin(session):
     while it worked through the whole list) - running them all at once
     caps the whole search at whatever the single slowest request takes."""
     excluded = await get_effective_excluded_coins()
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(select(CryptoTreeBranch.product_id))
-        claimed = set(result.scalars().all())
     candidates = [
         p for p in COIN_FAMILY_TREE
-        if p not in claimed and p not in excluded and not _coin_sale_cooldown_active(p)
+        if p not in excluded and not _coin_sale_cooldown_active(p)
     ]
 
     results = await asyncio.gather(
@@ -1010,7 +1032,7 @@ async def find_most_volatile_unclaimed_coin(session):
     if best_bullish_id:
         return best_bullish_id, best_bullish_atr
     if best_any_id:
-        log.info("[TREE] no unclaimed coin is currently bullish - falling back to highest volatility overall")
+        log.info("[TREE] no eligible coin is currently bullish - falling back to highest volatility overall")
         return best_any_id, best_any_atr
     return None, None
 
@@ -1277,10 +1299,10 @@ async def _maybe_spawn_child(branch):
                 )
     next_product = await get_next_eligible_product_id()
     if next_product is None:
-        log.info(f"[TREE] {branch.bot_name} crossed ${branch.next_unlock_tier:,.0f} but every eligible coin is already claimed - no child to spawn")
+        log.info(f"[TREE] {branch.bot_name} crossed ${branch.next_unlock_tier:,.0f} but every coin is excluded or cooling down - no child to spawn yet")
         return
 
-    child_name = f"crypto_tree_{next_product.lower().replace('-', '_')}"
+    child_name = await _unique_child_bot_name(next_product)
     milestone = branch.next_unlock_tier
     try:
         async with AsyncSessionLocal() as db:
@@ -1300,14 +1322,16 @@ async def _maybe_spawn_child(branch):
             await db.commit()
             remaining = fresh.allocated_usd
     except IntegrityError:
-        # Another branch crossed its own tier at nearly the same moment and
-        # claimed this exact coin first - same DB-level unique index that
-        # protects the coin-switch path (see _ensure_product_id_unique_index).
-        # The parent's own allocated_usd/next_unlock_tier update rolled back
-        # together with the failed insert (same transaction), so nothing is
-        # stuck half-applied - this crossing just gets retried next cycle,
-        # against whatever's unclaimed by then.
-        log.info(f"[TREE] {branch.bot_name} crossed ${milestone:,.0f} but {next_product} was claimed by another branch first (race) - will retry next cycle")
+        # product_id no longer needs to be unique (branches can share a
+        # coin now), but bot_name still does - a child's name is derived
+        # directly from its coin (crypto_tree_{product}), so two DIFFERENT
+        # parents crossing their own tier at nearly the same moment and
+        # both picking the same next_product would collide trying to
+        # create the identical child bot_name. The parent's own
+        # allocated_usd/next_unlock_tier update rolled back together with
+        # the failed insert (same transaction), so nothing is stuck
+        # half-applied - this crossing just gets retried next cycle.
+        log.info(f"[TREE] {branch.bot_name} crossed ${milestone:,.0f} but a child named {child_name} was just created by another branch first (race) - will retry next cycle")
         return
 
     log.info(
@@ -1362,10 +1386,10 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
 
     # Every exit - a profitable TARGET HIT, a STOP HIT, or a floor-breach
     # forced exit - now looks for a new coin to move to rather than
-    # automatically re-buying the same one just traded. Looked up before
-    # the update transaction below opens, using the DB's still-current
-    # claimed set (this branch's own coin included), so it can never
-    # "switch" to itself.
+    # automatically re-buying the same one just traded. It can't
+    # immediately switch back to the coin it just sold either - the
+    # one-cycle cooldown set at the top of this function (_coin_last_sold_at)
+    # covers that, same protection for every branch, not a "claimed" check.
     #
     # The root (BTC) is the permanent foundation the whole tree grows out
     # of, not a branch that wanders - per the account owner, it always
@@ -1419,31 +1443,20 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
     # update above - that part is correct and final either way.
     if row is not None and new_product_id:
         old_product_id = row.product_id
-        try:
-            async with AsyncSessionLocal() as db:
-                result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
-                fresh = result.scalar_one_or_none()
-                if fresh:
-                    fresh.product_id = new_product_id
-                    await db.commit()
-            row.product_id = new_product_id
-            log.info(f"[TREE] 🔀 {bot_name} switching {old_product_id} -> {new_product_id} (ATR {new_product_atr*100:.2f}%) after {reason}")
-        except IntegrityError:
-            # Another branch's thread claimed this exact coin first, in the
-            # gap between find_most_volatile_unclaimed_coin's read and this
-            # write - only the DB-level unique index (see
-            # _ensure_product_id_unique_index) actually catches this; a
-            # Python-only check can't, since both branches' reads can pass
-            # before either write lands. Stay on the old coin for this
-            # cycle rather than retrying inline - the next cycle re-runs
-            # the whole search fresh, against whatever's unclaimed by then.
-            log.warning(f"[TREE] {bot_name}: {new_product_id} was claimed by another branch first (race) - staying on {old_product_id} this cycle")
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
+            fresh = result.scalar_one_or_none()
+            if fresh:
+                fresh.product_id = new_product_id
+                await db.commit()
+        row.product_id = new_product_id
+        log.info(f"[TREE] 🔀 {bot_name} switching {old_product_id} -> {new_product_id} (ATR {new_product_atr*100:.2f}%) after {reason}")
     elif row is not None and bot_name == ROOT_BOT_NAME:
         log.info(f"[TREE] {bot_name}: root stays on {row.product_id} by design (the tree's permanent foundation)")
     elif row is not None and branch_is_locked:
         log.info(f"[TREE] {bot_name}: stays on {row.product_id} - currently holds the throne as the strongest of its siblings")
     elif row is not None:
-        log.info(f"[TREE] {bot_name}: no unclaimed coin available to switch to - staying on {row.product_id}")
+        log.info(f"[TREE] {bot_name}: no eligible coin available to switch to - staying on {row.product_id}")
 
     log.info(
         f"[TREE] {bot_name} SOLD {filled_qty:.8f} {product_id} @ ${filled_price:,.2f} ({reason}) | "
@@ -1634,19 +1647,16 @@ async def run_branch_cycle(bot_name: str) -> bool:
                 if engine._is_permanent_order_rejection(stuck_reason):
                     new_product_id, new_atr = await find_most_volatile_unclaimed_coin(session)
                     if new_product_id:
-                        try:
-                            async with AsyncSessionLocal() as db:
-                                result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
-                                fresh = result.scalar_one_or_none()
-                                if fresh:
-                                    fresh.product_id = new_product_id
-                                    await db.commit()
-                            log.warning(
-                                f"[TREE] {bot_name}: {branch.product_id} can never fill ({stuck_reason}) - "
-                                f"switching to {new_product_id} (ATR {new_atr*100:.2f}%) instead of retrying forever"
-                            )
-                        except IntegrityError:
-                            log.warning(f"[TREE] {bot_name}: {new_product_id} was claimed by another branch first (race) - will retry next cycle")
+                        async with AsyncSessionLocal() as db:
+                            result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
+                            fresh = result.scalar_one_or_none()
+                            if fresh:
+                                fresh.product_id = new_product_id
+                                await db.commit()
+                        log.warning(
+                            f"[TREE] {bot_name}: {branch.product_id} can never fill ({stuck_reason}) - "
+                            f"switching to {new_product_id} (ATR {new_atr*100:.2f}%) instead of retrying forever"
+                        )
                     else:
                         log.warning(f"[TREE] {bot_name}: {branch.product_id} can never fill ({stuck_reason}) but no other coin is currently available to switch to")
                 else:
@@ -1761,7 +1771,7 @@ def run():
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(_ensure_product_id_unique_index())
+    loop.run_until_complete(_drop_product_id_unique_index())
     loop.run_until_complete(_dedupe_locked_profit_state())
     loop.run_until_complete(_ensure_trading_bot_state_unique_index())
     loop.run_until_complete(_dedupe_family_tree_positions())

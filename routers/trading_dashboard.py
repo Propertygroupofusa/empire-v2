@@ -984,9 +984,9 @@ async def spawn_family_tree_branch(db: AsyncSession = Depends(get_db)):
 
     next_product = await tree.get_next_eligible_product_id()
     if next_product is None:
-        raise HTTPException(status_code=400, detail="No eligible coin left unclaimed to start a new branch on")
+        raise HTTPException(status_code=400, detail="No eligible coin to start a new branch on right now (every coin is excluded or cooling down)")
 
-    child_name = f"crypto_tree_{next_product.lower().replace('-', '_')}"
+    child_name = await tree._unique_child_bot_name(next_product)
     db.add(CryptoTreeBranch(
         bot_name=child_name, product_id=next_product, parent_bot_name=tree.ROOT_BOT_NAME,
         allocated_usd=tree.SEED_USD, next_unlock_tier=tree.UNLOCK_TIER_USD, equity_floor=0.0,
@@ -995,7 +995,7 @@ async def spawn_family_tree_branch(db: AsyncSession = Depends(get_db)):
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        raise HTTPException(status_code=409, detail=f"{next_product} was just claimed by another branch - try again")
+        raise HTTPException(status_code=409, detail=f"{child_name} was just created by another branch - try again")
 
     log.info(f"[dashboard] 🌱 Manually spawned {child_name} ({next_product}) with ${tree.SEED_USD:.2f} seed, funded from real unallocated cash")
     return {
@@ -1020,7 +1020,14 @@ async def spawn_family_tree_branch_on_coin(product_id: str, db: AsyncSession = D
     endpoint, and subject to the same exclusion list as every other
     coin-selection path - a coin on get_effective_excluded_coins() can't be
     manually spawned into either, for the same real reason the bot itself
-    won't auto-pick it."""
+    won't auto-pick it.
+
+    Per the account owner's explicit follow-up choice, no longer refuses a
+    coin just because an existing branch already trades it - multiple
+    branches can now hold the same coin at once (e.g. tapping "Trade this"
+    on a coin that's already proving itself real, live, elsewhere in the
+    tree). tree._unique_child_bot_name() gives the new branch a real,
+    distinct identity even when its coin is already in use."""
     if crypto_family_tree_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
 
@@ -1040,8 +1047,6 @@ async def spawn_family_tree_branch_on_coin(product_id: str, db: AsyncSession = D
 
     branches_result = await db.execute(select(CryptoTreeBranch))
     branches = list(branches_result.scalars().all())
-    if any(b.product_id == product_id for b in branches):
-        raise HTTPException(status_code=409, detail=f"{product_id} is already claimed by an existing branch")
 
     positions_result = await db.execute(
         select(BotPosition.bot).where(BotPosition.bot.in_([b.bot_name for b in branches]))
@@ -1066,7 +1071,7 @@ async def spawn_family_tree_branch_on_coin(product_id: str, db: AsyncSession = D
             ),
         )
 
-    child_name = f"crypto_tree_{product_id.lower().replace('-', '_')}"
+    child_name = await tree._unique_child_bot_name(product_id)
     db.add(CryptoTreeBranch(
         bot_name=child_name, product_id=product_id, parent_bot_name=tree.ROOT_BOT_NAME,
         allocated_usd=tree.SEED_USD, next_unlock_tier=tree.UNLOCK_TIER_USD, equity_floor=0.0,
@@ -1075,7 +1080,7 @@ async def spawn_family_tree_branch_on_coin(product_id: str, db: AsyncSession = D
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        raise HTTPException(status_code=409, detail=f"{product_id} was just claimed by another branch - try again")
+        raise HTTPException(status_code=409, detail=f"{child_name} was just created by another branch - try again")
 
     log.info(f"[dashboard] 🌱 Manually spawned {child_name} ({product_id}) with ${tree.SEED_USD:.2f} seed from the backtest page, funded from real unallocated cash")
     return {

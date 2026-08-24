@@ -1478,6 +1478,87 @@ crossed its own unlock tier yet is left untouched by this code path.
 
 ---
 
+## Multiple branches can now share the same coin
+
+Per the account owner's explicit request, after "Trade this" on POL-USD
+(a real coin already looking profitable in the backtest) refused with
+"POL-USD is already claimed by an existing branch": the original
+one-coin-per-branch rule - every branch trades a different coin, so two
+branches never fight over or double up on the same one - is now gone.
+A coin already held by one branch can be manually traded into again via
+"Trade this", auto-spawned onto by a brand-new $50 branch, or picked by
+the auto coin-switch-after-exit search, same as any unheld coin.
+
+This was a real, deliberate architecture change, not a small tweak -
+confirmed explicitly via a direct choice between "allow it everywhere"
+and "just pick a different coin instead" before touching it, given how
+much of this system leaned on that invariant.
+
+**What changed:**
+1. **The real DB-level UNIQUE index** on `crypto_tree_branches.product_id`
+   (`ix_crypto_tree_branches_product_id_unique`, added earlier this same
+   session specifically to make coin-claim races impossible) is now
+   dropped by `_drop_product_id_unique_index()` - a startup migration
+   (same pattern as every other one-time fix in this file), safe to run
+   on a deployment that never created the index too. Without dropping
+   this, every other change below would still fail at the database layer
+   regardless of what the Python-level checks say.
+2. **`get_next_eligible_product_id()`** (brand-new $50 branches) no
+   longer requires a coin to be unclaimed - still prefers whichever
+   eligible coin currently has the FEWEST branches on it (a coin with
+   zero branches always wins first, same practical result as before in
+   the common case), but degrades to piling onto the least-crowded coin
+   once every coin already has at least one branch, instead of refusing
+   to spawn at all.
+3. **`find_most_volatile_unclaimed_coin()`** (auto coin-switch after an
+   exit) no longer excludes an already-held coin from consideration at
+   all - always picks the objectively best real-time candidate by
+   trend/volatility/RSI, since the whole point of a manual or automatic
+   switch is going after what's actually performing, not steering away
+   from a coin just because it's already proving itself elsewhere in the
+   tree. The one-cycle sale cooldown (`_coin_sale_cooldown_active`) still
+   applies, so a branch still can't instantly rebuy the exact coin it
+   just sold.
+4. **The manual `POST .../spawn-branch/{product_id}`** ("Trade this")
+   and **`POST .../spawn-branch`** (auto-pick "Start new $50 branch")
+   endpoints both dropped their "already claimed by an existing branch"
+   409 refusal.
+5. **`_unique_child_bot_name()`** (new) - a branch's `bot_name` has
+   always been derived directly from its coin
+   (`crypto_tree_{coin}`), which was fine when `product_id` itself was
+   unique, but `bot_name` still needs to be unique (it's the real
+   per-branch thread/identity key everywhere else in this system:
+   `BotPosition.bot`, the coordinator's `_running_threads` dict, etc.).
+   Appends `_2`, `_3`, ... until landing on a free name, so a second (or
+   third) branch on an already-claimed coin gets a real, distinct
+   identity instead of colliding with the existing one. Used by both the
+   organic parent-triggered spawn (`_maybe_spawn_child`) and both manual
+   spawn endpoints.
+
+**What deliberately did NOT change**: `CryptoTreeBranch.bot_name` itself
+is still a real, enforced-unique identity - two branches can share a
+coin, but never a name. The orphan-adoption path's own
+`already_claimed = await load_branch(bot_name)` check (a DIFFERENT kind
+of "claimed" - about bot_name collision, not coin ownership) is
+untouched for the same reason. The per-coin trade-history aggregation
+(`/family-tree-status/coin-history`) already grouped by `product_id`
+rather than by branch, specifically so multiple branches trading the
+same coin accumulate onto one real history instead of fragmenting - no
+change needed there, it was already built for this.
+
+Verified offline: confirmed a real pre-existing unique index actually
+gets dropped (not just skipped) and two branches on the same
+`product_id` commit cleanly afterward; confirmed `_unique_child_bot_name`
+produces distinct incrementing names; confirmed both coin-selection
+functions now return an already-claimed coin when it's genuinely the
+best candidate; confirmed a real second branch spawns onto
+POL-USD with a distinct name via the exact same code path
+`_maybe_spawn_child()` uses; and confirmed the real "Trade this"
+FastAPI endpoint itself now succeeds on POL-USD instead of returning
+the 409 that was actually seen live.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
