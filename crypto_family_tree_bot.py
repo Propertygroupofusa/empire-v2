@@ -869,6 +869,24 @@ async def spawn_child_branch_with_retry(product_id: str, parent_bot_name, attemp
                 # repeat of this is diagnosable from the error message
                 # itself instead of guessing again.
                 last_error = str(getattr(e, "orig", e))[:300]
+                # Real production discovery: this error text once revealed
+                # "duplicate key value violates unique constraint
+                # ix_crypto_tree_branches_product_id_unique...
+                # Key (product_id)=(POL-USD) already exists" - a real,
+                # separate DB-level index (see _drop_product_id_unique_index)
+                # that should have been dropped hours earlier but wasn't.
+                # That's a conflict on which COIN this branch holds, not
+                # its bot_name - retrying with a different random name can
+                # NEVER satisfy a product_id conflict, so burning the
+                # remaining attempts (each with a real jitter delay) here
+                # would just waste time before failing anyway. Fail fast
+                # with an honest, specific message instead.
+                if "product_id" in last_error.lower():
+                    raise RuntimeError(
+                        f"{product_id} still has a real database-level uniqueness index blocking a "
+                        f"second branch on it (real error: {last_error}) - this is a schema issue, not "
+                        f"a naming race, and retrying with a different name can't fix it"
+                    )
                 continue
     detail = f"{last_name} collided with another branch on every retry ({attempts}x)"
     if last_error:
@@ -934,15 +952,71 @@ async def _drop_product_id_unique_index():
     get_next_eligible_product_id(), find_most_volatile_unclaimed_coin(),
     and the manual spawn-branch endpoint), so it has to come off too, on
     any deployment that already created it in an earlier session.
-    Harmless to call on a deployment that never had it - DROP INDEX IF
-    EXISTS is a no-op there."""
+
+    Real production gap found live: `DROP INDEX IF EXISTS` never raises
+    even when nothing was actually removed, so the old version of this
+    function logged "removed" unconditionally - that log line was never
+    real proof the index was gone. A real live error, hours later, proved
+    it wasn't: "duplicate key value violates unique constraint
+    ix_crypto_tree_branches_product_id_unique... Key (product_id)=(POL-USD)
+    already exists" - every single spawn-collision error the retry logic
+    was fighting all night was actually THIS, not a bot_name race at all
+    (see spawn_child_branch_with_retry's real-time detection of this same
+    error for the other half of this fix).
+
+    Now verifies the real outcome against Postgres's own system catalog
+    (pg_indexes) after the drop attempt, tries the ALTER TABLE...DROP
+    CONSTRAINT form too if the plain DROP INDEX didn't actually clear it
+    (Postgres can back a UNIQUE with a constraint rather than a bare
+    index depending on how it was originally created, and DROP INDEX
+    can't remove a constraint's backing index directly), and logs LOUDLY
+    at ERROR level if it's still there after both attempts - instead of
+    a misleading INFO "removed" line that was never actually verified.
+    The verification query is Postgres-specific; harmless no-op (skipped,
+    not fatal) on local SQLite dev where this whole problem doesn't
+    exist."""
+    index_name = "ix_crypto_tree_branches_product_id_unique"
+
+    async def _check_still_exists():
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    text("SELECT indexname FROM pg_indexes WHERE tablename = 'crypto_tree_branches' AND indexname = :name"),
+                    {"name": index_name},
+                )
+                return result.scalar_one_or_none() is not None
+        except Exception:
+            return None  # not Postgres (e.g. local SQLite dev) - can't verify this way, not fatal
+
     try:
         async with AsyncSessionLocal() as db:
-            await db.execute(text("DROP INDEX IF EXISTS ix_crypto_tree_branches_product_id_unique"))
+            await db.execute(text(f"DROP INDEX IF EXISTS {index_name}"))
             await db.commit()
-        log.info("[TREE] product_id uniqueness constraint removed - branches can now share the same coin")
     except Exception as e:
-        log.warning(f"[TREE] could not drop product_id uniqueness constraint: {e}")
+        log.error(f"[TREE] DROP INDEX for {index_name} raised a real error: {e}")
+
+    still_exists = await _check_still_exists()
+
+    if still_exists is True:
+        log.warning(f"[TREE] {index_name} still present after DROP INDEX - trying ALTER TABLE...DROP CONSTRAINT instead")
+        try:
+            async with AsyncSessionLocal() as db:
+                await db.execute(text(f"ALTER TABLE crypto_tree_branches DROP CONSTRAINT IF EXISTS {index_name}"))
+                await db.commit()
+        except Exception as e:
+            log.error(f"[TREE] ALTER TABLE DROP CONSTRAINT for {index_name} also raised a real error: {e}")
+        still_exists = await _check_still_exists()
+
+    if still_exists is False:
+        log.info(f"[TREE] ✅ confirmed {index_name} is gone (verified against pg_indexes) - branches can share the same coin")
+    elif still_exists is True:
+        log.error(
+            f"[TREE] 🔴 {index_name} STILL EXISTS after both DROP INDEX and DROP CONSTRAINT attempts - "
+            f"every real spawn onto an already-held coin will keep failing with a genuine duplicate-key "
+            f"error until this is resolved directly against the database"
+        )
+    else:
+        log.info(f"[TREE] {index_name}: drop attempted, but couldn't verify the real outcome (not running on Postgres)")
 
 
 async def _lower_existing_unlock_tiers():
@@ -1681,6 +1755,15 @@ async def _maybe_spawn_child(branch):
             # capture the real driver error text rather than assuming
             # every IntegrityError here means "bot_name taken".
             last_error = str(getattr(e, "orig", e))[:300]
+            # A real product_id conflict (the old, supposedly-dropped
+            # uniqueness index on which coin a branch holds - see
+            # _drop_product_id_unique_index) can never be fixed by trying
+            # a different bot_name, so stop burning the remaining
+            # attempts (each with a real jitter delay) here every single
+            # cycle - just log it plainly and let the next cycle re-check
+            # from scratch instead.
+            if "product_id" in last_error.lower():
+                break
             continue
     if remaining is None:
         suffix = f" - real DB error: {last_error}" if last_error else ""

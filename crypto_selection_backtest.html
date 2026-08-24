@@ -78,6 +78,13 @@
     <div id="status"></div>
 
     <div id="results"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>BTC-relative strength comparison:</strong> the check above only asks "is this coin up over the last ~25 hours?" - in a market where everything grinds up together, that's a weak signal. This runs the exact same real target/stop/breakeven/giveback replay TWICE per coin on the same real historical data - once as-is (baseline, identical to the table above), and once requiring the coin to be genuinely beating BTC-USD's own real return over the identical window before ever entering. Shadow mode only - this does not change what the live bot buys.
+    </div>
+    <button class="run-btn" id="rsBtn" onclick="runRelativeStrength()">▶ Run BTC-Relative Strength Comparison (~60-120 seconds)</button>
+    <div id="rsStatus"></div>
+    <div id="rsResults"></div>
 </div>
 
 <script>
@@ -169,6 +176,75 @@ function renderResults(data) {
         </table>
         <p class="trade-note">"Trade this" starts a real new $50 branch on that coin right now, using your actual unallocated Coinbase cash - same as the dashboard's "Start new $50 branch" button, just pointed at a coin you picked instead of the bot's auto-pick. Refused if the coin is already held by another branch, currently excluded, or there isn't enough real free cash.</p>
         ${skippedHtml}
+    `;
+}
+
+async function runRelativeStrength() {
+    const btn = document.getElementById('rsBtn');
+    const statusEl = document.getElementById('rsStatus');
+    const resultsEl = document.getElementById('rsResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real data, two replays per coin)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/crypto-selection-backtest/btc-relative-strength', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderRelativeStrengthResults(data);
+        statusEl.textContent = `Compared ${data.coins_with_results} coins over ${data.backtest_days} days, ${data.lookback_hours}h lookback window, $${data.spend_per_trade} redeployed per trade.`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run BTC-Relative Strength Comparison (~60-120 seconds)';
+    }
+}
+
+function renderRelativeStrengthResults(data) {
+    const resultsEl = document.getElementById('rsResults');
+    if (!data.comparison || data.comparison.length === 0) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No coins produced usable comparison results.</p>';
+        return;
+    }
+    const rows = data.comparison.map(r => {
+        const b = r.baseline;
+        const f = r.with_btc_filter;
+        const bRoi = b ? b.roi_pct_of_spend : null;
+        const fRoi = f ? f.roi_pct_of_spend : null;
+        const delta = (bRoi != null && fRoi != null) ? fRoi - bRoi : null;
+        const deltaHtml = delta == null ? '—' : `<span class="${delta >= 0 ? 'pos' : 'neg'}">${delta >= 0 ? '+' : ''}${delta.toFixed(1)}pp</span>`;
+        return `<tr>
+            <td>${r.product_id}</td>
+            <td>${b ? b.num_trades : 0}</td>
+            <td class="${bRoi != null && bRoi >= 0 ? 'pos' : 'neg'}">${bRoi != null ? (bRoi >= 0 ? '+' : '') + bRoi.toFixed(1) + '%' : '—'}</td>
+            <td>${f ? f.num_trades : 0}</td>
+            <td class="${fRoi != null && fRoi >= 0 ? 'pos' : 'neg'}">${fRoi != null ? (fRoi >= 0 ? '+' : '') + fRoi.toFixed(1) + '%' : '—'}</td>
+            <td>${deltaHtml}</td>
+        </tr>`;
+    }).join('');
+
+    resultsEl.innerHTML = `
+        <table>
+            <thead><tr>
+                <th>Coin</th><th>Baseline trades</th><th>Baseline ROI</th><th>Filtered trades</th><th>Filtered ROI</th><th>ROI change</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+        <p class="trade-note">"Filtered" only enters a position when the coin's real return over the last ${data.lookback_hours} hours beats BTC-USD's real return over the identical window - same real target/stop/breakeven/giveback exit rules either way. A positive "ROI change" means the BTC filter would have genuinely helped that coin; negative means it would have cost real trades that were actually fine.</p>
     `;
 }
 

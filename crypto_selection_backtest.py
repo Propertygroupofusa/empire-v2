@@ -31,6 +31,7 @@ Simplifications, stated plainly rather than hidden:
 Usage: python3 crypto_selection_backtest.py
 """
 import asyncio
+import bisect
 import sys
 sys.path.insert(0, "/home/user/empire-v2")
 import os
@@ -82,13 +83,23 @@ async def fetch_historical_candles(session, product_id, days=BACKTEST_DAYS):
     closes = [float(c[4]) for c in all_candles]
     highs = [float(c[2]) for c in all_candles]
     lows = [float(c[1]) for c in all_candles]
-    return closes, highs, lows
+    times = [int(c[0]) for c in all_candles]
+    return closes, highs, lows, times
 
 
-def backtest_one_coin(closes, highs, lows):
+def backtest_one_coin(closes, highs, lows, entry_gate=None):
     """Replays the REAL live rules candle-by-candle. Returns a dict of
-    results, or None if there wasn't enough data to trade at all."""
+    results, or None if there wasn't enough data to trade at all.
+
+    entry_gate, if given, is called as entry_gate(i) at each flat decision
+    point (i = index into closes/highs/lows) and must return True to allow
+    a new entry there - used by run_btc_relative_strength_comparison()
+    below to add a real entry-timing filter without duplicating this whole
+    replay loop. None (the default) means always enter the moment flat -
+    the original, unchanged behavior every existing caller (including the
+    live auto-exclusion system's daily backtest run) already depends on."""
     trades = []
+    entries_skipped_by_gate = 0
     i = ATR_WINDOW
     n = len(closes)
 
@@ -102,6 +113,10 @@ def backtest_one_coin(closes, highs, lows):
         atr_pct = engine._atr_pct_from_candles(window_closes, window_highs, window_lows)
 
         if position is None:
+            if entry_gate is not None and not entry_gate(i):
+                entries_skipped_by_gate += 1
+                i += 1
+                continue
             target_pct = max(engine.pick_target_pct(atr_pct), engine.min_profit_target_pct(SPEND, atr_pct))
             qty = SPEND / price
             position = {
@@ -146,12 +161,135 @@ def backtest_one_coin(closes, highs, lows):
     wins = [net for _, net in trades if net > 0]
     win_rate = len(wins) / len(trades) * 100
     avg_trade_pct = (total_pnl / len(trades)) / SPEND * 100
-    return {
+    result = {
         "num_trades": len(trades),
         "win_rate": win_rate,
         "total_pnl": total_pnl,
         "roi_pct_of_spend": total_pnl / SPEND * 100,
         "avg_trade_pct": avg_trade_pct,
+    }
+    # Only added when a gate was actually used, so the baseline schema
+    # (what _run_scheduled_backtest_and_update_exclusions persists to
+    # CryptoBacktestRun and what the live dashboard table renders) never
+    # changes shape.
+    if entry_gate is not None:
+        result["entries_skipped_by_gate"] = entries_skipped_by_gate
+    return result
+
+
+def calculate_relative_strength(coin_closes_window: list, btc_closes_window: list) -> float:
+    """Real alpha calc, per the account owner's explicit request to add a
+    BTC-relative-strength signal on top of the existing selection checks:
+    the coin's simple return over a window minus BTC's real simple return
+    over the IDENTICAL window. Positive means the coin genuinely
+    outperformed BTC over that stretch, not just moved up in absolute
+    terms - in a market where everything grinds up together, "up in
+    isolation" is a much weaker signal than "beating the market's own
+    benchmark asset." Expects both lists ordered oldest to newest, already
+    aligned to the same real time window (see _closest_close_at_or_before
+    for how the comparison function does that alignment)."""
+    if not coin_closes_window or not btc_closes_window or coin_closes_window[0] <= 0 or btc_closes_window[0] <= 0:
+        return 0.0
+    coin_return = (coin_closes_window[-1] - coin_closes_window[0]) / coin_closes_window[0]
+    btc_return = (btc_closes_window[-1] - btc_closes_window[0]) / btc_closes_window[0]
+    return coin_return - btc_return
+
+
+def _closest_close_at_or_before(times_sorted: list, closes_sorted: list, target_time: int):
+    """Real historical candle pages can have small gaps at different
+    points for two different coins (a page that came back short, a
+    momentary API hiccup) - looking up BTC's price by array INDEX instead
+    of real timestamp would silently misalign the comparison. This finds
+    BTC's most recent real close at or before the exact real time being
+    compared against, via binary search (both arrays are already
+    time-sorted by fetch_historical_candles). Returns None only if
+    target_time is before every real candle in the series."""
+    idx = bisect.bisect_right(times_sorted, target_time) - 1
+    if idx < 0:
+        return None
+    return closes_sorted[idx]
+
+
+def _make_btc_relative_strength_gate(closes, times, lookback_hours, btc_times_sorted, btc_closes_sorted):
+    """Returns an entry_gate(i) closure for backtest_one_coin(): only
+    allows a new entry at candle i if this coin's real return over the
+    last lookback_hours beats BTC-USD's real return over the identical
+    real time window. Coins get a free pass until they have enough of
+    their own history to compute a real window (~25 hours in, matching
+    the live bot's own bullish-check lookback) rather than being blocked
+    from ever entering near the start of the backtest."""
+    def gate(i):
+        if i < lookback_hours:
+            return True
+        btc_now = _closest_close_at_or_before(btc_times_sorted, btc_closes_sorted, times[i])
+        btc_then = _closest_close_at_or_before(btc_times_sorted, btc_closes_sorted, times[i - lookback_hours])
+        if btc_now is None or btc_then is None:
+            return True  # no real BTC data to compare against here - don't block on missing data
+        alpha = calculate_relative_strength([closes[i - lookback_hours], closes[i]], [btc_then, btc_now])
+        return alpha > 0
+    return gate
+
+
+async def run_btc_relative_strength_comparison(coins=None, days=BACKTEST_DAYS, lookback_hours=25, max_concurrent=6):
+    """SHADOW-MODE, additive comparison tool - does NOT touch or replace
+    run_full_backtest()/backtest_one_coin()'s existing baseline behavior,
+    which _run_scheduled_backtest_and_update_exclusions() and the live
+    top-15 coin rotation both depend on for real trading decisions today.
+    Answers a narrower question first, per the account owner's explicit
+    request: would requiring a coin to be outperforming BTC-USD over the
+    same real ~25-hour window (before entering a position) have improved
+    the numbers, coin by coin? Runs BOTH the existing baseline replay and
+    a new BTC-relative-strength-gated replay against the exact same real
+    historical candles, so the two are directly, fairly comparable -
+    nothing here changes what the live bot buys unless/until this is
+    wired into the live selection path separately, on purpose.
+
+    Real extra cost versus the existing baseline backtest: one additional
+    real historical-candle fetch for BTC-USD itself (the baseline backtest
+    doesn't currently load BTC's own history at all)."""
+    coins = [p for p in (coins or COIN_FAMILY_TREE) if p != "BTC-USD"]
+    semaphore = asyncio.Semaphore(max_concurrent)
+    async with aiohttp.ClientSession() as session:
+        btc_candles = await fetch_historical_candles(session, "BTC-USD", days=days)
+        if btc_candles is None:
+            return {"error": "could not fetch real BTC-USD history to compare against"}
+        _btc_closes, _btc_highs, _btc_lows, btc_times = btc_candles
+        btc_closes = _btc_closes
+
+        async def _one(product_id):
+            async with semaphore:
+                candles = await fetch_historical_candles(session, product_id, days=days)
+            if candles is None:
+                return product_id, None, "not enough historical data"
+            closes, highs, lows, times = candles
+            baseline = backtest_one_coin(closes, highs, lows)
+            gate = _make_btc_relative_strength_gate(closes, times, lookback_hours, btc_times, btc_closes)
+            filtered = backtest_one_coin(closes, highs, lows, entry_gate=gate)
+            return product_id, {"baseline": baseline, "with_btc_filter": filtered}, None
+
+        outcomes = await asyncio.gather(*(_one(pid) for pid in coins))
+
+    comparison = []
+    skipped = []
+    for product_id, result, skip_reason in outcomes:
+        if result is None:
+            skipped.append({"product_id": product_id, "reason": skip_reason})
+            continue
+        comparison.append({"product_id": product_id, **result})
+
+    def _sort_key(row):
+        filtered = row["with_btc_filter"]
+        return filtered["roi_pct_of_spend"] if filtered else -999.0
+    comparison.sort(key=_sort_key, reverse=True)
+
+    return {
+        "backtest_days": days,
+        "lookback_hours": lookback_hours,
+        "spend_per_trade": SPEND,
+        "coins_tested": len(coins),
+        "coins_with_results": len(comparison),
+        "skipped": skipped,
+        "comparison": comparison,
     }
 
 
@@ -160,7 +298,7 @@ async def _backtest_one_coin_with_semaphore(session, product_id, semaphore):
         candles = await fetch_historical_candles(session, product_id)
     if candles is None:
         return product_id, None, "not enough historical data"
-    closes, highs, lows = candles
+    closes, highs, lows, _times = candles
     result = backtest_one_coin(closes, highs, lows)
     if result is None:
         return product_id, None, "no trades triggered in this window"

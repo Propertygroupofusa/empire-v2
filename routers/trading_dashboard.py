@@ -1183,6 +1183,29 @@ async def run_crypto_selection_backtest():
     return await crypto_selection_backtest_module.run_full_backtest()
 
 
+@router.post("/crypto-selection-backtest/btc-relative-strength", dependencies=[Depends(require_admin_key)])
+async def run_btc_relative_strength_backtest():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders,
+    and no bot reads this result yet. Per the account owner's explicit
+    request: answers whether requiring a coin to be genuinely
+    outperforming BTC-USD over the same real ~25-hour window - not just
+    "up" in isolation - would have improved each coin's real backtested
+    numbers. Runs the exact same real target/stop/breakeven/giveback
+    replay as /crypto-selection-backtest, twice per coin, on the exact
+    same real historical data: once with no entry filter (baseline,
+    identical to the main backtest) and once gated by real BTC-relative
+    strength, so the two are directly comparable. Does not change what
+    the live bot buys unless/until wired into the live selection path
+    separately, on purpose - this is a read-only comparison report.
+
+    Pulls real historical data from Coinbase's public candles endpoint,
+    plus one extra fetch for BTC-USD's own history to compare against -
+    can take 30-90 seconds depending on that endpoint's response time."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_btc_relative_strength_comparison()
+
+
 @router.post("/alpaca-selection-backtest", dependencies=[Depends(require_admin_key)])
 async def run_alpaca_selection_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.

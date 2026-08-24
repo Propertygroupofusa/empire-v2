@@ -2037,6 +2037,126 @@ isn't visibly taking effect live.
 
 ---
 
+## The real root cause of the entire night's spawn-collision saga, finally exposed by the earlier diagnostic fix
+
+The diagnostic-error-capture fix added earlier this session (surface
+`e.orig` instead of guessing "bot_name taken") finally paid off with a
+real, live error text: **"Could not start a new branch:
+crypto_tree_pol_usd_138698 collided with another branch on every retry
+(12x) - real DB error: `<class 'asyncpg.exceptions.UniqueViolationError'>:
+duplicate key value violates unique constraint
+ix_crypto_tree_branches_product_id_unique... DETAIL: Key
+(product_id)=(POL-USD) already exists."`**
+
+This was never a `bot_name` race. Every single spawn-collision error
+across the entire night - the randomized suffixes, the jitter, the
+lockstep-contention fixes - was fighting the wrong constraint. The real
+conflict was on `product_id`: the OLD one-coin-per-branch uniqueness
+index (`ix_crypto_tree_branches_product_id_unique`) from before the
+shared-coin feature shipped was **still present in production**, hours
+after `_drop_product_id_unique_index()` was supposed to have removed it.
+No amount of retrying with a different `bot_name` could ever have
+satisfied a conflict on which *coin* a branch holds - every attempt to
+spawn a second branch onto an already-claimed coin was doomed from the
+first try, regardless of how many random names got tried afterward.
+
+Root cause of the migration's own silent failure: `DROP INDEX IF EXISTS`
+never raises in Postgres whether or not anything was actually removed,
+so the old version's `log.info("...removed...")` was never real proof -
+it fired unconditionally as long as no exception occurred, and nobody
+could tell from the logs whether the drop had actually worked.
+
+Fixed in two parts:
+1. **`_drop_product_id_unique_index()` now verifies its own real outcome**
+   against Postgres's own system catalog (`pg_indexes`) after the drop
+   attempt, tries `ALTER TABLE...DROP CONSTRAINT` as a fallback if the
+   plain `DROP INDEX` didn't actually clear it, and logs at ERROR level
+   (impossible to miss in Railway logs) if the index is confirmed still
+   present after both attempts - instead of an unverified INFO line.
+2. **Both retry loops** (`spawn_child_branch_with_retry()` and
+   `_maybe_spawn_child()`'s inline loop) now recognize a real
+   `product_id` conflict specifically (checking the captured error text)
+   and fail fast after the very first attempt with an honest, specific
+   message - instead of burning all 12 attempts (each with a real jitter
+   delay) against a constraint that retrying a name could never satisfy.
+   A genuine `bot_name` collision (the real, different failure mode
+   already fixed earlier) still retries normally - this fast-fail path
+   only triggers on the specific `product_id` conflict.
+
+Verified offline: a real pre-existing unique index is confirmed actually
+dropped (not just assumed) and two branches on the same `product_id`
+commit cleanly afterward; the migration is a safe no-op on a fresh
+deployment or on local SQLite dev (where the Postgres-only verification
+query can't run, logged plainly rather than crashing); a real
+`product_id`-conflict `IntegrityError` (mocked with the exact real
+asyncpg error text) makes both retry loops fail after exactly 1 attempt
+instead of 12, with the new honest message; and a genuine `bot_name`
+collision (mocked separately) still retries and resolves normally,
+confirming the fast-fail path is scoped correctly. Full existing
+regression suite (20 prior scratch test files) re-run clean alongside it.
+
+---
+
+## BTC-relative-strength backtest comparison tool (shadow mode, additive only)
+
+Per the account owner's explicit request: does a coin's own "is it up
+over the last ~25 hours" signal (the only timing check
+`find_most_volatile_unclaimed_coin()` uses) actually mean much in a
+market where everything is grinding up together? A coin up 2% while BTC
+is up 5% is arguably *underperforming*, not a real buy signal. Added a
+real, additive comparison tool to `crypto_selection_backtest.py` -
+deliberately NOT wired into live trading or the existing production
+backtest pipeline, which `_run_scheduled_backtest_and_update_exclusions()`
+and the top-15 coin rotation both depend on for real trading decisions
+today.
+
+- **`calculate_relative_strength(coin_closes_window, btc_closes_window)`**
+  - real alpha: the coin's simple return over a window minus BTC's real
+    return over the identical window, on real historical Coinbase candles.
+- **`_closest_close_at_or_before()`** - aligns two different coins' candle
+  series by real Unix timestamp (via `bisect`), not array index, since
+  real historical candle pages can have small gaps at different points
+  for different coins.
+- **`backtest_one_coin()`** gained an optional `entry_gate` parameter
+  (default `None` = unchanged original behavior) - a callback checked at
+  every flat decision point, so the BTC-relative-strength filter can be
+  layered on as a real entry-timing gate without duplicating the whole
+  replay loop. The existing production call site
+  (`_backtest_one_coin_with_semaphore`, feeding the live top-15 rotation)
+  passes no gate, so its behavior and result schema are byte-for-byte
+  unchanged.
+- **`run_btc_relative_strength_comparison()`** - new top-level entry
+  point: fetches BTC-USD's own real historical candles once (the one
+  real extra API cost versus the existing baseline backtest, which never
+  loads BTC's own history), then replays EVERY coin's real history twice
+  on the identical data - once as the existing baseline, once gated by
+  real BTC-relative strength - so the two are directly, fairly
+  comparable. Coins get a free pass on the gate until they have ~25 hours
+  of their own real history to compute a window from.
+- New route `POST /api/trading-dashboard/crypto-selection-backtest/btc-relative-strength`
+  (admin-key gated, same pattern as the existing backtest route) and a
+  second button + comparison table on `crypto_selection_backtest.html`
+  ("▶ Run BTC-Relative Strength Comparison") showing baseline vs.
+  filtered trades/ROI per coin side by side, with the real ROI delta
+  color-coded.
+
+Verified offline (no live network access in this sandbox, same
+documented gap as the existing backtest tool): the alpha calc is
+correct for both real outperformance and real underperformance cases;
+timestamp alignment correctly handles a genuine gap in one series;
+`backtest_one_coin(entry_gate=None)`'s result schema is provably
+unchanged (no new keys); a coin fabricated to consistently beat BTC
+trades normally through the filter with zero skips; a coin fabricated to
+consistently underperform BTC gets heavily blocked (verified via a
+real drop in trade count versus its own baseline, accounting for the
+free-pass window); and the full `run_btc_relative_strength_comparison()`
+pipeline works end-to-end with mocked candle fetches, confirming the
+real 4-tuple fetch signature change flows correctly through the
+already-existing production path too (`run_full_backtest()` re-verified
+directly against the same mocked data).
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
