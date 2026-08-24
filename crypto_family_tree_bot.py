@@ -251,7 +251,20 @@ COIN_FAMILY_TREE = [
     "ARB-USD",    # 2023
     "SUI-USD",    # 2023
     "BLUR-USD",   # 2023
-    "JUP-USD",    # 2024
+    # JUP-USD removed: real, confirmed-live "INVALID_ARGUMENT: Invalid
+    # product_id" on every single buy attempt, repeatedly, over multiple
+    # sessions - unlike MATIC-USD (a real Coinbase migration to POL-USD,
+    # with a genuine successor id), there is no public migration notice
+    # for JUP-USD and no successor to rename it to - it appears to simply
+    # not be a listed product on this account/tier. The existing
+    # permanent-rejection auto-switch (_is_permanent_order_rejection)
+    # already moves any branch caught holding it onto a different real
+    # coin on its very next cycle, but leaving it in this list meant
+    # OTHER branches could keep landing on it too (confirmed live:
+    # crypto_tree_bch_usd switched off RNDR-USD's real permission
+    # rejection straight into JUP-USD, which would have just failed
+    # again next cycle) - removing it here stops it from ever being
+    # offered as a candidate again, for any branch.
     # Added per the account owner's explicit request after the tree hit
     # its real ceiling - every coin above was already claimed by an
     # existing branch or excluded, so a real "Start new $50 branch"

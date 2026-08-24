@@ -808,6 +808,27 @@ directly and never re-reads `COIN_FAMILY_TREE` at buy time. Added
 `_lower_existing_unlock_tiers()`) that moves any branch still on the dead
 pair straight to `POL-USD` - the same coin, its real current identifier.
 
+### JUP-USD removed entirely - a second dead pair, with no real successor
+
+Real Railway logs kept showing `crypto_family_tree_bot:[TREE]` warnings
+of the shape "X can never fill (PERMISSION_DENIED...) - switching to
+JUP-USD instead of retrying forever" - the already-fixed
+permanent-rejection auto-switch (see above) correctly moved a branch OFF
+its dead coin, but kept landing it ON JUP-USD, which has its own
+separate, real, repeatedly-confirmed-live `INVALID_ARGUMENT: Invalid
+product_id` rejection - so the branch would just fail again on its very
+next cycle. Unlike MATIC-USD, there's no public Coinbase migration
+notice for JUP-USD and no successor id to rename it to - it appears to
+simply not be a listed product on this account/tier, still unconfirmed
+exactly why, but confirmed real and permanent by now from repeated
+identical failures across multiple sessions. Removed `JUP-USD` from
+`COIN_FAMILY_TREE` outright (36 coins now) - it can never be offered as
+a switch target to any branch again. No special migration function was
+needed the way `_migrate_matic_to_pol()` was: any branch currently stuck
+on `JUP-USD` still gets moved off it automatically by the existing
+permanent-rejection auto-switch on its very next cycle, now landing on a
+real, live coin instead of bouncing straight into JUP-USD again.
+
 ### A stuck branch now switches coins instead of retrying a doomed order forever
 
 Per the account owner's explicit request, after continuing to see the
