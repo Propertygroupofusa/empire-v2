@@ -2539,6 +2539,59 @@ eligible-now coins sort first in the returned list.
 
 ---
 
+## Manual "Add cash to BTC" - root's own carve-out for a gap every other coin already has a workaround for
+
+The account owner noticed BTC (the tree's permanent root) never showed up
+as something they could actively buy more of, and asked directly. The
+real reason: since branches can now share a coin, clicking "Trade this"
+on a coin you already hold effectively adds more capital to it by
+starting a second branch there - but root can NEVER have a sibling
+branch (it's the sole permanent foundation), so it had no equivalent path
+at all to receive more capital on demand. Discussed scoping this to every
+branch vs. just root - decided root-only, since every other coin already
+has the "Trade this" workaround and replicating a blended-entry/target/
+stop recompute for every branch's own risk math wasn't worth it for a gap
+that doesn't actually exist there.
+
+- **`POST /api/trading-dashboard/family-tree-status/root-add-cash`**
+  (`{amount}`, admin-key gated) - places a real market buy for the
+  requested amount via the exact same `engine.place_market_buy()` every
+  automatic entry already uses, then blends it into root's existing
+  position with a real quantity-weighted average entry price (or opens a
+  fresh position if root happens to be flat), and recomputes target/stop
+  off that new blended entry using the same real ATR-based formula every
+  fresh buy already uses - so the breakeven ratchet and peak-profit
+  giveback tracking stay correctly anchored to root's true cost basis
+  afterward.
+- Refused (400) if the amount isn't positive, or exceeds the real free
+  spendable cash currently sitting outside every branch's own allocated
+  balance - the exact same `spendable_for_spawn` calculation (real
+  Coinbase cash balance, minus locked profit, minus every FLAT branch's
+  own `allocated_usd`) the dashboard's "Start new $50 branch" button is
+  already gated on, so this can only ever deploy real money that isn't
+  already working somewhere else in the tree. A real Coinbase order
+  rejection surfaces the actual captured reason via a 502 (same
+  `_last_order_error` pattern used elsewhere), and never touches
+  `allocated_usd` or the position row when the order didn't fill.
+- New "💰 Add cash to BTC" button on root's card in
+  `family_tree_dashboard.html` - shown whenever root has an open position
+  (independent of profit state, unlike selling - adding cash never risks
+  locking in a loss) and also when root is momentarily flat (the endpoint
+  opens a fresh position in that case).
+
+Verified offline against a real throwaway SQLite DB (not mocked ORM
+calls, so the actual blended-entry math and `allocated_usd` bookkeeping
+round-trip through real rows the same way the bot's own internal helpers
+do in production): adding cash to an existing position correctly blends
+a quantity-weighted entry and recomputes target/stop off it; adding cash
+to a flat root opens a fresh position at the real fill price; a request
+exceeding real free spendable cash is refused with the exact real dollar
+figure; a non-positive amount is refused; and a real order rejection
+surfaces the captured reason via 502 without touching the branch's
+balance or position.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
