@@ -1915,6 +1915,62 @@ scratch test files) re-run clean alongside it.
 
 ---
 
+## Per-branch cycle jitter, per the account owner's own real observation about WHY branches keep colliding
+
+After a night of reactive fixes to the same underlying collision (more
+retries, randomized coin picks, randomized name suffixes, surfacing the
+real DB error), the account owner asked the right root-cause question
+directly: is 30 seconds the fastest the cycle can run, or "can we change
+it to every coin has its own time cycle... so it don't run into each
+other." Checking `_branch_thread_main()` confirmed the real mechanism
+behind tonight's whole pattern of collisions: every branch's cycle timer
+effectively starts from the SAME moment - the coordinator's startup scan
+starts every existing branch's thread back-to-back, and a freshly
+spawned branch's thread starts immediately too - and the old code's bare
+`time.sleep(CYCLE_SECONDS)` never let that initial clustering drift
+apart. Branches that started together stayed in lockstep, cycle after
+cycle, for as long as the process ran - which is exactly what kept
+multiple branches re-targeting the same spawn candidate at the same
+instant, night after night, no matter how much retry logic got added
+downstream of it.
+
+`CYCLE_SECONDS` itself (`BTC_COMPOUND_CYCLE_SECONDS` env var, 30s
+default) was already changeable without a code change, but lowering it
+isn't the right lever - it multiplies real Coinbase API load across
+every branch every cycle, and doesn't address the real problem, which is
+correlation between branches' timers, not the interval length itself.
+Per-coin/per-branch fully independent cycle timing (the account owner's
+literal suggestion) would also work but needs a real anchor - `_branch_thread_main()`
+already had one available for free: real per-branch execution-time
+variance already introduces some organic drift, it just isn't
+guaranteed or fast-acting.
+
+Fixed by jittering the recurring sleep itself:
+`time.sleep(CYCLE_SECONDS + random.uniform(-CYCLE_SECONDS * 0.1, CYCLE_SECONDS * 0.1))`
+- a modest +/-10% (27-33s on the 30s default) that doesn't meaningfully
+change real trading responsiveness, but guarantees every branch's cycle
+boundary keeps wandering relative to every other branch's. A group of
+branches that started in perfect lockstep spreads across the full window
+within a handful of real cycles instead of staying correlated
+indefinitely - this doesn't replace any of tonight's other collision
+fixes, it reduces how often they're even needed in the first place, by
+attacking the actual root cause instead of another symptom. Deliberately
+does NOT delay a branch's very first cycle (a freshly spawned $50
+child still checks for its buy immediately) - only the recurring sleep
+between cycles gets the jitter.
+
+Verified offline (real multi-minute thread timing isn't practical to
+assert in an automated test): every jittered duration stays within the
+documented +/-10% bound across 2000 samples; real statistical spread
+across the possible range, not clustered at exactly 30.0s every time;
+and a simulated group of branches that started in perfect lockstep
+measurably spreads apart (13+ seconds among 6 branches after 5 real
+cycles) instead of staying at zero spread, which is what the old fixed
+interval would have produced forever. Full existing regression suite (18
+prior scratch test files) re-run clean alongside it.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

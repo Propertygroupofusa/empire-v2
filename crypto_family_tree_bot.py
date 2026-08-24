@@ -2033,7 +2033,25 @@ def _branch_thread_main(bot_name: str):
         except Exception as e:
             log.error(f"[TREE] {bot_name} cycle error: {e}")
             log.error(f"Traceback: {traceback.format_exc()}")
-        time.sleep(CYCLE_SECONDS)
+        # Per the account owner's own real observation (after a night of
+        # spawn-collision fixes): every branch's cycle timer effectively
+        # starts from the same moment (the coordinator's startup scan
+        # starts every existing branch's thread back-to-back, and a
+        # newly-spawned branch's thread starts immediately too), and a
+        # bare fixed-interval sleep never lets that initial clustering
+        # drift apart on its own - branches that started in lockstep stay
+        # in lockstep, cycle after cycle, which is exactly what made
+        # several branches keep re-hitting the same spawn target at the
+        # same instant tonight. A small random jitter on the sleep itself
+        # (kept modest, +/-10%, so real trading responsiveness is
+        # unaffected) means every branch's cycle boundary keeps wandering
+        # relative to every other branch's - within a few real cycles, a
+        # group that started together is spread across the whole window
+        # instead of clustered at one instant. Deliberately NOT delaying
+        # the FIRST cycle above (a freshly spawned branch still checks for
+        # its buy immediately, no initial wait) - only the recurring sleep
+        # between cycles gets the jitter.
+        time.sleep(CYCLE_SECONDS + random.uniform(-CYCLE_SECONDS * 0.1, CYCLE_SECONDS * 0.1))
     with _threads_lock:
         _running_threads.pop(bot_name, None)
 
