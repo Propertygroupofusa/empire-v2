@@ -311,9 +311,25 @@ async def load_open_positions():
             result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
             rows = result.scalars().all()
             for row in rows:
+                # A real production bug (confirmed live: exit-check logs
+                # showing "None (LONG)" instead of a real contract code)
+                # traced back to here - a BotPosition row with a missing/
+                # NULL symbol gets loaded under the literal key None,
+                # which can never match a FUTURES contract again, so this
+                # position can be managed for exit signals but can never
+                # actually be closed through the normal contract-keyed
+                # path. Skip it and warn loudly instead of silently
+                # corrupting open_prop_positions with an unmanageable key.
+                if not row.symbol or row.symbol not in FUTURES:
+                    log.error(
+                        f"[APEX_589296] ⚠️ Skipping BotPosition id={row.id} with invalid symbol "
+                        f"{row.symbol!r} (not a real FUTURES contract) - this position needs a "
+                        f"manual look, it will not be managed automatically"
+                    )
+                    continue
                 open_prop_positions[row.symbol] = {"side": row.side, "entry": row.entry_price, "qty": row.qty, "open_time": row.opened_at, "peak_pnl_pct": row.peak_pct or 0.0}
             if rows:
-                log.info(f"[APEX_589296] Reloaded {len(rows)} open position(s) from DB: {list(open_prop_positions.keys())}")
+                log.info(f"[APEX_589296] Reloaded {len(open_prop_positions)} open position(s) from DB: {list(open_prop_positions.keys())}")
     except Exception as e:
         log.error(f"[APEX_589296] Failed to reload open positions from DB: {e}")
 
@@ -1365,8 +1381,11 @@ async def run_prop_cycle():
         if daily_circuit_breaker_tripped:
             log.warning(f"[APEX_589296] 🛑 CIRCUIT BREAKER: Daily loss ${daily_loss_dollars:.2f} >= ${dynamic_daily_max_loss:.2f} (scale {scale}x) — closing ALL positions")
             for contract in list(open_prop_positions.keys()):
+                config = FUTURES.get(contract)
+                if config is None:
+                    log.error(f"[APEX_589296] ⚠️ {contract!r} in open_prop_positions is not a real FUTURES contract - skipping, needs a manual look")
+                    continue
                 data = scans.get(contract)
-                config = FUTURES[contract]
                 if data:
                     await close_position(session, contract, config, open_prop_positions[contract],
                                        data["price"], data["rsi"], data["trend"], "CIRCUIT BREAKER - DAILY LOSS LIMIT")
@@ -1382,8 +1401,11 @@ async def run_prop_cycle():
                 f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
             )
             for contract in list(open_prop_positions.keys()):
+                config = FUTURES.get(contract)
+                if config is None:
+                    log.error(f"[APEX_589296] ⚠️ {contract!r} in open_prop_positions is not a real FUTURES contract - skipping, needs a manual look")
+                    continue
                 data = scans.get(contract)
-                config = FUTURES[contract]
                 if data:
                     await close_position(session, contract, config, open_prop_positions[contract],
                                        data["price"], data["rsi"], data["trend"], "EQUITY FLOOR BREACH")
@@ -1396,8 +1418,11 @@ async def run_prop_cycle():
         # don't hold out for a bigger move - and scales up slightly as
         # the real account grows.
         for contract, position in list(open_prop_positions.items()):
+            config = FUTURES.get(contract)
+            if config is None:
+                log.error(f"[APEX_589296] ⚠️ {contract!r} in open_prop_positions is not a real FUTURES contract - skipping, needs a manual look")
+                continue
             data = scans.get(contract)
-            config = FUTURES[contract]
             if not data:
                 continue
             price, rsi, trend = data["price"], data["rsi"], data["trend"]

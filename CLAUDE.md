@@ -1386,6 +1386,56 @@ fetch` + `git show`, no new access needed.
 
 ---
 
+## Real bug found and fixed: a BotPosition with a NULL/invalid symbol was unmanageable (prop_bot.py)
+
+Railway logs showed `alpaca_mean_reversion` exit-check lines reading
+"None (LONG)" instead of a real contract code (e.g. "MES (LONG)") -
+`⏱️ None (LONG): Max hold time exceeded`, `💰 None (LONG): Peak profit
+giveback...`, `📈 None (LONG): RSI exit signal...`. Traced to
+`load_open_positions()`, which reloads every `BotPosition` row for
+`bot='prop_apex'` at startup keyed directly by `row.symbol`, with no
+validation. A row with `symbol` NULL (or any value that isn't a real
+`FUTURES` contract code) gets loaded under that literal bad key -
+which can never match a real contract again. The exit-check math still
+ran (real price/RSI data happened to be available), which is how these
+specific log lines could exist at all, but the very next thing every
+one of the three exit-management passes in `run_prop_cycle()` did was
+a bare `config = FUTURES[contract]` - which raises a real `KeyError`
+for a bad key. A position stuck in this state can never actually be
+closed through the normal path: real money sitting open on Alpaca that
+this bot could see was ready to exit, but couldn't act on.
+
+Fixed in two parts:
+1. `load_open_positions()` now skips (and logs loudly, by BotPosition
+   `id`, so it's traceable) any row whose `symbol` isn't a real key in
+   `FUTURES` - the corrupted key can never enter `open_prop_positions`
+   again from this path.
+2. The three exit-management passes in `run_prop_cycle()` (daily-loss
+   circuit breaker, equity-floor breach, and the main per-cycle exit
+   check) now use `FUTURES.get(contract)` and skip-with-a-loud-warning
+   instead of the bare `FUTURES[contract]` indexing that would have
+   crashed - defense in depth, so a stale key reaching
+   `open_prop_positions` through any other path in the future degrades
+   to "this one position sits unmanaged, loudly logged" instead of an
+   uncaught `KeyError`.
+
+Verified offline: reproduced the exact scenario (a real `BotPosition`
+row with `symbol=None` seeded alongside a real valid one), confirmed
+the corrupted row is skipped while the real one still loads correctly,
+confirmed a non-None-but-still-invalid symbol is caught by the same
+guard, and confirmed `FUTURES[None]` really does raise `KeyError` -
+proving this is what the old code was hitting.
+
+**Not yet resolved**: which real BotPosition row actually has the bad
+symbol, and whether it corresponds to a real position still open on
+Alpaca that needs a manual close - this fix stops the bot from
+crashing on it and makes it loudly visible in the logs (by row id), but
+finding and manually resolving the underlying stuck row/position still
+needs a real look, since this session has no live DB or Alpaca access
+to do that itself.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
