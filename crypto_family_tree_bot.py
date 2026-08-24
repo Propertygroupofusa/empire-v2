@@ -2157,6 +2157,16 @@ async def run_branch_cycle(bot_name: str) -> bool:
             return True
 
         if position is None:
+            # Real, immediate kill switch for NEW entries only - matches the
+            # existing STOP_TRADING convention prop_bot.py/crypto_coinbase_bot.py
+            # already use, which this bot never had. Deliberately checked here,
+            # not at the top of run_branch_cycle: every exit path above this
+            # (STOP HIT, TARGET, breakeven, floor-breach) must keep running
+            # unconditionally so an already-open real position never loses its
+            # protection - only NEW buys pause.
+            if os.getenv("STOP_TRADING", "false").lower() == "true":
+                log.warning(f"[TREE] {bot_name}: STOP_TRADING=true - new entries paused (existing positions still protected)")
+                return True
             if await _floor_breach_cooldown_active(bot_name):
                 log.info(f"[TREE] {bot_name}: cooling down after a recent floor breach - entries paused a bit longer")
                 return True

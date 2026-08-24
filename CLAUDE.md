@@ -2675,6 +2675,55 @@ running in this sandbox), none touching `place_market_buy`.
 
 ---
 
+## Real, urgent gap found and fixed: the crypto family-tree bot had no STOP_TRADING kill switch
+
+The account owner hit a real moment of distress at the dashboard - Total
+Profit -$163.73 across 21 branches - and said directly: "I'm losing
+money bad stop this." Checking how to actually pause the bot exposed a
+real gap: `prop_bot.py` and `crypto_coinbase_bot.py` have always
+respected the `STOP_TRADING` Railway env var as a real, immediate kill
+switch on new entries - `crypto_family_tree_bot.py` (the bot actually
+shown on that dashboard) never checked it at all. Setting the existing
+env var would have paused the OTHER two bots while leaving the one
+actually losing money completely unaffected.
+
+Fixed by wiring the same `STOP_TRADING` convention into the family-tree
+bot, scoped narrowly and deliberately:
+
+- **`run_branch_cycle()`'s flat-branch buy path** now checks
+  `STOP_TRADING` first thing, before any real balance/price lookup or
+  order - a flat branch simply sits in cash instead of buying. Placed
+  deliberately AFTER every real exit check (STOP HIT, TARGET, breakeven,
+  floor-breach) in the function's control flow, not before - an
+  already-open real position's protection must never pause, only new
+  capital deployment does. Since a sold position's automatic rebuy goes
+  through this exact same flat-branch path on its next cycle, this one
+  check also correctly stops branches from re-entering after they exit
+  while the switch is on - proceeds just sit as cash instead.
+- The three manual endpoints that deploy new capital -
+  `add_cash_to_branch`, `spawn_family_tree_branch`,
+  `spawn_family_tree_branch_on_coin` - now also refuse (400) while
+  `STOP_TRADING=true`, matching the precedent already set by Alpaca's
+  own manual "Trade this"/entry-eligibility endpoints. A manual sell
+  (`close_family_tree_branch`, `root-take-profit`) is untouched - taking
+  profit or cutting a loss by hand must always stay available regardless
+  of the switch.
+
+Verified offline: a flat branch does not buy while `STOP_TRADING=true`
+(no real order placed); the identical branch buys normally once the
+var is unset, proving the gate doesn't leak into steady-state behavior;
+critically, an open position's real STOP-LOSS exit still fires and sells
+normally while `STOP_TRADING=true` - proving existing protection is
+never paused, only new entries are; and all three manual endpoints
+correctly refuse with a clear 400 while the switch is set.
+
+**To actually stop new crypto entries right now**: set `STOP_TRADING=true`
+in Railway's env vars and redeploy. Existing positions keep running under
+their real stop-loss/target/breakeven protection either way - this only
+stops new money from going in.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

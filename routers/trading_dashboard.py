@@ -899,6 +899,8 @@ async def add_cash_to_branch(bot_name: str, payload: AddCashRequest, db: AsyncSe
     somewhere else in the tree."""
     if crypto_family_tree_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        raise HTTPException(status_code=400, detail="STOP_TRADING is set - new capital deployment is paused")
     tree = crypto_family_tree_bot_module
     engine = tree.engine
 
@@ -1084,6 +1086,8 @@ async def spawn_family_tree_branch(db: AsyncSession = Depends(get_db)):
     branch row without a running thread within COORDINATOR_SCAN_SECONDS."""
     if crypto_family_tree_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        raise HTTPException(status_code=400, detail="STOP_TRADING is set - new capital deployment is paused")
 
     tree = crypto_family_tree_bot_module
     engine = tree.engine
@@ -1159,6 +1163,8 @@ async def spawn_family_tree_branch_on_coin(product_id: str, db: AsyncSession = D
     instead of making the account owner retry by hand."""
     if crypto_family_tree_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        raise HTTPException(status_code=400, detail="STOP_TRADING is set - new capital deployment is paused")
 
     tree = crypto_family_tree_bot_module
     engine = tree.engine
