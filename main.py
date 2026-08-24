@@ -182,6 +182,13 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import crypto_family_tree_bot: {e}")
 
+status_snapshot_module = None
+try:
+    import status_snapshot
+    status_snapshot_module = status_snapshot
+except Exception as e:
+    logging.warning(f"Failed to import status_snapshot: {e}")
+
 # Which Coinbase strategy actually runs - "family_tree" (multiple branches,
 # each the same single-position adaptive-target engine, growing one new
 # coin at a time as branches cross $1,000), "btc_compound" (that same
@@ -1104,6 +1111,14 @@ async def lifespan(app: FastAPI):
             log.warning(f"⚠️ Coinbase bot module for CRYPTO_STRATEGY_MODE={CRYPTO_STRATEGY_MODE!r} failed to import - bot will not run")
     except Exception as e:
         log.error(f"🛑 Crypto (Coinbase) bot thread startup failed: {e}")
+
+    try:
+        if status_snapshot_module is not None:
+            import threading
+            threading.Thread(target=status_snapshot_module.run, daemon=True).start()
+            log.info("📄 Status snapshot thread started (periodic real-status report to a git branch)")
+    except Exception as e:
+        log.warning(f"Status snapshot thread failed to start: {e}")
 
     print(f"[LIFESPAN] About to check alpaca_swing_bot_module: {alpaca_swing_bot_module is not None}", flush=True)
     try:

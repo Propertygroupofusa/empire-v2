@@ -1320,6 +1320,72 @@ fix. Both fixed: `commodities` now holds `["MGC", "MCL", "SIL"]`, and
 
 ---
 
+## Status snapshots for Claude sessions with no live network access (status_snapshot.py)
+
+A Claude Code session working on this repo (in a sandboxed cloud
+environment, as opposed to the account owner's own machine) generally
+has **no live network access** to this Railway deployment, Coinbase, or
+Alpaca - confirmed directly: a request to this app's own production URL
+got a real `403` at the outbound proxy layer, before it even reached the
+app. It also has no live trading API credentials. So by default, such a
+session can only reason about the CODE, not real current account state -
+real balances, real open positions, real recent P&L are all invisible to
+it unless the account owner manually screenshots or pastes them in.
+
+Per the account owner's explicit request ("do what you suggest" -
+choosing this over opening up live network access + real trading
+credentials to the session, which would also grant the ability to place
+real trades directly, a much bigger blast radius than read-only
+visibility), `status_snapshot.py` closes this gap through a channel that
+already exists both ways: git. The running app itself already has real
+DB access and real live Coinbase/Alpaca API access (it IS the app) - it
+periodically builds a real status report and pushes it as a git commit,
+which any Claude session with normal repo access (which every session
+working on this codebase already has) can then read with a plain `git
+fetch` + `git show`, no new access needed.
+
+- Runs as a background daemon thread (`status_snapshot.run()`, started
+  from `main.py`'s lifespan the same way every other bot module is)
+  every `STATUS_SNAPSHOT_INTERVAL_SECONDS` (30 min default).
+- Reuses the EXACT SAME functions the live dashboards already call
+  (`get_family_tree_status`, `get_coin_trade_history`,
+  `get_alpaca_overview` in `routers/trading_dashboard.py`) rather than
+  re-deriving real numbers a second way - the snapshot can never show a
+  different reality than the dashboards do.
+- Writes a human-and-Claude-readable `STATUS.md` (real allocated/locked/
+  total-profit figures, a per-branch table with live unrealized P&L,
+  real per-coin trade history, real Alpaca bucket P&L and open
+  positions) and pushes it to a **dedicated `status-snapshots` branch -
+  never `main`** - so it can never trigger a Railway redeploy (Railway
+  is configured to deploy on pushes to `main`; a redeploy every 30
+  minutes purely from a status commit would be a real, unwanted side
+  effect). Force-pushes a single fresh commit each cycle - the branch is
+  a moving pointer to "latest real state," not an accumulated history.
+- **Read-only by design**: the only thing this module ever writes is a
+  markdown file and a git commit. It has no code path that can place an
+  order, touch a position, or affect trading in any way - it only reads
+  real data that other, already-existing endpoints already expose.
+- **Requires setup the account owner has to do, not something a Claude
+  session can provision itself**: a GitHub token scoped to just this
+  repo (Contents: Read and write - a fine-grained personal access token,
+  not a classic all-repos token) added as the `STATUS_SNAPSHOT_GITHUB_TOKEN`
+  Railway env var. Without it, `run()` logs once on startup and does
+  nothing further - every other part of the app is completely
+  unaffected either way.
+- **To read the latest snapshot** (from any session with normal git
+  access to this repo): `git fetch origin status-snapshots && git show
+  origin/status-snapshots:STATUS.md`.
+- Verified offline with a dedicated test: the markdown generator against
+  real seeded `CryptoTreeBranch`/`CryptoCoinTradeHistory`/
+  `TradingBotState` rows, and the actual git add/commit/push sequence
+  the function runs against a real local throwaway repo+remote (proving
+  the git plumbing itself is correct) - the real GitHub push itself
+  couldn't be verified from the sandboxed dev environment this was built
+  in (no live network access, the exact gap this feature exists to
+  work around), so that part needs confirming once actually deployed.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
