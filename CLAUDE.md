@@ -2157,6 +2157,87 @@ directly against the same mocked data).
 
 ---
 
+## THE actual root cause of the entire night's spawn-collision saga: the coordinator thread was never running at all
+
+After the verified `_drop_product_id_unique_index()` fix shipped, the
+account owner reported the exact same collision (this time on SOL-USD)
+still happening - meaning the migration still hadn't actually run in
+production. Asked to search Railway's logs for `product_id_unique`
+specifically to see which of the migration's own diagnostic lines had
+fired; the account owner searched `tree` instead, and that search
+surfaced something far more fundamental: only two real log lines
+matched, one of them
+`WARNING:pgusa:⚠️ Coinbase bot module for CRYPTO_STRATEGY_MODE='"family_tree"' failed to import - bot will not run`.
+
+That `!r` repr is the tell: `'"family_tree"'` is Python's repr of a
+12-character string that itself STARTS AND ENDS WITH a literal `"`
+character - not the clean 11-character `family_tree` every `==`
+comparison in `main.py`'s lifespan startup (`CRYPTO_STRATEGY_MODE ==
+"family_tree"` / `"btc_compound"` / `"multi_pair"`) was written to
+expect. The real `CRYPTO_STRATEGY_MODE` Railway env var had been set to
+the literal value `"family_tree"`, quote characters included - almost
+certainly from pasting a value like `CRYPTO_STRATEGY_MODE="family_tree"`
+(the shell-style syntax this very file's own docs use) directly into
+Railway's raw value field, which stores exactly what's typed with no
+shell-quote stripping. Confirmed this was NOT a real import failure by
+checking the import site directly: `import crypto_family_tree_bot` at
+the top of `main.py` has its own, differently-worded exception handler
+(`logging.warning(f"Failed to import crypto_family_tree_bot: {e}")`),
+which would also have matched a `tree` search and did NOT appear in the
+results - proving the module loaded fine, and the `else` branch's
+warning text ("failed to import") was simply wrong about what was
+actually happening.
+
+The real, severe consequence: since none of the three `if`/`elif`
+branches matched, `crypto_family_tree_bot_module.run()` was never
+called from `main.py`'s startup at all - meaning the coordinator thread,
+every per-branch `_branch_thread_main()` cycle, and every startup
+migration that lives inside `run()` (including `_force_root_spawn_ready()`,
+`_lower_existing_unlock_tiers()`, the dedupe migrations, and - critically -
+`_drop_product_id_unique_index()` itself) had never executed even once,
+for as long as this malformed value had been set. This is exactly why
+BTC's floor stayed frozen at $121.93/$150.00 across multiple real
+redeploys despite `_force_root_spawn_ready()` supposedly force-fixing it
+on every startup, and why the "verified" index-drop migration never
+actually got a chance to drop anything in production - both fixes were
+completely correct, they simply never ran. Meanwhile the FastAPI manual
+endpoints (`routers/trading_dashboard.py`'s `spawn_family_tree_branch`,
+`spawn_family_tree_branch_on_coin`, "Trade this") kept working the whole
+time, because those call `crypto_family_tree_bot`'s functions directly
+on each HTTP request - independent of whether the background
+coordinator thread was ever started - which is why the account owner
+could still see real, correctly-worded collision errors (proving that
+code path executes) while the coordinator-only fixes silently never ran.
+
+Fixed in two parts in `main.py`:
+1. `CRYPTO_STRATEGY_MODE` is now normalized right after being read -
+   `.strip().strip('"').strip("'").strip()` - so a value with stray
+   surrounding quotes or whitespace pasted into Railway's dashboard can't
+   silently disable the entire coordinator thread again.
+2. The fallback `else` branch's warning no longer claims "failed to
+   import" (misleading - the real 2026-08-24 incident had every module
+   loading fine) - it now logs the real loaded/None state of all three
+   candidate modules alongside the mode string, so a future mismatch of
+   any kind is immediately diagnosable from the log line itself instead
+   of requiring another round of cross-referencing a different log
+   line's exception text to rule out a real import failure.
+
+Verified offline: the exact real malformed value from the live log
+(`'"family_tree"'`, both single- and double-quoted variants, and a
+whitespace-padded variant) all normalize back to the clean `family_tree`
+string the comparison expects, while an already-clean value is left
+unchanged.
+
+**Not yet confirmed live**: whether this was the ONLY reason the
+coordinator never ran, or whether the `product_id` unique-index drop
+still needs to be watched on the next real deploy now that `run()` can
+actually execute - the account owner needs to redeploy and check Railway
+logs for the coordinator's real startup lines (`✓ Crypto (Coinbase) bot
+thread started | family tree coordinator...`) and the `product_id_unique`
+migration's own diagnostic lines to confirm both are now actually firing.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

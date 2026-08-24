@@ -198,6 +198,19 @@ except Exception as e:
 # would have them fight over the same funds. Revert to either earlier mode
 # by setting this Railway variable and redeploying - no code change needed.
 CRYPTO_STRATEGY_MODE = os.getenv("CRYPTO_STRATEGY_MODE", "family_tree")
+# Real production bug found live: Railway's raw env-var editor will happily
+# store literal quote characters if they're pasted as part of the value
+# (e.g. entering `"family_tree"` instead of `family_tree`) - os.getenv()
+# then returns them as part of the string, so the exact-match checks below
+# (`CRYPTO_STRATEGY_MODE == "family_tree"`) silently fail every branch and
+# fall through to the "bot will not run" warning, even though the module
+# itself imported fine. Confirmed live via a Railway log search for "tree"
+# that showed ONLY the fallback warning - the separate, differently-worded
+# `logging.warning(f"Failed to import crypto_family_tree_bot: {e}")` a few
+# lines above never fired, proving this was a value-mismatch, not a real
+# import failure. Stripped here so a quoted value in the dashboard can't
+# silently disable the whole coordinator thread again.
+CRYPTO_STRATEGY_MODE = CRYPTO_STRATEGY_MODE.strip().strip('"').strip("'").strip()
 
 alpaca_swing_bot_module = None
 try:
@@ -1108,7 +1121,19 @@ async def lifespan(app: FastAPI):
             log.info("✓ Crypto (Coinbase) bot thread started | 28 pairs × 12 positions | 24/7 trading | Capital: $700 USD")
             log.info("💰 Strategy: 24/7 crypto + market hours stock scalping = constant opportunities and taking profits")
         else:
-            log.warning(f"⚠️ Coinbase bot module for CRYPTO_STRATEGY_MODE={CRYPTO_STRATEGY_MODE!r} failed to import - bot will not run")
+            # Deliberately NOT worded "failed to import" - the real 2026-08-24
+            # incident this covers was a mode-string mismatch (a stray quoted
+            # value in Railway), with every module below having imported fine.
+            # Logging each module's real loaded/None state here makes that
+            # distinction immediately visible instead of requiring another
+            # round of guessing between "bad env value" and "bad import".
+            log.warning(
+                f"⚠️ CRYPTO_STRATEGY_MODE={CRYPTO_STRATEGY_MODE!r} did not match any known "
+                f"mode ('family_tree'/'btc_compound'/'multi_pair') - bot will not run | "
+                f"family_tree module loaded: {crypto_family_tree_bot_module is not None} | "
+                f"btc_compound module loaded: {crypto_btc_compound_bot_module is not None} | "
+                f"multi_pair module loaded: {crypto_coinbase_bot_module is not None}"
+            )
     except Exception as e:
         log.error(f"🛑 Crypto (Coinbase) bot thread startup failed: {e}")
 
