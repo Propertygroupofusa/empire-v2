@@ -2358,6 +2358,47 @@ for an explicit `None`, not just a missing key.
 
 ---
 
+## Real, severe revenue bug found and fixed: every paid video order was charged 1/100th of its real price
+
+Found while investigating an unrelated question (a funnel-builder idea for
+the video service) - checked the real current prices in
+`calculate_quote_price()` (`routers/orders.py`) to ground the discussion in
+real numbers, and found it returning raw dollar figures (`"youtube": 750`,
+`"social": 500`, etc.). `quote_request.html` correctly shows this to the
+customer as "$750". But `VideoQuoteOrder.quote_price` is documented in this
+same file's own schema as **cents**, and is consumed everywhere else that
+way - `create_checkout`'s Stripe session passes it straight into
+`unit_amount` (cents for USD), and the admin dashboard/revenue
+totals/worker payout splits all divide it by 100 to show dollars.
+`calculate_quote_price()` was the one place that never multiplied by 100 -
+meaning every real paid order, since this flow has existed, charged the
+customer 1/100th of the price they saw on the quote page: a "$750" youtube
+video actually charged **$7.50** at the real Stripe checkout.
+
+Fixed by returning cents from `calculate_quote_price()` (`base_price_dollars
+* 100`) - the one function that was wrong, rather than scattering a `*100`
+across every consumer that already correctly assumed cents. Also fixed the
+one log line at the quote-creation call site that would otherwise have
+started printing raw cents as if they were dollars (`$75000` instead of
+`$750.00`) once this landed. `quote_request.html`'s own JS pricing
+calculator was never touched - it already computes and displays real
+dollar amounts client-side for the quote preview and never reads
+`quote_price` back from the API response, so the customer-facing quote
+page's display is unaffected either way.
+
+Verified offline against every real video type and the rush-delivery
+premium: each now returns the correct cents value matching its displayed
+dollar price (e.g. `"youtube"` at normal delivery -> 75000 cents = $750.00,
+not $7.50).
+
+**Not yet confirmed**: how much real revenue this actually cost historically
+- that needs a look at real Stripe payment history/the `video_quote_orders`
+table, which this session has no live access to. Every order paid before
+this fix shipped charged the 1/100th price; only orders created after this
+deploy will charge correctly.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

@@ -147,7 +147,7 @@ async def request_quote(
     await db.commit()
     await db.refresh(order)
 
-    log.info(f"New quote request from {customer_name} ({customer_email}): {video_type}, ${quote_price}")
+    log.info(f"New quote request from {customer_name} ({customer_email}): {video_type}, ${quote_price / 100:.2f}")
 
     return {
         "success": True,
@@ -318,9 +318,20 @@ async def send_video_ready_email(customer_email: str, customer_name: str, order_
 
 
 def calculate_quote_price(video_type: str, delivery_days: int) -> int:
-    """Calculate quote price based on video type and delivery speed"""
+    """Calculate quote price based on video type and delivery speed.
 
-    base_prices = {
+    Real bug found and fixed: this returned raw dollar figures (e.g. 750
+    for "youtube"), but VideoQuoteOrder.quote_price is stored - and
+    consumed everywhere else (Stripe's unit_amount, the admin dashboard,
+    revenue totals, worker payout splits, all of which divide by 100 to
+    show dollars) - as CENTS, matching this file's own documented schema.
+    quote_request.html correctly shows the customer "$750", but the real
+    Stripe checkout session created from this value charged $7.50 - every
+    paid order undercharged by 100x. Fixed by returning cents here, the
+    one place that never got the conversion, rather than scattering a
+    *100 at every consumer that already correctly assumes cents."""
+
+    base_prices_dollars = {
         "youtube": 750,
         "social": 500,
         "testimonial": 600,
@@ -329,13 +340,13 @@ def calculate_quote_price(video_type: str, delivery_days: int) -> int:
         "custom": 1000,
     }
 
-    base_price = base_prices.get(video_type, 750)
+    base_price_dollars = base_prices_dollars.get(video_type, 750)
 
     # Rush delivery premium (less than 24 hours = +$250)
     if delivery_days < 1:
-        base_price += 250
+        base_price_dollars += 250
 
-    return base_price
+    return base_price_dollars * 100
 
 
 async def get_or_create_bot_worker(db: AsyncSession):
