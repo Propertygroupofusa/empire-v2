@@ -2399,6 +2399,50 @@ deploy will charge correctly.
 
 ---
 
+## "Right now" trade eligibility on the stock/ETF backtest page
+
+Real friction found live: clicking "Trade this" on USO - its own real
+30-day backtest ranking was the best on the board (73.1% win rate, +16.9%
+ROI) - refused with `Mandate check failed: RSI 58.9 not oversold
+(threshold: 30)`. Not a bug - `try_open`'s real mean-reversion entry rule
+only fires on RSI < 30, and USO's RSI was genuinely neutral at that
+moment. But the account owner had no way to know that without clicking
+and hitting the refusal, and asked directly for the difference to be
+visible: "make it to where it shows me a difference to which ones that I
+can click and buy."
+
+Fixed by adding a real, read-only dry run of the exact same checks
+`manual_open_prop_position` (the real "Trade this" endpoint) already
+runs, in the same order - never a second, looser copy of the gate that
+could drift out of sync or, worse, quietly become the manual-only bypass
+the account owner explicitly said they did NOT want built a few messages
+earlier in this same session.
+
+- New `GET /api/trading-dashboard/alpaca-overview/entry-eligibility`
+  (admin-key gated): checks kill conditions and margin safety once
+  (account-wide, not per-symbol - if either fails, every symbol is
+  reported ineligible with that one shared reason, matching how a real
+  click would fail identically on all of them), then per symbol: already
+  held? in the approved universe? auto-excluded? real live RSI via the
+  same `get_price_rsi`, real `validate_entry` mandate check. Returns
+  `{eligible, reason, rsi}` per ticker. Never calls `size_position` or
+  `execute_futures_trade` - it only ever reads, never places an order.
+- `alpaca_selection_backtest.html` gained a "Right now" column
+  (✅ Ready (RSI x.x) / ⏳ real reason) and the "Trade this" button is now
+  `disabled` until that symbol's real check comes back eligible - loaded
+  automatically after every backtest run, plus a manual "🔄 Refresh trade
+  status" link since RSI moves over time independent of re-running the
+  whole backtest.
+
+Verified offline against the exact real scenario: a mocked USO at RSI
+58.9 (the real live value from the screenshot) is correctly reported
+ineligible with the real mandate reason; a genuinely oversold symbol is
+reported eligible; a symbol already held skips the RSI fetch entirely;
+a real kill condition or `STOP_TRADING` correctly blocks every symbol
+with one shared reason rather than looking like 11 separate failures.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

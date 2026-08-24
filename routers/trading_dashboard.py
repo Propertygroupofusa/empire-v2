@@ -1495,6 +1495,92 @@ async def manual_open_prop_position(ticker: str):
     }
 
 
+@router.get("/alpaca-overview/entry-eligibility", dependencies=[Depends(require_admin_key)])
+async def alpaca_entry_eligibility():
+    """Per the account owner's real request after "Trade this" refused USO
+    with "RSI 58.9 not oversold" - rather than finding out only after
+    clicking, this shows which symbols are ACTUALLY clickable right now.
+    Deliberately reuses the exact same real checks manual_open_prop_position
+    (this file) runs, in the same order, minus the final size_position/
+    execute_futures_trade - a read-only dry run of the same real gate, not
+    a second, looser copy of it that could drift out of sync or (worse)
+    quietly become the real bypass the account owner explicitly said they
+    did NOT want built. Every symbol still goes through get_price_rsi and
+    validate_entry for real, live data - nothing here is cached or
+    estimated.
+
+    Kill-condition and margin-safety are account-wide, not per-symbol, so
+    they're checked once: if either fails, every symbol is reported
+    ineligible with that one shared reason, matching how "Trade this"
+    itself would fail identically on every symbol in that state."""
+    if prop_bot_module is None:
+        raise HTTPException(status_code=500, detail="prop_bot module not available")
+    pb = prop_bot_module
+
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        return {"tickers": {c["symbol"]: {"eligible": False, "reason": "STOP_TRADING is set - all entries paused", "rsi": None} for c in pb.FUTURES.values()}}
+
+    excluded_symbols = await pb.get_effective_excluded_symbols()
+    approved_universe = (
+        pb.APEX_MANDATE["universe"]["futures"] +
+        pb.APEX_MANDATE["universe"]["crypto"] +
+        pb.APEX_MANDATE["universe"]["commodities"] +
+        pb.APEX_MANDATE["universe"]["inverse_etfs"]
+    )
+
+    async with aiohttp.ClientSession() as session:
+        equity = await pb.get_account_equity(session)
+        buying_power = await pb.get_account_buying_power(session) if equity is not None else None
+
+        shared_block_reason = None
+        if equity is None:
+            shared_block_reason = "Could not fetch real account equity right now"
+        else:
+            should_halt, halt_reason = pb.check_kill_conditions(
+                buying_power=buying_power, equity=equity, daily_loss=pb.daily_pnl,
+                open_position_count=len(pb.open_prop_positions),
+            )
+            if should_halt:
+                shared_block_reason = f"Trading halted by kill condition: {halt_reason}"
+            else:
+                is_safe, safety_reason = pb.check_margin_safety(buying_power, equity, len(pb.open_prop_positions))
+                if not is_safe:
+                    shared_block_reason = f"Margin safety check failed: {safety_reason}"
+
+        results = {}
+        for contract, config in pb.FUTURES.items():
+            ticker = config["symbol"]
+            if shared_block_reason:
+                results[ticker] = {"eligible": False, "reason": shared_block_reason, "rsi": None}
+                continue
+            if contract in pb.open_prop_positions:
+                results[ticker] = {"eligible": False, "reason": f"Already holding a position in {contract}", "rsi": None}
+                continue
+            if contract not in approved_universe:
+                results[ticker] = {"eligible": False, "reason": "Not in the approved trading universe", "rsi": None}
+                continue
+            if ticker in excluded_symbols:
+                results[ticker] = {"eligible": False, "reason": f"Auto-excluded - last {pb.AUTO_EXCLUDE_RUN_WINDOW} real backtest runs were all negative ROI", "rsi": None}
+                continue
+
+            price_data = await pb.get_price_rsi(session, ticker)
+            if price_data is None:
+                reason = pb._price_rsi_last_failure.get(ticker, "unknown reason")
+                results[ticker] = {"eligible": False, "reason": f"Could not fetch a live price/RSI: {reason}", "rsi": None}
+                continue
+
+            rsi = price_data["rsi"]
+            total_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in pb.open_prop_positions.values())
+            is_valid, mandate_reason = pb.validate_entry(
+                bot_name="prop_bot", symbol=contract, rsi=rsi, volume_ratio=1.0,
+                buying_power=buying_power, open_positions=len(pb.open_prop_positions),
+                total_notional=total_notional, equity=equity,
+            )
+            results[ticker] = {"eligible": is_valid, "reason": None if is_valid else mandate_reason, "rsi": rsi}
+
+    return {"tickers": results}
+
+
 async def get_alpaca_locked_usd() -> float:
     """Running total of profit skimmed by check_and_auto_close_positions -
     same generic per-key bucket table (TradingBotState) the bot-bucket

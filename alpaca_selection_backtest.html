@@ -58,6 +58,13 @@
     }
     .trade-btn:disabled { opacity: 0.55; cursor: default; }
     .trade-note { font-size: 0.78em; color: var(--text-dim); margin-top: 20px; }
+    .elig-cell { font-size: 0.78em; white-space: nowrap; }
+    .elig-yes { color: var(--green); font-weight: 700; }
+    .elig-no { color: var(--text-dim); }
+    .refresh-elig-btn {
+        border: none; background: none; color: var(--navy); text-decoration: underline;
+        cursor: pointer; font-size: 1em; padding: 0;
+    }
 </style>
 </head>
 <body>
@@ -148,7 +155,8 @@ function renderResults(data) {
             <td class="${pnlClass}">${fmtUsd(r.total_pnl)}</td>
             <td class="${roiClass}">${r.roi_pct_of_spend >= 0 ? '+' : ''}${r.roi_pct_of_spend.toFixed(1)}%</td>
             <td>${r.avg_trade_pct >= 0 ? '+' : ''}${r.avg_trade_pct.toFixed(2)}%</td>
-            <td><button class="trade-btn" onclick="tradeThisStock('${r.product_id}', this)">Trade this</button></td>
+            <td id="elig-${r.product_id}" class="elig-cell">Checking…</td>
+            <td><button class="trade-btn" id="btn-${r.product_id}" disabled onclick="tradeThisStock('${r.product_id}', this)">Trade this</button></td>
         </tr>`;
     }).join('');
 
@@ -161,13 +169,44 @@ function renderResults(data) {
     resultsEl.innerHTML = `
         <table>
             <thead><tr>
-                <th>Symbol</th><th>Trades</th><th>Win rate</th><th>Total P&amp;L</th><th>ROI on $${data.spend_per_trade}</th><th>Avg / trade</th><th>Action</th>
+                <th>Symbol</th><th>Trades</th><th>Win rate</th><th>Total P&amp;L</th><th>ROI on $${data.spend_per_trade}</th><th>Avg / trade</th><th>Right now</th><th>Action</th>
             </tr></thead>
             <tbody>${rows}</tbody>
         </table>
-        <p class="trade-note">"Trade this" places a real long market order on that symbol right now, on prop_bot.py's real funded-account evaluation - it runs through the exact same real risk checks (buying power, margin safety, mandate universe/notional limits) the automatic entries already use, not a shortcut around them. Refused if you're already holding a position in it, a real kill condition or STOP_TRADING is active, or any of those real checks fail.</p>
+        <p class="trade-note">"Trade this" places a real long market order on that symbol right now, on prop_bot.py's real funded-account evaluation - it runs through the exact same real risk checks (buying power, margin safety, mandate universe/notional limits) the automatic entries already use, not a shortcut around them. Refused if you're already holding a position in it, a real kill condition or STOP_TRADING is active, or any of those real checks fail. The "Right now" column shows that same real check ahead of time, before you click, so a button is only enabled when a real click would actually go through - <button class="refresh-elig-btn" onclick="loadEligibility()">🔄 Refresh trade status</button></p>
         ${skippedHtml}
     `;
+
+    loadEligibility();
+}
+
+async function loadEligibility() {
+    // Read-only dry run of the exact same real checks tradeThisStock()
+    // itself would hit - shows which rows are genuinely clickable right
+    // now (real live RSI, real account state) instead of finding out only
+    // after a click. Never places an order.
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-overview/entry-eligibility', {
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        for (const [ticker, info] of Object.entries(data.tickers || {})) {
+            const cell = document.getElementById('elig-' + ticker);
+            const btn = document.getElementById('btn-' + ticker);
+            if (!cell) continue;
+            if (info.eligible) {
+                cell.innerHTML = `<span class="elig-yes">✅ Ready${info.rsi != null ? ` (RSI ${info.rsi.toFixed(1)})` : ''}</span>`;
+                if (btn) { btn.disabled = false; btn.title = ''; }
+            } else {
+                cell.innerHTML = `<span class="elig-no">⏳ ${info.reason || 'Not eligible'}</span>`;
+                if (btn) { btn.disabled = true; btn.title = info.reason || 'Not eligible right now'; }
+            }
+        }
+    } catch (e) {
+        document.querySelectorAll('.elig-cell').forEach(c => { c.textContent = 'Could not check'; });
+    }
 }
 
 async function tradeThisStock(ticker, btn) {
