@@ -771,12 +771,27 @@ async def get_next_eligible_product_id():
     to be unclaimed - multiple branches can now hold the same coin at
     once. Still prefers spreading out where possible though: among all
     eligible coins, picks whichever currently has the FEWEST branches
-    already on it (ties broken by COIN_FAMILY_TREE order) - a coin with
-    zero branches always wins first, same practical result as the old
-    "must be unclaimed" rule in the common case, but this degrades to
-    piling onto the least-crowded coin instead of returning None once
-    every coin has at least one branch, rather than hard-blocking new
-    branches from spawning at all."""
+    already on it - a coin with zero branches always wins first, same
+    practical result as the old "must be unclaimed" rule in the common
+    case, but this degrades to piling onto the least-crowded coin instead
+    of returning None once every coin has at least one branch, rather
+    than hard-blocking new branches from spawning at all.
+
+    Real production evidence: exhausting even 12 retries+jitter in
+    spawn_child_branch_with_retry() on a real, repeated basis (not a
+    one-off) meant the collision rate itself was too high for retry
+    timing alone to fix - the OLD tie-break (fixed COIN_FAMILY_TREE list
+    order) made every concurrent spawner - manual clicks, "Trade this" on
+    the backtest page, and the coordinator's own per-cycle catch-up spawn
+    across every branch - deterministically agree on the IDENTICAL single
+    target coin whenever several coins were tied at the same lowest
+    count, funneling all of that real concurrent demand onto one coin
+    instead of spreading it out. Ties are now broken with a real random
+    pick among every coin AT the minimum count, so simultaneous spawners
+    naturally spread their targets across however many coins are tied
+    (often several, when most coins sit at 0-1 branches) instead of all
+    piling onto the same one - directly cutting the real collision rate,
+    not just retrying around it."""
     excluded = await get_effective_excluded_coins()
     eligible = [
         p for p in COIN_FAMILY_TREE
@@ -788,7 +803,9 @@ async def get_next_eligible_product_id():
         result = await db.execute(select(CryptoTreeBranch.product_id))
         held = list(result.scalars().all())
     counts = {p: held.count(p) for p in eligible}
-    return min(eligible, key=lambda p: (counts[p], eligible.index(p)))
+    min_count = min(counts.values())
+    tied = [p for p in eligible if counts[p] == min_count]
+    return random.choice(tied)
 
 
 async def _drop_product_id_unique_index():

@@ -1733,6 +1733,53 @@ files) re-run clean alongside it.
 
 ---
 
+## Real follow-up: spawn collisions kept exhausting even 12 retries+jitter - the root cause was one level deeper
+
+Right after the 12-attempts+jitter fix above shipped, the account owner
+hit the exact same wall again, still at the new numbers: **"Could not
+start a new branch: crypto_tree_xrp_usd_2 collided with another branch on
+every retry (12x) - try again"**. Not a one-off - happening on a
+sustained, repeated basis while several coins were sitting at or near
+their spawn tier.
+
+More retries and jitter alone couldn't fix this because the real problem
+wasn't purely about *timing* - it was that `get_next_eligible_product_id()`
+always deterministically picked the exact same coin. Its tie-break used
+fixed `COIN_FAMILY_TREE` list order, so whenever multiple coins were tied
+at the lowest branch count (very likely - most coins sit at 0 or 1
+branches, and by this point several of the negative-ROI coins from the
+earlier backtest screenshot, like LTC/LINK/SEI/ATOM/AAVE, had likely
+already been auto-excluded by the automatic backtest-exclusion layer,
+narrowing the real eligible pool down to just a couple of standout
+positive-ROI coins like XRP-USD), EVERY concurrent spawner - manual
+"Start new $50 branch" clicks, "Trade this" on the backtest page, AND the
+coordinator's own per-cycle catch-up spawn firing across every eligible
+branch - independently computed and agreed on the IDENTICAL target coin.
+That funneled all of the tree's real concurrent spawn demand onto one
+single coin instead of naturally spreading across whichever coins were
+actually tied, guaranteeing sustained, repeated collisions no matter how
+many times a losing attempt retried.
+
+Fixed in `get_next_eligible_product_id()`: ties are now broken with a
+real random pick (`random.choice`) among every coin AT the minimum
+branch count, not the first one in list order. A genuinely unclaimed
+coin still always wins outright when it's the sole minimum (no false
+randomization there) - this only changes behavior when 2+ coins are
+truly tied, spreading real concurrent demand across all of them instead
+of funneling it onto one.
+
+Verified offline: with 4 coins tied at count 0, 200 calls spread across
+all 4 instead of only ever returning one; a coin that's genuinely the
+sole zero-count candidate still always wins with no randomization noise;
+and the real concurrency shape that caused the actual failure - 8 real
+concurrent `spawn_child_branch_with_retry()` calls with only 3 coins
+tied-eligible - now all succeed, spread naturally across all 3 coins
+(e.g. 4/3/1) instead of every attempt colliding on a single one. Full
+existing regression suite (14 prior scratch test files) re-run clean
+alongside it.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
