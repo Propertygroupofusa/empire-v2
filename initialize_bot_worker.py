@@ -5,6 +5,19 @@ from models import Worker
 import os
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///empire.db")
+# Same real fix as database.py: Railway's Postgres plugin injects a plain
+# postgresql:// URL, which defaults to the sync psycopg2 driver -
+# create_async_engine requires an async driver, so rewrite the scheme to
+# asyncpg regardless of what's provided. Without this, this script's own
+# separate engine (deliberately not sharing database.py's, since it needs
+# to run standalone) fails every time with "the asyncio extension requires
+# an async driver... psycopg2 is not async" - a real, harmless-looking
+# warning that was actually silently preventing the bot worker earnings
+# row from ever being created.
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+elif DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
 
 async def initialize_bot_worker():
     """Create bot worker record for earnings tracking (non-blocking with timeout)"""
