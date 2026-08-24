@@ -46,6 +46,11 @@
     }
     .header h1 { font-size: 1.5em; font-weight: 800; color: var(--navy); }
     .header p { color: var(--text-dim); font-size: 0.85em; margin-top: 2px; }
+    .header-totals { margin-bottom: 4px; }
+    .header-total-row { font-size: 0.85em; font-weight: 700; color: var(--navy); white-space: nowrap; }
+    .header-total-row .v { font-weight: 800; }
+    .header-total-row .v.pos { color: var(--green); }
+    .header-total-row .v.neg { color: var(--red); }
     #status { color: var(--text-dim); font-size: 0.8em; }
     #status.error { color: var(--red); font-weight: 600; }
 
@@ -396,7 +401,13 @@
             <p>Live from the database · branches drawn as a real family tree, root at top</p>
             <p style="margin-top: 4px; font-size: 0.85em;"><a href="/crypto-selection-backtest-view" style="color: var(--navy);">📊 Coin selection backtest →</a></p>
         </div>
-        <div id="status">Loading…</div>
+        <div style="text-align:right;">
+            <div class="header-totals">
+                <div class="header-total-row">🌳 Coinbase: <span id="header-total-coinbase" class="v">—</span></div>
+                <div class="header-total-row">📈 Alpaca: <span id="header-total-alpaca" class="v">—</span></div>
+            </div>
+            <div id="status">Loading…</div>
+        </div>
     </div>
 
     <div class="narrative" id="narrative">Loading tree summary…</div>
@@ -1115,6 +1126,33 @@ async function refresh() {
         renderTotalProfit();
     } catch (e) {
         document.getElementById('coin-history-wrap').innerHTML = `<div class="coin-history-empty">Could not load coin history: ${e.message}</div>`;
+    }
+
+    loadHeaderTotals();
+}
+
+function renderHeaderTotal(elId, total) {
+    const el = document.getElementById(elId);
+    const cls = total >= 0 ? 'pos' : 'neg';
+    el.className = 'v ' + cls;
+    el.textContent = (total >= 0 ? '+' : '-') + fmtUsd(Math.abs(total));
+}
+
+async function loadHeaderTotals() {
+    // Coinbase total reuses the same two client-side accumulators the
+    // Total Profit KPI card already computes (lastRealizedProfit/
+    // lastUnrealizedProfit, populated earlier in this same refresh()) -
+    // one real number, shown in two places, not a second definition of
+    // "total profit."
+    if (lastRealizedProfit !== null || lastUnrealizedProfit !== null) {
+        renderHeaderTotal('header-total-coinbase', (lastRealizedProfit || 0) + (lastUnrealizedProfit || 0));
+    }
+    try {
+        const alpacaData = await apiGet('/alpaca-overview');
+        const alpacaTotal = (alpacaData.bots || []).reduce((sum, b) => sum + b.pl, 0);
+        renderHeaderTotal('header-total-alpaca', alpacaTotal);
+    } catch (e) {
+        document.getElementById('header-total-alpaca').textContent = '—';
     }
 }
 
