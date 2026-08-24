@@ -54,14 +54,24 @@ def get_headers():
     }
 
 def get_base_url():
-    """Alpaca base URL (live vs paper). Defaults to live to match
-    prop_bot.py's default and the actual live credentials configured in
-    Railway - ALPACA_BASE_URL was never set there, so this bot was silently
-    talking to the paper server with live-account keys, which can't
-    authenticate against it (account balance fetch failed every time)."""
-    return os.getenv("ALPACA_BASE_URL", "https://api.alpaca.markets")
+    """Alpaca base URL, defaulting safely to paper trading."""
+    return os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 
 LIVE_TRADE = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
+
+
+def _trading_endpoint_is_valid() -> bool:
+    """Require the endpoint to match the explicitly selected trade mode."""
+    endpoint = get_base_url().rstrip("/").lower()
+    is_live_endpoint = endpoint == "https://api.alpaca.markets"
+    is_paper_endpoint = endpoint == "https://paper-api.alpaca.markets"
+    if LIVE_TRADE and not is_live_endpoint:
+        log.error("ALPACA_LIVE_TRADE=true requires ALPACA_BASE_URL=https://api.alpaca.markets")
+        return False
+    if not LIVE_TRADE and not is_paper_endpoint:
+        log.error("Paper mode refuses non-paper ALPACA_BASE_URL; set https://paper-api.alpaca.markets")
+        return False
+    return True
 
 # Swing trading symbols: indices + commodities
 SWING_SYMBOLS = {
@@ -250,6 +260,9 @@ async def get_open_positions(session):
 
 async def place_order(session, symbol, qty, side):
     """Place a market order with validation"""
+    if not _trading_endpoint_is_valid():
+        log.error("Swing order blocked because Alpaca mode and endpoint do not match")
+        return None
     try:
         url = f"{get_base_url()}/v2/orders"
         payload = {

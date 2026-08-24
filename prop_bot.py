@@ -73,11 +73,25 @@ def get_headers():
     }
 
 def get_base_url():
-    """Dynamically read Alpaca base URL from env var. Default: production API (not paper trading)."""
-    return os.getenv("ALPACA_BASE_URL", "https://api.alpaca.markets")
+    """Dynamically read Alpaca base URL, defaulting safely to paper trading."""
+    return os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 
 # Live trading mode
 LIVE_TRADE = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
+
+
+def _trading_endpoint_is_valid() -> bool:
+    """Require the endpoint to match the explicitly selected trade mode."""
+    endpoint = get_base_url().rstrip("/").lower()
+    is_live_endpoint = endpoint == "https://api.alpaca.markets"
+    is_paper_endpoint = endpoint == "https://paper-api.alpaca.markets"
+    if LIVE_TRADE and not is_live_endpoint:
+        log.error("ALPACA_LIVE_TRADE=true requires ALPACA_BASE_URL=https://api.alpaca.markets")
+        return False
+    if not LIVE_TRADE and not is_paper_endpoint:
+        log.error("Paper mode refuses non-paper ALPACA_BASE_URL; set https://paper-api.alpaca.markets")
+        return False
+    return True
 
 # RSI entry/exit thresholds
 RSI_BUY_BELOW  = _safe_float_env("PROP_RSI_BUY_BELOW", "30")
@@ -930,6 +944,10 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
     }
 
     mode = "LIVE" if LIVE_TRADE else "PAPER"
+
+    if not _trading_endpoint_is_valid():
+        log.error(f"{mode} order blocked because Alpaca mode and endpoint do not match")
+        return False
 
     try:
         async with session.post(f"{get_base_url()}/v2/orders", headers=get_headers(), json=order) as r:

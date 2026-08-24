@@ -99,6 +99,7 @@ UNLOCK_TIER_USD = engine._safe_float_env("TREE_UNLOCK_TIER_USD", "100")
 PRIOR_UNLOCK_TIER_USD = 150.0
 BRANCH_FLOOR_TIER = engine._safe_float_env("TREE_BRANCH_FLOOR_TIER", "50")
 COORDINATOR_SCAN_SECONDS = engine._safe_int_env("TREE_COORDINATOR_SCAN_SECONDS", "20")
+CRYPTO_STOP_TRADING = os.getenv("CRYPTO_STOP_TRADING", "false").lower() == "true"
 
 # A floor-breach forced exit resets the floor down to only ~3-4% below the
 # fresh post-sale balance (see the tier-reset in _branch_sell_and_settle) -
@@ -1448,7 +1449,8 @@ async def run_branch_cycle(bot_name: str) -> bool:
     # check at all before this. Cheap when not yet eligible - the first
     # line inside is a synchronous comparison against the already-loaded
     # branch, no DB query happens unless it's actually crossed.
-    await _maybe_spawn_child(branch)
+    if not CRYPTO_STOP_TRADING:
+        await _maybe_spawn_child(branch)
     # _maybe_spawn_child() deducts the $50 seed from a FRESH row it loads
     # internally, not from this already-in-memory `branch` object - reload
     # so every use of branch.allocated_usd below (most importantly the
@@ -1568,6 +1570,9 @@ async def run_branch_cycle(bot_name: str) -> bool:
             return True
 
         if position is None:
+            if CRYPTO_STOP_TRADING:
+                log.info(f"[TREE] {bot_name}: CRYPTO_STOP_TRADING is enabled - new entries paused")
+                return True
             if await _floor_breach_cooldown_active(bot_name):
                 log.info(f"[TREE] {bot_name}: cooling down after a recent floor breach - entries paused a bit longer")
                 return True
