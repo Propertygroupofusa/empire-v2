@@ -787,6 +787,64 @@ async def _dedupe_locked_profit_state():
         log.warning(f"[TREE] could not dedupe locked-profit state: {e}")
 
 
+async def _dedupe_family_tree_positions():
+    """One-time cleanup, safe to call on every startup: a real production
+    crash confirmed this happened live - crypto_tree_xrp_usd's thread
+    raised sqlalchemy.exc.MultipleResultsFound on EVERY cycle
+    (_load_branch_position's scalar_one_or_none() can only handle 0 or 1
+    row) because two BotPosition rows existed under its bot_name.
+
+    Deliberately scoped to only the bot_names that currently exist as real
+    CryptoTreeBranch rows (crypto_tree_* and the BTC root) - never touches
+    prop_apex's or crypto_coinbase's rows in this same shared table, which
+    legitimately hold many concurrent positions (one row per open symbol)
+    by design, unlike a family-tree branch, which is a single-position
+    engine where its bot_name IS meant to be the position's unique key.
+
+    Every duplicate row represents qty this system has no way to tell
+    apart from a real fill, so the fix sums qty (at a qty-weighted-average
+    entry_price) rather than discarding one row's worth of real quantity -
+    same reasoning _dedupe_locked_profit_state() uses for real dollars.
+    Keeps the most recently opened row's target/stop, since that reflects
+    whichever buy actually happened last."""
+    try:
+        async with AsyncSessionLocal() as db:
+            bot_names = (await db.execute(select(CryptoTreeBranch.bot_name))).scalars().all()
+
+        for bot_name in bot_names:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(BotPosition).where(BotPosition.bot == bot_name).order_by(BotPosition.id)
+                )
+                rows = result.scalars().all()
+                if len(rows) <= 1:
+                    continue
+
+                total_qty = sum(r.qty for r in rows)
+                merged_entry = (
+                    sum(r.entry_price * r.qty for r in rows) / total_qty
+                    if total_qty > 0 else rows[-1].entry_price
+                )
+                newest = rows[-1]
+                survivor = rows[0]
+                survivor.qty = total_qty
+                survivor.entry_price = merged_entry
+                survivor.target_price = newest.target_price
+                survivor.stop_price = newest.stop_price
+                survivor.opened_at = newest.opened_at
+                survivor.peak_pct = newest.peak_pct
+                for dupe in rows[1:]:
+                    await db.delete(dupe)
+                await db.commit()
+            log.warning(
+                f"[TREE] 🔧 real duplicate BotPosition rows found and merged for {bot_name} "
+                f"({len(rows)} rows -> qty {total_qty:.8f} @ avg entry ${merged_entry:,.4f}, no quantity lost) - "
+                f"this is what was crashing _load_branch_position()"
+            )
+    except Exception as e:
+        log.warning(f"[TREE] could not dedupe family-tree positions: {e}")
+
+
 async def _ensure_trading_bot_state_unique_index():
     """One-time safety migration, safe to call on every startup: the
     TradingBotState model has always declared bot_name unique=True, but
@@ -929,12 +987,32 @@ async def find_most_volatile_unclaimed_coin(session):
 
 
 async def _load_branch_position(bot_name: str):
+    """A real production crash (sqlalchemy.exc.MultipleResultsFound) hit
+    crypto_tree_xrp_usd's thread on every single cycle once two BotPosition
+    rows existed under its bot_name - scalar_one_or_none() can only handle
+    0 or 1 row. Unlike prop_bot.py/crypto_coinbase_bot.py, which
+    legitimately hold several concurrent positions under one shared bot
+    value (one row per open symbol), each family-tree branch is a
+    single-position engine - more than one row under the same bot_name is
+    always a bug here. _dedupe_family_tree_positions() cleans up any
+    duplicate that already exists, and _save_branch_position now clears any
+    existing row before inserting a new one so this can't recur - taking
+    the most recent row here (order by id desc) is kept anyway as defense
+    in depth, so a stray duplicate degrades gracefully instead of crashing
+    this branch's thread every cycle."""
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(BotPosition).where(BotPosition.bot == bot_name))
-        return result.scalar_one_or_none()
+        result = await db.execute(
+            select(BotPosition).where(BotPosition.bot == bot_name).order_by(BotPosition.id.desc())
+        )
+        return result.scalars().first()
 
 
 async def _save_branch_position(bot_name, product_id, entry_price, qty, target_price, stop_price):
+    # Defensive: clear any existing row(s) for this bot_name first, so this
+    # can never leave two rows behind under the same bot_name - see
+    # _dedupe_family_tree_positions() for the real duplicate-row crash this
+    # guards against recurring.
+    await _clear_branch_position(bot_name)
     async with AsyncSessionLocal() as db:
         db.add(BotPosition(
             bot=bot_name, symbol=product_id, side="long",
@@ -949,8 +1027,10 @@ async def _raise_branch_stop_to_breakeven(bot_name: str, entry_price: float):
     """Only ever moves a position's stop UP to its own entry price - never
     down, never past entry. See BREAKEVEN_TRIGGER_PCT."""
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(BotPosition).where(BotPosition.bot == bot_name))
-        pos = result.scalar_one_or_none()
+        result = await db.execute(
+            select(BotPosition).where(BotPosition.bot == bot_name).order_by(BotPosition.id.desc())
+        )
+        pos = result.scalars().first()
         if pos and pos.stop_price is not None and pos.stop_price < entry_price:
             pos.stop_price = entry_price
             await db.commit()
@@ -962,20 +1042,24 @@ async def _update_branch_position_peak(bot_name: str, new_peak_usd: float):
     dollar figure for this bot only; only ever called with a value higher
     than what's already stored."""
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(BotPosition).where(BotPosition.bot == bot_name))
-        pos = result.scalar_one_or_none()
+        result = await db.execute(
+            select(BotPosition).where(BotPosition.bot == bot_name).order_by(BotPosition.id.desc())
+        )
+        pos = result.scalars().first()
         if pos:
             pos.peak_pct = new_peak_usd
             await db.commit()
 
 
 async def _clear_branch_position(bot_name: str):
+    """Deletes every BotPosition row under this bot_name, not just one -
+    defense against a stray duplicate (see _load_branch_position) lingering
+    behind after a sell instead of being fully cleared."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(BotPosition).where(BotPosition.bot == bot_name))
-        pos = result.scalar_one_or_none()
-        if pos:
+        for pos in result.scalars().all():
             await db.delete(pos)
-            await db.commit()
+        await db.commit()
 
 
 async def ensure_root_exists(session):
@@ -1621,6 +1705,7 @@ def run():
     loop.run_until_complete(_ensure_product_id_unique_index())
     loop.run_until_complete(_dedupe_locked_profit_state())
     loop.run_until_complete(_ensure_trading_bot_state_unique_index())
+    loop.run_until_complete(_dedupe_family_tree_positions())
     loop.run_until_complete(_migrate_matic_to_pol())
     loop.run_until_complete(_lower_existing_unlock_tiers())
 

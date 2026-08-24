@@ -493,6 +493,51 @@ crash scenario:
    update against whichever row actually won the race, instead of
    silently creating a second row.
 
+### A second real production crash from the same pattern: duplicate BotPosition rows (crypto_tree_xrp_usd stuck every cycle)
+
+A Railway log screenshot batch surfaced this: `crypto_tree_xrp_usd` was
+raising `sqlalchemy.exc.MultipleResultsFound` on literally every cycle,
+inside `_load_branch_position()`'s `scalar_one_or_none()` - the same
+underlying shape of bug as the locked-profit crash above (a shared table
+key ending up with two rows and every scalar_one_or_none() read on it
+crashing), but on `bot_positions`, and a different consumer of that
+table: `BotPosition.bot` was **never** declared `unique=True` in the
+model at all, unlike `TradingBotState.bot_name` (which at least claimed
+it) - and critically, `prop_bot.py`'s `prop_apex` and
+`crypto_coinbase_bot.py`'s `crypto_coinbase` **legitimately** hold
+several real concurrent positions under one shared `bot` value (one row
+per open symbol - prop_bot alone can hold up to 8), so a bare unique
+index on `bot` the way `trading_bot_state` got one would have been
+wrong and broken real multi-position trading immediately. Each
+family-tree branch is different: it's a single-position engine where
+its own `bot_name` IS meant to be the position's unique key, so more
+than one row under the same bot_name is always a bug there specifically
+- the fix had to be scoped to just that.
+
+Fixed in `crypto_family_tree_bot.py`, deliberately not touching the
+shared `BotPosition` model or `prop_bot.py`/`crypto_coinbase_bot.py`'s
+own use of the table at all:
+1. `_dedupe_family_tree_positions()` - a one-time startup migration,
+   scoped to only the `bot_name`s that currently exist as real
+   `CryptoTreeBranch` rows. Every duplicate row's qty is real quantity
+   this system can't tell apart from a genuine fill, so it sums the qty
+   (at a qty-weighted-average entry price) rather than discarding one
+   row's worth - same "never lose real money" reasoning as the
+   locked-profit dedupe - and keeps the most recently opened row's
+   target/stop.
+2. Every read site (`_load_branch_position`, `_update_branch_position_peak`,
+   `_raise_branch_stop_to_breakeven`) now orders by `id desc` and takes
+   the first row instead of `scalar_one_or_none()` - defense in depth,
+   so a stray future duplicate degrades gracefully (uses the most recent
+   row) instead of crashing the branch's thread every cycle forever.
+3. `_clear_branch_position()` now deletes **every** row under a
+   bot_name, not just one.
+4. `_save_branch_position()` now calls `_clear_branch_position()` first,
+   before inserting - self-healing, so a family-tree branch can never
+   leave two rows behind under its own bot_name again, without needing
+   a DB-level constraint that would have had to special-case prop_apex's
+   and crypto_coinbase's legitimately-multi-row bots.
+
 ### Alpaca-side unlock: cash-out only, no "add to a bucket"
 
 `alpaca_dashboard.html` has the same 🔓 Unlock button and
