@@ -73,13 +73,21 @@ def _compute_rsi(closes: list, period: int = 14):
     return 100 - (100 / (1 + rs))
 
 
-def _replay_symbol(closes: list, spend_per_trade: float = SPEND_PER_TRADE) -> list:
+def _replay_symbol(closes: list, spend_per_trade: float = SPEND_PER_TRADE, symbol: str = None) -> list:
     """Long-only replay: enters when 14-period RSI < RSI_LONG_THRESHOLD
     (mirrors validate_dual_direction's long branch), then exits via the
     bot's real should_exit_position() rules - same function the live bot
     calls, not a reimplementation. A position still open at the end of
     the window is marked-to-market at the last close, same convention
-    crypto_selection_backtest.py uses."""
+    crypto_selection_backtest.py uses.
+
+    `symbol` is passed through to should_exit_position() purely for its
+    own log line - previously left as the hardcoded default None, which
+    made every backtest-replay exit line print "None (LONG)"/"None
+    (SHORT)" instead of the real ticker (e.g. "SPY"), indistinguishable
+    from a genuine live-position log line at a glance. Doesn't change the
+    returned should_exit/new_peak values at all - purely a diagnostic
+    label."""
     trades = []
     position = None  # {"entry": float, "peak_pnl_pct": float, "entry_idx": int}
 
@@ -97,7 +105,7 @@ def _replay_symbol(closes: list, spend_per_trade: float = SPEND_PER_TRADE) -> li
 
         age_seconds = (i - position["entry_idx"]) * BAR_MINUTES * 60
         should_exit, _reason, _exit_type, new_peak = should_exit_position(
-            symbol=None, entry_price=position["entry"], current_price=price,
+            symbol=symbol, entry_price=position["entry"], current_price=price,
             current_rsi=rsi, position_age_seconds=age_seconds, direction="long",
             stop_loss_pct=STOP_LOSS_PCT, min_profit_target_pct=MIN_PROFIT_TARGET_PCT,
             rsi_profit_threshold_long=RSI_PROFIT_THRESHOLD_LONG,
@@ -137,7 +145,7 @@ async def run_full_backtest(contract_codes=None, days: int = BACKTEST_DAYS, max_
                 if closes is None:
                     skipped.append({"product_id": ticker, "reason": err})
                     return
-                trades = _replay_symbol(closes)
+                trades = _replay_symbol(closes, symbol=ticker)
                 if not trades:
                     skipped.append({"product_id": ticker, "reason": "no trades produced (RSI never dipped below threshold)"})
                     return
