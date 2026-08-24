@@ -230,6 +230,83 @@ def _make_btc_relative_strength_gate(closes, times, lookback_hours, btc_times_so
     return gate
 
 
+def _make_higher_tf_trend_gate(closes, sma_short=20, sma_long=50):
+    """Returns an entry_gate(i) closure for backtest_one_coin() - the
+    crypto-side analog of prop_bot.py's real get_higher_tf_trend() 1-hour
+    confirmation filter (same SMA20/SMA50 pairing, "don't fight the higher
+    timeframe trend"). Unlike the Alpaca version, this needs no separate
+    coarser-timeframe fetch: this backtest already replays on hourly
+    candles, so computing SMA20/SMA50 directly off the same closes array
+    already being replayed IS the real, direct equivalent - no extra API
+    cost versus the plain baseline. Only allows a new long entry when
+    SMA20 > SMA50 (a genuine uptrend), matching prop_bot.py's own
+    long-entry rule. Free pass (True) for the first sma_long candles -
+    not enough real history yet to compute a trend, so don't block on
+    its absence, same "don't block on missing data" rule every other gate
+    in this file already follows."""
+    def gate(i):
+        if i < sma_long:
+            return True
+        sma20 = sum(closes[i - sma_short + 1:i + 1]) / sma_short
+        sma50 = sum(closes[i - sma_long + 1:i + 1]) / sma_long
+        return sma20 > sma50
+    return gate
+
+
+async def run_higher_tf_trend_comparison(coins=None, days=BACKTEST_DAYS, sma_short=20, sma_long=50, max_concurrent=6):
+    """SHADOW-MODE, additive comparison - same pattern as
+    run_btc_relative_strength_comparison() below, testing a different real
+    question raised directly by the account owner (does the crypto side
+    need a higher-timeframe trend confirmation filter, the way the Alpaca
+    side already has one?): would requiring the coin's own SMA20 > SMA50
+    uptrend before entering have improved each coin's real backtested
+    numbers? Runs the exact same real target/stop/breakeven/giveback
+    replay twice per coin on identical real historical data - baseline vs
+    trend-gated - so the two are directly, fairly comparable. Does not
+    change what the live bot buys unless/until wired into the live
+    selection path separately, on purpose - this is a read-only
+    comparison report, same as every other backtest tool in this file."""
+    coins = coins or COIN_FAMILY_TREE
+    semaphore = asyncio.Semaphore(max_concurrent)
+    async with aiohttp.ClientSession() as session:
+        async def _one(product_id):
+            async with semaphore:
+                candles = await fetch_historical_candles(session, product_id, days=days)
+            if candles is None:
+                return product_id, None, "not enough historical data"
+            closes, highs, lows, _times = candles
+            baseline = backtest_one_coin(closes, highs, lows)
+            gate = _make_higher_tf_trend_gate(closes, sma_short=sma_short, sma_long=sma_long)
+            filtered = backtest_one_coin(closes, highs, lows, entry_gate=gate)
+            return product_id, {"baseline": baseline, "with_trend_filter": filtered}, None
+
+        outcomes = await asyncio.gather(*(_one(pid) for pid in coins))
+
+    comparison = []
+    skipped = []
+    for product_id, result, skip_reason in outcomes:
+        if result is None:
+            skipped.append({"product_id": product_id, "reason": skip_reason})
+            continue
+        comparison.append({"product_id": product_id, **result})
+
+    def _sort_key(row):
+        filtered = row["with_trend_filter"]
+        return filtered["roi_pct_of_spend"] if filtered else -999.0
+    comparison.sort(key=_sort_key, reverse=True)
+
+    return {
+        "backtest_days": days,
+        "sma_short": sma_short,
+        "sma_long": sma_long,
+        "spend_per_trade": SPEND,
+        "coins_tested": len(coins),
+        "coins_with_results": len(comparison),
+        "skipped": skipped,
+        "comparison": comparison,
+    }
+
+
 async def run_btc_relative_strength_comparison(coins=None, days=BACKTEST_DAYS, lookback_hours=25, max_concurrent=6):
     """SHADOW-MODE, additive comparison tool - does NOT touch or replace
     run_full_backtest()/backtest_one_coin()'s existing baseline behavior,

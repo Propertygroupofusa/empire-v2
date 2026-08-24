@@ -1206,6 +1206,29 @@ async def run_btc_relative_strength_backtest():
     return await crypto_selection_backtest_module.run_btc_relative_strength_comparison()
 
 
+@router.post("/crypto-selection-backtest/higher-tf-trend", dependencies=[Depends(require_admin_key)])
+async def run_higher_tf_trend_backtest():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders,
+    and no bot reads this result yet. Answers a real question the account
+    owner raised directly: the Alpaca side has a real 1-hour SMA20/SMA50
+    trend-confirmation filter on new entries (get_higher_tf_trend() in
+    prop_bot.py) that the crypto side has never had - would the same idea
+    have helped here? Runs the exact same real target/stop/breakeven/
+    giveback replay as /crypto-selection-backtest, twice per coin, on the
+    exact same real historical hourly candles: once with no entry filter
+    (baseline, identical to the main backtest) and once gated by the
+    coin's own real SMA20 > SMA50 uptrend, so the two are directly
+    comparable. Does not change what the live bot buys unless/until wired
+    into the live selection path separately, on purpose - this is a
+    read-only comparison report.
+
+    Pulls real historical data from Coinbase's public candles endpoint -
+    can take 30-90 seconds depending on that endpoint's response time."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_higher_tf_trend_comparison()
+
+
 @router.post("/alpaca-selection-backtest", dependencies=[Depends(require_admin_key)])
 async def run_alpaca_selection_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.

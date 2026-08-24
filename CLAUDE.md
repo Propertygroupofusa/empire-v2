@@ -2443,6 +2443,60 @@ with one shared reason rather than looking like 11 separate failures.
 
 ---
 
+## Higher-timeframe trend comparison for crypto (shadow mode, additive only)
+
+The Alpaca side has always had a real 1-hour SMA20/SMA50 trend
+confirmation filter on new entries (`get_higher_tf_trend()` in
+`prop_bot.py` - blocks a long entry when the 1-hour trend is DOWN). The
+account owner asked directly whether the crypto family-tree side needs
+the same thing. Rather than guess, this ports the idea into the existing
+shadow-mode backtest-comparison pattern (`run_btc_relative_strength_comparison()`
+already established this shape) so it can be tested against real
+historical data before touching live entries.
+
+- **`_make_higher_tf_trend_gate(closes, sma_short=20, sma_long=50)`**
+  (`crypto_selection_backtest.py`) - the crypto-side analog of
+  `get_higher_tf_trend()`, same SMA20/SMA50 pairing. Unlike the Alpaca
+  version, needs no separate coarser-timeframe fetch: this backtest
+  already replays on real hourly Coinbase candles, so the SMA20/SMA50 is
+  computed directly off the same closes array already being replayed -
+  no extra API cost versus the plain baseline backtest. Only allows a new
+  long entry when SMA20 > SMA50 (a genuine uptrend); free pass for the
+  first `sma_long` candles, matching every other gate in this file's
+  "don't block on missing history" rule.
+- **`run_higher_tf_trend_comparison()`** - same shape as the existing
+  BTC-relative-strength comparison: replays every coin's real history
+  twice (baseline vs SMA-trend-gated) using the exact same real
+  target/stop/breakeven/giveback rules, so the two are directly
+  comparable.
+- New route `POST /api/trading-dashboard/crypto-selection-backtest/higher-tf-trend`
+  (admin-key gated) and a third button + comparison table on
+  `crypto_selection_backtest.html` ("▶ Run Higher-Timeframe Trend
+  Comparison"), same pattern as the existing backtest/BTC-relative
+  buttons on that page.
+
+Verified offline (no live network access in this sandbox, same
+documented gap as every other backtest tool in this file - confirmed
+again directly via `curl` to `api.exchange.coinbase.com`, a real 403 at
+the outbound proxy before reaching Coinbase): the gate correctly
+identifies a real uptrend (SMA20 > SMA50) vs downtrend on synthetic
+series with hand-computable SMA values; gives a free pass before enough
+history exists; actually suppresses real entries during a synthetic
+downtrend window and allows them once a synthetic uptrend takes hold
+when wired into the real `backtest_one_coin()` replay loop (not just
+correct in isolation); and the end-to-end comparison function returns
+the correct schema and correctly skips a coin with too little history.
+
+**Not yet confirmed against real historical Coinbase data** - the
+account owner needs to click the new button on the live deployed
+backtest page and share the results before any real recommendation on
+whether to wire this into live entries can be made, the same way the
+BTC-relative-strength filter's real 30-day results were what justified
+promoting THAT filter from shadow mode to live. This one is still
+shadow-mode only; nothing here changes what the live bot buys.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
