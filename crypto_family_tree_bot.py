@@ -98,6 +98,16 @@ UNLOCK_TIER_USD = engine._safe_float_env("TREE_UNLOCK_TIER_USD", "100")
 # before this change; never touches a branch that already crossed its
 # first tier (its next_unlock_tier would no longer be exactly this value).
 PRIOR_UNLOCK_TIER_USD = 150.0
+
+# Per the account owner's explicit request ("let Bitcoin have its next
+# child at $50"): root's OWN next-spawn requirement is now half the
+# regular UNLOCK_TIER_USD - after root spawns a child, the amount it
+# needs to grow by before spawning its NEXT one is $50, not $100. Only
+# ever applies to root's own increment (see _maybe_spawn_child) - a
+# spawned child's own first tier still uses the regular UNLOCK_TIER_USD,
+# same as always.
+ROOT_UNLOCK_TIER_USD = engine._safe_float_env("TREE_ROOT_UNLOCK_TIER_USD", "50")
+
 BRANCH_FLOOR_TIER = engine._safe_float_env("TREE_BRANCH_FLOOR_TIER", "50")
 COORDINATOR_SCAN_SECONDS = engine._safe_int_env("TREE_COORDINATOR_SCAN_SECONDS", "20")
 
@@ -974,6 +984,43 @@ async def _lower_existing_unlock_tiers():
         log.warning(f"[TREE] could not lower existing unlock tiers: {e}")
 
 
+async def _force_root_spawn_ready():
+    """Real, direct one-time startup fix - per the account owner's
+    explicit request ("push that now") after the automatic per-cycle
+    floor self-heal (see _maybe_spawn_child's own self-heal branch,
+    fixed earlier the same night) did not visibly take effect across
+    several real redeploys: crypto_btc_compound's floor kept showing
+    $150.00 on the live dashboard for hours after that fix should have
+    healed it to $100.00 on its very first cycle. Rather than keep
+    guessing at why the reactive, per-cycle self-heal hasn't shown up
+    live, this forces the exact same real correction directly at
+    startup, unconditionally, then immediately attempts the spawn itself
+    right here - no dependency on root's own branch thread reaching its
+    next cycle tick first. Safe to call on every startup: a no-op once
+    root's floor already matches its real tier and it has nothing new to
+    spawn."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == ROOT_BOT_NAME))
+        root = result.scalar_one_or_none()
+    if root is None or root.allocated_usd < root.next_unlock_tier:
+        return
+    new_tier_floor = math.floor(root.allocated_usd / BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER
+    if root.equity_floor > new_tier_floor:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == ROOT_BOT_NAME))
+            fresh = result.scalar_one_or_none()
+            if fresh and fresh.equity_floor > new_tier_floor:
+                old_floor = fresh.equity_floor
+                fresh.equity_floor = new_tier_floor
+                await db.commit()
+                root.equity_floor = new_tier_floor
+                log.info(
+                    f"[TREE] 🪜 FORCE-healed root's floor at startup ${old_floor:,.2f} -> ${new_tier_floor:,.2f} "
+                    f"(real balance ${root.allocated_usd:.2f} had crossed its ${root.next_unlock_tier:,.2f} tier but stayed floor-blocked)"
+                )
+    await _maybe_spawn_child(root)
+
+
 async def _dedupe_locked_profit_state():
     """One-time cleanup, safe to call on every startup: a real production
     crash confirmed this actually happened - multiple branches (each its
@@ -1597,7 +1644,12 @@ async def _maybe_spawn_child(branch):
                 if not fresh or fresh.allocated_usd < fresh.next_unlock_tier:
                     return
                 fresh.allocated_usd -= SEED_USD
-                fresh.next_unlock_tier += UNLOCK_TIER_USD
+                # Root's own next requirement is deliberately lower than a
+                # regular branch's (see ROOT_UNLOCK_TIER_USD) - the child
+                # being spawned still gets the normal UNLOCK_TIER_USD for
+                # its own first tier below.
+                own_increment = ROOT_UNLOCK_TIER_USD if branch.bot_name == ROOT_BOT_NAME else UNLOCK_TIER_USD
+                fresh.next_unlock_tier += own_increment
                 db.add(CryptoTreeBranch(
                     bot_name=child_name, product_id=next_product, parent_bot_name=branch.bot_name,
                     allocated_usd=SEED_USD, next_unlock_tier=UNLOCK_TIER_USD, equity_floor=0.0,
@@ -2077,6 +2129,7 @@ def run():
     loop.run_until_complete(_dedupe_family_tree_positions())
     loop.run_until_complete(_migrate_matic_to_pol())
     loop.run_until_complete(_lower_existing_unlock_tiers())
+    loop.run_until_complete(_force_root_spawn_ready())
 
     async def _scan():
         async with engine.aiohttp.ClientSession() as session:

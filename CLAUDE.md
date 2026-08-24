@@ -1971,6 +1971,46 @@ prior scratch test files) re-run clean alongside it.
 
 ---
 
+## BTC root's next-child requirement lowered to $50, and force-fixed a spawn that had been stuck for hours
+
+Every single screenshot across an entire session showed `crypto_btc_compound`
+frozen at Balance $121.93 / Floor $150.00 / "Next spawn" 100% - the exact
+stuck state the earlier per-cycle floor self-heal fix was supposed to
+resolve on its very first cycle, across several real redeploys since. Per
+the account owner's explicit request ("let Bitcoin have its next child at
+$50... push that now"), rather than trust the reactive self-heal a
+further time, this forces the fix directly.
+
+Two real changes:
+
+1. **`ROOT_UNLOCK_TIER_USD` (new, $50 default)** - root's OWN
+   requirement to spawn its NEXT child is now half of the regular
+   `UNLOCK_TIER_USD` every other branch uses. `_maybe_spawn_child()` now
+   computes `own_increment = ROOT_UNLOCK_TIER_USD if branch is root else
+   UNLOCK_TIER_USD` when advancing `next_unlock_tier` after a spawn - a
+   spawned CHILD's own first tier is completely unaffected, still the
+   regular $100.
+2. **`_force_root_spawn_ready()`** (new one-time startup migration, safe
+   to run every deploy) - loads root directly, and if it's already
+   crossed its tier but is still floor-blocked, forces the exact same
+   floor-heal the reactive per-cycle path was supposed to do, then
+   immediately calls `_maybe_spawn_child(root)` right there at startup -
+   no dependency on root's own thread reaching its next cycle tick. A
+   no-op once root has nothing new to spawn.
+
+Verified offline by reproducing the EXACT real stuck numbers from the
+live screenshots (Balance $121.93, Floor $150.00, next_unlock_tier
+$100.00): confirms the floor force-heals to $100.00 and a real child
+spawns in the same startup call; confirms root's own next tier becomes
+$150.00 (100 + the new $50 increment), not $200.00; confirms a spawned
+child still gets the regular $100 first tier; confirms a completely
+separate, non-root branch is totally unaffected by this change (still
+uses the regular $100 increment); and confirms the migration is a safe
+no-op once root hasn't crossed its own tier yet. Full existing regression
+suite (19 prior scratch test files) re-run clean alongside it.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
