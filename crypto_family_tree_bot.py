@@ -831,6 +831,7 @@ async def spawn_child_branch_with_retry(product_id: str, parent_bot_name, attemp
     becomes vanishingly unlikely regardless of how many callers are
     racing for the same coin."""
     last_name = None
+    last_error = None
     for attempt in range(attempts):
         if attempt > 0:
             await asyncio.sleep(random.uniform(0.05, 0.4))
@@ -844,10 +845,25 @@ async def spawn_child_branch_with_retry(product_id: str, parent_bot_name, attemp
             try:
                 await db.commit()
                 return child_name
-            except IntegrityError:
+            except IntegrityError as e:
                 await db.rollback()
+                # Real gap found live: a randomized 6-digit suffix
+                # colliding on literally every one of 12 attempts is
+                # statistically near-impossible if this is really a
+                # bot_name uniqueness race - that pointed at this except
+                # clause silently assuming every IntegrityError here means
+                # "bot_name taken" without ever checking, when it could be
+                # a completely different constraint or data problem.
+                # Capture the real driver error text (same pattern as
+                # _describe_order_rejection for Coinbase rejections) so a
+                # repeat of this is diagnosable from the error message
+                # itself instead of guessing again.
+                last_error = str(getattr(e, "orig", e))[:300]
                 continue
-    raise RuntimeError(f"{last_name} collided with another branch on every retry ({attempts}x) - try again")
+    detail = f"{last_name} collided with another branch on every retry ({attempts}x)"
+    if last_error:
+        detail += f" - real DB error: {last_error}"
+    raise RuntimeError(detail + " - try again")
 
 
 async def get_next_eligible_product_id():
@@ -1566,6 +1582,7 @@ async def _maybe_spawn_child(branch):
     # between retries (see spawn_child_branch_with_retry for the full
     # story) breaks that lockstep instead of retrying at the exact same
     # instant a sibling's own retry does.
+    last_error = None
     for attempt in range(12):
         if attempt > 0:
             await asyncio.sleep(random.uniform(0.05, 0.4))
@@ -1588,10 +1605,15 @@ async def _maybe_spawn_child(branch):
                 await db.commit()
                 remaining = fresh.allocated_usd
             break
-        except IntegrityError:
+        except IntegrityError as e:
+            # See the matching comment in spawn_child_branch_with_retry -
+            # capture the real driver error text rather than assuming
+            # every IntegrityError here means "bot_name taken".
+            last_error = str(getattr(e, "orig", e))[:300]
             continue
     if remaining is None:
-        log.info(f"[TREE] {branch.bot_name} crossed ${milestone:,.0f} but every candidate name for a child on {next_product} collided with another branch (race) - will retry next cycle")
+        suffix = f" - real DB error: {last_error}" if last_error else ""
+        log.info(f"[TREE] {branch.bot_name} crossed ${milestone:,.0f} but every candidate name for a child on {next_product} collided with another branch (race){suffix} - will retry next cycle")
         return
 
     log.info(

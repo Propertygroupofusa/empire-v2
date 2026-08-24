@@ -1874,6 +1874,47 @@ scratch test files) re-run clean alongside it.
 
 ---
 
+## Real order-rejection reason now visible on spawn-collision errors too, after a third occurrence exposed the old code was guessing
+
+Right after the randomized-suffix fallback above shipped, the account
+owner hit the wall a THIRD time - but this occurrence was different in a
+way that matters: **"Could not start a new branch:
+crypto_tree_xrp_usd_660194 collided with another branch on every retry
+(12x) - try again"**. `660194` is one of the new random 6-digit
+fallback suffixes (range 1000-999999, ~999,000 values) - a genuine
+random collision on that name specifically, let alone on literally every
+one of 12 attempts, is statistically close to impossible for real
+concurrent contention to produce. That mismatch was the tell: the
+`except IntegrityError` handler in both `spawn_child_branch_with_retry()`
+and `_maybe_spawn_child()`'s inline loop was silently assuming EVERY
+`IntegrityError` on that insert meant "bot_name already taken" without
+ever actually checking - if the real cause were something else entirely
+(a different constraint, a data problem, anything), the retry loop would
+burn through all 12 attempts pointlessly and then report a misleading
+"collided with another branch" message, with the actual real error text
+thrown away.
+
+Fixed the same way `_describe_order_rejection()` already fixed this
+exact class of problem for Coinbase order rejections earlier this
+session: capture the real underlying driver error (`e.orig`, the actual
+DBAPI exception SQLAlchemy wraps) on every failed attempt, and include it
+in the final message - `"...collided with another branch on every retry
+(12x) - real DB error: <the actual text> - try again"` for the manual
+endpoints, and the same detail appended to `_maybe_spawn_child()`'s log
+line for the organic per-cycle path. This does not, by itself, fix
+whatever the real underlying cause turns out to be - it makes the NEXT
+occurrence immediately diagnosable from the error message itself instead
+of requiring another round of guessing at increasingly elaborate
+collision-avoidance schemes that were never the actual problem.
+
+Verified offline with a dedicated test that mocks a real `IntegrityError`
+wrapping a real driver error (`NOT NULL constraint failed: ...`) and
+confirms that exact text now appears in the raised message instead of
+being silently discarded. Full existing regression suite (17 prior
+scratch test files) re-run clean alongside it.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
