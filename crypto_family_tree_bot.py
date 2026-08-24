@@ -743,7 +743,7 @@ async def load_all_branches():
         return result.scalars().all()
 
 
-async def _unique_child_bot_name(product_id: str) -> str:
+async def _unique_child_bot_name(product_id: str, randomize: bool = False) -> str:
     """A branch's bot_name has always been derived directly from its
     coin (crypto_tree_{coin}) - that was fine when product_id itself was
     unique, but per the account owner's explicit choice, multiple
@@ -752,11 +752,33 @@ async def _unique_child_bot_name(product_id: str) -> str:
     in this system). Appends _2, _3, ... until landing on a name nothing
     already uses, so a second (or third) branch on an already-claimed
     coin still gets a real, distinct identity instead of colliding with
-    the existing one."""
+    the existing one.
+
+    Real production gap found live: this sequential scheme has no upper
+    bound on how many DIFFERENT concurrent callers can independently
+    compute the exact same "next free" name at once - unlike
+    get_next_eligible_product_id()'s coin choice, there's no coin-level
+    diversification possible here when several callers are all targeting
+    the SAME explicit coin (e.g. several real "Trade this" taps on the
+    identical coin, or the auto-spawn coordinator racing a manual click
+    for that exact coin) - real, observed live even after more
+    attempts+jitter fixed the coin-selection side of this. `randomize`
+    is the fallback for exactly that case: instead of continuing the
+    sequential search (which every racer computes identically), pick a
+    short random numeric suffix - the random space is large enough that
+    two concurrent callers landing on the identical suffix is
+    vanishingly unlikely regardless of how many are racing, so this
+    can't run out of room the way sequential numbering effectively can
+    under heavy real contention."""
     base = f"crypto_tree_{product_id.lower().replace('-', '_')}"
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoTreeBranch.bot_name))
         existing = set(result.scalars().all())
+    if randomize:
+        candidate = f"{base}_{random.randint(1000, 999999)}"
+        while candidate in existing:
+            candidate = f"{base}_{random.randint(1000, 999999)}"
+        return candidate
     if base not in existing:
         return base
     n = 2
@@ -793,12 +815,26 @@ async def spawn_child_branch_with_retry(product_id: str, parent_bot_name, attemp
     real racers rarely pick the same random delay twice in a row, so this
     breaks the lockstep almost immediately even under multiple branches
     racing at once. Only raises once every attempt genuinely collides (a
-    real, sustained pileup, not a transient race)."""
+    real, sustained pileup, not a transient race).
+
+    Real follow-up found live: even 12 attempts+jitter can still exhaust
+    when several REAL concurrent callers are all targeting the exact same
+    explicit coin (e.g. multiple "Trade this" taps on the identical coin,
+    or the auto-spawn coordinator racing a manual click for that same
+    coin) - there's no coin-level diversification possible here the way
+    get_next_eligible_product_id()'s randomized tiebreak helps the
+    auto-pick path, since the coin itself is fixed by the caller. The
+    first few attempts still try the nice sequential name
+    (crypto_tree_{coin}_2, _3, ...) for the common low-contention case,
+    but every attempt after that switches to _unique_child_bot_name's
+    randomized suffix - a large enough random space that real exhaustion
+    becomes vanishingly unlikely regardless of how many callers are
+    racing for the same coin."""
     last_name = None
     for attempt in range(attempts):
         if attempt > 0:
             await asyncio.sleep(random.uniform(0.05, 0.4))
-        child_name = await _unique_child_bot_name(product_id)
+        child_name = await _unique_child_bot_name(product_id, randomize=attempt >= 4)
         last_name = child_name
         async with AsyncSessionLocal() as db:
             db.add(CryptoTreeBranch(
@@ -1533,7 +1569,7 @@ async def _maybe_spawn_child(branch):
     for attempt in range(12):
         if attempt > 0:
             await asyncio.sleep(random.uniform(0.05, 0.4))
-        child_name = await _unique_child_bot_name(next_product)
+        child_name = await _unique_child_bot_name(next_product, randomize=attempt >= 4)
         try:
             async with AsyncSessionLocal() as db:
                 # Re-check against a fresh row under this transaction, so the

@@ -1829,6 +1829,51 @@ suite (15 prior scratch test files) re-run clean alongside it.
 
 ---
 
+## Real follow-up: spawn collisions on an explicitly-picked coin still exhausted 12 attempts - randomized-tiebreak couldn't help here
+
+Right after the randomized coin-selection tiebreak fix above shipped, a
+DIFFERENT real failure showed up: **"Could not start a branch on POL-USD:
+crypto_tree_pol_usd collided with another branch on every retry (12x) -
+try again"** - this time from the explicit-coin `spawn_family_tree_branch_on_coin`
+endpoint ("Trade this" on a specific backtest-page row), not the auto-pick
+endpoint the previous fix targeted.
+
+The randomized tiebreak in `get_next_eligible_product_id()` can only help
+when the BOT is choosing which coin to spawn on - it has multiple tied
+candidates to spread across. This path is different: the caller (a
+person tapping "Trade this" on one specific coin, possibly several times,
+or racing the auto-spawn coordinator which independently picked the same
+coin) hands in one FIXED coin with no alternative to diversify toward.
+Every concurrent caller targeting that same explicit coin still computes
+the identical sequential "next free" name search, so heavy enough real
+contention on one single coin could still exhaust even 12 attempts+jitter
+- observed live on POL-USD, which had just become the #1-ranked coin
+after the top-N rotation feature shipped, making it a natural magnet for
+simultaneous real spawn attempts from multiple sources at once.
+
+Fixed with a second, complementary mechanism in `_unique_child_bot_name()`:
+a new `randomize` parameter. The first few retry attempts (0-3) still try
+the clean sequential name (`crypto_tree_{coin}_2`, `_3`, ...) for the
+common, low-contention case - nothing changes there. From attempt 4
+onward, both `spawn_child_branch_with_retry()` and `_maybe_spawn_child()`'s
+inline loop switch to a random numeric suffix instead of continuing the
+sequential search - a random space large enough that two real concurrent
+callers landing on the identical suffix is vanishingly unlikely no matter
+how many are racing for that one coin, unlike sequential numbering which
+every racer computes identically and can genuinely run out of room under
+heavy enough real contention.
+
+Verified offline with the actual pathological shape of the failure: 20
+real concurrent `spawn_child_branch_with_retry()` calls all explicitly
+targeting the SAME single coin (no diversification possible) - all 20 now
+succeed with distinct real names, instead of any exhausting their
+retries. Confirmed the zero-contention case is untouched - a real,
+uncontested spawn still gets the plain, human-readable name with no
+unnecessary randomization. Full existing regression suite (16 prior
+scratch test files) re-run clean alongside it.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
