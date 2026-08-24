@@ -1618,6 +1618,51 @@ re-run clean alongside it.
 
 ---
 
+## Real-time "should I sell this?" advisory (💡 Sell advice button)
+
+Per the account owner's explicit request, right after being talked out of
+taking a thin, fee-losing profit on BTC by hand ("give me some answers...
+put a button there that would give me advice on like now it would be a
+good time to sell and then tell me why"): a new 💡 Sell advice button on
+every branch card with an open position (including BTC's root card),
+revealing a verdict + plain-English reason on tap.
+
+Deliberately NOT a separate heuristic invented for the dashboard -
+`compute_sell_advice()` in `crypto_family_tree_bot.py` reuses the exact
+same three real exit checks `run_branch_cycle()` evaluates every single
+cycle (TARGET hit, STOP hit, PEAK PROFIT GIVEBACK past
+`MAX_PROFIT_GIVEBACK_USD`), so the advice can never disagree with what the
+bot is actually about to do on its own. Three verdicts:
+
+- **🔴 Good time to sell** - one of the three real automatic exit
+  conditions is already true; the bot will do this on its own next cycle
+  regardless of whether the account owner acts first.
+- **🟡 Watch closely** - real unrealized profit has pulled back at least
+  60% of the way toward the giveback cap, but hasn't crossed it yet.
+- **🟢 Hold for now** - none of the above; either selling right now
+  wouldn't clear real round-trip fees, or it would, but the real target is
+  still meaningfully further out for a bigger real win, with the stop
+  already protecting the downside in the meantime.
+
+Wired into `GET /family-tree-status`'s existing per-branch `position`
+payload as `sell_advice` (`routers/trading_dashboard.py`) - no new
+endpoint, no extra fetch on button-click, since the dashboard already
+polls this endpoint every 15s and already has the current live price
+needed to compute it. `family_tree_dashboard.html`'s button just toggles
+visibility of an already-rendered panel.
+
+Verified offline against the exact real BTC numbers from the screenshot
+that prompted this (entry $76,925.78, now $77,391.39, target $78,079.67,
+breakeven stop, +$1.03 shown profit) - confirms it correctly advises HOLD
+(real net profit after fees is only ~$0.25, target is still ~0.89%
+further out) - plus dedicated cases for a real TARGET hit, a real STOP
+hit, a real giveback-cap breach, approaching-but-not-past the giveback
+cap, and a real profit comfortably clear of fees with the target still
+far off. Full existing regression suite (11 prior scratch test files) run
+clean alongside it.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

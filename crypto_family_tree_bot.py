@@ -1136,6 +1136,68 @@ async def _update_branch_position_peak(bot_name: str, new_peak_usd: float):
             await db.commit()
 
 
+def compute_sell_advice(entry_price: float, qty: float, target_price: float, stop_price: float,
+                         current_price: float, stored_peak_usd) -> dict:
+    """Real-time "is now a good time to sell this" advisory, backing the
+    dashboard's 💡 Sell advice button (per the account owner's explicit
+    request, after being talked out of a thin, fee-losing take-profit on
+    BTC and asking for that same reasoning available on demand instead of
+    typed out by hand each time). Deliberately reuses the EXACT same three
+    real exit checks run_branch_cycle() evaluates every cycle - TARGET,
+    STOP, and PEAK PROFIT GIVEBACK (see MAX_PROFIT_GIVEBACK_USD above) -
+    not a separate heuristic, so this can never tell the account owner
+    something different from what the bot itself is actually about to do.
+
+    Verdict is one of:
+      "sell"  - an automatic exit condition is already true; the bot is
+                about to do this on its own next cycle regardless.
+      "watch" - getting close to the giveback cap, not there yet.
+      "hold"  - none of the above; real net profit after fees still needs
+                the target to get meaningfully positive."""
+    unrealized_usd = qty * (current_price - entry_price)
+    exit_fee_usd = current_price * qty * (ROUND_TRIP_FEE_RATE / 2)
+    net_after_fees = unrealized_usd - exit_fee_usd
+    stored_peak = stored_peak_usd or 0.0
+    peak_giveback = (stored_peak - unrealized_usd) if stored_peak > 0 else 0.0
+    giveback_exceeded = stored_peak > 0 and peak_giveback >= MAX_PROFIT_GIVEBACK_USD
+    pct_to_target = (target_price / current_price - 1) * 100 if current_price else None
+
+    if current_price >= target_price:
+        return {"verdict": "sell", "reason": (
+            f"Target hit (${target_price:,.2f}) - real net profit after fees is about "
+            f"${net_after_fees:,.2f}. The bot will sell this automatically on its next "
+            f"cycle if you don't beat it to it."
+        )}
+    if current_price <= stop_price:
+        return {"verdict": "sell", "reason": (
+            f"At or below stop (${stop_price:,.2f}) - the bot is about to force-exit "
+            f"this on its next cycle to cap the loss. No reason to wait."
+        )}
+    if giveback_exceeded:
+        return {"verdict": "sell", "reason": (
+            f"Given back ${peak_giveback:,.2f} of its ${stored_peak:,.2f} peak profit, "
+            f"past the ${MAX_PROFIT_GIVEBACK_USD:,.2f} giveback cap - the bot is about "
+            f"to force-sell this automatically to lock in what's left."
+        )}
+    if stored_peak > 0 and peak_giveback >= MAX_PROFIT_GIVEBACK_USD * 0.6:
+        return {"verdict": "watch", "reason": (
+            f"Pulled back ${peak_giveback:,.2f} from its ${stored_peak:,.2f} peak - "
+            f"within ${(MAX_PROFIT_GIVEBACK_USD - peak_giveback):,.2f} of the automatic "
+            f"giveback-cap exit. Worth watching closely, but not a clear sell yet."
+        )}
+    if net_after_fees <= 0:
+        return {"verdict": "hold", "reason": (
+            f"Selling right now would net about ${net_after_fees:,.2f} after real "
+            f"round-trip fees - not a real profit yet. Target is "
+            f"{pct_to_target:.2f}% away at ${target_price:,.2f}."
+        )}
+    return {"verdict": "hold", "reason": (
+        f"Real net profit right now is only about ${net_after_fees:,.2f} after fees - "
+        f"target (${target_price:,.2f}) is {pct_to_target:.2f}% further out for a real "
+        f"win, and the stop is protecting the downside in the meantime."
+    )}
+
+
 async def _clear_branch_position(bot_name: str):
     """Deletes every BotPosition row under this bot_name, not just one -
     defense against a stray duplicate (see _load_branch_position) lingering

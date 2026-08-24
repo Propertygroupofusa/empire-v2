@@ -213,6 +213,37 @@
     .sell-btn:hover { background: var(--red); color: #fff; }
     .sell-btn:disabled { opacity: 0.5; cursor: default; }
 
+    .advice-btn {
+        font-family: inherit;
+        width: 100%;
+        margin-top: 6px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        color: var(--navy);
+        padding: 5px 10px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.76em;
+        font-weight: 600;
+    }
+    .advice-btn:hover { background: var(--bg); }
+    .advice-panel {
+        margin-top: 6px;
+        padding: 8px 10px;
+        border-radius: 6px;
+        border-left: 3px solid var(--border);
+        font-size: 0.78em;
+        line-height: 1.4;
+    }
+    .advice-panel.advice-sell { border-left-color: var(--red); background: var(--red-bg); }
+    .advice-panel.advice-watch { border-left-color: var(--gold); background: var(--gold-bg); }
+    .advice-panel.advice-hold { border-left-color: var(--green); background: var(--green-bg); }
+    .advice-verdict { font-weight: 700; margin-bottom: 3px; }
+    .advice-sell .advice-verdict { color: var(--red); }
+    .advice-watch .advice-verdict { color: var(--gold); }
+    .advice-hold .advice-verdict { color: var(--green); }
+    .advice-reason { color: var(--text); }
+
     .unlock-btn {
         font-family: inherit;
         margin-top: 8px;
@@ -549,6 +580,7 @@ function branchCardHtml(b) {
 
     let posHtml = '<div class="node-position none">Flat — waiting to buy</div>';
     let sellBtnHtml = '';
+    let adviceHtml = '';
     // Real-time unrealized $ on the CURRENT open position, refreshed every
     // time the dashboard polls (see setInterval(refresh,...) below) - a
     // real ticker, not a static number, so a real decision to hit Sell can
@@ -611,6 +643,25 @@ function branchCardHtml(b) {
         } else {
             sellBtnHtml = `<div class="sell-disabled-note">${p.unrealized_pct == null ? 'Live price unavailable — sell disabled' : 'Not in profit yet — sell disabled'}</div>`;
         }
+        // Real-time "is now actually a good time to sell this" advisory -
+        // reuses the bot's own TARGET/STOP/GIVEBACK exit math server-side
+        // (see compute_sell_advice in crypto_family_tree_bot.py) so this can
+        // never disagree with what the bot itself is about to do. Per the
+        // account owner's explicit request, after being talked out of a
+        // thin, fee-losing take-profit by hand - this puts that same
+        // reasoning one tap away instead.
+        if (p.sell_advice) {
+            const adv = p.sell_advice;
+            const advClass = adv.verdict === 'sell' ? 'advice-sell' : (adv.verdict === 'watch' ? 'advice-watch' : 'advice-hold');
+            const advLabel = adv.verdict === 'sell' ? '🔴 Good time to sell' : (adv.verdict === 'watch' ? '🟡 Watch closely' : '🟢 Hold for now');
+            const panelId = 'advice-' + b.bot_name;
+            adviceHtml = `
+                <button class="advice-btn" onclick="toggleAdvice('${panelId}', this)">💡 Sell advice</button>
+                <div id="${panelId}" class="advice-panel ${advClass}" style="display:none;">
+                    <div class="advice-verdict">${advLabel}</div>
+                    <div class="advice-reason">${adv.reason}</div>
+                </div>`;
+        }
     }
 
     // Real reason this branch's last buy/sell attempt was rejected by
@@ -639,8 +690,17 @@ function branchCardHtml(b) {
             </div>
             ${posHtml}
             ${sellBtnHtml}
+            ${adviceHtml}
             ${orderErrorHtml}
         </div>`;
+}
+
+function toggleAdvice(panelId, btn) {
+    const panel = document.getElementById(panelId);
+    if (!panel) return;
+    const showing = panel.style.display !== 'none';
+    panel.style.display = showing ? 'none' : 'block';
+    btn.textContent = showing ? '💡 Sell advice' : '💡 Hide advice';
 }
 
 async function sellBranch(botName, btn) {

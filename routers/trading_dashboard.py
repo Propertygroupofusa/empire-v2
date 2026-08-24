@@ -698,6 +698,14 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
                 "entry_fee_usd": round(
                     pos.entry_price * pos.qty * (crypto_family_tree_bot_module.ROUND_TRIP_FEE_RATE / 2), 2
                 ) if crypto_family_tree_bot_module is not None else None,
+                # Backs the dashboard's 💡 Sell advice button - reuses the
+                # bot's own real TARGET/STOP/GIVEBACK exit checks (see
+                # compute_sell_advice) so the advice can never disagree with
+                # what the bot is actually about to do on its own.
+                "sell_advice": crypto_family_tree_bot_module.compute_sell_advice(
+                    pos.entry_price, pos.qty, pos.target_price, pos.stop_price,
+                    current_price, pos.peak_pct,
+                ) if crypto_family_tree_bot_module is not None and current_price is not None else None,
             },
         })
 
