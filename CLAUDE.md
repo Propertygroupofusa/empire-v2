@@ -1436,6 +1436,48 @@ to do that itself.
 
 ---
 
+## Real bug found and fixed: a healthy branch below its own floor could never spawn again (crypto_family_tree_bot.py)
+
+The dashboard showed `crypto_btc_compound` at $121.93 balance vs a
+$150.00 floor, holding a genuinely healthy, breakeven-protected
+position (+0.09%) - "Next spawn" sat at 100% but never actually fired.
+`_maybe_spawn_child()` was correctly refusing (`allocated_usd <
+equity_floor` logs "not spawning while unhealthy"), but nothing was
+ever going to fix that: the only two paths that ever lower a branch's
+floor are `_branch_sell_and_settle()`'s post-sale reset and
+`run_branch_cycle()`'s flat-branch self-heal - neither ever fires for a
+branch that's actively HOLDING a position, which is exactly BTC's
+state. Since this position's own unrealized P&L (+0.09%) couldn't
+explain a ~$28 gap between balance and floor, the real cause traces
+back to a legitimate, intentional spawn deduction (giving a child its
+$50 seed) that happened while the balance was above $150 - not a
+trading loss, which is what the floor ratchet actually exists to guard
+against. Left as-is, this branch would have stayed locked out of
+spawning indefinitely, potentially until its current position happened
+to sell on its own schedule.
+
+Fixed in `_maybe_spawn_child()`: when a branch has crossed its own
+unlock tier but sits below its floor, it now self-heals the floor down
+to the branch's own real current tier (same `math.floor(balance /
+BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER` formula the other two self-heal
+paths already use) and spawns immediately in the same call, instead of
+returning and waiting on a sale that might not happen for a long time.
+Doesn't touch the held position's own risk management at all - the
+floor-breach force-sell path only ever fires when a held position's
+OWN stop has also failed, completely unaffected by this fix either
+way. Only ever applies once the branch has actually crossed its next
+unlock tier - a branch below floor that hasn't earned its way there
+yet is left completely untouched, same as before.
+
+Verified offline: reproduced BTC's exact real numbers ($121.93
+balance, $150.00 floor), confirmed the floor heals to $100.00 (its own
+real tier), confirmed it spawns a real child in that same call instead
+of needing another cycle, confirmed the parent's balance still drops
+by the real seed amount afterward, and confirmed a branch that hasn't
+crossed its own unlock tier yet is left untouched by this code path.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

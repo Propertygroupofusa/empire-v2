@@ -1243,8 +1243,38 @@ async def _maybe_spawn_child(branch):
     if branch.allocated_usd < branch.next_unlock_tier:
         return
     if branch.allocated_usd < branch.equity_floor:
-        log.info(f"[TREE] {branch.bot_name} reached ${branch.allocated_usd:.2f} but is below its own floor ${branch.equity_floor:,.2f} - not spawning while unhealthy")
-        return
+        # Real gap found live: crypto_btc_compound sat at $121.93 vs a
+        # $150.00 floor while HOLDING a healthy, breakeven-protected
+        # position (+0.09%) - the ~$28 gap couldn't be explained by this
+        # position's own price movement, so it traces back to a real,
+        # legitimate spawn deduction (giving a child its $50 seed) that
+        # happened while the balance was above $150, leaving the parent
+        # permanently unable to spawn again until its current position
+        # happened to sell (only _branch_sell_and_settle's post-sale
+        # reset, or the separate flat-branch self-heal in
+        # run_branch_cycle, ever lower a floor - neither fires for a
+        # branch that's still holding). A deliberate spawn deduction
+        # isn't the "real trading loss" the floor ratchet exists to
+        # guard against, so self-heal it the same way those other two
+        # paths already do: lower the floor to match this branch's own
+        # real current tier, then spawn immediately rather than waiting
+        # on a sale that might not happen for a long time. Doesn't touch
+        # the held position's own risk management at all - the floor
+        # breach only ever force-sells a healthy held position when its
+        # OWN stop has also failed, which this doesn't change either way.
+        new_tier_floor = math.floor(branch.allocated_usd / BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == branch.bot_name))
+            row = result.scalar_one_or_none()
+            if row and row.allocated_usd < row.equity_floor:
+                old_floor = row.equity_floor
+                row.equity_floor = new_tier_floor
+                await db.commit()
+                branch.equity_floor = new_tier_floor
+                log.info(
+                    f"[TREE] 🪜 {branch.bot_name} floor self-healed ${old_floor:,.2f} -> ${new_tier_floor:,.2f} "
+                    f"(real balance ${branch.allocated_usd:.2f} was below it, likely from a real spawn deduction) - can spawn again now"
+                )
     next_product = await get_next_eligible_product_id()
     if next_product is None:
         log.info(f"[TREE] {branch.bot_name} crossed ${branch.next_unlock_tier:,.0f} but every eligible coin is already claimed - no child to spawn")
