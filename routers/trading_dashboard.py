@@ -862,42 +862,41 @@ async def take_root_profit():
     }
 
 
-class RootAddCashRequest(BaseModel):
+class AddCashRequest(BaseModel):
     amount: float
 
 
-@router.post("/family-tree-status/root-add-cash", dependencies=[Depends(require_admin_key)])
-async def add_cash_to_root(payload: RootAddCashRequest, db: AsyncSession = Depends(get_db)):
-    """Manually deploys real, currently-unallocated cash directly into
-    BTC's (the tree's permanent root) position right now - per the
-    account owner's explicit request after noticing root has no
-    equivalent to every other coin's "Trade this" (which, now that
-    branches can share a coin, effectively means "add more capital to a
-    coin you already hold" by starting a second branch on it). Root can
-    never have a sibling branch, so it had no way at all to receive more
-    capital on demand - this is a deliberate, narrow carve-out scoped to
-    root only, not built for every branch (every other coin already has
-    the "Trade this" workaround; recomputing a blended entry/target/stop
-    for every branch's own risk math wasn't worth it for a gap that
-    doesn't actually exist there).
+@router.post("/family-tree-status/add-cash/{bot_name}", dependencies=[Depends(require_admin_key)])
+async def add_cash_to_branch(bot_name: str, payload: AddCashRequest, db: AsyncSession = Depends(get_db)):
+    """Manually deploys real, currently-unallocated cash directly into ANY
+    branch's position right now - originally built scoped to root only
+    (BTC can never have a sibling branch, unlike every other coin where
+    "Trade this" on an already-held coin effectively adds capital by
+    starting a second branch on it), then opened up to every branch per
+    the account owner's explicit follow-up ("put that add cash button on
+    all of them why not it won't hurt it's up to me to use it or not") -
+    the underlying real buy/blend/recompute logic never actually depended
+    on being root, so this generalizes cleanly.
 
     Places a real market buy for the requested amount via the exact same
     engine.place_market_buy() every automatic entry already uses, then
-    blends it into root's existing position with a real quantity-weighted
-    average entry price (or opens a fresh position if root happens to be
-    flat), and recomputes target/stop off that new blended entry using
-    the same real ATR-based formula every fresh buy already uses - so the
-    breakeven ratchet and peak-profit giveback tracking stay correctly
-    anchored to root's true cost basis afterward, not a stale
-    pre-add-cash entry.
+    blends it into the branch's existing position with a real
+    quantity-weighted average entry price (or opens a fresh position if
+    the branch happens to be flat), and recomputes target/stop off that
+    new blended entry using the same real ATR-based formula every fresh
+    buy already uses - so the breakeven ratchet and peak-profit giveback
+    tracking stay correctly anchored to the branch's true cost basis
+    afterward, not a stale pre-add-cash entry.
 
-    Refused (400) if the amount isn't positive, or exceeds the real free
-    spendable cash currently sitting outside every branch's own allocated
-    balance - the same real "spendable_for_spawn" figure the dashboard's
-    "Start new $50 branch" button is gated on, computed the same way here
-    (real Coinbase cash balance, minus locked profit, minus every FLAT
-    branch's own allocated_usd) - so this can only ever deploy real money
-    that isn't already working somewhere else in the tree."""
+    Refused (400) if the amount isn't positive, if bot_name doesn't exist,
+    or if the amount exceeds the real free spendable cash currently
+    sitting outside every branch's own allocated balance - the same real
+    "spendable_for_spawn" figure the dashboard's "Start new $50 branch"
+    button is gated on, computed the same way here (real Coinbase cash
+    balance, minus locked profit, minus every FLAT branch's own
+    allocated_usd, INCLUDING this branch's own if it's currently flat) -
+    so this can only ever deploy real money that isn't already working
+    somewhere else in the tree."""
     if crypto_family_tree_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
     tree = crypto_family_tree_bot_module
@@ -906,11 +905,10 @@ async def add_cash_to_root(payload: RootAddCashRequest, db: AsyncSession = Depen
     if payload.amount <= 0:
         raise HTTPException(status_code=400, detail="amount must be positive")
 
-    root_bot_name = tree.ROOT_BOT_NAME
-    branch_result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == root_bot_name))
+    branch_result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
     branch = branch_result.scalar_one_or_none()
     if branch is None:
-        raise HTTPException(status_code=404, detail="Root branch not found")
+        raise HTTPException(status_code=404, detail=f"No branch named {bot_name}")
 
     async with engine.aiohttp.ClientSession() as session:
         real_balance, err = await engine.get_usd_balance(session)
@@ -933,7 +931,7 @@ async def add_cash_to_root(payload: RootAddCashRequest, db: AsyncSession = Depen
 
         price, atr_pct = await engine.get_price_and_volatility(session, branch.product_id)
         if price is None or atr_pct is None:
-            raise HTTPException(status_code=503, detail="Could not fetch a live BTC price/volatility right now - try again")
+            raise HTTPException(status_code=503, detail=f"Could not fetch a live {branch.product_id} price/volatility right now - try again")
 
         fill = await engine.place_market_buy(session, payload.amount, branch.product_id)
         if not fill:
@@ -941,7 +939,7 @@ async def add_cash_to_root(payload: RootAddCashRequest, db: AsyncSession = Depen
             raise HTTPException(status_code=502, detail=f"Real Coinbase order did not fill: {stuck_reason}")
         filled_qty, filled_price = fill
 
-        existing_position = await tree._load_branch_position(root_bot_name)
+        existing_position = await tree._load_branch_position(bot_name)
         if existing_position is not None:
             new_qty = existing_position.qty + filled_qty
             blended_entry = (
@@ -955,19 +953,20 @@ async def add_cash_to_root(payload: RootAddCashRequest, db: AsyncSession = Depen
         target_pct = max(engine.pick_target_pct(atr_pct), engine.min_profit_target_pct(position_dollar_size, atr_pct))
         target_price = blended_entry * (1 + target_pct)
         stop_price = blended_entry * (1 - tree.STOP_LOSS_PCT)
-        await tree._save_branch_position(root_bot_name, branch.product_id, blended_entry, new_qty, target_price, stop_price)
+        await tree._save_branch_position(bot_name, branch.product_id, blended_entry, new_qty, target_price, stop_price)
 
     branch.allocated_usd += payload.amount
     await db.commit()
 
     log.info(
-        f"[dashboard] 💰 Manually added ${payload.amount:.2f} real cash to root BTC position - "
-        f"bought {filled_qty:.8f} BTC @ ${filled_price:,.2f}, blended entry now ${blended_entry:,.2f}, "
+        f"[dashboard] 💰 Manually added ${payload.amount:.2f} real cash to {bot_name}'s {branch.product_id} position - "
+        f"bought {filled_qty:.8f} @ ${filled_price:,.2f}, blended entry now ${blended_entry:,.2f}, "
         f"branch total now ${branch.allocated_usd:.2f}"
     )
     return {
         "status": "cash_added",
-        "bot_name": root_bot_name,
+        "bot_name": bot_name,
+        "product_id": branch.product_id,
         "amount_deployed": round(payload.amount, 2),
         "filled_qty": filled_qty,
         "filled_price": round(filled_price, 2),

@@ -677,20 +677,17 @@ function branchCardHtml(b) {
             } else {
                 sellBtnHtml = `<div class="sell-disabled-note">${p.unrealized_pct == null ? 'Live price unavailable — take-profit disabled' : 'Not in profit yet — take-profit disabled'}</div>`;
             }
-            // Per the account owner's explicit request: root can never
-            // have a sibling branch (unlike every other coin, where
-            // "Trade this" on an already-held coin now effectively adds
-            // more capital by starting a second branch on it), so it had
-            // no way at all to receive more capital on demand. Always
-            // shown once root has an open position, independent of
-            // profit state - unlike selling, adding cash never risks
-            // locking in a loss.
-            sellBtnHtml += `<button class="sell-btn" style="background:var(--navy);margin-top:6px;" onclick="addCashToRoot(this)">💰 Add cash to BTC</button>`;
         } else if (p.unrealized_pct != null && p.unrealized_pct > 0) {
             sellBtnHtml = `<button class="sell-btn" onclick="sellBranch('${b.bot_name}', this)">Sell now &amp; find next coin</button>`;
         } else {
             sellBtnHtml = `<div class="sell-disabled-note">${p.unrealized_pct == null ? 'Live price unavailable — sell disabled' : 'Not in profit yet — sell disabled'}</div>`;
         }
+        // Per the account owner's explicit request ("put that add cash
+        // button on all of them why not it won't hurt it's up to me to
+        // use it or not") - available on every branch with an open
+        // position, independent of profit state (unlike selling, adding
+        // cash never risks locking in a loss).
+        sellBtnHtml += `<button class="sell-btn" style="background:var(--navy);margin-top:6px;" onclick="addCashToBranch('${b.bot_name}', this)">💰 Add cash to ${coin}</button>`;
         // Real-time "is now actually a good time to sell this" advisory -
         // reuses the bot's own TARGET/STOP/GIVEBACK exit math server-side
         // (see compute_sell_advice in crypto_family_tree_bot.py) so this can
@@ -724,12 +721,12 @@ function branchCardHtml(b) {
                     ${backtestHtml}
                 </div>`;
         }
-    } else if (isRoot) {
-        // Root is momentarily flat (rare, but possible right after a
-        // sell before the automatic rebuy lands) - the endpoint handles
-        // this case by opening a fresh position, so the button stays
-        // available either way.
-        sellBtnHtml = `<button class="sell-btn" style="background:var(--navy);" onclick="addCashToRoot(this)">💰 Add cash to BTC</button>`;
+    } else {
+        // Any branch can be momentarily flat (right after a sell, before
+        // the automatic rebuy lands, or a brand-new $50 branch before its
+        // first buy) - the endpoint handles this case by opening a fresh
+        // position, so the button stays available either way.
+        sellBtnHtml = `<button class="sell-btn" style="background:var(--navy);" onclick="addCashToBranch('${b.bot_name}', this)">💰 Add cash to ${coin}</button>`;
     }
 
     // Real reason this branch's last buy/sell attempt was rejected by
@@ -813,25 +810,25 @@ async function takeRootProfit(btn) {
     }
 }
 
-async function addCashToRoot(btn) {
-    const amountStr = prompt('How much real cash to deploy into BTC right now? (must be real free spendable cash, not already allocated to another branch)');
+async function addCashToBranch(botName, btn) {
+    const amountStr = prompt('How much real cash to deploy into this coin right now? (must be real free spendable cash, not already allocated to another branch)');
     if (!amountStr) return;
     const amount = parseFloat(amountStr);
     if (!amount || amount <= 0) { alert('Enter a positive dollar amount.'); return; }
-    if (!confirm(`Buy $${amount.toFixed(2)} more BTC right now at market price and add it to root's position? Real order, can't be undone.`)) return;
+    if (!confirm(`Buy $${amount.toFixed(2)} more of this coin right now at market price and add it to ${botName}'s position? Real order, can't be undone.`)) return;
     const originalText = btn.textContent;
     btn.disabled = true;
     btn.textContent = 'Buying…';
     try {
         const key = getAdminKey();
-        const res = await fetch(API_BASE + '/family-tree-status/root-add-cash', {
+        const res = await fetch(API_BASE + '/family-tree-status/add-cash/' + encodeURIComponent(botName), {
             method: 'POST',
             headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
             body: JSON.stringify({ amount }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
-        alert(`Bought ${data.filled_qty.toFixed(8)} BTC @ ${fmtUsd(data.filled_price)}. New blended entry: ${fmtUsd(data.new_entry_price)}. Branch total now ${fmtUsd(data.branch_new_balance)}.`);
+        alert(`Bought ${data.filled_qty.toFixed(8)} ${data.product_id} @ ${fmtUsd(data.filled_price)}. New blended entry: ${fmtUsd(data.new_entry_price)}. Branch total now ${fmtUsd(data.branch_new_balance)}.`);
         refresh();
     } catch (e) {
         alert('Add cash failed: ' + e.message);

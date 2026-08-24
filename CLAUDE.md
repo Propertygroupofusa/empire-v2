@@ -2592,6 +2592,35 @@ balance or position.
 
 ---
 
+## "Add cash" generalized from root-only to every branch
+
+Right after shipping root-only "Add cash to BTC", the account owner said
+directly: "put that add cash button on all of them why not it won't hurt
+it's up to me to use it or not." The underlying real buy/blend/recompute
+logic never actually depended on being root, so this was a clean
+generalization rather than a rebuild:
+
+- `POST /api/trading-dashboard/family-tree-status/root-add-cash`
+  (`{amount}`) is now `POST /api/trading-dashboard/family-tree-status/add-cash/{bot_name}`
+  (`{amount}`) - works identically for root or any other branch. Same
+  real market buy, same quantity-weighted blended entry, same
+  target/stop recompute off the new blended entry, same real
+  free-spendable-cash refusal (real balance minus locked profit minus
+  every FLAT branch's own `allocated_usd`, including the target branch
+  itself if it's currently flat).
+- `family_tree_dashboard.html`'s "💰 Add cash to BTC" button is now
+  "💰 Add cash to {coin}" on every branch card - root and non-root alike,
+  both when holding a position and when momentarily flat.
+
+Verified offline against a real throwaway SQLite DB: root still works
+exactly as before (regression check); a real non-root branch (XRP)
+blends its OWN entry price and updates its OWN `allocated_usd`, proving
+the generalization is real rather than just accepting an ignored
+`bot_name` param; and a nonexistent `bot_name` is refused with a clean
+404.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
