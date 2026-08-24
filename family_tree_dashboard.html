@@ -75,6 +75,9 @@
     .kpi.profit .value.neg { color: var(--red); }
     .kpi.profit.pos { border-color: #b7e4c7; background: var(--green-bg); }
     .kpi.profit.neg { border-color: #f3c6cd; background: var(--red-bg); }
+    .profit-breakdown { font-size: 0.72em; color: var(--text-dim); margin-top: 4px; font-weight: 600; }
+    .profit-breakdown .pos { color: var(--green); }
+    .profit-breakdown .neg { color: var(--red); }
 
     .section-title {
         font-size: 1.02em;
@@ -416,6 +419,7 @@
         <div class="kpi profit" id="stat-profit-card">
             <div class="label">💰 Total Profit</div>
             <div class="value" id="stat-profit">—</div>
+            <div class="profit-breakdown" id="stat-profit-breakdown"></div>
         </div>
         <div class="kpi"><div class="label">Branches / Coins</div><div class="value" id="stat-count">—</div></div>
         <div class="kpi"><div class="label">Total Allocated</div><div class="value" id="stat-total">—</div></div>
@@ -1066,10 +1070,12 @@ function toggleCoinTrades(i) {
 
 let lastUnrealizedProfit = null;
 let lastRealizedProfit = null;
+let lastLockedProfit = null;
 
 function renderTotalProfit() {
     const card = document.getElementById('stat-profit-card');
     const valueEl = document.getElementById('stat-profit');
+    const breakdownEl = document.getElementById('stat-profit-breakdown');
     if (lastUnrealizedProfit === null && lastRealizedProfit === null) {
         valueEl.textContent = '—';
         return;
@@ -1087,6 +1093,27 @@ function renderTotalProfit() {
     valueEl.textContent = (total >= 0 ? '+' : '-') + fmtUsd(Math.abs(total));
     card.classList.remove('pos', 'neg');
     card.classList.add(cls);
+
+    // Real breakdown, per the account owner's explicit request: how much
+    // of the total above is actually banked (realized, from a completed
+    // sell) vs. still riding in open positions (unrealized - could still
+    // go either way before it hits a real target/stop) vs. permanently
+    // skimmed out of the compounding loop (locked). Same three real
+    // numbers the rest of the dashboard already shows separately (Coin
+    // Trade History, each branch's live Profit row, the Locked Profit
+    // card) - just lined up together here so "how much is actually mine
+    // right now" doesn't require doing the math by hand.
+    if (breakdownEl) {
+        const realized = lastRealizedProfit || 0;
+        const unrealized = lastUnrealizedProfit || 0;
+        const locked = lastLockedProfit || 0;
+        const part = (label, val) => `${label} <span class="${val >= 0 ? 'pos' : 'neg'}">${val >= 0 ? '+' : '-'}${fmtUsd(Math.abs(val))}</span>`;
+        breakdownEl.innerHTML = [
+            part('Realized', realized),
+            part('Unrealized', unrealized),
+            part('🔒 Locked', locked),
+        ].join(' · ');
+    }
 }
 
 async function refresh() {
@@ -1096,6 +1123,7 @@ async function refresh() {
         document.getElementById('stat-count').textContent = data.branch_count;
         document.getElementById('stat-total').textContent = fmtUsd(data.total_allocated_usd);
         document.getElementById('stat-locked').textContent = fmtUsd(data.locked_usd || 0);
+        lastLockedProfit = data.locked_usd || 0;
         document.getElementById('stat-refreshed').textContent = new Date().toLocaleTimeString();
         updateSpawnButtonState(data);
         updateUnlockButtonState(data);
