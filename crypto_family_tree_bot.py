@@ -932,9 +932,22 @@ async def find_most_volatile_unclaimed_coin(session):
     Higher volatility is still not free upside - the fixed stop-loss % can
     get hit faster on a bigger swing too.
 
-    If no unclaimed coin is currently bullish, falls back to the highest
-    volatility overall rather than doing nothing. Returns (product_id,
-    atr_pct), or (None, None) if every coin is already claimed or none
+    A real, previously-known gap, now fixed: "bullish over ~25 hours" is a
+    coarse, medium-term signal with no protection against a coin that's
+    ALREADY extended right now - the exact shape of loss the real
+    coin-trade-history evidence showed (PEPE, DOGE, one of two XRP trades,
+    all quick losers). Any candidate whose current RSI is at or above
+    engine.ENTRY_MAX_RSI (65, matching prop_bot.py's own crypto overbought
+    threshold) is skipped entirely here, in both the bullish path and the
+    any-volatility fallback below - never buy into a coin that's already
+    overbought, whichever path picks it. A candidate with no RSI yet
+    (too little price history) is still eligible - this only excludes a
+    confirmed-overbought reading, it doesn't require one.
+
+    If no unclaimed, non-overbought coin is currently bullish, falls back
+    to the highest volatility among the remaining non-overbought
+    candidates rather than doing nothing. Returns (product_id, atr_pct),
+    or (None, None) if every coin is already claimed, overbought, or none
     have usable price data right now.
 
     A coin sold within the last CYCLE_SECONDS (see
@@ -968,8 +981,11 @@ async def find_most_volatile_unclaimed_coin(session):
         if isinstance(result, Exception):
             log.warning(f"[TREE] volatility lookup failed for {product_id}: {result}")
             continue
-        price, atr_pct, is_bullish = result
+        price, atr_pct, is_bullish, rsi = result
         if price is None or atr_pct is None:
+            continue
+        if rsi is not None and rsi >= engine.ENTRY_MAX_RSI:
+            log.info(f"[TREE] {product_id}: skipping - RSI {rsi:.1f} is already overbought (>= {engine.ENTRY_MAX_RSI:.0f})")
             continue
         if atr_pct > best_any_atr:
             best_any_atr = atr_pct

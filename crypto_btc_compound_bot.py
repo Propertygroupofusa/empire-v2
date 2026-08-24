@@ -97,6 +97,24 @@ STOP_LOSS_PCT = _safe_float_env("BTC_COMPOUND_STOP_LOSS_PCT", "0.02")  # -2% def
 # downside. Only ever moves up, checked every cycle.
 BREAKEVEN_TRIGGER_PCT = _safe_float_env("BTC_COMPOUND_BREAKEVEN_TRIGGER_PCT", "0.01")  # +1% default
 
+# A real, known gap (documented before this fix): find_most_volatile_unclaimed_coin()
+# in crypto_family_tree_bot.py only ever checked "bullish over the last
+# ~25 hours" - a coarse, medium-term signal with no short-term
+# overbought/extended check, unlike prop_bot.py's own RSI-gated entries on
+# the Alpaca side. That gap meant a branch could switch straight into a
+# coin that had already pumped hard and was due to mean-revert - the exact
+# shape of loss the real coin-trade-history evidence showed (PEPE, DOGE,
+# one of two XRP trades, all quick losers). This mirrors prop_bot.py's
+# existing RSI_SELL_ABOVE=70 / CRYPTO_RSI_SELL_ABOVE=65 overbought-exit
+# convention, adapted as an overbought-ENTRY guard here instead: this
+# engine buys momentum (already-bullish coins), not dips, so the fix isn't
+# "wait for oversold" (that would fight the bullish-only selection this
+# engine is built around) - it's "don't buy a bullish coin that's ALREADY
+# extended right now," using the same 65 threshold prop_bot.py already
+# uses for crypto specifically (tighter than stocks' 70, matching crypto's
+# higher volatility).
+ENTRY_MAX_RSI = _safe_float_env("BTC_COMPOUND_ENTRY_MAX_RSI", "65")
+
 # Adaptive profit-target tiers, chosen by current ATR% (volatility):
 #   ATR% < VOL_LOW_THRESHOLD          -> TARGET_LOW_PCT   (quiet market)
 #   VOL_LOW_THRESHOLD..VOL_HIGH_THRESHOLD -> TARGET_MED_PCT (normal)
@@ -308,6 +326,22 @@ def _atr_pct_from_candles(closes, highs, lows) -> float:
     return atr / price if price else 0.0
 
 
+def _rsi_from_closes(closes, period: int = 14):
+    """Same simple-moving-average RSI formula prop_bot.py's get_price_rsi()
+    already uses on the Alpaca side (not Wilder's smoothing) - kept
+    identical on purpose so this is a real analogous adaptation, not a
+    different indicator with the same name. Returns None if there aren't
+    enough closes yet (mirrors ATR's own len-guard above)."""
+    if len(closes) < period + 1:
+        return None
+    gains = [max(closes[i] - closes[i - 1], 0) for i in range(1, len(closes))]
+    losses = [max(closes[i - 1] - closes[i], 0) for i in range(1, len(closes))]
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    rs = avg_gain / avg_loss if avg_loss > 0 else 100
+    return 100 - (100 / (1 + rs))
+
+
 async def get_price_and_volatility(session, product_id: str = PRODUCT_ID) -> tuple:
     """Current price and ATR% (volatility as a fraction of price) for any
     Coinbase product. Returns (price, atr_pct) or (None, None) on failure.
@@ -324,18 +358,22 @@ async def get_price_and_volatility(session, product_id: str = PRODUCT_ID) -> tup
 async def get_price_volatility_and_trend(session, product_id: str = PRODUCT_ID) -> tuple:
     """Same as get_price_and_volatility, plus whether the coin is currently
     bullish - price now higher than it was at the start of the same
-    ~25-hour candle window used for the ATR calculation. Only used by
+    ~25-hour candle window used for the ATR calculation - and its current
+    RSI (see _rsi_from_closes, ENTRY_MAX_RSI). Only used by
     find_most_volatile_unclaimed_coin() in crypto_family_tree_bot.py to
     pick a coin after a floor-breach loss; every other caller keeps using
     plain get_price_and_volatility, unaffected by this. Returns
-    (price, atr_pct, is_bullish) or (None, None, None) on failure."""
+    (price, atr_pct, is_bullish, rsi) or (None, None, None, None) on
+    failure - rsi itself can independently be None (too little history)
+    even when the other three fields are real."""
     candles = await _fetch_candles(session, product_id)
     if candles is None:
-        return None, None, None
+        return None, None, None, None
     closes, highs, lows = candles
     atr_pct = _atr_pct_from_candles(closes, highs, lows)
     is_bullish = closes[-1] > closes[0]
-    return closes[-1], atr_pct, is_bullish
+    rsi = _rsi_from_closes(closes)
+    return closes[-1], atr_pct, is_bullish, rsi
 
 
 def pick_target_pct(atr_pct: float) -> float:

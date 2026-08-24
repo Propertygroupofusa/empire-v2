@@ -384,12 +384,11 @@ endpoint it calls (see `routers/trading_dashboard.py`).
   not.
 - **Coin selection**: `find_most_volatile_unclaimed_coin()` picks the
   highest-ATR coin among unclaimed candidates that's also "bullish"
-  (price now higher than ~25 hours ago). This is a coarse, medium-term
-  check with **no short-term overbought/extended signal** (unlike
-  `prop_bot.py`'s RSI < 30 entry filter on the Alpaca side) - a real,
-  known gap, not yet fixed. See the coin-selection backtest section
-  below - candidates are now also filtered through a real exclusion
-  list before this function even runs.
+  (price now higher than ~25 hours ago), now ALSO filtered by
+  `engine.ENTRY_MAX_RSI` (65) - see "Overbought-entry RSI filter" below,
+  a previously-known gap that's now fixed. See the coin-selection
+  backtest section below - candidates are now also filtered through a
+  real exclusion list before this function even runs.
 - **Manual controls on the dashboard**: a "Sell now" button per branch,
   only enabled when the position is genuinely in profit right now
   (re-checked server-side too, so it can't be bypassed by calling the
@@ -929,6 +928,59 @@ Total Profit is just `sum(bots[].pl)` across all 8 buckets, computed
 client-side from data the page already fetches. Deliberately does NOT
 also add `positions[].unrealized_pl` on top - that would double-count
 the unrealized portion already folded into each bucket's `pl`.
+
+### Overbought-entry RSI filter, closing a previously-known gap
+
+Per the account owner's explicit request after seeing real evidence of
+losses ("cut the weak coins now, and add a real entry filter so it stops
+taking bad setups") - the coin-trade-history table showed PEPE, DOGE,
+and one of two XRP trades all as quick losers, exactly the shape of loss
+you'd expect from `find_most_volatile_unclaimed_coin()`'s only signal
+being "bullish over the last ~25 hours": a coarse, medium-term check
+with no protection against buying a coin that had ALREADY pumped hard
+and was due to pull back right as it got bought.
+
+Deliberately not a literal copy of `prop_bot.py`'s RSI < 30
+oversold-entry filter - that engine buys dips (mean reversion);
+`crypto_family_tree_bot.py` buys momentum (already-bullish coins), so
+"wait for oversold" would fight the bullish-only selection this engine
+is built around. The real analogous fix is the other direction: refuse
+a candidate that's ALREADY overbought right now, using the same
+threshold `prop_bot.py` already established for crypto specifically
+(`CRYPTO_RSI_SELL_ABOVE = 65`, tighter than stocks' 70) - now
+`engine.ENTRY_MAX_RSI` in `crypto_btc_compound_bot.py`.
+
+- `_rsi_from_closes()` mirrors `prop_bot.py`'s `get_price_rsi()` formula
+  EXACTLY (simple moving-average RSI over the last 14 gain/loss values,
+  not Wilder's smoothing) - kept identical on purpose so this is a real
+  analogous adaptation, not a different indicator wearing the same name.
+  Computed from the same ~25-hour, 5-minute candle fetch ATR already
+  uses - no new API calls.
+- `get_price_volatility_and_trend()` now returns a 4-tuple
+  `(price, atr_pct, is_bullish, rsi)` instead of 3 - `rsi` can
+  independently be `None` (too little price history) even when the
+  other three fields are real; only one real caller exists in the
+  codebase (`find_most_volatile_unclaimed_coin()`), so this didn't touch
+  any other consumer.
+- `find_most_volatile_unclaimed_coin()` now skips any candidate whose
+  RSI is at or above `ENTRY_MAX_RSI`, in BOTH the bullish path and the
+  any-volatility fallback - never buy into an already-overbought coin,
+  whichever path would have picked it. A candidate with `rsi=None` is
+  still eligible - the filter only excludes a CONFIRMED overbought
+  reading, not an absence of one. If every unclaimed candidate is
+  overbought, correctly returns `(None, None)` rather than buying the
+  least-bad option.
+
+Verified with a dedicated offline test (`_rsi_from_closes` checked
+against an independently-written reference implementation of the same
+formula, plus the core scenario: a coin with the highest ATR AND
+bullish AND overbought gets skipped in favor of a real, non-overbought
+candidate) - this could only be validated as internally consistent and
+mathematically correct, not as an improvement to real trading outcomes,
+since running the actual coin-selection backtest against real Coinbase
+history requires network access this environment doesn't have (see the
+coin-selection backtest section below) - that validation has to happen
+live, watched after deploying.
 
 ### Coin-selection backtest and exclusion (crypto_selection_backtest.py)
 
