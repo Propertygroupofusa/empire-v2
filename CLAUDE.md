@@ -1076,6 +1076,17 @@ and `get_next_eligible_product_id()` before either ever runs):
    just for lacking history. The starting SET itself (which 4 coins
    begin excluded) still only ever changes via another explicit decision
    like the original one.
+
+   **Follow-up addition**: `PEPE-USD` and `WIF-USD` - two of the 10 meme
+   coins added when the universe expanded from 26 to 37 (see above) -
+   were added to this set within hours of going live, per the account
+   owner's explicit choice after seeing real evidence on the coin-history
+   dashboard: PEPE-USD lost on its first-ever trade (-$0.99, 0% win
+   rate). Both had zero backtest runs on record at the time they were
+   added, so the "zero runs = stays excluded" default above applies -
+   they need a real positive backtest run to heal back into rotation,
+   same as every other manually-excluded coin. `MANUAL_EXCLUDED_COINS`
+   is now `{STX-USD, BLUR-USD, UNI-USD, DOT-USD, PEPE-USD, WIF-USD}`.
 2. **Automatic layer** - per the account owner's explicit choice
    ("fully automatic... hands-off, no check before it takes effect"),
    the coordinator (`run()`'s `_scan()`) re-runs the real backtest on

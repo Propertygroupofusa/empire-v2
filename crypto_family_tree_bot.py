@@ -284,7 +284,7 @@ COIN_FAMILY_TREE = [
 # "excluded" instead of "included" by default. This set itself never
 # shrinks or grows on its own though - only another explicit decision
 # adds or removes a coin from the starting list.
-MANUAL_EXCLUDED_COINS = {"STX-USD", "BLUR-USD", "UNI-USD", "DOT-USD"}
+MANUAL_EXCLUDED_COINS = {"STX-USD", "BLUR-USD", "UNI-USD", "DOT-USD", "PEPE-USD", "WIF-USD"}
 
 # Per the account owner's explicit choice: the coordinator (see run()'s
 # _scan()) now re-runs the real backtest on its own every
