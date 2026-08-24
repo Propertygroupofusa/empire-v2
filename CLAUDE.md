@@ -2236,6 +2236,87 @@ logs for the coordinator's real startup lines (`✓ Crypto (Coinbase) bot
 thread started | family tree coordinator...`) and the `product_id_unique`
 migration's own diagnostic lines to confirm both are now actually firing.
 
+**Confirmed live**: the redeploy worked. BTC's floor healed from the
+stuck $150.00 to $100.00 and it spawned children immediately at startup
+(POL-USD, plus a `crypto_tree_doge_usd_2` landing on an already-claimed
+coin with a distinct suffix name, exactly as designed) - the dashboard
+showed 11 real branches holding positions, +$6.53 total profit, BTC's
+own next spawn already at 62%. The whole night's fix chain - the
+CRYPTO_STRATEGY_MODE normalization getting the coordinator running for
+the first time, `_force_root_spawn_ready()`, the floor self-heal, and
+the retry/naming logic - is verified working together in production, not
+just in offline tests.
+
+---
+
+## BTC-relative-strength filter promoted from shadow mode to live entry selection
+
+The BTC-relative-strength comparison tool (see above) was built and kept
+deliberately shadow-mode-only, per the account owner's own explicit
+choice at the time - additive, non-interfering, answering "would this
+help?" before touching anything live. The account owner then ran it for
+real: `POST .../crypto-selection-backtest/btc-relative-strength`, 21
+coins, 30 real days, $150/trade, 25h lookback. The real results settled
+the question kept open until then:
+
+- Almost everything was net-negative at BASELINE over this real 30-day
+  window (only XRP-USD +4.7%, DOGE-USD +3.1%, POL-USD +2.2%, ETH-USD
+  +1.0% were positive; SHIB-USD -53.9%, WIF-USD -47.5%, PEPE-USD -42.4%
+  were the worst) - a real signal this was a rough real month for alts
+  generally, independent of any entry-timing fix.
+- The FILTERED replay (only enter when a coin's real return over the
+  identical ~25h window beats BTC-USD's own real return over that same
+  window) showed a positive ROI change on 15 of the 21 real coins tested
+  - some substantially: INJ-USD +24.9pp, SHIB-USD +20.0pp, UNI-USD
+  +15.6pp, XLM-USD +13.2pp, ICP-USD +11.8pp. XRP-USD - already the best
+  baseline performer - improved in both directions under the filter
+  (+4.7% -> +9.5%).
+- It also cost a handful of the already-positive/near-positive coins a
+  little (DOGE-USD -2.9pp, POL-USD -2.1pp, ETH-USD -1.6pp, ATOM-USD
+  -3.3pp), and two others meaningfully (LINK-USD -13.2pp, SUI-USD
+  -10.1pp) - not a uniform win, but a real net positive across the real
+  sample. Given real evidence and an explicit decision to act on it
+  ("wire it into live entries now"), this moved from shadow-mode
+  diagnostic to an actual live entry gate.
+
+**Implementation** - deliberately reuses the exact same real comparison
+`calculate_relative_strength()`/the backtest's `entry_gate` already
+validated offline, adapted for the live 5-minute-candle path instead of
+the backtest's hourly one:
+
+- `get_price_volatility_and_trend()` in `crypto_btc_compound_bot.py` now
+  returns a 5-tuple `(price, atr_pct, is_bullish, rsi, coin_return)` -
+  `coin_return` is the coin's real simple return over the same ~25-hour
+  candle window the existing bullish/ATR/RSI checks already use (`(closes[-1]
+  - closes[0]) / closes[0]`). Only one real caller exists
+  (`find_most_volatile_unclaimed_coin()`), so the signature change is
+  safe - same reasoning the RSI-filter addition already used for this
+  exact function.
+- `find_most_volatile_unclaimed_coin()` in `crypto_family_tree_bot.py`
+  now fetches BTC-USD's own `get_price_volatility_and_trend()` ONCE,
+  concurrently with every other candidate (added to the same
+  `asyncio.gather()` call, not a second round-trip), and requires each
+  candidate's `coin_return - btc_return > 0` - the identical `alpha > 0`
+  threshold the validated backtest gate used, not a new invented number.
+  Checked in BOTH the bullish path and the any-volatility fallback,
+  composing with the existing RSI-overbought filter (a candidate must
+  pass both, same as before).
+- **Fails OPEN** when BTC-USD's own data can't be fetched (a real
+  network hiccup) - logs a warning and skips the check that cycle rather
+  than blocking every candidate on a missing benchmark, matching the
+  backtest gate's own already-validated behavior for missing BTC data.
+
+Verified offline: a candidate that beats BTC wins over a higher-ATR
+candidate that doesn't (proving the filter actually changes the
+outcome, not just logs); the filter fails open and falls back to
+pre-existing behavior when BTC-USD's own lookup raises; and the
+RSI-overbought filter still composes correctly alongside the new BTC
+filter (an overbought-but-BTC-beating candidate is still skipped in
+favor of a candidate that clears both checks). Not yet confirmed against
+real live entries - needs watching on the dashboard's coin-switch
+behavior after the next redeploy, same as every other real trading-logic
+change in this file.
+
 ---
 
 ## Known Limitations & TODOs

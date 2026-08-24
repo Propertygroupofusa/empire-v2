@@ -358,22 +358,30 @@ async def get_price_and_volatility(session, product_id: str = PRODUCT_ID) -> tup
 async def get_price_volatility_and_trend(session, product_id: str = PRODUCT_ID) -> tuple:
     """Same as get_price_and_volatility, plus whether the coin is currently
     bullish - price now higher than it was at the start of the same
-    ~25-hour candle window used for the ATR calculation - and its current
-    RSI (see _rsi_from_closes, ENTRY_MAX_RSI). Only used by
-    find_most_volatile_unclaimed_coin() in crypto_family_tree_bot.py to
+    ~25-hour candle window used for the ATR calculation - its current RSI
+    (see _rsi_from_closes, ENTRY_MAX_RSI), and its real simple return over
+    that same ~25-hour window (coin_return - the raw number
+    find_most_volatile_unclaimed_coin() needs to compute BTC-relative
+    alpha against BTC-USD's own return over the identical window, the same
+    real comparison crypto_selection_backtest.py's
+    calculate_relative_strength() already validated offline on 30 real
+    days of history before this was wired into live selection). Only used
+    by find_most_volatile_unclaimed_coin() in crypto_family_tree_bot.py to
     pick a coin after a floor-breach loss; every other caller keeps using
     plain get_price_and_volatility, unaffected by this. Returns
-    (price, atr_pct, is_bullish, rsi) or (None, None, None, None) on
-    failure - rsi itself can independently be None (too little history)
-    even when the other three fields are real."""
+    (price, atr_pct, is_bullish, rsi, coin_return) or
+    (None, None, None, None, None) on failure - rsi itself can
+    independently be None (too little history) even when the other fields
+    are real."""
     candles = await _fetch_candles(session, product_id)
     if candles is None:
-        return None, None, None, None
+        return None, None, None, None, None
     closes, highs, lows = candles
     atr_pct = _atr_pct_from_candles(closes, highs, lows)
     is_bullish = closes[-1] > closes[0]
     rsi = _rsi_from_closes(closes)
-    return closes[-1], atr_pct, is_bullish, rsi
+    coin_return = (closes[-1] - closes[0]) / closes[0] if closes[0] else None
+    return closes[-1], atr_pct, is_bullish, rsi, coin_return
 
 
 def pick_target_pct(atr_pct: float) -> float:

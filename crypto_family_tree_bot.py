@@ -1313,7 +1313,25 @@ async def find_most_volatile_unclaimed_coin(session):
     (too little price history) is still eligible - this only excludes a
     confirmed-overbought reading, it doesn't require one.
 
-    If no non-overbought coin is currently bullish, falls back to the
+    BTC-relative-strength filter, added after a real 30-day/21-coin
+    backtest comparison (crypto_selection_backtest.py's
+    run_btc_relative_strength_comparison(), run live on the backtest page)
+    showed a net-positive ROI change on the majority of coins (15 of 21)
+    when entries were gated on beating BTC-USD's own return over the same
+    window - "up in isolation" is a much weaker signal than "beating the
+    market's own benchmark asset" in a market where everything grinds up
+    or down together, which is exactly what that 30-day sample showed
+    (almost every coin was net negative in isolation; the coins that also
+    beat BTC over the same stretch did meaningfully better). Requires each
+    candidate's real simple return over the same ~25-hour window to exceed
+    BTC-USD's real return over the identical window (alpha =
+    coin_return - btc_return > 0) - the exact same comparison
+    calculate_relative_strength() validated offline, now live instead of
+    shadow-only. Fails OPEN (does not block) when BTC's own real return
+    can't be fetched, matching the backtest gate's own documented
+    behavior - a missing benchmark isn't grounds to block every candidate.
+
+    If no non-overbought, BTC-beating coin is currently bullish, falls back to the
     highest volatility among the remaining non-overbought candidates
     rather than doing nothing. Returns (product_id, atr_pct), or
     (None, None) if every coin is excluded, overbought, or none have
@@ -1344,10 +1362,22 @@ async def find_most_volatile_unclaimed_coin(session):
         if p not in excluded and not _coin_sale_cooldown_active(p)
     ]
 
+    # BTC-USD's own return over the identical ~25h window is fetched once,
+    # concurrently with every candidate, and compared against each
+    # candidate's own coin_return below - not root's own coin (root never
+    # calls this function), just the real benchmark every candidate gets
+    # measured against.
     results = await asyncio.gather(
+        engine.get_price_volatility_and_trend(session, "BTC-USD"),
         *(engine.get_price_volatility_and_trend(session, product_id) for product_id in candidates),
         return_exceptions=True,
     )
+    btc_result, results = results[0], results[1:]
+    btc_return = None
+    if isinstance(btc_result, Exception):
+        log.warning(f"[TREE] BTC-relative-strength: BTC-USD lookup failed ({btc_result}) - filter fails open this cycle")
+    else:
+        _, _, _, _, btc_return = btc_result
 
     best_bullish_id, best_bullish_atr = None, -1.0
     best_any_id, best_any_atr = None, -1.0
@@ -1355,11 +1385,17 @@ async def find_most_volatile_unclaimed_coin(session):
         if isinstance(result, Exception):
             log.warning(f"[TREE] volatility lookup failed for {product_id}: {result}")
             continue
-        price, atr_pct, is_bullish, rsi = result
+        price, atr_pct, is_bullish, rsi, coin_return = result
         if price is None or atr_pct is None:
             continue
         if rsi is not None and rsi >= engine.ENTRY_MAX_RSI:
             log.info(f"[TREE] {product_id}: skipping - RSI {rsi:.1f} is already overbought (>= {engine.ENTRY_MAX_RSI:.0f})")
+            continue
+        if btc_return is not None and coin_return is not None and (coin_return - btc_return) <= 0:
+            log.info(
+                f"[TREE] {product_id}: skipping - not beating BTC-USD over the same ~25h window "
+                f"(coin {coin_return:+.2%} vs BTC {btc_return:+.2%})"
+            )
             continue
         if atr_pct > best_any_atr:
             best_any_atr = atr_pct
