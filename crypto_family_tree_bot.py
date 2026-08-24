@@ -684,6 +684,40 @@ async def _unique_child_bot_name(product_id: str) -> str:
     return f"{base}_{n}"
 
 
+async def spawn_child_branch_with_retry(product_id: str, parent_bot_name, attempts: int = 5) -> str:
+    """Inserts a brand-new $50-seed branch on product_id, used by both manual
+    dashboard spawn buttons. _unique_child_bot_name() computes a name from a
+    plain SELECT, then this does a separate INSERT - a real gap a concurrent
+    spawn (the coordinator's own per-cycle catch-up spawn check in
+    _maybe_spawn_child, or a second near-simultaneous manual click) can land
+    in between, claiming the identical name first and failing this one's
+    commit with a bot_name IntegrityError. Real, observed live: a manual
+    "Start new $50 branch" on XRP-USD failed with "crypto_tree_xrp_usd_2 was
+    just created by another branch - try again", dumping the race onto the
+    account owner to retry by hand. Rather than surface that, recompute a
+    fresh name and retry the insert here, server-side, up to `attempts`
+    times - the collision window is a few milliseconds wide, so a second
+    attempt lands on a free name essentially every time. Only raises once
+    every attempt genuinely collides (a real, repeated pileup, not a single
+    unlucky race)."""
+    last_name = None
+    for _ in range(attempts):
+        child_name = await _unique_child_bot_name(product_id)
+        last_name = child_name
+        async with AsyncSessionLocal() as db:
+            db.add(CryptoTreeBranch(
+                bot_name=child_name, product_id=product_id, parent_bot_name=parent_bot_name,
+                allocated_usd=SEED_USD, next_unlock_tier=UNLOCK_TIER_USD, equity_floor=0.0,
+            ))
+            try:
+                await db.commit()
+                return child_name
+            except IntegrityError:
+                await db.rollback()
+                continue
+    raise RuntimeError(f"{last_name} collided with another branch on every retry ({attempts}x) - try again")
+
+
 async def get_next_eligible_product_id():
     """Picks a coin for a brand-new $50 branch to start on - not currently
     excluded (see get_effective_excluded_coins), not still cooling down
@@ -1302,36 +1336,43 @@ async def _maybe_spawn_child(branch):
         log.info(f"[TREE] {branch.bot_name} crossed ${branch.next_unlock_tier:,.0f} but every coin is excluded or cooling down - no child to spawn yet")
         return
 
-    child_name = await _unique_child_bot_name(next_product)
     milestone = branch.next_unlock_tier
-    try:
-        async with AsyncSessionLocal() as db:
-            # Re-check against a fresh row under this transaction, so the
-            # coordinator's scan and this branch's own cycle can't both spawn
-            # a child for the same crossing.
-            result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == branch.bot_name))
-            fresh = result.scalar_one_or_none()
-            if not fresh or fresh.allocated_usd < fresh.next_unlock_tier:
-                return
-            fresh.allocated_usd -= SEED_USD
-            fresh.next_unlock_tier += UNLOCK_TIER_USD
-            db.add(CryptoTreeBranch(
-                bot_name=child_name, product_id=next_product, parent_bot_name=branch.bot_name,
-                allocated_usd=SEED_USD, next_unlock_tier=UNLOCK_TIER_USD, equity_floor=0.0,
-            ))
-            await db.commit()
-            remaining = fresh.allocated_usd
-    except IntegrityError:
-        # product_id no longer needs to be unique (branches can share a
-        # coin now), but bot_name still does - a child's name is derived
-        # directly from its coin (crypto_tree_{product}), so two DIFFERENT
-        # parents crossing their own tier at nearly the same moment and
-        # both picking the same next_product would collide trying to
-        # create the identical child bot_name. The parent's own
-        # allocated_usd/next_unlock_tier update rolled back together with
-        # the failed insert (same transaction), so nothing is stuck
-        # half-applied - this crossing just gets retried next cycle.
-        log.info(f"[TREE] {branch.bot_name} crossed ${milestone:,.0f} but a child named {child_name} was just created by another branch first (race) - will retry next cycle")
+    remaining = None
+    child_name = None
+    # product_id no longer needs to be unique (branches can share a coin
+    # now), but bot_name still does - a child's name is derived directly
+    # from its coin (crypto_tree_{product}), so two DIFFERENT parents
+    # crossing their own tier at nearly the same moment and both picking
+    # the same next_product would collide trying to create the identical
+    # child bot_name (the same real race the manual spawn buttons can hit -
+    # see spawn_child_branch_with_retry). Retry a few times with a freshly
+    # computed name before giving up - each attempt's parent deduction and
+    # child insert stay atomic (same transaction), so a failed attempt
+    # rolls back cleanly with nothing stuck half-applied.
+    for _ in range(5):
+        child_name = await _unique_child_bot_name(next_product)
+        try:
+            async with AsyncSessionLocal() as db:
+                # Re-check against a fresh row under this transaction, so the
+                # coordinator's scan and this branch's own cycle can't both
+                # spawn a child for the same crossing.
+                result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == branch.bot_name))
+                fresh = result.scalar_one_or_none()
+                if not fresh or fresh.allocated_usd < fresh.next_unlock_tier:
+                    return
+                fresh.allocated_usd -= SEED_USD
+                fresh.next_unlock_tier += UNLOCK_TIER_USD
+                db.add(CryptoTreeBranch(
+                    bot_name=child_name, product_id=next_product, parent_bot_name=branch.bot_name,
+                    allocated_usd=SEED_USD, next_unlock_tier=UNLOCK_TIER_USD, equity_floor=0.0,
+                ))
+                await db.commit()
+                remaining = fresh.allocated_usd
+            break
+        except IntegrityError:
+            continue
+    if remaining is None:
+        log.info(f"[TREE] {branch.bot_name} crossed ${milestone:,.0f} but every candidate name for a child on {next_product} collided with another branch (race) - will retry next cycle")
         return
 
     log.info(

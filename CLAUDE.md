@@ -1559,6 +1559,65 @@ the 409 that was actually seen live.
 
 ---
 
+## Real follow-up bug from shared-coin branches: a bot_name collision required manual retry, now self-heals
+
+The account owner hit a real, live error right after the shared-coin
+change above shipped: tapping "Start new $50 branch" produced **"Could
+not start a new branch: crypto_tree_xrp_usd_2 was just created by
+another branch - try again"**, with the explicit ask "fix it" - the
+dialog blocked the spawn and needed a manual retry click.
+
+Root cause: `_unique_child_bot_name()` computes the next free name with
+a plain `SELECT`, then the caller does a separate `INSERT` - a real gap
+a concurrent spawn can land in between and claim the identical name
+first. This is now a much more likely real race than before the
+shared-coin change: with `product_id` no longer unique, `_maybe_spawn_child()`
+runs its catch-up check every single cycle for every branch (not just
+after a sell), so the coordinator itself is now constantly a candidate
+to race a manual dashboard click - or two branches crossing their own
+tier at nearly the same real moment can independently compute the same
+"next free" name for the same coin. The `bot_name` unique index (never
+dropped - only `product_id`'s was) correctly caught this as a real
+`IntegrityError`, but the old code treated ANY collision as a dead end:
+the manual endpoints surfaced a 409 requiring the account owner to
+click again by hand, and the organic path just gave up until next
+cycle - working as designed, but "designed to make a person retry a
+race that resolves itself in milliseconds" was never actually the
+right design.
+
+Fixed with a new shared `spawn_child_branch_with_retry()` in
+`crypto_family_tree_bot.py`: recomputes a fresh `_unique_child_bot_name()`
+and retries the insert up to 5 times before giving up, so a transient
+collision resolves itself server-side instead of being handed to the
+account owner as an error. Both manual spawn endpoints
+(`POST .../spawn-branch` and `POST .../spawn-branch/{product_id}` in
+`routers/trading_dashboard.py`) now call this helper directly instead
+of doing their own single-shot name-then-insert, and only raise (409)
+if every one of the 5 attempts genuinely collides - a real, repeated
+pileup, not a single unlucky race. `_maybe_spawn_child()`'s own organic
+spawn (which keeps the parent's seed deduction atomic with the child
+insert, unlike the manual endpoints) got the same retry loop inline,
+recomputing the child name each pass while keeping that atomicity -
+still falls back to "retry next cycle" only if every one of its 5
+attempts also collides.
+
+Verified offline with a dedicated test that reproduces the exact real
+scenario: seeds `crypto_tree_xrp_usd`, then simulates a concurrent
+spawn winning the race for `crypto_tree_xrp_usd_2` in the exact gap
+between the name-check and the insert (a mocked `_unique_child_bot_name`
+that inserts a competing row the first time it's called) - confirms the
+retry silently lands on `crypto_tree_xrp_usd_3` instead of raising,
+confirms the real `POST /family-tree-status/spawn-branch` FastAPI
+endpoint itself now succeeds through the same simulated collision
+instead of returning the 409 the account owner actually saw, and
+confirms a genuine total pileup (every retry attempt collides) still
+raises a clear error rather than looping forever or silently dropping
+the spawn. Full existing regression suite (10 prior scratch test files,
+including both shared-coin-branches tests from the original feature)
+re-run clean alongside it.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

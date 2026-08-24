@@ -24,7 +24,6 @@ import aiohttp
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select, func, case
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db, AsyncSessionLocal
@@ -986,16 +985,10 @@ async def spawn_family_tree_branch(db: AsyncSession = Depends(get_db)):
     if next_product is None:
         raise HTTPException(status_code=400, detail="No eligible coin to start a new branch on right now (every coin is excluded or cooling down)")
 
-    child_name = await tree._unique_child_bot_name(next_product)
-    db.add(CryptoTreeBranch(
-        bot_name=child_name, product_id=next_product, parent_bot_name=tree.ROOT_BOT_NAME,
-        allocated_usd=tree.SEED_USD, next_unlock_tier=tree.UNLOCK_TIER_USD, equity_floor=0.0,
-    ))
     try:
-        await db.commit()
-    except IntegrityError:
-        await db.rollback()
-        raise HTTPException(status_code=409, detail=f"{child_name} was just created by another branch - try again")
+        child_name = await tree.spawn_child_branch_with_retry(next_product, tree.ROOT_BOT_NAME)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
     log.info(f"[dashboard] 🌱 Manually spawned {child_name} ({next_product}) with ${tree.SEED_USD:.2f} seed, funded from real unallocated cash")
     return {
@@ -1026,8 +1019,11 @@ async def spawn_family_tree_branch_on_coin(product_id: str, db: AsyncSession = D
     coin just because an existing branch already trades it - multiple
     branches can now hold the same coin at once (e.g. tapping "Trade this"
     on a coin that's already proving itself real, live, elsewhere in the
-    tree). tree._unique_child_bot_name() gives the new branch a real,
-    distinct identity even when its coin is already in use."""
+    tree). tree.spawn_child_branch_with_retry() gives the new branch a real,
+    distinct identity even when its coin is already in use, and retries a
+    few times server-side if that name collides with a concurrent spawn
+    (the coordinator's own per-cycle catch-up check, or a second click)
+    instead of making the account owner retry by hand."""
     if crypto_family_tree_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
 
@@ -1071,16 +1067,10 @@ async def spawn_family_tree_branch_on_coin(product_id: str, db: AsyncSession = D
             ),
         )
 
-    child_name = await tree._unique_child_bot_name(product_id)
-    db.add(CryptoTreeBranch(
-        bot_name=child_name, product_id=product_id, parent_bot_name=tree.ROOT_BOT_NAME,
-        allocated_usd=tree.SEED_USD, next_unlock_tier=tree.UNLOCK_TIER_USD, equity_floor=0.0,
-    ))
     try:
-        await db.commit()
-    except IntegrityError:
-        await db.rollback()
-        raise HTTPException(status_code=409, detail=f"{child_name} was just created by another branch - try again")
+        child_name = await tree.spawn_child_branch_with_retry(product_id, tree.ROOT_BOT_NAME)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
     log.info(f"[dashboard] 🌱 Manually spawned {child_name} ({product_id}) with ${tree.SEED_USD:.2f} seed from the backtest page, funded from real unallocated cash")
     return {
