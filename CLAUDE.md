@@ -2621,6 +2621,60 @@ the generalization is real rather than just accepting an ignored
 
 ---
 
+## Real bug found and fixed: concurrent branches could ask Coinbase for more cash than genuinely existed (INSUFFICIENT_FUND)
+
+The account owner shared a real dashboard screenshot showing several
+branches (POL, DOGE, XRP) all displaying the same real rejection at
+once: **"⚠️ Last order rejected: INSUFFICIENT_FUND: Insufficient balance
+in source account."** Multiple branches rejecting with the identical
+real Coinbase error in the same window pointed at a shared-resource race,
+not a per-coin problem.
+
+Root cause: each branch's flat-branch buy path (`run_branch_cycle`)
+computes `spend = min(branch.allocated_usd, real_balance - locked_usd)`
+against its OWN snapshot of the real Coinbase USD balance, fetched fresh
+each cycle. With every branch running as an independent, jittered
+background thread (`_branch_thread_main`) and nothing coordinating the
+one shared real cash pool between them, several branches can
+legitimately decide "I can afford this" off the same real balance
+snapshot within the same real moment - Coinbase itself has no concept of
+one branch "reserving" cash while another's order is in flight, so
+whichever order lands second (or third) after the balance has already
+moved gets a real, honest rejection. This is also asymmetric with the
+sell side: `place_market_sell()` has always clamped its qty against a
+fresh real held-balance check immediately before submitting; `place_market_buy()`
+had no equivalent - it just spent whatever the caller told it to,
+whatever the real balance actually was at the moment the order fired.
+
+Fixed in `place_market_buy()` (`crypto_btc_compound_bot.py`): fetches the
+real current USD balance immediately before submitting and clamps
+`usd_amount` down to it, mirroring `place_market_sell()`'s existing
+pattern. Returns `None` outright (no order placed) if the real balance
+is `<= 0` after the clamp. Fails open on a real balance-fetch failure -
+uses the original requested amount unchanged rather than blocking a
+buy on a data hiccup, matching every other "don't block on missing data"
+gate in this codebase. This doesn't eliminate the race outright (two
+branches could still both clamp against the identical real balance a
+moment before either order lands), but it moves the real balance check
+to the last possible instant before the order actually goes out - the
+same defensive placement the sell-side clamp already uses - so a branch
+now asks Coinbase for at most what's genuinely real right now, and a
+partially-covered spend fills for what's actually available instead of
+getting rejected outright.
+
+Verified offline (no live network access in this sandbox): a requested
+spend exceeding the real balance is clamped down to the exact real
+balance in the order actually submitted; a spend already within the real
+balance is submitted unchanged; a real balance-fetch failure doesn't
+block the buy (original amount used); and a real $0 balance returns
+`None` without ever calling the order-placement path. Full existing
+regression suite re-run alongside it - the only failures were pre-existing,
+unrelated scratch-test staleness from earlier in this session (stale
+fixture data, a renamed function, tests needing a local Postgres not
+running in this sandbox), none touching `place_market_buy`.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

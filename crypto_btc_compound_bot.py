@@ -393,7 +393,37 @@ def pick_target_pct(atr_pct: float) -> float:
 
 
 async def place_market_buy(session, usd_amount: float, product_id: str = PRODUCT_ID):
-    """Spends usd_amount on product_id at market. Returns (filled_qty, filled_price) or None."""
+    """Spends usd_amount on product_id at market. Returns (filled_qty, filled_price) or None.
+
+    Before placing, clamps usd_amount to the real current USD cash
+    balance - the buy-side mirror of place_market_sell()'s existing qty
+    clamp against real held balance, added after real, live
+    INSUFFICIENT_FUND rejections showed up on several branches at once
+    (screenshot evidence: POL/DOGE/XRP branches all rejecting in the same
+    window). Root cause: every branch computes its own spend amount
+    against its own snapshot of the real balance (see run_branch_cycle's
+    flat-branch buy path), but with many branches running as independent,
+    jittered threads and nothing coordinating the shared real cash pool
+    between them, several can genuinely decide "I can afford this" off
+    the same stale snapshot at nearly the same real moment - Coinbase
+    itself has no concept of "reserved" cash between branches, so
+    whichever order lands second gets a real, honest rejection. This
+    clamp doesn't eliminate that race outright (two branches could still
+    both clamp against the same real balance before either order lands),
+    but it moves the check to the last possible moment before the order
+    actually goes out - the same defensive placement the sell-side clamp
+    already uses - so a branch never knowingly asks Coinbase for more
+    than genuinely exists at that instant, and a spend that's fully
+    covered up to some real amount fills for that amount instead of
+    getting rejected outright."""
+    real_usd, _ = await get_usd_balance(session)
+    if real_usd is not None and real_usd < usd_amount:
+        log.info(f"[BTC-COMPOUND] {product_id}: clamping buy ${usd_amount:.2f} -> real USD balance ${real_usd:.2f}")
+        usd_amount = real_usd
+    if usd_amount <= 0:
+        log.warning(f"[BTC-COMPOUND] {product_id}: nothing to spend after real-balance clamp")
+        return None
+
     path = "/api/v3/brokerage/orders"
     order = {
         "client_order_id": str(uuid.uuid4()),
