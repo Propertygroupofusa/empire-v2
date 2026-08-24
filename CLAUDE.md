@@ -1663,6 +1663,76 @@ clean alongside it.
 
 ---
 
+## Sell advice now includes the real coin-selection backtest history too
+
+Per the account owner's explicit follow-up, while looking at the real
+`crypto_selection_backtest.py` results table live: "use whatever system
+or however this right here is getting its information" to help the sell
+advice too. `get_latest_backtest_result()` in `crypto_family_tree_bot.py`
+reads the exact same `CryptoBacktestRun` rows that page's table and the
+automatic coin-exclusion rule already read (`_compute_auto_excluded_coins`)
+- not a new or separately-computed number - and returns the most recent
+real run for a coin (trades, win rate, ROI). Wired into
+`GET /family-tree-status`'s existing position payload as
+`historical_backtest`, alongside (never replacing) the live `sell_advice`
+verdict - purely additional real context, e.g. "Real backtest (Aug 24):
+33 trades, 48.5% win rate, +4.6% ROI", shown in the same advice panel
+under the live reasoning. The verdict itself stays tied only to the live
+TARGET/STOP/GIVEBACK checks, exactly as before - this never overrides it.
+
+Verified offline: a coin with no real backtest run on record returns
+`None` (not a fabricated number); a coin with multiple real runs on
+record returns the MOST RECENT one, matching the real screenshot's
+XRP-USD row (33 trades, 48.5% win rate, +4.6% ROI) exactly; and the real
+`/family-tree-status` endpoint attaches this context to a branch's
+position alongside its still-independent live `sell_advice` verdict.
+
+---
+
+## Real bug found and fixed: spawn retries could still exhaust under real concurrent contention
+
+Right after the collision-retry fix above shipped, the account owner hit
+the wall it was supposed to prevent: **"Could not start a new branch:
+crypto_tree_xrp_usd_2 collided with another branch on every retry (5x) -
+try again"** - all 5 retries failed, not just one. They'd also just
+deposited a real $150 into Coinbase specifically to fund more spawns
+(confirmed via a real Coinbase balance screenshot - not a funding issue,
+`spendable_for_spawn` was never the blocker here).
+
+Root cause: every branch's 30-second cycle timer starts from roughly the
+same moment (server boot), so when SEVERAL branches cross their unlock
+tier in the same cycle window - realistic with many branches sitting near
+100% "Next spawn" at once, as the dashboard was showing - they can all
+call `get_next_eligible_product_id()` in the same instant. Since that
+function deterministically picks the single least-crowded coin (not a
+random tiebreak), several different parent branches converge on the
+IDENTICAL target coin and race to spawn a child on it at essentially the
+same moment. The original fix's retry loop had zero delay between
+attempts, so several racers retrying in immediate lockstep could keep
+landing on the same instant as each other's next retry - colliding again
+and again instead of naturally spreading out, exhausting all 5 attempts
+in a real, sustained pileup rather than a single transient race.
+
+Fixed in both `spawn_child_branch_with_retry()` (manual spawn endpoints)
+and `_maybe_spawn_child()`'s inline retry loop (organic per-cycle spawn):
+raised attempts from 5 to 12, and added a small random jitter sleep
+(0.05-0.4s) before every retry after the first. Real concurrent racers
+essentially never pick the same random delay twice in a row, so this
+breaks the lockstep almost immediately even with several branches racing
+for the same coin at once - each one settles onto a distinct `_N` suffix
+within a fraction of a second instead of colliding indefinitely.
+
+Verified offline with a dedicated test that reproduces the actual
+concurrency shape of the real failure - 6 real concurrent
+`spawn_child_branch_with_retry()` calls fired at once via
+`asyncio.gather()`, all racing for the same coin - confirming all 6 now
+succeed with 6 distinct real branch names (`crypto_tree_xrp_usd_2`
+through `_7`) in under half a second, instead of any of them exhausting
+their retries. Full existing regression suite (13 prior scratch test
+files) re-run clean alongside it.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

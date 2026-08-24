@@ -243,6 +243,15 @@
     .advice-watch .advice-verdict { color: var(--gold); }
     .advice-hold .advice-verdict { color: var(--green); }
     .advice-reason { color: var(--text); }
+    .advice-backtest {
+        margin-top: 6px;
+        padding-top: 6px;
+        border-top: 1px solid rgba(0,0,0,0.08);
+        color: var(--text-dim);
+        font-size: 0.95em;
+    }
+    .advice-backtest .pos { color: var(--green); font-weight: 700; }
+    .advice-backtest .neg { color: var(--red); font-weight: 700; }
 
     .unlock-btn {
         font-family: inherit;
@@ -655,11 +664,25 @@ function branchCardHtml(b) {
             const advClass = adv.verdict === 'sell' ? 'advice-sell' : (adv.verdict === 'watch' ? 'advice-watch' : 'advice-hold');
             const advLabel = adv.verdict === 'sell' ? '🔴 Good time to sell' : (adv.verdict === 'watch' ? '🟡 Watch closely' : '🟢 Hold for now');
             const panelId = 'advice-' + b.bot_name;
+            // Real historical context from the exact same coin-selection
+            // backtest system (crypto_selection_backtest.py's saved
+            // CryptoBacktestRun rows) that page's own table shows for this
+            // coin - purely informational, never changes the verdict above.
+            let backtestHtml = '<div class="advice-backtest">No real backtest run recorded yet for this coin.</div>';
+            const bt = p.historical_backtest;
+            if (bt) {
+                const roiPct = (bt.roi_pct_of_spend * 100).toFixed(1);
+                const roiClass = bt.roi_pct_of_spend >= 0 ? 'pos' : 'neg';
+                const winPct = (bt.win_rate * 100).toFixed(1);
+                const runDate = bt.run_at ? new Date(bt.run_at).toLocaleDateString() : 'unknown date';
+                backtestHtml = `<div class="advice-backtest">Real backtest (${runDate}): ${bt.num_trades} trades, ${winPct}% win rate, <span class="${roiClass}">${bt.roi_pct_of_spend >= 0 ? '+' : ''}${roiPct}% ROI</span></div>`;
+            }
             adviceHtml = `
                 <button class="advice-btn" onclick="toggleAdvice('${panelId}', this)">💡 Sell advice</button>
                 <div id="${panelId}" class="advice-panel ${advClass}" style="display:none;">
                     <div class="advice-verdict">${advLabel}</div>
                     <div class="advice-reason">${adv.reason}</div>
+                    ${backtestHtml}
                 </div>`;
         }
     }

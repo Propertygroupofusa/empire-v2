@@ -51,6 +51,7 @@ import asyncio
 import logging
 import math
 import os
+import random
 import threading
 import time
 import traceback
@@ -383,6 +384,33 @@ async def get_effective_excluded_coins() -> set:
     return await _manually_excluded_still_excluded() | await _compute_auto_excluded_coins()
 
 
+async def get_latest_backtest_result(product_id: str):
+    """Real historical context for the dashboard's 💡 Sell advice button,
+    per the account owner's explicit follow-up request to use "whatever
+    system... is getting its information" on the coin-selection backtest
+    page to help inform sell advice too - reads the exact same
+    CryptoBacktestRun rows that page's table and the automatic
+    coin-exclusion rule already read (_compute_auto_excluded_coins above),
+    not a new or separately-computed number. Returns the most recent real
+    run for this coin, or None if it's never been backtested."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(CryptoBacktestRun)
+            .where(CryptoBacktestRun.product_id == product_id)
+            .order_by(desc(CryptoBacktestRun.run_at))
+            .limit(1)
+        )
+        row = result.scalar_one_or_none()
+    if row is None:
+        return None
+    return {
+        "num_trades": row.num_trades,
+        "win_rate": row.win_rate,
+        "roi_pct_of_spend": row.roi_pct_of_spend,
+        "run_at": row.run_at.isoformat() if row.run_at else None,
+    }
+
+
 async def _run_scheduled_backtest_and_update_exclusions():
     """Called from the coordinator's own scan loop, throttled to once per
     AUTO_BACKTEST_INTERVAL_SECONDS (see run()'s _scan()). Runs the exact
@@ -684,7 +712,7 @@ async def _unique_child_bot_name(product_id: str) -> str:
     return f"{base}_{n}"
 
 
-async def spawn_child_branch_with_retry(product_id: str, parent_bot_name, attempts: int = 5) -> str:
+async def spawn_child_branch_with_retry(product_id: str, parent_bot_name, attempts: int = 12) -> str:
     """Inserts a brand-new $50-seed branch on product_id, used by both manual
     dashboard spawn buttons. _unique_child_bot_name() computes a name from a
     plain SELECT, then this does a separate INSERT - a real gap a concurrent
@@ -695,13 +723,28 @@ async def spawn_child_branch_with_retry(product_id: str, parent_bot_name, attemp
     "Start new $50 branch" on XRP-USD failed with "crypto_tree_xrp_usd_2 was
     just created by another branch - try again", dumping the race onto the
     account owner to retry by hand. Rather than surface that, recompute a
-    fresh name and retry the insert here, server-side, up to `attempts`
-    times - the collision window is a few milliseconds wide, so a second
-    attempt lands on a free name essentially every time. Only raises once
-    every attempt genuinely collides (a real, repeated pileup, not a single
-    unlucky race)."""
+    fresh name and retry the insert here, server-side.
+
+    Real follow-up found live: a plain immediate retry (5 attempts, no
+    delay) still exhausted every attempt and surfaced "collided with
+    another branch on every retry (5x)". Root cause: every branch's
+    30-second cycle timer starts from roughly the same moment (server
+    boot), so when several branches cross their unlock tier in the same
+    cycle window, get_next_eligible_product_id()'s deterministic
+    "least-crowded coin" pick has them ALL converge on the identical
+    target coin and race in near-perfect lockstep - back-to-back
+    zero-delay retries can keep landing on the exact same instant as a
+    sibling's own retry, colliding again and again instead of
+    desynchronizing. Fixed with two changes: more attempts (12, not 5),
+    and a small random jitter sleep before each retry after the first -
+    real racers rarely pick the same random delay twice in a row, so this
+    breaks the lockstep almost immediately even under multiple branches
+    racing at once. Only raises once every attempt genuinely collides (a
+    real, sustained pileup, not a transient race)."""
     last_name = None
-    for _ in range(attempts):
+    for attempt in range(attempts):
+        if attempt > 0:
+            await asyncio.sleep(random.uniform(0.05, 0.4))
         child_name = await _unique_child_bot_name(product_id)
         last_name = child_name
         async with AsyncSessionLocal() as db:
@@ -1407,11 +1450,19 @@ async def _maybe_spawn_child(branch):
     # crossing their own tier at nearly the same moment and both picking
     # the same next_product would collide trying to create the identical
     # child bot_name (the same real race the manual spawn buttons can hit -
-    # see spawn_child_branch_with_retry). Retry a few times with a freshly
-    # computed name before giving up - each attempt's parent deduction and
-    # child insert stay atomic (same transaction), so a failed attempt
-    # rolls back cleanly with nothing stuck half-applied.
-    for _ in range(5):
+    # see spawn_child_branch_with_retry). Retry with a freshly computed
+    # name before giving up - each attempt's parent deduction and child
+    # insert stay atomic (same transaction), so a failed attempt rolls
+    # back cleanly with nothing stuck half-applied. Every branch's cycle
+    # timer starts from roughly the same moment (server boot), so several
+    # branches crossing their tier in the same window can race in
+    # near-lockstep on the identical target coin - a real jitter sleep
+    # between retries (see spawn_child_branch_with_retry for the full
+    # story) breaks that lockstep instead of retrying at the exact same
+    # instant a sibling's own retry does.
+    for attempt in range(12):
+        if attempt > 0:
+            await asyncio.sleep(random.uniform(0.05, 0.4))
         child_name = await _unique_child_bot_name(next_product)
         try:
             async with AsyncSessionLocal() as db:

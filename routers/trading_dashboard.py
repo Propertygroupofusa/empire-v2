@@ -706,6 +706,17 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
                     pos.entry_price, pos.qty, pos.target_price, pos.stop_price,
                     current_price, pos.peak_pct,
                 ) if crypto_family_tree_bot_module is not None and current_price is not None else None,
+                # Real historical context alongside the live verdict above -
+                # the same CryptoBacktestRun data crypto_selection_backtest.html's
+                # own table already shows for this exact coin, per the
+                # account owner's explicit request to have the sell advice
+                # draw on that real backtest system too, not just live
+                # TARGET/STOP/GIVEBACK math. Purely informational - never
+                # changes the verdict itself, which stays tied to what the
+                # bot is actually about to do right now.
+                "historical_backtest": (
+                    await crypto_family_tree_bot_module.get_latest_backtest_result(b.product_id)
+                ) if crypto_family_tree_bot_module is not None else None,
             },
         })
 
