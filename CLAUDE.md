@@ -2011,6 +2011,32 @@ suite (19 prior scratch test files) re-run clean alongside it.
 
 ---
 
+## `_force_root_spawn_ready()` hardened after two redeploys still showed no change
+
+After pushing the force-root-spawn fix above, the account owner redeployed
+twice (confirmed via a Railway deploy-log screenshot showing a fresh
+active deployment) and BTC's floor still showed $150.00, unchanged. The
+original version of `_force_root_spawn_ready()` had no error handling of
+its own - unlike every OTHER one-time startup migration in this file,
+which all wrap their body in `try/except` and log a warning rather than
+raise. If this one hit any real, unexpected exception, it could have
+silently failed, or - worse - propagated up through `run()`'s startup
+sequence and blocked every later step (every branch thread launching,
+the coordinator scan loop) from ever running, without any log to explain
+why.
+
+Fixed by wrapping the whole function the same defensive way as its
+siblings, and adding real diagnostic logging that fires unconditionally
+at the top: `root balance $X | next_unlock_tier $Y | floor $Z` before any
+decision is made, plus explicit log lines for both the "hasn't crossed
+its tier yet" early-return and the "done" completion. This doesn't
+change what the fix DOES - it makes the actual live state (and any real
+failure) visible in Railway's logs on the very next deploy, instead of
+continuing to guess blind at why a fix that tests correctly offline
+isn't visibly taking effect live.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

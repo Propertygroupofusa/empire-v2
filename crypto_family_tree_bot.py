@@ -999,26 +999,45 @@ async def _force_root_spawn_ready():
     next cycle tick first. Safe to call on every startup: a no-op once
     root's floor already matches its real tier and it has nothing new to
     spawn."""
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == ROOT_BOT_NAME))
-        root = result.scalar_one_or_none()
-    if root is None or root.allocated_usd < root.next_unlock_tier:
-        return
-    new_tier_floor = math.floor(root.allocated_usd / BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER
-    if root.equity_floor > new_tier_floor:
+    try:
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == ROOT_BOT_NAME))
-            fresh = result.scalar_one_or_none()
-            if fresh and fresh.equity_floor > new_tier_floor:
-                old_floor = fresh.equity_floor
-                fresh.equity_floor = new_tier_floor
-                await db.commit()
-                root.equity_floor = new_tier_floor
-                log.info(
-                    f"[TREE] 🪜 FORCE-healed root's floor at startup ${old_floor:,.2f} -> ${new_tier_floor:,.2f} "
-                    f"(real balance ${root.allocated_usd:.2f} had crossed its ${root.next_unlock_tier:,.2f} tier but stayed floor-blocked)"
-                )
-    await _maybe_spawn_child(root)
+            root = result.scalar_one_or_none()
+        if root is None:
+            log.info("[TREE] _force_root_spawn_ready: no root row yet (fresh install) - skipping")
+            return
+        log.info(
+            f"[TREE] _force_root_spawn_ready: root balance ${root.allocated_usd:,.2f} | "
+            f"next_unlock_tier ${root.next_unlock_tier:,.2f} | floor ${root.equity_floor:,.2f}"
+        )
+        if root.allocated_usd < root.next_unlock_tier:
+            log.info("[TREE] _force_root_spawn_ready: root hasn't crossed its own tier yet - nothing to force")
+            return
+        new_tier_floor = math.floor(root.allocated_usd / BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER
+        if root.equity_floor > new_tier_floor:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == ROOT_BOT_NAME))
+                fresh = result.scalar_one_or_none()
+                if fresh and fresh.equity_floor > new_tier_floor:
+                    old_floor = fresh.equity_floor
+                    fresh.equity_floor = new_tier_floor
+                    await db.commit()
+                    root.equity_floor = new_tier_floor
+                    log.info(
+                        f"[TREE] 🪜 FORCE-healed root's floor at startup ${old_floor:,.2f} -> ${new_tier_floor:,.2f} "
+                        f"(real balance ${root.allocated_usd:.2f} had crossed its ${root.next_unlock_tier:,.2f} tier but stayed floor-blocked)"
+                    )
+        await _maybe_spawn_child(root)
+        log.info("[TREE] _force_root_spawn_ready: done")
+    except Exception as e:
+        # Never let this one-time fix block the rest of startup (every
+        # branch thread launching, the coordinator scan loop, etc.) even
+        # if something real and unexpected goes wrong here - same
+        # defensive pattern as every other one-time migration in this
+        # file. Logged loudly so a real failure is diagnosable from
+        # Railway logs instead of silently vanishing.
+        log.error(f"[TREE] _force_root_spawn_ready failed: {e}")
+        log.error(f"Traceback: {traceback.format_exc()}")
 
 
 async def _dedupe_locked_profit_state():
