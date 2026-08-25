@@ -3507,6 +3507,40 @@ to preview the real plan for POL-USD (15 branches)/SOL-USD (5)/XRP-USD
 
 ---
 
+## Real, severe bug found and fixed: the entire Alpaca dashboard was broken (HTTP 422 on every load)
+
+The account owner shared a real screenshot: `/alpaca-dashboard` stuck on
+"Loading account summary..." with a bright red "Error: HTTP 422" at the
+top of the page - every stat card empty. Root cause: an earlier edit this
+session (adding the `_safe_float()` helper "right before
+`get_alpaca_overview()`" to fix the Alpaca-position-fields-were-strings
+crash) inserted the new helper function literally BETWEEN the
+`@router.get("/alpaca-overview", ...)` decorator line and the
+`async def get_alpaca_overview(...)` line it was meant to decorate -
+so the decorator silently attached itself to `_safe_float` instead. Since
+`_safe_float(v)` takes one plain, untyped, no-default parameter, FastAPI
+registered IT as the real `/alpaca-overview` route handler and started
+demanding a required query parameter `v` on every request - which the
+dashboard's JS never sends, producing a 422 "field required" on every
+single real load. The actual `get_alpaca_overview()` function was left
+completely undecorated - not bound to any route at all.
+
+Fixed by moving `_safe_float()`'s definition back above the decorator, so
+`@router.get("/alpaca-overview", ...)` correctly applies to
+`get_alpaca_overview` again. Verified via a real AST parse of the whole
+router file confirming exactly one `GET /alpaca-overview` route now
+exists, bound to the correct function, with no duplicate route
+registrations anywhere else in the file (checked the entire file for the
+same decorator-before-helper pattern recurring elsewhere - this was the
+only occurrence).
+
+This is a reminder to visually re-check the lines immediately around an
+insertion when adding a helper function next to an existing decorated
+endpoint, not just confirm the diff "looks right" from the added lines
+alone.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

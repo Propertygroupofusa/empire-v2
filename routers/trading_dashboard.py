@@ -1439,7 +1439,6 @@ async def run_alpaca_exit_rule_comparison():
     return await alpaca_selection_backtest_module.run_exit_rule_sensitivity_comparison()
 
 
-@router.get("/alpaca-overview", dependencies=[Depends(require_admin_key)])
 def _safe_float(v):
     """Alpaca's real REST API returns numeric position fields as JSON
     strings (e.g. "150.25", not 150.25) - this converts them to real
@@ -1454,6 +1453,7 @@ def _safe_float(v):
         return None
 
 
+@router.get("/alpaca-overview", dependencies=[Depends(require_admin_key)])
 async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
     """Real Alpaca account snapshot for a focused, at-a-glance dashboard:
     equity, each bot_N bucket's capital/profit, every real open position,
