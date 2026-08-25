@@ -4118,7 +4118,49 @@ without a code change.
 
 ---
 
-## Known Limitations & TODOs
+## Confirmed: excluding a coin never stops its own branch from funding others, plus a real 100x display bug found and fixed
+
+The account owner asked directly, looking at POL-USD's branch sitting at
+96% toward its own next spawn tier with a real, breakeven-locked +1.28%
+open position: does excluding POL-USD (above) stop that branch from
+still reinforcing other weaker branches once it crosses its own tier?
+Verified directly in `_maybe_spawn_child()` rather than assumed: the
+seed deduction happens on `branch` (whichever branch just crossed ITS
+OWN `next_unlock_tier` - here, the POL branch), and gets deployed into
+`weakest` (picked by `_pick_weakest_branch_for_reinforcement()`, which
+only excludes a CANDIDATE TARGET currently sitting on an excluded coin -
+see "Real feedback loop found" above). Nothing in this path ever checks
+what coin the SOURCE branch itself holds. So yes - POL-USD being
+excluded only stops it from receiving NEW capital (new branches, more
+reinforcement); it has zero effect on POL's own branch continuing to
+fund other branches once it crosses its own tier, exactly as the account
+owner wanted. No code change was needed here - this was a real question
+that needed a real answer, not a guess.
+
+While comparing that branch's real numbers against two others on the
+same screenshot, a second real bug surfaced: the Sell Advice panel's
+"Real backtest" line showed **"5000.0% win rate, +632.2% ROI"** for
+POL-USD - impossible on its face (a win rate can't exceed 100%) - while
+`crypto_selection_backtest.html`'s own table showed the identical
+`CryptoBacktestRun` row correctly as 50.0% win rate, +6.3% ROI, for the
+same coin, same run. Root cause: `CryptoBacktestRun.win_rate` and
+`.roi_pct_of_spend` are stored as real percentage values already (e.g.
+`6.3` meaning 6.3%, matching how `crypto_selection_backtest.html`
+renders them directly with no scaling) - but `family_tree_dashboard.html`'s
+Sell Advice rendering (`renderBranchDetail`, the "Real backtest" line)
+multiplied both by 100 again, exactly reproducing the observed 100x
+inflation (50.0 * 100 = 5000.0; ~6.32 * 100 ≈ 632.2). Fixed by removing
+the stray `* 100` in both places (`family_tree_dashboard.html`) - this
+was the only place in the codebase with this specific bug; a grep for
+the same pattern elsewhere (`bot_race_dashboard.html`) turned up a
+different `win_rate` field from a genuinely different, correctly-scaled
+0-1 fraction source, confirmed unrelated and left untouched rather than
+"fixed" on a pattern match alone.
+
+This did not change any real trading number, balance, or decision - it
+only fixed what the Sell Advice panel DISPLAYED for a coin's historical
+backtest context, which is purely informational and never feeds into
+the live TARGET/STOP/GIVEBACK verdict itself.
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
 - **Video editing:** HeyGen only generates new videos; can't modify existing videos per user request

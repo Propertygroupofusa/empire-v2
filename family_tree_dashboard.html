@@ -757,9 +757,15 @@ function branchCardHtml(b) {
             let backtestHtml = '<div class="advice-backtest">No real backtest run recorded yet for this coin.</div>';
             const bt = p.historical_backtest;
             if (bt) {
-                const roiPct = (bt.roi_pct_of_spend * 100).toFixed(1);
+                // roi_pct_of_spend/win_rate are already stored as real
+                // percentage values (e.g. 6.3 meaning 6.3%, matching
+                // crypto_selection_backtest.html's own table for the same
+                // CryptoBacktestRun rows) - NOT fractions. A stray *100
+                // here previously showed nonsense like "5000.0% win rate,
+                // +632.2% ROI" for a real 50.0%/+6.3% result.
+                const roiPct = bt.roi_pct_of_spend.toFixed(1);
                 const roiClass = bt.roi_pct_of_spend >= 0 ? 'pos' : 'neg';
-                const winPct = (bt.win_rate * 100).toFixed(1);
+                const winPct = bt.win_rate.toFixed(1);
                 const runDate = bt.run_at ? new Date(bt.run_at).toLocaleDateString() : 'unknown date';
                 backtestHtml = `<div class="advice-backtest">Real backtest (${runDate}): ${bt.num_trades} trades, ${winPct}% win rate, <span class="${roiClass}">${bt.roi_pct_of_spend >= 0 ? '+' : ''}${roiPct}% ROI</span></div>`;
             }
