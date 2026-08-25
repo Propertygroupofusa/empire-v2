@@ -1476,6 +1476,25 @@ async def run_alpaca_exit_rule_comparison():
     return await alpaca_selection_backtest_module.run_exit_rule_sensitivity_comparison()
 
 
+@router.post("/alpaca-selection-backtest/momentum-comparison", dependencies=[Depends(require_admin_key)])
+async def run_alpaca_momentum_comparison():
+    """SHADOW-MODE ONLY - never touches live trading, places no order.
+    Per the account owner's real request: everything built so far is
+    mean-reversion (buy weakness, small quick profit) - this replays the
+    SAME real historical Alpaca bars under a genuinely different rule set:
+    buy STRENGTH (RSI above 55 and price above its own 20-bar average)
+    and exit via a trailing stop off the real peak price since entry
+    (not a small fixed target), letting a real winner run further. Runs
+    both the existing real mean-reversion replay and the new momentum
+    replay against the identical real bars, so the two are directly,
+    fairly comparable - real evidence before any real money is touched.
+    Returns totals for both strategies (summed across every symbol) plus
+    a per-symbol breakdown."""
+    if alpaca_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+    return await alpaca_selection_backtest_module.run_momentum_vs_mean_reversion_comparison()
+
+
 def _safe_float(v):
     """Alpaca's real REST API returns numeric position fields as JSON
     strings (e.g. "150.25", not 150.25) - this converts them to real

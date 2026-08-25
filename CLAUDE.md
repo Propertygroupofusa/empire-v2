@@ -3723,6 +3723,70 @@ click it left for later.
 
 ---
 
+## Momentum entry / trailing-stop exit comparison (shadow mode, additive only)
+
+The account owner noticed real live notifications (a coin up 5% in 3
+hours, a stock up 4% in a day) and asked directly why the bot wasn't
+capturing those - the honest answer was that everything built so far
+(crypto and Alpaca alike) is mean-reversion: it buys WEAKNESS (RSI
+oversold) and takes a small, quick profit. It was never going to react to
+something already rising, and structurally couldn't - an already-up move
+looks "overbought" to a mean-reversion system, which is closer to an exit
+signal than an entry one. The account owner asked for the real opposite
+idea to be built and backtested against real history before any money
+touched it: buy STRENGTH and ride it with a trailing stop.
+
+Added to `alpaca_selection_backtest.py`, same shadow-mode-only posture as
+every other comparison tool in this file (never touches live trading,
+never places a real order):
+
+- **`_replay_symbol_momentum()`** - a genuinely different rule set from
+  the existing mean-reversion replay, not a variant of it:
+  - **Entry**: RSI above `MOMENTUM_RSI_ENTRY` (55) AND price above its own
+    `MOMENTUM_SMA_PERIOD`-bar (20) moving average - both conditions
+    required, confirming real, sustained strength rather than one noisy
+    spike. The exact opposite signal direction from mean-reversion's
+    RSI-oversold entry.
+  - **Exit**: a real trailing stop measured off the PEAK price reached
+    since entry (`MOMENTUM_TRAIL_PCT`, 3%) - not a small fixed target off
+    entry. Lets a real winning move run for as long as it keeps making
+    new highs, only cutting it once it genuinely reverses from its own
+    high. `MOMENTUM_MAX_HOLD_BARS` (24 real hours) is a backstop only,
+    much longer than mean-reversion's tighter 2-hour default - a real
+    momentum trade is meant to be held longer, not exited quickly.
+- **`run_momentum_vs_mean_reversion_comparison()`** - fetches real Alpaca
+  history ONCE per symbol, then replays BOTH the existing real
+  mean-reversion strategy (`_replay_symbol()`, completely unchanged) and
+  the new momentum variant against the identical real bars, so the two
+  are directly, fairly comparable on the same real data.
+- New route `POST /api/trading-dashboard/alpaca-selection-backtest/momentum-comparison`
+  (admin-key gated) and a third button + comparison tables on
+  `alpaca_selection_backtest.html` ("▶ Run Momentum vs. Mean-Reversion
+  Comparison"), same pattern as the existing backtest/exit-rule buttons.
+
+Verified offline against a real, hand-computed price path (RSI
+monkeypatched to a fixed, stateless sequence, same technique already
+validated in the exit-rule-sensitivity test): a real climb from $100 to a
+$120 peak, then a pullback to exactly $116 (precisely the 3% trailing-stop
+line off that peak), is captured by the momentum exit at **+16%** - far
+beyond what mean-reversion's ~2-4% target could ever capture on the same
+move; confirms momentum entry genuinely requires BOTH real conditions
+(RSI-high alone, or price-above-SMA alone, each independently produce
+zero trades); and confirms the comparison pipeline correctly SUMS real
+P&L across every symbol for both strategies with the schema the dashboard
+JS expects.
+
+**Not yet run against real historical data** - same documented gap as
+every other backtest tool in this codebase (no live network access from
+this sandbox to Alpaca's market-data API). The account owner needs to
+open `/alpaca-selection-backtest-view` after the next redeploy and click
+the new comparison button themselves, then share the real results before
+any decision to actually build a live momentum strategy gets made - this
+tool only informs that decision, it doesn't change what the live bots do
+on its own.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

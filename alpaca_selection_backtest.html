@@ -91,6 +91,13 @@
     <button class="run-btn" id="exitRuleBtn" onclick="runExitRuleComparison()">▶ Run Exit-Rule Sensitivity Comparison (real data, ~30-60 seconds)</button>
     <div id="exitRuleStatus"></div>
     <div id="exitRuleResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>What if it bought strength instead of weakness?</strong> Everything above buys the dip (RSI oversold) and takes a small quick profit. This replays the exact same real historical bars under the opposite idea — buy a symbol already showing real momentum (RSI &gt; 55, price above its own 20-bar average) and ride it with a trailing stop off its peak instead of a small fixed target. Same real data, a genuinely different rule set, side by side.
+    </div>
+    <button class="run-btn" id="momentumBtn" onclick="runMomentumComparison()">▶ Run Momentum vs. Mean-Reversion Comparison (real data, ~30-60 seconds)</button>
+    <div id="momentumStatus"></div>
+    <div id="momentumResults"></div>
 </div>
 
 <script>
@@ -287,6 +294,79 @@ function renderExitRuleComparison(data) {
         <p style="margin-top:20px;font-weight:700;">Per-symbol breakdown:</p>
         <table>
             <thead><tr><th>Symbol</th>${scenarioNames.map(n => `<th>${n}</th>`).join('')}</tr></thead>
+            <tbody>${symbolRows}</tbody>
+        </table>
+    `;
+}
+
+async function runMomentumComparison() {
+    const btn = document.getElementById('momentumBtn');
+    const statusEl = document.getElementById('momentumStatus');
+    const resultsEl = document.getElementById('momentumResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (pulling real Alpaca history for 11 symbols)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-selection-backtest/momentum-comparison', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        renderMomentumComparison(data);
+        statusEl.textContent = `Tested ${data.symbols_tested} symbols over ${data.backtest_days} days, ${data.symbols_with_results} produced real bars - same real history replayed under each strategy.`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Momentum vs. Mean-Reversion Comparison (real data, ~30-60 seconds)';
+    }
+}
+
+function renderMomentumComparison(data) {
+    const resultsEl = document.getElementById('momentumResults');
+    const t = data.totals;
+    if (!t) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No usable results.</p>';
+        return;
+    }
+
+    const mrClass = t.mean_reversion.total_pnl >= 0 ? 'pos' : 'neg';
+    const momClass = t.momentum.total_pnl >= 0 ? 'pos' : 'neg';
+
+    const symbolRows = (data.symbol_breakdown || []).map(row => {
+        const mr = row.mean_reversion, mom = row.momentum;
+        const mrC = mr.total_pnl >= 0 ? 'pos' : 'neg';
+        const momC = mom.total_pnl >= 0 ? 'pos' : 'neg';
+        return `<tr>
+            <td>${row.product_id}</td>
+            <td class="${mrC}">${fmtUsd(mr.total_pnl)} <span style="color:var(--text-dim);font-weight:400;">(${mr.num_trades}tr, ${mr.win_rate.toFixed(0)}%)</span></td>
+            <td class="${momC}">${fmtUsd(mom.total_pnl)} <span style="color:var(--text-dim);font-weight:400;">(${mom.num_trades}tr, ${mom.win_rate.toFixed(0)}%)</span></td>
+        </tr>`;
+    }).join('');
+
+    resultsEl.innerHTML = `
+        <p style="margin-top:16px;font-weight:700;">Totals across all symbols (the real answer to "which one made more money"):</p>
+        <table>
+            <thead><tr><th>Strategy</th><th>Trades</th><th>Win rate</th><th>Total P&amp;L</th></tr></thead>
+            <tbody>
+                <tr><td>Mean-reversion (current live rule)</td><td>${t.mean_reversion.num_trades}</td><td>${t.mean_reversion.win_rate.toFixed(1)}%</td><td class="${mrClass}">${fmtUsd(t.mean_reversion.total_pnl)}</td></tr>
+                <tr><td>Momentum (buy strength, trailing stop)</td><td>${t.momentum.num_trades}</td><td>${t.momentum.win_rate.toFixed(1)}%</td><td class="${momClass}">${fmtUsd(t.momentum.total_pnl)}</td></tr>
+            </tbody>
+        </table>
+        <p style="margin-top:20px;font-weight:700;">Per-symbol breakdown:</p>
+        <table>
+            <thead><tr><th>Symbol</th><th>Mean-reversion</th><th>Momentum</th></tr></thead>
             <tbody>${symbolRows}</tbody>
         </table>
     `;
