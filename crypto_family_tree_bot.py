@@ -195,6 +195,12 @@ COIN_LOCK_KEY_PREFIX = "crypto_family_tree_coin_locked_"
 PROFIT_SKIM_PCT = engine._safe_float_env("TREE_PROFIT_SKIM_PCT", "0.10")
 LOCKED_PROFIT_STATE_KEY = "crypto_family_tree_locked_usd"
 
+# Per the account owner's explicit request: every OTHER real spawn should
+# reinforce whichever EXISTING branch is currently weakest (lowest % toward
+# its own next spawn tier) with a real $50 buy, instead of always starting a
+# brand-new branch - "help it build it back up." See _next_spawn_is_reinforcement().
+SPAWN_ALTERNATION_STATE_KEY = "crypto_family_tree_spawn_alternation"
+
 # Real spendable cash (real_balance - locked_usd) below MIN_TRADE_USD just
 # sits there forever on its own - no branch can ever spend less than
 # MIN_TRADE_USD on a buy, so it isn't profit and run_branch_cycle's
@@ -1806,6 +1812,126 @@ async def adopt_orphaned_positions(session):
         )
 
 
+async def _next_spawn_is_reinforcement() -> bool:
+    """Real, persisted alternation counter (survives restarts, stored the
+    same generic per-key TradingBotState bucket locked_usd/equity floors
+    already use) - per the account owner's explicit request: every OTHER
+    real spawn should reinforce whichever EXISTING branch is currently
+    weakest instead of starting a brand-new branch. Returns True on every
+    2nd real spawn (count 2, 4, 6, ...), False otherwise. A rare race
+    between two branches' threads incrementing this at nearly the same
+    real moment could occasionally skip or repeat a parity - this is a
+    soft allocation preference, not a financial safety invariant, so
+    that's an acceptable tradeoff rather than adding real cross-thread
+    locking just for this."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == SPAWN_ALTERNATION_STATE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            db.add(TradingBotState(bot_name=SPAWN_ALTERNATION_STATE_KEY, base_capital=1.0, starting_capital=0.0))
+            try:
+                await db.commit()
+                return False  # count starts at 1 -> first real spawn is normal
+            except IntegrityError:
+                await db.rollback()
+                async with AsyncSessionLocal() as db2:
+                    result2 = await db2.execute(select(TradingBotState).where(TradingBotState.bot_name == SPAWN_ALTERNATION_STATE_KEY))
+                    row2 = result2.scalar_one_or_none()
+                    if row2 is None:
+                        return False
+                    row2.base_capital += 1
+                    new_count = row2.base_capital
+                    await db2.commit()
+                    return int(new_count) % 2 == 0
+        row.base_capital += 1
+        new_count = row.base_capital
+        await db.commit()
+    return int(new_count) % 2 == 0
+
+
+async def _pick_weakest_branch_for_reinforcement(exclude_bot_name: str):
+    """Picks the branch with the lowest real progress toward its own next
+    spawn tier (allocated_usd / next_unlock_tier) - the exact same real
+    percentage shown on the dashboard's "Next spawn" bars. Excludes the
+    branch that's doing the spawning itself - it just crossed its OWN tier
+    and is about to have that tier raised, so it would often (wrongly)
+    look "weakest" right at this moment and end up reinforcing itself,
+    which is pointless (functionally the same as not spawning at all).
+    Returns the CryptoTreeBranch row, or None if there's no other branch
+    yet to reinforce (e.g. the very first spawn in a fresh tree)."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoTreeBranch))
+        branches = result.scalars().all()
+    candidates = [
+        b for b in branches
+        if b.bot_name != exclude_bot_name and b.next_unlock_tier and b.next_unlock_tier > 0
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda b: b.allocated_usd / b.next_unlock_tier)
+
+
+async def _deploy_seed_into_weakest_branch(session, target_bot_name: str, usd_amount: float) -> bool:
+    """Places a real market buy for usd_amount into target_bot_name's
+    current coin and blends it into its existing position (or opens a
+    fresh one if flat) - the same real quantity-weighted blended-entry and
+    target/stop recompute logic the dashboard's "Add cash to {coin}"
+    button already uses (add_cash_to_branch in routers/trading_dashboard.py),
+    reimplemented here so the automatic every-other-spawn reinforcement
+    path can call it without a FastAPI/HTTPException dependency. Returns
+    True on a real successful deploy; False (order didn't fill, or price
+    data unavailable) leaves it to the caller to not lose the seed money."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == target_bot_name))
+        target_branch = result.scalar_one_or_none()
+    if target_branch is None:
+        return False
+
+    price, atr_pct = await engine.get_price_and_volatility(session, target_branch.product_id)
+    if price is None or atr_pct is None:
+        log.warning(f"[TREE] reinforcement: could not fetch a live price for {target_branch.product_id} - skipping this turn")
+        return False
+
+    fill = await engine.place_market_buy(session, usd_amount, target_branch.product_id)
+    if not fill:
+        stuck_reason = engine._last_order_error.get(target_branch.product_id, "unknown reason")
+        log.warning(f"[TREE] reinforcement: real buy into {target_bot_name} ({target_branch.product_id}) did not fill: {stuck_reason}")
+        return False
+    filled_qty, filled_price = fill
+
+    existing_position = await _load_branch_position(target_bot_name)
+    if existing_position is not None:
+        new_qty = existing_position.qty + filled_qty
+        blended_entry = (
+            existing_position.qty * existing_position.entry_price + filled_qty * filled_price
+        ) / new_qty
+    else:
+        new_qty = filled_qty
+        blended_entry = filled_price
+
+    position_dollar_size = new_qty * blended_entry
+    target_pct = max(engine.pick_target_pct(atr_pct), engine.min_profit_target_pct(position_dollar_size, atr_pct))
+    target_price = blended_entry * (1 + target_pct)
+    stop_price = blended_entry * (1 - STOP_LOSS_PCT)
+    await _save_branch_position(target_bot_name, target_branch.product_id, blended_entry, new_qty, target_price, stop_price)
+
+    new_balance = None
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == target_bot_name))
+        fresh = result.scalar_one_or_none()
+        if fresh:
+            fresh.allocated_usd += usd_amount
+            new_balance = fresh.allocated_usd
+            await db.commit()
+
+    log.info(
+        f"[TREE] 💪 reinforcement: bought {filled_qty:.8f} {target_branch.product_id} @ ${filled_price:,.2f} into "
+        f"{target_bot_name} (was weakest at spawn time) - blended entry now ${blended_entry:,.2f}"
+        + (f", branch total now ${new_balance:.2f}" if new_balance is not None else "")
+    )
+    return True
+
+
 async def _maybe_spawn_child(branch):
     """Called right after a branch's allocated_usd is updated (always right
     after a real sell, when the number is freshly accurate). If it just
@@ -1846,6 +1972,58 @@ async def _maybe_spawn_child(branch):
                     f"[TREE] 🪜 {branch.bot_name} floor self-healed ${old_floor:,.2f} -> ${new_tier_floor:,.2f} "
                     f"(real balance ${branch.allocated_usd:.2f} was below it, likely from a real spawn deduction) - can spawn again now"
                 )
+
+    # Per the account owner's explicit request: every OTHER real spawn
+    # reinforces whichever EXISTING branch is currently weakest (lowest %
+    # toward its own next spawn tier) with a real buy, instead of starting
+    # a brand-new branch - "help it build it back up." See
+    # _next_spawn_is_reinforcement()/_pick_weakest_branch_for_reinforcement().
+    if await _next_spawn_is_reinforcement():
+        weakest = await _pick_weakest_branch_for_reinforcement(exclude_bot_name=branch.bot_name)
+        if weakest is not None:
+            own_increment = ROOT_UNLOCK_TIER_USD if branch.bot_name == ROOT_BOT_NAME else UNLOCK_TIER_USD
+            milestone = branch.next_unlock_tier
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == branch.bot_name))
+                fresh = result.scalar_one_or_none()
+                if not fresh or fresh.allocated_usd < fresh.next_unlock_tier:
+                    return
+                fresh.allocated_usd -= SEED_USD
+                fresh.next_unlock_tier += own_increment
+                await db.commit()
+                remaining = fresh.allocated_usd
+
+            weakest_pct_before = (weakest.allocated_usd / weakest.next_unlock_tier) * 100
+            async with engine.aiohttp.ClientSession() as session:
+                deployed = await _deploy_seed_into_weakest_branch(session, weakest.bot_name, SEED_USD)
+
+            if deployed:
+                log.info(
+                    f"[TREE] 🌱💪 {branch.bot_name} crossed ${milestone:,.0f} - every-other-spawn reinforcement turn, "
+                    f"so instead of a new branch its ${SEED_USD:.2f} seed went into {weakest.bot_name} "
+                    f"(weakest at {weakest_pct_before:.0f}% toward its own next tier) | {branch.bot_name} continues with ${remaining:.2f}"
+                )
+            else:
+                # Real buy failed (order rejection, price fetch failure) -
+                # the seed was already deducted from the parent above, so
+                # give it back rather than silently losing real allocated
+                # dollars into nothing.
+                async with AsyncSessionLocal() as db:
+                    result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == branch.bot_name))
+                    fresh2 = result.scalar_one_or_none()
+                    if fresh2:
+                        fresh2.allocated_usd += SEED_USD
+                        fresh2.next_unlock_tier -= own_increment
+                        await db.commit()
+                log.warning(
+                    f"[TREE] {branch.bot_name}: reinforcement deploy into {weakest.bot_name} failed - "
+                    f"refunded the ${SEED_USD:.2f} seed, will retry next cycle"
+                )
+            return
+        # No other branch exists yet to reinforce (e.g. the very first
+        # spawn in a fresh tree) - fall through to the normal new-branch
+        # path below instead of silently skipping this spawn opportunity.
+
     next_product = await get_next_eligible_product_id()
     if next_product is None:
         log.info(f"[TREE] {branch.bot_name} crossed ${branch.next_unlock_tier:,.0f} but every coin is excluded or cooling down - no child to spawn yet")

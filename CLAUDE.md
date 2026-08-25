@@ -2791,6 +2791,71 @@ change in this file.
 
 ---
 
+## Every-other real spawn now reinforces the weakest branch instead of always starting a new one
+
+Per the account owner's explicit request, after looking at the real
+"Branch Ranking by Allocated Balance" list and seeing a wide spread
+between BTC at 74% toward its next tier and several POL branches sitting
+at 18-46%: "I want the next spawn to spawn into the coin that is weaker
+to help it build it back up... do that with every other spawn." Clarified
+via two direct questions before building: (1) alternate every OTHER real
+spawn, not every spawn; (2) "weaker" ranked by lowest real percentage
+toward the branch's own next spawn tier (`allocated_usd / next_unlock_tier`
+- the exact number already shown on the dashboard's "Next spawn" bars),
+not raw dollar balance.
+
+- **`_next_spawn_is_reinforcement()`** - a real, persisted counter
+  (`SPAWN_ALTERNATION_STATE_KEY`, same generic `TradingBotState` bucket
+  `locked_usd`/equity floors already use) that survives restarts. Every
+  2nd real spawn (count 2, 4, 6, ...) is a reinforcement turn; odd counts
+  are normal. A rare cross-thread race incrementing this could
+  occasionally skip/repeat a parity - accepted as a soft allocation
+  preference, not a financial safety invariant worth real locking for.
+- **`_pick_weakest_branch_for_reinforcement()`** - picks the branch with
+  the lowest `allocated_usd / next_unlock_tier` ratio, explicitly
+  excluding the branch that's doing the spawning itself (it just crossed
+  its OWN tier and is about to have that tier raised, so it would often
+  wrongly look "weakest" right at this moment and end up reinforcing
+  itself - pointless, functionally identical to not spawning at all).
+- **`_deploy_seed_into_weakest_branch()`** - places a real market buy for
+  the $50 seed into the weakest branch's current coin and blends it into
+  its existing position (or opens a fresh one if flat) - the same real
+  quantity-weighted blended-entry and target/stop recompute logic the
+  dashboard's "Add cash to {coin}" button already uses, reimplemented
+  here (not shared code - `add_cash_to_branch` lives in
+  `routers/trading_dashboard.py` behind a FastAPI dependency, and this
+  path needed to work standalone from the bot module without touching
+  already-tested, deployed endpoint code).
+- Wired into **`_maybe_spawn_child()`**, right after the existing
+  floor-self-heal block and before the normal coin-search: on a
+  reinforcement turn, the spawning branch's $50 seed deduction and
+  `next_unlock_tier` increment happen exactly as a normal spawn's do, but
+  instead of inserting a new `CryptoTreeBranch` row, the $50 gets a real
+  buy into the weakest existing branch. A failed real buy (rejected
+  order, missing price data) refunds the $50 and rolls back the tier
+  increment on the parent - no real dollars silently deducted with
+  nothing to show for it. A reinforcement turn with no OTHER branch yet
+  to reinforce (e.g. the very first spawn in a fresh tree) falls through
+  to a normal new-branch spawn instead of silently skipping the
+  opportunity. The manual "Start new $50 branch" / "Trade this" endpoints
+  are completely untouched - this only changes the automatic,
+  tier-crossing spawn path.
+
+Verified offline against a real throwaway SQLite DB (not mocked ORM
+calls): spawn #1 is normal (new branch created); spawn #2 correctly
+skips creating a branch and reinforces the real weakest candidate
+(verified by seeding a real 36%-weak branch alongside a real 90%-strong
+one and confirming the buy went to the weak one); the reinforced
+branch's real `allocated_usd` and `BotPosition` (blended entry, qty)
+update correctly; spawn #3 alternates back to normal; a failed real buy
+during a reinforcement turn correctly refunds the seed and rolls back
+the tier increment; and a reinforcement turn with no other branch to
+reinforce falls through to a normal spawn. Full existing regression
+suite re-run clean alongside it, including confirming the manual
+spawn/add-cash endpoints are unaffected.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
