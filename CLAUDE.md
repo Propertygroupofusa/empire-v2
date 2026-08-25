@@ -3976,6 +3976,55 @@ noticeably less frequent than before, which is expected, not a bug).
 
 ---
 
+## POL-USD added to MANUAL_EXCLUDED_COINS after real, conclusive evidence
+
+The reinforcement-loophole fix (see "Real feedback loop found via the
+first real status-snapshot read" above) stopped the tree from actively
+pouring MORE capital into POL-USD, but deliberately left the coin itself
+tradable and every existing POL branch untouched - the account owner's
+own choice at the time, pending more evidence. That evidence arrived:
+the live Coin Trade History table now shows POL-USD at **79 real
+trades, a 14% win rate, and -$337.96 total P&L** - not just the worst
+coin in the tree, but worse than every other coin's total loss added
+together. The account owner asked directly why POL had so many more
+trades than everything else and whether there was a way to reverse the
+loss.
+
+Answered honestly rather than searching for a magic setting: the trade
+count is high because POL-USD ended up with far more branches sharing
+it than any other coin (a direct, still-visible consequence of the
+earlier top-15-rotation spawn storm - see above), and more branches on
+one coin means more independent buy/sell cycles counted against that
+coin, not better odds of winning. There is no config flip that reverses
+P&L on trades that have already closed - the $337.96 is real and
+realized, not recoverable by changing a rule going forward.
+
+What IS real and actionable: added `POL-USD` to `MANUAL_EXCLUDED_COINS`
+in `crypto_family_tree_bot.py` (now 7 coins:
+`STX-USD, BLUR-USD, UNI-USD, DOT-USD, PEPE-USD, WIF-USD, POL-USD`). Same
+contestable/self-healing rule as every other coin in this set - it
+becomes tradable again the instant a real backtest run shows it
+genuinely positive, same "zero runs = stays excluded" default the others
+already use. This stops any NEW branch from spawning into POL-USD, being
+reinforced with it, or switching into it after an exit - it does NOT
+force-sell the branches currently holding it (same "never force-sold on
+exclusion" behavior every other coin in this set already has); those
+keep trading under their own real stop/target/breakeven protection and
+simply won't be offered POL-USD again once they exit. Actually closing
+the existing POL positions early, or consolidating the many branches
+still sharing it (the existing `consolidate_branches_by_coin()`
+dry-run/execute tool), are both real decisions the account owner can
+still make from the dashboard - this fix only stops the exposure from
+growing further.
+
+Verified via the existing exclusion-set tests
+(`test_pepe_wif_exclusion.py`, updated in place to expect 7 coins
+instead of 6, same pattern as when PEPE/WIF were added) - confirms
+POL-USD is now in the set and is correctly excluded with zero backtest
+runs on record, same default every other manually-excluded coin uses.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

@@ -320,7 +320,27 @@ COIN_FAMILY_TREE = [
 # "excluded" instead of "included" by default. This set itself never
 # shrinks or grows on its own though - only another explicit decision
 # adds or removes a coin from the starting list.
-MANUAL_EXCLUDED_COINS = {"STX-USD", "BLUR-USD", "UNI-USD", "DOT-USD", "PEPE-USD", "WIF-USD"}
+#
+# POL-USD added per the account owner's explicit real-money decision
+# after the reinforcement-loophole fix (see "Real feedback loop found"
+# above) had already stopped the bleeding from getting WORSE but left
+# existing exposure untouched. The account owner then watched the real
+# per-coin trade history keep showing POL-USD as, by far, the tree's
+# worst performer: 79 real trades, a 14% win rate, -$337.96 total P&L -
+# more negative than every other coin's total loss combined, and the
+# direct real consequence of POL having accumulated far more branches
+# than any other coin during the earlier top-15-rotation spawn storm
+# (more branches sharing one coin means more independent buy/sell
+# cycles counted against that coin, not better odds). Adding it here
+# stops any NEW branch from spawning into it, being reinforced with it,
+# or switching into it after an exit - it does NOT force-sell any
+# branch currently holding it (see the "never force-sold" note below);
+# those keep running under their own real stop/target/breakeven
+# protection and simply won't be offered POL-USD again once they exit.
+# Same contestable/self-healing rule as every other coin here - it
+# becomes tradable again the instant a real backtest run shows it
+# genuinely positive.
+MANUAL_EXCLUDED_COINS = {"STX-USD", "BLUR-USD", "UNI-USD", "DOT-USD", "PEPE-USD", "WIF-USD", "POL-USD"}
 
 # Per the account owner's explicit choice: the coordinator (see run()'s
 # _scan()) now re-runs the real backtest on its own every
