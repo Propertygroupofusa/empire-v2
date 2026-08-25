@@ -3322,6 +3322,76 @@ re-run clean alongside it.
 
 ---
 
+## Alpaca exit-rule sensitivity comparison - checking whether the tight peak-giveback cap is why 4 months of real trading only made ~$29-50
+
+The account owner raised a real, pointed concern: $980 deposited into the
+Alpaca account roughly 4 months ago, and real profit sitting at only
+~$29-50 since - "I'm almost not convinced any of this works." That's a
+fair read of the real numbers (roughly 3-5% total, not annualized, for a
+system carrying real market risk and constant engineering attention).
+
+Checked why, directly in the code: `alpaca_mean_reversion.py`'s
+`should_exit_position()` force-closes any position that has EVER shown a
+real profit the moment it gives back `max_giveback_pct` (0.5% today) from
+its best point - independent of whether the real 2% profit target has
+been reached. The real profit target exists, but a position rarely gets
+there, because a 0.5% wobble on the way up force-exits it first. This is
+a deliberate design (it's what stops a winner from round-tripping into a
+loss), but it also means the strategy is structurally close to incapable
+of capturing a real 2%+ move - it's built to bank tiny wins repeatedly,
+not let anything run.
+
+Rather than just recommend loosening it on a guess, built a real,
+additive comparison tool (same shadow-mode-only posture as every other
+backtest tool in this codebase - never touches live trading, places no
+order) so the account owner can decide with real evidence:
+
+- `_replay_symbol()` in `alpaca_selection_backtest.py` gained two optional
+  params, `giveback_pct`/`profit_target_pct`, defaulting to the module's
+  own real live constants (`MAX_GIVEBACK_PCT`/`MIN_PROFIT_TARGET_PCT`) -
+  the existing `run_full_backtest()` call site passes neither, so it's
+  completely unaffected by this change.
+- `run_exit_rule_sensitivity_comparison()` (new): fetches real Alpaca
+  history ONCE per symbol (not once per scenario - the same real bars
+  replayed multiple times, not re-fetched), then replays 3 real
+  scenarios against it via the bot's own real `should_exit_position()` -
+  `EXIT_RULE_SCENARIOS`: current (0.5% giveback / 2% target, today's real
+  live rule), moderate (1.5% / 3%), loose (2.5% / 4%). Returns both a
+  per-scenario TOTAL (summed across every real symbol - the direct
+  answer to "would this have made more real money over the last 30
+  days") and a per-symbol breakdown.
+- New route `POST /api/trading-dashboard/alpaca-selection-backtest/exit-rule-comparison`
+  (admin-key gated, same pattern as every other backtest route) and a
+  new "▶ Run Exit-Rule Sensitivity Comparison" button + two tables
+  (scenario totals, then per-symbol breakdown) on
+  `alpaca_selection_backtest.html`, right under the existing backtest
+  button.
+
+Verified offline against a real, hand-computed price path (RSI
+monkeypatched to a fixed, stateless sequence - 20 on the entry bar, 50 on
+every bar after, so the RSI-entry/RSI-exit logic never introduces
+unpredictable noise into a test whose whole point is isolating the
+giveback/target math): confirms the unchanged call site produces
+byte-for-byte identical output to before this change; confirms a real,
+hand-verified climb-with-a-pullback price path exits the tight scenario
+early on the pullback (+0.9%) while the moderate and loose scenarios ride
+through it to their own further, real, larger targets (+3.2% and +4.5%
+respectively) - proving this is a real, demonstrable effect in the actual
+live exit function, not a coincidence; and confirms the comparison's
+totals correctly SUM real P&L across every symbol and match the schema
+the dashboard JS expects.
+
+**Not yet run against real historical data** - same documented gap as
+every other backtest tool in this codebase (no live network access from
+this sandbox to Alpaca's market-data API). The account owner needs to
+open `/alpaca-selection-backtest-view` after the next redeploy and click
+the new comparison button themselves, then share the real results before
+any decision to actually loosen the live `MAX_GIVEBACK_PCT`/
+`MIN_PROFIT_TARGET_PCT` constants gets made - this tool only informs that
+decision, it doesn't make it or change live behavior on its own.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

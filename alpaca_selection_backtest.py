@@ -73,7 +73,10 @@ def _compute_rsi(closes: list, period: int = 14):
     return 100 - (100 / (1 + rs))
 
 
-def _replay_symbol(closes: list, spend_per_trade: float = SPEND_PER_TRADE, symbol: str = None) -> list:
+def _replay_symbol(
+    closes: list, spend_per_trade: float = SPEND_PER_TRADE, symbol: str = None,
+    giveback_pct: float = MAX_GIVEBACK_PCT, profit_target_pct: float = MIN_PROFIT_TARGET_PCT,
+) -> list:
     """Long-only replay: enters when 14-period RSI < RSI_LONG_THRESHOLD
     (mirrors validate_dual_direction's long branch), then exits via the
     bot's real should_exit_position() rules - same function the live bot
@@ -87,7 +90,14 @@ def _replay_symbol(closes: list, spend_per_trade: float = SPEND_PER_TRADE, symbo
     (SHORT)" instead of the real ticker (e.g. "SPY"), indistinguishable
     from a genuine live-position log line at a glance. Doesn't change the
     returned should_exit/new_peak values at all - purely a diagnostic
-    label."""
+    label.
+
+    `giveback_pct`/`profit_target_pct` default to the module's own real
+    live constants (MAX_GIVEBACK_PCT/MIN_PROFIT_TARGET_PCT), so every
+    existing caller (run_full_backtest) is completely unaffected - these
+    only let run_exit_rule_sensitivity_comparison() below replay the
+    exact same real history under a looser exit rule, to see whether it
+    would have actually made more money."""
     trades = []
     position = None  # {"entry": float, "peak_pnl_pct": float, "entry_idx": int}
 
@@ -107,10 +117,10 @@ def _replay_symbol(closes: list, spend_per_trade: float = SPEND_PER_TRADE, symbo
         should_exit, _reason, _exit_type, new_peak = should_exit_position(
             symbol=symbol, entry_price=position["entry"], current_price=price,
             current_rsi=rsi, position_age_seconds=age_seconds, direction="long",
-            stop_loss_pct=STOP_LOSS_PCT, min_profit_target_pct=MIN_PROFIT_TARGET_PCT,
+            stop_loss_pct=STOP_LOSS_PCT, min_profit_target_pct=profit_target_pct,
             rsi_profit_threshold_long=RSI_PROFIT_THRESHOLD_LONG,
             peak_pnl_pct=position["peak_pnl_pct"],
-            breakeven_trigger_pct=BREAKEVEN_TRIGGER_PCT, max_giveback_pct=MAX_GIVEBACK_PCT,
+            breakeven_trigger_pct=BREAKEVEN_TRIGGER_PCT, max_giveback_pct=giveback_pct,
         )
         position["peak_pnl_pct"] = new_peak
         if should_exit:
@@ -180,4 +190,94 @@ async def run_full_backtest(contract_codes=None, days: int = BACKTEST_DAYS, max_
         "coins_with_results": len(results),
         "skipped": skipped,
         "ranked": results,
+    }
+
+
+# ============================================================================
+# EXIT-RULE SENSITIVITY COMPARISON (shadow mode, additive only)
+# ============================================================================
+# Real account owner question after 4 months of live Alpaca trading: $980
+# in, only ~$29-50 of real profit - is the tight peak-giveback cap (0.5%)
+# the reason winners never get room to run toward the real 2% target? This
+# replays the SAME real historical bars every symbol already gets in
+# run_full_backtest() above, under multiple exit-rule scenarios side by
+# side, using the bot's own real should_exit_position() for every scenario
+# - never a reimplementation, never touches live trading or places an
+# order. Deliberately NOT wired into anything live; purely a decision-
+# support comparison, same shadow-mode-only posture as every other
+# comparison tool in this codebase (BTC-relative-strength, higher-tf-trend
+# on the crypto side).
+EXIT_RULE_SCENARIOS = {
+    "current (0.5% giveback / 2% target)": {"giveback_pct": MAX_GIVEBACK_PCT, "profit_target_pct": MIN_PROFIT_TARGET_PCT},
+    "moderate (1.5% giveback / 3% target)": {"giveback_pct": 0.015, "profit_target_pct": 0.03},
+    "loose (2.5% giveback / 4% target)": {"giveback_pct": 0.025, "profit_target_pct": 0.04},
+}
+
+
+async def run_exit_rule_sensitivity_comparison(contract_codes=None, days: int = BACKTEST_DAYS, max_concurrent: int = 6) -> dict:
+    """Fetches real Alpaca history ONCE per symbol (not once per scenario -
+    same real bars replayed multiple times), then replays every scenario in
+    EXIT_RULE_SCENARIOS against it via the bot's real should_exit_position().
+    Returns both a per-scenario TOTAL (summed across every symbol - the
+    direct answer to "would loosening this have made more real money over
+    the last 30 days") and a per-symbol breakdown per scenario."""
+    codes = contract_codes or list(FUTURES.keys())
+    tickers = [(code, FUTURES[code]["symbol"]) for code in codes]
+    seen = set()
+    unique_tickers = []
+    for _code, ticker in tickers:
+        if ticker not in seen:
+            seen.add(ticker)
+            unique_tickers.append(ticker)
+
+    semaphore = asyncio.Semaphore(max_concurrent)
+    per_symbol = {}
+    skipped = []
+
+    async with aiohttp.ClientSession() as session:
+        async def _one(ticker):
+            async with semaphore:
+                closes, err = await _fetch_bars(session, ticker, days)
+                if closes is None:
+                    skipped.append({"product_id": ticker, "reason": err})
+                    return
+                per_symbol[ticker] = closes
+
+        await asyncio.gather(*[_one(t) for t in unique_tickers])
+
+    scenario_totals = {name: {"total_pnl": 0.0, "num_trades": 0, "num_wins": 0} for name in EXIT_RULE_SCENARIOS}
+    symbol_breakdown = []
+
+    for ticker, closes in per_symbol.items():
+        row = {"product_id": ticker, "scenarios": {}}
+        for name, params in EXIT_RULE_SCENARIOS.items():
+            trades = _replay_symbol(
+                closes, symbol=ticker,
+                giveback_pct=params["giveback_pct"], profit_target_pct=params["profit_target_pct"],
+            )
+            wins = [t for t in trades if t["pnl_usd"] > 0]
+            total_pnl = sum(t["pnl_usd"] for t in trades)
+            row["scenarios"][name] = {
+                "num_trades": len(trades),
+                "win_rate": round(len(wins) / len(trades) * 100, 1) if trades else 0.0,
+                "total_pnl": round(total_pnl, 2),
+                "roi_pct_of_spend": round(total_pnl / SPEND_PER_TRADE * 100, 1) if trades else 0.0,
+            }
+            scenario_totals[name]["total_pnl"] += total_pnl
+            scenario_totals[name]["num_trades"] += len(trades)
+            scenario_totals[name]["num_wins"] += len(wins)
+        symbol_breakdown.append(row)
+
+    for name, totals in scenario_totals.items():
+        totals["total_pnl"] = round(totals["total_pnl"], 2)
+        totals["win_rate"] = round(totals["num_wins"] / totals["num_trades"] * 100, 1) if totals["num_trades"] else 0.0
+
+    return {
+        "backtest_days": days,
+        "spend_per_trade": SPEND_PER_TRADE,
+        "symbols_tested": len(unique_tickers),
+        "symbols_with_results": len(per_symbol),
+        "skipped": skipped,
+        "scenario_totals": scenario_totals,
+        "symbol_breakdown": symbol_breakdown,
     }

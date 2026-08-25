@@ -84,6 +84,13 @@
     <div id="status"></div>
 
     <div id="results"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>Would looser exit rules have made more real money?</strong> The live bot force-closes any position that's ever shown a profit the moment it gives back 0.5% from its best point - tight profit protection, but it may also be why gains stay small even when a trade is genuinely trending. This replays the exact same real historical bars above under 3 exit-rule scenarios side by side (using the bot's own real should_exit_position() for each), so you can see the real trade-off instead of guessing.
+    </div>
+    <button class="run-btn" id="exitRuleBtn" onclick="runExitRuleComparison()">▶ Run Exit-Rule Sensitivity Comparison (real data, ~30-60 seconds)</button>
+    <div id="exitRuleStatus"></div>
+    <div id="exitRuleResults"></div>
 </div>
 
 <script>
@@ -207,6 +214,82 @@ async function loadEligibility() {
     } catch (e) {
         document.querySelectorAll('.elig-cell').forEach(c => { c.textContent = 'Could not check'; });
     }
+}
+
+async function runExitRuleComparison() {
+    const btn = document.getElementById('exitRuleBtn');
+    const statusEl = document.getElementById('exitRuleStatus');
+    const resultsEl = document.getElementById('exitRuleResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (pulling real Alpaca history for 11 symbols)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-selection-backtest/exit-rule-comparison', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        renderExitRuleComparison(data);
+        statusEl.textContent = `Tested ${data.symbols_tested} symbols over ${data.backtest_days} days, ${data.symbols_with_results} produced real trades, $${data.spend_per_trade} redeployed per trade - same real history replayed under each scenario.`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Exit-Rule Sensitivity Comparison (real data, ~30-60 seconds)';
+    }
+}
+
+function renderExitRuleComparison(data) {
+    const resultsEl = document.getElementById('exitRuleResults');
+    const scenarioNames = Object.keys(data.scenario_totals || {});
+    if (scenarioNames.length === 0) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No usable results.</p>';
+        return;
+    }
+
+    const totalsRows = scenarioNames.map(name => {
+        const t = data.scenario_totals[name];
+        const pnlClass = t.total_pnl >= 0 ? 'pos' : 'neg';
+        return `<tr>
+            <td>${name}</td>
+            <td>${t.num_trades}</td>
+            <td>${t.win_rate.toFixed(1)}%</td>
+            <td class="${pnlClass}">${fmtUsd(t.total_pnl)}</td>
+        </tr>`;
+    }).join('');
+
+    const symbolRows = (data.symbol_breakdown || []).map(row => {
+        const cells = scenarioNames.map(name => {
+            const s = row.scenarios[name];
+            const pnlClass = s.total_pnl >= 0 ? 'pos' : 'neg';
+            return `<td class="${pnlClass}">${fmtUsd(s.total_pnl)} <span style="color:var(--text-dim);font-weight:400;">(${s.num_trades}tr, ${s.win_rate.toFixed(0)}%)</span></td>`;
+        }).join('');
+        return `<tr><td>${row.product_id}</td>${cells}</tr>`;
+    }).join('');
+
+    resultsEl.innerHTML = `
+        <p style="margin-top:16px;font-weight:700;">Totals across all symbols (this is the real answer to "would this have made more money"):</p>
+        <table>
+            <thead><tr><th>Scenario</th><th>Trades</th><th>Win rate</th><th>Total P&amp;L</th></tr></thead>
+            <tbody>${totalsRows}</tbody>
+        </table>
+        <p style="margin-top:20px;font-weight:700;">Per-symbol breakdown:</p>
+        <table>
+            <thead><tr><th>Symbol</th>${scenarioNames.map(n => `<th>${n}</th>`).join('')}</tr></thead>
+            <tbody>${symbolRows}</tbody>
+        </table>
+    `;
 }
 
 async function tradeThisStock(ticker, btn) {

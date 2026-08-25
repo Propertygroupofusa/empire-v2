@@ -1399,6 +1399,22 @@ async def run_alpaca_selection_backtest():
     return await alpaca_selection_backtest_module.run_full_backtest()
 
 
+@router.post("/alpaca-selection-backtest/exit-rule-comparison", dependencies=[Depends(require_admin_key)])
+async def run_alpaca_exit_rule_comparison():
+    """SHADOW-MODE ONLY - never touches live trading, places no order.
+    Per the account owner's real question after ~4 months of live Alpaca
+    trading (real deposit $980, real profit only ~$29-50): is the tight
+    0.5% peak-giveback cap the reason winners never reach the real 2%
+    target? Replays the SAME real historical Alpaca bars run_full_backtest()
+    uses, under 3 exit-rule scenarios side by side (current 0.5%/2%,
+    moderate 1.5%/3%, loose 2.5%/4%), using the bot's own real
+    should_exit_position() for every scenario. Returns per-scenario totals
+    (summed across every symbol) plus a per-symbol breakdown."""
+    if alpaca_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+    return await alpaca_selection_backtest_module.run_exit_rule_sensitivity_comparison()
+
+
 @router.get("/alpaca-overview", dependencies=[Depends(require_admin_key)])
 def _safe_float(v):
     """Alpaca's real REST API returns numeric position fields as JSON
