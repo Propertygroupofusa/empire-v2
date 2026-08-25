@@ -327,7 +327,24 @@ async def load_open_positions():
                         f"manual look, it will not be managed automatically"
                     )
                     continue
-                open_prop_positions[row.symbol] = {"side": row.side, "entry": row.entry_price, "qty": row.qty, "open_time": row.opened_at, "peak_pnl_pct": row.peak_pct or 0.0}
+                # Real production crash found live: BotPosition.opened_at is
+                # stored via SQLAlchemy's plain DateTime column
+                # (default=datetime.utcnow) - a NAIVE datetime, implicitly
+                # UTC. run_prop_cycle's own `now` is timezone-AWARE
+                # (datetime.now(ET)), so subtracting a naive open_time
+                # reloaded here from an aware `now` after a real Railway
+                # restart raised "TypeError: can't subtract offset-naive
+                # and offset-aware datetimes" on every single cycle for any
+                # position that survived the restart - the exit-management
+                # passes never crashed outright (caught by run_prop_cycle's
+                # own outer try/except), but max-hold/trailing-stop age
+                # tracking for that position silently never worked.
+                # Reattach UTC tzinfo to the naive value it always
+                # represented, rather than leaving it naive.
+                open_time = row.opened_at
+                if open_time is not None and open_time.tzinfo is None:
+                    open_time = open_time.replace(tzinfo=timezone.utc)
+                open_prop_positions[row.symbol] = {"side": row.side, "entry": row.entry_price, "qty": row.qty, "open_time": open_time, "peak_pnl_pct": row.peak_pct or 0.0}
             if rows:
                 log.info(f"[APEX_589296] Reloaded {len(open_prop_positions)} open position(s) from DB: {list(open_prop_positions.keys())}")
     except Exception as e:
@@ -1570,6 +1587,16 @@ async def run_prop_cycle():
 
             # Calculate position age in seconds (track when position opened)
             position_open_time = position.get("open_time", now)
+            # Defense in depth alongside the fix in load_open_positions():
+            # `now` is always timezone-aware (datetime.now(ET)) - a naive
+            # open_time reaching this point from any other path would raise
+            # a real, UNCAUGHT TypeError here that aborts run_prop_cycle's
+            # entire pass (every position, every new entry) for that cycle,
+            # confirmed live via a real Railway traceback. Normalize rather
+            # than crash - the exact tz is irrelevant to an age-in-seconds
+            # calculation, only that both sides agree on being aware.
+            if position_open_time.tzinfo is None:
+                position_open_time = position_open_time.replace(tzinfo=timezone.utc)
             position_age_seconds = int((now - position_open_time).total_seconds())
 
             # Momentum Exit Decision - a real trailing stop off this

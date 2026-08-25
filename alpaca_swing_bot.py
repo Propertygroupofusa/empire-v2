@@ -403,10 +403,12 @@ async def run_swing_check():
     # Get account status
     async with aiohttp.ClientSession() as session:
         equity, buying_power = await get_account_balance(session)
-        log.info(f"Equity: ${equity:.2f if equity else 'unknown'} | Buying Power: ${buying_power:.2f if buying_power else 'unknown'}")
+        equity_str = f"${equity:.2f}" if equity is not None else "unknown"
+        buying_power_str = f"${buying_power:.2f}" if buying_power is not None else "unknown"
+        log.info(f"Equity: {equity_str} | Buying Power: {buying_power_str}")
 
         if not equity or equity < MIN_EQUITY:
-            log.warning(f"⚠️  Equity ${equity:.2f} below minimum ${MIN_EQUITY}")
+            log.warning(f"⚠️  Equity {equity_str} below minimum ${MIN_EQUITY}")
             return
 
         # Scan all symbols for swing setups

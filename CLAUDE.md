@@ -4279,6 +4279,88 @@ none touch `_log_activity` or any of its four call sites.
 
 ---
 
+## Two real, confirmed-live production crashes found from Railway log screenshots
+
+The account owner shared a batch of real Railway log screenshots (no
+specific question attached) - reading through them surfaced two genuine,
+previously-unknown crashes, distinct from anything already documented in
+this file.
+
+### 1. alpaca_swing_bot.py: every single daily swing check crashed immediately after logging equity
+
+Real traceback: `ValueError: Invalid format specifier '.2f if equity
+else 'unknown'' for object of type 'float'`, raised inside
+`run_swing_check()` right after fetching the account balance. Root
+cause: the log line put a conditional expression INSIDE an f-string's
+format-spec portion -
+`f"Equity: ${equity:.2f if equity else 'unknown'}..."` - which is never
+valid Python, regardless of what `equity` actually is. Since this line
+runs unconditionally at the very start of the function and nothing
+downstream has its own try/except, this meant the swing bot's entire
+real trading logic (symbol scanning, setups, order placement) never ran
+- silently, for as long as this bug existed, on every single scheduled
+check.
+
+Fixed by computing `equity_str`/`buying_power_str` as plain strings
+first (`f"${equity:.2f}" if equity is not None else "unknown"`), then
+interpolating those as plain strings - valid in both directions.
+Also fixed a second, previously-unreached latent bug the first one was
+masking: the very next line (`if not equity ... log.warning(f"⚠️ Equity
+${equity:.2f} below minimum...")`) would ALSO raise (`unsupported format
+string passed to NoneType.__format__`) the moment `equity` is genuinely
+`None` (a real, confirmed-possible return from `get_account_balance()`
+on a non-200 response or exception) - once the first crash was fixed,
+this one would have fired instead. Now reuses the same `equity_str`.
+
+Verified offline (`test_swing_bot_equity_log_crash.py`, new): calls the
+real `run_swing_check()` with `get_account_balance()` mocked to return
+both real float values and `(None, None)` (the two real shapes it can
+actually return) - confirms neither raises the original ValueError, nor
+the second latent TypeError.
+
+### 2. prop_bot.py: a position that survived a Railway restart crashed the bot's ENTIRE cycle, every time
+
+Real traceback: `TypeError: can't subtract offset-naive and
+offset-aware datetimes`, raised at `run_prop_cycle()`'s position-age
+calculation (`position_age_seconds = int((now -
+position_open_time).total_seconds())`). Root cause: `now` is always
+timezone-AWARE (`datetime.now(ET)`), but `position_open_time` can come
+from `BotPosition.opened_at` - a plain SQLAlchemy `DateTime` column
+(`default=datetime.utcnow`), which is NAIVE - reloaded by
+`load_open_positions()` at startup with no timezone normalization. Any
+real position that survived a Railway restart (loaded from the DB
+rather than opened fresh in the running process) hit this exact crash
+on its very next cycle. Confirmed from the real traceback that nothing
+catches this locally - it propagates all the way up through
+`run_until_complete`, meaning it aborted `run_prop_cycle`'s ENTIRE pass
+(every other open position's exit checks, every new entry scan) for
+that cycle too, not just the one affected position.
+
+Fixed in two places, same defense-in-depth pattern already used
+elsewhere in this file for the `symbol=None` `BotPosition` bug:
+1. `load_open_positions()` now reattaches `timezone.utc` to a naive
+   `opened_at` before storing it as `open_time`, instead of leaving it
+   naive.
+2. `run_prop_cycle`'s own age-calculation line independently normalizes
+   a naive `position_open_time` from ANY source before subtracting -
+   so a future, different path that reintroduces a naive value degrades
+   to "treat it as UTC" instead of crashing the whole cycle again.
+
+Verified offline (`test_position_open_time_tz_crash.py`, new) against a
+real throwaway SQLite DB: seeds a real `BotPosition` row with a
+genuinely naive `opened_at` (reproducing the exact real shape
+`datetime.utcnow()` produces); confirms `load_open_positions()` reattaches
+tzinfo instead of leaving it naive; confirms the real subtraction that
+used to crash now succeeds; confirms the ORIGINAL naive value really
+does raise the exact real `TypeError` when subtracted directly (proving
+this is a real fix, not a test of nothing); confirms the second,
+independent defense-in-depth normalization also prevents the crash for
+a hypothetical naive value from any other source; and confirms a
+freshly-opened position (already aware, the normal live path) is
+completely unaffected by either fix.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
