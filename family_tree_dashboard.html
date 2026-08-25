@@ -475,8 +475,8 @@
 
     <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
         <div class="panel">
-            <div class="panel-title">Branch Ranking by Allocated Balance</div>
-            <div class="panel-sub">Real per-branch USD, largest first - the same numbers behind the tree below</div>
+            <div class="panel-title">Branch Ranking by Next-Spawn Progress</div>
+            <div class="panel-sub">Real per-branch % toward its own next spawn tier, closest first - re-sorts live as each branch's real percentage moves, not just its balance</div>
             <div id="branches-bar" class="bar-list"></div>
         </div>
         <div class="panel">
@@ -567,10 +567,19 @@ function spawnPctColor(pct) {
 function renderBarList(containerId, items) {
     const el = document.getElementById(containerId);
     if (!items.length) { el.innerHTML = '<div class="empty">No branches yet</div>'; return; }
+    // When every item carries a real spawnPct (the "Next spawn" progress
+    // toward each branch's own next tier), rank and fill by THAT instead
+    // of raw dollar balance - per the account owner's explicit request,
+    // so the list re-sorts live on every refresh as a branch's own real
+    // percentage moves, not just when its dollar balance does. Falls back
+    // to dollar-value ranking (the original behavior) when spawnPct isn't
+    // provided, e.g. a future caller with no percentage of its own.
+    const byPct = items.every(i => i.spawnPct != null);
     const max = Math.max(1, ...items.map(i => i.value));
-    el.innerHTML = items.slice().sort((a, b) => b.value - a.value).map(i => {
-        const pct = (i.value / max) * 100;
+    const sorted = items.slice().sort((a, b) => byPct ? (b.spawnPct - a.spawnPct) : (b.value - a.value));
+    el.innerHTML = sorted.map(i => {
         const spawnPct = i.spawnPct != null ? Math.round(Math.max(0, Math.min(100, i.spawnPct))) : null;
+        const pct = byPct ? Math.max(0, Math.min(100, i.spawnPct)) : (i.value / max) * 100;
         const spawnBadge = spawnPct != null
             ? `<span class="bar-spawn-pct" style="color:${spawnPctColor(spawnPct)}">${spawnPct}%</span>`
             : '';
