@@ -505,6 +505,12 @@ async def place_market_sell(session, qty: float, product_id: str = PRODUCT_ID):
 
     if qty <= 0:
         log.warning(f"[BTC-COMPOUND] {product_id}: nothing sellable after balance/precision clamp (qty was {qty})")
+        # Tags this as a distinct, recognizable reason (not a generic
+        # rejection) so a caller like _branch_sell_and_settle can tell
+        # "there was genuinely nothing left to sell" apart from a real,
+        # possibly-transient order rejection - see the real cross-branch
+        # balance drift on shared coins this was built to catch.
+        _last_order_error[product_id] = "NOTHING_TO_SELL: real balance is effectively 0 - tracked position no longer matches reality"
         return None
 
     path = "/api/v3/brokerage/orders"

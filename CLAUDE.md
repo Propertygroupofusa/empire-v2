@@ -2894,6 +2894,92 @@ spawn correctly creates a new branch again instead of reinforcing.
 
 ---
 
+## Real bug found and fixed: a branch could get permanently stuck retrying a sell that could never fill (phantom position from cross-branch balance drift on a shared coin)
+
+Real Railway log screenshots showed the same pattern recurring across
+multiple coins, every cycle, forever: `crypto_btc_compound_bot:[BTC-COMPOUND]
+POL-USD: clamping sell qty 325.01000000 -> real held balance 0.00000000`,
+immediately followed by `nothing sellable after balance/precision clamp
+(qty was 0.0)`, and on the family-tree side `crypto_family_tree_bot:[TREE]
+crypto_tree_bch_usd: TARGET HIT but sell did not fill - will retry next
+cycle` / the same for `crypto_tree_doge_usd_3`. The account owner asked
+directly why real branches kept losing and what was going wrong.
+
+Root cause traces back to the earlier shared-coin-branches change (see
+above): multiple branches can now hold the same real coin simultaneously,
+but Coinbase's real balance for that coin is POOLED across every branch
+holding it, while each branch's own `BotPosition.qty` is tracked
+separately with zero live reconciliation between the two. Once the real
+pooled balance for a coin (POL-USD, BCH-USD, DOGE-USD all hit this) drops
+to genuinely 0 - another branch on the same coin sold its share first, or
+enough small real-world drift (fees taken in the asset itself, rounding)
+accumulated - any branch STILL holding a stale tracked position for that
+coin hits its TARGET or STOP, tries to sell, and `place_market_sell()`'s
+existing real-balance clamp correctly reduces the doomed sell to 0 qty and
+refuses to place it. Before this fix, `_branch_sell_and_settle()` treated
+that refusal exactly like any other transient failure - log a warning and
+retry the IDENTICAL sell next cycle - which can never succeed, since the
+real balance backing it is never coming back. The branch was stuck in a
+genuine infinite loop: unable to sell (nothing real left to sell), unable
+to buy (still shown as holding a position), completely unmanaged for as
+long as the process kept running.
+
+Fixed in two parts:
+1. `place_market_sell()` (`crypto_btc_compound_bot.py`): when the real
+   balance/precision clamp reduces qty to 0, it now also tags
+   `_last_order_error[product_id] = "NOTHING_TO_SELL: ..."` before
+   returning `None` - reusing the exact same dict/dashboard-banner
+   mechanism `_describe_order_rejection()` already established for real
+   Coinbase rejections, so this needed no new UI.
+2. `_branch_sell_and_settle()` (`crypto_family_tree_bot.py`): on a failed
+   sell, now checks whether `_last_order_error` for that coin carries the
+   `NOTHING_TO_SELL` tag. If so - a CONFIRMED phantom position, not a
+   guess - it self-heals: clears the stale `BotPosition` via the existing
+   `_clear_branch_position()`, starts the same one-cycle sale cooldown a
+   real sale would, and (for a non-root branch) picks a new coin through
+   the exact same `find_most_volatile_unclaimed_coin()` a normal exit
+   already uses. Root (BTC) still never coin-switches, matching its
+   existing "stays on BTC-USD by design" behavior - only its stale
+   position gets cleared. Deliberately does NOT touch `allocated_usd` and
+   does NOT write a `CryptoCoinTradeHistory` row - no real trade happened,
+   so there's no real fill price/qty to record, and inventing one would
+   fabricate P&L that never actually occurred; the real dollar impact (if
+   any) of the underlying cross-branch drift is left exactly where it
+   already was, on whichever branch's real trade actually consumed the
+   balance. Any OTHER real sell failure (no tag, or a different reason)
+   still falls through to the original "will retry next cycle" behavior,
+   completely unaffected.
+
+Verified offline with a dedicated test suite reproducing the exact real
+log pattern: `place_market_sell()` correctly tags `NOTHING_TO_SELL` only
+when the real balance genuinely clamps qty to 0 (not when a real balance
+covers the sell); `_branch_sell_and_settle()` correctly clears the stale
+position and switches to a new real coin for a non-root branch, while
+root's position clears but it stays on BTC-USD and never calls the
+coin-switch search; `allocated_usd` is left completely untouched and no
+`CryptoCoinTradeHistory` row is written in either case; the one-cycle sale
+cooldown starts for the phantom coin same as a real sale; and a genuine,
+untagged transient sell failure is completely unaffected - position stays
+intact, still retries next cycle exactly as before. Full existing
+regression suite re-run alongside it; the only failures were confirmed
+pre-existing/stale via `git stash` comparison against the prior commit
+(unrelated to this change - a return-signature mismatch in an outdated
+test's mock, a renamed function, and a stale hardcoded spawn-tier
+constant), none touching `place_market_sell` or `_branch_sell_and_settle`.
+
+**What this does NOT fix**: the underlying cross-branch balance
+drift itself - multiple branches sharing a coin with a pooled real
+balance and no live reconciliation between their individually-tracked
+quantities is still the real architecture (a deliberate choice from
+earlier in this session). This fix stops a branch that lands in that gap
+from being stuck forever and gets it back to real, working trading
+immediately - it does not prevent the gap from occurring again on a
+different coin in the future. A structural fix (e.g. tracking real
+per-branch balance shares, or reconciling against the real pooled balance
+on every cycle) would be a much bigger change and hasn't been requested.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

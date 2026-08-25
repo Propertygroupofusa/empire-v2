@@ -2093,6 +2093,48 @@ async def _maybe_spawn_child(branch):
 async def _branch_sell_and_settle(session, bot_name, product_id, position, reason):
     fill = await engine.place_market_sell(session, position.qty, product_id)
     if not fill:
+        stuck_reason = engine._last_order_error.get(product_id, "")
+        if stuck_reason.startswith("NOTHING_TO_SELL"):
+            # Real, confirmed phantom position: this branch's tracked qty
+            # no longer corresponds to any real Coinbase balance for this
+            # coin. Since branches can share a coin, the real balance is
+            # POOLED across every branch holding it while each branch's
+            # own qty is tracked separately with no live reconciliation -
+            # confirmed live via repeated real log lines ("clamping sell
+            # qty X -> real held balance 0.00000000" / "TARGET HIT but
+            # sell did not fill") recurring across multiple coins (POL-USD,
+            # BCH-USD, DOGE-USD) every cycle, forever, because the same
+            # doomed sell was being retried against a balance that was
+            # never coming back. Self-heals instead: clears the stale
+            # tracked position and (for a non-root branch) picks a new
+            # coin the same way a real exit does, so the branch becomes
+            # usable again instead of stuck in a permanent retry loop.
+            # Deliberately does NOT touch allocated_usd or write a
+            # CryptoCoinTradeHistory row - no real trade happened here, so
+            # there is no real fill price/qty to record, and inventing one
+            # would fabricate P&L that never actually occurred.
+            log.warning(
+                f"[TREE] {bot_name}: {reason} but real held balance for {product_id} is effectively 0 "
+                f"(tracked position no longer matches reality - likely real cross-branch balance drift "
+                f"on a shared coin) - clearing the stale position instead of retrying forever"
+            )
+            await _clear_branch_position(bot_name)
+            _coin_last_sold_at[product_id] = time.time()
+            if bot_name != ROOT_BOT_NAME:
+                new_product_id, new_product_atr = await find_most_volatile_unclaimed_coin(session)
+                if new_product_id:
+                    async with AsyncSessionLocal() as db:
+                        result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
+                        row = result.scalar_one_or_none()
+                        if row:
+                            old_product_id = row.product_id
+                            row.product_id = new_product_id
+                            await db.commit()
+                            log.info(
+                                f"[TREE] 🔀 {bot_name} switching {old_product_id} -> {new_product_id} "
+                                f"(ATR {new_product_atr*100:.2f}%) after phantom-position self-heal"
+                            )
+            return
         log.warning(f"[TREE] {bot_name}: {reason} but sell did not fill - will retry next cycle")
         return
     filled_qty, filled_price = fill
