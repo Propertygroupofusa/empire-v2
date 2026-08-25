@@ -4482,6 +4482,31 @@ and logs no `LOCK` event at all - confirming the skim gate itself
 
 ---
 
+## Real follow-up: the "why didn't THIS transaction lock 10%" confusion, fixed with clearer on-dashboard copy
+
+Right after the LOCK activity event shipped, the account owner pointed
+at a real `$100.00` manual "Add cash" entry in the Live Activity feed
+and asked why it showed no lock line - genuinely unclear from the UI
+alone that a deposit/buy was never supposed to have one (only a real
+WINNING SELL does; a deposit is money going IN, not a realized gain).
+Asked directly whether the skim should also apply to deposits before
+touching anything - the account owner confirmed no, keep it profit-only,
+just explain it better.
+
+Added two on-dashboard clarifications (`family_tree_dashboard.html`,
+no logic changes - the skim's real behavior was already correct and
+unchanged):
+1. The 🔒 Locked Profit KPI card now has a real caption directly under
+   the number: "Grows ONLY from 10% of each real winning sell - never
+   from a deposit or a buy."
+2. The Live Activity panel's own subtitle now explicitly says a 🔒 line
+   only ever appears after a real winning sell, and a buy/deposit never
+   gets one.
+
+No test needed - this is copy-only, no behavior changed.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
