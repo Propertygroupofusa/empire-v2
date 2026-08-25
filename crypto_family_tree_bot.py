@@ -1890,14 +1890,33 @@ async def _pick_weakest_branch_for_reinforcement(exclude_bot_name: str):
     and is about to have that tier raised, so it would often (wrongly)
     look "weakest" right at this moment and end up reinforcing itself,
     which is pointless (functionally the same as not spawning at all).
-    Returns the CryptoTreeBranch row, or None if there's no other branch
-    yet to reinforce (e.g. the very first spawn in a fresh tree)."""
+
+    Also excludes any branch whose CURRENT coin is presently excluded
+    (manual or automatic layer - see get_effective_excluded_coins). Real
+    gap found live: POL-USD topped the 30-day backtest ranking right as
+    the top-15 rotation shipped, a spawn storm landed 15 of 23 branches
+    on it, and its real live performance turned out to be terrible (39
+    trades, 12.8% win rate, -$310.66). Since a losing coin keeps its
+    branches weak, and this function used to have zero awareness of coin
+    exclusion, "always reinforce the weakest" was a closed loop feeding
+    fresh money back into whichever coin was already losing the most -
+    reinforcement bypassed exclusion entirely, so even flagging a coin
+    excluded couldn't stop it. Now a branch stuck on an excluded coin is
+    skipped for reinforcement (it still trades normally under its own
+    target/stop, it just isn't handed more capital) in favor of the next
+    real weakest branch on a coin that's actually still eligible.
+
+    Returns the CryptoTreeBranch row, or None if there's no other real
+    eligible branch to reinforce (e.g. the very first spawn in a fresh
+    tree, or every other branch's coin is currently excluded)."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoTreeBranch))
         branches = result.scalars().all()
+    excluded_coins = await get_effective_excluded_coins()
     candidates = [
         b for b in branches
         if b.bot_name != exclude_bot_name and b.next_unlock_tier and b.next_unlock_tier > 0
+        and b.product_id not in excluded_coins
     ]
     if not candidates:
         return None

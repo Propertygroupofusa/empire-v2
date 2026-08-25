@@ -3250,11 +3250,75 @@ one line, no other changes needed. This is the real, final piece: the
 throwaway-repo `push_snapshot()` logic was already correct, it just had
 no `git` executable to actually invoke.
 
-**Not yet confirmed live**: needs one more real redeploy (this one changes
-the Docker image itself, so it's a real rebuild, not just a code
-redeploy) and a follow-up `git fetch origin status-snapshots` to confirm
-the full chain - code, `.git`-independence, and now the `git` binary
-itself - all work together end-to-end in production.
+**Confirmed live**: the redeploy landed and the `status-snapshots` branch
+finally exists on GitHub with real content (`git fetch origin
+status-snapshots && git show origin/status-snapshots:STATUS.md`) - the
+full chain (code, `.git`-independence, and the `git` binary) works
+end-to-end in production. First real snapshot read this way: 23 crypto
+branches, Total Profit -$349.27, Alpaca Total Profit +$29.36.
+
+---
+
+## Real feedback loop found via the first real status-snapshot read: reinforcement kept feeding a losing coin
+
+The very first real `STATUS.md` snapshot read via git (see above) surfaced
+something the dashboard's per-branch view never made visible at a glance:
+**15 of the tree's 23 real branches are holding POL-USD**, and POL-USD's
+real per-coin trade history is dismal - 39 trades, 12.8% win rate,
+-$310.66 - by far the largest single chunk of the tree's real -$349.27
+total loss. The account owner asked directly how this much capital ended
+up concentrated in one coin and asked me to find out.
+
+**Root cause of the concentration**: POL-USD became the real #1-ranked
+coin by 30-day backtest ROI right at the moment the top-15 rotation
+feature shipped, in the middle of the shared-coin-branches +
+spawn-collision-retry saga already documented above - a real "spawn
+storm" where a wave of concurrent branch spawns all independently landed
+on the same top-ranked coin. Its real LIVE performance turned out
+nothing like its backtested ranking.
+
+**Root cause of why it kept getting WORSE, not just staying bad**: the
+"always reinforce the weakest branch" feature (see the three reinforcement
+revisions above) picks the weakest branch purely by lowest real
+`allocated_usd / next_unlock_tier`, then buys MORE of THAT branch's
+current coin - `_pick_weakest_branch_for_reinforcement()` and
+`_deploy_seed_into_weakest_branch()` never checked coin exclusion at
+all. Since a losing coin keeps its branches weak, and weak branches are
+exactly what reinforcement targets, this was a real closed loop: POL-USD
+loses -> its branches stay weakest -> reinforcement pours another real
+$50 seed back into POL-USD -> repeat. Coin exclusion (manual or
+automatic) provided zero protection against this specific path, since
+reinforcement never consulted it.
+
+Fixed in `_pick_weakest_branch_for_reinforcement()`: now also excludes
+any candidate branch whose current coin is in
+`get_effective_excluded_coins()` (the same manual+automatic exclusion set
+every other coin-selection path already respects), falling through to
+the next real weakest branch on a coin that's actually still eligible.
+If literally every other branch is on an excluded coin, correctly
+returns `None` (falls through to a normal new-branch spawn) rather than
+reinforcing an excluded coin anyway. A branch already stuck on POL-USD
+is NOT force-sold by this fix - it keeps trading normally under its own
+target/stop/breakeven protection, it just stops being handed fresh
+capital via reinforcement.
+
+**Deliberately not done in this pass** (the account owner's own choice,
+via a direct multi-select question): POL-USD was NOT added to
+`MANUAL_EXCLUDED_COINS` this time, and existing POL-USD branches were
+left completely untouched/still trading - only the reinforcement
+loophole itself was closed. Whether POL-USD is *currently* sitting in
+the automatic exclusion layer or the top-15 rotation is unconfirmed from
+this sandbox (no live backtest-table access) - worth checking directly
+on the `crypto_selection_backtest.html` page.
+
+Verified offline against a real throwaway SQLite DB: the numerically
+weakest branch is correctly skipped when its coin is excluded, in favor
+of the next real weakest branch on an eligible coin; a tree where every
+OTHER branch is on an excluded coin correctly returns `None` instead of
+reinforcing the excluded coin anyway; and with no exclusions active at
+all, behavior is completely unchanged from before this fix - the plain
+numeric weakest still wins. Full existing reinforcement regression test
+re-run clean alongside it.
 
 ---
 
