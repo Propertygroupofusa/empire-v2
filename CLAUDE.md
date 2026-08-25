@@ -3190,6 +3190,46 @@ live network access to GitHub or Railway).
 
 ---
 
+## Reinforcement rule revised again: unconditional, not gated by any threshold
+
+After the account owner had the 50%-threshold reinforcement rule explained
+back to them (with a visual artifact showing the two spawn states), they
+spotted the real gap in it directly: a branch sitting stuck partway - say
+60-90% toward its own next tier - never dips below the 50% help line, so
+it never gets reinforced either. It just sits there waiting on its own
+trades to eventually move it, potentially indefinitely. Asked directly
+via a clarifying question (three real options: always help the weakest
+regardless of any threshold, raise the threshold higher, or add a
+separate time-based "stuck too long" detector) - the account owner chose
+the first: **always help whichever branch is currently weakest, no
+threshold, full stop.**
+
+`REINFORCEMENT_THRESHOLD_PCT` and `_tree_needs_reinforcement()` are both
+removed entirely - there's no longer a percentage gate to check.
+`_maybe_spawn_child()` now always calls
+`_pick_weakest_branch_for_reinforcement()` first on every single real
+spawn; a brand-new branch only ever gets created in the one case where
+there's genuinely no OTHER branch left to reinforce (a fresh tree, or a
+tree of exactly one branch) - the existing `None` fallback path, already
+built for the very first spawn ever, now also covers this case. This is
+the third real revision of this same rule this session: every-other-spawn
+(alternating) -> reinforce-until-50%-then-normal -> now unconditional.
+
+Verified offline against a real throwaway SQLite DB: a branch stuck at
+70% (which the OLD 50%-threshold rule would have completely ignored) now
+correctly receives the real reinforcement seed; a SECOND consecutive real
+spawn also reinforces (this time targeting a different branch at 95%,
+proving there's truly no threshold left at all, not just a higher one);
+the picker still correctly excludes the spawning branch itself; and a
+tree with no other branch to reinforce still correctly falls through to
+a normal new-branch spawn. Full existing regression suite re-run
+alongside it; the two failures seen were confirmed pre-existing/stale via
+`git stash` comparison against the prior commit (both from the coin
+universe having grown since those tests were written - unrelated to this
+change).
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

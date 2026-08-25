@@ -198,9 +198,14 @@ LOCKED_PROFIT_STATE_KEY = "crypto_family_tree_locked_usd"
 # Per the account owner's explicit request: every real spawn reinforces
 # whichever EXISTING branch is currently weakest (lowest % toward its own
 # next spawn tier) with a real $50 buy, instead of starting a brand-new
-# branch, for as long as ANY branch sits below this threshold - "help your
-# weakest one out until everyone is above 50%." See _tree_needs_reinforcement().
-REINFORCEMENT_THRESHOLD_PCT = engine._safe_float_env("TREE_REINFORCEMENT_THRESHOLD_PCT", "0.50")
+# branch - unconditionally, every single spawn, not gated by any threshold.
+# Revised twice: first "every other spawn" (alternating), then "reinforce
+# until everyone clears 50%, then back to normal," and finally - after the
+# account owner asked what happens to a branch stuck partway (60-90%) that
+# never dips below 50% and so never gets help - "always help whichever one
+# is weakest, period." A brand-new branch now only ever gets created once
+# there's no OTHER existing branch left to reinforce (see
+# _pick_weakest_branch_for_reinforcement's None case in _maybe_spawn_child).
 
 # Real spendable cash (real_balance - locked_usd) below MIN_TRADE_USD just
 # sits there forever on its own - no branch can ever spend less than
@@ -1877,27 +1882,6 @@ async def adopt_orphaned_positions(session):
         )
 
 
-async def _tree_needs_reinforcement() -> bool:
-    """Per the account owner's explicit revision of the original
-    every-other-spawn rule (which alternated 1-normal/1-reinforce): "help
-    your weakest one out until everyone is above 50% and then it is fine
-    until a new coin[gets weak again]." Every real spawn now reinforces
-    the weakest existing branch for as long as ANY real branch sits below
-    REINFORCEMENT_THRESHOLD_PCT toward its own next spawn tier - once
-    every branch is at or above that bar, spawning goes back to normal
-    (new branches) until some branch eventually drops back below it
-    again. Returns True if at least one real branch is currently below
-    the threshold."""
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(select(CryptoTreeBranch))
-        branches = result.scalars().all()
-    for b in branches:
-        if b.next_unlock_tier and b.next_unlock_tier > 0:
-            if (b.allocated_usd / b.next_unlock_tier) < REINFORCEMENT_THRESHOLD_PCT:
-                return True
-    return False
-
-
 async def _pick_weakest_branch_for_reinforcement(exclude_bot_name: str):
     """Picks the branch with the lowest real progress toward its own next
     spawn tier (allocated_usd / next_unlock_tier) - the exact same real
@@ -2022,59 +2006,61 @@ async def _maybe_spawn_child(branch):
                     f"(real balance ${branch.allocated_usd:.2f} was below it, likely from a real spawn deduction) - can spawn again now"
                 )
 
-    # Per the account owner's explicit request (revised from the original
-    # every-other-spawn rule): every real spawn reinforces whichever
-    # EXISTING branch is currently weakest (lowest % toward its own next
-    # spawn tier) with a real buy, instead of starting a brand-new branch,
-    # for as long as ANY branch sits below REINFORCEMENT_THRESHOLD_PCT -
-    # "help your weakest one out until everyone is above 50%." See
-    # _tree_needs_reinforcement()/_pick_weakest_branch_for_reinforcement().
-    if await _tree_needs_reinforcement():
-        weakest = await _pick_weakest_branch_for_reinforcement(exclude_bot_name=branch.bot_name)
-        if weakest is not None:
-            own_increment = ROOT_UNLOCK_TIER_USD if branch.bot_name == ROOT_BOT_NAME else UNLOCK_TIER_USD
-            milestone = branch.next_unlock_tier
+    # Per the account owner's explicit request: every single real spawn
+    # reinforces whichever EXISTING branch is currently weakest (lowest %
+    # toward its own next spawn tier) with a real buy, instead of starting
+    # a brand-new branch - unconditionally, no threshold. This closes a
+    # real gap the account owner spotted in the earlier 50%-threshold
+    # version: a branch stuck partway (say 60-90%) that never dipped below
+    # 50% never got help and could sit stagnant indefinitely. Now a new
+    # branch only ever gets created once there's no OTHER branch left to
+    # reinforce at all (see the None case below - the very first spawn in
+    # a fresh tree, or a tree of exactly one branch).
+    weakest = await _pick_weakest_branch_for_reinforcement(exclude_bot_name=branch.bot_name)
+    if weakest is not None:
+        own_increment = ROOT_UNLOCK_TIER_USD if branch.bot_name == ROOT_BOT_NAME else UNLOCK_TIER_USD
+        milestone = branch.next_unlock_tier
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == branch.bot_name))
+            fresh = result.scalar_one_or_none()
+            if not fresh or fresh.allocated_usd < fresh.next_unlock_tier:
+                return
+            fresh.allocated_usd -= SEED_USD
+            fresh.next_unlock_tier += own_increment
+            await db.commit()
+            remaining = fresh.allocated_usd
+
+        weakest_pct_before = (weakest.allocated_usd / weakest.next_unlock_tier) * 100
+        async with engine.aiohttp.ClientSession() as session:
+            deployed = await _deploy_seed_into_weakest_branch(session, weakest.bot_name, SEED_USD)
+
+        if deployed:
+            log.info(
+                f"[TREE] 🌱💪 {branch.bot_name} crossed ${milestone:,.0f} - its ${SEED_USD:.2f} seed "
+                f"went into {weakest.bot_name} (currently weakest at {weakest_pct_before:.0f}% toward its own next tier) "
+                f"| {branch.bot_name} continues with ${remaining:.2f}"
+            )
+        else:
+            # Real buy failed (order rejection, price fetch failure) -
+            # the seed was already deducted from the parent above, so
+            # give it back rather than silently losing real allocated
+            # dollars into nothing.
             async with AsyncSessionLocal() as db:
                 result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == branch.bot_name))
-                fresh = result.scalar_one_or_none()
-                if not fresh or fresh.allocated_usd < fresh.next_unlock_tier:
-                    return
-                fresh.allocated_usd -= SEED_USD
-                fresh.next_unlock_tier += own_increment
-                await db.commit()
-                remaining = fresh.allocated_usd
-
-            weakest_pct_before = (weakest.allocated_usd / weakest.next_unlock_tier) * 100
-            async with engine.aiohttp.ClientSession() as session:
-                deployed = await _deploy_seed_into_weakest_branch(session, weakest.bot_name, SEED_USD)
-
-            if deployed:
-                log.info(
-                    f"[TREE] 🌱💪 {branch.bot_name} crossed ${milestone:,.0f} - a branch is still below "
-                    f"{REINFORCEMENT_THRESHOLD_PCT*100:.0f}%, so instead of a new branch its ${SEED_USD:.2f} seed "
-                    f"went into {weakest.bot_name} (weakest at {weakest_pct_before:.0f}% toward its own next tier) "
-                    f"| {branch.bot_name} continues with ${remaining:.2f}"
-                )
-            else:
-                # Real buy failed (order rejection, price fetch failure) -
-                # the seed was already deducted from the parent above, so
-                # give it back rather than silently losing real allocated
-                # dollars into nothing.
-                async with AsyncSessionLocal() as db:
-                    result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == branch.bot_name))
-                    fresh2 = result.scalar_one_or_none()
-                    if fresh2:
-                        fresh2.allocated_usd += SEED_USD
-                        fresh2.next_unlock_tier -= own_increment
-                        await db.commit()
-                log.warning(
-                    f"[TREE] {branch.bot_name}: reinforcement deploy into {weakest.bot_name} failed - "
-                    f"refunded the ${SEED_USD:.2f} seed, will retry next cycle"
-                )
-            return
-        # No other branch exists yet to reinforce (e.g. the very first
-        # spawn in a fresh tree) - fall through to the normal new-branch
-        # path below instead of silently skipping this spawn opportunity.
+                fresh2 = result.scalar_one_or_none()
+                if fresh2:
+                    fresh2.allocated_usd += SEED_USD
+                    fresh2.next_unlock_tier -= own_increment
+                    await db.commit()
+            log.warning(
+                f"[TREE] {branch.bot_name}: reinforcement deploy into {weakest.bot_name} failed - "
+                f"refunded the ${SEED_USD:.2f} seed, will retry next cycle"
+            )
+        return
+    # No other branch exists yet to reinforce (e.g. the very first
+    # spawn in a fresh tree, or a tree of exactly one branch) - fall
+    # through to the normal new-branch path below instead of silently
+    # skipping this spawn opportunity.
 
     next_product = await get_next_eligible_product_id()
     if next_product is None:
