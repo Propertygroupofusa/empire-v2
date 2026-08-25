@@ -3787,6 +3787,57 @@ on its own.
 
 ---
 
+## Live price ticker on both dashboards
+
+Per the account owner's explicit request, showing a Fortune.com screenshot
+as the reference: a horizontal scrolling live price strip at the top of
+both dashboards.
+
+New `GET /api/trading-dashboard/ticker` (admin-key gated, read-only, no
+trading involved): 5 major coins (BTC, ETH, XRP, DOGE, SOL) via
+`engine._fetch_candles()` - the exact same real Coinbase candle fetch
+`crypto_btc_compound_bot.py`'s own ATR/RSI calcs already use, not a new
+integration - plus SPY/QQQ via a direct real Alpaca bars fetch mirroring
+`alpaca_selection_backtest.py`'s own `_fetch_bars()` pattern. Price is the
+latest real close; % change is the real move from the oldest candle in
+the fetched window to the latest. A coin or symbol whose real fetch fails
+is skipped cleanly, not a crash - the ticker just shows whatever real
+data did come back.
+
+Deliberately **not** "Powered by Binance" like the reference screenshot -
+this codebase has no Binance integration or credentials anywhere; the
+real data sources are Coinbase and Alpaca, the same two everything else
+on these dashboards already uses. Said so explicitly rather than
+matching the reference image's branding, since claiming a data source
+this app doesn't actually use would be dishonest.
+
+`family_tree_dashboard.html` and `alpaca_dashboard.html` both gained a
+scrolling ticker strip at the very top (navy bar, green/red up/down
+arrows) - CSS-animated horizontal scroll, pauses on hover, refreshes
+every 30s independently of the rest of the page's 15s refresh.
+
+Verified offline with the real fetch functions mocked: a real +10% BTC
+move (50000 -> 55000) and a real -10% ETH move (3000 -> 2700) both
+compute correctly; a real per-coin or per-symbol fetch failure (including
+a too-few-bars response) is skipped cleanly rather than crashing the
+whole endpoint; and the real Alpaca-side move (SPY 500 -> 510, +2%) is
+computed correctly through the same direct bars-fetch pattern used
+elsewhere in this codebase.
+
+**On the account owner's separate ask** ("pull from newsletters... big
+wheels... follow all these people") - deliberately NOT built yet. That
+request is genuinely ambiguous between two very different things: (a) a
+real financial-news headline feed (buildable, though scraping a site
+like Fortune.com beyond its own official RSS feed would need checking
+against that site's terms of service first), or (b) following social-
+media trading influencers for signals - which would reintroduce the
+exact "chase unverified hype instead of real evidence" pattern this same
+session spent real effort showing doesn't hold up (see "so all these
+people on YouTube just be lying there" above). Asked the account owner
+to clarify scope before building either.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

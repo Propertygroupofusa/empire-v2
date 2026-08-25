@@ -37,6 +37,18 @@
 
     .container { max-width: 1280px; margin: 0 auto; }
 
+    .ticker-wrap {
+        overflow: hidden; white-space: nowrap; background: var(--navy); border-radius: 8px;
+        margin-bottom: 14px; padding: 8px 0;
+    }
+    .ticker-track { display: inline-flex; animation: ticker-scroll 40s linear infinite; }
+    .ticker-track:hover { animation-play-state: paused; }
+    @keyframes ticker-scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+    .ticker-item { display: inline-flex; align-items: center; gap: 6px; padding: 0 20px; color: #fff; font-size: 0.85em; font-weight: 600; white-space: nowrap; }
+    .ticker-item .t-sym { opacity: 0.85; }
+    .ticker-item .t-up { color: #6fe6a0; }
+    .ticker-item .t-down { color: #ff8a8a; }
+
     .header {
         display: flex;
         justify-content: space-between;
@@ -215,6 +227,8 @@
 </head>
 <body>
 <div class="container">
+    <div class="ticker-wrap"><div class="ticker-track" id="ticker-track"><span class="ticker-item">Loading live prices…</span></div></div>
+
     <div class="header">
         <div>
             <h1>📈 Alpaca — Prop Bot Overview</h1>
@@ -575,8 +589,35 @@ async function confirmUnlockProfit() {
     }
 }
 
+function fmtTickerPrice(n) {
+    if (n < 1) return '$' + n.toFixed(4);
+    return '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+async function loadTicker() {
+    const track = document.getElementById('ticker-track');
+    try {
+        const data = await apiGet('/ticker');
+        const items = data.items || [];
+        if (items.length === 0) {
+            track.innerHTML = '<span class="ticker-item">No live prices available right now</span>';
+            return;
+        }
+        const renderOne = it => {
+            const cls = it.change_pct >= 0 ? 't-up' : 't-down';
+            const arrow = it.change_pct >= 0 ? '▲' : '▼';
+            return `<span class="ticker-item"><span class="t-sym">${it.symbol}</span> ${fmtTickerPrice(it.price)} <span class="${cls}">${arrow} ${Math.abs(it.change_pct).toFixed(2)}%</span></span>`;
+        };
+        track.innerHTML = items.map(renderOne).join('') + items.map(renderOne).join('');
+    } catch (e) {
+        track.innerHTML = '<span class="ticker-item">Could not load live prices</span>';
+    }
+}
+
 refresh();
+loadTicker();
 setInterval(refresh, 15000);
+setInterval(loadTicker, 30000);
 </script>
 </body>
 </html>

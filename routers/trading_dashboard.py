@@ -115,6 +115,68 @@ BOT_PREFIX = "bot_"
 # account sits below this threshold.
 MARGIN_MIN_EQUITY = 2000.0
 
+TICKER_CRYPTO_PRODUCTS = ["BTC-USD", "ETH-USD", "XRP-USD", "DOGE-USD", "SOL-USD"]
+TICKER_STOCK_SYMBOLS = ["SPY", "QQQ"]
+
+
+@router.get("/ticker", dependencies=[Depends(require_admin_key)])
+async def get_ticker():
+    """Real live price ticker for the dashboards - per the account owner's
+    explicit request for a scrolling price strip like the one on Fortune's
+    site. Real data only, no trading involved (read-only):
+    - Crypto: Coinbase's public, unauthenticated candles endpoint (the
+      exact same real fetch crypto_btc_compound_bot.py's own ATR/RSI
+      calcs already use - engine._fetch_candles), ~25 hours of 5-min
+      candles per coin. % change is the real move from the oldest candle
+      in that window to the latest.
+    - Stocks: Alpaca's real market-data bars API (same feed=iex pattern
+      alpaca_selection_backtest.py's _fetch_bars already uses), 15-min
+      bars over the last day. Same real % change calc.
+
+    NOT "Powered by Binance" like the reference screenshot - this account
+    has no Binance integration or credentials anywhere in this codebase;
+    the real data sources here are Coinbase and Alpaca, the same ones
+    every other real number on these dashboards already comes from."""
+    items = []
+
+    async with aiohttp.ClientSession() as session:
+        if crypto_family_tree_bot_module is not None:
+            crypto_engine = crypto_family_tree_bot_module.engine
+            for product_id in TICKER_CRYPTO_PRODUCTS:
+                candles = await crypto_engine._fetch_candles(session, product_id)
+                if candles is None:
+                    continue
+                closes, _highs, _lows = candles
+                price = closes[-1]
+                change_pct = round((closes[-1] - closes[0]) / closes[0] * 100, 2) if closes[0] else 0.0
+                items.append({
+                    "symbol": product_id.replace("-USD", ""),
+                    "price": round(price, 6 if price < 1 else 2),
+                    "change_pct": change_pct,
+                    "kind": "crypto",
+                })
+
+        if prop_bot_module is not None and ALPACA_KEY and ALPACA_SECRET:
+            for symbol in TICKER_STOCK_SYMBOLS:
+                start = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=15Min&start={start}&limit=1000&feed=iex"
+                try:
+                    async with session.get(url, headers=prop_bot_module.get_headers(), timeout=aiohttp.ClientTimeout(total=15)) as r:
+                        if r.status != 200:
+                            continue
+                        data = await r.json()
+                        bars = data.get("bars", [])
+                        if len(bars) < 2:
+                            continue
+                        closes = [b["c"] for b in bars]
+                        price = closes[-1]
+                        change_pct = round((closes[-1] - closes[0]) / closes[0] * 100, 2) if closes[0] else 0.0
+                        items.append({"symbol": symbol, "price": round(price, 2), "change_pct": change_pct, "kind": "stock"})
+                except Exception as e:
+                    log.warning(f"[ticker] failed to fetch {symbol}: {e}")
+
+    return {"items": items, "generated_at": datetime.utcnow().isoformat()}
+
 
 async def _get_or_init_bots(db: AsyncSession, current_equity: float) -> list:
     """Fetches the NUM_BOTS tracked buckets, creating them on first call.
