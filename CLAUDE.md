@@ -3642,6 +3642,87 @@ confirmed.
 
 ---
 
+## Same real decision, crypto side: retire the family tree, buy real buy-and-hold BTC
+
+Right after the Alpaca retirement shipped, the account owner asked the
+same question about Coinbase - reinforced by a sharp, correct real
+observation: the crypto tree can lose ~$300 in a single day (POL-USD's
+real -$310.66) while a passive $5,000 in Alpaca was only projected to
+earn $300-600 a *year* - a badly asymmetric risk/reward. Given the crypto
+side's real numbers are actually worse than Alpaca's (net **-$349.27**,
+not just underwhelming like Alpaca's +$29), the same real mechanism was
+built for it: `liquidate_family_tree_and_buy_btc()` in
+`crypto_family_tree_bot.py`, the direct crypto counterpart to
+`prop_bot.py`'s liquidate-and-buy-SPY.
+
+**New persisted flag**: `is_crypto_passive_mode()`/`set_crypto_passive_mode()`
+(same generic `TradingBotState` bucket pattern, same DB-not-env-var
+reasoning as the Alpaca side). Checked at the very top of
+`run_branch_cycle()` - the one function every branch's thread calls every
+cycle, root included - so passive mode stops EVERYTHING at once: no
+entries, no exits, no spawns, no reinforcement, for every branch,
+without needing to touch the coordinator's thread-management logic
+separately. Returns `True` (not `False`) while passive so a branch's
+thread keeps existing rather than exiting.
+
+**The real liquidation, in order**:
+1. Sells every non-root branch's real position at market
+   (`engine.place_market_sell()`, which already clamps to the real
+   Coinbase balance itself), records each real fill as a
+   `CryptoCoinTradeHistory` row (`exit_reason="RETIRED_TO_BTC"`) so
+   nothing vanishes from the real per-coin trade history, then deletes
+   every non-root branch row once flat - its `allocated_usd` was only
+   ever a bookkeeping split of shared real Coinbase cash, so deleting the
+   row just stops earmarking it.
+2. Sets passive mode `True` **before** buying, closing the real window
+   where something could otherwise spawn/reinforce/enter between
+   "everything sold" and "BTC bought."
+3. Buys real BTC-USD with the real free cash (real balance minus
+   whatever is genuinely locked profit - never auto-spent, matching
+   every other real-money path in this file) minus a small safety
+   buffer, then **blends it into root's EXISTING BTC position** with the
+   same real quantity-weighted average entry and recomputed target/stop
+   the "Add cash" button already uses - root's own pre-existing position
+   is never discarded, only added to.
+4. Bumps root's `allocated_usd` by the real amount spent.
+
+**Root's "can never be manually sold" lock is lifted once retired** -
+`close_family_tree_branch` in `routers/trading_dashboard.py` now checks
+`is_crypto_passive_mode()` before refusing a root sell: that protection
+existed to guard the tree's permanent foundation while it was actively
+growing, and once retired there's no tree left to protect - the account
+owner must always be able to sell their own real BTC holding by hand,
+same principle the Alpaca side already uses for manual close.
+
+New `POST /api/trading-dashboard/family-tree-status/liquidate-and-buy-btc`
+(admin-key gated) and a matching real banner + double-confirmed button on
+`family_tree_dashboard.html` ("🔒📈 Retire the tree & buy real BTC" /
+"🔒📈 Family tree retired" after), same UX pattern as the Alpaca side.
+
+Verified offline against a real throwaway SQLite DB: the passive-mode
+flag round-trips correctly; `run_branch_cycle()` genuinely does nothing
+(no DB changes at all) for any branch, root included, while passive;
+the real liquidation sells every non-root branch with hand-verified P&L
+(a real loss on one coin, a real profit on another), records real trade-
+history rows for each, deletes every non-root branch while leaving root
+untouched structurally, sets passive mode, sizes the real BTC spend as
+exactly 99.5% of real freed cash, and correctly **blends** the new BTC
+buy into root's pre-existing position (qty-weighted entry, not
+discarded) with root's `allocated_usd` bumped by the real spend. Full
+existing crypto regression suite (reinforcement, exclusion, reconciliation,
+consolidation) re-run clean alongside it.
+
+**Not yet run against the real account** - same as the Alpaca side, this
+needs the account owner to open the family tree dashboard after the next
+redeploy and click the button themselves; a genuinely irreversible
+action once confirmed. Discussed explicitly first whether to wait and
+let the reinforcement fix + branch consolidation try to recover the tree
+before retiring it - the account owner chose to build the retirement
+tool now regardless, with the decision of when (or whether) to actually
+click it left for later.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

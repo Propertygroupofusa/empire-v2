@@ -524,6 +524,35 @@ async def load_branch(bot_name: str):
         return result.scalar_one_or_none()
 
 
+CRYPTO_PASSIVE_MODE_KEY = "crypto_family_tree_passive_mode"
+
+
+async def is_crypto_passive_mode() -> bool:
+    """True once the account owner has retired the entire family tree in
+    favor of one real buy-and-hold BTC position (mirrors
+    prop_bot.is_alpaca_passive_mode() on the Alpaca side - see that
+    function's docstring for why this is a DB-persisted flag rather than
+    a Railway env var). Checked at the top of every real branch cycle
+    (run_branch_cycle) so every branch thread - root included - stops
+    doing anything at all once set: no entries, no exits, no spawns, no
+    reinforcement. A real, deliberate one-way retirement, not a pause."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == CRYPTO_PASSIVE_MODE_KEY))
+        row = result.scalar_one_or_none()
+        return bool(row and row.base_capital and row.base_capital >= 1.0)
+
+
+async def set_crypto_passive_mode(enabled: bool):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == CRYPTO_PASSIVE_MODE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = TradingBotState(bot_name=CRYPTO_PASSIVE_MODE_KEY, base_capital=0.0)
+            db.add(row)
+        row.base_capital = 1.0 if enabled else 0.0
+        await db.commit()
+
+
 async def get_locked_usd() -> float:
     """The running total of skimmed profit walled off from ever being
     redeployed by any branch - see PROFIT_SKIM_PCT. Reusing TradingBotState
@@ -2125,6 +2154,160 @@ async def consolidate_branches_by_coin(dry_run: bool = True) -> dict:
     return {"dry_run": False, "groups_merged": len(executed), "plan": executed}
 
 
+async def liquidate_family_tree_and_buy_btc() -> dict:
+    """Per the account owner's explicit, real decision (mirrors
+    prop_bot.py's liquidate-and-buy-SPY on the Alpaca side): retire the
+    ENTIRE crypto family tree and consolidate everything into one real
+    buy-and-hold BTC position on the permanent root branch. A ONE-WAY
+    real action:
+
+    1. Sells every real position held by every NON-root branch at market
+       (place_market_sell(), which clamps to the real Coinbase balance
+       itself - no separate balance check needed here), records each real
+       fill as a CryptoCoinTradeHistory row (exit_reason "RETIRED_TO_BTC")
+       so nothing vanishes from the real per-coin trade history, and
+       deletes every non-root branch row once flat (its own allocated_usd
+       was only ever a bookkeeping split of the same shared real Coinbase
+       cash - deleting the row simply stops earmarking it, the real
+       dollars become free cash automatically).
+    2. Sets is_crypto_passive_mode() to True BEFORE buying, so nothing can
+       race in and spawn/reinforce/enter in the gap between everything
+       being sold and the BTC buy landing - every branch thread's
+       run_branch_cycle() checks this first thing and does nothing at all
+       once it's set.
+    3. Buys real BTC-USD with the real free cash (real Coinbase balance
+       minus whatever is genuinely locked profit - locked profit is never
+       auto-spent, matching every other real spend path in this file),
+       minus a small safety buffer (same reasoning as every other
+       real-balance clamp in this codebase), and blends it into root's
+       EXISTING BTC position with the same real quantity-weighted average
+       entry price and recomputed target/stop the "Add cash" button
+       already uses - root keeps whatever real position it already held,
+       this only adds to it.
+    4. Bumps root's own allocated_usd by the real amount just spent - its
+       pre-existing balance (never touched by this liquidation) plus every
+       other branch's freed real capital now consolidated into it.
+
+    Returns a real summary: what was closed and its P&L, how much was
+    spent on BTC, and the resulting real fill."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoTreeBranch))
+        all_branches = result.scalars().all()
+
+    root = next((b for b in all_branches if b.bot_name == ROOT_BOT_NAME), None)
+    others = [b for b in all_branches if b.bot_name != ROOT_BOT_NAME]
+
+    closed = []
+    async with engine.aiohttp.ClientSession() as session:
+        for b in others:
+            pos = await _load_branch_position(b.bot_name)
+            if pos is not None:
+                fill = await engine.place_market_sell(session, pos.qty, b.product_id)
+                if fill:
+                    filled_qty, filled_price = fill
+                    pnl = round((filled_price - pos.entry_price) * filled_qty, 2)
+                    async with AsyncSessionLocal() as db:
+                        db.add(CryptoCoinTradeHistory(
+                            product_id=b.product_id, bot_name=b.bot_name,
+                            entry_price=pos.entry_price, exit_price=filled_price, qty=filled_qty,
+                            pnl=pnl, exit_reason="RETIRED_TO_BTC",
+                        ))
+                        await db.commit()
+                    closed.append({"bot_name": b.bot_name, "product_id": b.product_id, "qty": filled_qty, "exit_price": filled_price, "realized_pnl": pnl})
+                    log.info(f"[TREE] 🔒 retiring {b.bot_name}: sold {filled_qty:.8f} {b.product_id} @ ${filled_price:,.2f} | P&L ${pnl:.2f}")
+                else:
+                    reason = engine._last_order_error.get(b.product_id, "unknown reason")
+                    closed.append({"bot_name": b.bot_name, "product_id": b.product_id, "qty": 0.0, "exit_price": None, "realized_pnl": 0.0, "note": f"sell did not fill: {reason}"})
+                    log.warning(f"[TREE] 🔒 retiring {b.bot_name}: real sell of {b.product_id} did not fill ({reason})")
+                await _clear_branch_position(b.bot_name)
+
+        async with AsyncSessionLocal() as db:
+            for b in others:
+                result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == b.bot_name))
+                row = result.scalar_one_or_none()
+                if row:
+                    await db.delete(row)
+            await db.commit()
+
+        await set_crypto_passive_mode(True)
+
+        real_balance, err = await engine.get_usd_balance(session)
+        if real_balance is None:
+            log.warning(f"[TREE] 🔒 could not fetch real USD balance to buy BTC: {err} - passive mode still enabled")
+            return {"status": "closed_only", "closed_positions": closed, "passive_mode": True, "error": f"Could not fetch real USD balance to buy BTC: {err}"}
+
+        locked = await get_locked_usd()
+        spendable = max(0.0, real_balance - locked)
+
+        if spendable < 1.0:
+            log.warning(f"[TREE] 🔒 only ${spendable:.2f} real spendable cash after closing - not enough to buy BTC, passive mode still enabled")
+            return {
+                "status": "closed_only", "closed_positions": closed, "passive_mode": True,
+                "cash_after_closing": round(real_balance, 2),
+                "note": "Real spendable cash after closing was too small to buy BTC. The tree is still retired - nothing will trade on its own.",
+            }
+
+        spend = round(spendable * 0.995, 2)
+        price, atr_pct = await engine.get_price_and_volatility(session, ROOT_PRODUCT_ID)
+        if price is None or atr_pct is None:
+            log.warning("[TREE] 🔒 could not fetch a live BTC-USD price - passive mode still enabled, no buy attempted")
+            return {
+                "status": "closed_only", "closed_positions": closed, "passive_mode": True,
+                "cash_after_closing": round(real_balance, 2),
+                "note": "Could not fetch a live BTC-USD price to size the buy. The tree is still retired - retry the buy manually or via this endpoint again.",
+            }
+
+        fill = await engine.place_market_buy(session, spend, ROOT_PRODUCT_ID)
+        if not fill:
+            reason = engine._last_order_error.get(ROOT_PRODUCT_ID, "unknown reason")
+            log.error(f"[TREE] 🔒 real BTC buy failed: {reason} - passive mode still enabled")
+            return {
+                "status": "closed_no_buy", "closed_positions": closed, "passive_mode": True,
+                "cash_after_closing": round(real_balance, 2),
+                "error": f"Closed every other real position, but the real BTC buy failed: {reason}. The tree is still retired - retry the buy manually or via this endpoint again.",
+            }
+        filled_qty, filled_price = fill
+
+        existing_position = await _load_branch_position(ROOT_BOT_NAME)
+        if existing_position is not None:
+            new_qty = existing_position.qty + filled_qty
+            blended_entry = (existing_position.qty * existing_position.entry_price + filled_qty * filled_price) / new_qty
+        else:
+            new_qty = filled_qty
+            blended_entry = filled_price
+
+        position_dollar_size = new_qty * blended_entry
+        target_pct = max(engine.pick_target_pct(atr_pct), engine.min_profit_target_pct(position_dollar_size, atr_pct))
+        target_price = blended_entry * (1 + target_pct)
+        stop_price = blended_entry * (1 - STOP_LOSS_PCT)
+        await _save_branch_position(ROOT_BOT_NAME, ROOT_PRODUCT_ID, blended_entry, new_qty, target_price, stop_price)
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == ROOT_BOT_NAME))
+            root_row = result.scalar_one_or_none()
+            new_root_balance = None
+            if root_row:
+                root_row.allocated_usd = round((root_row.allocated_usd or 0.0) + spend, 2)
+                new_root_balance = root_row.allocated_usd
+                await db.commit()
+
+    root_balance_note = f"${new_root_balance:,.2f}" if new_root_balance is not None else "unknown (root row missing)"
+    log.info(
+        f"[TREE] 🔒📈 Retired the family tree - closed {len(others)} other branch(es), bought {filled_qty:.8f} "
+        f"BTC-USD @ ${filled_price:,.2f} (${spend:,.2f}) - root now {root_balance_note}"
+    )
+    return {
+        "status": "liquidated_and_bought_btc",
+        "closed_positions": closed,
+        "cash_after_closing": round(real_balance, 2),
+        "spend_on_btc": spend,
+        "btc_filled_qty": filled_qty,
+        "btc_filled_price": round(filled_price, 2),
+        "root_new_balance": round(new_root_balance, 2) if new_root_balance is not None else None,
+        "passive_mode": True,
+    }
+
+
 async def _maybe_spawn_child(branch):
     """Called right after a branch's allocated_usd is updated (always right
     after a real sell, when the number is freshly accurate). If it just
@@ -2475,6 +2658,16 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
 async def run_branch_cycle(bot_name: str) -> bool:
     """One cycle for one branch. Returns False if this branch's row is
     gone (its thread should stop), True otherwise."""
+    if await is_crypto_passive_mode():
+        # Real, deliberate retirement (see is_crypto_passive_mode) - every
+        # branch, root included, does nothing at all: no entries, no
+        # exits, no spawns, no reinforcement. Returns True (not False) so
+        # the thread keeps existing rather than exiting - passive mode is
+        # reversible in principle even though nothing in this codebase
+        # currently flips it back on, and a thread that already exited
+        # wouldn't restart on its own if it ever were.
+        return True
+
     branch = await load_branch(bot_name)
     if branch is None:
         return False

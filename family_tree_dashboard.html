@@ -429,6 +429,8 @@
         </div>
     </div>
 
+    <div id="crypto-passive-mode-banner" style="display:none;"></div>
+
     <div class="narrative" id="narrative">Loading tree summary…</div>
 
     <div class="kpi-row">
@@ -1207,6 +1209,7 @@ async function refresh() {
         document.getElementById('stat-refreshed').textContent = new Date().toLocaleTimeString();
         updateSpawnButtonState(data);
         updateUnlockButtonState(data);
+        renderCryptoPassiveModeBanner(data);
 
         const branches = data.branches || [];
         lastUnrealizedProfit = branches.reduce((sum, b) => {
@@ -1289,6 +1292,52 @@ function renderReconciliation(data) {
         <thead><tr><th>Asset</th><th>Branches</th><th>Tracked qty (DB)</th><th>Real balance (Coinbase)</th><th>Status</th></tr></thead>
         <tbody>${rows}</tbody>
     </table></div>`;
+}
+
+function renderCryptoPassiveModeBanner(data) {
+    const el = document.getElementById('crypto-passive-mode-banner');
+    el.style.display = '';
+    if (data.crypto_passive_mode) {
+        el.innerHTML = `<div class="panel" style="background: var(--green-bg); border: 1px solid var(--green); padding: 14px 18px; margin-bottom: 16px;">
+            <strong>🔒📈 Family tree retired.</strong> This account now holds a real buy-and-hold BTC position only —
+            no branch is trading anymore. See it on the root card below.
+        </div>`;
+    } else {
+        el.innerHTML = `<div class="panel" style="padding: 14px 18px; margin-bottom: 16px;">
+            <button class="unlock-btn" onclick="confirmLiquidateAndBuyBtc()">🔒📈 Retire the tree &amp; buy real BTC</button>
+            <div style="font-size:0.8em; color: var(--text-dim); margin-top:6px;">
+                Sells every real position held by every branch except root right now, permanently stops the whole
+                tree from trading again, and buys real BTC with all the freed cash, blended into root's position.
+                A real, one-way action.
+            </div>
+        </div>`;
+    }
+}
+
+async function confirmLiquidateAndBuyBtc() {
+    if (!confirm('Sell EVERY real position held by every branch except root right now, permanently retire the entire family tree, and buy real BTC with all the freed cash? This is a real, one-way action.')) return;
+    if (!confirm('Really sure? This locks in whatever real gain or loss each branch currently shows, and stops the whole tree from trading for good.')) return;
+    const banner = document.getElementById('crypto-passive-mode-banner');
+    banner.innerHTML = '<div class="panel" style="padding:14px 18px;">Selling every real position and buying BTC…</div>';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/family-tree-status/liquidate-and-buy-btc', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        alert(
+            `Done. Closed ${data.closed_positions.length} branch(es)` +
+            (data.spend_on_btc
+                ? ` and bought ~${fmtUsd(data.spend_on_btc)} of real BTC.`
+                : '. Not enough real cash was free to buy BTC yet - the tree is still retired.')
+        );
+    } catch (e) {
+        alert('Could not complete: ' + e.message);
+    } finally {
+        await refresh();
+    }
 }
 
 async function previewConsolidate() {

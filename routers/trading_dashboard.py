@@ -737,6 +737,8 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         spendable_for_spawn = round(real_balance - locked_usd - flat_allocated_sum, 2)
         can_spawn = seed_usd is not None and spendable_for_spawn >= seed_usd
 
+    crypto_passive_mode = await crypto_family_tree_bot_module.is_crypto_passive_mode() if crypto_family_tree_bot_module else False
+
     return {
         "branches": out,
         "branch_count": len(out),
@@ -745,6 +747,7 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         "spendable_for_spawn": spendable_for_spawn,
         "seed_usd": seed_usd,
         "can_spawn": can_spawn,
+        "crypto_passive_mode": crypto_passive_mode,
     }
 
 
@@ -1002,6 +1005,32 @@ async def consolidate_family_tree_branches(dry_run: bool = True):
     return await crypto_family_tree_bot_module.consolidate_branches_by_coin(dry_run=dry_run)
 
 
+@router.post("/family-tree-status/liquidate-and-buy-btc", dependencies=[Depends(require_admin_key)])
+async def liquidate_family_tree_and_buy_btc():
+    """Per the account owner's explicit, real decision - the crypto-side
+    counterpart to the Alpaca liquidate-and-buy-SPY action: retires the
+    ENTIRE family tree and consolidates everything into one real
+    buy-and-hold BTC position on the permanent root branch.
+
+    A REAL, ONE-WAY action: sells every real position held by every
+    non-root branch at market, records each fill in the real per-coin
+    trade history, deletes every non-root branch row, permanently retires
+    the whole tree (is_crypto_passive_mode() - every branch thread, root
+    included, stops doing anything at all: no entries, no exits, no
+    spawns, no reinforcement), then buys real BTC with the real freed
+    cash and blends it into root's existing position. See
+    crypto_family_tree_bot.liquidate_family_tree_and_buy_btc() for the
+    full real mechanics.
+
+    Root's own existing "can never be manually sold" protection is lifted
+    once this runs - there's no tree left to protect, so the account
+    owner can always sell the resulting real BTC holding by hand
+    afterward via the normal close endpoint."""
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+    return await crypto_family_tree_bot_module.liquidate_family_tree_and_buy_btc()
+
+
 @router.post("/family-tree-status/close/{bot_name}", dependencies=[Depends(require_admin_key)])
 async def close_family_tree_branch(bot_name: str):
     """Manually force one branch to sell its open position right now, at
@@ -1029,7 +1058,15 @@ async def close_family_tree_branch(bot_name: str):
     # matching its existing "root stays on BTC-USD by design" behavior on
     # automatic exits. Enforced here, not just hidden in the UI, so it
     # can't be bypassed by calling this endpoint directly.
-    if bot_name == crypto_family_tree_bot_module.ROOT_BOT_NAME:
+    #
+    # Lifted once the tree has been retired into a real buy-and-hold BTC
+    # position (see liquidate_family_tree_and_buy_btc) - "stays root,
+    # never manually sold" existed to protect the tree's permanent
+    # foundation while it was actively growing; once retired, there's no
+    # tree left to protect, and the account owner must always be able to
+    # sell their own real holding by hand, same principle the Alpaca-side
+    # SPY retirement already uses for manual close.
+    if bot_name == crypto_family_tree_bot_module.ROOT_BOT_NAME and not await crypto_family_tree_bot_module.is_crypto_passive_mode():
         raise HTTPException(
             status_code=400,
             detail=f"{bot_name} is the tree's permanent root - it can never be manually sold",
