@@ -6,6 +6,7 @@ RUN apt-get update \
        fonts-dejavu-core \
        build-essential \
        python3-dev \
+       git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

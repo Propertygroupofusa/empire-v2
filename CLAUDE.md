@@ -3230,6 +3230,34 @@ change).
 
 ---
 
+## A third real status-snapshot bug: the container never had a `git` binary at all
+
+After the `.git`-directory fix redeployed, a new and much simpler real
+error showed up on the very next cycle:
+`WARNING:status_snapshot:[STATUS-SNAPSHOT] snapshot push failed: [Errno 2]
+No such file or directory: 'git'`. `push_snapshot()` shells out to the
+real `git` CLI via `subprocess.run(["git"] + args, ...)` - but the
+`Dockerfile`'s base image is `python:3.11-slim`, which does not ship
+`git`, and the `apt-get install` list here never included it (only
+`ffmpeg`, `fonts-dejavu-core`, `build-essential`, `python3-dev`). Every
+earlier fix in this saga (the `.git`-directory workaround, the throwaway-repo
+rewrite) was correct about the repository *state* but couldn't have worked
+regardless, since the `git` binary itself was never present in the real
+deployed container to run any of those commands.
+
+Fixed by adding `git` to the Dockerfile's `apt-get install` line -
+one line, no other changes needed. This is the real, final piece: the
+throwaway-repo `push_snapshot()` logic was already correct, it just had
+no `git` executable to actually invoke.
+
+**Not yet confirmed live**: needs one more real redeploy (this one changes
+the Docker image itself, so it's a real rebuild, not just a code
+redeploy) and a follow-up `git fetch origin status-snapshots` to confirm
+the full chain - code, `.git`-independence, and now the `git` binary
+itself - all work together end-to-end in production.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
