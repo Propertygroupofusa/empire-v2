@@ -188,6 +188,7 @@ function renderWatchlist(data) {
             else if (c.cooldown) reason = 'Cooling down';
             else if (c.overbought) reason = 'Overbought';
             else if (c.beats_btc === false) reason = 'Trailing BTC';
+            else if (c.higher_tf_uptrend === false) reason = 'Downtrend (1H)';
             badge = `<span class="wl-badge wl-blocked">${reason}</span>`;
         }
 

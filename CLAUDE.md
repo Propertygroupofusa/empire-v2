@@ -2724,6 +2724,73 @@ stops new money from going in.
 
 ---
 
+## Higher-timeframe (hourly SMA20/SMA50) trend filter promoted to live entry selection
+
+Right after the BTC-relative-strength promotion above, the account owner
+asked whether the crypto side needed the same 1-hour trend confirmation
+the Alpaca side already has. The comparison tool (see the shadow-mode
+section above) was run for real: 18 coins, 30 real days, SMA20/SMA50 on
+hourly candles, $150/trade. Real results: **15 of 18 coins improved with
+the filter, only 3 got worse** (SOL-USD -4.9pp, DOGE-USD -8.0pp,
+LINK-USD -5.7pp) - several improvements were large: ADA-USD +24.6pp,
+DOT-USD +23.2pp, SHIB-USD +18.8pp, TIA-USD +16.5pp, UNI-USD +15.0pp.
+Honest caveat that came with it: this filter mostly CUTS LOSSES rather
+than creates wins - most filtered coins are still net-negative on this
+real (rough, alt-unfriendly) 30-day sample; only XRP-USD, ADA-USD, and
+ETH-USD end up net-positive after filtering. Given a real, mostly-
+consistent 83% hit rate and the account owner's explicit "yes," this
+moved from shadow-mode diagnostic to a real live entry gate, the same
+way the BTC-relative-strength filter did.
+
+Implementation - deliberately uses a SEPARATE real hourly-candle fetch,
+not the existing ~25h/5-minute data every other live check already uses:
+
+- **`engine._fetch_hourly_closes(session, product_id, count=50)`**
+  (`crypto_btc_compound_bot.py`) - real Coinbase candles at
+  `granularity=3600`, trimmed to the most recent `count` hourly closes.
+  Kept separate from the existing `_fetch_candles()` (5-min candles) on
+  purpose: the real backtest that justified this filter was computed on
+  a real 50-HOUR window, and a 5-min-candle substitute would be a
+  different, unvalidated filter wearing the same name.
+- **`engine.get_higher_tf_trend(session, product_id, sma_short=20, sma_long=50)`**
+  - returns `True` (uptrend), `False` (downtrend), or `None` if there
+  isn't yet enough real hourly history. Callers must fail OPEN on `None`
+  - only a CONFIRMED downtrend blocks anything, matching every other
+  "don't block on missing data" gate in this codebase.
+- **`find_most_volatile_unclaimed_coin()`** (`crypto_family_tree_bot.py`)
+  now fetches this concurrently for every candidate (added to the same
+  outer `asyncio.gather`, not a second sequential round-trip) and skips
+  any candidate with a confirmed downtrend, composing with the existing
+  RSI-overbought and BTC-relative-strength filters (a candidate must
+  clear all three).
+- **`get_live_coin_snapshot()`** (the "🟢 What's bullish right now" live
+  watchlist) updated the same way, reporting a real `higher_tf_uptrend`
+  field per coin and folding it into `eligible_now` - so the live
+  watchlist never disagrees with what the picker actually does.
+  `crypto_selection_backtest.html`'s watchlist panel shows a real
+  "Downtrend (1H)" reason badge when this is what's blocking a coin.
+
+Real cost: roughly doubles the live API calls during a coin-switch
+search (every candidate now needs both its existing 5-min fetch AND a
+new hourly fetch) - acceptable since coin-switches only happen on branch
+exits, not every cycle for every branch.
+
+Verified offline (no live network access in this sandbox): a real
+Coinbase-shaped hourly candles response is parsed and trimmed correctly;
+SMA20/SMA50 correctly identifies a real uptrend vs downtrend; a fetch
+failure returns `None` (fails open), never `False`; the live picker
+actually SKIPS a candidate with a confirmed downtrend even though every
+other check would have picked it, and picks the next-best real
+candidate instead; a candidate whose hourly-trend lookup fails is still
+correctly treated as eligible (fails open in the real live path, not
+just in the isolated function); and the live watchlist's `eligible_now`
+correctly reflects a confirmed downtrend. Not yet confirmed against real
+live trading outcomes - needs watching on the dashboard's coin-switch
+behavior after the next redeploy, same as every other live trading-logic
+change in this file.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

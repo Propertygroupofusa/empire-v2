@@ -384,6 +384,53 @@ async def get_price_volatility_and_trend(session, product_id: str = PRODUCT_ID) 
     return closes[-1], atr_pct, is_bullish, rsi, coin_return
 
 
+async def _fetch_hourly_closes(session, product_id: str, count: int = 50):
+    """Fetches the most recent `count` real hourly candles (Coinbase public
+    candles endpoint, granularity=3600) - used ONLY by get_higher_tf_trend()
+    below for its SMA20/SMA50 trend check. Deliberately separate from
+    _fetch_candles() (5-min candles, ~25h window): the higher-timeframe
+    filter needs a real 50-HOUR window to match exactly what
+    crypto_selection_backtest.py's _make_higher_tf_trend_gate() validated
+    offline before this was wired into live selection - a 5-min-candle
+    substitute would be a different, untested filter, not the one the real
+    30-day comparison actually backed. Returns closes (oldest-first,
+    trimmed to the most recent `count`) or None on failure/insufficient
+    data."""
+    url = f"https://api.exchange.coinbase.com/products/{product_id}/candles?granularity=3600"
+    try:
+        async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+            if not data or len(data) < count:
+                return None
+            candles = list(reversed(data))[-count:]
+            return [float(c[4]) for c in candles]
+    except Exception as e:
+        log.warning(f"[BTC-COMPOUND] Hourly candle fetch failed for {product_id}: {e}")
+        return None
+
+
+async def get_higher_tf_trend(session, product_id: str, sma_short: int = 20, sma_long: int = 50):
+    """Real, live SMA20/SMA50 (hourly) trend confirmation - the crypto-side
+    analog of prop_bot.py's get_higher_tf_trend(), promoted from shadow-mode
+    backtest to live entry selection after a real 30-day/18-coin comparison
+    (crypto_selection_backtest.py's run_higher_tf_trend_comparison(), run
+    live on the backtest page) showed a net-positive ROI change on 15 of 18
+    coins - several substantially (ADA +24.6pp, DOT +23.2pp, SHIB +18.8pp,
+    TIA +16.5pp, UNI +15.0pp) - against only 3 coins made worse (SOL -4.9pp,
+    DOGE -8.0pp, LINK -5.7pp). Returns True (uptrend, SMA20 > SMA50), False
+    (downtrend), or None if there isn't yet enough real hourly history -
+    callers must fail OPEN on None, matching every other "don't block on
+    missing data" gate in this codebase."""
+    closes = await _fetch_hourly_closes(session, product_id, count=sma_long)
+    if closes is None:
+        return None
+    sma20 = sum(closes[-sma_short:]) / sma_short
+    sma50 = sum(closes[-sma_long:]) / sma_long
+    return sma20 > sma50
+
+
 def pick_target_pct(atr_pct: float) -> float:
     if atr_pct < VOL_LOW_THRESHOLD:
         return TARGET_LOW_PCT

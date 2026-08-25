@@ -1331,6 +1331,17 @@ async def find_most_volatile_unclaimed_coin(session):
     can't be fetched, matching the backtest gate's own documented
     behavior - a missing benchmark isn't grounds to block every candidate.
 
+    Higher-timeframe (hourly SMA20/SMA50) trend filter, added the same way
+    after a real 30-day/18-coin comparison (crypto_selection_backtest.py's
+    run_higher_tf_trend_comparison()) showed a net-positive ROI change on
+    15 of 18 coins, several substantially (ADA +24.6pp, DOT +23.2pp,
+    SHIB +18.8pp) against only 3 made worse. Requires the candidate's own
+    real hourly SMA20 to be above its SMA50 (see engine.get_higher_tf_trend) -
+    a separate real hourly-candle fetch from the ~25h/5-min data every other
+    check here uses, since that's the exact real window the backtest
+    validated. Fails OPEN on missing/insufficient real hourly history -
+    only a CONFIRMED downtrend blocks a candidate.
+
     If no non-overbought, BTC-beating coin is currently bullish, falls back to the
     highest volatility among the remaining non-overbought candidates
     rather than doing nothing. Returns (product_id, atr_pct), or
@@ -1366,13 +1377,20 @@ async def find_most_volatile_unclaimed_coin(session):
     # concurrently with every candidate, and compared against each
     # candidate's own coin_return below - not root's own coin (root never
     # calls this function), just the real benchmark every candidate gets
-    # measured against.
-    results = await asyncio.gather(
-        engine.get_price_volatility_and_trend(session, "BTC-USD"),
-        *(engine.get_price_volatility_and_trend(session, product_id) for product_id in candidates),
-        return_exceptions=True,
+    # measured against. The real hourly SMA20/50 trend check runs
+    # concurrently alongside all of it, in the same round trip.
+    vol_results, trend_results = await asyncio.gather(
+        asyncio.gather(
+            engine.get_price_volatility_and_trend(session, "BTC-USD"),
+            *(engine.get_price_volatility_and_trend(session, product_id) for product_id in candidates),
+            return_exceptions=True,
+        ),
+        asyncio.gather(
+            *(engine.get_higher_tf_trend(session, product_id) for product_id in candidates),
+            return_exceptions=True,
+        ),
     )
-    btc_result, results = results[0], results[1:]
+    btc_result, results = vol_results[0], vol_results[1:]
     btc_return = None
     if isinstance(btc_result, Exception):
         log.warning(f"[TREE] BTC-relative-strength: BTC-USD lookup failed ({btc_result}) - filter fails open this cycle")
@@ -1381,7 +1399,7 @@ async def find_most_volatile_unclaimed_coin(session):
 
     best_bullish_id, best_bullish_atr = None, -1.0
     best_any_id, best_any_atr = None, -1.0
-    for product_id, result in zip(candidates, results):
+    for product_id, result, trend_ok in zip(candidates, results, trend_results):
         if isinstance(result, Exception):
             log.warning(f"[TREE] volatility lookup failed for {product_id}: {result}")
             continue
@@ -1396,6 +1414,17 @@ async def find_most_volatile_unclaimed_coin(session):
                 f"[TREE] {product_id}: skipping - not beating BTC-USD over the same ~25h window "
                 f"(coin {coin_return:+.2%} vs BTC {btc_return:+.2%})"
             )
+            continue
+        # Real, live SMA20/SMA50 (hourly) trend confirmation - promoted from
+        # shadow-mode backtest after a real 30-day/18-coin comparison showed
+        # a net-positive ROI change on 15 of 18 coins (see
+        # engine.get_higher_tf_trend's docstring for the real numbers).
+        # Fails OPEN (None) on missing/insufficient real hourly data - only
+        # a CONFIRMED downtrend (False) blocks a candidate.
+        if isinstance(trend_ok, Exception):
+            trend_ok = None
+        if trend_ok is False:
+            log.info(f"[TREE] {product_id}: skipping - hourly SMA20/SMA50 trend is DOWN")
             continue
         if atr_pct > best_any_atr:
             best_any_atr = atr_pct
@@ -1429,12 +1458,18 @@ async def get_live_coin_snapshot():
     descending (the same volatility tiebreak the live picker uses)."""
     excluded = await get_effective_excluded_coins()
     async with engine.aiohttp.ClientSession() as session:
-        results = await asyncio.gather(
-            engine.get_price_volatility_and_trend(session, "BTC-USD"),
-            *(engine.get_price_volatility_and_trend(session, product_id) for product_id in COIN_FAMILY_TREE),
-            return_exceptions=True,
+        vol_results, trend_results = await asyncio.gather(
+            asyncio.gather(
+                engine.get_price_volatility_and_trend(session, "BTC-USD"),
+                *(engine.get_price_volatility_and_trend(session, product_id) for product_id in COIN_FAMILY_TREE),
+                return_exceptions=True,
+            ),
+            asyncio.gather(
+                *(engine.get_higher_tf_trend(session, product_id) for product_id in COIN_FAMILY_TREE),
+                return_exceptions=True,
+            ),
         )
-    btc_result, coin_results = results[0], results[1:]
+    btc_result, coin_results = vol_results[0], vol_results[1:]
     btc_return = None
     if isinstance(btc_result, Exception):
         log.warning(f"[TREE] live snapshot: BTC-USD lookup failed ({btc_result}) - BTC-relative filter shown as N/A")
@@ -1442,7 +1477,9 @@ async def get_live_coin_snapshot():
         _, _, _, _, btc_return = btc_result
 
     snapshot = []
-    for product_id, result in zip(COIN_FAMILY_TREE, coin_results):
+    for product_id, result, trend_ok in zip(COIN_FAMILY_TREE, coin_results, trend_results):
+        if isinstance(trend_ok, Exception):
+            trend_ok = None
         row = {
             "product_id": product_id,
             "excluded": product_id in excluded,
@@ -1452,7 +1489,7 @@ async def get_live_coin_snapshot():
             row.update({
                 "price": None, "atr_pct": None, "is_bullish": None, "rsi": None,
                 "coin_return": None, "btc_return": btc_return, "alpha": None,
-                "overbought": None, "beats_btc": None, "eligible_now": False,
+                "overbought": None, "beats_btc": None, "higher_tf_uptrend": trend_ok, "eligible_now": False,
                 "error": str(result) if isinstance(result, Exception) else "no real price data available",
             })
             snapshot.append(row)
@@ -1463,7 +1500,7 @@ async def get_live_coin_snapshot():
             row.update({
                 "price": None, "atr_pct": None, "is_bullish": None, "rsi": None,
                 "coin_return": None, "btc_return": btc_return, "alpha": None,
-                "overbought": None, "beats_btc": None, "eligible_now": False,
+                "overbought": None, "beats_btc": None, "higher_tf_uptrend": trend_ok, "eligible_now": False,
                 "error": "no real price data available",
             })
             snapshot.append(row)
@@ -1473,12 +1510,13 @@ async def get_live_coin_snapshot():
         alpha = (coin_return - btc_return) if (coin_return is not None and btc_return is not None) else None
         beats_btc = alpha is None or alpha > 0  # fails open, matching the live picker's own documented behavior
         eligible_now = (
-            not row["excluded"] and not row["cooldown"] and not overbought and beats_btc
+            not row["excluded"] and not row["cooldown"] and not overbought and beats_btc and trend_ok is not False
         )
         row.update({
             "price": price, "atr_pct": atr_pct, "is_bullish": is_bullish, "rsi": rsi,
             "coin_return": coin_return, "btc_return": btc_return, "alpha": alpha,
-            "overbought": overbought, "beats_btc": beats_btc, "eligible_now": eligible_now,
+            "overbought": overbought, "beats_btc": beats_btc, "higher_tf_uptrend": trend_ok,
+            "eligible_now": eligible_now,
         })
         snapshot.append(row)
 
