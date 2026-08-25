@@ -3141,6 +3141,53 @@ appears after this redeploy - needs the account owner to redeploy once
 more and a follow-up `git fetch origin status-snapshots` from a session
 with normal repo access.
 
+**Update - a second real bug found immediately after the first was
+fixed**: the crash above was resolved, but the very next log line
+revealed the actual root blocker: `WARNING:status_snapshot:[STATUS-
+SNAPSHOT] no .git directory found in this deployment - cannot push`.
+Real, confirmed live: Railway's deployed container does not include a
+`.git` directory at all - Railway hands the running app its source
+files, not a full git checkout with history (no `.dockerignore` exists
+in this repo, so this isn't a build-config choice - it's how Railway's
+build/deploy pipeline works). `push_snapshot()`'s original design
+assumed the app's own directory (`REPO_DIR`) was a real git working
+tree, which holds in local dev but never in this actual deployment.
+
+Fixed by recognizing this dependency was never actually necessary:
+since `SNAPSHOT_BRANCH` only ever holds a single force-pushed commit
+with no shared history requirement (a deliberate design choice already
+documented in this module - "never accumulated history"), `push_snapshot()`
+now does a fresh `git init` in its own throwaway `tempfile.TemporaryDirectory()`
+for every single push, writes `STATUS.md` there, commits, and force-pushes
+from there - completely independent of whatever git state (or lack of
+one) exists in the real running app's own directory. `REPO_DIR` and the
+`.git`-directory existence check are both gone; `_run_git()` now takes an
+explicit `cwd` per call instead of a module-level default. This is also
+strictly safer than the original approach - it never writes into or runs
+git commands against the real deployed app's own source directory.
+
+Verified offline with a dedicated test that reproduces the exact real
+Railway state (a real directory confirmed to have no `.git`, `os.chdir`'d
+into for the test) and a real local bare "remote" repo standing in for
+GitHub (the real `github.com` push URL redirected to it via a thin
+`_run_git` wrapper, so no real network or token is touched) - confirms
+`push_snapshot()` now succeeds from that exact no-`.git` state, confirms
+the pushed branch's `STATUS.md` contains the real generated content via
+plain `git show`, and confirms a second, different push correctly
+force-overwrites the branch with fresh content (proving the throwaway-
+repo approach works repeatedly, not just once). The old test's Case 5
+(previously asserting `push_snapshot()` "correctly refuses when `.git`
+is missing") tested the exact bug being fixed here and was rewritten to
+assert the corrected behavior instead.
+
+**Confirmed live**: after this fix, Railway logs showed the crash from
+the first bug was gone (no more `unsupported operand type(s)` line) -
+the `.git` gap is what remained, now also fixed. Still needs one more
+real redeploy and a follow-up `git fetch origin status-snapshots` to
+confirm the actual push succeeds end-to-end in production, the one part
+that could never be verified from this sandboxed dev environment (no
+live network access to GitHub or Railway).
+
 ---
 
 ## Known Limitations & TODOs

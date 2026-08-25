@@ -18,6 +18,7 @@ import asyncio
 import logging
 import os
 import subprocess
+import tempfile
 import time
 from datetime import datetime, timezone
 
@@ -30,7 +31,6 @@ GITHUB_TOKEN = os.getenv("STATUS_SNAPSHOT_GITHUB_TOKEN", "")
 REPO_SLUG = os.getenv("STATUS_SNAPSHOT_REPO_SLUG", "Propertygroupofusa/empire-v2")
 SNAPSHOT_BRANCH = os.getenv("STATUS_SNAPSHOT_BRANCH", "status-snapshots")
 SNAPSHOT_FILENAME = "STATUS.md"
-REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _fmt_usd(n) -> str:
@@ -177,55 +177,74 @@ async def build_snapshot_markdown() -> str:
     )
 
 
-def _run_git(args, timeout=30):
+def _run_git(args, cwd, timeout=30):
     return subprocess.run(
-        ["git"] + args, cwd=REPO_DIR, capture_output=True, text=True, timeout=timeout
+        ["git"] + args, cwd=cwd, capture_output=True, text=True, timeout=timeout
     )
 
 
 def push_snapshot(content: str) -> bool:
     """Writes STATUS.md and force-pushes a single fresh commit to
-    SNAPSHOT_BRANCH. Force-push is deliberate and safe here: this branch
-    only ever exists to hold the latest snapshot, never accumulated
-    history, and nothing else should ever push to it. Never touches
-    main - this function has no code path that can reach main."""
+    SNAPSHOT_BRANCH, from a throwaway git repo created just for this push
+    - NOT from the running app's own directory/git state.
+
+    Real bug found live: Railway's deployed container has no .git
+    directory at all ("no .git directory found in this deployment -
+    cannot push") - Railway's build process hands the running app its
+    source files, not a full git checkout with history. The original
+    version of this function assumed the app's own directory was a real
+    git working tree, which is true in local dev but not in this actual
+    deployment.
+
+    Since this branch only ever holds a single force-pushed snapshot
+    commit with no shared history requirement (see the module docstring -
+    "never accumulated history"), there was never a real need to reuse
+    the app directory's own git history in the first place: a fresh
+    `git init` in a throwaway temp directory produces an equally valid
+    commit to force-push, and is actually safer than the original
+    approach - it never writes into or runs git commands against the
+    real running app's own source directory, whether or not a .git
+    happens to exist there."""
     if not GITHUB_TOKEN:
         log.info("[STATUS-SNAPSHOT] STATUS_SNAPSHOT_GITHUB_TOKEN not set - skipping push (snapshot generation still ran)")
         return False
 
-    if not os.path.isdir(os.path.join(REPO_DIR, ".git")):
-        log.warning("[STATUS-SNAPSHOT] no .git directory found in this deployment - cannot push")
-        return False
-
-    snapshot_path = os.path.join(REPO_DIR, SNAPSHOT_FILENAME)
     try:
-        with open(snapshot_path, "w") as f:
-            f.write(content)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            init = _run_git(["init", "-q"], cwd=tmp_dir)
+            if init.returncode != 0:
+                log.warning(f"[STATUS-SNAPSHOT] git init failed: {init.stderr}")
+                return False
 
-        _run_git(["config", "--local", "user.email", "status-snapshot@empire-v2.local"])
-        _run_git(["config", "--local", "user.name", "Empire Status Snapshot"])
+            _run_git(["config", "--local", "user.email", "status-snapshot@empire-v2.local"], cwd=tmp_dir)
+            _run_git(["config", "--local", "user.name", "Empire Status Snapshot"], cwd=tmp_dir)
 
-        add = _run_git(["add", "-f", SNAPSHOT_FILENAME])
-        if add.returncode != 0:
-            log.warning(f"[STATUS-SNAPSHOT] git add failed: {add.stderr}")
-            return False
+            snapshot_path = os.path.join(tmp_dir, SNAPSHOT_FILENAME)
+            with open(snapshot_path, "w") as f:
+                f.write(content)
 
-        commit = _run_git(["commit", "-m", f"Status snapshot {datetime.now(timezone.utc).isoformat()}"])
-        if commit.returncode != 0 and "nothing to commit" not in commit.stdout:
-            log.warning(f"[STATUS-SNAPSHOT] git commit failed: {commit.stderr}")
-            return False
+            add = _run_git(["add", SNAPSHOT_FILENAME], cwd=tmp_dir)
+            if add.returncode != 0:
+                log.warning(f"[STATUS-SNAPSHOT] git add failed: {add.stderr}")
+                return False
 
-        remote_url = f"https://x-access-token:{GITHUB_TOKEN}@github.com/{REPO_SLUG}.git"
-        push = _run_git(["push", "--force", remote_url, f"HEAD:refs/heads/{SNAPSHOT_BRANCH}"], timeout=60)
-        if push.returncode != 0:
-            # Never let the real push URL (with the token embedded) reach
-            # the logs - only the generic git stderr, which git itself
-            # does not include the URL in for a plain push failure.
-            log.warning(f"[STATUS-SNAPSHOT] git push failed: {push.stderr}")
-            return False
+            commit = _run_git(["commit", "-m", f"Status snapshot {datetime.now(timezone.utc).isoformat()}"], cwd=tmp_dir)
+            if commit.returncode != 0:
+                log.warning(f"[STATUS-SNAPSHOT] git commit failed: {commit.stderr}")
+                return False
 
-        log.info(f"[STATUS-SNAPSHOT] pushed real status snapshot to {SNAPSHOT_BRANCH}")
-        return True
+            remote_url = f"https://x-access-token:{GITHUB_TOKEN}@github.com/{REPO_SLUG}.git"
+            push = _run_git(["push", "--force", remote_url, f"HEAD:refs/heads/{SNAPSHOT_BRANCH}"], cwd=tmp_dir, timeout=60)
+            if push.returncode != 0:
+                # Never let the real push URL (with the token embedded)
+                # reach the logs - only the generic git stderr, which git
+                # itself does not include the URL in for a plain push
+                # failure.
+                log.warning(f"[STATUS-SNAPSHOT] git push failed: {push.stderr}")
+                return False
+
+            log.info(f"[STATUS-SNAPSHOT] pushed real status snapshot to {SNAPSHOT_BRANCH}")
+            return True
     except Exception as e:
         log.warning(f"[STATUS-SNAPSHOT] snapshot push failed: {e}")
         return False
