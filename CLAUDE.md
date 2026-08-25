@@ -3838,6 +3838,144 @@ to clarify scope before building either.
 
 ---
 
+## Live Alpaca strategy swapped from mean-reversion to momentum
+
+Right after the momentum-vs-mean-reversion comparison tool (see above)
+was built and run for real, the account owner personally ran it against
+30 real days of Alpaca history across every symbol prop_bot.py trades.
+Real results: **momentum made $68.08 across 67 trades (56.7% win rate)
+vs. mean-reversion's $48.52 across 357 trades (51.3% win rate)** - more
+real profit, 5x fewer trades (meaningfully less fee drag), and a better
+win rate, all on the identical real data. Given a compound question with
+two real paths forward - swap the live strategy to momentum, or still
+retire to a passive buy-and-hold SPY position (the account's other
+recently-built option) - the account owner was asked directly via a
+clarifying question rather than guessing on an ambiguous "yes," and
+explicitly chose **"Swap live rules to momentum."** Active trading stays
+live; the rules it trades under changed.
+
+**What changed, end to end** - every real layer between a price tick and
+an order now runs on momentum, not mean-reversion:
+
+1. **`bot_mandates.py`**: `APEX_MANDATE["entry"]["rsi_threshold"]`
+   flipped from `30` (buy oversold) to `55` (buy confirmed strength),
+   with a new `"momentum": True` flag. `validate_entry()`'s
+   single-direction branch now checks `rsi < threshold` (reject) under
+   `momentum: True`, the mirror image of the old `rsi > threshold`
+   oversold rejection - a real, opposite-direction gate, not a
+   relabeled number.
+2. **`alpaca_mean_reversion.py`**: new `should_exit_position_momentum()`
+   - a real trailing stop off the position's own peak price since entry
+   (`trail_pct`, 3% default), not mean-reversion's small fixed
+   profit-target/breakeven-ratchet/giveback-cap combination. A position
+   that's never been profitable (`peak_pnl_pct=0.0`, the real default
+   for a freshly-opened position) still carries an effective real -3%
+   stop from entry. `max_hold_seconds` (24h) is a backstop only, much
+   longer than mean-reversion's tighter default, since a real momentum
+   trade is meant to be held longer while it keeps making new highs, not
+   exited quickly. The OLD `should_exit_position()` (non-momentum) is
+   deliberately NOT removed - `alpaca_selection_backtest.py` still
+   imports and uses it as the real baseline strategy for the
+   momentum-vs-mean-reversion and exit-rule-sensitivity comparison
+   tools, so it needs to keep working correctly even though it's no
+   longer prop_bot.py's live path.
+3. **`prop_bot.py`** (the real, live cycle every open/prospective
+   position goes through):
+   - New `get_price_momentum()` - a real, SEPARATE Alpaca bars fetch
+     (15-min timeframe, 100-bar limit, `feed=iex`) from the old
+     `get_price_rsi()` (5-min/`sma50`), deliberately matching
+     `alpaca_selection_backtest.py`'s already-validated
+     `_replay_symbol_momentum()` exactly (same timeframe, same real
+     SMA(20) period, same RSI(14) formula) - reusing the mismatched
+     5-min/SMA50 shape built for mean-reversion would have made this a
+     different, unvalidated variant wearing the same name. Returns
+     `{"price", "rsi", "trend", "momentum", "sma20"}`, reusing the same
+     `_price_rsi_last_failure` diagnostic dict `get_price_rsi()` already
+     established, so a live fetch failure is still diagnosable from the
+     dashboard the same way. `get_price_rsi()` itself is left in place,
+     unmodified, still real and still directly tested
+     (`test_price_rsi_bar_floor.py`/`test_price_rsi_diagnosis.py`) -
+     just no longer called from prop_bot.py's own live scan loop.
+   - Pass 0 (the per-cycle scan) now calls `get_price_momentum()`
+     instead of `get_price_rsi()`.
+   - Pass 1 (exit management on every held position) now calls
+     `should_exit_position_momentum()` instead of the old 9-parameter
+     `should_exit_position()` call - `peak_pnl_pct` is read from and
+     written back to the in-memory position dict AND persisted via the
+     existing `_db_update_peak_pct()`/`BotPosition.peak_pct`, so a
+     Railway restart can't silently wipe a position's real trailing-stop
+     high-water mark.
+   - Pass 2 (new entries) now requires BOTH `rsi > MOMENTUM_RSI_ENTRY`
+     (55) AND `price > sma20` directly (not just the mandate's RSI
+     check alone) before a symbol becomes a real candidate - the same
+     two-condition real momentum signal the validated backtest used.
+     Confidence-ranking when multiple symbols qualify the same cycle is
+     now `rsi - MOMENTUM_RSI_ENTRY` (how far past the threshold), the
+     natural momentum analog of mean-reversion's old "how oversold"
+     ranking.
+   - The now-unused `mr_should_exit`/`validate_dual_direction` imports
+     were removed from prop_bot.py (dead code - no remaining call
+     site); `get_price_rsi` itself was left in place since it's still
+     directly, independently tested and doesn't cause any harm sitting
+     unused.
+4. **`routers/trading_dashboard.py`** - both real dashboard-facing entry
+   points updated to match, so neither can drift out of sync with the
+   real live logic above:
+   - `manual_open_prop_position()` ("Trade this"): now calls
+     `get_price_momentum()` and, after the existing `validate_entry()`
+     mandate check, added a second explicit real check
+     (`price <= sma20` -> 400) for momentum's other required condition,
+     matching Pass 2 exactly - a manual click can never enter something
+     the live automatic logic itself wouldn't.
+   - `alpaca_entry_eligibility()` (the "Right now" dry-run column on the
+     backtest page): same two changes - `get_price_momentum()` instead
+     of `get_price_rsi()`, plus the same real SMA20 check layered on
+     after the mandate check - so the dashboard's eligibility preview
+     can never show a symbol as eligible that a real click would
+     actually refuse, or vice versa.
+   - Verified via a real AST parse of the whole router file after each
+     edit (the same discipline established after the earlier
+     `_safe_float`/decorator-misplacement bug) - route count, bindings,
+     and no duplicates all confirmed correct.
+
+**Verified offline** (`test_live_momentum_swap.py`, new): a real
+oversold RSI (the OLD buy signal) is now correctly REJECTED under the
+momentum mandate; a real RSI above 55 is correctly ACCEPTED; RSI exactly
+at the mandate's own boundary passes the mandate's `<` check but is
+still excluded by Pass 2's own stricter `>` check (both real, separate
+gates verified independently); the commodities/inverse-ETF universe
+check is completely unaffected; the real trailing-stop exit correctly
+holds through a small pullback within the 3% trail, correctly exits once
+a real pullback exceeds it, correctly raises the peak on a genuine new
+high, and correctly backstops via the 24h max-hold when neither has
+fired. `test_inverse_etfs.py`, `test_manual_trade_this_stock.py`, and
+`test_alpaca_entry_eligibility.py` (all pre-existing, from earlier this
+session) were updated in place - not deleted - to use real
+momentum-qualifying RSI/SMA20 values instead of the old oversold ones,
+since their actual point (universe checks, kill-condition/margin-safety
+enforcement, the manual-entry gate reusing the same real functions the
+automatic path uses) is unchanged and still needs to keep working
+correctly under the new strategy. Full existing regression suite
+re-run alongside it; the crypto-side and Postgres-dependent failures
+seen are confirmed pre-existing/unrelated to this change (stale renamed
+functions, missing local Postgres) - none touch prop_bot.py,
+alpaca_mean_reversion.py, bot_mandates.py, or the Alpaca side of
+routers/trading_dashboard.py.
+
+**Not yet confirmed against real live trading outcomes** - this is a
+real, live strategy change now shipped, but its actual effect can only
+be judged by watching real trades over the coming days/weeks, the same
+as every other live strategy change in this file. The 30-day backtest
+sample is real evidence, not a guarantee of the same magnitude going
+forward - the account owner should watch the dashboard's per-branch
+status and the "Right now" eligibility column after the next redeploy to
+confirm real entries are actually firing under the new RSI>55/SMA20
+condition (momentum setups are rarer than oversold dips by design - 67
+trades vs. 357 over the same real 30 days - so real entries will be
+noticeably less frequent than before, which is expected, not a bug).
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

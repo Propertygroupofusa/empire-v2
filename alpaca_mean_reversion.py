@@ -124,6 +124,49 @@ def should_exit_position(
     return False, reason, "hold", new_peak_pnl_pct
 
 
+def should_exit_position_momentum(
+    symbol: str,
+    entry_price: float,
+    current_price: float,
+    position_age_seconds: int,
+    peak_pnl_pct: float = 0.0,
+    max_hold_seconds: int = 86400,  # 24 real hours - a backstop only, much longer than mean-reversion's 2-hour default
+    trail_pct: float = 0.03,  # exits on a pullback this large from the real peak since entry, not a fixed target off entry
+) -> Tuple[bool, str, str, float]:
+    """Momentum's real exit rule - the direct live counterpart to
+    alpaca_selection_backtest.py's _replay_symbol_momentum(), which this
+    mirrors exactly (not a reimplementation with different math): a
+    trailing stop measured off the real PEAK price reached since entry,
+    not a small fixed target off entry. peak_pnl_pct starts at 0.0 (the
+    peak "price" starts at the entry price itself, same as the backtest's
+    own position["peak"] = price at entry) - a position that never once
+    goes positive still has a real effective stop at trail_pct below its
+    own entry, exactly matching the backtest's behavior.
+
+    Returns (should_exit, reason, exit_type, new_peak_pnl_pct) - same
+    shape as should_exit_position() above, so callers persist the peak
+    the same way (BotPosition.peak_pct)."""
+    unrealized_pnl_pct = (current_price - entry_price) / entry_price
+    new_peak_pnl_pct = max(peak_pnl_pct, unrealized_pnl_pct)
+    trailing_stop_pct = new_peak_pnl_pct - trail_pct
+
+    if unrealized_pnl_pct <= trailing_stop_pct:
+        reason = (
+            f"Momentum trailing stop: pulled back to {unrealized_pnl_pct*100:.2f}% from a "
+            f"{new_peak_pnl_pct*100:.2f}% peak (trail: {trail_pct*100:.1f}%)"
+        )
+        log.info(f"  📉 {symbol}: {reason}")
+        return True, reason, "trail", new_peak_pnl_pct
+
+    if position_age_seconds >= max_hold_seconds:
+        reason = f"Max hold time exceeded: {position_age_seconds}s >= {max_hold_seconds}s"
+        log.info(f"  ⏱️  {symbol}: {reason}")
+        return True, reason, "timeout", new_peak_pnl_pct
+
+    reason = f"Hold: P&L {unrealized_pnl_pct*100:.2f}% (peak {new_peak_pnl_pct*100:.2f}%, trailing stop at {trailing_stop_pct*100:.2f}%)"
+    return False, reason, "hold", new_peak_pnl_pct
+
+
 def calculate_position_sizing_stocks(
     cash_available: float,
     entry_price: float,

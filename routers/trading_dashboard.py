@@ -1885,12 +1885,12 @@ async def manual_open_prop_position(ticker: str):
     backtest page, per the account owner's explicit request to match the
     crypto side's. This is NOT a shortcut around the account's real
     risk rules: it reuses the EXACT same real functions the automatic
-    entry path calls (get_price_rsi, validate_entry/APEX_MANDATE's
+    entry path calls (get_price_momentum, validate_entry/APEX_MANDATE's
     universe check, check_kill_conditions, check_margin_safety,
     size_position, execute_futures_trade) rather than reimplementing any
     of them, so a manual entry gets the same real protection an
     automatic one does - it's just triggered on demand instead of by a
-    live RSI signal. Long-only, matching everything else prop_bot.py can
+    live momentum signal. Long-only, matching everything else prop_bot.py can
     actually execute today (shorting is disabled on the real account -
     see get_account_shorting_enabled)."""
     if prop_bot_module is None:
@@ -1940,11 +1940,12 @@ async def manual_open_prop_position(ticker: str):
         if should_halt:
             raise HTTPException(status_code=400, detail=f"Trading halted by kill condition: {halt_reason}")
 
-        price_data = await pb.get_price_rsi(session, ticker)
+        price_data = await pb.get_price_momentum(session, ticker)
         if price_data is None:
             reason = pb._price_rsi_last_failure.get(ticker, "unknown reason")
             raise HTTPException(status_code=503, detail=f"Could not fetch a live price/RSI for {ticker}: {reason} - try again")
         price, rsi, trend = price_data["price"], price_data["rsi"], price_data["trend"]
+        sma20 = price_data.get("sma20") or price
 
         total_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in pb.open_prop_positions.values())
         is_valid, mandate_reason = pb.validate_entry(
@@ -1954,6 +1955,17 @@ async def manual_open_prop_position(ticker: str):
         )
         if not is_valid:
             raise HTTPException(status_code=400, detail=f"Mandate check failed: {mandate_reason}")
+
+        # Momentum's other real condition - validate_entry only checks
+        # RSI direction, so this second real condition (price above its
+        # own 20-bar average) is checked here too, matching the automatic
+        # entry path's Pass 2 exactly, so a manual click can never enter
+        # something the live logic itself wouldn't.
+        if price <= sma20:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Mandate check failed: price ${price:.2f} not above its own 20-bar average ${sma20:.2f} - not real momentum yet",
+            )
 
         is_safe, safety_reason = pb.check_margin_safety(buying_power, equity, len(pb.open_prop_positions))
         if not is_safe:
@@ -1993,9 +2005,10 @@ async def alpaca_entry_eligibility():
     execute_futures_trade - a read-only dry run of the same real gate, not
     a second, looser copy of it that could drift out of sync or (worse)
     quietly become the real bypass the account owner explicitly said they
-    did NOT want built. Every symbol still goes through get_price_rsi and
-    validate_entry for real, live data - nothing here is cached or
-    estimated.
+    did NOT want built. Updated alongside the live momentum-strategy swap:
+    now goes through get_price_momentum (RSI + real SMA20) and the same
+    price-above-SMA20 check manual_open_prop_position enforces, not the
+    old RSI-oversold framing - nothing here is cached or estimated.
 
     Kill-condition and margin-safety are account-wide, not per-symbol, so
     they're checked once: if either fails, every symbol is reported
@@ -2051,19 +2064,24 @@ async def alpaca_entry_eligibility():
                 results[ticker] = {"eligible": False, "reason": f"Auto-excluded - last {pb.AUTO_EXCLUDE_RUN_WINDOW} real backtest runs were all negative ROI", "rsi": None}
                 continue
 
-            price_data = await pb.get_price_rsi(session, ticker)
+            price_data = await pb.get_price_momentum(session, ticker)
             if price_data is None:
                 reason = pb._price_rsi_last_failure.get(ticker, "unknown reason")
                 results[ticker] = {"eligible": False, "reason": f"Could not fetch a live price/RSI: {reason}", "rsi": None}
                 continue
 
             rsi = price_data["rsi"]
+            price = price_data["price"]
+            sma20 = price_data.get("sma20") or price
             total_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in pb.open_prop_positions.values())
             is_valid, mandate_reason = pb.validate_entry(
                 bot_name="prop_bot", symbol=contract, rsi=rsi, volume_ratio=1.0,
                 buying_power=buying_power, open_positions=len(pb.open_prop_positions),
                 total_notional=total_notional, equity=equity,
             )
+            if is_valid and price <= sma20:
+                is_valid = False
+                mandate_reason = f"Price ${price:.2f} not above its own 20-bar average ${sma20:.2f} - not real momentum yet"
             results[ticker] = {"eligible": is_valid, "reason": None if is_valid else mandate_reason, "rsi": rsi}
 
     return {"tickers": results}

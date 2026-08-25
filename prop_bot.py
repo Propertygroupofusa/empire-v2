@@ -22,7 +22,7 @@ from sqlalchemy import select, desc
 from database import AsyncSessionLocal
 from models import BotPosition, Payment, AlpacaBacktestRun, TradingBotState
 from bot_mandates import APEX_MANDATE, validate_entry
-from alpaca_mean_reversion import should_exit_position as mr_should_exit, validate_dual_direction
+from alpaca_mean_reversion import should_exit_position_momentum
 from profit_tracker import FiveHourProfitTracker
 
 # Measurement system: Trade logging with full signal context
@@ -546,9 +546,11 @@ async def get_price_rsi(session, symbol):
             # Real bug found live: this used to hard-require 50 bars before
             # returning anything at all, because sma50 needs all 50 - but
             # the 14-period RSI itself only needs 15 closes, and the entry
-            # validator (validate_dual_direction, called from try_open) was
-            # already written to tolerate a missing sma50 via
-            # data.get("sma50", price). The practical effect: for roughly
+            # validator that called this at the time (mean-reversion's
+            # validate_dual_direction, since replaced by the momentum
+            # strategy's get_price_momentum/direct SMA20 check - see
+            # CLAUDE.md) was already written to tolerate a missing sma50
+            # via data.get("sma50", price). The practical effect: for roughly
             # the first ~4 hours of every single trading day (until 50 real
             # 5-min bars exist), get_price_rsi() returned None outright -
             # the scanner skipped every symbol and "Trade this" refused
@@ -590,6 +592,81 @@ async def get_price_rsi(session, symbol):
             return {"price": price, "rsi": round(rsi, 1), "trend": trend, "momentum": round(momentum, 2), "sma50": sma50}
     except Exception as e:
         log.error(f"Price error {symbol}: {e}")
+        _price_rsi_last_failure[symbol] = f"{type(e).__name__}: {e}"
+        return None
+
+
+MOMENTUM_RSI_ENTRY = 55.0
+MOMENTUM_SMA_PERIOD = 20
+MOMENTUM_TRAIL_PCT = 0.03
+MOMENTUM_MAX_HOLD_SECONDS = 86400  # 24 real hours - a backstop only, not the primary exit
+
+
+async def get_price_momentum(session, symbol):
+    """The live counterpart to get_price_rsi() above, but on real 15-min
+    bars with a real 20-bar SMA - deliberately matching
+    alpaca_selection_backtest.py's _replay_symbol_momentum() exactly
+    (same timeframe, same SMA period, same RSI formula), since that's the
+    real, validated evidence this live strategy is based on. get_price_rsi()'s
+    5-min/SMA50 shape was built for mean-reversion and would be a
+    different, unvalidated variant if reused here instead.
+
+    Returns {"price", "rsi", "trend", "momentum", "sma20"} - same key
+    names as get_price_rsi() where they overlap, so existing logging/
+    display code that reads data["price"]/["rsi"]/["trend"] keeps working
+    unchanged. Reuses the same _price_rsi_last_failure dict for the same
+    diagnosability the dashboard's error messages already rely on."""
+    try:
+        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=15Min&limit=100&feed=iex"
+        async with session.get(url, headers=get_headers()) as r:
+            if r.status != 200:
+                try:
+                    error_text = await r.text()
+                except Exception:
+                    error_text = "(could not read response)"
+                log.warning(f"Alpaca API error for {symbol}: HTTP {r.status}: {error_text[:200]}")
+                _price_rsi_last_failure[symbol] = f"Alpaca returned HTTP {r.status}: {error_text[:200]}"
+                return None
+
+            try:
+                data = await r.json()
+            except Exception as e:
+                log.warning(f"Failed to parse JSON for {symbol}: {type(e).__name__}: {e}")
+                _price_rsi_last_failure[symbol] = f"Could not parse Alpaca's response: {type(e).__name__}"
+                return None
+
+            bars = data.get("bars")
+            if not isinstance(bars, list):
+                log.warning(f"Invalid bars format for {symbol}: expected list, got {type(bars).__name__}")
+                _price_rsi_last_failure[symbol] = f"Unexpected bars format from Alpaca: {type(bars).__name__}"
+                return None
+
+            MIN_BARS = MOMENTUM_SMA_PERIOD + 1
+            if len(bars) < MIN_BARS:
+                bar_count = len(bars)
+                log.debug(f"Insufficient 15-min bars for {symbol}: got {bar_count}, need at least {MIN_BARS}")
+                _price_rsi_last_failure[symbol] = f"Only {bar_count} of the required {MIN_BARS} 15-min bars are available right now"
+                return None
+
+            closes = [b["c"] for b in bars]
+            price = closes[-1]
+
+            period = 14
+            gains = [max(closes[i] - closes[i - 1], 0) for i in range(1, len(closes))]
+            losses = [max(closes[i - 1] - closes[i], 0) for i in range(1, len(closes))]
+            avg_gain = sum(gains[-period:]) / period
+            avg_loss = sum(losses[-period:]) / period
+            rs = avg_gain / avg_loss if avg_loss > 0 else 100
+            rsi = 100 - (100 / (1 + rs))
+
+            sma20 = sum(closes[-MOMENTUM_SMA_PERIOD:]) / MOMENTUM_SMA_PERIOD
+            trend = "bullish" if price > sma20 else "bearish"
+            momentum = ((price - closes[-3]) / closes[-3]) * 100 if len(closes) >= 3 and closes[-3] > 0 else 0
+
+            _price_rsi_last_failure.pop(symbol, None)
+            return {"price": price, "rsi": round(rsi, 1), "trend": trend, "momentum": round(momentum, 2), "sma20": sma20}
+    except Exception as e:
+        log.error(f"Momentum price error {symbol}: {e}")
         _price_rsi_last_failure[symbol] = f"{type(e).__name__}: {e}"
         return None
 
@@ -1421,7 +1498,9 @@ async def run_prop_cycle():
         scans = {}
         for contract, config in FUTURES.items():
             # Scan all symbols 24/7 — crypto, commodities, indices all available on Alpaca
-            data = await get_price_rsi(session, config["symbol"])
+            # Momentum strategy (real 15-min bars/20-bar SMA), not mean-reversion's
+            # get_price_rsi() - see MOMENTUM_RSI_ENTRY above for why.
+            data = await get_price_momentum(session, config["symbol"])
             if data:
                 scans[contract] = data
                 log.info(f"[APEX_589296] {contract} ({config['symbol']}) | ${data['price']:.2f} | RSI:{data['rsi']} | Momentum:{data.get('momentum', 0):+.2f}% | {data['trend']}")
@@ -1493,38 +1572,27 @@ async def run_prop_cycle():
             position_open_time = position.get("open_time", now)
             position_age_seconds = int((now - position_open_time).total_seconds())
 
-            # Mean Reversion Exit Decision — enforces 6 rules: breakeven
-            # ratchet, peak-profit giveback cap, stop loss, min profit, RSI
-            # exit, timeout. peak_pnl_pct is this position's real
-            # high-water mark, persisted to BotPosition.peak_pct so a
-            # Railway restart can't wipe it and silently disarm the first
-            # two rules on exactly the positions that ran up the most.
-            #
-            # min_profit_target_pct/max_giveback_pct raised from 2%/0.5% to
-            # 3%/1.5% (the "moderate" scenario) after the account owner
-            # asked why 4 months of real trading on $980 only made ~$29-50.
-            # alpaca_selection_backtest.py's real exit-rule sensitivity
-            # comparison (run live against real 30-day Alpaca history)
-            # showed moderate beating the original tight rule on both real
-            # P&L ($52.38 vs $48.26) and win rate (54.4% vs 51.4%), while
-            # the looser 2.5%/4% scenario only added another $0.75 for
-            # meaningfully more risk - moderate captures nearly all of the
-            # real benefit. See CLAUDE.md for the full real comparison.
-            should_exit, reason, exit_type, new_peak_pnl_pct = mr_should_exit(
+            # Momentum Exit Decision - a real trailing stop off this
+            # position's own real peak price since entry, not a small
+            # fixed target. Replaced mean-reversion's should_exit_position()
+            # after a real, live head-to-head comparison on the same real
+            # 30-day Alpaca history: momentum made $68.08 (67 trades,
+            # 56.7% win rate) vs mean-reversion's $48.52 (357 trades,
+            # 51.3% win rate) - more real money, far fewer trades (less
+            # fee drag), better win rate. See MOMENTUM_RSI_ENTRY above and
+            # CLAUDE.md for the full real comparison. peak_pnl_pct is this
+            # position's real high-water mark, persisted to
+            # BotPosition.peak_pct so a Railway restart can't wipe it and
+            # silently reset the trailing stop on exactly the positions
+            # that ran up the most.
+            should_exit, reason, exit_type, new_peak_pnl_pct = should_exit_position_momentum(
                 symbol=contract,
                 entry_price=entry,
                 current_price=price,
-                current_rsi=rsi,
                 position_age_seconds=position_age_seconds,
-                direction=side,
-                max_hold_seconds=PROP_MAX_HOLD_SECONDS,
-                stop_loss_pct=0.003,  # 0.3% hard stop (matches get_dynamic_stop_loss base)
-                min_profit_target_pct=0.03,  # 3% minimum profit - raised from 2% (see "moderate" scenario, exit-rule sensitivity comparison)
-                rsi_profit_threshold_long=60,  # Sell longs when RSI >= 60 (overbought)
-                rsi_profit_threshold_short=40,  # Cover shorts when RSI <= 40 (oversold)
                 peak_pnl_pct=position.get("peak_pnl_pct", 0.0),
-                breakeven_trigger_pct=0.01,  # +1% - matches the crypto side's ratchet trigger
-                max_giveback_pct=0.015,  # can't give back more than 1.5% from its peak once ever profitable - raised from 0.5% (see below)
+                max_hold_seconds=MOMENTUM_MAX_HOLD_SECONDS,
+                trail_pct=MOMENTUM_TRAIL_PCT,
             )
             if new_peak_pnl_pct > position.get("peak_pnl_pct", 0.0):
                 position["peak_pnl_pct"] = new_peak_pnl_pct
@@ -1547,30 +1615,30 @@ async def run_prop_cycle():
             price, rsi, trend = data["price"], data["rsi"], data["trend"]
             momentum = data.get("momentum", 0)
 
-            # Mean Reversion Entry Validation — check both long and short directions
-            # get_price_rsi() now returns sma50=None (not just an absent
-            # key) once fewer than 50 real bars exist - `or` catches that
-            # explicit None the same way `.get(..., price)` caught a
-            # missing key before.
-            sma50 = data.get("sma50") or price  # fallback to price if SMA50 unavailable
-
-            direction, should_enter, reason = validate_dual_direction(
-                symbol=contract,
-                current_rsi=rsi,
-                sma_50=sma50,
-                current_price=price,
-                cash_available=cash_remaining if cash_remaining is not None else 0,
-                open_positions=len(open_prop_positions),
-                max_open=dynamic_max_positions,
+            # Momentum Entry Validation - buy real, confirmed strength
+            # (RSI above MOMENTUM_RSI_ENTRY AND price above its own real
+            # 20-bar average - both required), the opposite signal
+            # direction from mean-reversion's oversold check this
+            # replaced. Long-only, matching this account's real shorting-
+            # disabled constraint (unchanged from before).
+            sma20 = data.get("sma20") or price  # fallback to price if unavailable
+            direction = "long" if (rsi > MOMENTUM_RSI_ENTRY and price > sma20) else "hold"
+            should_enter = direction != "hold"
+            reason = "OK" if should_enter else (
+                f"RSI {rsi:.1f} not above {MOMENTUM_RSI_ENTRY} or price ${price:.2f} not above its own "
+                f"20-bar average ${sma20:.2f}"
             )
 
-            if should_enter and direction != "hold":
-                # Strong mean reversion signal: record confidence as distance from threshold
-                confidence = abs(rsi - (30 if direction == "long" else 70))
+            if should_enter:
+                # Real momentum signal: record confidence as how far above
+                # the threshold RSI is - a stronger, more confirmed move
+                # gets prioritized first when several symbols qualify the
+                # same cycle.
+                confidence = rsi - MOMENTUM_RSI_ENTRY
                 candidates.append((confidence, contract, config, direction, price, rsi, trend))
                 status = f"{direction.upper()}_SETUP"
             else:
-                status = f"NEUTRAL ({reason})" if not should_enter else "HOLD"
+                status = f"NEUTRAL ({reason})"
 
             latest_signals[contract] = {
                 "symbol": config["symbol"], "price": price, "rsi": rsi, "trend": trend,
