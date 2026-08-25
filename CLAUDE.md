@@ -3438,6 +3438,75 @@ real evidence, not a guarantee of the same magnitude going forward.
 
 ---
 
+## Branch consolidation: merging every branch sharing a coin into one
+
+Per the account owner's explicit request ("come up with a mechanism where
+all of them can help each other"): with the shared-coin-branches feature
+live, up to 15 real branches had piled onto POL-USD alone during the
+top-15-rotation spawn storm - each one independently tracking its own qty
+against ONE pooled real Coinbase balance for that coin, the exact
+structural gap already behind both the phantom-position self-heal and the
+DB-vs-Coinbase reconciliation SHORTFALLs found earlier this session.
+Rather than build a new, separate "help each other" mechanic, the real fix
+was to remove the fragmentation causing the risk in the first place -
+turning many thin, individually floor-fragile branches on the same coin
+into one bigger, sturdier one is real branches helping each other by
+combining forces, and it structurally eliminates the cross-branch drift
+risk for good on every coin it's applied to.
+
+`consolidate_branches_by_coin()` (`crypto_family_tree_bot.py`): for every
+`product_id` held by 2+ real branches (BTC-USD, and any group containing
+the root branch, are always skipped - root never shares its coin by
+design):
+- `allocated_usd`: SUMMED across the group - no money created or
+  destroyed, pure bookkeeping consolidation.
+- `next_unlock_tier`: the MAX of the group's tiers, deliberately
+  conservative so the merge itself (not new capital) doesn't artificially
+  trigger a spawn/reinforcement none of the branches separately earned.
+- `equity_floor`: recomputed fresh from the NEW combined balance via the
+  same real tier formula every other floor self-heal in this file already
+  uses - never just the max of the old floors, which could exceed the
+  combined balance's own real bracket and immediately block trading.
+- Position: every branch's real tracked qty (if holding) is SUMMED into
+  one real quantity-weighted average entry price - the same blended-entry
+  math the "Add cash" button already uses - then target/stop are
+  recomputed fresh off that blended entry via a live price/ATR fetch.
+- Survivor: the branch with the LARGEST `allocated_usd` keeps its
+  identity (matches the existing "strongest sibling" throne philosophy
+  already used elsewhere in this codebase); every other branch in the
+  group is deleted after being folded in.
+
+`dry_run=True` (the default, both for the function and the new
+`POST /family-tree-status/consolidate-branches` endpoint) computes and
+returns the full real plan WITHOUT touching the database or placing any
+order, so it can be reviewed before it executes; `dry_run=False` executes
+it for real. `family_tree_dashboard.html`'s reconciliation panel gained a
+"🔗 Combine branches sharing a coin" button that always previews the real
+plan first (coin, survivor, merged-away branches, combined balance,
+blended position) with an explicit "✅ Confirm and combine for real"
+step before anything is touched - never a single-click destructive
+action. Per-coin trade history (`/family-tree-status/coin-history`) is
+completely unaffected either way - it's already tracked by coin, not by
+branch, so nothing there is lost when branches merge.
+
+Verified offline against a real throwaway SQLite DB seeded with the exact
+real shape from STATUS.md (3 branches on POL-USD - 2 holding real
+positions, 1 flat - plus a lone, untouched XRP-USD branch and root alone
+on BTC-USD): dry_run computes the correct real plan (survivor = highest
+balance, combined balance summed, tier = max, floor recomputed, blended
+entry quantity-weighted) without touching the database at all; execute
+actually deletes the merged-away branches and updates the survivor's
+bookkeeping AND blended position correctly; BTC-USD/root and the lone
+XRP-USD branch are both left completely untouched throughout; and a
+second call after consolidating correctly finds nothing left to merge.
+
+**Not yet run against real production data** - the account owner needs to
+open the family tree dashboard, click "🔗 Combine branches sharing a coin"
+to preview the real plan for POL-USD (15 branches)/SOL-USD (5)/XRP-USD
+(2), and confirm it before it actually executes against the real tree.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

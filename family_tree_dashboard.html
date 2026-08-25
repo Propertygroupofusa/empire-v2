@@ -452,6 +452,9 @@
         <div class="panel-sub">Per real asset (not per-branch, since branches can share a coin and Coinbase's balance for it is pooled): what every branch's tracked position says it holds, summed, vs. what Coinbase actually reports right now.</div>
         <div id="recon-banner">Loading…</div>
         <div id="recon-table-wrap"></div>
+        <button id="consolidate-btn" class="unlock-btn" style="margin-top:12px;" onclick="previewConsolidate()">🔗 Combine branches sharing a coin</button>
+        <div id="consolidate-status" style="margin-top:8px; font-size:0.85em; color: var(--text-dim);"></div>
+        <div id="consolidate-plan-wrap"></div>
     </div>
 
     <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
@@ -1286,6 +1289,66 @@ function renderReconciliation(data) {
         <thead><tr><th>Asset</th><th>Branches</th><th>Tracked qty (DB)</th><th>Real balance (Coinbase)</th><th>Status</th></tr></thead>
         <tbody>${rows}</tbody>
     </table></div>`;
+}
+
+async function previewConsolidate() {
+    // Real bookkeeping merge, never a Coinbase order - see
+    // consolidate_branches_by_coin() in crypto_family_tree_bot.py. Always
+    // shows the real plan (dry_run=true) first; nothing is touched until
+    // the account owner explicitly confirms it in the follow-up prompt.
+    const statusEl = document.getElementById('consolidate-status');
+    const planWrap = document.getElementById('consolidate-plan-wrap');
+    statusEl.textContent = 'Computing the real merge plan…';
+    planWrap.innerHTML = '';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/family-tree-status/consolidate-branches?dry_run=true', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        if (data.groups_to_merge === 0) {
+            statusEl.textContent = '✅ No coin is currently shared by more than one branch - nothing to combine.';
+            return;
+        }
+        statusEl.textContent = `Real plan: ${data.groups_to_merge} coin${data.groups_to_merge === 1 ? '' : 's'} would be consolidated. Review below, then confirm.`;
+        const rows = data.plan.map(p => `<tr>
+            <td>${p.product_id}</td>
+            <td>${p.survivor_bot_name}</td>
+            <td>${p.merged_bot_names.join(', ')}</td>
+            <td>${fmtUsd(p.combined_allocated_usd)}</td>
+            <td>${p.combined_qty ? p.combined_qty.toLocaleString(undefined, { maximumFractionDigits: 8 }) + ' @ ' + fmtUsd(p.blended_entry_price) : '— (flat)'}</td>
+        </tr>`).join('');
+        planWrap.innerHTML = `<div style="overflow-x:auto;"><table id="consolidate-table">
+            <thead><tr><th>Coin</th><th>Survives as</th><th>Merged away</th><th>Combined balance</th><th>Blended position</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table></div>
+        <button class="unlock-btn" style="margin-top:10px;" onclick="executeConsolidate()">✅ Confirm and combine for real</button>`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+    }
+}
+
+async function executeConsolidate() {
+    if (!confirm('Combine these branches for real? Merged-away branches will be permanently deleted (their coin\'s trade history is unaffected - it\'s tracked per-coin, not per-branch). This cannot be undone by calling this again.')) return;
+    const statusEl = document.getElementById('consolidate-status');
+    const planWrap = document.getElementById('consolidate-plan-wrap');
+    statusEl.textContent = 'Combining…';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/family-tree-status/consolidate-branches?dry_run=false', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        statusEl.textContent = `✅ Combined ${data.groups_merged} coin${data.groups_merged === 1 ? '' : 's'} for real.`;
+        planWrap.innerHTML = '';
+        await refresh();
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+    }
 }
 
 function renderHeaderTotal(elId, total) {

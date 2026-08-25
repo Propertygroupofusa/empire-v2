@@ -1984,6 +1984,147 @@ async def _deploy_seed_into_weakest_branch(session, target_bot_name: str, usd_am
     return True
 
 
+async def consolidate_branches_by_coin(dry_run: bool = True) -> dict:
+    """Per the account owner's explicit request: merge every branch
+    currently sharing the same coin into ONE branch - real bookkeeping
+    consolidation only, no Coinbase order placed, no money created or
+    destroyed. Real motivation: the shared-coin-branches feature let up to
+    15 real branches pile onto POL-USD alone during the top-15-rotation
+    spawn storm, and each branch independently tracks its own qty against
+    a POOLED real Coinbase balance for that coin - the exact structural
+    gap behind both the phantom-position self-heal and the DB-vs-Coinbase
+    reconciliation SHORTFALLs found earlier this session. Merging every
+    branch on a coin into one eliminates that gap for good on every coin
+    it's applied to (one real tracked position, one thread managing it,
+    nothing left to drift apart) and turns many thin, individually
+    floor-fragile branches into one bigger, sturdier one - real branches
+    helping each other by combining forces instead of quietly competing
+    for the same pooled balance.
+
+    For each product_id with 2+ real branches (BTC-USD, and any group
+    containing the root branch, are always skipped - root never shares
+    its coin with another branch by design):
+    - allocated_usd: SUMMED across every branch in the group - no money
+      created or destroyed, purely consolidated bookkeeping.
+    - next_unlock_tier: the MAX of the group's tiers, deliberately
+      conservative - the merge itself is a bookkeeping operation, not new
+      capital, so it shouldn't artificially trigger an immediate spawn/
+      reinforcement none of the branches separately earned yet.
+    - equity_floor: recomputed fresh from the NEW combined balance via
+      the same real tier formula every other floor self-heal in this file
+      already uses - never just the max of the old floors, which could
+      exceed the combined balance's own real bracket and immediately
+      block trading.
+    - Position: every branch's real tracked qty (if holding) is SUMMED
+      into one real quantity-weighted average entry price - the same
+      blended-entry math the "Add cash" button already uses - then
+      target/stop are recomputed fresh off that blended entry via a live
+      price/ATR fetch, same formula used everywhere else in this file.
+    - Survivor: the branch with the LARGEST allocated_usd in the group
+      keeps its identity (matches the existing "strongest sibling" throne
+      philosophy already used elsewhere in this codebase); every other
+      branch in the group is deleted after being folded in.
+
+    dry_run=True (the default) computes and returns the full real plan -
+    what would merge into what, and the resulting numbers - WITHOUT
+    touching the database or placing any order, so the plan can be seen
+    before it executes. dry_run=False executes it for real."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoTreeBranch))
+        all_branches = result.scalars().all()
+
+    groups = {}
+    for b in all_branches:
+        groups.setdefault(b.product_id, []).append(b)
+
+    merge_groups = {
+        pid: bs for pid, bs in groups.items()
+        if len(bs) > 1 and pid != "BTC-USD" and not any(b.bot_name == ROOT_BOT_NAME for b in bs)
+    }
+
+    plan = []
+    for product_id, branches in merge_groups.items():
+        survivor = max(branches, key=lambda b: b.allocated_usd)
+        losers = [b for b in branches if b.bot_name != survivor.bot_name]
+
+        combined_allocated = sum(b.allocated_usd for b in branches)
+        new_next_tier = max(b.next_unlock_tier for b in branches if b.next_unlock_tier)
+        new_floor = math.floor(combined_allocated / BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER
+
+        positions = []
+        for b in branches:
+            pos = await _load_branch_position(b.bot_name)
+            if pos is not None:
+                positions.append(pos)
+
+        combined_qty = sum(p.qty for p in positions)
+        blended_entry = (sum(p.qty * p.entry_price for p in positions) / combined_qty) if combined_qty > 0 else None
+
+        plan.append({
+            "product_id": product_id,
+            "survivor_bot_name": survivor.bot_name,
+            "merged_bot_names": [b.bot_name for b in losers],
+            "combined_allocated_usd": round(combined_allocated, 2),
+            "new_next_unlock_tier": new_next_tier,
+            "new_equity_floor": new_floor,
+            "combined_qty": combined_qty,
+            "blended_entry_price": blended_entry,
+        })
+
+    if dry_run:
+        return {"dry_run": True, "groups_to_merge": len(plan), "plan": plan}
+
+    executed = []
+    async with engine.aiohttp.ClientSession() as session:
+        for item in plan:
+            product_id = item["product_id"]
+            survivor_bot_name = item["survivor_bot_name"]
+
+            if item["combined_qty"] > 0:
+                price, atr_pct = await engine.get_price_and_volatility(session, product_id)
+                if price is not None and atr_pct is not None:
+                    position_dollar_size = item["combined_qty"] * item["blended_entry_price"]
+                    target_pct = max(engine.pick_target_pct(atr_pct), engine.min_profit_target_pct(position_dollar_size, atr_pct))
+                    target_price = item["blended_entry_price"] * (1 + target_pct)
+                    stop_price = item["blended_entry_price"] * (1 - STOP_LOSS_PCT)
+                    await _save_branch_position(
+                        survivor_bot_name, product_id, item["blended_entry_price"],
+                        item["combined_qty"], target_price, stop_price,
+                    )
+                else:
+                    log.warning(
+                        f"[TREE] consolidate: could not fetch a live price for {product_id} - merged the "
+                        f"bookkeeping for {survivor_bot_name} but left its position row untouched this pass"
+                    )
+
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == survivor_bot_name))
+                survivor_row = result.scalar_one_or_none()
+                if survivor_row:
+                    survivor_row.allocated_usd = item["combined_allocated_usd"]
+                    survivor_row.next_unlock_tier = item["new_next_unlock_tier"]
+                    survivor_row.equity_floor = item["new_equity_floor"]
+                    await db.commit()
+
+                for loser_bot_name in item["merged_bot_names"]:
+                    result2 = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == loser_bot_name))
+                    loser_row = result2.scalar_one_or_none()
+                    if loser_row:
+                        await db.delete(loser_row)
+                await db.commit()
+
+            for loser_bot_name in item["merged_bot_names"]:
+                await _clear_branch_position(loser_bot_name)
+
+            executed.append(item)
+            log.info(
+                f"[TREE] 🔗 consolidated {len(item['merged_bot_names']) + 1} branches on {product_id} into "
+                f"{survivor_bot_name} - combined balance ${item['combined_allocated_usd']:,.2f}"
+            )
+
+    return {"dry_run": False, "groups_merged": len(executed), "plan": executed}
+
+
 async def _maybe_spawn_child(branch):
     """Called right after a branch's allocated_usd is updated (always right
     after a real sell, when the number is freshly accurate). If it just

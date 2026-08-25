@@ -978,6 +978,30 @@ async def add_cash_to_branch(bot_name: str, payload: AddCashRequest, db: AsyncSe
     }
 
 
+@router.post("/family-tree-status/consolidate-branches", dependencies=[Depends(require_admin_key)])
+async def consolidate_family_tree_branches(dry_run: bool = True):
+    """Merges every real branch sharing the same coin into one - per the
+    account owner's explicit request, after the shared-coin-branches
+    feature let up to 15 real branches pile onto POL-USD in a single spawn
+    storm, each independently tracking its own qty against one POOLED real
+    Coinbase balance (the exact structural gap behind both the phantom-
+    position self-heal and the DB-vs-Coinbase reconciliation SHORTFALLs
+    found earlier this session). See
+    crypto_family_tree_bot.consolidate_branches_by_coin() for the real
+    merge math (summed allocated_usd, max next_unlock_tier, floor
+    recomputed from the new combined balance, quantity-weighted blended
+    entry, target/stop recomputed off it).
+
+    dry_run=true (the default - always call this way first) computes and
+    returns the full real plan without touching the database or placing
+    any order. Only call with dry_run=false once you've reviewed the plan
+    and want to actually execute it - that pass deletes the merged-away
+    branches for real and can't be undone by calling this endpoint again."""
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+    return await crypto_family_tree_bot_module.consolidate_branches_by_coin(dry_run=dry_run)
+
+
 @router.post("/family-tree-status/close/{bot_name}", dependencies=[Depends(require_admin_key)])
 async def close_family_tree_branch(bot_name: str):
     """Manually force one branch to sell its open position right now, at
