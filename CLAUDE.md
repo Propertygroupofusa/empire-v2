@@ -4450,6 +4450,38 @@ not a bounce) before this shipped - not just reasoned about.
 
 ---
 
+## Locked-profit skim confirmed intact, plus a new LOCK activity event
+
+The account owner asked directly whether the 10%-of-profit skim into
+locked profit was still working - they hadn't seen it grow lately and
+wanted it verified, not just reassured about. Checked the real code
+directly: `PROFIT_SKIM_PCT` is still `0.10`, `_branch_sell_and_settle()`
+still computes `skim = round(pnl * PROFIT_SKIM_PCT, 2) if pnl > 0 else
+0.0` and calls `_add_locked_usd(skim)` on every real sale, completely
+untouched by anything else this session. The real, honest explanation
+for it not growing: the skim only ever fires on a genuinely profitable
+sale, and the tree's real recent performance (POL at 14% win rate, SOL
+at 6%, most coins net negative per the Coin Trade History numbers
+documented earlier in this file) has produced very few real winners to
+skim from - not a bug, the tree just hasn't been winning much lately.
+
+What WAS a real, fixable gap: the skim event itself was never in the
+Live Activity feed - only the plain SELL line above it. Added a new
+`LOCK` event type, logged right where `_add_locked_usd()` is already
+called, naming the real skimmed dollar amount and which trade it came
+from - so the account owner can now watch it happen live instead of
+only inferring it from the locked-profit total between dashboard
+refreshes.
+
+Verified offline (`test_lock_profit_activity_event.py`, new) against a
+real throwaway SQLite DB: a real profitable sale increases `locked_usd`
+by exactly 10% of that trade's real profit and logs a real `LOCK` event
+naming it; a real losing sale correctly increases `locked_usd` by zero
+and logs no `LOCK` event at all - confirming the skim gate itself
+(`pnl > 0`) is exactly as strict as it's always been.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

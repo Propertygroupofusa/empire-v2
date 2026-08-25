@@ -2822,7 +2822,9 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
     await _log_activity(bot_name, product_id, "SELL", sell_msg)
     if skim > 0:
         await _add_locked_usd(skim)
-        log.info(f"[TREE] 🔒 {bot_name} locked away ${skim:.2f} (10% of this trade's ${pnl:.2f} profit) - permanently out of the compounding loop")
+        lock_msg = f"🔒 {bot_name} locked away ${skim:.2f} (10% of this trade's ${pnl:.2f} profit) - permanently out of the compounding loop"
+        log.info(f"[TREE] {lock_msg}")
+        await _log_activity(bot_name, product_id, "LOCK", lock_msg)
     if row is not None:
         await _maybe_spawn_child(row)
 
