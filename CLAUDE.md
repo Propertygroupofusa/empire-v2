@@ -4025,6 +4025,99 @@ runs on record, same default every other manually-excluded coin uses.
 
 ---
 
+## Real gap found and closed: a coin can rank #1 on backtest while genuinely bleeding real money live - new live-trade-performance exclusion layer
+
+Right after POL-USD was manually excluded (above), the account owner
+shared screenshots that exposed WHY the automatic exclusion system never
+caught it on its own: the real 30-day backtest table ranked **POL-USD
+#1** - 44 simulated trades, 50% win rate, +$9.48 (+6.3% ROI) - while the
+real live Coin Trade History showed the same coin at 79 real trades, a
+14% win rate, and **-$337.96** - the tree's worst performer by far, and
+the whole reason it was excluded in the first place. Same coin,
+opposite verdicts, and the account owner asked directly "who is making
+all of these trades" and whether there was a settings flip that could
+reverse the loss.
+
+Diagnosed rather than guessed: the backtest (`crypto_selection_backtest.py`)
+simulates ONE clean position trading a coin alone with a fresh $150 each
+time - it can never see what actually happens when several real branches
+(up to 15, for POL, from the earlier top-15-rotation spawn storm) fight
+over the same coin's real pooled Coinbase balance and real order book at
+once. Real concurrent orders on thin liquidity produce real slippage and
+fee drag a single-position replay structurally cannot model. The
+existing automatic exclusion layer (`_compute_auto_excluded_coins`) only
+ever reads `CryptoBacktestRun` - it was blind to this entire failure
+mode by design, since POL's backtest results looked great the whole
+time. No config flip reverses P&L on trades that have already closed -
+that part of the answer had to be given straight, not softened.
+
+What WAS real and buildable: a genuinely new exclusion layer that reads
+REAL live trade history instead of backtest simulations, so a coin that
+is actually losing real money gets cut off automatically even while it
+still ranks well on paper - closing this exact blind spot for whichever
+coin hits it next, not just POL.
+
+- **`_compute_live_performance_excluded_coins()`** (new, `crypto_family_tree_bot.py`):
+  reads `CryptoCoinTradeHistory` (the same real per-coin trade ledger the
+  Coin Trade History dashboard panel already reads) for each coin's most
+  recent `LIVE_PERFORMANCE_TRADE_WINDOW` (30 default) real completed
+  trades. A coin is excluded once it has at least
+  `LIVE_PERFORMANCE_MIN_TRADES` (15) real trades in that window AND
+  EITHER the real win rate is below `LIVE_PERFORMANCE_MIN_WIN_RATE`
+  (25%) OR the real total P&L over that window is below
+  `LIVE_PERFORMANCE_MIN_PNL_USD` (-$50) - one rule that catches both "a
+  long string of small losses" (POL's actual shape: 14% win rate) and "a
+  few large losses dragging an otherwise-fine win rate deeply negative"
+  in the same pass. A coin with fewer than the minimum real trades on
+  record is never excluded here - not enough real evidence yet, the same
+  default every other exclusion layer in this file already uses.
+- **Self-healing by construction, no separate un-exclude logic needed**:
+  because the window is the most recent N trades (not all-time) and is
+  re-read fresh on every call, a coin whose real recent performance
+  genuinely turns around heals automatically the moment enough winning
+  trades roll into the window and the old losing stretch rolls out -
+  same contestable, never-one-way philosophy as every other layer here,
+  just without needing its own explicit healing function.
+- Wired into `get_effective_excluded_coins()` alongside the existing
+  manual/automatic-backtest/top-N-rotation layers (a straight set union)
+  - every existing caller (`find_most_volatile_unclaimed_coin()`,
+  `get_next_eligible_product_id()`, `_pick_weakest_branch_for_reinforcement()`,
+  the live coin watchlist) picks this up automatically with no call-site
+  changes needed.
+
+Verified offline (`test_live_performance_exclusion.py`, new) against a
+real throwaway SQLite DB seeded with real `CryptoCoinTradeHistory` rows:
+POL-USD's exact real shape (a 30-trade window at a ~14% win rate, deeply
+negative total P&L) is correctly caught, and flows through to
+`get_effective_excluded_coins()` even with zero backtest history for
+that coin at all; a coin with a genuinely healthy real win rate/P&L is
+left alone; a coin with too few real trades on record is never excluded
+regardless of how bad they look; a coin with a bad OLD history but a
+genuinely strong recent stretch heals purely from the rolling window,
+with no special-cased healing code; and a coin with a high win rate but
+real large losses dragging total P&L deeply negative is still caught -
+proving the OR condition's second half actually does something, not
+just the win-rate half. Existing exclusion-layer regression tests
+(`test_auto_exclusion.py`, `test_manual_exclusion_fast_heal.py`,
+`test_reinforcement_skips_excluded_coin.py`, `test_throne_respects_exclusion.py`,
+`test_top_n_rotation.py`) all re-run clean alongside it, confirming the
+new layer doesn't change behavior when no real trade history exists yet
+for a coin (the common case in those tests' fixtures).
+
+**Not yet confirmed against real production data** - the thresholds
+(30-trade window, 15-trade minimum, 25% win-rate floor, -$50 P&L floor)
+are a reasoned starting point, not backtested themselves, since there's
+no historical "what would this rule have flagged and when" data to
+replay against from this sandbox. Worth watching after the next
+redeploy to confirm it doesn't fire too eagerly (excluding a coin still
+within normal variance) or too late (a coin should have been caught
+sooner) - env-overridable (`TREE_LIVE_PERF_TRADE_WINDOW`,
+`TREE_LIVE_PERF_MIN_TRADES`, `TREE_LIVE_PERF_MIN_WIN_RATE`,
+`TREE_LIVE_PERF_MIN_PNL_USD`) if the account owner wants to tune them
+without a code change.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

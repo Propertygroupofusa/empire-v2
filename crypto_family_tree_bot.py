@@ -371,7 +371,61 @@ AUTO_EXCLUDE_RUN_WINDOW = engine._safe_int_env("TREE_AUTO_EXCLUDE_RUN_WINDOW", "
 # just working from a rank cut instead of a good/bad verdict.
 TOP_N_ELIGIBLE_COINS = engine._safe_int_env("TREE_TOP_N_ELIGIBLE_COINS", "15")
 
+# Real gap found live: POL-USD's backtest ranked it #1 (44 simulated
+# trades, 50% win rate, +6.3% ROI) while its REAL live trade history
+# showed 79 real trades, a 14% win rate, and -$337.96 - the tree's worst
+# performer by far. The automatic backtest-based exclusion layer above
+# was structurally blind to this: it only ever reads CryptoBacktestRun,
+# which simulates ONE clean position trading a coin alone with a fresh
+# $150 each time - it can never see what actually happens when several
+# real branches (up to 15, for POL) fight over the same coin's real
+# pooled Coinbase balance and real order book at once. This layer closes
+# that gap by watching REAL CryptoCoinTradeHistory directly, independent
+# of what any backtest says about the same coin. A rolling window (not
+# all-time) so a coin that's actually turned around recently heals
+# quickly, same contestable/self-healing philosophy as every other layer
+# here - the window itself, re-read fresh on every call, IS the healing
+# mechanism, no separate un-exclude logic needed.
+LIVE_PERFORMANCE_TRADE_WINDOW = engine._safe_int_env("TREE_LIVE_PERF_TRADE_WINDOW", "30")
+LIVE_PERFORMANCE_MIN_TRADES = engine._safe_int_env("TREE_LIVE_PERF_MIN_TRADES", "15")
+LIVE_PERFORMANCE_MIN_WIN_RATE = engine._safe_float_env("TREE_LIVE_PERF_MIN_WIN_RATE", "0.25")
+LIVE_PERFORMANCE_MIN_PNL_USD = engine._safe_float_env("TREE_LIVE_PERF_MIN_PNL_USD", "-50.0")
+
 _last_auto_backtest_at = 0.0
+
+
+async def _compute_live_performance_excluded_coins() -> set:
+    """Real, live counterpart to _compute_auto_excluded_coins() above, but
+    reading actual completed trades (CryptoCoinTradeHistory) instead of
+    backtest simulations. A coin is excluded once its most recent
+    LIVE_PERFORMANCE_TRADE_WINDOW real trades (or fewer, if it hasn't
+    traded that many times yet) number at least LIVE_PERFORMANCE_MIN_TRADES
+    and EITHER the real win rate over that window is below
+    LIVE_PERFORMANCE_MIN_WIN_RATE OR the real total P&L over that window
+    is below LIVE_PERFORMANCE_MIN_PNL_USD - catches both "a long string of
+    small losses" (POL's real shape: 14% win rate) and "a few large
+    losses dragging an otherwise-okay win rate down" in one rule. A coin
+    with fewer than LIVE_PERFORMANCE_MIN_TRADES real trades on record is
+    never excluded here - not enough real evidence yet, same "needs real
+    evidence" default every other layer in this file uses."""
+    excluded = set()
+    async with AsyncSessionLocal() as db:
+        for product_id in COIN_FAMILY_TREE:
+            result = await db.execute(
+                select(CryptoCoinTradeHistory.pnl)
+                .where(CryptoCoinTradeHistory.product_id == product_id)
+                .order_by(desc(CryptoCoinTradeHistory.closed_at))
+                .limit(LIVE_PERFORMANCE_TRADE_WINDOW)
+            )
+            recent_pnls = result.scalars().all()
+            if len(recent_pnls) < LIVE_PERFORMANCE_MIN_TRADES:
+                continue
+            wins = sum(1 for pnl in recent_pnls if pnl > 0)
+            win_rate = wins / len(recent_pnls)
+            total_pnl = sum(recent_pnls)
+            if win_rate < LIVE_PERFORMANCE_MIN_WIN_RATE or total_pnl < LIVE_PERFORMANCE_MIN_PNL_USD:
+                excluded.add(product_id)
+    return excluded
 
 
 async def _compute_top_ranked_coins():
@@ -468,11 +522,20 @@ async def get_effective_excluded_coins() -> set:
     _manually_excluded_still_excluded) unioned with whatever the
     automatic backtest rule currently flags on any coin (contestable -
     can add or remove coins on every scheduled run, see
-    _compute_auto_excluded_coins), unioned with every coin currently
-    OUTSIDE the real top-TOP_N_ELIGIBLE_COINS ranking by backtest ROI
-    (see _compute_top_ranked_coins) - skipped entirely during the
-    cold-start case where there isn't yet enough real ranking data."""
-    excluded = await _manually_excluded_still_excluded() | await _compute_auto_excluded_coins()
+    _compute_auto_excluded_coins), unioned with whatever the real
+    live-trade-performance rule flags (see
+    _compute_live_performance_excluded_coins - independent of what any
+    backtest says, since a coin can rank well in a clean single-position
+    simulation while still bleeding real money live, as POL-USD did),
+    unioned with every coin currently OUTSIDE the real
+    top-TOP_N_ELIGIBLE_COINS ranking by backtest ROI (see
+    _compute_top_ranked_coins) - skipped entirely during the cold-start
+    case where there isn't yet enough real ranking data."""
+    excluded = (
+        await _manually_excluded_still_excluded()
+        | await _compute_auto_excluded_coins()
+        | await _compute_live_performance_excluded_coins()
+    )
     top_ranked = await _compute_top_ranked_coins()
     if top_ranked is not None:
         excluded |= {p for p in COIN_FAMILY_TREE if p not in top_ranked}
