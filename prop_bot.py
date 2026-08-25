@@ -1465,6 +1465,17 @@ async def run_prop_cycle():
             # high-water mark, persisted to BotPosition.peak_pct so a
             # Railway restart can't wipe it and silently disarm the first
             # two rules on exactly the positions that ran up the most.
+            #
+            # min_profit_target_pct/max_giveback_pct raised from 2%/0.5% to
+            # 3%/1.5% (the "moderate" scenario) after the account owner
+            # asked why 4 months of real trading on $980 only made ~$29-50.
+            # alpaca_selection_backtest.py's real exit-rule sensitivity
+            # comparison (run live against real 30-day Alpaca history)
+            # showed moderate beating the original tight rule on both real
+            # P&L ($52.38 vs $48.26) and win rate (54.4% vs 51.4%), while
+            # the looser 2.5%/4% scenario only added another $0.75 for
+            # meaningfully more risk - moderate captures nearly all of the
+            # real benefit. See CLAUDE.md for the full real comparison.
             should_exit, reason, exit_type, new_peak_pnl_pct = mr_should_exit(
                 symbol=contract,
                 entry_price=entry,
@@ -1474,12 +1485,12 @@ async def run_prop_cycle():
                 direction=side,
                 max_hold_seconds=PROP_MAX_HOLD_SECONDS,
                 stop_loss_pct=0.003,  # 0.3% hard stop (matches get_dynamic_stop_loss base)
-                min_profit_target_pct=0.02,  # 2% minimum profit (KEY: prevents breakeven exits)
+                min_profit_target_pct=0.03,  # 3% minimum profit - raised from 2% (see "moderate" scenario, exit-rule sensitivity comparison)
                 rsi_profit_threshold_long=60,  # Sell longs when RSI >= 60 (overbought)
                 rsi_profit_threshold_short=40,  # Cover shorts when RSI <= 40 (oversold)
                 peak_pnl_pct=position.get("peak_pnl_pct", 0.0),
                 breakeven_trigger_pct=0.01,  # +1% - matches the crypto side's ratchet trigger
-                max_giveback_pct=0.005,  # can't give back more than 0.5% from its peak once ever profitable
+                max_giveback_pct=0.015,  # can't give back more than 1.5% from its peak once ever profitable - raised from 0.5% (see below)
             )
             if new_peak_pnl_pct > position.get("peak_pnl_pct", 0.0):
                 position["peak_pnl_pct"] = new_peak_pnl_pct

@@ -3392,6 +3392,52 @@ decision, it doesn't make it or change live behavior on its own.
 
 ---
 
+## Real decision made from the exit-rule comparison: loosened prop_bot.py's live giveback/target to "moderate"
+
+The account owner ran the comparison tool above live, against real 30-day
+Alpaca history across all 11 symbols. Real results:
+
+| Scenario | Trades | Win rate | Total P&L |
+|---|---|---|---|
+| current (0.5% giveback / 2% target) | 352 | 51.4% | $48.26 |
+| moderate (1.5% giveback / 3% target) | 340 | 54.4% | $52.38 |
+| loose (2.5% giveback / 4% target) | 340 | 54.4% | $53.13 |
+
+Moderate beat current on BOTH real P&L (+$4.12) and win rate (+3 points) -
+not just a looser rule taking more risk for more reward, a genuinely
+better real outcome on this sample. Loose only added another $0.75 over
+moderate for meaningfully more risk exposure - fast diminishing returns
+past moderate. Per-symbol, the win wasn't uniform (USO actually did
+*worse* looser: $27.58 -> $25.09-$25.84; DIA/IWM/RWM/DOG/SH stayed
+negative in every scenario regardless of exit rule) - the aggregate gain
+came from GLD/QQQ/SLV/PSQ improving more than USO/DOG/SH gave back.
+
+Given this real evidence, the account owner asked me to combine it with
+the real live context (4 months, $980 in, only ~$29-50 real profit) and
+make the call. Changed `prop_bot.py`'s single real `mr_should_exit()` call
+site (the live per-cycle exit check every open position goes through) from
+`min_profit_target_pct=0.02` / `max_giveback_pct=0.005` to `0.03` / `0.015`
+- the "moderate" scenario, not "loose" - moderate captured almost all of
+the real benefit ($4.12 of the total $4.87 available) without loose's
+extra risk for only 75 more cents. `stop_loss_pct` (0.3%, tighter than the
+backtest tool's own 1.5% mirror constant) and every other parameter at
+this call site are unchanged - only the two constants actually tested.
+
+Scoped narrowly and deliberately: `alpaca_swing_bot.py` has its own,
+separate exit logic (never calls `should_exit_position` at all) and
+`mean_reversion_strategy.py` has its own older, unused implementation of
+the same idea (confirmed via a real grep - not imported anywhere in the
+live app) - neither was touched, since the real comparison evidence only
+applies to the function and call site it actually replayed.
+
+**Not yet confirmed against forward-looking real trading** - this is a
+real, live parameter change now shipped, but its actual effect can only
+be judged by watching real trades over the coming weeks, the same as any
+other live strategy change in this file. The 30-day backtest sample is
+real evidence, not a guarantee of the same magnitude going forward.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
