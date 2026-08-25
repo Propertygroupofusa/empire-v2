@@ -4162,6 +4162,68 @@ only fixed what the Sell Advice panel DISPLAYED for a coin's historical
 backtest context, which is purely informational and never feeds into
 the live TARGET/STOP/GIVEBACK verdict itself.
 
+---
+
+## Combined automated exclusion now requires backtest AND live performance to agree
+
+Per the account owner's explicit follow-up ("why don't it take
+backtesting into account too... we need to use all the tools we can"):
+the automated exclusion layers had a real asymmetry POL-USD's own
+opposite-verdict story exposed - either the backtest rule OR the
+live-performance rule alone was enough to cut a coin off, meaning one
+tool's evidence could be completely overridden by the other's
+disagreement (a great backtest gets discarded the instant live goes
+bad, or vice versa). The account owner chose, from a direct multi-choice
+question, to require **both** automated signals to agree before the
+combined layer excludes a coin.
+
+`get_effective_excluded_coins()` (`crypto_family_tree_bot.py`) now
+computes `backtest_bad = await _compute_auto_excluded_coins()` and
+`live_bad = await _compute_live_performance_excluded_coins()`
+separately, then only adds their **intersection**
+(`backtest_bad & live_bad`) to the excluded set - not their union. A
+coin flagged by just one of the two tools (POL-USD's exact real shape:
+backtest-good/live-bad) is no longer cut off by this combined layer on
+its own; real evidence from either tool isn't thrown away just because
+the other currently disagrees.
+
+**`MANUAL_EXCLUDED_COINS` is completely unaffected** - it's a deliberate
+human decision, not an automated-signal question, and POL-USD stays on
+it: that decision already weighed both the backtest AND the devastating
+live evidence together before being made, so it isn't a case of "one
+signal being discarded." Manual exclusion remains the way to act
+immediately on a real problem coin without waiting for both automated
+tools to agree - exactly what already happened with POL-USD.
+
+**A real, accepted tradeoff, stated plainly rather than hidden**: a coin
+with genuinely terrible live results but literally zero backtest history
+(never run) won't be caught by this intersection either, since "no
+data" isn't "backtest agrees it's bad." The top-15 rotation gate
+(`_compute_top_ranked_coins`) and the manual list are both untouched and
+still provide real protection independent of this change - this
+intersection only governs the two *automated* "is this coin bad"
+signals specifically.
+
+Verified via the existing exclusion-layer tests, updated in place for
+the new semantics (not deleted - their original intent, that an excluded
+coin stays out of rotation, is preserved, just re-armed to require both
+signals): `test_auto_exclusion.py`'s Case 4 now confirms a bad-backtest-only
+coin (LINK-USD, no live data) does NOT get excluded by the combined
+layer alone, then Case 4b confirms it DOES once real bad live trades are
+also seeded (both signals agree); Case 6 (which exercises
+`get_next_eligible_product_id()` respecting an excluded coin) now seeds
+both bad backtest AND bad live data for its test coin, since a bad
+backtest alone no longer exercises that path. `test_live_performance_exclusion.py`
+was updated the same way, plus a new case confirming a coin flagged bad
+by BOTH signals together is excluded via `get_effective_excluded_coins()`.
+Full existing regression suite re-run clean alongside both (aside from
+the same pre-existing, unrelated `find_most_volatile_unclaimed_coin`
+mock-signature staleness already documented earlier in this file).
+
+---
+
+## Known Limitations & TODOs
+
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
 - **Video editing:** HeyGen only generates new videos; can't modify existing videos per user request
 - **Admin auth:** No authentication on admin endpoints yet (add before production)

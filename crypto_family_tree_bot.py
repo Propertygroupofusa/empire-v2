@@ -519,23 +519,39 @@ async def _manually_excluded_still_excluded() -> set:
 async def get_effective_excluded_coins() -> set:
     """The real, live set of coins no branch will ever be offered right
     now - whichever of MANUAL_EXCLUDED_COINS hasn't yet healed (see
-    _manually_excluded_still_excluded) unioned with whatever the
-    automatic backtest rule currently flags on any coin (contestable -
-    can add or remove coins on every scheduled run, see
-    _compute_auto_excluded_coins), unioned with whatever the real
-    live-trade-performance rule flags (see
-    _compute_live_performance_excluded_coins - independent of what any
-    backtest says, since a coin can rank well in a clean single-position
-    simulation while still bleeding real money live, as POL-USD did),
-    unioned with every coin currently OUTSIDE the real
-    top-TOP_N_ELIGIBLE_COINS ranking by backtest ROI (see
-    _compute_top_ranked_coins) - skipped entirely during the cold-start
-    case where there isn't yet enough real ranking data."""
-    excluded = (
-        await _manually_excluded_still_excluded()
-        | await _compute_auto_excluded_coins()
-        | await _compute_live_performance_excluded_coins()
-    )
+    _manually_excluded_still_excluded), unioned with every coin currently
+    OUTSIDE the real top-TOP_N_ELIGIBLE_COINS ranking by backtest ROI
+    (see _compute_top_ranked_coins, skipped entirely during the
+    cold-start case where there isn't yet enough real ranking data), PLUS
+    whichever coins the two automated "is this coin bad" signals below
+    both agree on.
+
+    Per the account owner's explicit choice, made after watching POL-USD
+    rank #1 on backtest (44 sim trades, 50% win rate, +6.3% ROI) while
+    its real live trade history showed the exact opposite (79 real
+    trades, 14% win rate, -$337.96): the automatic backtest rule
+    (_compute_auto_excluded_coins) and the automatic live-performance
+    rule (_compute_live_performance_excluded_coins) now only exclude a
+    coin when BOTH signals agree it's bad - a coin flagged by just one
+    of the two (like POL would have been, backtest-good/live-bad) no
+    longer gets cut off by this combined layer on its own. Real evidence
+    from either tool alone still counts for something, it just isn't
+    thrown away the instant the other tool disagrees.
+
+    This is a deliberate, accepted tradeoff: a coin with genuinely bad
+    live results but literally zero backtest history yet (never run)
+    won't be caught by this intersection either, since "no data" isn't
+    the same as "backtest agrees it's bad." MANUAL_EXCLUDED_COINS (POL-USD
+    included, added from real live evidence that already accounted for
+    both) remains the way to act immediately and directly on a real
+    problem coin without waiting on signal agreement - manual exclusion
+    is a deliberate human decision, not an automated-signal question, and
+    is completely unaffected by this change."""
+    manual = await _manually_excluded_still_excluded()
+    backtest_bad = await _compute_auto_excluded_coins()
+    live_bad = await _compute_live_performance_excluded_coins()
+    signal_agreed_bad = backtest_bad & live_bad
+    excluded = manual | signal_agreed_bad
     top_ranked = await _compute_top_ranked_coins()
     if top_ranked is not None:
         excluded |= {p for p in COIN_FAMILY_TREE if p not in top_ranked}
