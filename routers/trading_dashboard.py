@@ -1505,9 +1505,11 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
             await db.refresh(bot)
 
     locked_usd = round(await get_alpaca_locked_usd(), 2)
+    alpaca_passive_mode = await prop_bot_module.is_alpaca_passive_mode() if prop_bot_module else False
 
     return {
         "equity": round(equity, 2),
+        "alpaca_passive_mode": alpaca_passive_mode,
         "cash": round(cash, 2),
         "session_pl": round(session_pl, 2),
         "session_pl_pct": round(session_pl_pct, 2),
@@ -1605,6 +1607,136 @@ async def close_alpaca_position(symbol: str, db: AsyncSession = Depends(get_db))
     return {"status": "closed", "symbol": symbol, "qty": qty, "realized_pnl": round(pnl, 2), "order": close_result}
 
 
+@router.post("/alpaca-overview/liquidate-and-buy-spy", dependencies=[Depends(require_admin_key)])
+async def liquidate_alpaca_and_buy_spy(db: AsyncSession = Depends(get_db)):
+    """Per the account owner's explicit, real decision: retire active
+    Alpaca trading entirely (prop_bot.py's mean-reversion futures-proxy
+    trading AND alpaca_swing_bot.py's separate swing/day strategy - both
+    place real trades on this same account) and replace it with a single
+    real buy-and-hold SPY position, after real evidence showed both a
+    HYSA and, in this particular strong stretch, the S&P 500 itself
+    outperformed this account's real active-trading return.
+
+    A ONE-WAY real action, in order:
+    1. Closes EVERY real open position on the account at market (the same
+       real DELETE /v2/positions/{symbol}?cancel_orders=true Alpaca's own
+       app uses, same pattern as the existing manual close-one endpoint) -
+       reads the real position list directly from Alpaca, so this closes
+       everything regardless of which of the two bots opened it.
+    2. Records each real realized P&L as a Payment row, same bookkeeping
+       the existing manual close already does, so nothing vanishes from
+       earnings tracking.
+    3. Sets is_alpaca_passive_mode() to True BEFORE buying, so nothing can
+       race in and open a new position in the gap between closing
+       everything and the SPY buy landing - both prop_bot.py's and
+       alpaca_swing_bot.py's own main loops check this every cycle and
+       fully stop (no entries, no exit-management - there's nothing left
+       to manage) once it's set. This is a real, deliberate retirement,
+       not a pause - it stays off only if explicitly turned back on.
+    4. Buys real SPY with ~99.5% of the real cash freed up (a small
+       buffer, same reasoning as the crypto side's real-balance clamp -
+       leaves a sliver rather than requesting exactly 100% of a balance
+       that could shift by the time the order executes), via a real
+       Alpaca notional (dollar-amount) market order - Alpaca computes the
+       real fractional share count itself, so this doesn't need a
+       separately-fetched price to compute qty from.
+
+    The resulting real SPY position needs no separate tracking - it's not
+    added to open_prop_positions (passive mode means nothing ever reads
+    that dict to manage it again anyway), so the dashboard's existing real
+    Alpaca positions list already shows it accurately going forward,
+    straight from Alpaca itself."""
+    if prop_bot_module is None:
+        raise HTTPException(status_code=500, detail="prop_bot module not available")
+    pb = prop_bot_module
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        raise HTTPException(status_code=500, detail="Alpaca credentials not configured")
+
+    async with aiohttp.ClientSession() as session:
+        positions = await _fetch_alpaca_positions(session)
+        symbol_to_contract = {cfg["symbol"]: code for code, cfg in pb.FUTURES.items()}
+
+        closed = []
+        for p in positions:
+            symbol = p.get("symbol")
+            if not symbol:
+                continue
+            try:
+                qty = float(p.get("qty", 0))
+                entry_price = float(p.get("avg_entry_price", 0))
+                current_price = float(p.get("current_price", entry_price))
+                pnl = (current_price - entry_price) * qty
+            except (ValueError, TypeError):
+                qty, pnl = 0.0, 0.0
+
+            async with session.delete(
+                f"{ALPACA_BASE_URL}/v2/positions/{symbol}?cancel_orders=true", headers=ALPACA_HEADERS
+            ) as r:
+                if r.status not in (200, 207):
+                    body = await r.text()
+                    log.error(f"[liquidate-to-spy] failed to close {symbol} ({r.status}): {body}")
+                    continue
+
+            contract = symbol_to_contract.get(symbol)
+            if contract:
+                pb.open_prop_positions.pop(contract, None)
+                await pb._db_delete_open(contract)
+
+            try:
+                db.add(Payment(
+                    id=f"liquidate_{uuid.uuid4().hex[:8]}",
+                    job_id=f"liquidate_{symbol}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+                    worker_id="bot@pgusa.local",
+                    client_id="alpaca_liquidate_to_spy",
+                    gross_amount=pnl,
+                    worker_amount=pnl * 0.90,
+                    platform_amount=pnl * 0.10,
+                    payout_status="pending" if pnl > 0 else "completed",
+                ))
+                await db.commit()
+            except Exception as e:
+                log.warning(f"Failed to record liquidation earnings for {symbol}: {e}")
+
+            closed.append({"symbol": symbol, "qty": qty, "realized_pnl": round(pnl, 2)})
+            log.info(f"[liquidate-to-spy] closed {symbol}: qty={qty}, realized_pnl=${pnl:.2f}")
+
+        await pb.set_alpaca_passive_mode(True)
+
+        account = await _fetch_alpaca_account(session)
+        try:
+            cash = float(account.get("cash", 0))
+        except (ValueError, TypeError):
+            cash = 0.0
+
+        if cash < 1.0:
+            log.warning(f"[liquidate-to-spy] only ${cash:.2f} real cash free after closing - not enough to buy SPY, passive mode still enabled")
+            return {
+                "status": "closed_only",
+                "closed_positions": closed,
+                "cash_after_closing": round(cash, 2),
+                "passive_mode": True,
+                "note": "Real free cash after closing was too small to buy SPY. Active trading is still retired - nothing will open a new position on its own.",
+            }
+
+        spend = round(cash * 0.995, 2)
+        order = {"symbol": "SPY", "notional": str(spend), "side": "buy", "type": "market", "time_in_force": "day"}
+        async with session.post(f"{ALPACA_BASE_URL}/v2/orders", headers=ALPACA_HEADERS, json=order) as r:
+            spy_order = await r.json()
+            if r.status not in (200, 201):
+                log.error(f"[liquidate-to-spy] real SPY buy failed ({r.status}): {spy_order}")
+                raise HTTPException(status_code=502, detail=f"Closed {len(closed)} position(s) for real, but the real SPY buy order failed: {spy_order.get('message', spy_order)} - passive mode is still enabled, retry the buy manually or via this endpoint again")
+
+    log.info(f"[dashboard] 🔒📈 Liquidated {len(closed)} real position(s), bought ~${spend:.2f} of real SPY - Alpaca active trading retired")
+    return {
+        "status": "liquidated_and_bought_spy",
+        "closed_positions": closed,
+        "cash_after_closing": round(cash, 2),
+        "spy_order_notional": spend,
+        "spy_order": spy_order,
+        "passive_mode": True,
+    }
+
+
 class AlpacaUnlockProfitRequest(BaseModel):
     amount: float
 
@@ -1650,6 +1782,8 @@ async def manual_open_prop_position(ticker: str):
 
     if os.getenv("STOP_TRADING", "false").lower() == "true":
         raise HTTPException(status_code=400, detail="STOP_TRADING is set - all entries (manual or automatic) are paused")
+    if await pb.is_alpaca_passive_mode():
+        raise HTTPException(status_code=400, detail="Active Alpaca trading has been retired in favor of a real buy-and-hold SPY position - no new entries")
 
     symbol_to_contract = {cfg["symbol"]: code for code, cfg in pb.FUTURES.items()}
     contract = symbol_to_contract.get(ticker)

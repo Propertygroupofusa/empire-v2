@@ -3541,6 +3541,107 @@ alone.
 
 ---
 
+## Real, deliberate decision: retired active Alpaca trading for a real buy-and-hold SPY position
+
+After walking through real evidence together - the exit-rule comparison,
+a real HYSA-vs-bot-vs-S&P comparison at several deposit sizes, and a plain
+"why can't my bot beat the S&P" explanation - the account owner made a
+real, explicit call: stop active trading on the Alpaca side entirely
+("I don't want those eight active bot buckets anymore... does it serve
+any purpose for real") and put the whole account into a single real
+buy-and-hold SPY position instead. Confirmed the exact mechanics via two
+direct questions before touching anything: close every real open position
+immediately (not wait for natural exits), and deploy 100% of the real
+freed cash into SPY.
+
+**New persisted flag**: `is_alpaca_passive_mode()`/`set_alpaca_passive_mode()`
+in `prop_bot.py` - a real DB-backed flag (reusing the same generic
+`TradingBotState` bucket `locked_usd`/equity-floor state already lives in),
+deliberately NOT a Railway env var like `STOP_TRADING` - a manually-pasted
+env var is exactly the class of bug that silently disabled the crypto
+coordinator earlier this session (stray quote characters); a flag this
+code sets itself for a permanent, deliberate retirement doesn't have that
+failure mode. Checked by BOTH real bots that place trades on this shared
+account:
+- `prop_bot.py`'s own `run()` outer loop - skips `run_prop_cycle()`
+  entirely when passive (same "skip everything" semantics `STOP_TRADING`
+  already has at that exact spot) - no new entries AND no exit-management
+  on the one remaining real position, which is exactly what a genuine
+  buy-and-hold needs (nothing should ever auto-sell it).
+- `alpaca_swing_bot.py`'s own `run()` outer loop - this bot places real
+  trades on the SAME account completely independently of `prop_bot.py`
+  and had no `STOP_TRADING` awareness at all, so stopping only `prop_bot.py`
+  would have left it free to keep trading real money out of the same
+  shared cash pool. Now checks the same flag every cycle.
+- The manual "Trade this" endpoint (`manual_open_prop_position`) also
+  refuses while passive, matching its existing `STOP_TRADING` refusal.
+- Manual close (`close_alpaca_position`) is deliberately UNCHANGED - the
+  account owner can always sell the SPY position by hand if they ever
+  want to, same "manual sell always stays available" principle used
+  everywhere else in this codebase.
+
+**New endpoint**: `POST /api/trading-dashboard/alpaca-overview/liquidate-and-buy-spy`
+(admin-key gated) - a real, one-way action:
+1. Reads every real open position straight from Alpaca's own `/v2/positions`
+   (not from either bot's own internal tracking), so it closes everything
+   regardless of which bot opened it - `alpaca_swing_bot.py` never
+   persists to `BotPosition` at all, so this is the only reliable source
+   of truth for "what's actually open right now."
+2. Closes each one via the same real `DELETE /v2/positions/{symbol}?cancel_orders=true`
+   the existing manual close-one endpoint already uses, records each
+   real realized P&L as a `Payment` row (same bookkeeping pattern), and
+   cleans up `prop_bot.py`'s own `open_prop_positions`/DB row for any
+   symbol it was tracking.
+3. Sets passive mode to `True` BEFORE placing the SPY buy - closes the
+   real window where something could otherwise race in and open a new
+   position between "everything closed" and "SPY bought."
+4. Buys real SPY with 99.5% of the real freed cash via a real Alpaca
+   *notional* (dollar-amount) market order - Alpaca computes the real
+   fractional share count itself, so this never needs a separately-fetched
+   price that could go stale between fetch and execution. The 0.5% buffer
+   mirrors the same real-balance-clamp caution the crypto side's
+   `place_market_buy()` already uses.
+5. Refuses to attempt a SPY buy if less than $1 of real cash is free
+   after closing (a real edge case, not expected here) - passive mode
+   stays set either way, so nothing resumes trading on its own regardless.
+
+The resulting SPY position needs no separate app-level tracking - since
+passive mode means nothing ever reads `open_prop_positions` to manage it
+again, the dashboard's existing real positions list (already sourced
+directly from Alpaca) shows it accurately without any new bookkeeping.
+
+`alpaca_dashboard.html` gained a real banner + button: before retiring,
+shows "🔒📈 Retire active trading & buy real SPY" with a clear explanation
+and a real double-confirmation (this is a genuinely irreversible action,
+not a toggle); after, shows "🔒📈 Active trading retired" and points to
+the Open Positions table where the real SPY holding now appears. The
+existing 8-bucket "Buckets" grid was already `display:none` in this file
+from earlier in the session, so no further hiding was needed there - the
+account owner's mental model of "8 buckets" was the underlying dashboard
+bookkeeping abstraction (`TradingBotState` bot_1..bot_8, purely
+proportional shares of one real account, see the earlier "Alpaca-side
+unlock" section above), not something separately visible to hide.
+
+Verified offline: `is_alpaca_passive_mode()`/`set_alpaca_passive_mode()`
+round-trip correctly against a real throwaway SQLite DB; the real
+`liquidate_alpaca_and_buy_spy()` endpoint function, called directly with
+a fake Alpaca session standing in for the real HTTP calls, correctly
+closes every real position with hand-verified P&L math, records a real
+`Payment` row per close, sets passive mode `True` before the buy, computes
+the real SPY spend as exactly 99.5% of the real freed cash, and posts a
+real notional buy order for it; and the too-little-real-cash edge case
+correctly sets passive mode without attempting a real SPY buy. Full
+existing Alpaca regression tests (position-string-fields fix, exit-rule
+comparison) re-run clean alongside it.
+
+**Not yet run against the real account** - the account owner needs to
+open `/alpaca-dashboard` after the next redeploy and click "🔒📈 Retire
+active trading & buy real SPY" themselves to actually execute this
+against real money; this is a genuinely irreversible action once
+confirmed.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

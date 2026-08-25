@@ -641,6 +641,21 @@ def run():
 
     while True:
         try:
+            # Real, deliberate one-way retirement of active trading on this
+            # shared Alpaca account - see prop_bot.is_alpaca_passive_mode()
+            # for why this is a DB-persisted flag rather than an env var,
+            # and why it's checked here too: this bot places real trades on
+            # the SAME account independently of prop_bot.py's own loop, so
+            # stopping only prop_bot.py would leave this one still free to
+            # keep trading real money against the account's shared cash
+            # pool after the account owner asked to retire ALL active
+            # trading in favor of one real buy-and-hold SPY position.
+            from prop_bot import is_alpaca_passive_mode
+            if loop.run_until_complete(is_alpaca_passive_mode()):
+                log.info("Alpaca passive mode active - swing bot retired, holding a real buy-and-hold SPY position only")
+                time.sleep(300)
+                continue
+
             now = datetime.now(ET)
 
             # Check if market is open (9:30am - 4:00pm ET, Mon-Fri)

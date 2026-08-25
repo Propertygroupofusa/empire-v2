@@ -224,6 +224,8 @@
         <div id="status">Loading…</div>
     </div>
 
+    <div id="passive-mode-banner" style="display:none;"></div>
+
     <div class="narrative" id="narrative">Loading account summary…</div>
 
     <div class="kpi-row">
@@ -419,6 +421,51 @@ async function closePosition(symbol, btn) {
     }
 }
 
+function renderPassiveModeBanner(data) {
+    const el = document.getElementById('passive-mode-banner');
+    el.style.display = '';
+    if (data.alpaca_passive_mode) {
+        el.innerHTML = `<div class="panel" style="background: var(--green-bg); border: 1px solid var(--green); padding: 14px 18px; margin-bottom: 16px;">
+            <strong>🔒📈 Active trading retired.</strong> This account now holds a real buy-and-hold SPY position only —
+            no bot is opening or closing trades here anymore. See it under Open Positions below.
+        </div>`;
+    } else {
+        el.innerHTML = `<div class="panel" style="padding: 14px 18px; margin-bottom: 16px;">
+            <button class="unlock-btn" onclick="confirmLiquidateAndBuySpy()">🔒📈 Retire active trading &amp; buy real SPY</button>
+            <div style="font-size:0.8em; color: var(--text-dim); margin-top:6px;">
+                Closes every real open position on this account right now, permanently stops both trading bots from
+                opening or managing anything else, and buys real SPY with all the freed cash. A real, one-way action.
+            </div>
+        </div>`;
+    }
+}
+
+async function confirmLiquidateAndBuySpy() {
+    if (!confirm('Close EVERY real open position on this account right now, permanently retire active trading, and buy real SPY with all the freed cash? This is a real, one-way action.')) return;
+    if (!confirm('Really sure? This locks in whatever real gain or loss each open position currently shows, and stops both trading bots on this account for good.')) return;
+    const banner = document.getElementById('passive-mode-banner');
+    banner.innerHTML = '<div class="panel" style="padding:14px 18px;">Closing every real position and buying SPY…</div>';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-overview/liquidate-and-buy-spy', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        alert(
+            `Done. Closed ${data.closed_positions.length} real position(s)` +
+            (data.spy_order_notional
+                ? ` and bought ~${fmtUsd(data.spy_order_notional)} of real SPY.`
+                : '. Not enough real cash was free to buy SPY yet - active trading is still retired.')
+        );
+    } catch (e) {
+        alert('Could not complete: ' + e.message);
+    } finally {
+        await refresh();
+    }
+}
+
 async function refresh() {
     const statusEl = document.getElementById('status');
     try {
@@ -451,6 +498,7 @@ async function refresh() {
         }
 
         renderGauge('goal-gauge', data.progress_to_goal_pct, fmtUsd(data.equity) + ' of ' + fmtUsd(data.goal));
+        renderPassiveModeBanner(data);
 
         const bots = data.bots || [];
         renderBarList('bots-bar', bots.map(b => ({ label: b.name, value: b.profit })));

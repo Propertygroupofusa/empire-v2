@@ -20,7 +20,7 @@ import aiohttp
 import uuid
 from sqlalchemy import select, desc
 from database import AsyncSessionLocal
-from models import BotPosition, Payment, AlpacaBacktestRun
+from models import BotPosition, Payment, AlpacaBacktestRun, TradingBotState
 from bot_mandates import APEX_MANDATE, validate_entry
 from alpaca_mean_reversion import should_exit_position as mr_should_exit, validate_dual_direction
 from profit_tracker import FiveHourProfitTracker
@@ -332,6 +332,40 @@ async def load_open_positions():
                 log.info(f"[APEX_589296] Reloaded {len(open_prop_positions)} open position(s) from DB: {list(open_prop_positions.keys())}")
     except Exception as e:
         log.error(f"[APEX_589296] Failed to reload open positions from DB: {e}")
+
+
+ALPACA_PASSIVE_MODE_KEY = "alpaca_passive_mode"
+
+
+async def is_alpaca_passive_mode() -> bool:
+    """True once the account owner has retired active Alpaca trading in
+    favor of a real buy-and-hold SPY position (see the real dashboard
+    action that closes every open position and buys SPY with the freed
+    cash). Checked by both this bot's and alpaca_swing_bot.py's own main
+    loops to permanently stop opening OR managing any new real trade on
+    this account - a real, deliberate one-way decision, not a pause.
+
+    DB-persisted (reusing the same generic TradingBotState bucket
+    locked_usd/equity-floor state already lives in) rather than a Railway
+    env var like STOP_TRADING - this avoids the exact stray-quote-character
+    class of bug that silently disabled the crypto coordinator earlier
+    this session (a manually-pasted env var is a real, recurring failure
+    mode; a value this code sets itself isn't)."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == ALPACA_PASSIVE_MODE_KEY))
+        row = result.scalar_one_or_none()
+        return bool(row and row.base_capital and row.base_capital >= 1.0)
+
+
+async def set_alpaca_passive_mode(enabled: bool):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == ALPACA_PASSIVE_MODE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = TradingBotState(bot_name=ALPACA_PASSIVE_MODE_KEY, base_capital=0.0)
+            db.add(row)
+        row.base_capital = 1.0 if enabled else 0.0
+        await db.commit()
 
 
 async def _db_save_open(contract: str, side: str, entry: float, qty: float):
@@ -1734,6 +1768,10 @@ def run():
         if os.getenv("STOP_TRADING", "false").lower() == "true":
             log.warning("STOP_TRADING=true — prop bot paused")
             time.sleep(60)
+            continue
+        if loop.run_until_complete(is_alpaca_passive_mode()):
+            log.info("Alpaca passive mode active - active trading retired, holding a real buy-and-hold SPY position only")
+            time.sleep(300)
             continue
         try:
             loop.run_until_complete(run_prop_cycle())
