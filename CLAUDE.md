@@ -4222,6 +4222,63 @@ mock-signature staleness already documented earlier in this file).
 
 ---
 
+## Live Activity feed - real-time visibility into every buy/sell/spawn/reinforcement
+
+Per the account owner's explicit request: "I have no idea what is going
+on in the background... I want to see it work[ing] visual[ly]." The
+dashboard showed static balances and positions, refreshed every 15s, but
+nothing that let the account owner actually watch the bot act in real
+time the way Railway's own logs do - without needing to dig through
+Railway.
+
+- **`CryptoActivityEvent`** (new model, `models.py`): one row per real,
+  visible event - `bot_name`, `product_id`, `event_type`
+  (BUY/SELL/SPAWN/REINFORCE), `message`, `created_at`. Deliberately
+  separate from `CryptoCoinTradeHistory` (which only ever records a
+  completed SELL's P&L) - this is a real, append-only activity log
+  covering every visible event type, not just closed trades.
+- **`_log_activity()`** (`crypto_family_tree_bot.py`): best-effort,
+  wrapped in try/except so a logging failure can never block or roll
+  back the real trade it's describing. `message` is the exact same
+  human-readable text already going to the real Railway log at each call
+  site (the log line was refactored to build the string once, log it,
+  then also persist it) - so the dashboard feed can never say something
+  different from what the logs already say. Opportunistically trims the
+  table back to `ACTIVITY_FEED_MAX_ROWS` (500 default) on roughly 1-in-20
+  calls, so this real-but-low-value table doesn't grow forever on a bot
+  generating one event per branch per ~30s cycle.
+- Wired into the four real places something visible actually happens:
+  the flat-branch BUY in `run_branch_cycle`, the SELL in
+  `_branch_sell_and_settle`, and both SPAWN and REINFORCE inside
+  `_maybe_spawn_child`.
+- **`GET /family-tree-status/activity-feed`** (new, admin-key gated,
+  `routers/trading_dashboard.py`): reads back the most recent N events
+  (50 default), most recent first. Read-only.
+- **`family_tree_dashboard.html`**: new "📡 Live Activity" panel (a
+  pulsing live-indicator dot, placed right under the tree visualization)
+  polling the new endpoint every 5s - meaningfully faster than the rest
+  of the dashboard's 15s cycle, since the whole point is feeling
+  real-time. New rows fade in with a brief highlight so a genuinely new
+  event is visually distinct from ones already seen.
+
+Verified offline (`test_activity_feed.py`, new) against a real throwaway
+SQLite DB: `_log_activity`/`get_activity_feed` round-trip correctly,
+most-recent-first; a simulated DB failure inside `_log_activity` is
+swallowed and never raised to the caller; a real flat-branch BUY through
+`run_branch_cycle` logs a real BUY event with the correct product_id; a
+real TARGET-HIT sell logs a real SELL event; a real spawn (crossing a
+branch's own tier) logs a real SPAWN event; and two consecutive real
+reinforcements each log their own distinct REINFORCE event naming their
+own real target coin, without one overwriting the other. Full existing
+regression suite re-run alongside it; the three failures seen were
+confirmed pre-existing via a direct `git stash` comparison against the
+prior commit (two are the same already-documented
+`find_most_volatile_unclaimed_coin` mock-signature staleness, one is an
+unrelated stale `next_unlock_tier` assertion in `test_family_tree.py`) -
+none touch `_log_activity` or any of its four call sites.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

@@ -1374,3 +1374,36 @@ class CryptoCoinTradeHistory(Base):
             "opened_at": self.opened_at.isoformat() if self.opened_at else None,
             "closed_at": self.closed_at.isoformat() if self.closed_at else None,
         }
+
+
+class CryptoActivityEvent(Base):
+    """One row per real, visible thing the family-tree bot just did - a
+    buy, a sell, a new branch spawning, a reinforcement seed landing
+    somewhere. Built per the account owner's explicit request: the
+    dashboard showed static balances and positions, but nothing that let
+    them actually SEE the bot working in real time the way Railway's own
+    logs do, without digging through Railway. Deliberately a separate,
+    dedicated table from CryptoCoinTradeHistory (which only ever records
+    a completed SELL's P&L) - this one is a real, append-only activity
+    log covering every visible event type, not just closed trades.
+    `message` is the same human-readable text already written to the
+    real Railway logs at the moment each event happens, so the dashboard
+    feed can never say something different from what the logs say."""
+    __tablename__ = "crypto_activity_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot_name = Column(String, index=True)
+    product_id = Column(String, index=True)
+    event_type = Column(String, index=True)  # BUY | SELL | SPAWN | REINFORCE
+    message = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "bot_name": self.bot_name,
+            "product_id": self.product_id,
+            "event_type": self.event_type,
+            "message": self.message,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }

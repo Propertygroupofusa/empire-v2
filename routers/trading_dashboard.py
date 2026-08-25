@@ -864,6 +864,22 @@ async def get_coin_trade_history(db: AsyncSession = Depends(get_db)):
     return {"coins": coins, "coin_count": len(coins)}
 
 
+@router.get("/family-tree-status/activity-feed", dependencies=[Depends(require_admin_key)])
+async def get_activity_feed(limit: int = 50):
+    """Real, live feed of what the bot has actually just done - per the
+    account owner's explicit request to SEE it working (buying, selling,
+    spawning, reinforcing) without digging through Railway's own logs.
+    Backed by CryptoActivityEvent, written at the exact same real moment
+    as the matching Railway log line in crypto_family_tree_bot.py (BUY in
+    run_branch_cycle, SELL in _branch_sell_and_settle, SPAWN/REINFORCE in
+    _maybe_spawn_child) - the dashboard can never show something
+    different from what actually happened. Read-only."""
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+    events = await crypto_family_tree_bot_module.get_activity_feed(limit=limit)
+    return {"events": events, "event_count": len(events)}
+
+
 @router.post("/family-tree-status/root-take-profit", dependencies=[Depends(require_admin_key)])
 async def take_root_profit():
     """Manually cash in BTC's (the tree's permanent root) profit right

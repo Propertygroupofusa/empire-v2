@@ -60,7 +60,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, text, desc
 from sqlalchemy.exc import IntegrityError
 from database import AsyncSessionLocal
-from models import BotPosition, CryptoTreeBranch, TradingBotState, CryptoBacktestRun, CryptoCoinTradeHistory
+from models import BotPosition, CryptoTreeBranch, TradingBotState, CryptoBacktestRun, CryptoCoinTradeHistory, CryptoActivityEvent
 
 import crypto_btc_compound_bot as engine
 
@@ -661,6 +661,51 @@ async def get_locked_usd() -> float:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == LOCKED_PROFIT_STATE_KEY))
         row = result.scalar_one_or_none()
         return row.base_capital if row else 0.0
+
+
+ACTIVITY_FEED_MAX_ROWS = engine._safe_int_env("TREE_ACTIVITY_FEED_MAX_ROWS", "500")
+
+
+async def _log_activity(bot_name: str, product_id: str, event_type: str, message: str):
+    """Best-effort real activity log for the dashboard's Live Activity
+    feed - per the account owner's explicit request to actually SEE the
+    bot buying/selling/spawning in real time, not just static balances.
+    Deliberately never allowed to raise: a logging failure must never
+    block or roll back a real trade the caller is in the middle of
+    recording, so any DB error here is caught and only warned about.
+    `message` should be the exact same human-readable text already going
+    to the real Railway log at the call site, so the dashboard feed can
+    never say something different from what the logs already say.
+
+    Opportunistically trims the table back down to ACTIVITY_FEED_MAX_ROWS
+    (deleting the oldest rows past that cap) on roughly 1-in-20 calls -
+    cheap, and keeps this real but low-value table from growing forever
+    on a bot that generates one of these events every 30s per branch."""
+    try:
+        async with AsyncSessionLocal() as db:
+            db.add(CryptoActivityEvent(bot_name=bot_name, product_id=product_id, event_type=event_type, message=message))
+            await db.commit()
+            if random.random() < 0.05:
+                result = await db.execute(select(CryptoActivityEvent.id).order_by(desc(CryptoActivityEvent.id)).offset(ACTIVITY_FEED_MAX_ROWS).limit(1))
+                cutoff_id = result.scalar_one_or_none()
+                if cutoff_id is not None:
+                    await db.execute(text("DELETE FROM crypto_activity_events WHERE id < :cutoff"), {"cutoff": cutoff_id})
+                    await db.commit()
+    except Exception as e:
+        log.warning(f"[TREE] activity feed log failed (non-fatal, real trade unaffected): {e}")
+
+
+async def get_activity_feed(limit: int = 50):
+    """Real, live feed of the bot's own recent activity - reads back
+    exactly what _log_activity() above wrote, most recent first. Purely
+    read-only, used by the dashboard's Live Activity panel."""
+    limit = max(1, min(limit, ACTIVITY_FEED_MAX_ROWS))
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(CryptoActivityEvent).order_by(desc(CryptoActivityEvent.created_at)).limit(limit)
+        )
+        rows = result.scalars().all()
+    return [row.to_dict() for row in rows]
 
 
 async def _add_locked_usd(amount: float):
@@ -2477,11 +2522,13 @@ async def _maybe_spawn_child(branch):
             deployed = await _deploy_seed_into_weakest_branch(session, weakest.bot_name, SEED_USD)
 
         if deployed:
-            log.info(
-                f"[TREE] 🌱💪 {branch.bot_name} crossed ${milestone:,.0f} - its ${SEED_USD:.2f} seed "
+            reinforce_msg = (
+                f"🌱💪 {branch.bot_name} crossed ${milestone:,.0f} - its ${SEED_USD:.2f} seed "
                 f"went into {weakest.bot_name} (currently weakest at {weakest_pct_before:.0f}% toward its own next tier) "
                 f"| {branch.bot_name} continues with ${remaining:.2f}"
             )
+            log.info(f"[TREE] {reinforce_msg}")
+            await _log_activity(branch.bot_name, weakest.product_id, "REINFORCE", reinforce_msg)
         else:
             # Real buy failed (order rejection, price fetch failure) -
             # the seed was already deducted from the parent above, so
@@ -2576,10 +2623,12 @@ async def _maybe_spawn_child(branch):
         log.info(f"[TREE] {branch.bot_name} crossed ${milestone:,.0f} but every candidate name for a child on {next_product} collided with another branch (race){suffix} - will retry next cycle")
         return
 
-    log.info(
-        f"[TREE] 🌱 {branch.bot_name} crossed ${milestone:,.0f} - spawned {child_name} ({next_product}) "
+    spawn_msg = (
+        f"🌱 {branch.bot_name} crossed ${milestone:,.0f} - spawned {child_name} ({next_product}) "
         f"with ${SEED_USD:.2f} seed | {branch.bot_name} continues with ${remaining:.2f}"
     )
+    log.info(f"[TREE] {spawn_msg}")
+    await _log_activity(child_name, next_product, "SPAWN", spawn_msg)
 
 
 async def _branch_sell_and_settle(session, bot_name, product_id, position, reason):
@@ -2742,11 +2791,13 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
     elif row is not None:
         log.info(f"[TREE] {bot_name}: no eligible coin available to switch to - staying on {row.product_id}")
 
-    log.info(
-        f"[TREE] {bot_name} SOLD {filled_qty:.8f} {product_id} @ ${filled_price:,.2f} ({reason}) | "
+    sell_msg = (
+        f"{'📈' if pnl >= 0 else '📉'} {bot_name} SOLD {filled_qty:.8f} {product_id} @ ${filled_price:,.2f} ({reason}) | "
         f"entry ${position.entry_price:,.2f} -> exit ${filled_price:,.2f} | "
         f"P&L: {'+' if pnl >= 0 else ''}${pnl:.2f} after est. fees | branch now ${new_allocated:.2f}"
     )
+    log.info(f"[TREE] {sell_msg}")
+    await _log_activity(bot_name, product_id, "SELL", sell_msg)
     if skim > 0:
         await _add_locked_usd(skim)
         log.info(f"[TREE] 🔒 {bot_name} locked away ${skim:.2f} (10% of this trade's ${pnl:.2f} profit) - permanently out of the compounding loop")
@@ -2970,11 +3021,13 @@ async def run_branch_cycle(bot_name: str) -> bool:
             target_price = filled_price * (1 + target_pct)
             stop_price = filled_price * (1 - STOP_LOSS_PCT)
             await _save_branch_position(bot_name, branch.product_id, filled_price, filled_qty, target_price, stop_price)
-            log.info(
-                f"[TREE] {bot_name} BOUGHT {filled_qty:.8f} {branch.product_id} @ ${filled_price:,.2f} (${spend:.2f} deployed) | "
+            buy_msg = (
+                f"🟢 {bot_name} BOUGHT {filled_qty:.8f} {branch.product_id} @ ${filled_price:,.2f} (${spend:.2f} deployed) | "
                 f"ATR {atr_pct*100:.2f}% -> target +{target_pct*100:.2f}% (${target_price:,.2f}, min ${engine.pick_min_profit_usd(atr_pct):.2f} net) | "
                 f"stop -{STOP_LOSS_PCT*100:.2f}% (${stop_price:,.2f}) | branch total ${branch.allocated_usd:.2f} | floor ${branch.equity_floor:,.2f}"
             )
+            log.info(f"[TREE] {buy_msg}")
+            await _log_activity(bot_name, branch.product_id, "BUY", buy_msg)
             return True
 
         if price is None:

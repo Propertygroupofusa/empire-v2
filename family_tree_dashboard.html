@@ -124,6 +124,14 @@
     .coin-trades-inner th:first-child, .coin-trades-inner td:first-child { text-align: left; }
     .coin-history-empty { font-size: 0.85em; color: var(--text-dim); padding: 8px 0; }
 
+    @keyframes activity-pulse { 0% { box-shadow: 0 0 0 0 rgba(16,185,129,0.6); } 70% { box-shadow: 0 0 0 6px rgba(16,185,129,0); } 100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); } }
+    .activity-feed { display: flex; flex-direction: column; gap: 6px; max-height: 340px; overflow-y: auto; }
+    .activity-row { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border-radius: 8px; background: var(--bg); font-size: 0.85em; line-height: 1.4; animation: activity-row-in 0.4s ease; }
+    .activity-row.is-new { background: rgba(16,185,129,0.08); }
+    .activity-msg { flex: 1; word-break: break-word; }
+    .activity-time { flex-shrink: 0; color: var(--text-dim); font-size: 0.85em; white-space: nowrap; }
+    @keyframes activity-row-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
     .bar-list { display: flex; flex-direction: column; gap: 10px; }
     .bar-row { display: grid; grid-template-columns: 110px 1fr 90px; align-items: center; gap: 10px; font-size: 0.82em; }
     .bar-row .bar-label { color: var(--text-dim); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -491,6 +499,15 @@
         <button id="spawn-branch-btn" class="sell-btn" style="width:auto; margin-top:0;" onclick="spawnBranch(this)" disabled title="Checking real free cash...">🌱 Start new $50 branch</button>
     </div>
     <div class="tree-canvas"><div class="tree-canvas-inner" id="tree"></div></div>
+
+    <div class="section-title" style="display:flex; justify-content:space-between; align-items:center;">
+        <span>📡 Live Activity</span>
+        <span id="activity-live-dot" style="width:9px; height:9px; border-radius:50%; background:var(--green); box-shadow:0 0 0 rgba(16,185,129,0.5); animation:activity-pulse 2s infinite;"></span>
+    </div>
+    <div class="panel">
+        <div class="panel-sub">Every real buy, sell, spawn, and reinforcement, as it happens - refreshes every 5s.</div>
+        <div id="activity-feed-wrap"><div class="coin-history-empty">Loading…</div></div>
+    </div>
 
     <div class="section-title">📜 Coin Trade History</div>
     <div class="panel">
@@ -1459,6 +1476,39 @@ function fmtTickerPrice(n) {
     return '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+let lastActivitySeenId = 0;
+let activityFirstLoad = true;
+
+function timeAgo(isoString) {
+    if (!isoString) return '';
+    const diffSec = Math.max(0, Math.floor((Date.now() - new Date(isoString + 'Z').getTime()) / 1000));
+    if (diffSec < 5) return 'just now';
+    if (diffSec < 60) return `${diffSec}s ago`;
+    if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+    return `${Math.floor(diffSec / 3600)}h ago`;
+}
+
+async function loadActivityFeed() {
+    const wrap = document.getElementById('activity-feed-wrap');
+    try {
+        const data = await apiGet('/family-tree-status/activity-feed?limit=50');
+        const events = data.events || [];
+        if (events.length === 0) {
+            wrap.innerHTML = '<div class="coin-history-empty">No activity recorded yet - the feed fills in as the bot buys, sells, and spawns branches.</div>';
+            return;
+        }
+        const newestId = events[0].id;
+        wrap.innerHTML = `<div class="activity-feed">${events.map(ev => {
+            const isNew = !activityFirstLoad && ev.id > lastActivitySeenId;
+            return `<div class="activity-row${isNew ? ' is-new' : ''}"><div class="activity-msg">${ev.message}</div><div class="activity-time">${timeAgo(ev.created_at)}</div></div>`;
+        }).join('')}</div>`;
+        lastActivitySeenId = newestId;
+        activityFirstLoad = false;
+    } catch (e) {
+        wrap.innerHTML = `<div class="coin-history-empty">Could not load activity feed: ${e.message}</div>`;
+    }
+}
+
 async function loadTicker() {
     const track = document.getElementById('ticker-track');
     try {
@@ -1483,8 +1533,10 @@ async function loadTicker() {
 
 refresh();
 loadTicker();
+loadActivityFeed();
 setInterval(refresh, 15000);
 setInterval(loadTicker, 30000);
+setInterval(loadActivityFeed, 5000);
 </script>
 </body>
 </html>
