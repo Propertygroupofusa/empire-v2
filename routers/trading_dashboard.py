@@ -1041,11 +1041,22 @@ async def add_cash_to_branch(bot_name: str, payload: AddCashRequest, db: AsyncSe
     branch.allocated_usd += payload.amount
     await db.commit()
 
-    log.info(
-        f"[dashboard] 💰 Manually added ${payload.amount:.2f} real cash to {bot_name}'s {branch.product_id} position - "
+    add_cash_msg = (
+        f"💰 Manually added ${payload.amount:.2f} real cash to {bot_name}'s {branch.product_id} position - "
         f"bought {filled_qty:.8f} @ ${filled_price:,.2f}, blended entry now ${blended_entry:,.2f}, "
         f"branch total now ${branch.allocated_usd:.2f}"
     )
+    log.info(f"[dashboard] {add_cash_msg}")
+    await tree._log_activity(bot_name, branch.product_id, "BUY", add_cash_msg)
+
+    # Settle immediately if this deposit pushed the branch over its own
+    # next spawn tier, instead of leaving it sitting at 100% for up to
+    # ~30s until its next scheduled cycle picks it up - the automatic
+    # per-cycle sale path already does this same immediate check
+    # (_branch_sell_and_settle calls _maybe_spawn_child in the same call
+    # a sale crosses the tier), this was the one real gap: a manual
+    # cash deposit crossing the tier had no equivalent trigger.
+    await tree._maybe_spawn_child(branch)
     return {
         "status": "cash_added",
         "bot_name": bot_name,

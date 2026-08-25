@@ -1039,6 +1039,10 @@ async def spawn_child_branch_with_retry(product_id: str, parent_bot_name, attemp
             ))
             try:
                 await db.commit()
+                await _log_activity(
+                    child_name, product_id, "SPAWN",
+                    f"🌱 Manually started {child_name} ({product_id}) with ${SEED_USD:.2f} seed",
+                )
                 return child_name
             except IntegrityError as e:
                 await db.rollback()
@@ -2290,10 +2294,13 @@ async def consolidate_branches_by_coin(dry_run: bool = True) -> dict:
                 await _clear_branch_position(loser_bot_name)
 
             executed.append(item)
-            log.info(
-                f"[TREE] 🔗 consolidated {len(item['merged_bot_names']) + 1} branches on {product_id} into "
-                f"{survivor_bot_name} - combined balance ${item['combined_allocated_usd']:,.2f}"
+            consolidate_msg = (
+                f"🔗 Merged {len(item['merged_bot_names']) + 1} branches on {product_id} into "
+                f"{survivor_bot_name} - combined balance ${item['combined_allocated_usd']:,.2f} "
+                f"(no coins sold, real balances summed: {', '.join(item['merged_bot_names'])} folded in)"
             )
+            log.info(f"[TREE] {consolidate_msg}")
+            await _log_activity(survivor_bot_name, product_id, "CONSOLIDATE", consolidate_msg)
 
     return {"dry_run": False, "groups_merged": len(executed), "plan": executed}
 
@@ -2529,6 +2536,19 @@ async def _maybe_spawn_child(branch):
             )
             log.info(f"[TREE] {reinforce_msg}")
             await _log_activity(branch.bot_name, weakest.product_id, "REINFORCE", reinforce_msg)
+            # Deliberately does NOT immediately re-check the RECIPIENT here
+            # (tried this, reverted it): if the $50 reinforcement itself
+            # pushes the recipient over ITS OWN tier, chaining an immediate
+            # re-check can ping-pong - the recipient reinforces back
+            # whichever branch just gave it money (now the weakest again
+            # after giving away its own $50), which can reinforce the
+            # recipient again, back and forth, firing real Coinbase orders
+            # on every bounce within one call stack. Confirmed live in
+            # testing before this ever shipped. The recipient's own next
+            # scheduled cycle (run_branch_cycle's catch-up check, ~30s)
+            # picks this up safely on its own - only the ORIGINAL source of
+            # a crossing (a sale, or the manual add-cash endpoint) settles
+            # immediately, never a chain through who it reinforced.
         else:
             # Real buy failed (order rejection, price fetch failure) -
             # the seed was already deducted from the parent above, so
@@ -2654,11 +2674,13 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
             # CryptoCoinTradeHistory row - no real trade happened here, so
             # there is no real fill price/qty to record, and inventing one
             # would fabricate P&L that never actually occurred.
-            log.warning(
-                f"[TREE] {bot_name}: {reason} but real held balance for {product_id} is effectively 0 "
+            phantom_msg = (
+                f"⚠️ {bot_name}: {reason} but real held balance for {product_id} is effectively 0 "
                 f"(tracked position no longer matches reality - likely real cross-branch balance drift "
-                f"on a shared coin) - clearing the stale position instead of retrying forever"
+                f"on a shared coin) - clearing the stale position instead of retrying forever (no real trade occurred)"
             )
+            log.warning(f"[TREE] {phantom_msg}")
+            await _log_activity(bot_name, product_id, "SELL", phantom_msg)
             await _clear_branch_position(bot_name)
             _coin_last_sold_at[product_id] = time.time()
             if bot_name != ROOT_BOT_NAME:

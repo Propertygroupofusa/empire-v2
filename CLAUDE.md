@@ -4361,6 +4361,95 @@ completely unaffected by either fix.
 
 ---
 
+## Live Activity feed extended to manual dashboard actions - a real gap found by direct question
+
+The account owner asked directly whether the Live Activity feed (built
+earlier this session) could be missing anything - "make sure it's not
+static... we're not missing any points of transactions." Checked rather
+than reassured: the feed only covered the fully-automatic per-cycle
+paths (flat-branch buy, sell, spawn, reinforce inside
+`run_branch_cycle`/`_branch_sell_and_settle`/`_maybe_spawn_child`).
+Manual dashboard actions bypassed it entirely - "Add cash to X" (a
+button the account owner uses repeatedly), manual spawn ("Start new $50
+branch" / "Trade this"), and the "Combine branches sharing a coin"
+consolidate action all produced zero activity-feed rows despite being
+real, visible things happening to the tree. Also found: the
+phantom-position self-heal path inside `_branch_sell_and_settle` used
+to `return` before ever reaching the SELL log at the bottom of that
+function, so a real position-clearing event was invisible too.
+
+Fixed by wiring `_log_activity()` into all four gaps:
+1. `add_cash_to_branch()` (`routers/trading_dashboard.py`) - logs a real
+   BUY event after a manual cash deposit fills.
+2. `spawn_child_branch_with_retry()` (`crypto_family_tree_bot.py`) -
+   logs a real SPAWN event on success; shared by both manual spawn
+   endpoints (`spawn_family_tree_branch` and
+   `spawn_family_tree_branch_on_coin`), so one fix covers both.
+3. `consolidate_branches_by_coin()` - logs a new `CONSOLIDATE` event
+   type per merged group, naming the real survivor and which branches
+   folded in - directly answering the exact "what happened to my
+   branches" confusion this session's consolidate-button conversation
+   surfaced.
+4. The phantom-position self-heal branch inside
+   `_branch_sell_and_settle()` now logs a SELL-typed event whose message
+   explicitly says "no real trade occurred", instead of returning
+   silently.
+
+### A real, dangerous cascade found and reverted before shipping
+
+The account owner also asked to speed up the real ~30s wait before a
+branch at 100% "Next spawn" actually settles - relayed a technical
+suggestion (from a separate tool they'd consulted) to make hitting the
+tier trigger immediate settlement instead of waiting for the branch's
+next scheduled cycle. Evaluated rather than applied as given: the
+suggested `CYCLE_SECONDS`/jitter retune (27s ± 3s) was rejected as
+unnecessary and risky - nearly identical to the existing 30s ± 10%
+range, and shrinking the base interval is the exact lever that caused
+the real multi-day spawn-collision saga documented earlier in this
+file. The "duplicate protection" concern was already covered by the
+existing fresh-row re-check under transaction before every deduction.
+
+The core "settle immediately" idea WAS real and worth building: a branch
+crossing its tier via an automatic sale already settles immediately
+(`_branch_sell_and_settle` calls `_maybe_spawn_child` in the same call),
+but a branch crossing its tier via a manual cash deposit had no
+equivalent - it just sat at 100% until its own next scheduled cycle
+(~30s). Fixed narrowly: `add_cash_to_branch()` now calls
+`_maybe_spawn_child()` on itself immediately after committing the
+deposit.
+
+A second version of this fix - also re-checking the REINFORCEMENT
+RECIPIENT immediately, so a $50 reinforcement that itself pushed the
+recipient over ITS OWN tier would settle right away too - was built,
+tested, and found to have a real, dangerous flaw before it ever shipped:
+it can **ping-pong**. Confirmed live in testing: branch A crosses its
+tier and reinforces branch B; B, now also over its own tier, immediately
+reinforces back whichever branch is weakest - which is often A itself,
+having just given away $50. With only two branches in a group this
+became a real back-and-forth bounce, firing multiple real Coinbase
+market orders (each with real fees) within a single API call before the
+naturally-growing tier thresholds finally outpaced the $50 increments
+and it stopped on its own. Mathematically bounded, but genuinely
+unacceptable for live trading - several unintended real orders firing
+from one click. Reverted specifically: the RECIPIENT of a reinforcement
+is deliberately NOT re-checked immediately; it settles safely on its own
+next scheduled cycle instead. Only the ORIGINAL source of a crossing (a
+sale, or a manual add-cash deposit) settles immediately - never a chain
+through who it reinforced.
+
+Verified offline: `test_add_cash_branch.py`'s seed helper gained an
+explicit `next_tier` parameter (default raised well above the test's own
+amounts) so its existing blending-math assertions aren't disturbed by
+the new immediate-settlement side effect, which now has its own explicit
+coverage; `test_activity_feed_manual_actions.py` (new) confirms all four
+newly-wired paths (manual add-cash, manual spawn, consolidate, phantom
+self-heal) produce real, correctly-typed `CryptoActivityEvent` rows
+against a real throwaway SQLite DB. The reverted ping-pong version was
+directly reproduced and confirmed fixed (only one settlement hop occurs,
+not a bounce) before this shipped - not just reasoned about.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
