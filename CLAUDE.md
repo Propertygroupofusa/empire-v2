@@ -2856,6 +2856,44 @@ spawn/add-cash endpoints are unaffected.
 
 ---
 
+## Reinforcement rule revised: persistent (not alternating), until every branch clears 50%
+
+Right after the every-other-spawn reinforcement feature shipped, the
+account owner watched it live and pushed back: a spawn made a brand-new
+branch instead of reinforcing the real weak POL branches they were
+pointing at. That was actually the every-OTHER-spawn rule working
+exactly as built (half of all spawns are normal, by design) - but the
+account owner's real intent, once restated plainly, was different from
+the literal "every other" they'd first said: "I know I said every other
+coin but... help your weakest one out until everyone is above 50% and
+then it is fine until a new coin[s gets weak again]."
+
+Replaced the persisted alternation counter with a threshold check:
+
+- **`_tree_needs_reinforcement()`** (replaces `_next_spawn_is_reinforcement()`)
+  - scans every real branch and returns `True` if ANY branch's real
+  `allocated_usd / next_unlock_tier` is below `REINFORCEMENT_THRESHOLD_PCT`
+  (50% default, `TREE_REINFORCEMENT_THRESHOLD_PCT` env-overridable). No
+  more alternating counter/`TradingBotState` row for this - the tree's
+  own real state each spawn IS the check now.
+- **Every real spawn** reinforces the weakest branch for as long as this
+  returns `True` - not just every other one. Once every branch is at or
+  above the threshold, spawning goes back to normal (new branches) until
+  some branch's real balance eventually drops back below 50% again (e.g.
+  from a real stop-loss or floor-breach exit).
+- `_pick_weakest_branch_for_reinforcement()` and
+  `_deploy_seed_into_weakest_branch()` are unchanged - only the "should
+  this spawn reinforce at all" decision changed, not how the reinforcement
+  itself is picked or executed.
+
+Verified offline against a real throwaway SQLite DB: two consecutive real
+spawns BOTH reinforce (not alternating) while a real branch is still
+below 50%, each one correctly targeting whichever real branch is
+currently weakest; once every branch is confirmed at/above 50%, the next
+spawn correctly creates a new branch again instead of reinforcing.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

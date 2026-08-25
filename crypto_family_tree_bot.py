@@ -195,11 +195,12 @@ COIN_LOCK_KEY_PREFIX = "crypto_family_tree_coin_locked_"
 PROFIT_SKIM_PCT = engine._safe_float_env("TREE_PROFIT_SKIM_PCT", "0.10")
 LOCKED_PROFIT_STATE_KEY = "crypto_family_tree_locked_usd"
 
-# Per the account owner's explicit request: every OTHER real spawn should
-# reinforce whichever EXISTING branch is currently weakest (lowest % toward
-# its own next spawn tier) with a real $50 buy, instead of always starting a
-# brand-new branch - "help it build it back up." See _next_spawn_is_reinforcement().
-SPAWN_ALTERNATION_STATE_KEY = "crypto_family_tree_spawn_alternation"
+# Per the account owner's explicit request: every real spawn reinforces
+# whichever EXISTING branch is currently weakest (lowest % toward its own
+# next spawn tier) with a real $50 buy, instead of starting a brand-new
+# branch, for as long as ANY branch sits below this threshold - "help your
+# weakest one out until everyone is above 50%." See _tree_needs_reinforcement().
+REINFORCEMENT_THRESHOLD_PCT = engine._safe_float_env("TREE_REINFORCEMENT_THRESHOLD_PCT", "0.50")
 
 # Real spendable cash (real_balance - locked_usd) below MIN_TRADE_USD just
 # sits there forever on its own - no branch can ever spend less than
@@ -1812,41 +1813,25 @@ async def adopt_orphaned_positions(session):
         )
 
 
-async def _next_spawn_is_reinforcement() -> bool:
-    """Real, persisted alternation counter (survives restarts, stored the
-    same generic per-key TradingBotState bucket locked_usd/equity floors
-    already use) - per the account owner's explicit request: every OTHER
-    real spawn should reinforce whichever EXISTING branch is currently
-    weakest instead of starting a brand-new branch. Returns True on every
-    2nd real spawn (count 2, 4, 6, ...), False otherwise. A rare race
-    between two branches' threads incrementing this at nearly the same
-    real moment could occasionally skip or repeat a parity - this is a
-    soft allocation preference, not a financial safety invariant, so
-    that's an acceptable tradeoff rather than adding real cross-thread
-    locking just for this."""
+async def _tree_needs_reinforcement() -> bool:
+    """Per the account owner's explicit revision of the original
+    every-other-spawn rule (which alternated 1-normal/1-reinforce): "help
+    your weakest one out until everyone is above 50% and then it is fine
+    until a new coin[gets weak again]." Every real spawn now reinforces
+    the weakest existing branch for as long as ANY real branch sits below
+    REINFORCEMENT_THRESHOLD_PCT toward its own next spawn tier - once
+    every branch is at or above that bar, spawning goes back to normal
+    (new branches) until some branch eventually drops back below it
+    again. Returns True if at least one real branch is currently below
+    the threshold."""
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == SPAWN_ALTERNATION_STATE_KEY))
-        row = result.scalar_one_or_none()
-        if row is None:
-            db.add(TradingBotState(bot_name=SPAWN_ALTERNATION_STATE_KEY, base_capital=1.0, starting_capital=0.0))
-            try:
-                await db.commit()
-                return False  # count starts at 1 -> first real spawn is normal
-            except IntegrityError:
-                await db.rollback()
-                async with AsyncSessionLocal() as db2:
-                    result2 = await db2.execute(select(TradingBotState).where(TradingBotState.bot_name == SPAWN_ALTERNATION_STATE_KEY))
-                    row2 = result2.scalar_one_or_none()
-                    if row2 is None:
-                        return False
-                    row2.base_capital += 1
-                    new_count = row2.base_capital
-                    await db2.commit()
-                    return int(new_count) % 2 == 0
-        row.base_capital += 1
-        new_count = row.base_capital
-        await db.commit()
-    return int(new_count) % 2 == 0
+        result = await db.execute(select(CryptoTreeBranch))
+        branches = result.scalars().all()
+    for b in branches:
+        if b.next_unlock_tier and b.next_unlock_tier > 0:
+            if (b.allocated_usd / b.next_unlock_tier) < REINFORCEMENT_THRESHOLD_PCT:
+                return True
+    return False
 
 
 async def _pick_weakest_branch_for_reinforcement(exclude_bot_name: str):
@@ -1973,12 +1958,14 @@ async def _maybe_spawn_child(branch):
                     f"(real balance ${branch.allocated_usd:.2f} was below it, likely from a real spawn deduction) - can spawn again now"
                 )
 
-    # Per the account owner's explicit request: every OTHER real spawn
-    # reinforces whichever EXISTING branch is currently weakest (lowest %
-    # toward its own next spawn tier) with a real buy, instead of starting
-    # a brand-new branch - "help it build it back up." See
-    # _next_spawn_is_reinforcement()/_pick_weakest_branch_for_reinforcement().
-    if await _next_spawn_is_reinforcement():
+    # Per the account owner's explicit request (revised from the original
+    # every-other-spawn rule): every real spawn reinforces whichever
+    # EXISTING branch is currently weakest (lowest % toward its own next
+    # spawn tier) with a real buy, instead of starting a brand-new branch,
+    # for as long as ANY branch sits below REINFORCEMENT_THRESHOLD_PCT -
+    # "help your weakest one out until everyone is above 50%." See
+    # _tree_needs_reinforcement()/_pick_weakest_branch_for_reinforcement().
+    if await _tree_needs_reinforcement():
         weakest = await _pick_weakest_branch_for_reinforcement(exclude_bot_name=branch.bot_name)
         if weakest is not None:
             own_increment = ROOT_UNLOCK_TIER_USD if branch.bot_name == ROOT_BOT_NAME else UNLOCK_TIER_USD
@@ -1999,9 +1986,10 @@ async def _maybe_spawn_child(branch):
 
             if deployed:
                 log.info(
-                    f"[TREE] 🌱💪 {branch.bot_name} crossed ${milestone:,.0f} - every-other-spawn reinforcement turn, "
-                    f"so instead of a new branch its ${SEED_USD:.2f} seed went into {weakest.bot_name} "
-                    f"(weakest at {weakest_pct_before:.0f}% toward its own next tier) | {branch.bot_name} continues with ${remaining:.2f}"
+                    f"[TREE] 🌱💪 {branch.bot_name} crossed ${milestone:,.0f} - a branch is still below "
+                    f"{REINFORCEMENT_THRESHOLD_PCT*100:.0f}%, so instead of a new branch its ${SEED_USD:.2f} seed "
+                    f"went into {weakest.bot_name} (weakest at {weakest_pct_before:.0f}% toward its own next tier) "
+                    f"| {branch.bot_name} continues with ${remaining:.2f}"
                 )
             else:
                 # Real buy failed (order rejection, price fetch failure) -
