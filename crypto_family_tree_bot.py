@@ -1531,6 +1531,70 @@ async def get_live_coin_snapshot():
     return {"btc_return_25h": btc_return, "coins": snapshot}
 
 
+async def get_reconciliation_report():
+    """Real DB-vs-Coinbase reconciliation, built directly off the phantom-
+    position self-heal fix above: the dashboard showing "22 branches
+    holding positions" is misleading on its own - a DB BotPosition row
+    proves the bot THINKS it holds an asset, not that Coinbase actually
+    has it right now. This makes that gap directly visible instead of only
+    discovering it reactively when a stuck sell finally surfaces it.
+
+    Deliberately grouped by asset currency, NOT by individual branch:
+    since branches can share a coin, Coinbase's real balance for an asset
+    is POOLED across every branch holding it - comparing one branch's own
+    qty against the full pooled balance would flag a false mismatch on
+    every shared coin (most of the tree, by design, since the shared-coin
+    change shipped). The correct comparison is real_balance vs the SUM of
+    every branch's tracked qty for that same asset.
+
+    Read-only - fetches real balances, never places an order or touches
+    the DB. One row per asset currently held by 1+ branches:
+    {currency, branch_count, tracked_qty, real_balance, status} where
+    status is "ok" (real balance covers the tracked sum, within a small
+    tolerance for fee/rounding dust), "SHORTFALL" (real balance is
+    meaningfully below what the tree thinks it holds - the dangerous
+    direction: a phantom position, or one about to become one), or
+    "unchecked" (the real balance lookup itself failed)."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(BotPosition))
+        positions = result.scalars().all()
+
+    tracked_by_currency = {}
+    branch_count_by_currency = {}
+    for pos in positions:
+        currency = pos.symbol.split("-")[0]
+        tracked_by_currency[currency] = tracked_by_currency.get(currency, 0.0) + pos.qty
+        branch_count_by_currency[currency] = branch_count_by_currency.get(currency, 0) + 1
+
+    async with engine.aiohttp.ClientSession() as session:
+        all_balances, fetch_err = await engine.get_all_asset_balances(session)
+
+    report = []
+    for currency, tracked_qty in tracked_by_currency.items():
+        if all_balances is None:
+            report.append({
+                "currency": currency, "branch_count": branch_count_by_currency[currency],
+                "tracked_qty": round(tracked_qty, 8), "real_balance": None,
+                "status": "unchecked", "detail": fetch_err,
+            })
+            continue
+        real_balance = all_balances.get(currency, 0.0)
+        # Small proportional tolerance for real fee/dust rounding, not
+        # a strict equality check - a few thousandths of a unit off is
+        # normal and not a real discrepancy.
+        shortfall = tracked_qty - real_balance
+        tolerance = max(tracked_qty * 0.01, 1e-6)
+        status = "SHORTFALL" if shortfall > tolerance else "ok"
+        report.append({
+            "currency": currency, "branch_count": branch_count_by_currency[currency],
+            "tracked_qty": round(tracked_qty, 8), "real_balance": round(real_balance, 8),
+            "status": status, "detail": None,
+        })
+
+    report.sort(key=lambda r: (r["status"] != "SHORTFALL", r["currency"]))
+    return {"assets": report, "shortfall_count": sum(1 for r in report if r["status"] == "SHORTFALL")}
+
+
 async def _load_branch_position(bot_name: str):
     """A real production crash (sqlalchemy.exc.MultipleResultsFound) hit
     crypto_tree_xrp_usd's thread on every single cycle once two BotPosition

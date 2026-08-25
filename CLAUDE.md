@@ -2980,6 +2980,112 @@ on every cycle) would be a much bigger change and hasn't been requested.
 
 ---
 
+## DB-vs-Coinbase reconciliation report, made visible on the dashboard
+
+Right after the phantom-position self-heal fix above, the account owner
+shared a pasted third-party analysis of the same real log evidence
+(POL-USD clamping to a real balance of 0, "TARGET HIT but sell did not
+fill"), arguing the dashboard's "22 branches holding positions" was
+dangerously misleading since a DB `BotPosition` row proves the bot
+THINKS it holds an asset, not that Coinbase actually has it. That
+specific diagnosis was correct and matched what had already been found
+and fixed - this makes it directly visible instead of only discoverable
+reactively when a stuck sell surfaces it.
+
+`get_reconciliation_report()` (`crypto_family_tree_bot.py`) is
+deliberately grouped by ASSET CURRENCY, not by individual branch: since
+branches can legitimately share a coin (see "Multiple branches can now
+share the same coin" above), Coinbase's real balance for an asset is
+POOLED across every branch holding it - comparing one branch's own qty
+against the full pooled balance would flag a false "mismatch" on every
+shared coin, which by now is most of the tree. The correct comparison is
+real_balance vs. the SUM of every branch's tracked qty for that same
+asset - `SHORTFALL` only fires when the real pooled balance is
+meaningfully below what the tree's combined tracked positions say it
+holds (a small proportional tolerance absorbs real fee/rounding dust, not
+a strict equality check). A real balance-fetch failure is reported
+`unchecked` with the actual error, never silently treated as either ok or
+a shortfall. Read-only - fetches real balances, never places an order or
+touches the DB.
+
+Real efficiency fix caught before this ever shipped: the dashboard polls
+`/family-tree-status` (and now this new endpoint) every 15 seconds, and
+`get_asset_balance()` re-fetches and re-paginates the ENTIRE real
+Coinbase `/accounts` list from scratch on every call - calling it once
+per distinct held currency (potentially 15-20+ with the top-N rotation
+active) would have turned one dashboard refresh into a dozen-plus
+redundant real Coinbase API calls, every 15 seconds, forever. New
+`get_all_asset_balances()` (`crypto_btc_compound_bot.py`) walks the real
+account pages exactly once and returns every currency's balance in one
+dict, and the reconciliation report uses that single batched fetch
+instead of looping `get_asset_balance()` per currency. A currency absent
+from the real account list entirely (Coinbase genuinely has no account
+for it) is correctly treated as a real 0 balance, not silently skipped -
+if the tree tracks a position in it, that's a real SHORTFALL.
+
+New `GET /family-tree-status/reconciliation` (admin-key gated) and a new
+"🔍 Reconciliation" panel on `family_tree_dashboard.html`, placed right
+under the KPI row for visibility - a green banner when every real asset's
+Coinbase balance covers its tracked sum, a red banner naming exactly how
+many assets are short when it doesn't, and a per-asset table (branches
+sharing it, DB tracked qty, real Coinbase balance, status).
+
+**On the rest of that pasted analysis** (evaluated critically before
+acting, same as every other pasted-tool proposal this session):
+- **The dual-bot-engine concern was checked directly against the real
+  code and does NOT hold**: `main.py`'s startup is a single
+  `if/elif/elif` on `CRYPTO_STRATEGY_MODE` (`family_tree` /
+  `btc_compound` / `multi_pair`) - only ONE of
+  `crypto_family_tree_bot_module.run` / `crypto_btc_compound_bot_module.run`
+  / `crypto_coinbase_bot_module.run` is ever started as a thread, never
+  more than one. With `CRYPTO_STRATEGY_MODE=family_tree` (confirmed live
+  this session), `crypto_btc_compound_bot.py`'s own `run()` loop is never
+  invoked at all - that module is only imported and used as a shared
+  `engine` library (its buy/sell/target functions) by
+  `crypto_family_tree_bot.py`, not run as an independent bot. The root
+  branch reusing the literal bot_name `"crypto_btc_compound"`
+  (`ROOT_BOT_NAME`) is a deliberate continuity choice (see
+  `ensure_root_exists()`), not two processes fighting over one position -
+  there is only ever one thread (the root branch's own
+  `_branch_thread_main`) writing to that bot_name's `BotPosition` row
+  under this strategy mode.
+- **The "central execution lock / single coordinator serializing every
+  branch's orders" rewrite was deliberately NOT built.** The real risk it
+  targets - two branches racing to spend/sell against the same pooled
+  real balance at once - is already defended at the point that actually
+  matters: `place_market_buy()` and `place_market_sell()` both fetch the
+  real Coinbase balance immediately before submitting and clamp to it
+  (see the INSUFFICIENT_FUND fix above), so no single order can ever ask
+  for more than genuinely exists at that instant. A global lock
+  serializing 23 branch threads through one gate would add meaningful
+  latency and a single point of failure to a live-money system for a
+  marginal additional safety margin over what the per-order clamp already
+  provides, and doesn't change the fundamental shared-balance dynamic -
+  it only changes how the race is arbitrated. Not ruled out as a future
+  option if reconciliation data shows the per-order clamp isn't holding
+  up, but not warranted as an immediate rewrite under real financial
+  pressure.
+- **"Pause all new BUY orders until reconciliation is fixed" was left as
+  the account owner's own call, not applied automatically.** The
+  `STOP_TRADING=true` kill switch already exists for exactly this (see
+  above) - the new reconciliation panel now gives a real, direct answer
+  to whether it's actually needed, instead of guessing.
+
+Verified offline against a real throwaway SQLite DB: two branches sharing
+one coin are correctly SUMMED into one tracked_qty figure (not reported
+as conflicting per-branch numbers); a real balance that covers the
+tracked sum is `ok`; a genuine shortfall is flagged `SHORTFALL`; a tiny
+real fee/rounding dust gap stays within tolerance and is NOT a false
+positive; a currency entirely absent from the real batched balances
+(no Coinbase account for it) is correctly treated as a real 0 balance,
+not silently skipped; a TOTAL real balance-fetch failure marks every
+currently-held asset `unchecked` with the actual error text rather than
+false-`ok` or false-`SHORTFALL`; `shortfall_count` reflects only genuine
+shortfalls; and SHORTFALL rows sort first. Full existing regression
+suite re-run alongside it.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

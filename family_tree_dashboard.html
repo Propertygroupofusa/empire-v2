@@ -349,6 +349,21 @@
         box-sizing: border-box;
         word-break: break-word;
     }
+    #recon-banner {
+        margin-bottom: 12px;
+        padding: 10px 14px;
+        border-radius: 8px;
+        font-size: 0.88em;
+        font-weight: 600;
+    }
+    #recon-banner.ok { color: var(--green); background: var(--green-bg); border: 1px solid var(--green); }
+    #recon-banner.shortfall { color: var(--red); background: var(--red-bg); border: 1px solid var(--red); }
+    #recon-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+    #recon-table th, #recon-table td { padding: 6px 10px; text-align: right; border-bottom: 1px solid #eee; }
+    #recon-table th:first-child, #recon-table td:first-child { text-align: left; }
+    #recon-table .status-ok { color: var(--green); font-weight: 700; }
+    #recon-table .status-shortfall { color: var(--red); font-weight: 700; }
+    #recon-table .status-unchecked { color: #999; font-weight: 700; }
 
     .breakeven-badge {
         display: inline-block;
@@ -430,6 +445,13 @@
             <button id="unlock-profit-btn" class="unlock-btn" onclick="unlockProfit()" disabled title="Loading...">🔓 Unlock</button>
         </div>
         <div class="kpi"><div class="label">Refreshed</div><div class="value" id="stat-refreshed" style="font-size:1em">—</div></div>
+    </div>
+
+    <div class="panel">
+        <div class="panel-title">🔍 Reconciliation — DB vs. real Coinbase balance</div>
+        <div class="panel-sub">Per real asset (not per-branch, since branches can share a coin and Coinbase's balance for it is pooled): what every branch's tracked position says it holds, summed, vs. what Coinbase actually reports right now.</div>
+        <div id="recon-banner">Loading…</div>
+        <div id="recon-table-wrap"></div>
     </div>
 
     <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
@@ -1215,7 +1237,55 @@ async function refresh() {
         document.getElementById('coin-history-wrap').innerHTML = `<div class="coin-history-empty">Could not load coin history: ${e.message}</div>`;
     }
 
+    try {
+        const reconData = await apiGet('/family-tree-status/reconciliation');
+        renderReconciliation(reconData);
+    } catch (e) {
+        document.getElementById('recon-banner').className = 'shortfall';
+        document.getElementById('recon-banner').textContent = 'Could not load reconciliation: ' + e.message;
+        document.getElementById('recon-table-wrap').innerHTML = '';
+    }
+
     loadHeaderTotals();
+}
+
+function renderReconciliation(data) {
+    const banner = document.getElementById('recon-banner');
+    const wrap = document.getElementById('recon-table-wrap');
+    const assets = data.assets || [];
+
+    if (assets.length === 0) {
+        banner.className = 'ok';
+        banner.textContent = '✅ No open positions to reconcile right now.';
+        wrap.innerHTML = '';
+        return;
+    }
+
+    if (data.shortfall_count > 0) {
+        banner.className = 'shortfall';
+        banner.textContent = `⚠️ ${data.shortfall_count} real asset${data.shortfall_count === 1 ? '' : 's'} where Coinbase's real balance is short of what the tree's tracked positions say it holds — a shortfalled coin's branch(es) may be stuck retrying an impossible sell.`;
+    } else {
+        banner.className = 'ok';
+        banner.textContent = `✅ Every real asset's Coinbase balance covers what the tree's tracked positions say it holds (${assets.length} asset${assets.length === 1 ? '' : 's'} checked).`;
+    }
+
+    const rows = assets.map(a => {
+        const statusLabel = a.status === 'SHORTFALL' ? '⚠️ SHORTFALL' : a.status === 'unchecked' ? '— unchecked' : '✅ ok';
+        const statusClass = a.status === 'SHORTFALL' ? 'status-shortfall' : a.status === 'unchecked' ? 'status-unchecked' : 'status-ok';
+        const realBalanceText = a.real_balance === null ? '—' : a.real_balance.toLocaleString(undefined, { maximumFractionDigits: 8 });
+        return `<tr>
+            <td>${a.currency}</td>
+            <td>${a.branch_count}</td>
+            <td>${a.tracked_qty.toLocaleString(undefined, { maximumFractionDigits: 8 })}</td>
+            <td>${realBalanceText}</td>
+            <td class="${statusClass}">${statusLabel}</td>
+        </tr>`;
+    }).join('');
+
+    wrap.innerHTML = `<div style="overflow-x:auto;"><table id="recon-table">
+        <thead><tr><th>Asset</th><th>Branches</th><th>Tracked qty (DB)</th><th>Real balance (Coinbase)</th><th>Status</th></tr></thead>
+        <tbody>${rows}</tbody>
+    </table></div>`;
 }
 
 function renderHeaderTotal(elId, total) {

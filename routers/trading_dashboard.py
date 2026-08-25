@@ -1295,6 +1295,22 @@ async def family_tree_coin_watchlist():
     return await crypto_family_tree_bot_module.get_live_coin_snapshot()
 
 
+@router.get("/family-tree-status/reconciliation", dependencies=[Depends(require_admin_key)])
+async def family_tree_reconciliation():
+    """Real DB-vs-Coinbase reconciliation, per the account owner's direct
+    request after seeing real branches get permanently stuck retrying an
+    impossible sell (real balance 0.00000000 against a tracked position
+    that said otherwise) - "22 branches holding positions" on its own
+    proves nothing about what Coinbase actually has right now. Grouped by
+    asset (not per-branch) since branches can legitimately share a coin
+    and Coinbase's real balance for it is pooled - see
+    crypto_family_tree_bot.get_reconciliation_report() for the full
+    reasoning. Read-only, never places an order."""
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+    return await crypto_family_tree_bot_module.get_reconciliation_report()
+
+
 @router.post("/crypto-selection-backtest", dependencies=[Depends(require_admin_key)])
 async def run_crypto_selection_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders,

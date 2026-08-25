@@ -264,6 +264,46 @@ async def get_asset_balance(session, currency: str) -> tuple:
         return None, f"{type(e).__name__}: {str(e)[:150]}"
 
 
+async def get_all_asset_balances(session) -> tuple:
+    """Real available balance of EVERY currency on this account in one
+    paginated walk through /accounts, returned as ({currency: balance},
+    None) or (None, reason). Built for get_reconciliation_report(), which
+    needs several currencies' real balances at once (potentially one per
+    coin the tree currently holds) - calling get_asset_balance() in a loop
+    would re-fetch and re-paginate the full account list from scratch for
+    EVERY currency, and that report is polled by the dashboard every 15s,
+    which would otherwise turn one dashboard refresh into a dozen-plus
+    redundant real Coinbase API calls. This walks the pages exactly once
+    regardless of how many currencies the caller ultimately looks up."""
+    path = "/api/v3/brokerage/accounts"
+    cursor = None
+    balances = {}
+    try:
+        while True:
+            params = {"limit": 250}
+            if cursor:
+                params["cursor"] = cursor
+            async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path), params=params, timeout=15) as r:
+                if r.status != 200:
+                    body = (await r.text())[:300]
+                    return None, f"HTTP {r.status}: {body}"
+                data = await r.json()
+                for account in data.get("accounts", []):
+                    currency = account.get("currency")
+                    if currency:
+                        balances[currency] = float(account["available_balance"]["value"])
+                if not data.get("has_next") or not data.get("cursor"):
+                    break
+                cursor = data.get("cursor")
+        return balances, None
+    except asyncio.TimeoutError:
+        return None, "Coinbase API timeout"
+    except aiohttp.ClientError as e:
+        return None, f"Coinbase connection failed: {type(e).__name__}"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {str(e)[:150]}"
+
+
 async def get_usd_balance(session) -> tuple:
     """Real available USD balance. Returns (balance, None) or (None, reason)."""
     return await get_asset_balance(session, "USD")
