@@ -1400,6 +1400,20 @@ async def run_alpaca_selection_backtest():
 
 
 @router.get("/alpaca-overview", dependencies=[Depends(require_admin_key)])
+def _safe_float(v):
+    """Alpaca's real REST API returns numeric position fields as JSON
+    strings (e.g. "150.25", not 150.25) - this converts them to real
+    floats, returning None on anything that genuinely can't be parsed
+    (missing field, real None) rather than raising or silently
+    defaulting to 0, which would fabricate a fake price/qty."""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
     """Real Alpaca account snapshot for a focused, at-a-glance dashboard:
     equity, each bot_N bucket's capital/profit, every real open position,
@@ -1469,12 +1483,20 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
             {
                 "symbol": p.get("symbol"),
                 "side": p.get("side"),
-                "qty": p.get("qty"),
-                "avg_entry_price": p.get("avg_entry_price"),
-                "current_price": p.get("current_price"),
-                "market_value": p.get("market_value"),
-                "unrealized_pl": p.get("unrealized_pl"),
-                "unrealized_plpc": p.get("unrealized_plpc"),
+                # Alpaca's real REST API returns these numeric fields as
+                # JSON strings, not numbers - a real bug found via
+                # status_snapshot.py crashing on "current - entry" (str -
+                # str). JS callers (alpaca_dashboard.html) never noticed
+                # since JS's `-` operator silently coerces strings to
+                # numbers; a Python consumer doing real arithmetic on this
+                # payload does not have that luxury. Cast explicitly here
+                # so every consumer of this endpoint gets real floats.
+                "qty": _safe_float(p.get("qty")),
+                "avg_entry_price": _safe_float(p.get("avg_entry_price")),
+                "current_price": _safe_float(p.get("current_price")),
+                "market_value": _safe_float(p.get("market_value")),
+                "unrealized_pl": _safe_float(p.get("unrealized_pl")),
+                "unrealized_plpc": _safe_float(p.get("unrealized_plpc")),
                 "opened_at": opened_at_by_symbol.get(p.get("symbol")),
             }
             for p in positions

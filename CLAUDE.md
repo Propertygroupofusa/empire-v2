@@ -3086,6 +3086,63 @@ suite re-run alongside it.
 
 ---
 
+## Real crash found via the new status-snapshot feature: Alpaca position fields were raw strings, not numbers
+
+Right after the account owner finished setting up `STATUS_SNAPSHOT_GITHUB_TOKEN`
+(a real multi-step GitHub token walkthrough, done live over several
+messages), the status-snapshot branch still never appeared. Railway logs
+confirmed the daemon WAS starting correctly (`"starting - snapshot every
+1800s, branch 'status-snapshots'"` - the token/wiring itself was fine),
+but every cycle immediately failed: `WARNING:status_snapshot:[STATUS-
+SNAPSHOT] cycle failed: unsupported operand type(s) for -: 'str' and 'str'`.
+
+Root cause: `get_alpaca_overview()`'s `positions` payload
+(`routers/trading_dashboard.py`) passes Alpaca's raw REST API position
+fields (`qty`, `avg_entry_price`, `current_price`, `market_value`,
+`unrealized_pl`, `unrealized_plpc`) straight through with no type
+conversion - and Alpaca's real API returns these as JSON STRINGS (e.g.
+`"avg_entry_price": "150.25"`), not numbers, unlike `account.get("equity")`
+etc. a few lines above in the same function, which correctly wraps
+everything in `float(...)`. This bug has existed since this endpoint was
+built - it was invisible on `alpaca_dashboard.html` purely because
+JavaScript's `-` operator silently coerces strings to numbers
+(`"150.25" - "100" === 50.25` is valid JS), so nothing there ever broke.
+`status_snapshot.py`'s new `_build_alpaca_section()` was the first REAL
+Python consumer of this payload to do actual arithmetic on it
+(`(current - entry) * qty`), and Python has no such coercion - hence the
+exact real crash.
+
+Fixed with a new `_safe_float()` helper in `routers/trading_dashboard.py`,
+applied to every numeric position field in the endpoint's response -
+converts a real Alpaca-style numeric string to an actual float, and
+returns `None` (never a fabricated `0`) on a genuinely missing or
+unparseable value. `alpaca_dashboard.html`'s own JS is completely
+unaffected either way (`Number(p.unrealized_pl || 0)` and `fmtUsd(...)`
+both already handle a real number just as well as a string) - this fix
+only changes the payload's actual type to match what it always claimed to
+be.
+
+Verified offline: `_safe_float()` correctly parses real Alpaca-style
+numeric strings; returns `None` (not 0, not a crash) for a real missing
+or garbage value; passes through a value that's already numeric
+unchanged; and a dedicated reproduction confirms the exact real crash -
+subtracting two raw Alpaca-style numeric strings raises the identical
+real `TypeError` seen in the logs - and confirms the same math succeeds
+once both values are run through `_safe_float()` first, matching what
+the fixed endpoint now does before ever returning the payload. Full
+existing regression suite re-run alongside it; the only failures were
+confirmed pre-existing via `git stash` comparison against the prior
+commit (an unrelated mock gap in one scratch test, and the same
+already-known stale `bot_name` collision in another), neither touching
+this fix.
+
+**Not yet confirmed live**: whether the status-snapshot branch actually
+appears after this redeploy - needs the account owner to redeploy once
+more and a follow-up `git fetch origin status-snapshots` from a session
+with normal repo access.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
