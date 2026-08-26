@@ -5895,6 +5895,83 @@ an automatic consequence of this tool existing.
 
 ---
 
+## Real bug found via a scheduled health check: the floor-breach check used the held position's raw value instead of the branch's real total wealth
+
+A routine, automated daily health check (reading `STATUS.md` off the
+`status-snapshots` branch, per that system's own documented purpose)
+turned up nothing conclusive on its own, but the account owner then
+shared a real Railway log screenshot moments later that exposed a
+genuine, previously-undiscovered bug:
+
+```
+INFO:crypto_family_tree_bot:[TREE] crypto_btc_compound HOLDING
+0.00318668 BTC-USD | entry $78,575.36 | now $78,508.52 (-0.09%) |
+target $79,753.99 | stop $77,003.85 | peak profit $0.64 |
+equity $250.18 | floor $700.00
+```
+
+Root's real `allocated_usd` (its true tracked total wealth, confirmed
+against that same day's `STATUS.md` snapshot) was **$869.10** - well
+above its $700.00 floor - but the log showed `equity $250.18`, well
+BELOW the floor. The gap: `run_branch_cycle()`'s floor-breach/floor-raise
+check computed `equity` as `position.qty * price` - the CURRENTLY HELD
+POSITION's raw market value alone - whenever a position was open,
+completely discarding any real idle cash sitting in `branch.allocated_usd`
+beyond what happened to be currently deployed. Root's real balance was
+mostly idle cash outside its comparatively small BTC position (common
+whenever a branch has been reinforced, taken profit, or simply never
+invests 100% of its balance in one buy) - none of that was ever visible
+to this specific check, so a completely healthy, cash-rich branch could
+be misreported as floor-breached purely because its CURRENT position
+happened to be small, with nothing to do with real financial health. The
+existing "don't force-sell a healthy position on a floor breach unless
+its own stop has also failed" protection (documented above) is why this
+didn't cause a real forced sale here - but the underlying equity
+figure itself was wrong regardless, and would also silently have
+prevented the floor from ever being RAISED to match a cash-rich
+branch's true growing wealth (the raise check reads the same broken
+`equity` value).
+
+Fixed in `run_branch_cycle()`: while holding a position, real equity is
+now `branch.allocated_usd + unrealized_pnl` (where `unrealized_pnl =
+qty * (price - entry_price)`) - the branch's own tracked total PLUS the
+position's real mark-to-market gain/loss, not the position's notional
+value in isolation. This is the same `qty * (price - entry_price)`
+formula already used elsewhere in this same file (the peak-profit
+giveback tracking), just applied here too. A branch with no idle cash at
+all (fully invested) is unaffected - `allocated_usd` and position value
+converge to the same number in that case, same as before this fix.
+
+Verified offline (`test_equity_floor_breach_real_wealth.py`, 6 checks)
+against the EXACT real numbers from the screenshot: the real unrealized
+P&L on this tiny position is confirmed small (~-$0.21); the FIXED
+formula correctly keeps real equity (~$868.89) comfortably above the
+real $700 floor - not breached; the OLD buggy formula on these SAME real
+numbers is confirmed to have actually produced the exact $250.18 shown
+live, proving this is a real, reproduced bug and not a guess; a branch
+that IS genuinely underwater (its real `allocated_usd` itself has
+dropped from real losses) still correctly reports breached under the
+fixed formula - real protection is not weakened, only the false-positive
+case is fixed; and end-to-end through `run_branch_cycle()` on the real
+screenshot's exact numbers, the healthy held position is confirmed NOT
+force-sold (matching the account owner's own log line, "instead of
+forcing an early exit") - and as a direct, confirming side effect, the
+floor correctly RAISES from $700 to $850 once the real, corrected
+equity crosses that tier, something the old bug had also been silently
+preventing for any idle-cash-rich branch. Full existing regression
+suite most likely to touch this code path
+(`test_rolling_expectancy_kill_switch.py`,
+`test_giveback_net_of_fees.py`, `test_flat_branch_avoids_excluded_coin.py`,
+`test_reinforce_failure_visibility.py` - 34 checks total) re-run clean
+alongside it.
+
+Per the health-check routine's own scope, this fix was investigated,
+tested, and pushed directly - no trade was placed, no position closed,
+and no passive-mode flag touched; those stay the account owner's own
+call.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

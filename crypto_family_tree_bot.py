@@ -2957,9 +2957,25 @@ async def run_branch_cycle(bot_name: str) -> bool:
         real_balance, real_balance_err = await engine.get_usd_balance(session)
         price, atr_pct = await engine.get_price_and_volatility(session, branch.product_id)
 
+        # Real bug found live (root's own screenshot: "equity $250.18 |
+        # floor $700.00" while its real allocated_usd was $869.10) - this
+        # used to be `equity = position.qty * price`, the CURRENT
+        # POSITION's raw market value alone, discarding any real idle
+        # cash sitting in `branch.allocated_usd` beyond what's currently
+        # deployed (common: after reinforcement adds capital without a
+        # matching full-size buy, after a partial-fill, or simply a
+        # branch that never invests 100% of its balance at once). A
+        # branch can be genuinely wealthy and healthy while holding a
+        # comparatively small position, and this wrongly reported it as
+        # floor-breached purely because the position itself was small -
+        # nothing to do with real financial health. The correct real
+        # equity while holding is the branch's own tracked total PLUS the
+        # position's real unrealized P&L (mark-to-market), not the
+        # position's notional value in isolation.
         equity = branch.allocated_usd
         if position is not None and price is not None:
-            equity = position.qty * price
+            unrealized_pnl = position.qty * (price - position.entry_price)
+            equity = branch.allocated_usd + unrealized_pnl
 
         new_floor = branch.equity_floor
         if equity >= BRANCH_FLOOR_TIER:
