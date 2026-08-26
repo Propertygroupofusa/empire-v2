@@ -1711,7 +1711,7 @@ function renderBtcPredictionLog(data) {
         }
         return `<div style="display:flex; flex-direction:column; gap:2px; padding:7px 0; border-bottom:1px solid var(--border); font-size:0.82em;">
             <div>${statusHtml}</div>
-            <div>predicted <strong style="color:${targetColor};">${fmtBtc(p.projected_price)}</strong> <span style="color:var(--text-dim);">(&plusmn;1&sigma; ${fmtBtc(p.band_1sigma_low)}&ndash;${fmtBtc(p.band_1sigma_high)})</span></div>
+            <div><strong style="color:#2563eb; font-size:1.15em;">predicted</strong> <strong style="color:${targetColor};">${fmtBtc(p.projected_price)}</strong> <span style="color:var(--text-dim);">(&plusmn;1&sigma; ${fmtBtc(p.band_1sigma_low)}&ndash;${fmtBtc(p.band_1sigma_high)})</span></div>
         </div>`;
     }).join('');
 }
