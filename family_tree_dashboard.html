@@ -1681,9 +1681,10 @@ function renderBtcProjection(data) {
                 <div style="font-size:1.6em; font-weight:800; color:var(--gold);">${fmtBtc(data.projected_price)}</div>
             </div>
         </div>
-        <div style="position:relative; height:26px; background:var(--red-bg); border-radius:8px; overflow:hidden; margin-bottom:6px;">
-            <div style="position:absolute; left:${pct(lo1)}%; right:${(100 - pct(hi1))}%; top:0; bottom:0; background:var(--green-bg);"></div>
+        <div style="position:relative; height:26px; margin-top:22px; background:var(--red-bg); border-radius:8px; overflow:visible; margin-bottom:6px;">
+            <div style="position:absolute; left:${pct(lo1)}%; right:${(100 - pct(hi1))}%; top:0; bottom:0; background:var(--green-bg); border-radius:8px; overflow:hidden;"></div>
             <div style="position:absolute; left:${pct(data.current_price)}%; top:0; bottom:0; width:2px; background:var(--navy);"></div>
+            <div style="position:absolute; left:${pct(data.current_price)}%; bottom:100%; transform:translateX(-50%); margin-bottom:3px; white-space:nowrap; font-size:0.78em; font-weight:800; color:var(--navy); background:#fff; padding:1px 6px; border-radius:5px; border:1px solid var(--navy);">${fmtBtc(data.current_price)}</div>
         </div>
         <div style="display:flex; justify-content:space-between; font-size:0.7em; color:var(--text-dim); margin-bottom:14px;">
             <span>${fmtBtc(lo2)} (&minus;2&sigma;)</span><span>${fmtBtc(lo1)} (&minus;1&sigma;)</span><span>${fmtBtc(hi1)} (+1&sigma;)</span><span>${fmtBtc(hi2)} (+2&sigma;)</span>
