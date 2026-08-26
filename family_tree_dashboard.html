@@ -554,6 +554,15 @@
         </div>
     </div>
 
+    <div class="section-title" style="display:flex; justify-content:space-between; align-items:center;">
+        <span>🧭 BTC Direction Signal Test</span>
+        <button id="btc-directional-backtest-btn" class="unlock-btn" style="margin-top:0;" onclick="runBtcDirectionalBacktest()">▶ Run signal test</button>
+    </div>
+    <div class="panel">
+        <div class="panel-sub">Shadow-mode only - never places a trade or feeds any bet. Real, honest test of whether a few simple signals (recent momentum, RSI mean-reversion, whether the prior window went up or down) actually predict BTC's real 15-minute DIRECTION better than a real 50/50 coin flip, on real historical Coinbase candles. A signal at or near 50% has no real edge, whatever it looks like on a single live window.</div>
+        <div id="btc-directional-wrap"><div class="coin-history-empty">Not yet run - tap "Run signal test" above.</div></div>
+    </div>
+
     <div class="section-title">📜 Coin Trade History</div>
     <div class="panel">
         <div class="panel-sub">Real trade count and P&amp;L per coin, tracked across every branch and every time it's been bought and sold - buying a coin back after selling it picks up right where its history left off. Tap a coin to see its individual trades.</div>
@@ -1729,6 +1738,55 @@ async function runBtcProjectionBacktest() {
         alert(`Real backtest done: ${data.num_samples} real 15-minute windows over ${data.window_days} real day(s). The +/-1-sigma band captured the real price ${data.pct_within_1sigma}% of the time (naive error ${data.naive_mae_pct}% vs trend error ${data.trend_mae_pct}%).`);
     } catch (e) {
         alert('Could not run the accuracy check: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = original;
+    }
+}
+
+const DIRECTIONAL_SIGNAL_LABELS = {
+    momentum_25min: 'Momentum (last 25 min)',
+    rsi_reversion: 'RSI mean-reversion',
+    prior_window_persistence: 'Prior window persistence',
+};
+
+function renderBtcDirectionalResult(data) {
+    const wrap = document.getElementById('btc-directional-wrap');
+    const rows = Object.entries(data.signals).map(([name, s]) => {
+        const label = DIRECTIONAL_SIGNAL_LABELS[name] || name;
+        if (s.hit_rate_pct === null) {
+            return `<div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border);">
+                <span>${label}</span><span style="color:var(--text-dim);">no real samples yet</span></div>`;
+        }
+        const edge = s.hit_rate_pct - data.coin_flip_baseline_pct;
+        const color = edge > 3 ? 'var(--green)' : (edge < -3 ? 'var(--red)' : 'var(--text-dim)');
+        const edgeLabel = edge > 0 ? `+${edge.toFixed(1)}pp vs coin flip` : `${edge.toFixed(1)}pp vs coin flip`;
+        return `<div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border);">
+            <span>${label}</span>
+            <span><strong style="color:${color};">${s.hit_rate_pct}%</strong> <span style="color:var(--text-dim); font-size:0.85em;">(${s.num_predictions} real predictions, ${edgeLabel})</span></span>
+        </div>`;
+    }).join('');
+    wrap.innerHTML = `<div style="margin-bottom:8px; color:var(--text-dim); font-size:0.85em;">
+            ${data.num_windows} real non-overlapping 15-minute windows over ${data.window_days} real day(s) - coin-flip baseline is an honest 50%.
+        </div>${rows}`;
+}
+
+async function runBtcDirectionalBacktest() {
+    const btn = document.getElementById('btc-directional-backtest-btn');
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Running... (~10-40s)';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/family-tree-status/btc-projection/directional-backtest', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        renderBtcDirectionalResult(data);
+    } catch (e) {
+        document.getElementById('btc-directional-wrap').innerHTML = `<div class="coin-history-empty">Could not run: ${e.message}</div>`;
     } finally {
         btn.disabled = false;
         btn.textContent = original;

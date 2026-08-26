@@ -275,3 +275,146 @@ async def run_price_projection_backtest(product_id: str = PRODUCT_ID, days: floa
     stats["product_id"] = product_id
     stats["window_days"] = days
     return stats
+
+
+# ============================================================================
+# DIRECTIONAL SIGNAL VALIDATION - SHADOW MODE, NEVER WIRED TO ANY TRADING OR
+# BETTING ACTION. Per the account owner's explicit request for "a real,
+# validated signal test... same rigor as the momentum-strategy work" after
+# repeatedly asking whether this tool could tell them which side of a real
+# prediction-market bet would win. Declined to build any betting mechanism
+# without real evidence of an edge - this is that evidence check.
+#
+# Genuinely different question from everything above: get_live_projection()
+# and its backtest answer "how close is the predicted PRICE LEVEL" - this
+# answers "does any real, simple signal predict which DIRECTION (up/down)
+# BTC actually moves over the next real 15 minutes, better than a coin
+# flip." A well-calibrated price range (the panel above) can be completely
+# honest about uncertainty while still having zero directional edge - the
+# two questions don't imply each other, which is exactly why naive beating
+# trend up above does NOT by itself answer this section's question.
+# ============================================================================
+
+DIRECTIONAL_SIGNAL_NAMES = ["momentum_25min", "rsi_reversion", "prior_window_persistence"]
+
+
+def _rsi_from_closes(closes, period: int = 14):
+    """Same simple-moving-average RSI formula prop_bot.py's get_price_rsi()
+    and crypto_btc_compound_bot.py's _rsi_from_closes already use (not
+    Wilder's smoothing) - duplicated deliberately rather than importing the
+    live bot module, matching this module's own "standalone, never imported
+    by any trading bot" design (see the module docstring). Returns None if
+    there isn't enough real history yet."""
+    if len(closes) < period + 1:
+        return None
+    gains = [max(closes[i] - closes[i - 1], 0) for i in range(1, len(closes))]
+    losses = [max(closes[i - 1] - closes[i], 0) for i in range(1, len(closes))]
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    rs = avg_gain / avg_loss if avg_loss > 0 else 100
+    return 100 - (100 / (1 + rs))
+
+
+def _directional_signal_predictions(closes, window_start_idx):
+    """Given the real chronological closes array and the real index a
+    15-minute window is about to open at, computes each real candidate
+    signal's predicted direction using ONLY data available up to that
+    point - never looks ahead into the window itself. Returns "up",
+    "down", or None (signal undecided / not enough real history yet) per
+    signal name.
+
+    Three real, simple, un-tuned candidates - not an exhaustive search:
+    - momentum_25min: price now vs. 25 real minutes ago - does recent
+      short-term direction persist into the next window?
+    - rsi_reversion: RSI < 45 predicts up (mean-reversion), RSI > 55
+      predicts down, otherwise undecided - the opposite-direction
+      analog of the family tree's own overbought-entry filter.
+    - prior_window_persistence: did the PREVIOUS real 15-minute window
+      go up or down - does window-to-window momentum persist?"""
+    preds = {}
+
+    if window_start_idx >= 25:
+        preds["momentum_25min"] = "up" if closes[window_start_idx] > closes[window_start_idx - 25] else "down"
+    else:
+        preds["momentum_25min"] = None
+
+    rsi = _rsi_from_closes(closes[:window_start_idx + 1])
+    if rsi is None:
+        preds["rsi_reversion"] = None
+    elif rsi < 45:
+        preds["rsi_reversion"] = "up"
+    elif rsi > 55:
+        preds["rsi_reversion"] = "down"
+    else:
+        preds["rsi_reversion"] = None
+
+    if window_start_idx >= HORIZON_MINUTES:
+        preds["prior_window_persistence"] = "up" if closes[window_start_idx] > closes[window_start_idx - HORIZON_MINUTES] else "down"
+    else:
+        preds["prior_window_persistence"] = None
+
+    return preds
+
+
+def _directional_backtest_replay(closes: list) -> dict:
+    """Pure computation, no I/O: walks real, NON-overlapping 15-minute
+    windows (matching how a real prediction-market app's own windows work
+    - overlapping windows would inflate the sample count with heavily
+    correlated data, less honest than fewer independent real windows), and
+    at each one with enough real history behind it, computes every real
+    candidate signal's predicted direction using only data up to that
+    point, then compares against the REAL direction price actually moved
+    over that window. Returns real, honest per-signal hit rates plus the
+    real sample size each is based on - never a fabricated result."""
+    correct = {name: 0 for name in DIRECTIONAL_SIGNAL_NAMES}
+    total = {name: 0 for name in DIRECTIONAL_SIGNAL_NAMES}
+    num_windows = 0
+
+    i = MIN_LOOKBACK_MINUTES
+    while i + HORIZON_MINUTES < len(closes):
+        actual_direction = "up" if closes[i + HORIZON_MINUTES] > closes[i] else "down"
+        preds = _directional_signal_predictions(closes, i)
+        for name in DIRECTIONAL_SIGNAL_NAMES:
+            pred = preds[name]
+            if pred is None:
+                continue
+            total[name] += 1
+            if pred == actual_direction:
+                correct[name] += 1
+        num_windows += 1
+        i += HORIZON_MINUTES  # real, non-overlapping windows
+
+    if num_windows == 0:
+        return None
+
+    signals = {}
+    for name in DIRECTIONAL_SIGNAL_NAMES:
+        n = total[name]
+        signals[name] = {
+            "num_predictions": n,
+            "hit_rate_pct": round(correct[name] / n * 100, 2) if n > 0 else None,
+        }
+    return {
+        "num_windows": num_windows,
+        "coin_flip_baseline_pct": 50.0,
+        "signals": signals,
+    }
+
+
+async def run_directional_signal_backtest(product_id: str = PRODUCT_ID, days: float = BACKTEST_DAYS_DEFAULT) -> dict:
+    """SHADOW-MODE - never touches live trading, places no order, and is
+    never read by anything that trades or bets. Real, honest test of
+    whether any simple real signal predicts BTC's real 15-minute
+    DIRECTION better than a real 50/50 coin flip, on real historical
+    Coinbase 1-minute candles. Returns {"error": ...} on a real fetch or
+    data-sufficiency failure, never a fabricated result."""
+    async with aiohttp.ClientSession() as session:
+        closes = await _fetch_1min_candles_paginated(session, product_id, days)
+    if closes is None:
+        return {"error": f"could not fetch enough real 1-minute history for {product_id} over the last {days} day(s)"}
+    result = _directional_backtest_replay(closes)
+    if result is None:
+        return {"error": "not enough real candles in the fetched window to produce any samples"}
+    result["product_id"] = product_id
+    result["window_days"] = days
+    return result

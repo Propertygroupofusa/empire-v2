@@ -1273,6 +1273,25 @@ async def run_btc_price_projection_backtest(days: float = 3.0):
     return result
 
 
+@router.post("/family-tree-status/btc-projection/directional-backtest", dependencies=[Depends(require_admin_key)])
+async def run_btc_directional_signal_backtest(days: float = 3.0):
+    """SHADOW-MODE - never touches live trading, places no order, and this
+    result is never read by anything that trades or bets. Built as the
+    real, validated alternative offered (and accepted) in place of turning
+    the BTC prediction panel into a real-money betting-confidence
+    mechanism - a real test of whether any simple signal predicts BTC's
+    real 15-minute DIRECTION better than a real 50/50 coin flip, on real
+    historical Coinbase 1-minute candles. Not persisted (unlike the
+    price-level backtest above) - this is a one-off diagnostic run on
+    demand, not something the live panel's calibration depends on."""
+    if btc_price_projection_module is None:
+        raise HTTPException(status_code=500, detail="btc_price_projection module not available")
+    result = await btc_price_projection_module.run_directional_signal_backtest(days=days)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result["error"])
+    return result
+
+
 @router.post("/family-tree-status/root-take-profit", dependencies=[Depends(require_admin_key)])
 async def take_root_profit():
     """Manually cash in BTC's (the tree's permanent root) profit right

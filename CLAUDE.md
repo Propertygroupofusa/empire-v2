@@ -5791,6 +5791,110 @@ the average back positive.
 
 ---
 
+## BTC directional-signal backtest - the validated alternative to a betting-confidence mechanism, twice declined
+
+The account owner twice asked, in different framings, for the informational
+BTC 15-minute price-projection panel to be turned into something that could
+give them confidence to actually bet real money on a direction ("I know
+that I can pick which one and it'll win"). Declined both times, on real
+evidence already in this same file: the panel's own price-LEVEL backtest
+showed the honest zero-drift `naive` estimate beating the `trend` estimate
+- i.e. no proven directional edge exists yet - and the real -$349 to -$431
+crypto-tree loss earlier in this session is the concrete cautionary
+parallel for shipping a real-money mechanism ahead of real evidence.
+Offered instead to build "a real, validated signal test - same rigor as
+the momentum-strategy work" - shadow-mode only, never wired to any trade
+or bet - which the account owner confirmed.
+
+This is a genuinely different question from the existing price-LEVEL
+projection panel: not "what price will BTC hit," but "does any simple
+signal predict which DIRECTION (up/down) BTC moves over the next real
+15 minutes, better than a coin flip." Added to `btc_price_projection.py`,
+which is by design never imported by any live trading bot module (same
+"informational only" boundary the whole projection panel already keeps):
+
+- **`_rsi_from_closes()`** - the same simple-moving-average RSI formula
+  (not Wilder's smoothing) `prop_bot.py`'s `get_price_rsi()` and
+  `crypto_btc_compound_bot.py`'s own `_rsi_from_closes()` already use -
+  duplicated deliberately rather than importing a live bot module, to
+  keep this file's own "standalone, never imported by anything that
+  trades" boundary intact.
+- **`_directional_signal_predictions(closes, window_start_idx)`** - three
+  real, simple, un-tuned candidate signals, computed using ONLY data
+  available up to that point (never looking ahead into the window being
+  predicted): `momentum_25min` (does the last 25 real minutes' direction
+  persist forward), `rsi_reversion` (RSI &lt; 45 predicts up, RSI &gt; 55
+  predicts down - the mean-reversion analog of the family tree's own
+  overbought-entry filter), and `prior_window_persistence` (did the
+  PREVIOUS real 15-minute window go up or down). Any signal without
+  enough real history yet returns `None` rather than a fabricated guess.
+- **`_directional_backtest_replay(closes)`** - walks real, NON-overlapping
+  15-minute windows (stepping by the full real horizon, not a sliding
+  window) - deliberately more statistically honest for this specific
+  question than overlapping windows would be, since overlapping windows
+  are heavily correlated and would inflate the real sample count without
+  adding real independent evidence. At each window, computes every real
+  signal's prediction from data available at that point, compares against
+  the REAL direction price actually moved, and returns real per-signal
+  hit rates plus the real sample size each is based on - a signal with
+  too little real history to have an opinion on a given window is simply
+  excluded from that window's tally, never counted as a miss.
+- **`run_directional_signal_backtest(product_id, days)`** - SHADOW-MODE,
+  fetches real historical Coinbase 1-minute candles (same paginated fetch
+  the existing price-level backtest already uses) and returns the real
+  replay result, or a real `{"error": ...}` on a genuine fetch/data
+  failure - never a fabricated result.
+
+New `POST /api/trading-dashboard/family-tree-status/btc-projection/directional-backtest`
+(admin-key gated, `routers/trading_dashboard.py`) - unlike the price-level
+backtest's sibling endpoint, this one is NOT persisted to any table; it's
+a one-off diagnostic the account owner runs on demand, not something the
+live panel's calibration depends on. New "🧭 BTC Direction Signal Test"
+panel on `family_tree_dashboard.html`, right under the existing BTC
+projection panel - a "▶ Run signal test" button and a per-signal result
+table (hit rate, real sample count, and the edge vs. the honest 50%
+coin-flip baseline, color-coded only when the edge is meaningfully above
+or below zero).
+
+Verified offline (`test_directional_signal_backtest.py`, 21 checks, no
+network access needed - pure-function tests only): `_rsi_from_closes`
+matches the real formula's actual output for a pure uptrend (~99.01%, not
+literally 100 - the formula's real `avg_loss=0` special case, matched
+exactly, not assumed), a pure downtrend (0), and a hand-verified balanced
+alternating series (exactly 50); `_directional_signal_predictions`
+correctly detects a real, deliberate price rise for both `momentum_25min`
+and `prior_window_persistence`, returns `None` for both with too little
+real history, and `rsi_reversion` correctly predicts UP on a deeply
+oversold synthetic series and DOWN on a deeply overbought one;
+`_directional_backtest_replay` counts the correct real number of COMPLETE
+non-overlapping windows on a hand-crafted alternating up/down/up/down/up/
+down synthetic series (5 complete windows from 6 segments, matching the
+replay's own strict boundary condition, not a rounding bug), always
+reports the honest unfabricated 50.0% coin-flip baseline, and returns
+`None` cleanly on a real series too short to produce even one window.
+Confirmed via a real AST route-count parse that the new route is bound to
+the correct function with no duplicate registrations (55 total routes,
+zero duplicate method+path pairs) - same discipline established after the
+earlier `_safe_float`/decorator-misplacement bug. `family_tree_dashboard.html`
+re-verified with a real Python `HTMLParser` tag-balance check (no
+mismatched/unclosed tags) and `node --check` on the extracted inline
+`<script>` block (no syntax errors).
+
+**Not yet run against real historical data** - same documented gap as
+every other backtest tool in this file (no live network access to
+Coinbase from this sandbox). The account owner needs to open the family
+tree dashboard after the next redeploy and tap "▶ Run signal test"
+themselves to see the real hit rates - a signal landing at or near 50%
+has no real edge regardless of how it looks on a single live window, the
+same honest standard already applied to the price-level projection's own
+naive-vs-trend comparison. This tool is diagnostic only by design and
+will stay that way unless a future real, out-of-sample result shows a
+signal with a genuine, repeatable edge - and even then, wiring it into
+any real trade or bet would be a new, separate, explicit decision, not
+an automatic consequence of this tool existing.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
