@@ -5126,6 +5126,83 @@ actually resolve and show up as HIT or MISS in the new section.
 
 ---
 
+## BTC live ticker + countdown panel, styled after a real prediction-market app screenshot
+
+Per the account owner's explicit request, after sharing several real
+screenshots of a third-party prediction-market app's "15 min Bitcoin"
+screen (a live price line, a "Price to beat" reference, and a countdown
+timer to the window's close): "I would like to have my dashboard with a
+ticker and a timing like this tracking Bitcoin and that will be dope."
+Scoped narrowly to exactly what was asked - the VISUAL (a live chart +
+countdown + price-to-beat display) - and deliberately NOT the betting
+mechanism from that same screenshot (Over/Under buttons, payout
+multipliers). This is a pure display feature layered on top of the
+already-existing, purely-informational BTC projection panel (see above) -
+it places no order and is never read by anything that trades.
+
+Deliberately reuses real state that already exists rather than tracking
+a second copy of it: the existing BTC-projection panel already logs a
+real `PricePredictionLog` row every 15 real minutes
+(`_log_new_btc_prediction_if_due`), each with a real `price_at_prediction`
+(the moment the window opened) and `resolve_at` (when it closes) - that
+IS the same "price to beat" / countdown concept the reference screenshot
+shows, just not previously surfaced as its own ticker. So no new
+scheduling or state-tracking was built for this - the new endpoint reads
+the same real ledger.
+
+- **`fetch_recent_1min_candles_with_times()`** (`btc_price_projection.py`,
+  new) - the same real, live, single unpaginated Coinbase 1-minute-candle
+  call `_fetch_recent_1min_candles()` already makes for the projection
+  math, but keeps each candle's real timestamp (needed for a real time
+  axis on the chart) instead of only closes. Trimmed to the most recent
+  90 real minutes.
+- **`GET /family-tree-status/btc-projection/chart`** (new, admin-key
+  gated, `routers/trading_dashboard.py`) - read-only: fetches the real
+  90-minute price history above, reads the most recent real
+  `PricePredictionLog` row for its real `price_at_prediction` (price to
+  beat) and `resolve_at` (countdown target, computed server-side as real
+  `seconds_remaining`), and returns both plus a real
+  `pct_change_vs_price_to_beat`. If no prediction window has ever been
+  logged yet (e.g. right after a fresh deploy), honestly falls back to
+  `price_to_beat = current_price` and `seconds_remaining = 0` rather than
+  fabricating a window.
+- New "📈 BTC Live Ticker" panel on `family_tree_dashboard.html`, placed
+  directly above the existing "🔮 BTC — Next 15 Minutes" panel: a large
+  current-price readout (green/red based on real current price vs. the
+  real price to beat), the real price-to-beat figure, a countdown pill
+  (ticks down client-side every second between polls, styled red once
+  under 60 real seconds remaining, matching the reference screenshot's
+  own urgency cue), and a real SVG line chart of the 90-minute price
+  history with a dashed reference line at the real price-to-beat level -
+  drawn with plain inline SVG, no charting library. Polls the new
+  endpoint every 10s (faster than the existing projection panel's 30s,
+  since the whole point here is feeling live, matching what was asked).
+
+Verified offline (`test_btc_chart_endpoint.py`, new, 11 checks) against a
+real throwaway SQLite DB: with no `PricePredictionLog` row yet, the
+endpoint honestly falls back to `price_to_beat = current_price` and
+`seconds_remaining = 0` rather than inventing a window; with a real,
+active (unresolved) prediction row, `price_to_beat` and
+`seconds_remaining` are both hand-verified against that row's real
+`price_at_prediction`/`resolve_at`; `pct_change_vs_price_to_beat` is
+hand-computed and matches exactly; a real live-fetch failure raises a
+clean 503, not a crash; and the returned history is real, oldest-first,
+with `current_price` matching the most recent history point. Re-ran the
+full existing BTC-projection regression suite
+(`test_btc_price_projection.py`, `test_btc_projection_endpoints.py`,
+`test_btc_prediction_log.py` - 40 checks total) alongside it, confirming
+this addition doesn't disturb the existing projection panel's own
+behavior. `family_tree_dashboard.html` re-verified with a real Python
+`HTMLParser` tag-balance check (no mismatched/unclosed tags) and
+`node --check` on the extracted inline `<script>` block (no syntax
+errors), same discipline as every other edit to this file this session.
+
+**Not yet confirmed against real live data** - the account owner needs to
+open the family tree dashboard after the next redeploy to see the real
+live chart, countdown, and price-to-beat populate and tick down.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

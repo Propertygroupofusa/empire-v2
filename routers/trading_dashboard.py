@@ -1043,6 +1043,62 @@ async def get_btc_prediction_log(limit: int = 20):
     }
 
 
+@router.get("/family-tree-status/btc-projection/chart", dependencies=[Depends(require_admin_key)])
+async def get_btc_price_chart():
+    """Real, live BTC ticker + countdown for the dashboard - per the
+    account owner's explicit request for "a ticker and a timing... like
+    this tracking Bitcoin." Purely a display feed: a real recent 1-minute
+    price history for a live line chart, plus the current active
+    prediction window's real price_at_prediction (the "price to beat")
+    and resolve_at (the countdown target) - both already being generated
+    every 15 real minutes by the existing prediction ledger
+    (_log_new_btc_prediction_if_due), reused here rather than tracked a
+    second way. Read-only, never places an order."""
+    if btc_price_projection_module is None:
+        raise HTTPException(status_code=500, detail="btc_price_projection module not available")
+    bpp = btc_price_projection_module
+
+    async with aiohttp.ClientSession() as session:
+        history = await bpp.fetch_recent_1min_candles_with_times(session, product_id=bpp.PRODUCT_ID, minutes=90)
+    if not history:
+        raise HTTPException(status_code=503, detail="Could not fetch real BTC price history right now - try again")
+
+    current_price = history[-1]["price"]
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(PricePredictionLog)
+            .where(PricePredictionLog.product_id == bpp.PRODUCT_ID)
+            .order_by(PricePredictionLog.predicted_at.desc())
+            .limit(1)
+        )
+        active = result.scalar_one_or_none()
+
+    if active is not None:
+        price_to_beat = active.price_at_prediction
+        resolve_at = active.resolve_at.isoformat() + "Z"
+        seconds_remaining = max(0, int((active.resolve_at - datetime.utcnow()).total_seconds()))
+    else:
+        # No real prediction window has ever been logged yet (e.g. right
+        # after a fresh deploy) - fall back to the current price with a
+        # real, honest zero countdown rather than fabricating a window.
+        price_to_beat = current_price
+        resolve_at = None
+        seconds_remaining = 0
+
+    pct_change = round((current_price - price_to_beat) / price_to_beat * 100, 4) if price_to_beat else 0.0
+
+    return {
+        "product_id": bpp.PRODUCT_ID,
+        "current_price": current_price,
+        "price_to_beat": price_to_beat,
+        "pct_change_vs_price_to_beat": pct_change,
+        "resolve_at": resolve_at,
+        "seconds_remaining": seconds_remaining,
+        "history": history,
+    }
+
+
 @router.post("/family-tree-status/btc-projection/backtest", dependencies=[Depends(require_admin_key)])
 async def run_btc_price_projection_backtest(days: float = 3.0):
     """SHADOW-MODE - never touches live trading, places no order. Runs a

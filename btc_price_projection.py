@@ -67,6 +67,31 @@ async def _fetch_recent_1min_candles(session, product_id: str = PRODUCT_ID):
         return None
 
 
+async def fetch_recent_1min_candles_with_times(session, product_id: str = PRODUCT_ID, minutes: int = 90):
+    """Same real, live, unpaginated Coinbase candles call as
+    _fetch_recent_1min_candles above, but keeps each candle's real
+    timestamp alongside its close - needed for the dashboard's live price
+    chart (a real time axis, not just array order) and unrelated to the
+    projection math itself, which only ever needed the closes. Returns a
+    list of real {"t": unix_seconds, "price": float} dicts, oldest-first,
+    trimmed to the most recent `minutes` real candles - or None on a real
+    fetch failure."""
+    url = f"https://api.exchange.coinbase.com/products/{product_id}/candles?granularity={GRANULARITY_SECONDS}"
+    try:
+        async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+            if not data:
+                return None
+            candles = list(reversed(data))  # Coinbase returns newest-first
+            points = [{"t": int(c[0]), "price": float(c[4])} for c in candles]
+            return points[-minutes:]
+    except Exception as e:
+        log.warning(f"[BTC-PROJECTION] live chart candle fetch failed: {e}")
+        return None
+
+
 async def _fetch_1min_candles_paginated(session, product_id: str, days: float):
     """Paginated pull of real historical 1-minute candles - same real
     public Coinbase endpoint as the live fetch above, just walking a

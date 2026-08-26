@@ -430,6 +430,24 @@
     }
     .treemap-cell .tm-label { font-size: 0.8em; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .treemap-cell .tm-value { font-size: 0.72em; opacity: 0.9; margin-top: 2px; }
+
+    .btc-tick-top { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
+    .btc-tick-price { font-size: 2em; font-weight: 800; }
+    .btc-tick-price.pos { color: var(--green); }
+    .btc-tick-price.neg { color: var(--red); }
+    .btc-tick-sub { font-size: 0.8em; color: var(--text-dim); margin-top: 2px; }
+    .btc-tick-beat { text-align: right; }
+    .btc-tick-beat .lbl { font-size: 0.72em; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+    .btc-tick-beat .val { font-size: 1.1em; font-weight: 700; color: var(--navy); margin-top: 2px; }
+    .btc-tick-countdown {
+        display: inline-flex; align-items: center; justify-content: center;
+        min-width: 64px; padding: 4px 12px; border-radius: 999px;
+        border: 2px solid var(--border); font-weight: 800; font-size: 0.95em;
+        color: var(--navy); margin-top: 6px; font-variant-numeric: tabular-nums;
+    }
+    .btc-tick-countdown.urgent { border-color: var(--red); color: var(--red); }
+    .btc-tick-chart-wrap { width: 100%; overflow: hidden; border-radius: 8px; background: var(--bg); }
+    .btc-tick-chart-wrap svg { display: block; width: 100%; height: auto; }
 </style>
 </head>
 <body>
@@ -508,6 +526,15 @@
     <div class="panel">
         <div class="panel-sub">Every real buy, sell, spawn, and reinforcement, as it happens - refreshes every 5s. A 🔒 line (10% of profit locked away) only ever appears after a real WINNING sell - a buy or a deposit is money going IN, not profit yet, so it never gets a lock line.</div>
         <div id="activity-feed-wrap"><div class="coin-history-empty">Loading…</div></div>
+    </div>
+
+    <div class="section-title" style="display:flex; justify-content:space-between; align-items:center;">
+        <span>📈 BTC Live Ticker</span>
+        <span id="btc-ticker-live-dot" style="width:9px; height:9px; border-radius:50%; background:var(--green); box-shadow:0 0 0 rgba(16,185,129,0.5); animation:activity-pulse 2s infinite;"></span>
+    </div>
+    <div class="panel">
+        <div class="panel-sub">Real live BTC price and a countdown to the current 15-minute window's close - purely a display, same as the panel below. Refreshes every 10s.</div>
+        <div id="btc-ticker-wrap"><div class="coin-history-empty">Loading…</div></div>
     </div>
 
     <div class="section-title" style="display:flex; justify-content:space-between; align-items:center;">
@@ -1642,6 +1669,80 @@ async function runBtcProjectionBacktest() {
     }
 }
 
+let btcTickerResolveAtMs = null;
+
+function fmtCountdown(msRemaining) {
+    if (msRemaining === null) return '--:--';
+    const totalSec = Math.max(0, Math.round(msRemaining / 1000));
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function tickBtcCountdown() {
+    const el = document.getElementById('btc-tick-countdown');
+    if (!el) return;
+    const msRemaining = btcTickerResolveAtMs === null ? null : (btcTickerResolveAtMs - Date.now());
+    el.textContent = fmtCountdown(msRemaining);
+    el.classList.toggle('urgent', msRemaining !== null && msRemaining < 60000);
+}
+
+function buildBtcSparklineSvg(history, priceToBeat, isUp) {
+    const W = 600, H = 140, PAD = 6;
+    const prices = history.map(p => p.price);
+    let lo = Math.min(...prices, priceToBeat), hi = Math.max(...prices, priceToBeat);
+    if (hi === lo) { hi += 1; lo -= 1; }
+    const x = (i) => PAD + (i / (history.length - 1)) * (W - PAD * 2);
+    const y = (v) => H - PAD - ((v - lo) / (hi - lo)) * (H - PAD * 2);
+    const points = history.map((p, i) => `${x(i).toFixed(1)},${y(p.price).toFixed(1)}`).join(' ');
+    const color = isUp ? '#009845' : '#d6455a';
+    const beatY = y(priceToBeat).toFixed(1);
+    const lastX = x(history.length - 1).toFixed(1);
+    const lastY = y(history[history.length - 1].price).toFixed(1);
+    return `
+        <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+            <line x1="0" y1="${beatY}" x2="${W}" y2="${beatY}" stroke="#c7cede" stroke-width="1" stroke-dasharray="4,4"/>
+            <polyline points="${points}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+            <circle cx="${lastX}" cy="${lastY}" r="4.5" fill="${color}"/>
+        </svg>`;
+}
+
+function renderBtcTicker(data) {
+    const wrap = document.getElementById('btc-ticker-wrap');
+    if (!data || !data.history || data.history.length < 2) {
+        wrap.innerHTML = '<div class="coin-history-empty">Could not load a live BTC price right now.</div>';
+        return;
+    }
+    const isUp = data.current_price >= data.price_to_beat;
+    const pctStr = (data.pct_change_vs_price_to_beat >= 0 ? '+' : '') + data.pct_change_vs_price_to_beat.toFixed(3) + '%';
+    btcTickerResolveAtMs = data.resolve_at ? new Date(data.resolve_at).getTime() : null;
+
+    wrap.innerHTML = `
+        <div class="btc-tick-top">
+            <div>
+                <div class="btc-tick-price ${isUp ? 'pos' : 'neg'}">${fmtBtc(data.current_price)}</div>
+                <div class="btc-tick-sub">Current &middot; ${pctStr} vs price to beat</div>
+            </div>
+            <div class="btc-tick-beat">
+                <div class="lbl">Price to beat</div>
+                <div class="val">${fmtBtc(data.price_to_beat)}</div>
+                <div id="btc-tick-countdown" class="btc-tick-countdown">--:--</div>
+            </div>
+        </div>
+        <div class="btc-tick-chart-wrap">${buildBtcSparklineSvg(data.history, data.price_to_beat, isUp)}</div>
+    `;
+    tickBtcCountdown();
+}
+
+async function loadBtcTicker() {
+    try {
+        const data = await apiGet('/family-tree-status/btc-projection/chart');
+        renderBtcTicker(data);
+    } catch (e) {
+        document.getElementById('btc-ticker-wrap').innerHTML = `<div class="coin-history-empty">Could not load: ${e.message}</div>`;
+    }
+}
+
 async function loadTicker() {
     const track = document.getElementById('ticker-track');
     try {
@@ -1666,12 +1767,15 @@ async function loadTicker() {
 
 refresh();
 loadTicker();
+loadBtcTicker();
 loadBtcProjection();
 loadActivityFeed();
 setInterval(refresh, 15000);
 setInterval(loadTicker, 30000);
 setInterval(loadActivityFeed, 5000);
 setInterval(loadBtcProjection, 30000);
+setInterval(loadBtcTicker, 10000);
+setInterval(tickBtcCountdown, 1000);
 </script>
 </body>
 </html>
