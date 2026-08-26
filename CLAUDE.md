@@ -5273,6 +5273,74 @@ would need to be reported back to correct.
 
 ---
 
+## Real bug found and fixed: duplicate PricePredictionLog rows from a concurrent-poll race
+
+The account owner's own screenshot surfaced this directly: the "Recent
+Predictions" list showed the identical "06:50 AM predicted $78,851.64"
+window logged **four times** in a row. Same shape of bug as two other
+real duplicate-row races already fixed elsewhere in this codebase
+(`TradingBotState.bot_name`, `BotPosition` under
+`crypto_family_tree_bot.py`) - `_log_new_btc_prediction_if_due()` did a
+plain "check if a row exists for this window, then insert" with no real
+DB-level uniqueness behind it. With the dashboard now polled from more
+than one place at once (the new 10s ticker AND the 30s projection
+panel, possibly more than one open browser tab too), two calls landing
+close together could both see "no row yet" and both insert -
+`PricePredictionLog.predicted_at` was never declared `unique=True`, and
+even if it had been, `Base.metadata.create_all()` only applies that to a
+table at CREATE time, never retroactively to one that already existed.
+
+Fixed the same two-part way as every prior instance of this exact race:
+
+1. **`_ensure_btc_prediction_log_dedupe_and_unique_index()`** (new,
+   `routers/trading_dashboard.py`) - a one-time, guarded startup
+   migration (module-level `_btc_prediction_log_migrated` flag, since
+   this feature has no dedicated background thread/`run()` of its own to
+   hook a real startup sequence into - it's lazily triggered on the
+   first real call to `_log_new_btc_prediction_if_due`). Dedupes any
+   existing real duplicate `(product_id, predicted_at)` groups - keeping
+   whichever duplicate is already **resolved** over a still-pending one,
+   so real hit/miss data is never thrown away - then adds the real
+   DB-level `CREATE UNIQUE INDEX` the model should have had from the
+   start, so this exact race can never recur.
+2. **`_log_new_btc_prediction_if_due()`** now catches the real
+   `IntegrityError` a genuine remaining race would raise once the index
+   exists, and treats it as a no-op (another concurrent poll already won
+   this exact window) rather than letting it propagate up through the
+   endpoint.
+
+Verified offline (`test_btc_prediction_log_dedupe.py`, new, 8 checks)
+against a real throwaway SQLite DB reproducing the EXACT real scenario
+from the screenshot: 4 duplicate rows for the identical real window
+collapse to 1 (the resolved one survives, not a pending duplicate); the
+real unique index actually rejects a genuine duplicate insert at the
+database layer (not just assumed); the migration is idempotent (a
+second call does nothing further); and `_log_new_btc_prediction_if_due`
+does not propagate a real `IntegrityError` raised by a genuine race
+(simulated by forcing the exact real exception on commit, the same
+"mock the real DB error directly" approach already used elsewhere in
+this codebase for races that true concurrent SQLite writes can't
+reliably reproduce the way real production Postgres can). Full existing
+BTC-projection regression suite (`test_btc_window_alignment.py`,
+`test_btc_prediction_log.py`, `test_btc_projection_endpoints.py`,
+`test_btc_price_projection.py`, `test_btc_chart_endpoint.py` - 78 checks)
+re-run clean alongside it - 86 checks total, no regressions.
+
+**On the older entries in that same screenshot not looking wall-clock
+aligned** (06:50/06:35/06:16/06:01 AM instead of real `:00/:15/:30/:45`
+marks): that's expected, not a bug - those rows were logged by the OLD
+rolling-interval code before the wall-clock-alignment fix (previous
+section) had deployed. Old rows are never retroactively rewritten; only
+predictions logged after that fix went live get real quarter-hour
+timestamps, which the pending `07:15 AM` row in the same screenshot
+already confirms is working.
+
+**Not yet confirmed live** - the account owner needs to redeploy; the
+existing 4 duplicate rows will self-heal (dedupe down to 1) the next
+time the ticker or projection panel is polled after that.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

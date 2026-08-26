@@ -23,7 +23,8 @@ from datetime import datetime, timezone, timedelta
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, func, case
+from sqlalchemy import select, func, case, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db, AsyncSessionLocal
@@ -937,6 +938,75 @@ async def _resolve_due_btc_predictions(db, current_price: float, product_id: str
         await db.commit()
 
 
+_btc_prediction_log_migrated = False
+
+
+async def _ensure_btc_prediction_log_dedupe_and_unique_index():
+    """One-time, safe-to-call-repeatedly startup migration (guarded by the
+    module-level flag below so it only actually runs once per process).
+
+    Real bug, confirmed live on the account owner's own dashboard: the
+    same "06:50 AM predicted $78,851.64" window was logged FOUR times.
+    Root cause is the same shape of race already fixed elsewhere in this
+    codebase for TradingBotState.bot_name and BotPosition
+    (crypto_family_tree_bot.py) - _log_new_btc_prediction_if_due does a
+    plain "check if a row exists for this window, then insert" with no
+    real DB-level uniqueness backing it, and with the dashboard commonly
+    polled from more than one place at once (the ticker at 10s, the
+    projection panel at 30s, possibly more than one open browser tab),
+    two calls landing close together can both see "no row yet" and both
+    insert - PricePredictionLog.predicted_at was never declared
+    unique=True, and even if it had been, Base.metadata.create_all()
+    only applies that to a table at CREATE time, never retroactively to
+    one that already existed.
+
+    Fixed the same two-part way as every other duplicate-row race in
+    this codebase: dedupe any real duplicates that already exist (a
+    unique index can't be created while they do), then add the real
+    DB-level constraint so this exact race can't recur. When two
+    duplicate rows differ (one resolved, one still pending), the
+    resolved one survives - its real hit/miss data is never thrown away
+    in favor of a still-pending duplicate."""
+    global _btc_prediction_log_migrated
+    if _btc_prediction_log_migrated:
+        return
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(PricePredictionLog).order_by(
+                    PricePredictionLog.product_id, PricePredictionLog.predicted_at, PricePredictionLog.id
+                )
+            )
+            rows = result.scalars().all()
+            seen = {}
+            removed = 0
+            for row in rows:
+                key = (row.product_id, row.predicted_at)
+                survivor = seen.get(key)
+                if survivor is None:
+                    seen[key] = row
+                    continue
+                if row.resolved and not survivor.resolved:
+                    await db.delete(survivor)
+                    seen[key] = row
+                else:
+                    await db.delete(row)
+                removed += 1
+            if removed:
+                await db.commit()
+                log.warning(f"[btc-projection] removed {removed} duplicate PricePredictionLog row(s) from a real concurrent-poll race")
+
+            await db.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_price_prediction_log_product_predicted_unique "
+                "ON price_prediction_log (product_id, predicted_at)"
+            ))
+            await db.commit()
+        _btc_prediction_log_migrated = True
+        log.info("[btc-projection] price_prediction_log (product_id, predicted_at) uniqueness enforced at the DB level")
+    except Exception as e:
+        log.warning(f"[btc-projection] could not dedupe/enforce uniqueness on price_prediction_log: {e}")
+
+
 async def _log_new_btc_prediction_if_due(db, projection: dict):
     """Logs a new real, individual prediction for the live "did it hit"
     track record - keyed to the real, wall-clock-aligned window
@@ -945,7 +1015,14 @@ async def _log_new_btc_prediction_if_due(db, projection: dict):
     live ticker - converges on the exact same window and its exact same
     real countdown, matching a real external prediction-market app's own
     fixed :00/:15/:30/:45 boundaries. A no-op if a row for the current
-    window already exists (from an earlier poll within the same window)."""
+    window already exists (from an earlier poll within the same window).
+
+    Also self-heals the real duplicate-row race documented on
+    _ensure_btc_prediction_log_dedupe_and_unique_index above, and treats
+    a genuine race caught by that real DB-level constraint as a no-op
+    (another concurrent poll already logged this exact window) rather
+    than letting it raise."""
+    await _ensure_btc_prediction_log_dedupe_and_unique_index()
     product_id = projection["product_id"]
     window_start, window_end = _current_prediction_window()
     result = await db.execute(
@@ -969,7 +1046,10 @@ async def _log_new_btc_prediction_if_due(db, projection: dict):
         band_2sigma_high=projection["band_2sigma_high"],
         resolved=False,
     ))
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
 
 
 async def _latest_btc_calibration_and_method(db, bpp):
