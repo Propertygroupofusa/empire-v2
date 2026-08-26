@@ -2459,11 +2459,19 @@ async def liquidate_family_tree_and_buy_btc() -> dict:
     }
 
 
-async def _maybe_spawn_child(branch):
+async def _maybe_spawn_child(branch, allow_reinforce: bool = True):
     """Called right after a branch's allocated_usd is updated (always right
     after a real sell, when the number is freshly accurate). If it just
     crossed a new unlock tier, isn't floor-breached, and a coin remains
-    unclaimed, spins off a new branch - a bookkeeping transfer only."""
+    unclaimed, spins off a new branch - a bookkeeping transfer only.
+
+    allow_reinforce=False is used for exactly one case: settling a
+    reinforcement RECIPIENT immediately (see the reinforcement block below).
+    It hard-disables this call from reinforcing anyone else - it can only
+    spawn a brand-new branch or do nothing - which makes a bounce back to
+    an existing branch structurally impossible, not just unlikely. This is
+    deliberately narrower than the full recursive recheck that was tried
+    and reverted earlier (see the account owner's real ping-pong bug)."""
     if branch.allocated_usd < branch.next_unlock_tier:
         return
     if branch.allocated_usd < branch.equity_floor:
@@ -2510,7 +2518,7 @@ async def _maybe_spawn_child(branch):
     # branch only ever gets created once there's no OTHER branch left to
     # reinforce at all (see the None case below - the very first spawn in
     # a fresh tree, or a tree of exactly one branch).
-    weakest = await _pick_weakest_branch_for_reinforcement(exclude_bot_name=branch.bot_name)
+    weakest = await _pick_weakest_branch_for_reinforcement(exclude_bot_name=branch.bot_name) if allow_reinforce else None
     if weakest is not None:
         own_increment = ROOT_UNLOCK_TIER_USD if branch.bot_name == ROOT_BOT_NAME else UNLOCK_TIER_USD
         milestone = branch.next_unlock_tier
@@ -2536,19 +2544,26 @@ async def _maybe_spawn_child(branch):
             )
             log.info(f"[TREE] {reinforce_msg}")
             await _log_activity(branch.bot_name, weakest.product_id, "REINFORCE", reinforce_msg)
-            # Deliberately does NOT immediately re-check the RECIPIENT here
-            # (tried this, reverted it): if the $50 reinforcement itself
-            # pushes the recipient over ITS OWN tier, chaining an immediate
-            # re-check can ping-pong - the recipient reinforces back
-            # whichever branch just gave it money (now the weakest again
-            # after giving away its own $50), which can reinforce the
-            # recipient again, back and forth, firing real Coinbase orders
-            # on every bounce within one call stack. Confirmed live in
-            # testing before this ever shipped. The recipient's own next
-            # scheduled cycle (run_branch_cycle's catch-up check, ~30s)
-            # picks this up safely on its own - only the ORIGINAL source of
-            # a crossing (a sale, or the manual add-cash endpoint) settles
-            # immediately, never a chain through who it reinforced.
+            # Settle the RECIPIENT immediately too, per the account owner's
+            # real complaint that a branch sitting at 100% "Next spawn" was
+            # visibly waiting up to a full cycle (~30s, felt like "a
+            # minute") before anything happened. A full recursive recheck
+            # was tried here before and reverted - it let the recipient
+            # reinforce back whichever branch just gave it money, which
+            # could bounce back and forth firing real Coinbase orders each
+            # hop (confirmed live in testing). This is deliberately
+            # narrower: allow_reinforce=False means the recipient, even if
+            # this reinforcement pushed it over its OWN tier, can only ever
+            # spawn a brand-new branch or do nothing - it can never send
+            # money to another existing branch. That makes a bounce back to
+            # branch.bot_name (or anyone else) structurally impossible, not
+            # just unlikely, while still collapsing the wait to this same
+            # call instead of the recipient's own next scheduled cycle.
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == weakest.bot_name))
+                fresh_recipient = result.scalar_one_or_none()
+            if fresh_recipient is not None:
+                await _maybe_spawn_child(fresh_recipient, allow_reinforce=False)
         else:
             # Real buy failed (order rejection, price fetch failure) -
             # the seed was already deducted from the parent above, so

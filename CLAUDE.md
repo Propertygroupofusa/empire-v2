@@ -4507,6 +4507,59 @@ No test needed - this is copy-only, no behavior changed.
 
 ---
 
+## Reinforcement RECIPIENT now settles immediately too, without reopening the ping-pong risk
+
+Real, direct follow-up from the account owner watching the dashboard live: a
+branch sitting at 100% "Next spawn" was visibly sitting there for what felt
+like "a minute" before anything happened. Root cause traced to a deliberate,
+narrower gap left by an earlier fix in this same file (see "A real,
+dangerous cascade found and reverted before shipping" above): a branch
+crossing its OWN tier via a real SALE, or via the manual "Add cash" deposit,
+already settles immediately in the same call - but the RECIPIENT of a
+reinforcement (money moving INTO an existing weak branch from another
+branch's spawn) was deliberately left to wait for its own next scheduled
+cycle (~27-33s with jitter), specifically because immediately re-checking
+the recipient was tried once already and found to cause a real, confirmed
+ping-pong: branch A reinforces branch B; B, now also over its own tier,
+immediately reinforces back to whichever branch is weakest - often A itself,
+having just given away its own $50 - bouncing back and forth and firing
+real Coinbase market orders on every hop within one call stack.
+
+Fixed with a narrower, structurally-safe version instead of just redoing the
+reverted one: `_maybe_spawn_child()` gained an `allow_reinforce: bool = True`
+parameter. Right after a reinforcement deploy succeeds, the recipient's now-
+current row is re-fetched fresh and settled immediately via
+`_maybe_spawn_child(fresh_recipient, allow_reinforce=False)` - but that
+`False` isn't just "skip one more hop," it hard-disables the reinforcement
+branch inside the function entirely for that call. A chained call can
+therefore only ever spawn a genuinely NEW branch (real seed deduction, real
+new row, never sent to an existing branch) or do nothing - it can never
+move money to another existing branch, which makes a bounce back to
+whichever branch triggered it (or anyone else) structurally impossible, not
+just avoided by luck the way a depth counter or lockout timer would be.
+Every other call site (`_branch_sell_and_settle`, `add_cash_to_branch`,
+`run_branch_cycle`'s catch-up check) is unaffected - they all still call
+`_maybe_spawn_child(branch)` with the default `allow_reinforce=True`.
+
+Verified offline against a real throwaway SQLite DB
+(`test_reinforcement_recipient_immediate_settle.py`): a reinforcement that
+pushes the recipient over its own tier now spawns a brand-new child
+IMMEDIATELY, in the same call, instead of waiting for the recipient's own
+next cycle; exactly ONE real buy happens (the original reinforcement) with
+no second reinforcement buy anywhere, confirming the chain cannot bounce
+back to the branch that triggered it or to root; the new child is
+genuinely spawned FROM the recipient's own funds, not a coincidental
+unrelated spawn; and a reinforcement that does NOT push the recipient over
+its own tier is completely unaffected - no extra branch, no extra buy, same
+as before this fix. Full existing reinforcement regression suite re-run
+alongside it; the pre-existing failures seen
+(`test_reinforce_always_weakest.py`, `test_spawn_alternation_reinforcement.py`,
+`test_spawn_reinforcement_threshold.py`) were confirmed via `git stash`
+comparison to already fail identically without this change (stale fixture
+data referencing POL-USD, now manually excluded - unrelated).
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
