@@ -1179,10 +1179,17 @@ async def get_btc_price_chart():
 
     async with aiohttp.ClientSession() as session:
         history = await bpp.fetch_recent_1min_candles_with_times(session, product_id=bpp.PRODUCT_ID, minutes=90)
+        live_price = await bpp.fetch_live_ticker_price(session, product_id=bpp.PRODUCT_ID)
     if not history:
         raise HTTPException(status_code=503, detail="Could not fetch real BTC price history right now - try again")
 
-    current_price = history[-1]["price"]
+    # Per the account owner's explicit request to tighten this closer to
+    # Bitcoin's real-time price: anchor "current" on the real-time ticker
+    # trade price (sub-second, not bucketed into a 1-minute candle) when
+    # it's available, only falling back to the last candle close if that
+    # extra fetch failed - never blocks the chart on this one non-essential
+    # precision improvement.
+    current_price = live_price if live_price is not None else history[-1]["price"]
 
     # Best-effort: make sure a row for the CURRENT real wall-clock window
     # exists, so the countdown is accurate even if the projection panel
@@ -1192,7 +1199,7 @@ async def get_btc_price_chart():
     try:
         async with AsyncSessionLocal() as db:
             _, method = await _latest_btc_calibration_and_method(db, bpp)
-            proj = bpp._compute_projection([h["price"] for h in history])
+            proj = bpp._compute_projection([h["price"] for h in history], live_price=live_price)
             proj["product_id"] = bpp.PRODUCT_ID
             proj["method"] = method
             proj["projected_price"] = proj["trend_price"] if method == "trend" else proj["naive_price"]

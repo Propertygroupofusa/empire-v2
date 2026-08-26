@@ -126,15 +126,46 @@ async def _fetch_1min_candles_paginated(session, product_id: str, days: float):
     return [float(c[4]) for c in all_candles]
 
 
-def _compute_projection(closes: list) -> dict:
+async def fetch_live_ticker_price(session, product_id: str = PRODUCT_ID):
+    """Real-time last-trade price straight from Coinbase's own real
+    `/ticker` endpoint - per the account owner's explicit request to
+    tighten the ticker/prediction precision closer to Bitcoin's actual
+    real-time price. A 1-minute candle's close can lag the true current
+    price by up to most of a real minute depending on exactly when
+    within that candle's window the fetch happens to land; the ticker
+    endpoint returns the literal most recent real trade instead, the
+    tightest real-time read this public API offers. Fails open (returns
+    None) on any real fetch problem - callers fall back to the last
+    candle close rather than blocking on missing precision data."""
+    url = f"https://api.exchange.coinbase.com/products/{product_id}/ticker"
+    try:
+        async with session.get(url, headers={"Accept": "application/json"}, timeout=10) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+            price = data.get("price")
+            return float(price) if price is not None else None
+    except Exception as e:
+        log.warning(f"[BTC-PROJECTION] live ticker price fetch failed: {e}")
+        return None
+
+
+def _compute_projection(closes: list, live_price: float = None) -> dict:
     """Pure computation from a real, chronological list of 1-minute
     closes (oldest-first, at least MIN_LOOKBACK_MINUTES long) - the
     current price, the naive and trend-adjusted point estimates, and a
     real volatility band scaled to the 15-minute horizon (sigma scales
     with the square root of time under a random-walk assumption - the
     same standard, honest approach options pricing uses, not something
-    invented for this feature)."""
-    current_price = closes[-1]
+    invented for this feature).
+
+    `live_price`, when provided, anchors the "current price" to a real,
+    tighter real-time read (see fetch_live_ticker_price above) instead of
+    the last 1-minute candle's close - the trend slope and volatility are
+    still derived from the real closes series either way, only the final
+    current-price/naive-price basis (and everything computed relative to
+    it) gets the tighter real number."""
+    current_price = live_price if live_price is not None else closes[-1]
 
     trend_window = closes[-(TREND_LOOKBACK_MINUTES + 1):]
     slope_per_min = (trend_window[-1] - trend_window[0]) / trend_window[0] / (len(trend_window) - 1)
@@ -169,11 +200,19 @@ async def get_live_projection(session, product_id: str = PRODUCT_ID, method: str
     real backtest (run_price_projection_backtest) actually validated as
     more accurate, defaulting to "naive" (the honest zero-drift baseline)
     when there's no real evidence yet. Returns None if real live data
-    couldn't be fetched."""
+    couldn't be fetched.
+
+    Also fetches the real-time ticker price (fetch_live_ticker_price) to
+    anchor the current-price basis more tightly than the last 1-minute
+    candle close alone would - per the account owner's explicit request
+    to tighten this closer to Bitcoin's real-time price. Fails open: a
+    ticker-fetch failure just falls back to the candle close, it never
+    blocks the whole projection on this one extra, non-essential call."""
     closes = await _fetch_recent_1min_candles(session, product_id)
     if closes is None:
         return None
-    proj = _compute_projection(closes)
+    live_price = await fetch_live_ticker_price(session, product_id)
+    proj = _compute_projection(closes, live_price=live_price)
     proj["product_id"] = product_id
     proj["method"] = method
     proj["projected_price"] = proj["trend_price"] if method == "trend" else proj["naive_price"]

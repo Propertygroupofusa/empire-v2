@@ -5341,6 +5341,90 @@ time the ticker or projection panel is polled after that.
 
 ---
 
+## BTC ticker/projection tightened to Coinbase's real-time ticker price, not just the 1-minute candle close
+
+Per the account owner's explicit follow-up, comparing a real window
+directly against a real third-party prediction-market app's "15 min
+Bitcoin" screen: "tweak it a little bit closer to Bitcoin['s] real
+time... I know it's hard to be exact but just a little bit more, tighten
+it up." Both the live ticker and the projection panel had always
+computed "current price" as the LAST 1-MINUTE CANDLE's close - a real,
+honest number, but one that can lag the true current price by up to
+most of a real minute depending on exactly where within that candle's
+window the fetch happens to land. Coinbase's public API also exposes a
+real `/ticker` endpoint that returns the literal most recent trade -
+the tightest real-time read available, with no minute-bucket lag.
+
+- **`fetch_live_ticker_price()`** (new, `btc_price_projection.py`) -
+  hits Coinbase's real `/products/{id}/ticker` endpoint and returns the
+  real last-trade price as a float. Fails open (returns `None`) on any
+  real fetch problem - this is a precision improvement, never something
+  that should block the whole ticker/projection on one extra,
+  non-essential call.
+- **`_compute_projection(closes, live_price=None)`** - gained an
+  optional real anchor parameter. When provided, `current_price` (and
+  therefore `naive_price`, `trend_price`, and every sigma band, all
+  computed relative to it) uses the tighter real ticker price instead of
+  `closes[-1]` - the trend slope and volatility themselves still come
+  from the real historical closes series either way, only the final
+  price basis gets the tighter real number. `live_price=None` (the
+  default) reproduces the exact prior behavior byte-for-byte - fully
+  backward compatible.
+- **`get_live_projection()`** (the projection panel's own live fetch)
+  now also calls `fetch_live_ticker_price()` alongside its existing
+  candle fetch and threads the real result through to
+  `_compute_projection()`.
+- **`get_btc_price_chart()`** (`routers/trading_dashboard.py`, the live
+  ticker) does the same - fetches the real ticker price alongside its
+  existing 90-minute candle history, uses it as the real "current"
+  figure shown, and passes it into the same window-bookkeeping call that
+  logs a real `price_at_prediction` for a fresh window, so a newly-opened
+  window's real "price to beat" is anchored on the tighter number too,
+  not the previous minute's candle close.
+
+Verified offline (`test_btc_live_ticker_price.py`, new, 13 checks): a
+real live_price override correctly becomes the current/naive price basis
+and every downstream number (trend_price, sigma bands) is correctly
+computed relative to IT, not the candle close - hand-verified against
+the exact same slope formula `_compute_projection` itself uses; omitting
+the override reproduces the exact prior candle-close-only behavior;
+`get_live_projection()` actually calls the new fetch and threads a real,
+distinctly-different mocked ticker price through to its final result;
+`get_live_projection()` fails open (still returns a real, valid
+projection anchored on the candle close) when the real ticker fetch
+fails; and `fetch_live_ticker_price()` itself correctly parses a real
+Coinbase-shaped response, and correctly returns `None` (never crashes)
+on a real non-200 status, a real malformed response missing the `price`
+field, and a real connection failure. Every existing BTC test file
+(`test_btc_price_projection.py`, `test_btc_projection_endpoints.py`,
+`test_btc_chart_endpoint.py`, `test_btc_window_alignment.py`,
+`test_btc_prediction_log.py`, `test_btc_prediction_log_dedupe.py`) was
+updated to mock the new fetch alongside its existing candle-fetch mocks
+(keeping them fast and deterministic, and avoiding real, always-blocked
+network attempts from this sandbox) - full suite re-run clean, 99
+checks total, no regressions; every existing exact-match assertion still
+holds since a mocked `None` ticker result reproduces the pre-existing
+candle-close-only behavior exactly.
+
+**Confirmed live, directly, from two closely-timed real screenshots the
+account owner captured mid-conversation**: one from this dashboard, one
+from the real third-party app, both mid-window (5:57 and 6:09 into their
+respective real 15-minute windows - only 12 real seconds apart) - real
+window-open prices $78,915.98 vs $78,918.62 (within $2.64, consistent
+with two different real exchanges' feeds) and both agreeing on real
+direction (BTC trading below its window-open price on both). This
+confirms the wall-clock-alignment fix (previous section) is genuinely
+working in production, independent of and prior to this precision
+improvement landing.
+
+**Not yet confirmed live for THIS specific change** - the account owner
+needs to redeploy and compare a fresh pair of screenshots the same way,
+to see whether the real ticker-price anchor narrows the gap between the
+two apps' numbers any further versus the pre-existing candle-close-only
+figures.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
