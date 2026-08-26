@@ -4765,6 +4765,118 @@ on its own.
 
 ---
 
+## Real follow-up: the combined-strategy backtest run live, and a real pushback on the momentum entry itself
+
+The account owner ran the combined dual-strategy backtest above for real:
+constrained (real shared $450 pool) came back at **-$2.13** across 70
+trades, worse than either standalone strategy; unconstrained (theoretical
+ceiling) came back at **+$59.47** across 374 trades - still LESS than
+momentum running alone (+$66.00). Real, conclusive evidence against
+combining: mean-reversion fires far more often (358 vs 68 signals over the
+same 30 days) and keeps grabbing the shared pool first, crowding out
+momentum's rarer, more profitable trades - and even with unlimited money,
+mean-reversion sometimes claims a symbol a moment before momentum would
+have, stealing the better trade. Recommendation given: leave the account
+exactly as it is, momentum-only - confirmed correct, no code change
+needed.
+
+Separately, a real, well-reasoned pushback arrived on the momentum entry
+gate itself (relayed from a second tool): `RSI > 55 AND price > SMA20` is
+binary - it can identify momentum exists, but can't distinguish a fresh
+breakout from a stock that's already run hard and is due to snap back
+("buying the top"). The wider proposal included RSI-state (rising vs a
+static threshold), an SMA20 trend slope, an overextension cap, ATR-based
+position sizing, and a full entry×exit cross-product test matrix.
+
+**Evaluated, not applied wholesale** - agreed with the core diagnosis
+(RSI-rising and an overextension filter both directly target the "already
+exhausted move" problem) but scoped the test narrower than the full
+proposal, for two real reasons:
+1. **ATR-based position sizing left out of this pass.** It changes the
+   dollar-risk basis per trade - mixing it into the same test as entry
+   changes would make it impossible to tell whether an improvement came
+   from better signal timing or from just risking less per trade. Worth
+   testing separately, after this narrower question is answered.
+2. **"Higher highs" confirmation left out.** It appeared in the proposal's
+   earlier conceptual sketch but wasn't in the account owner's own
+   concrete Strategy A-D list - built exactly what was specified to test,
+   not an extra untested variable layered on top.
+
+**`run_entry_signal_ab_test()`** (`alpaca_selection_backtest.py`): fetches
+real Alpaca history with real timestamps (reusing `_fetch_bars_with_times`,
+already built for the combined-strategy backtest above), then replays 4
+entry variants against the identical real bars via the new
+`_replay_symbol_momentum_variant()` - a parameterized version of
+`_replay_symbol_momentum()` whose entry GATE is configurable while the
+EXIT (trailing stop off the real peak, 24h backstop) stays byte-for-byte
+identical across all four, so the comparison isolates entry-signal quality
+specifically, exactly matching the account owner's own note that entry and
+exit should be tested independently:
+
+- `ENTRY_VARIANTS["A"]` - today's live rule, unchanged (RSI > 55 AND price
+  > SMA20) - the real regression baseline.
+- `ENTRY_VARIANTS["B"]` - A, plus RSI must be RISING (current RSI > the
+  real RSI one bar earlier) - not just above the threshold, genuinely
+  gaining strength right now.
+- `ENTRY_VARIANTS["C"]` - B, plus SMA20 must be RISING too (compared
+  against its own real value `SMA_SLOPE_LOOKBACK_BARS` (4, ~1 real hour)
+  bars back) - confirms the underlying trend itself is turning up, not
+  just a momentary RSI blip.
+- `ENTRY_VARIANTS["D"]` - C, plus an overextension cap: price can't
+  already be more than `MAX_EXTENSION_PCT` (3%) above its own real SMA20 -
+  refuses an entry that's already stretched too far from its own average,
+  the real "buying the top" guard.
+
+**`_summarize_trades()`** - per the account owner's own explicit request
+not to judge on total profit alone: real win rate, profit factor (real
+gross win / real gross loss), a real dollar max drawdown computed off a
+real chronological equity curve (not just a percentage), Sharpe and
+Sortino computed from each variant's own real per-trade return series
+(explicitly labeled as real per-trade ratios, not annualized - honest
+about precision, not dressed up as more rigorous than it is), real average
+holding time from real entry/exit timestamps, and the longest real losing
+streak in real chronological order. Deliberately does NOT model fees/
+slippage (the same real, already-documented gap in every other backtest
+tool in this file) or break results out by market regime (a genuinely
+separate, larger feature, not something this function can produce as a
+side effect) - both left as explicit future work rather than faked.
+
+New `POST /api/trading-dashboard/alpaca-selection-backtest/entry-signal-ab-test`
+(admin-key gated, same pattern as the other four backtest routes) and a
+fifth button + two result tables on `alpaca_selection_backtest.html`
+("▶ Run Entry-Signal A/B/C/D Test"), right under the combined-strategy
+section - a metric-by-variant table (trades, win rate, total P&L, ROI,
+avg trade, profit factor, max drawdown, Sharpe, Sortino, avg holding time,
+longest losing streak) plus a per-symbol P&L breakdown across all four.
+
+Verified offline (`test_entry_signal_ab_test.py`, RSI/SMA monkeypatched to
+fixed lookup tables keyed by a hand-crafted closes array's marker prices -
+same technique already validated elsewhere in this file's backtest tests,
+extended to distinguish a "current" evaluation point from the "previous"
+one each filter compares against): variant A enters on the plain base
+gate exactly matching today's live rule; variant B correctly BLOCKS an
+entry when RSI is actually falling (66 < previous 68) even though both
+clear the >55 threshold, and correctly ALLOWS one when RSI is genuinely
+rising (52 -> 60); variant C additionally blocks when SMA20 isn't rising
+and allows once it genuinely is; variant D additionally blocks a real
+33%-overextended entry and allows a fresh 1%-above-SMA20 one; and
+`_summarize_trades()`'s win rate, profit factor, real dollar max drawdown,
+longest losing streak, and real average holding time were all hand-verified
+against a small, fully worked 4-trade sequence. Full existing regression
+suite (the constrained/unconstrained combined-strategy test) re-run clean
+alongside it.
+
+**Not yet run against real historical data** - same documented gap as
+every other backtest tool in this file. The account owner needs to open
+`/alpaca-selection-backtest-view` after the next redeploy and click the
+new button themselves to see whether any of B/C/D actually beats today's
+live rule A on real data - this tool only informs that decision; per the
+account owner's own recommendation (endorsed above), nothing here changes
+what the live bot does unless the data shows a real, meaningful,
+out-of-sample improvement.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

@@ -1604,6 +1604,24 @@ async def run_alpaca_combined_strategy_backtest():
     return await alpaca_selection_backtest_module.run_combined_dual_strategy_backtest()
 
 
+@router.post("/alpaca-selection-backtest/entry-signal-ab-test", dependencies=[Depends(require_admin_key)])
+async def run_alpaca_entry_signal_ab_test():
+    """SHADOW-MODE ONLY - never touches live trading, places no order.
+    Real, well-reasoned pushback on the live momentum entry (RSI > 55 AND
+    price > SMA20 is binary - it can't tell a fresh breakout from a stock
+    that's already run and is due to snap back). Replays the SAME real
+    historical bars under 4 entry variants that progressively layer on
+    real filters (RSI rising, SMA20 rising, an overextension cap), with
+    the exit rule held completely fixed across all four so this isolates
+    entry-signal quality specifically. Returns a real multi-metric summary
+    per variant (win rate, profit factor, max drawdown, Sharpe/Sortino,
+    avg holding time, longest losing streak - not just total P&L) plus a
+    per-symbol P&L breakdown across all four."""
+    if alpaca_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+    return await alpaca_selection_backtest_module.run_entry_signal_ab_test()
+
+
 def _safe_float(v):
     """Alpaca's real REST API returns numeric position fields as JSON
     strings (e.g. "150.25", not 150.25) - this converts them to real

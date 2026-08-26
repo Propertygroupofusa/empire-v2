@@ -105,6 +105,13 @@
     <button class="run-btn" id="combinedBtn" onclick="runCombinedComparison()">▶ Run Combined Strategy Backtest (real data, ~30-60 seconds)</button>
     <div id="combinedStatus"></div>
     <div id="combinedResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>Is RSI &gt; 55 + price &gt; SMA20 too binary?</strong> It can spot momentum, but it can't tell a fresh breakout from a stock that's already run hard and is due to snap back. This tests 4 entry variants that progressively add real filters — B adds "RSI rising" (not just above 55), C adds "SMA20 rising" too, D adds a cap on how far price can already be above SMA20 — with the exit rule held exactly the same across all four, so this isolates entry quality specifically. Judges on more than total profit: win rate, profit factor, max drawdown, Sharpe/Sortino, average holding time, and longest losing streak.
+    </div>
+    <button class="run-btn" id="entrySignalBtn" onclick="runEntrySignalAbTest()">▶ Run Entry-Signal A/B/C/D Test (real data, ~30-60 seconds)</button>
+    <div id="entrySignalStatus"></div>
+    <div id="entrySignalResults"></div>
 </div>
 
 <script>
@@ -466,6 +473,96 @@ function renderCombinedComparison(data) {
             Even the "unlimited capital" row isn't a naive sum of the two standalone totals above it - the same real symbol
             can never be claimed by both strategies at once (momentum only enters above RSI 55, mean-reversion only below
             RSI 40), so this picks whichever real signal claims a flat symbol first, same as one real account actually would.
+        </p>
+    `;
+}
+
+async function runEntrySignalAbTest() {
+    const btn = document.getElementById('entrySignalBtn');
+    const statusEl = document.getElementById('entrySignalStatus');
+    const resultsEl = document.getElementById('entrySignalResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (pulling real Alpaca history for 11 symbols x 4 variants)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-selection-backtest/entry-signal-ab-test', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        renderEntrySignalAbTest(data);
+        statusEl.textContent = `Tested ${data.symbols_tested} symbols over ${data.backtest_days} days, ${data.symbols_with_results} produced real bars - same real history replayed under all 4 entry variants, exit rule held fixed.`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Entry-Signal A/B/C/D Test (real data, ~30-60 seconds)';
+    }
+}
+
+function renderEntrySignalAbTest(data) {
+    const resultsEl = document.getElementById('entrySignalResults');
+    const names = data.variant_names || [];
+    const v = data.variants || {};
+    if (!names.length) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No usable results.</p>';
+        return;
+    }
+
+    const metricRow = (label, fmt) => `
+        <tr>
+            <td>${label}</td>
+            ${names.map(n => `<td>${fmt(v[n])}</td>`).join('')}
+        </tr>`;
+    const pnlCell = (m) => `<span class="${m.total_pnl >= 0 ? 'pos' : 'neg'}">${fmtUsd(m.total_pnl)}</span>`;
+    const numOrDash = (x, suffix = '') => (x === null || x === undefined) ? '—' : (x + suffix);
+
+    resultsEl.innerHTML = `
+        <p style="margin-top:16px;font-weight:700;">Totals across all symbols — the real answer to "does a richer entry gate help":</p>
+        <table>
+            <thead><tr><th>Metric</th>${names.map(n => `<th>${n}</th>`).join('')}</tr></thead>
+            <tbody>
+                ${metricRow('Trades', m => m.num_trades)}
+                ${metricRow('Win rate', m => m.win_rate.toFixed(1) + '%')}
+                ${metricRow('Total P&amp;L', pnlCell)}
+                ${metricRow('ROI on total spend', m => m.roi_pct_of_spend.toFixed(1) + '%')}
+                ${metricRow('Avg trade', m => m.avg_trade_pct.toFixed(2) + '%')}
+                ${metricRow('Profit factor', m => numOrDash(m.profit_factor))}
+                ${metricRow('Max drawdown', m => fmtUsd(m.max_drawdown_usd))}
+                ${metricRow('Sharpe (per-trade)', m => numOrDash(m.sharpe))}
+                ${metricRow('Sortino (per-trade)', m => numOrDash(m.sortino))}
+                ${metricRow('Avg holding time', m => numOrDash(m.avg_holding_hours, 'h'))}
+                ${metricRow('Longest losing streak', m => m.max_losing_streak)}
+            </tbody>
+        </table>
+        <p style="margin-top:20px;font-weight:700;">Per-symbol P&amp;L across all 4 variants:</p>
+        <table>
+            <thead><tr><th>Symbol</th>${names.map(n => `<th>${n}</th>`).join('')}</tr></thead>
+            <tbody>
+                ${(data.symbol_breakdown || []).map(row => `
+                    <tr>
+                        <td>${row.product_id}</td>
+                        ${names.map(n => `<td class="${row[n] >= 0 ? 'pos' : 'neg'}">${fmtUsd(row[n])}</td>`).join('')}
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>
+        <p style="margin-top:14px;font-size:0.85em;color:var(--text-dim);">
+            Exit rule (trailing stop off the real peak since entry, 24h backstop) is identical across all 4 - only the entry
+            gate changes, so this isolates entry-signal quality. Sharpe/Sortino here are real per-trade ratios computed from
+            each variant's own trade-return series, not an annualized figure - useful for comparing the 4 variants against
+            each other, not as a standalone number to quote elsewhere.
         </p>
     `;
 }
