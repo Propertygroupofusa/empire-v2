@@ -889,6 +889,26 @@ async def get_activity_feed(limit: int = 50):
 BTC_PREDICTION_LOG_INTERVAL_MINUTES = 15  # don't log a new individual prediction more often than this real interval
 
 
+def _current_prediction_window(now: datetime = None):
+    """Real wall-clock-aligned 15-minute window boundaries (:00/:15/:30/:45
+    past the hour, UTC) - per the account owner's explicit request to match
+    a real third-party prediction-market app's own countdown, so pushing
+    the button "no matter what" lands on the same window that app is
+    already partway through, instead of a phase that drifts based on
+    whenever this dashboard happened to first get polled. This can't be
+    verified against that app's own real internal clock from this sandbox
+    (no live access to it) - quarter-hour UTC alignment is the standard,
+    near-universal convention these "N-minute" markets use, and for any
+    real-world timezone offset in whole or half hours (true for the US and
+    almost everywhere else), it lines up with the same boundaries on a
+    local wall clock too."""
+    now = now or datetime.utcnow()
+    minute_bucket = (now.minute // BTC_PREDICTION_LOG_INTERVAL_MINUTES) * BTC_PREDICTION_LOG_INTERVAL_MINUTES
+    window_start = now.replace(minute=minute_bucket, second=0, microsecond=0)
+    window_end = window_start + timedelta(minutes=BTC_PREDICTION_LOG_INTERVAL_MINUTES)
+    return window_start, window_end
+
+
 async def _resolve_due_btc_predictions(db, current_price: float, product_id: str):
     """Resolves every real, unresolved individual prediction (see
     PricePredictionLog) whose real 15-minute window has actually passed,
@@ -919,25 +939,27 @@ async def _resolve_due_btc_predictions(db, current_price: float, product_id: str
 
 async def _log_new_btc_prediction_if_due(db, projection: dict):
     """Logs a new real, individual prediction for the live "did it hit"
-    track record - but only if at least BTC_PREDICTION_LOG_INTERVAL_MINUTES
-    have passed since the last one, so the dashboard's own 30s poll
-    doesn't log a new "prediction" every 30 seconds instead of one real,
-    independent 15-minute-ahead call at a time."""
+    track record - keyed to the real, wall-clock-aligned window
+    (_current_prediction_window above) rather than "15 minutes since the
+    last one," so every poll - from either the projection panel or the
+    live ticker - converges on the exact same window and its exact same
+    real countdown, matching a real external prediction-market app's own
+    fixed :00/:15/:30/:45 boundaries. A no-op if a row for the current
+    window already exists (from an earlier poll within the same window)."""
     product_id = projection["product_id"]
+    window_start, window_end = _current_prediction_window()
     result = await db.execute(
-        select(PricePredictionLog)
-        .where(PricePredictionLog.product_id == product_id)
-        .order_by(PricePredictionLog.predicted_at.desc())
-        .limit(1)
+        select(PricePredictionLog).where(
+            PricePredictionLog.product_id == product_id,
+            PricePredictionLog.predicted_at == window_start,
+        )
     )
-    last = result.scalar_one_or_none()
-    now = datetime.utcnow()
-    if last and (now - last.predicted_at) < timedelta(minutes=BTC_PREDICTION_LOG_INTERVAL_MINUTES):
+    if result.scalar_one_or_none() is not None:
         return
     db.add(PricePredictionLog(
         product_id=product_id,
-        predicted_at=now,
-        resolve_at=now + timedelta(minutes=15),
+        predicted_at=window_start,
+        resolve_at=window_end,
         price_at_prediction=projection["current_price"],
         method=projection["method"],
         projected_price=projection["projected_price"],
@@ -948,6 +970,26 @@ async def _log_new_btc_prediction_if_due(db, projection: dict):
         resolved=False,
     ))
     await db.commit()
+
+
+async def _latest_btc_calibration_and_method(db, bpp):
+    """Shared by both the projection panel and the live ticker's own
+    window-logging: reads the most recent real backtest calibration and
+    picks whichever of naive/trend it actually showed winning (naive by
+    default, with no real evidence yet). One real function so the two
+    endpoints can never disagree about which method is "live" right now."""
+    result = await db.execute(
+        select(PricePredictionCalibration)
+        .where(PricePredictionCalibration.product_id == bpp.PRODUCT_ID)
+        .order_by(PricePredictionCalibration.run_at.desc())
+        .limit(1)
+    )
+    latest_calibration = result.scalar_one_or_none()
+    method = "naive"
+    if latest_calibration and latest_calibration.trend_mae_pct is not None and latest_calibration.naive_mae_pct is not None:
+        if latest_calibration.trend_mae_pct < latest_calibration.naive_mae_pct:
+            method = "trend"
+    return latest_calibration, method
 
 
 @router.get("/family-tree-status/btc-projection", dependencies=[Depends(require_admin_key)])
@@ -968,18 +1010,7 @@ async def get_btc_price_projection():
     bpp = btc_price_projection_module
 
     async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(PricePredictionCalibration)
-            .where(PricePredictionCalibration.product_id == bpp.PRODUCT_ID)
-            .order_by(PricePredictionCalibration.run_at.desc())
-            .limit(1)
-        )
-        latest_calibration = result.scalar_one_or_none()
-
-    method = "naive"
-    if latest_calibration and latest_calibration.trend_mae_pct is not None and latest_calibration.naive_mae_pct is not None:
-        if latest_calibration.trend_mae_pct < latest_calibration.naive_mae_pct:
-            method = "trend"
+        latest_calibration, method = await _latest_btc_calibration_and_method(db, bpp)
 
     async with aiohttp.ClientSession() as session:
         projection = await bpp.get_live_projection(session, method=method)
@@ -1047,13 +1078,21 @@ async def get_btc_prediction_log(limit: int = 20):
 async def get_btc_price_chart():
     """Real, live BTC ticker + countdown for the dashboard - per the
     account owner's explicit request for "a ticker and a timing... like
-    this tracking Bitcoin." Purely a display feed: a real recent 1-minute
+    this tracking Bitcoin," and a real follow-up request to have the
+    countdown land on the same real wall-clock window a third-party
+    prediction-market app's own "15 min Bitcoin" countdown is already
+    partway through - "no matter what" they open this dashboard. Windows
+    are aligned to real :00/:15/:30/:45 UTC boundaries
+    (_current_prediction_window), not to whenever this dashboard happened
+    to first get polled - see that function's own docstring for why this
+    is the best real match achievable without live access to that other
+    app's internal clock. Purely a display feed: a real recent 1-minute
     price history for a live line chart, plus the current active
     prediction window's real price_at_prediction (the "price to beat")
-    and resolve_at (the countdown target) - both already being generated
-    every 15 real minutes by the existing prediction ledger
-    (_log_new_btc_prediction_if_due), reused here rather than tracked a
-    second way. Read-only, never places an order."""
+    and resolve_at (the countdown target) - both from the same real
+    prediction ledger the panel below already tracks (_log_new_btc_
+    prediction_if_due), reused here rather than tracked a second way.
+    Read-only, never places an order."""
     if btc_price_projection_module is None:
         raise HTTPException(status_code=500, detail="btc_price_projection module not available")
     bpp = btc_price_projection_module
@@ -1064,6 +1103,22 @@ async def get_btc_price_chart():
         raise HTTPException(status_code=503, detail="Could not fetch real BTC price history right now - try again")
 
     current_price = history[-1]["price"]
+
+    # Best-effort: make sure a row for the CURRENT real wall-clock window
+    # exists, so the countdown is accurate even if the projection panel
+    # below hasn't polled yet since this window opened. Never fatal to the
+    # chart itself - same defensive pattern the projection endpoint uses
+    # for this same ledger.
+    try:
+        async with AsyncSessionLocal() as db:
+            _, method = await _latest_btc_calibration_and_method(db, bpp)
+            proj = bpp._compute_projection([h["price"] for h in history])
+            proj["product_id"] = bpp.PRODUCT_ID
+            proj["method"] = method
+            proj["projected_price"] = proj["trend_price"] if method == "trend" else proj["naive_price"]
+            await _log_new_btc_prediction_if_due(db, proj)
+    except Exception as e:
+        log.warning(f"[btc-projection/chart] window bookkeeping failed (non-fatal): {e}")
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(

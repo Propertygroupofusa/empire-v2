@@ -5203,6 +5203,76 @@ live chart, countdown, and price-to-beat populate and tick down.
 
 ---
 
+## BTC ticker countdown aligned to real wall-clock windows, to match a real third-party app
+
+Per the account owner's explicit follow-up, comparing the new ticker
+against a real screenshot of a third-party "15 min Bitcoin"
+prediction-market app: "if I push it in Bitcoin on coinbase already 2
+minutes into is 15 minutes session, mines would read that and
+automatically pick up the same time that that one is on." The countdown
+built above was real, but its 15-minute windows started from whenever
+`_log_new_btc_prediction_if_due()` first happened to be polled after a
+deploy - an arbitrary phase with no relationship to any other clock,
+including that other app's.
+
+Fixed by aligning every window to real `:00/:15/:30/:45` UTC boundaries
+instead - `_current_prediction_window()` in `routers/trading_dashboard.py`
+buckets the current real time down to its quarter-hour mark and returns
+`[window_start, window_end)`. This can't be verified against that other
+app's own actual internal clock from this sandbox (no live access to it)
+- quarter-hour UTC alignment is the standard, near-universal convention
+real "N-minute" markets use, and it lines up with the same boundaries on
+a real local wall clock for any timezone offset in whole or half hours
+(true for the US and almost everywhere else), so opening both apps at
+the same real moment should now show the same real time remaining.
+
+- `_log_new_btc_prediction_if_due()` (previously "log a new prediction if
+  15 real minutes have passed since the last one") now keys off the exact
+  real window boundary instead - a no-op if a row for the CURRENT real
+  window already exists, a fresh row otherwise. This is a real, deliberate
+  behavior change from a rolling interval to a fixed, shared clock.
+- `_latest_btc_calibration_and_method()` (new, factored out of the
+  existing projection endpoint) picks naive vs. trend the same real way
+  in both places, so the ticker's own best-effort window-bookkeeping
+  (added to `GET /family-tree-status/btc-projection/chart` - previously
+  read-only, now also ensures the current real window exists before
+  reading it, using `bpp._compute_projection()` on the price history it
+  already fetched rather than a second live API call) and the projection
+  panel below it can never disagree about which real window - or which
+  method - is currently live, regardless of which one happens to poll
+  first after a new window opens.
+
+Verified offline (`test_btc_window_alignment.py`, new, 14 checks): the
+real bucketing math is hand-verified against five real times spanning a
+normal boundary, an exact boundary, just-before a boundary, and both real
+midnight-UTC edge cases (00:02 and 23:59:59, confirming the day rolls
+over correctly); logging is idempotent within the same real window
+(polling twice creates only one row) and correctly creates a fresh row
+once a genuinely new real window starts; and cross-endpoint agreement is
+directly proven both ways - the projection panel logging first and the
+ticker reading the identical row, and the ticker being the FIRST to poll
+in a brand-new window and correctly creating/reading its own row with no
+help from the panel. `test_btc_chart_endpoint.py` was updated in place
+(not deleted) for the new real behavior - the endpoint no longer has a
+real "no window yet, honest zero countdown" fallback state, since it now
+always ensures a real window exists before returning; its case for "an
+existing window row is read, not overwritten by fresh live data" is
+hand-verified by seeding a real row with a deliberately different price
+than what the live fetch would produce, confirming the read wins. Full
+existing regression suite (`test_btc_price_projection.py`,
+`test_btc_projection_endpoints.py`, `test_btc_prediction_log.py` - 51
+checks) re-run clean alongside it - 65 checks total, no regressions.
+
+**Not yet confirmed against the real third-party app** - the account
+owner needs to open both apps at the same real moment after the next
+redeploy and compare the two countdowns directly; if that app's internal
+clock turns out to use a different phase than quarter-hour UTC (unlikely,
+but not verifiable from this sandbox), the two will still both be honest,
+real, fixed-clock countdowns - just not phase-matched - and the offset
+would need to be reported back to correct.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
