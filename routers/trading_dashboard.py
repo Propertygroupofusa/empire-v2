@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db, AsyncSessionLocal
 from admin_auth import require_admin_key
-from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory, PricePredictionCalibration
+from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory, PricePredictionCalibration, PricePredictionLog
 
 NUM_BOTS = int(os.getenv("PROP_NUM_BOTS", "8"))
 if NUM_BOTS <= 0:
@@ -886,6 +886,70 @@ async def get_activity_feed(limit: int = 50):
     return {"events": events, "event_count": len(events)}
 
 
+BTC_PREDICTION_LOG_INTERVAL_MINUTES = 15  # don't log a new individual prediction more often than this real interval
+
+
+async def _resolve_due_btc_predictions(db, current_price: float, product_id: str):
+    """Resolves every real, unresolved individual prediction (see
+    PricePredictionLog) whose real 15-minute window has actually passed,
+    using the current real price already fetched for this same live
+    call - no extra API request. resolution_delay_seconds records how
+    late relative to resolve_at the real check landed, so a stale
+    resolution (e.g. the dashboard sat closed for a while) stays
+    honestly visible in the data instead of hidden."""
+    now = datetime.utcnow()
+    result = await db.execute(
+        select(PricePredictionLog).where(
+            PricePredictionLog.product_id == product_id,
+            PricePredictionLog.resolved == False,
+            PricePredictionLog.resolve_at <= now,
+        )
+    )
+    due = result.scalars().all()
+    for row in due:
+        row.actual_price = current_price
+        row.resolved = True
+        row.hit_1sigma = row.band_1sigma_low <= current_price <= row.band_1sigma_high
+        row.hit_2sigma = row.band_2sigma_low <= current_price <= row.band_2sigma_high
+        row.abs_error_pct = round(abs(current_price - row.projected_price) / row.price_at_prediction * 100, 4)
+        row.resolution_delay_seconds = (now - row.resolve_at).total_seconds()
+    if due:
+        await db.commit()
+
+
+async def _log_new_btc_prediction_if_due(db, projection: dict):
+    """Logs a new real, individual prediction for the live "did it hit"
+    track record - but only if at least BTC_PREDICTION_LOG_INTERVAL_MINUTES
+    have passed since the last one, so the dashboard's own 30s poll
+    doesn't log a new "prediction" every 30 seconds instead of one real,
+    independent 15-minute-ahead call at a time."""
+    product_id = projection["product_id"]
+    result = await db.execute(
+        select(PricePredictionLog)
+        .where(PricePredictionLog.product_id == product_id)
+        .order_by(PricePredictionLog.predicted_at.desc())
+        .limit(1)
+    )
+    last = result.scalar_one_or_none()
+    now = datetime.utcnow()
+    if last and (now - last.predicted_at) < timedelta(minutes=BTC_PREDICTION_LOG_INTERVAL_MINUTES):
+        return
+    db.add(PricePredictionLog(
+        product_id=product_id,
+        predicted_at=now,
+        resolve_at=now + timedelta(minutes=15),
+        price_at_prediction=projection["current_price"],
+        method=projection["method"],
+        projected_price=projection["projected_price"],
+        band_1sigma_low=projection["band_1sigma_low"],
+        band_1sigma_high=projection["band_1sigma_high"],
+        band_2sigma_low=projection["band_2sigma_low"],
+        band_2sigma_high=projection["band_2sigma_high"],
+        resolved=False,
+    ))
+    await db.commit()
+
+
 @router.get("/family-tree-status/btc-projection", dependencies=[Depends(require_admin_key)])
 async def get_btc_price_projection():
     """Real, live 15-minute-ahead price projection for BTC - per the
@@ -923,7 +987,60 @@ async def get_btc_price_projection():
         raise HTTPException(status_code=503, detail="Could not fetch a live BTC price right now - try again")
 
     projection["calibration"] = latest_calibration.to_dict() if latest_calibration else None
+
+    # Best-effort, real individual prediction-tracking - per the account
+    # owner's explicit follow-up: the aggregate calibration above answers
+    # "how did this do on past history," this builds the LIVE, ongoing
+    # "is it actually hitting, one real prediction at a time" record.
+    # Wrapped so a bookkeeping failure here can never break the live
+    # panel itself - same defensive pattern _log_activity() already uses
+    # elsewhere in this codebase.
+    try:
+        async with AsyncSessionLocal() as db:
+            await _resolve_due_btc_predictions(db, projection["current_price"], bpp.PRODUCT_ID)
+            await _log_new_btc_prediction_if_due(db, projection)
+    except Exception as e:
+        log.warning(f"[btc-projection] prediction-log bookkeeping failed (non-fatal): {e}")
+
     return projection
+
+
+@router.get("/family-tree-status/btc-projection/log", dependencies=[Depends(require_admin_key)])
+async def get_btc_prediction_log(limit: int = 20):
+    """Real, individual prediction-by-prediction track record for the BTC
+    15-minute projection - per the account owner's explicit follow-up
+    ("I need to know that too... did it hit it or did it [not]"). Read-
+    only; resolution itself happens inside get_btc_price_projection()
+    above, piggybacked on the dashboard's own live poll."""
+    if btc_price_projection_module is None:
+        raise HTTPException(status_code=500, detail="btc_price_projection module not available")
+    product_id = btc_price_projection_module.PRODUCT_ID
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(PricePredictionLog)
+            .where(PricePredictionLog.product_id == product_id)
+            .order_by(PricePredictionLog.predicted_at.desc())
+            .limit(limit)
+        )
+        rows = result.scalars().all()
+
+        resolved_result = await db.execute(
+            select(PricePredictionLog).where(
+                PricePredictionLog.product_id == product_id,
+                PricePredictionLog.resolved == True,
+            )
+        )
+        resolved_rows = resolved_result.scalars().all()
+
+    hit_1sigma_count = sum(1 for r in resolved_rows if r.hit_1sigma)
+    live_hit_rate_1sigma = round(hit_1sigma_count / len(resolved_rows) * 100, 1) if resolved_rows else None
+
+    return {
+        "predictions": [r.to_dict() for r in rows],
+        "resolved_count": len(resolved_rows),
+        "live_hit_rate_1sigma": live_hit_rate_1sigma,
+    }
 
 
 @router.post("/family-tree-status/btc-projection/backtest", dependencies=[Depends(require_admin_key)])

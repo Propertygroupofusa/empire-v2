@@ -1444,3 +1444,60 @@ class PricePredictionCalibration(Base):
             "pct_within_1sigma": self.pct_within_1sigma,
             "pct_within_2sigma": self.pct_within_2sigma,
         }
+
+
+class PricePredictionLog(Base):
+    """One real, individual 15-minute-ahead prediction, logged the moment
+    it's made and resolved once its real 15-minute window has actually
+    passed - per the account owner's explicit follow-up: the aggregate
+    PricePredictionCalibration answers "how has this done on PAST
+    historical data," this answers "is it actually hitting, one real
+    prediction at a time, going forward, right now." Resolved by
+    routers/trading_dashboard.py's own live endpoint piggybacking on the
+    dashboard's existing 30s poll - no separate background process. A
+    prediction whose resolve_at has passed gets checked against whatever
+    real price is available the next time the endpoint is hit, which is
+    normally within seconds of the true 15-minute mark while the
+    dashboard is open; resolution_delay_seconds records exactly how late
+    that real check landed, so a stale resolution (dashboard closed for a
+    while) is honestly visible in the data rather than hidden."""
+    __tablename__ = "price_prediction_log"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(String, index=True)
+    predicted_at = Column(DateTime, default=datetime.utcnow, index=True)
+    resolve_at = Column(DateTime, index=True)
+    price_at_prediction = Column(Float)
+    method = Column(String)  # "naive" or "trend" - whichever was live when this prediction was made
+    projected_price = Column(Float)
+    band_1sigma_low = Column(Float)
+    band_1sigma_high = Column(Float)
+    band_2sigma_low = Column(Float)
+    band_2sigma_high = Column(Float)
+    resolved = Column(Boolean, default=False, index=True)
+    actual_price = Column(Float, nullable=True)
+    hit_1sigma = Column(Boolean, nullable=True)
+    hit_2sigma = Column(Boolean, nullable=True)
+    abs_error_pct = Column(Float, nullable=True)
+    resolution_delay_seconds = Column(Float, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "product_id": self.product_id,
+            "predicted_at": self.predicted_at.isoformat() if self.predicted_at else None,
+            "resolve_at": self.resolve_at.isoformat() if self.resolve_at else None,
+            "price_at_prediction": self.price_at_prediction,
+            "method": self.method,
+            "projected_price": self.projected_price,
+            "band_1sigma_low": self.band_1sigma_low,
+            "band_1sigma_high": self.band_1sigma_high,
+            "band_2sigma_low": self.band_2sigma_low,
+            "band_2sigma_high": self.band_2sigma_high,
+            "resolved": self.resolved,
+            "actual_price": self.actual_price,
+            "hit_1sigma": self.hit_1sigma,
+            "hit_2sigma": self.hit_2sigma,
+            "abs_error_pct": self.abs_error_pct,
+            "resolution_delay_seconds": self.resolution_delay_seconds,
+        }

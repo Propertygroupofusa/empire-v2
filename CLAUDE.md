@@ -5055,6 +5055,77 @@ until that first real run happens.
 
 ---
 
+## BTC projection extended to a live, individual prediction-by-prediction track record
+
+Right after the projection panel shipped, the account owner asked the
+right follow-up question: the panel only showed ONE aggregate number from
+a historical backtest ("72% of 4244 past windows") - it never showed
+whether each real prediction going FORWARD actually hit. "I need to know
+that too... did it predict it, did it hit it or did it [not]."
+
+**New `PricePredictionLog` model** (`models.py`) - one row per real,
+individual 15-minute-ahead prediction, logged the moment it's made
+(`predicted_at`, the real price/method/projected price/both bands at that
+moment) and resolved once its real 15-minute window has actually passed
+(`resolved`, `actual_price`, `hit_1sigma`, `hit_2sigma`, `abs_error_pct`).
+Deliberately separate from `PricePredictionCalibration` above - that
+table answers "how did this do on PAST history," this one answers "is it
+actually hitting, right now, going forward."
+
+**No new background process** - `_resolve_due_btc_predictions()` and
+`_log_new_btc_prediction_if_due()` (both in `routers/trading_dashboard.py`)
+piggyback on the existing live `GET /family-tree-status/btc-projection`
+endpoint, which the dashboard already polls every 30s:
+1. First resolves any real prediction whose `resolve_at` has passed,
+   using the SAME live price this call already fetched - no extra API
+   cost. `resolution_delay_seconds` records how late relative to the true
+   15-minute mark the real check actually landed, so a stale resolution
+   (dashboard closed for a while) stays honestly visible in the data
+   rather than hidden.
+2. Then logs a new prediction - but only if at least
+   `BTC_PREDICTION_LOG_INTERVAL_MINUTES` (15) have genuinely passed since
+   the last one, so the dashboard's own 30s poll doesn't log a new
+   "prediction" every 30 seconds instead of one real, independent
+   15-minute-ahead call at a time.
+Both wrapped in a single try/except around the whole block - a real
+bookkeeping failure here can never break the live panel itself, the same
+defensive pattern `_log_activity()` already uses elsewhere in this file.
+**Real, honest limitation stated plainly**: this only logs/resolves while
+something is actually polling the endpoint (normally the dashboard being
+open) - there's no separate always-on background loop for it.
+
+New `GET /api/trading-dashboard/family-tree-status/btc-projection/log`
+(admin-key gated, read-only) returns the most recent real predictions plus
+a real `live_hit_rate_1sigma` computed only from resolved rows (an
+unresolved, still-pending prediction never counts toward it either way).
+New "Recent Predictions - did it actually hit?" section on the existing
+BTC panel in `family_tree_dashboard.html`: a live hit-rate line, then each
+real prediction as its own row - time made, the predicted range, and
+either "⏳ Pending (resolves HH:MM)", "✅ HIT - actual $X (Y% off)", or
+"❌ MISS - actual $X (Y% off)".
+
+Verified offline (`test_btc_prediction_log.py`, 18 checks) against a real
+throwaway SQLite DB: the log-if-due timing logic correctly logs once,
+correctly skips an immediate second call, and correctly logs again once
+the real interval has genuinely passed; resolving a real due prediction
+correctly computes hit_1sigma/hit_2sigma/abs_error_pct/resolution_delay_seconds
+for both a real HIT case (hand-verified 0.5% error) and a real, genuine
+MISS case (a price 5% away, outside even the 2-sigma band) while leaving
+a not-yet-due row completely untouched; and the full
+`get_btc_price_projection()` endpoint correctly logs a new prediction on
+its first real call and correctly resolves a real due one (using that
+same call's own live price) on a later call, with the prediction-log
+endpoint's real hit-rate summary reflecting exactly that. Full existing
+regression suite (`test_btc_price_projection.py`, `test_btc_projection_endpoints.py`,
+`test_add_cash_branch.py`) re-run clean alongside it.
+
+**Not yet confirmed against real live predictions** - the account owner
+needs to leave the family tree dashboard open for at least ~15-30 real
+minutes after the next redeploy to see the first real predictions
+actually resolve and show up as HIT or MISS in the new section.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

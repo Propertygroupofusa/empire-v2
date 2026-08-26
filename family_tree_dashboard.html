@@ -517,6 +517,13 @@
     <div class="panel">
         <div class="panel-sub">A real, honest range based on how much BTC has actually been moving in the last hour - not a guess at an exact number. No honest system can predict the exact price; this shows the most likely price plus a real range, and how often that range has actually been right. Purely informational - never feeds into any trade. Updates every 30s.</div>
         <div id="btc-projection-wrap"><div class="coin-history-empty">Loading…</div></div>
+        <div style="margin-top:16px; padding-top:14px; border-top:1px solid var(--border);">
+            <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:8px; flex-wrap:wrap; gap:6px;">
+                <div style="font-weight:700; color:var(--navy); font-size:0.9em;">Recent Predictions - did it actually hit?</div>
+                <div id="btc-pred-hitrate" style="font-size:0.8em; color:var(--text-dim);"></div>
+            </div>
+            <div id="btc-pred-log-wrap"><div class="coin-history-empty">Loading…</div></div>
+        </div>
     </div>
 
     <div class="section-title">📜 Coin Trade History</div>
@@ -1566,6 +1573,49 @@ async function loadBtcProjection() {
         renderBtcProjection(data);
     } catch (e) {
         document.getElementById('btc-projection-wrap').innerHTML = `<div class="coin-history-empty">Could not load: ${e.message}</div>`;
+    }
+    // The live projection call above is what actually resolves any due
+    // real prediction and logs a new one server-side - load the log
+    // AFTER it so this always shows the freshest real state.
+    await loadBtcPredictionLog();
+}
+
+function renderBtcPredictionLog(data) {
+    const wrap = document.getElementById('btc-pred-log-wrap');
+    const hitRateEl = document.getElementById('btc-pred-hitrate');
+    const preds = data.predictions || [];
+    hitRateEl.textContent = data.live_hit_rate_1sigma != null
+        ? `Live hit rate: ${data.live_hit_rate_1sigma}% (${data.resolved_count} resolved)`
+        : 'No resolved predictions yet';
+    if (preds.length === 0) {
+        wrap.innerHTML = '<div class="coin-history-empty">No predictions logged yet - a real one gets recorded every 15 minutes while this dashboard stays open.</div>';
+        return;
+    }
+    const timeFmt = { hour: '2-digit', minute: '2-digit' };
+    wrap.innerHTML = preds.map(p => {
+        const madeAt = new Date(p.predicted_at).toLocaleTimeString([], timeFmt);
+        let statusHtml;
+        if (!p.resolved) {
+            const resolveAt = new Date(p.resolve_at).toLocaleTimeString([], timeFmt);
+            statusHtml = `<span style="color:var(--text-dim);">&#8987; Pending (resolves ${resolveAt})</span>`;
+        } else if (p.hit_1sigma) {
+            statusHtml = `<span style="color:var(--green); font-weight:700;">&#9989; HIT</span> - actual ${fmtBtc(p.actual_price)} (${p.abs_error_pct}% off)`;
+        } else {
+            statusHtml = `<span style="color:var(--red); font-weight:700;">&#10060; MISS</span> - actual ${fmtBtc(p.actual_price)} (${p.abs_error_pct}% off)`;
+        }
+        return `<div style="display:flex; justify-content:space-between; gap:10px; padding:7px 0; border-bottom:1px solid var(--border); font-size:0.82em; flex-wrap:wrap;">
+            <div><strong>${madeAt}</strong> predicted ${fmtBtc(p.projected_price)} <span style="color:var(--text-dim);">(&plusmn;1&sigma; ${fmtBtc(p.band_1sigma_low)}&ndash;${fmtBtc(p.band_1sigma_high)})</span></div>
+            <div>${statusHtml}</div>
+        </div>`;
+    }).join('');
+}
+
+async function loadBtcPredictionLog() {
+    try {
+        const data = await apiGet('/family-tree-status/btc-projection/log?limit=15');
+        renderBtcPredictionLog(data);
+    } catch (e) {
+        document.getElementById('btc-pred-log-wrap').innerHTML = `<div class="coin-history-empty">Could not load: ${e.message}</div>`;
     }
 }
 
