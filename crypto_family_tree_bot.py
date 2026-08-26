@@ -2576,10 +2576,23 @@ async def _maybe_spawn_child(branch, allow_reinforce: bool = True):
                     fresh2.allocated_usd += SEED_USD
                     fresh2.next_unlock_tier -= own_increment
                     await db.commit()
-            log.warning(
-                f"[TREE] {branch.bot_name}: reinforcement deploy into {weakest.bot_name} failed - "
-                f"refunded the ${SEED_USD:.2f} seed, will retry next cycle"
+            stuck_reason = engine._last_order_error.get(weakest.product_id, "unknown reason")
+            fail_msg = (
+                f"⚠️ {branch.bot_name} crossed ${milestone:,.0f} but the reinforcement buy into "
+                f"{weakest.bot_name} ({weakest.product_id}) failed ({stuck_reason}) - refunded the "
+                f"${SEED_USD:.2f} seed, will retry next cycle"
             )
+            log.warning(f"[TREE] {fail_msg}")
+            # Real gap found live: a repeatedly-failing reinforcement deploy
+            # refunds back to the exact same balance/tier every cycle and
+            # retries - which, with NO visible trace on the dashboard
+            # before this (only a successful REINFORCE ever logged to the
+            # activity feed), looked from the outside like the branch was
+            # simply stuck frozen at 100% "Next spawn" forever, with no way
+            # to tell a retry loop from an actual bug. Logging this failure
+            # too makes a real, repeated failure visible and diagnosable
+            # (the real rejection reason included) instead of silent.
+            await _log_activity(branch.bot_name, weakest.product_id, "REINFORCE_FAILED", fail_msg)
         return
     # No other branch exists yet to reinforce (e.g. the very first
     # spawn in a fresh tree, or a tree of exactly one branch) - fall

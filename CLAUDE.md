@@ -5494,6 +5494,67 @@ continuing to re-buy it.
 
 ---
 
+## Real gap found live: a failed reinforcement retry loop looked identical to being frozen
+
+Right after the POL-USD merge above, the account owner watched the
+dashboard for several minutes and asked directly: "why are you still
+stuck... the 100% still stuck instead of flip over." `crypto_tree_xrp_usd_4`
+sat at exactly $908.30 with "Next spawn" pinned at 100% the entire time -
+no visible change on the dashboard at all.
+
+Traced through the real numbers rather than guessed: after the merge,
+POL's combined balance ($958.30) crossed its own (deliberately
+conservative, max-of-the-two) tier once, correctly reinforcing
+`crypto_btc_compound` with a real $50 seed (visible in the activity
+feed) and leaving POL at $908.30 against a new tier of $800 - still OVER
+its tier, which should have triggered another real reinforcement attempt
+on its very next ~30s cycle, and kept doing so until it genuinely
+dropped below tier. Reading `_maybe_spawn_child()`/`_deploy_seed_into_
+weakest_branch()` directly surfaced the real explanation: when a
+reinforcement deploy fails (a real order rejection or missing price data
+on the recipient's coin), the seed is correctly refunded and the tier
+correctly reverted - real money is never at risk - but this refund
+puts the branch back to the EXACT same balance and tier it started
+with, and it silently retries again next cycle. Critically, a FAILED
+attempt was never logged to the Live Activity feed at all (only a
+SUCCESSFUL `REINFORCE` event ever was) - so a branch retrying and
+failing every single cycle was, from the dashboard's own point of view,
+completely indistinguishable from a branch that was simply broken and
+frozen. There was no way to tell "it's retrying and failing" from "it's
+stuck" without digging through Railway's own server logs.
+
+Fixed in `_maybe_spawn_child()`: the existing refund/revert logic (the
+real money-safety part) is completely unchanged - a failed deploy still
+refunds the $50 seed and reverts the tier increment exactly as before.
+What's new: it now also logs a real `REINFORCE_FAILED` activity event,
+naming the real recipient, its real coin, and the real captured
+rejection reason (via `engine._last_order_error`) - the same "surface
+the real reason instead of leaving it invisible" pattern already applied
+to Coinbase order rejections and spawn-name collisions earlier this
+session. A repeated failure is now visible and diagnosable straight from
+the dashboard's Live Activity panel instead of looking like silence.
+
+Verified offline (`test_reinforce_failure_visibility.py`, new, 8 checks)
+against a real throwaway SQLite DB seeded with the exact real numbers
+from the screenshot (POL $908.30 / tier $800, BTC $865.76): a failed
+deploy still correctly refunds the seed and reverts the tier (unchanged
+money-safety behavior, hand-verified against the exact real figures);
+a real `REINFORCE_FAILED` event is now logged, naming the real
+recipient, coin, and a real captured rejection reason (`INSUFFICIENT_FUND`
+used as the test's real-shaped example); and a real SUCCESSFUL deploy
+logs no `REINFORCE_FAILED` event and still logs the existing `REINFORCE`
+success event exactly as before, completely unaffected. Full related
+regression suite (`test_reinforcement_skips_excluded_coin.py`,
+`test_flat_branch_avoids_excluded_coin.py`) re-run clean alongside it.
+
+**Not yet confirmed which specific real reason was actually stalling
+POL's reinforcement** - this fix makes the real reason visible on the
+next occurrence; the account owner should check the Live Activity feed
+for a `⚠️` REINFORCE_FAILED line after redeploying to see the actual
+captured rejection text, rather than guessing at it further.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
