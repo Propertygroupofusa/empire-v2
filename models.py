@@ -1371,8 +1371,14 @@ class CryptoCoinTradeHistory(Base):
             "qty": self.qty,
             "pnl": self.pnl,
             "exit_reason": self.exit_reason,
-            "opened_at": self.opened_at.isoformat() if self.opened_at else None,
-            "closed_at": self.closed_at.isoformat() if self.closed_at else None,
+            # + "Z" on both - same real display bug as PricePredictionLog
+            # above: a naive datetime.utcnow() value with no timezone
+            # designator gets silently misread as the viewer's LOCAL time by
+            # the browser's Date parser instead of being converted from
+            # UTC, showing individual trades in the Coin Trade History panel
+            # several hours off from the rest of the same dashboard.
+            "opened_at": self.opened_at.isoformat() + "Z" if self.opened_at else None,
+            "closed_at": self.closed_at.isoformat() + "Z" if self.closed_at else None,
         }
 
 
@@ -1436,7 +1442,21 @@ class PricePredictionCalibration(Base):
         return {
             "id": self.id,
             "product_id": self.product_id,
-            "run_at": self.run_at.isoformat() if self.run_at else None,
+            # + "Z" - this column is a naive datetime.utcnow() value with no
+            # tzinfo attached, so a bare .isoformat() produces a string with
+            # no timezone designator at all (e.g. "2026-08-26T08:50:05").
+            # Real bug this caused, confirmed live: the browser's `new
+            # Date(...)` treats a timezone-less ISO string as LOCAL time per
+            # spec, not UTC - so this real UTC value got silently displayed
+            # as if it already were the viewer's local time, off by their
+            # real UTC offset (matched a live screenshot: this page's real
+            # 3:51 AM local "Refreshed" time next to this same section
+            # showing "Last checked ... 8:50:05 AM" - the same real moment,
+            # ~5 hours apart on one page). Appending "Z" marks it explicitly
+            # UTC so the browser converts it to the viewer's real local time
+            # correctly - the same fix already applied correctly elsewhere
+            # (get_btc_price_chart's resolve_at) but missed here.
+            "run_at": self.run_at.isoformat() + "Z" if self.run_at else None,
             "window_days": self.window_days,
             "num_samples": self.num_samples,
             "naive_mae_pct": self.naive_mae_pct,
@@ -1485,8 +1505,13 @@ class PricePredictionLog(Base):
         return {
             "id": self.id,
             "product_id": self.product_id,
-            "predicted_at": self.predicted_at.isoformat() if self.predicted_at else None,
-            "resolve_at": self.resolve_at.isoformat() if self.resolve_at else None,
+            # + "Z" on both - same real display bug as PricePredictionCalibration.run_at above (a
+            # naive UTC value with no timezone designator gets silently
+            # misread as local time by the browser); this is the source of
+            # the "Recent Predictions" list's own wrong times on the
+            # dashboard.
+            "predicted_at": self.predicted_at.isoformat() + "Z" if self.predicted_at else None,
+            "resolve_at": self.resolve_at.isoformat() + "Z" if self.resolve_at else None,
             "price_at_prediction": self.price_at_prediction,
             "method": self.method,
             "projected_price": self.projected_price,

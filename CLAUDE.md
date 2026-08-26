@@ -5555,6 +5555,115 @@ captured rejection text, rather than guessing at it further.
 
 ---
 
+## Real bug found live: dashboard timestamps silently off by the viewer's UTC offset
+
+The account owner spotted this directly, comparing two numbers on the
+SAME loaded page: "Refreshed 3:51:25 AM" in the KPI row next to "Last
+checked ... 8:50:05 AM" in the BTC projection panel a few inches below
+it - the same real moment, shown roughly 5 hours apart on one screen.
+
+Root cause: `PricePredictionCalibration.run_at`, `PricePredictionLog.
+predicted_at`/`resolve_at`, and `CryptoCoinTradeHistory.opened_at`/
+`closed_at` are all real, naive `datetime.utcnow()` values - correct
+UTC internally - but their `to_dict()` methods serialized them with a
+bare `.isoformat()` call, producing a string with NO timezone
+designator at all (e.g. `"2026-08-26T08:50:05"`). Per the real
+ECMAScript spec, a browser's `new Date(...)` treats a timezone-less ISO
+string as the viewer's LOCAL time, not UTC - so a real UTC value got
+silently misread and displayed as if it already were local, off by
+however many hours the viewer's real UTC offset is. The "Refreshed"
+time next to it was unaffected because it comes from a real client-side
+`new Date().toLocaleTimeString()` call, which is correctly local by
+construction - never touching this bug at all, which is exactly why the
+two numbers diverged only on this one page's server-sourced fields.
+
+This was already correctly handled in exactly one place -
+`get_btc_price_chart()`'s own `resolve_at` (`+ "Z"`, added earlier this
+session) - which is why the BTC Live Ticker's own countdown/price-to-beat
+times were never wrong. The bug was in every OTHER real UTC timestamp
+this dashboard serializes that hadn't gotten the same treatment.
+
+Fixed by appending the real UTC marker (`+ "Z"`) to every affected
+field: `PricePredictionCalibration.run_at`, `PricePredictionLog.
+predicted_at`/`resolve_at` (`models.py`), and `CryptoCoinTradeHistory.
+opened_at`/`closed_at` (`models.py`), plus `get_latest_backtest_result()`'s
+own manually-built `run_at` string (`crypto_family_tree_bot.py`, feeds
+the Sell Advice panel's "Real backtest (date)" line). Deliberately did
+NOT touch `CryptoActivityEvent.created_at` - the Live Activity feed's
+own `timeAgo()` JS function already compensates for this exact same real
+gap by appending `+ 'Z'` at the call site, so fixing it at the model
+layer too would have double-appended and broken a value that already
+displays correctly today.
+
+Verified offline (`test_utc_timestamp_z_suffix.py`, new, 7 checks):
+each of the five now-fixed fields carries a real, browser-parseable UTC
+marker (`Z` or `+00:00`) in its serialized output, matching the exact
+real naive value plus `"Z"`; and a genuinely absent timestamp still
+serializes to real `None`, not a broken `"NoneZ"` string. Full existing
+BTC-projection regression suite re-run clean alongside it, confirming no
+existing test asserted the old (broken) bare-isoformat string shape.
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+compare the "Refreshed" time against the BTC panel's "Last checked" time
+and the Coin Trade History's individual trade timestamps to confirm they
+now all read the same real local time.
+
+---
+
+## Real bug found live: branch cards overlapping and covering each other on the Tree view
+
+Right after the previous fix, the account owner sent a screenshot: the
+root branch's card and the branch below it in the tree were visually on
+top of each other - buttons and balance figures overlapping, part of the
+POL branch's own content unreadable behind root's card.
+
+Root cause: `layoutTree()`/`renderTree()` (`family_tree_dashboard.html`)
+assumed every branch card was the SAME fixed height (`TREE_NODE_H`,
+246px) when computing where to position each node and draw its
+connector line - but a real card's actual rendered height varies: root
+alone carries an extra "🔒 Take profit now" button no other card has, and
+ANY card can grow with a real order-rejection banner or its own real
+position-info box (entry/target/stop). The moment a real card's true
+height exceeded that one fixed guess (confirmed exactly this in the
+screenshot - root's card, with its extra button plus other real content,
+was meaningfully taller than 246px), it visually overflowed past its
+assigned box and covered whatever the layout had already positioned
+directly below it.
+
+Fixed by measuring every branch's REAL rendered card height before
+computing any position, instead of assuming a constant: `renderTree()`
+now renders each real card off-screen first (`visibility:hidden`, fixed
+width, `height:auto`) and reads its true `offsetHeight`, then
+`layoutTree(branches, heights)` uses those real per-node heights - each
+row's vertical position is now based on the tallest REAL card at that
+depth, not a fixed guess. `TREE_NODE_H` is kept only as a defensive
+fallback if a real height measurement is ever unavailable.
+
+Verified with a standalone Node.js reproduction of the pure layout math
+(`test_tree_layout.js`, new, 6 checks - no DOM/browser available in this
+sandbox, so the layout algorithm itself was extracted and tested
+directly): reproduces the EXACT real scenario from the screenshot (a
+much-taller root card, a somewhat-taller child card) and confirms the
+child's real position never overlaps root's real bottom edge, with the
+correct gap preserved; directly proves the OLD fixed-height formula
+WOULD have overlapped on these same real heights (480px root vs. the old
+246px assumption), confirming this is a genuine fix and not a no-op;
+confirms uniform default heights reproduce the exact original
+(pre-bug) row spacing, so normal/smaller cards are unaffected; confirms
+siblings never horizontally overlap; and confirms a missing height
+measurement safely falls back to the real `TREE_NODE_H` constant rather
+than producing `NaN` positions. Also re-verified with a real Python
+`HTMLParser` tag-balance check and `node --check` on the extracted
+inline `<script>` block, same discipline as every other edit to this
+file this session.
+
+**Not yet confirmed live in an actual browser** - this sandbox has no
+way to render and screenshot the page; the account owner needs to
+redeploy and confirm the tree view no longer shows any card overlapping
+another, especially root's card next to its child.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

@@ -1115,44 +1115,77 @@ async function confirmUnlockProfit() {
 // branches root-to-child with connecting lines, not just indentation.
 // Branch counts here are small (single digits), so this simple version is
 // plenty; a squarified/Reingold-Tilford layout would be overkill.
+//
+// Real bug found live (account owner's own screenshot): every node used
+// to be assigned the SAME fixed height (TREE_NODE_H), but a real card's
+// actual height varies with its real state - root alone carries an extra
+// "Take profit now" button no other card has, and ANY card can grow with
+// a real order-rejection banner or its own real position-info box. Once a
+// real card's true rendered height exceeded that one fixed guess, it
+// visually spilled downward past its assigned box and overlapped
+// whatever the layout had already positioned right below it - exactly
+// what made the next branch unreadable. Fixed by measuring every real
+// card's actual rendered height first, then laying out row spacing off
+// those real numbers instead of a single guessed constant.
 const TREE_NODE_W = 230;
-const TREE_NODE_H = 246;
+const TREE_NODE_H = 246;  // fallback only, if a real height measurement is ever unavailable
 const TREE_SIBLING_GAP = 28;
 const TREE_LEVEL_GAP = 46;
 
-function layoutTree(branches) {
+function layoutTree(branches, heights) {
     const byParent = {};
     branches.forEach(b => {
         const key = b.parent_bot_name || '__root__';
         (byParent[key] = byParent[key] || []).push(b);
     });
 
+    // Real depth-of-every-node pass first, so the real max card height at
+    // each depth is known before any row's Y offset is computed - a
+    // shallower row's tallest real card determines how far down the NEXT
+    // row has to start, not a fixed per-node guess.
+    const depthOf = {};
+    function markDepth(node, depth) {
+        depthOf[node.bot_name] = depth;
+        (byParent[node.bot_name] || []).forEach(c => markDepth(c, depth + 1));
+    }
+    (byParent['__root__'] || []).forEach(r => markDepth(r, 0));
+
+    const maxDepth = branches.length ? Math.max(...branches.map(b => depthOf[b.bot_name] ?? 0)) : 0;
+    const rowHeight = new Array(maxDepth + 1).fill(TREE_NODE_H);
+    branches.forEach(b => {
+        const d = depthOf[b.bot_name] ?? 0;
+        rowHeight[d] = Math.max(rowHeight[d], heights[b.bot_name] || TREE_NODE_H);
+    });
+    const rowTop = [0];
+    for (let i = 1; i <= maxDepth; i++) {
+        rowTop[i] = rowTop[i - 1] + rowHeight[i - 1] + TREE_LEVEL_GAP;
+    }
+
     const positions = {};
     let cursorX = 0;
-    let maxDepth = 0;
 
     function place(node, depth) {
-        maxDepth = Math.max(maxDepth, depth);
         const children = byParent[node.bot_name] || [];
-        const y = depth * (TREE_NODE_H + TREE_LEVEL_GAP);
+        const y = rowTop[depth];
+        const h = heights[node.bot_name] || TREE_NODE_H;
 
         if (!children.length) {
             const x = cursorX;
             cursorX += TREE_NODE_W + TREE_SIBLING_GAP;
-            positions[node.bot_name] = { x, y, node };
+            positions[node.bot_name] = { x, y, h, node };
             return x + TREE_NODE_W / 2;
         }
 
         const centers = children.map(c => place(c, depth + 1));
         const center = (centers[0] + centers[centers.length - 1]) / 2;
-        positions[node.bot_name] = { x: center - TREE_NODE_W / 2, y, node };
+        positions[node.bot_name] = { x: center - TREE_NODE_W / 2, y, h, node };
         return center;
     }
 
     (byParent['__root__'] || []).forEach(r => place(r, 0));
 
     const width = Math.max(TREE_NODE_W, cursorX - TREE_SIBLING_GAP);
-    const height = (maxDepth + 1) * (TREE_NODE_H + TREE_LEVEL_GAP) - TREE_LEVEL_GAP;
+    const height = rowTop[maxDepth] + rowHeight[maxDepth];
     return { positions, width, height, byParent };
 }
 
@@ -1163,21 +1196,35 @@ function renderTree(branches) {
         return;
     }
 
-    const { positions, width, height, byParent } = layoutTree(branches);
+    // Real measurement pass: render every card off-screen at its real
+    // fixed width (height:auto) to read its true rendered height before
+    // any position is computed - see the real overlap bug this replaces,
+    // documented above layoutTree.
+    const measureDiv = document.createElement('div');
+    measureDiv.style.cssText = `position:absolute; visibility:hidden; left:-9999px; top:0; width:${TREE_NODE_W}px;`;
+    document.body.appendChild(measureDiv);
+    const heights = {};
+    branches.forEach(b => {
+        measureDiv.innerHTML = branchCardHtml(b);
+        heights[b.bot_name] = Math.max(measureDiv.offsetHeight, 1);
+    });
+    document.body.removeChild(measureDiv);
+
+    const { positions, width, height, byParent } = layoutTree(branches, heights);
 
     let lines = '';
-    Object.values(positions).forEach(({ x, y, node }) => {
+    Object.values(positions).forEach(({ x, y, h, node }) => {
         (byParent[node.bot_name] || []).forEach(child => {
             const c = positions[child.bot_name];
-            const px = x + TREE_NODE_W / 2, py = y + TREE_NODE_H;
+            const px = x + TREE_NODE_W / 2, py = y + h;
             const cx = c.x + TREE_NODE_W / 2, cy = c.y;
             const my = (py + cy) / 2;
             lines += `<path class="tree-line" d="M ${px} ${py} C ${px} ${my} ${cx} ${my} ${cx} ${cy}" />`;
         });
     });
 
-    const nodes = Object.values(positions).map(({ x, y, node }) =>
-        `<div class="tree-node" style="left:${x}px; top:${y}px; width:${TREE_NODE_W}px; height:${TREE_NODE_H}px;">${branchCardHtml(node)}</div>`
+    const nodes = Object.values(positions).map(({ x, y, h, node }) =>
+        `<div class="tree-node" style="left:${x}px; top:${y}px; width:${TREE_NODE_W}px; height:${h}px;">${branchCardHtml(node)}</div>`
     ).join('');
 
     container.style.width = width + 'px';

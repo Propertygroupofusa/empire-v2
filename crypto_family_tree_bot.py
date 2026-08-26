@@ -581,7 +581,11 @@ async def get_latest_backtest_result(product_id: str):
         "num_trades": row.num_trades,
         "win_rate": row.win_rate,
         "roi_pct_of_spend": row.roi_pct_of_spend,
-        "run_at": row.run_at.isoformat() if row.run_at else None,
+        # + "Z" - same real display bug as PricePredictionLog/
+        # PricePredictionCalibration in models.py: a naive UTC value with
+        # no timezone designator gets silently misread as the viewer's
+        # local time by the browser's Date parser.
+        "run_at": row.run_at.isoformat() + "Z" if row.run_at else None,
     }
 
 
