@@ -5664,6 +5664,66 @@ another, especially root's card next to its child.
 
 ---
 
+## Real bug fixed: peak-profit giveback could force-sell into a real loss labeled "locking in gains"
+
+Confirmed live earlier this session (see "do you think it was a good
+idea to sell that last Branch" above): a real SOLD event read "PEAK
+PROFIT GIVEBACK - locking in gains" but its actual settled P&L was
+**-$6.65** - a real loss, from an exit whose own label claimed the
+opposite. The account owner asked directly for this to be fixed.
+
+Root cause: the giveback-cap check (`peak_giveback >=
+MAX_PROFIT_GIVEBACK_USD`, `run_branch_cycle` in
+`crypto_family_tree_bot.py`) only ever compared GROSS dollars - raw
+price move x qty - against the real $3.75 cap. It never checked whether
+what's actually left, after the real round-trip Coinbase fee, is still
+a genuine profit. A position whose peak was small enough that giving
+back $3.75 of it left less than the real fee cost still force-sold,
+because the check never looked at that.
+
+Fixed by requiring a second, real condition before the giveback exit is
+allowed to fire: a projected net P&L, computed with the EXACT SAME real
+fee formula `_branch_sell_and_settle()` itself already uses to record
+the real settled P&L (`price * qty * (1 - ROUND_TRIP_FEE_RATE/2) -
+entry_price * qty`), must still be positive. If the dollar-giveback
+condition is met but the real fee-adjusted proceeds would be a loss, the
+position is NOT force-sold - it keeps running under its own real
+TARGET/STOP/breakeven protection instead, with a real log line
+explaining exactly why the giveback path was skipped this cycle
+(`"...holding under its own target/stop protection instead of
+force-selling into a loss labeled as a win"`) - the same "make it
+visible instead of silent" pattern already applied to the reinforcement-
+failure fix above. The real hard STOP-LOSS and real TARGET exits are
+both completely untouched - this only gates the giveback path
+specifically, and never weakens or removes any existing protection; a
+position that keeps losing is still bounded by its own real, unconditional
+stop, exactly as before.
+
+Verified offline (`test_giveback_net_of_fees.py`, new, 8 checks) against
+a real throwaway SQLite DB, reproducing the exact real math class that
+caused the live -$6.65 loss: a giveback that would realize a real net
+loss after fees correctly does NOT sell (position stays open, unchanged);
+a giveback whose real net proceeds are still genuinely positive still
+sells exactly as before this fix (regression check - the pre-existing,
+already-validated behavior is untouched); and a real STOP-LOSS hit still
+force-sells completely unconditionally regardless of this new fee gate,
+confirming the hard floor was never weakened. Full related regression
+suite (`test_flat_branch_avoids_excluded_coin.py`,
+`test_reinforcement_skips_excluded_coin.py`,
+`test_throne_respects_exclusion.py`) re-run clean alongside it.
+
+**Not yet confirmed against real live trading** - this is a real, live
+risk-logic change now shipped; its actual effect can only be judged by
+watching real positions over time, the same as every other live
+protection change in this file. A position that would previously have
+been force-sold at a small real loss will now instead keep running under
+target/stop protection until either a genuine profit reopens the
+giveback path, the real target is hit, or the real stop is hit - which
+could occasionally mean holding slightly longer through continued real
+price weakness before the hard stop eventually catches it.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

@@ -3139,7 +3139,34 @@ async def run_branch_cycle(bot_name: str) -> bool:
             position.peak_pct = unrealized_usd
             stored_peak = unrealized_usd
         peak_giveback = stored_peak - unrealized_usd
-        giveback_exceeded = stored_peak > 0 and peak_giveback >= MAX_PROFIT_GIVEBACK_USD
+
+        # Real bug found live: this exit is labeled "locking in gains,"
+        # but the dollar-giveback check above is purely GROSS (raw price
+        # move x qty) - it never checked whether what's actually left,
+        # AFTER the real round-trip Coinbase fee, is still genuinely a
+        # profit. Confirmed live: a position whose peak was small enough
+        # that giving back $3.75 of it left less than the real fee cost
+        # force-sold anyway, and the real settled P&L came back at -$6.65
+        # - a real loss, from an exit that called itself profit-locking.
+        # Fixed the same way the real TARGET exit's own min-profit floor
+        # already works: mirror _branch_sell_and_settle's own real fee
+        # formula here (half the round-trip rate, matching how the actual
+        # settlement computes real P&L) and only let the giveback path
+        # fire when the real, fee-adjusted proceeds would still be a
+        # genuine profit. If not, this exit is skipped entirely and the
+        # position keeps running under its own real TARGET/STOP/breakeven
+        # protection instead - never force-sold into a real loss dressed
+        # up as a win.
+        projected_net_pnl = (price * position.qty * (1 - ROUND_TRIP_FEE_RATE / 2)) - (position.entry_price * position.qty)
+        giveback_would_realize_loss = stored_peak > 0 and peak_giveback >= MAX_PROFIT_GIVEBACK_USD and projected_net_pnl <= 0
+        giveback_exceeded = stored_peak > 0 and peak_giveback >= MAX_PROFIT_GIVEBACK_USD and projected_net_pnl > 0
+        if giveback_would_realize_loss:
+            log.info(
+                f"[TREE] {bot_name}: peak-profit giveback cap reached (${peak_giveback:.2f} given back from "
+                f"${stored_peak:.2f} peak) but the real fee-adjusted proceeds right now would be a loss "
+                f"(${projected_net_pnl:.2f} net) - holding under its own target/stop protection instead of "
+                f"force-selling into a loss labeled as a win"
+            )
 
         if price >= position.target_price or price <= position.stop_price or giveback_exceeded:
             if price >= position.target_price:
