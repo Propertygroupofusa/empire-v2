@@ -4617,6 +4617,65 @@ is open, same as before retirement.
 
 ---
 
+## "Next Best Trade" panel added to the main Alpaca dashboard
+
+Per the account owner's explicit request - asking for a real "next best
+option" area sitting right under their existing open positions, so they can
+see and manually buy the strongest real candidate themselves if the bot
+hasn't gotten to it yet ("if my bot don't do it, I want to be able to see
+it... this is what I'm looking to buy for you next"). The stock/ETF backtest
+page already had an equivalent "Right now" eligibility column, but that
+lives on a separate page the account owner has to navigate to - this puts
+the same real, live-checked pick directly on `alpaca_dashboard.html`, right
+under Open Positions.
+
+`family_tree_dashboard.html`'s "🟢 What's bullish right now" coin watchlist
+(crypto side) already does the equivalent job over there - this is the
+direct Alpaca-side counterpart, reusing the existing real
+`GET /alpaca-overview/entry-eligibility` endpoint rather than adding a new
+one. That endpoint is a read-only dry run of the EXACT SAME real checks
+`manual_open_prop_position` ("Trade this") itself runs, in the same order -
+so this panel can never show a symbol as buyable that a real click would
+actually refuse, or vice versa.
+
+New `loadNextBestTrade()`/`renderNextBestTrade()`/`buyNextBestTrade()` in
+`alpaca_dashboard.html`: fetches `/alpaca-overview/entry-eligibility`,
+filters to symbols reporting `eligible: true`, and sorts by real RSI
+descending - the same ordering `prop_bot.py`'s own Pass 2 confidence rank
+(`rsi - MOMENTUM_RSI_ENTRY`) uses, since RSI itself already reflects how far
+past the 55 threshold a symbol is among candidates that already cleared
+both gates. Shows the single top pick prominently ("Best right now") plus
+up to 3 runners-up underneath, each with its own Buy button that calls the
+existing real `POST /alpaca-overview/trade-this/{ticker}` endpoint - same
+real order-placement path, same real risk checks, same confirm-dialog
+pattern already established on the backtest page's own "Trade this" button.
+
+**Deliberately does NOT join the page's existing 15s auto-refresh loop** -
+`entry-eligibility` sequentially fetches a real live quote/RSI for every
+symbol in the account's universe (~19 symbols today), which can take real
+seconds; polling that every 15s forever alongside everything else on the
+page would mean constant, unnecessary real Alpaca API load. Loads once on
+page open instead, plus a manual "🔄 Refresh" link right in the panel's own
+subtitle - same precedent the backtest page's own "Right now" column
+already established. Correctly shows a real "active trading is retired"
+message instead of fetching anything while `is_alpaca_passive_mode()` is
+on, and re-checks itself automatically right after a real buy fires (so the
+just-bought symbol - now "already holding a position" - drops out of the
+list without a manual refresh).
+
+Verified via a real Python `HTMLParser` tag-balance check (no mismatched or
+unclosed tags introduced) and `node --check` on the extracted inline
+`<script>` block (no syntax errors) - this file has no automated test
+harness of its own the way the Python backend does, so these were the real
+correctness checks available from this sandbox. **Not yet confirmed against
+real live Alpaca data** - needs the account owner to open
+`/alpaca-dashboard` after the next redeploy and confirm the panel populates
+with a real symbol (or correctly shows the empty state, since momentum
+setups are rare by design) and that a real Buy click places an order
+correctly.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

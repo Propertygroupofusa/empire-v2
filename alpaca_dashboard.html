@@ -209,6 +209,35 @@
     .close-btn:disabled { opacity: 0.5; cursor: default; }
     .no-date { color: var(--text-dim); font-style: italic; }
 
+    .buy-btn {
+        font-family: inherit;
+        background: var(--green-bg);
+        border: 1px solid var(--green);
+        color: var(--green);
+        padding: 6px 14px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.82em;
+        font-weight: 700;
+    }
+    .buy-btn:hover { background: var(--green); color: #fff; }
+    .buy-btn:disabled { opacity: 0.5; cursor: default; }
+
+    .pick-row {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 12px; padding: 12px 4px;
+    }
+    .pick-row + .pick-row { border-top: 1px solid var(--border); }
+    .pick-row.top { padding: 6px 4px 16px; }
+    .pick-sym { font-weight: 800; color: var(--navy); }
+    .pick-row.top .pick-sym { font-size: 1.3em; }
+    .pick-meta { font-size: 0.8em; color: var(--text-dim); margin-top: 2px; }
+    .pick-badge {
+        display: inline-block; font-size: 0.7em; font-weight: 700; letter-spacing: 0.3px;
+        text-transform: uppercase; color: var(--green); background: var(--green-bg);
+        border-radius: 20px; padding: 2px 9px; margin-left: 8px; vertical-align: 2px;
+    }
+
     .empty { text-align: center; color: var(--text-dim); padding: 30px; font-style: italic; }
 
     .narrative {
@@ -293,6 +322,17 @@
     </p>
     <div class="panel" style="padding:0; overflow-x:auto;">
         <div id="positions" style="padding: 8px 20px;"></div>
+    </div>
+
+    <div class="section-title">Next Best Trade</div>
+    <p class="panel-sub" id="next-trade-note" style="margin-bottom:10px;">
+        The strongest real setup right now that clears every entry check the bot itself uses (RSI above 55
+        <i>and</i> price above its 20-bar average) — sitting right here so you can buy it yourself if the bot
+        hasn't gotten to it yet. Doesn't auto-refresh with the rest of the page (checking pulls a live quote
+        for every symbol) — <a href="#" onclick="loadNextBestTrade(); return false;" style="color:var(--navy); font-weight:600;">🔄 Refresh</a>.
+    </p>
+    <div class="panel" id="next-trade-panel">
+        <div id="next-trade-content" class="empty">Loading…</div>
     </div>
 </div>
 
@@ -508,6 +548,103 @@ async function confirmResumeActiveTrading() {
     }
 }
 
+// Per the account owner's explicit request: a "next best trade" area right
+// under Open Positions, showing the strongest real momentum candidate right
+// now with a Buy button, in case the bot hasn't picked it up yet on its own.
+// Deliberately reuses the exact same real dry-run check the "Right now"
+// column on the backtest page and manual_open_prop_position (the actual
+// "Trade this" endpoint) both already use - this can never show a symbol as
+// ready that a real click would refuse, or vice versa.
+async function loadNextBestTrade() {
+    if (isAlpacaPassive) {
+        renderNextBestTrade({ passive: true });
+        return;
+    }
+    const el = document.getElementById('next-trade-content');
+    el.className = '';
+    el.innerHTML = 'Checking every symbol\'s real live RSI and moving average…';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-overview/entry-eligibility', {
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const picks = Object.entries(data.tickers || {})
+            .filter(([, info]) => info.eligible)
+            .map(([ticker, info]) => ({ ticker, rsi: info.rsi }))
+            .sort((a, b) => (b.rsi || 0) - (a.rsi || 0));
+        renderNextBestTrade({ picks });
+    } catch (e) {
+        renderNextBestTrade({ error: e.message });
+    }
+}
+
+function renderNextBestTrade(state) {
+    const el = document.getElementById('next-trade-content');
+    if (state.passive) {
+        el.className = 'empty';
+        el.innerHTML = 'Active trading is retired right now, so nothing is eligible to buy here — resume it above first.';
+        return;
+    }
+    if (state.error) {
+        el.className = 'empty';
+        el.textContent = 'Could not check: ' + state.error;
+        return;
+    }
+    const picks = state.picks || [];
+    if (picks.length === 0) {
+        el.className = 'empty';
+        el.innerHTML = 'Nothing clears every entry check right now — momentum setups are rare by design. Hit Refresh in a bit.';
+        return;
+    }
+    el.className = '';
+    const top = picks[0];
+    const runners = picks.slice(1, 4);
+    el.innerHTML = `
+        <div class="pick-row top">
+            <div>
+                <span class="pick-sym">${top.ticker}</span><span class="pick-badge">Best right now</span>
+                <div class="pick-meta">RSI ${top.rsi != null ? top.rsi.toFixed(1) : '—'} · clears both entry gates</div>
+            </div>
+            <button class="buy-btn" id="buy-${top.ticker}" onclick="buyNextBestTrade('${top.ticker}', this)" style="font-size:0.95em; padding:8px 18px;">Buy</button>
+        </div>
+        ${runners.map(p => `
+            <div class="pick-row">
+                <div>
+                    <span class="pick-sym">${p.ticker}</span>
+                    <div class="pick-meta">RSI ${p.rsi != null ? p.rsi.toFixed(1) : '—'}</div>
+                </div>
+                <button class="buy-btn" id="buy-${p.ticker}" onclick="buyNextBestTrade('${p.ticker}', this)">Buy</button>
+            </div>
+        `).join('')}
+    `;
+}
+
+async function buyNextBestTrade(ticker, btn) {
+    if (!confirm(`Place a real long market order on ${ticker} right now, on the real Alpaca account? This runs through the same real risk checks the automatic entries use, but places a real trade and can't be undone.`)) return;
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Placing…';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-overview/trade-this/' + encodeURIComponent(ticker), {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        btn.textContent = '✓ Opened';
+        alert(`Bought ${ticker}: ${data.qty} shares @ ${fmtUsd(data.entry_price)} (${data.contract})`);
+        await refresh();
+        await loadNextBestTrade();
+    } catch (e) {
+        btn.disabled = false;
+        btn.textContent = originalText;
+        alert('Could not place a trade on ' + ticker + ': ' + e.message);
+    }
+}
+
 async function refresh() {
     const statusEl = document.getElementById('status');
     try {
@@ -540,6 +677,7 @@ async function refresh() {
         }
 
         renderGauge('goal-gauge', data.progress_to_goal_pct, fmtUsd(data.equity) + ' of ' + fmtUsd(data.goal));
+        isAlpacaPassive = !!data.alpaca_passive_mode;
         renderPassiveModeBanner(data);
 
         const bots = data.bots || [];
@@ -550,6 +688,18 @@ async function refresh() {
 
         statusEl.textContent = 'Last updated ' + new Date().toLocaleTimeString();
         statusEl.className = '';
+
+        // Loaded once here (not on the 15s auto-refresh loop) - checking
+        // pulls a real live quote per symbol from Alpaca sequentially, so
+        // polling it as often as the rest of the page would mean real,
+        // unnecessary API load every 15s forever. Use the manual Refresh
+        // link above the panel to check again on demand.
+        if (!nextTradeLoadedOnce) {
+            nextTradeLoadedOnce = true;
+            loadNextBestTrade();
+        } else if (isAlpacaPassive) {
+            renderNextBestTrade({ passive: true });
+        }
     } catch (e) {
         statusEl.textContent = 'Error: ' + e.message;
         statusEl.className = 'error';
@@ -562,6 +712,8 @@ async function refresh() {
 // independent principal pools, so there's nothing meaningful an
 // "add to a bucket" action could do here.
 let currentLockedUsd = 0;
+let isAlpacaPassive = false;
+let nextTradeLoadedOnce = false;
 
 function updateUnlockButtonState() {
     const btn = document.getElementById('unlock-profit-btn');
