@@ -65,6 +65,14 @@
         border: none; background: none; color: var(--navy); text-decoration: underline;
         cursor: pointer; font-size: 1em; padding: 0;
     }
+    .promote-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+    .promote-btn {
+        padding: 8px 14px; border: 1px solid var(--gold); border-radius: 6px; font-size: 0.82em; font-weight: 700;
+        cursor: pointer; background: var(--gold-bg); color: var(--gold); white-space: nowrap;
+    }
+    .promote-btn:hover { background: var(--gold); color: #fff; }
+    .promote-btn:disabled { opacity: 0.55; cursor: default; background: var(--gold-bg); color: var(--gold); }
+    .promote-btn.is-live { background: var(--gold); color: #fff; cursor: default; }
 </style>
 </head>
 <body>
@@ -111,6 +119,7 @@
     </div>
     <button class="run-btn" id="entrySignalBtn" onclick="runEntrySignalAbTest()">▶ Run Entry-Signal A/B/C/D Test (real data, ~30-60 seconds)</button>
     <div id="entrySignalStatus"></div>
+    <div id="liveVariantBadge" style="margin-top:14px;font-size:0.85em;color:var(--text-dim);"></div>
     <div id="entrySignalResults"></div>
 </div>
 
@@ -477,6 +486,32 @@ function renderCombinedComparison(data) {
     `;
 }
 
+let currentLiveVariant = null;
+
+async function loadLiveEntryVariant() {
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-overview', {
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        currentLiveVariant = data.entry_variant || 'A';
+    } catch (e) {
+        currentLiveVariant = null;
+    }
+    renderLiveVariantBadge();
+}
+
+function renderLiveVariantBadge() {
+    const el = document.getElementById('liveVariantBadge');
+    if (!currentLiveVariant) {
+        el.textContent = '';
+        return;
+    }
+    el.innerHTML = `🎯 Currently live on the real account: <strong style="color:var(--gold)">Variant ${currentLiveVariant}</strong>`;
+}
+
 async function runEntrySignalAbTest() {
     const btn = document.getElementById('entrySignalBtn');
     const statusEl = document.getElementById('entrySignalStatus');
@@ -489,10 +524,13 @@ async function runEntrySignalAbTest() {
 
     try {
         const key = getAdminKey();
-        const res = await fetch(API_BASE + '/alpaca-selection-backtest/entry-signal-ab-test', {
-            method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
-        });
+        const [res] = await Promise.all([
+            fetch(API_BASE + '/alpaca-selection-backtest/entry-signal-ab-test', {
+                method: 'POST',
+                headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            }),
+            loadLiveEntryVariant(),
+        ]);
         if (res.status === 401 || res.status === 403) {
             localStorage.removeItem(KEY_STORAGE);
             adminKey = '';
@@ -508,6 +546,40 @@ async function runEntrySignalAbTest() {
     } finally {
         btn.disabled = false;
         btn.textContent = '▶ Run Entry-Signal A/B/C/D Test (real data, ~30-60 seconds)';
+    }
+}
+
+async function promoteEntryVariant(variant, btn) {
+    if (!confirm(
+        `Promote Variant ${variant} to the LIVE Alpaca bot? From its next cycle onward, prop_bot.py's real automatic entries ` +
+        `(and manual "Trade this" clicks) will require this exact rule instead of whatever's live now. This is a real, ` +
+        `immediate change to how real money gets traded - not a backtest.`
+    )) return;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Promoting...';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-overview/set-entry-variant', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ variant }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        currentLiveVariant = data.entry_variant;
+        renderLiveVariantBadge();
+        document.querySelectorAll('.promote-btn').forEach(b => {
+            const isLive = b.dataset.variant === currentLiveVariant;
+            b.classList.toggle('is-live', isLive);
+            b.disabled = isLive;
+            b.textContent = isLive ? `✓ Live now` : `Promote ${b.dataset.variant} to live`;
+        });
+        alert(`Variant ${variant} is now live. Takes effect on the bot's very next cycle.`);
+    } catch (e) {
+        btn.disabled = false;
+        btn.textContent = original;
+        alert('Could not promote: ' + e.message);
     }
 }
 
@@ -563,6 +635,19 @@ function renderEntrySignalAbTest(data) {
             gate changes, so this isolates entry-signal quality. Sharpe/Sortino here are real per-trade ratios computed from
             each variant's own trade-return series, not an annualized figure - useful for comparing the 4 variants against
             each other, not as a standalone number to quote elsewhere.
+        </p>
+        <p style="margin-top:20px;font-weight:700;">Push a variant to the live bot:</p>
+        <div class="promote-row">
+            ${names.map(n => {
+                const letter = n.trim().charAt(0);
+                const isLive = letter === currentLiveVariant;
+                return `<button class="promote-btn${isLive ? ' is-live' : ''}" data-variant="${letter}" ${isLive ? 'disabled' : ''}
+                    onclick="promoteEntryVariant('${letter}', this)">${isLive ? '✓ Live now' : `Promote ${letter} to live`}</button>`;
+            }).join('')}
+        </div>
+        <p style="margin-top:8px;font-size:0.78em;color:var(--text-dim);">
+            A real, immediate change to the live bot's entries - takes effect on its very next cycle, no restart needed. Only
+            these 4 tested combinations can ever be promoted - there's no way to push an untested mix of filters.
         </p>
     `;
 }

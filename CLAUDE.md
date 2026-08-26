@@ -4877,6 +4877,91 @@ out-of-sample improvement.
 
 ---
 
+## One-click promotion of a backtested entry variant (A/B/C/D) to the live Alpaca bot
+
+Per the account owner's explicit request, right after the entry-signal A/B/C/D
+tool shipped: "I'll get to see what they doing then switch to that [variant]
+that's doing the best and I can push to live put that visual in the
+dashboard." The backtest tool answers "which variant is best" - this closes
+the loop by letting the account owner act on that answer directly from the
+dashboard, without a manual code change and redeploy every time.
+
+**`get_live_entry_variant()`/`set_live_entry_variant()`** (`prop_bot.py`) -
+DB-persisted (same generic `TradingBotState` bucket `is_alpaca_passive_mode()`
+and every other real-time flag in this file already use, not a Railway env
+var - avoids the exact stray-quote-character class of bug that silently
+disabled the crypto coordinator earlier this session). Stores one of exactly
+`["A", "B", "C", "D"]` - deliberately restricted to the 4 combinations
+`alpaca_selection_backtest.py`'s `ENTRY_VARIANTS` actually tested, so there is
+no way to promote an untested combination of filters. Defaults to `"A"`
+(today's original rule, unchanged) when never explicitly set, so a fresh
+deployment never silently runs something unvalidated.
+
+**`check_momentum_entry_gate(data, variant)`** (`prop_bot.py`, new) - the ONE
+real function every entry path now shares, replacing three separately-
+maintained copies of the same logic that were already at real risk of
+drifting apart:
+1. The automatic Pass 2 scan (`run_prop_cycle`) - reads
+   `get_live_entry_variant()` once per cycle, then calls this for every
+   candidate symbol.
+2. `manual_open_prop_position` ("Trade this") - previously had its own
+   inline `if price <= sma20` check; now calls the same shared function.
+3. `alpaca_entry_eligibility` (the "Right now" dry-run column) - previously
+   had its own duplicate inline check; now calls the same shared function.
+
+All three now read the same live variant and can never disagree about
+whether a symbol is currently buyable.
+
+**`get_price_momentum()` extended** to also compute and return `rsi_prev`
+(RSI one real 15-min bar back) and `sma20_prev` (SMA20 `SMA_SLOPE_LOOKBACK_BARS`
+real bars back, matching the backtest's own constant) - both `None`-safe and
+only ever consulted when the live variant actually requires "rising"
+confirmation (B/C/D), so variant A's behavior is byte-for-byte unchanged
+from before this feature existed.
+
+New `POST /api/trading-dashboard/alpaca-overview/set-entry-variant`
+(admin-key gated, `{"variant": "A"|"B"|"C"|"D"}`) and a "Push a variant to
+the live bot" button row under the entry-signal test's results on
+`alpaca_selection_backtest.html` - one gold-styled `.promote-btn` per
+variant, the currently-live one shown disabled as "✓ Live now". A real
+confirm dialog names exactly what's about to change before it fires (this
+is real automatic order placement, not a backtest). Takes effect on the
+bot's very next cycle - no restart needed.
+
+**The visual, on the main dashboard** - `alpaca-overview`'s response payload
+now includes `entry_variant`, and `alpaca_dashboard.html` shows a small
+"🎯 Live entry rule: Variant X" badge right under the header, linking back to
+the backtest page to compare or promote a different one - so the account
+owner can see at a glance which rule is actually live without having to
+remember or dig through the backtest page.
+
+Verified offline (`test_live_entry_variant_promotion.py`, new) against a
+real throwaway SQLite DB: `get_live_entry_variant()`/`set_live_entry_variant()`
+round-trip correctly and default to `"A"`; `set_live_entry_variant()` rejects
+an unknown variant string; `check_momentum_entry_gate()` correctly
+implements all 4 variants (A passes on the base gate alone; B blocks a real
+falling-RSI case even though it clears the base >55 threshold and allows a
+genuinely rising one; C additionally blocks a non-rising SMA20; D
+additionally blocks a real 30%-overextended entry) - matching the exact
+same logic already validated in the backtest's own
+`_replay_symbol_momentum_variant()`. Most importantly, a real **no-drift**
+test: with the live variant set to B and a mocked falling-RSI symbol, the
+`alpaca_entry_eligibility` dry-run correctly reports it ineligible, AND a
+real call to `manual_open_prop_position` on the same symbol is ALSO
+refused, for the exact same reason - proving the three call sites can no
+longer disagree with each other. Full existing regression suite
+(`test_alpaca_entry_eligibility.py`, `test_manual_trade_this_stock.py`,
+`test_live_momentum_swap.py`, the new entry-signal A/B/C/D test) re-run
+clean alongside it - variant A's default behavior is provably unchanged.
+
+**Not yet confirmed against real live trading outcomes** - the account
+owner needs to run the entry-signal backtest on real data first (still
+pending from the previous entry above), then use the new promote buttons
+to push whichever variant the real evidence favors - this feature only
+provides the mechanism, it doesn't recommend which variant to pick.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

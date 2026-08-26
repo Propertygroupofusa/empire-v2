@@ -1689,10 +1689,12 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
 
     locked_usd = round(await get_alpaca_locked_usd(), 2)
     alpaca_passive_mode = await prop_bot_module.is_alpaca_passive_mode() if prop_bot_module else False
+    entry_variant = await prop_bot_module.get_live_entry_variant() if prop_bot_module else "A"
 
     return {
         "equity": round(equity, 2),
         "alpaca_passive_mode": alpaca_passive_mode,
+        "entry_variant": entry_variant,
         "cash": round(cash, 2),
         "session_pl": round(session_pl, 2),
         "session_pl_pct": round(session_pl_pct, 2),
@@ -1943,6 +1945,37 @@ async def resume_alpaca_active_trading():
     return {"status": "active_trading_resumed", "was_passive": was_passive, "passive_mode": False}
 
 
+class SetEntryVariantRequest(BaseModel):
+    variant: str
+
+
+@router.post("/alpaca-overview/set-entry-variant", dependencies=[Depends(require_admin_key)])
+async def set_alpaca_entry_variant(payload: SetEntryVariantRequest):
+    """Promotes one of the 4 real, backtested entry-gate variants (see
+    alpaca_selection_backtest.py's ENTRY_VARIANTS / run_entry_signal_ab_test,
+    and prop_bot.py's check_momentum_entry_gate which actually enforces
+    whichever one is live) to production - per the account owner's explicit
+    request to see the real backtest results, then push whichever variant
+    performs best straight to the live bot from the dashboard, without a
+    manual code change each time.
+
+    Deliberately restricted to exactly the 4 combinations the backtest tool
+    itself tested (A/B/C/D, each cumulative on the previous) - there is no
+    way to request an untested combination of filters, so the live bot can
+    never end up running something that was never actually validated. Takes
+    effect on prop_bot.py's very next cycle - no restart needed, same as
+    every other real-time flag in this codebase (STOP_TRADING, passive
+    mode)."""
+    if prop_bot_module is None:
+        raise HTTPException(status_code=500, detail="prop_bot module not available")
+    variant = payload.variant.strip().upper()
+    if variant not in prop_bot_module.ENTRY_VARIANT_LEVELS:
+        raise HTTPException(status_code=400, detail=f"variant must be one of {prop_bot_module.ENTRY_VARIANT_LEVELS}, got {payload.variant!r}")
+    await prop_bot_module.set_live_entry_variant(variant)
+    log.info(f"[dashboard] 🎯 Live Alpaca entry variant promoted to '{variant}'")
+    return {"status": "promoted", "entry_variant": variant}
+
+
 class AlpacaUnlockProfitRequest(BaseModel):
     amount: float
 
@@ -2044,16 +2077,17 @@ async def manual_open_prop_position(ticker: str):
         if not is_valid:
             raise HTTPException(status_code=400, detail=f"Mandate check failed: {mandate_reason}")
 
-        # Momentum's other real condition - validate_entry only checks
-        # RSI direction, so this second real condition (price above its
-        # own 20-bar average) is checked here too, matching the automatic
-        # entry path's Pass 2 exactly, so a manual click can never enter
-        # something the live logic itself wouldn't.
-        if price <= sma20:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Mandate check failed: price ${price:.2f} not above its own 20-bar average ${sma20:.2f} - not real momentum yet",
-            )
+        # Reuses the exact same real gate (check_momentum_entry_gate) the
+        # automatic Pass 2 scan and the "Right now" eligibility dry-run
+        # both call - covers momentum's price>SMA20 condition (which
+        # validate_entry's mandate check above doesn't) plus whichever
+        # variant (A/B/C/D - see get_live_entry_variant) is currently
+        # promoted to live, so a manual click can never enter something
+        # the live logic itself wouldn't.
+        live_variant = await pb.get_live_entry_variant()
+        gate_ok, gate_reason = pb.check_momentum_entry_gate(price_data, live_variant)
+        if not gate_ok:
+            raise HTTPException(status_code=400, detail=f"Mandate check failed: {gate_reason}")
 
         is_safe, safety_reason = pb.check_margin_safety(buying_power, equity, len(pb.open_prop_positions))
         if not is_safe:
@@ -2136,6 +2170,7 @@ async def alpaca_entry_eligibility():
                 if not is_safe:
                     shared_block_reason = f"Margin safety check failed: {safety_reason}"
 
+        live_variant = await pb.get_live_entry_variant()
         results = {}
         for contract, config in pb.FUTURES.items():
             ticker = config["symbol"]
@@ -2159,17 +2194,19 @@ async def alpaca_entry_eligibility():
                 continue
 
             rsi = price_data["rsi"]
-            price = price_data["price"]
-            sma20 = price_data.get("sma20") or price
             total_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in pb.open_prop_positions.values())
             is_valid, mandate_reason = pb.validate_entry(
                 bot_name="prop_bot", symbol=contract, rsi=rsi, volume_ratio=1.0,
                 buying_power=buying_power, open_positions=len(pb.open_prop_positions),
                 total_notional=total_notional, equity=equity,
             )
-            if is_valid and price <= sma20:
-                is_valid = False
-                mandate_reason = f"Price ${price:.2f} not above its own 20-bar average ${sma20:.2f} - not real momentum yet"
+            if is_valid:
+                # Reuses the exact same real gate check_momentum_entry_gate
+                # the automatic Pass 2 scan and manual_open_prop_position
+                # both call - covers price>SMA20 plus whichever variant is
+                # currently live, so this preview can never show a symbol
+                # as eligible that a real click would actually refuse.
+                is_valid, mandate_reason = pb.check_momentum_entry_gate(price_data, live_variant)
             results[ticker] = {"eligible": is_valid, "reason": None if is_valid else mandate_reason, "rsi": rsi}
 
     return {"tickers": results}

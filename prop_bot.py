@@ -618,6 +618,91 @@ MOMENTUM_SMA_PERIOD = 20
 MOMENTUM_TRAIL_PCT = 0.03
 MOMENTUM_MAX_HOLD_SECONDS = 86400  # 24 real hours - a backstop only, not the primary exit
 
+# Real, backtested entry-gate variants (see alpaca_selection_backtest.py's
+# ENTRY_VARIANTS / run_entry_signal_ab_test) - cumulative, each level adds
+# one more real filter on top of the previous. Values match exactly what
+# the backtest actually tested, so promoting a variant to live can never
+# run an untested combination.
+ENTRY_VARIANT_LEVELS = ["A", "B", "C", "D"]
+SMA_SLOPE_LOOKBACK_BARS = 4  # ~1 real hour on 15-min bars, matching alpaca_selection_backtest.py's SMA_SLOPE_LOOKBACK_BARS
+MAX_EXTENSION_PCT = 0.03  # matching alpaca_selection_backtest.py's MAX_EXTENSION_PCT
+ALPACA_ENTRY_VARIANT_KEY = "alpaca_entry_variant"
+
+
+async def get_live_entry_variant() -> str:
+    """Which of the 4 real, backtested entry-gate variants (A = today's
+    original rule, B/C/D layer on RSI-rising / SMA20-rising / an
+    overextension cap) the live bot currently requires. DB-persisted
+    (same generic TradingBotState bucket is_alpaca_passive_mode() and
+    every other real-time flag in this file already uses) rather than a
+    Railway env var - avoids the exact stray-quote-character class of bug
+    that silently disabled the crypto coordinator earlier this session.
+    Defaults to "A" (today's live rule, unchanged) if never explicitly
+    promoted - a fresh deployment never silently runs an unvalidated
+    variant."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == ALPACA_ENTRY_VARIANT_KEY))
+        row = result.scalar_one_or_none()
+        if row is None or row.base_capital is None:
+            return "A"
+        level = int(row.base_capital)
+        if 0 <= level < len(ENTRY_VARIANT_LEVELS):
+            return ENTRY_VARIANT_LEVELS[level]
+        return "A"
+
+
+async def set_live_entry_variant(variant: str):
+    if variant not in ENTRY_VARIANT_LEVELS:
+        raise ValueError(f"unknown entry variant {variant!r} - must be one of {ENTRY_VARIANT_LEVELS}")
+    level = float(ENTRY_VARIANT_LEVELS.index(variant))
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == ALPACA_ENTRY_VARIANT_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = TradingBotState(bot_name=ALPACA_ENTRY_VARIANT_KEY, base_capital=level)
+            db.add(row)
+        else:
+            row.base_capital = level
+        await db.commit()
+
+
+def check_momentum_entry_gate(data: dict, variant: str):
+    """The ONE real place every entry path (the automatic Pass 2 scan,
+    manual_open_prop_position's "Trade this", and alpaca_entry_eligibility's
+    "Right now" dry-run in routers/trading_dashboard.py) evaluates the
+    momentum entry gate - so all three can never drift out of sync with
+    each other or with whichever variant is currently promoted to live.
+    Returns (passes: bool, reason: str). `data` is get_price_momentum()'s
+    real return dict (price/rsi/sma20/rsi_prev/sma20_prev)."""
+    price = data["price"]
+    rsi = data["rsi"]
+    sma20 = data.get("sma20") or price
+
+    if not (rsi > MOMENTUM_RSI_ENTRY and price > sma20):
+        return False, (
+            f"RSI {rsi:.1f} not above {MOMENTUM_RSI_ENTRY} or price ${price:.2f} not above its own "
+            f"20-bar average ${sma20:.2f}"
+        )
+
+    if variant in ("B", "C", "D"):
+        rsi_prev = data.get("rsi_prev")
+        if rsi_prev is None or not (rsi > rsi_prev):
+            rsi_prev_str = f"{rsi_prev:.1f}" if rsi_prev is not None else "unknown"
+            return False, f"RSI {rsi:.1f} isn't rising (was {rsi_prev_str} the prior bar) - variant {variant} requires real upward RSI momentum, not just a level above {MOMENTUM_RSI_ENTRY}"
+
+    if variant in ("C", "D"):
+        sma20_prev = data.get("sma20_prev")
+        if sma20_prev is None or not (sma20 > sma20_prev):
+            sma20_prev_str = f"${sma20_prev:.2f}" if sma20_prev is not None else "unknown"
+            return False, f"SMA20 isn't rising (now ${sma20:.2f} vs {sma20_prev_str} ~1h ago) - variant {variant} requires a real rising trend, not just RSI momentum"
+
+    if variant == "D":
+        extension_pct = (price - sma20) / sma20 if sma20 else 0.0
+        if extension_pct > MAX_EXTENSION_PCT:
+            return False, f"price is {extension_pct * 100:.1f}% above its own SMA20 - variant D refuses an entry already this stretched (cap {MAX_EXTENSION_PCT * 100:.0f}%)"
+
+    return True, "OK"
+
 
 async def get_price_momentum(session, symbol):
     """The live counterpart to get_price_rsi() above, but on real 15-min
@@ -668,20 +753,40 @@ async def get_price_momentum(session, symbol):
             closes = [b["c"] for b in bars]
             price = closes[-1]
 
-            period = 14
-            gains = [max(closes[i] - closes[i - 1], 0) for i in range(1, len(closes))]
-            losses = [max(closes[i - 1] - closes[i], 0) for i in range(1, len(closes))]
-            avg_gain = sum(gains[-period:]) / period
-            avg_loss = sum(losses[-period:]) / period
-            rs = avg_gain / avg_loss if avg_loss > 0 else 100
-            rsi = 100 - (100 / (1 + rs))
+            def _rsi_of(cs, period=14):
+                if len(cs) < period + 1:
+                    return None
+                gains = [max(cs[i] - cs[i - 1], 0) for i in range(1, len(cs))]
+                losses = [max(cs[i - 1] - cs[i], 0) for i in range(1, len(cs))]
+                avg_gain = sum(gains[-period:]) / period
+                avg_loss = sum(losses[-period:]) / period
+                rs = avg_gain / avg_loss if avg_loss > 0 else 100
+                return 100 - (100 / (1 + rs))
+
+            rsi = _rsi_of(closes)
+            # RSI/SMA one real bar (rsi_prev) / SMA_SLOPE_LOOKBACK_BARS bars
+            # (sma20_prev) back - only ever consulted by
+            # check_momentum_entry_gate() when the live variant actually
+            # requires "rising" confirmation (B/C/D); None-safe otherwise so
+            # variant A's behavior is completely unchanged.
+            rsi_prev = _rsi_of(closes[:-1]) if len(closes) > 1 else None
 
             sma20 = sum(closes[-MOMENTUM_SMA_PERIOD:]) / MOMENTUM_SMA_PERIOD
+            sma20_prev = None
+            if len(closes) >= MOMENTUM_SMA_PERIOD + SMA_SLOPE_LOOKBACK_BARS:
+                prev_closes = closes[:-SMA_SLOPE_LOOKBACK_BARS]
+                sma20_prev = sum(prev_closes[-MOMENTUM_SMA_PERIOD:]) / MOMENTUM_SMA_PERIOD
+
             trend = "bullish" if price > sma20 else "bearish"
             momentum = ((price - closes[-3]) / closes[-3]) * 100 if len(closes) >= 3 and closes[-3] > 0 else 0
 
             _price_rsi_last_failure.pop(symbol, None)
-            return {"price": price, "rsi": round(rsi, 1), "trend": trend, "momentum": round(momentum, 2), "sma20": sma20}
+            return {
+                "price": price, "rsi": round(rsi, 1) if rsi is not None else None,
+                "trend": trend, "momentum": round(momentum, 2), "sma20": sma20,
+                "rsi_prev": round(rsi_prev, 1) if rsi_prev is not None else None,
+                "sma20_prev": sma20_prev,
+            }
     except Exception as e:
         log.error(f"Momentum price error {symbol}: {e}")
         _price_rsi_last_failure[symbol] = f"{type(e).__name__}: {e}"
@@ -1631,6 +1736,12 @@ async def run_prop_cycle():
             await asyncio.sleep(0.3)
 
         # ── Pass 2: new entries, with rotation if already at the cap ─────
+        # Which of the 4 real, backtested entry variants (see
+        # get_live_entry_variant's docstring) is currently promoted to
+        # live - read once per cycle, not once per symbol. Defaults to
+        # "A" (today's original rule) until the account owner explicitly
+        # promotes a different one from the backtest page.
+        live_entry_variant = await get_live_entry_variant()
         candidates = []
         for contract, config in FUTURES.items():
             # Skip non-crypto symbols during after-hours
@@ -1642,19 +1753,15 @@ async def run_prop_cycle():
             price, rsi, trend = data["price"], data["rsi"], data["trend"]
             momentum = data.get("momentum", 0)
 
-            # Momentum Entry Validation - buy real, confirmed strength
-            # (RSI above MOMENTUM_RSI_ENTRY AND price above its own real
-            # 20-bar average - both required), the opposite signal
-            # direction from mean-reversion's oversold check this
-            # replaced. Long-only, matching this account's real shorting-
-            # disabled constraint (unchanged from before).
-            sma20 = data.get("sma20") or price  # fallback to price if unavailable
-            direction = "long" if (rsi > MOMENTUM_RSI_ENTRY and price > sma20) else "hold"
-            should_enter = direction != "hold"
-            reason = "OK" if should_enter else (
-                f"RSI {rsi:.1f} not above {MOMENTUM_RSI_ENTRY} or price ${price:.2f} not above its own "
-                f"20-bar average ${sma20:.2f}"
-            )
+            # Momentum Entry Validation - reuses the exact same real gate
+            # (check_momentum_entry_gate) the manual "Trade this" endpoint
+            # and the "Right now" eligibility dry-run both call, so all
+            # three can never drift out of sync with each other or with
+            # whichever variant is currently live. Long-only, matching
+            # this account's real shorting-disabled constraint (unchanged
+            # from before).
+            should_enter, reason = check_momentum_entry_gate(data, live_entry_variant)
+            direction = "long" if should_enter else "hold"
 
             if should_enter:
                 # Real momentum signal: record confidence as how far above
