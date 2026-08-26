@@ -1697,6 +1697,7 @@ function renderBtcPredictionLog(data) {
     wrap.innerHTML = preds.map(p => {
         const madeAt = new Date(p.predicted_at).toLocaleTimeString([], timeFmt);
         let statusHtml;
+        const targetColor = (p.resolved && p.hit_1sigma) ? 'var(--green)' : 'var(--text)';
         if (!p.resolved) {
             const resolveAt = new Date(p.resolve_at).toLocaleTimeString([], timeFmt);
             statusHtml = `<span style="color:var(--text-dim);">&#8987; Pending (resolves ${resolveAt})</span>`;
@@ -1706,7 +1707,7 @@ function renderBtcPredictionLog(data) {
             statusHtml = `<span style="color:var(--red); font-weight:700;">&#10060; MISS</span> - actual ${fmtBtc(p.actual_price)} (${p.abs_error_pct}% off)`;
         }
         return `<div style="display:flex; justify-content:space-between; gap:10px; padding:7px 0; border-bottom:1px solid var(--border); font-size:0.82em; flex-wrap:wrap;">
-            <div><strong>${madeAt}</strong> predicted ${fmtBtc(p.projected_price)} <span style="color:var(--text-dim);">(&plusmn;1&sigma; ${fmtBtc(p.band_1sigma_low)}&ndash;${fmtBtc(p.band_1sigma_high)})</span></div>
+            <div><strong>${madeAt}</strong> predicted <strong style="color:${targetColor};">${fmtBtc(p.projected_price)}</strong> <span style="color:var(--text-dim);">(&plusmn;1&sigma; ${fmtBtc(p.band_1sigma_low)}&ndash;${fmtBtc(p.band_1sigma_high)})</span></div>
             <div>${statusHtml}</div>
         </div>`;
     }).join('');
