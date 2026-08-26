@@ -437,3 +437,195 @@ async def run_momentum_vs_mean_reversion_comparison(contract_codes=None, days: i
         },
         "symbol_breakdown": rows,
     }
+
+
+# ============================================================================
+# COMBINED DUAL-STRATEGY BACKTEST - momentum AND mean-reversion running
+# TOGETHER, sharing one real capital pool (shadow mode, additive only)
+# ============================================================================
+# Real account owner question, after seeing the momentum-vs-mean-reversion
+# comparison above: "they together looks like it'll make a whole lot more
+# money... are we putting them together?" run_momentum_vs_mean_reversion_
+# comparison() above replays each ruleset INDEPENDENTLY, each with its own
+# always-available $150/trade - the right way to answer "which ruleset is
+# better," but not the right way to answer "would running both AT ONCE make
+# more money," since a real account sharing one pool of cash can't spend the
+# same dollar twice. This answers that second question directly: merges
+# every symbol's real bars onto ONE shared timeline, in true chronological
+# order (not per-symbol independently), and runs BOTH entry gates against a
+# SINGLE real cash pool - a new signal can only open a position if there's
+# genuinely enough free capital left, same as a real account actually
+# working both strategies at once.
+#
+# Two real numbers come out of this, not one:
+# - "unconstrained": the pool is set absurdly large so capital never binds -
+#   the closest real answer to "if money were never the limit." Even this
+#   isn't a naive sum of the two strategies' standalone totals above: since
+#   momentum only enters when RSI > 55 and mean-reversion only enters when
+#   RSI < 40, the SAME symbol can never be claimed by both at once, but two
+#   real bots independently trading the same real symbol at genuinely
+#   different times would still just be one real position in one real
+#   account - this replay picks whichever signal claims a flat symbol
+#   first, the same as real trading actually would.
+# - "constrained": a real, modest shared pool (COMBINED_POOL_USD, enough
+#   for a few real concurrent positions at once) - the honest answer given
+#   the account's actual real scale, where a strong momentum signal and a
+#   strong mean-reversion signal showing up on different symbols at the
+#   same real moment genuinely do compete for the same real dollars.
+COMBINED_POOL_USD = 3 * SPEND_PER_TRADE  # a real, modest shared pool - room for ~3 concurrent positions, matching the account's actual real trade size
+UNCONSTRAINED_POOL_USD = 10_000_000.0  # effectively unlimited - isolates the "same-symbol overlap" effect from the "shared-cash" effect
+
+
+async def _fetch_bars_with_times(session, symbol: str, days: int):
+    """Same real historical 15-min bars as _fetch_bars, but keeps each bar's
+    real UTC timestamp too - needed to replay multiple symbols on one
+    shared timeline (see run_combined_dual_strategy_backtest), which plain
+    array-index alignment can't guarantee stays in sync across symbols with
+    slightly different real trading-session gaps. Returns
+    (bars: list[(timestamp_str, close)], None) or (None, reason)."""
+    start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=15Min&start={start}&limit=10000&feed=iex"
+    try:
+        async with session.get(url, headers=get_headers(), timeout=aiohttp.ClientTimeout(total=20)) as r:
+            if r.status != 200:
+                body = (await r.text())[:200]
+                return None, f"HTTP {r.status}: {body}"
+            data = await r.json()
+            bars = data.get("bars", [])
+            if len(bars) < 60:
+                return None, f"only {len(bars)} bars (need 60+)"
+            return [(b["t"], b["c"]) for b in bars], None
+    except asyncio.TimeoutError:
+        return None, "Alpaca API timeout"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {str(e)[:150]}"
+
+
+def _simulate_combined(events: list, pool_usd: float) -> dict:
+    """Pure, stateless replay over a pre-built, already-time-sorted event
+    stream [(timestamp_str, ticker, close), ...] spanning every symbol -
+    no I/O, safe to call more than once (constrained vs unconstrained)
+    against the identical fetched data. Real momentum and mean-reversion
+    entry/exit logic here mirrors _replay_symbol_momentum()/_replay_symbol()
+    exactly, just driven off real elapsed wall-clock time between entry and
+    now (position_age_seconds) instead of a bar-index count, since bar
+    spacing can't be assumed uniform once multiple symbols are interleaved."""
+    history = {}
+    cash = pool_usd
+    open_positions = {}  # ticker -> {strategy, entry, entry_time, spend, peak/peak_pnl_pct}
+    trades = []
+    max_concurrent = 0
+
+    for t, ticker, price in events:
+        closes = history.setdefault(ticker, [])
+        closes.append(price)
+        if len(closes) < 51:
+            continue
+        rsi = _compute_rsi(closes[-51:])
+        if rsi is None:
+            continue
+        now = datetime.fromisoformat(t.replace("Z", "+00:00"))
+
+        pos = open_positions.get(ticker)
+        if pos is not None:
+            age_seconds = (now - pos["entry_time"]).total_seconds()
+            if pos["strategy"] == "momentum":
+                pos["peak"] = max(pos["peak"], price)
+                exited = price <= pos["peak"] * (1 - MOMENTUM_TRAIL_PCT) or age_seconds >= MOMENTUM_MAX_HOLD_BARS * BAR_MINUTES * 60
+            else:
+                should_exit, _reason, _exit_type, new_peak = should_exit_position(
+                    symbol=ticker, entry_price=pos["entry"], current_price=price,
+                    current_rsi=rsi, position_age_seconds=age_seconds, direction="long",
+                    stop_loss_pct=STOP_LOSS_PCT, min_profit_target_pct=MIN_PROFIT_TARGET_PCT,
+                    rsi_profit_threshold_long=RSI_PROFIT_THRESHOLD_LONG,
+                    peak_pnl_pct=pos["peak_pnl_pct"],
+                    breakeven_trigger_pct=BREAKEVEN_TRIGGER_PCT, max_giveback_pct=MAX_GIVEBACK_PCT,
+                )
+                pos["peak_pnl_pct"] = new_peak
+                exited = should_exit
+            if exited:
+                pnl_usd = pos["spend"] * (price - pos["entry"]) / pos["entry"]
+                cash += pos["spend"] + pnl_usd
+                trades.append({"product_id": ticker, "strategy": pos["strategy"], "pnl_usd": round(pnl_usd, 2)})
+                del open_positions[ticker]
+            continue  # a symbol that just exited doesn't also re-enter on the same bar
+
+        sma = _compute_sma(closes, MOMENTUM_SMA_PERIOD)
+        if sma is not None and rsi > MOMENTUM_RSI_ENTRY and price > sma and cash >= SPEND_PER_TRADE:
+            open_positions[ticker] = {"strategy": "momentum", "entry": price, "peak": price, "entry_time": now, "spend": SPEND_PER_TRADE}
+            cash -= SPEND_PER_TRADE
+        elif rsi < RSI_LONG_THRESHOLD and cash >= SPEND_PER_TRADE:
+            open_positions[ticker] = {"strategy": "mean_reversion", "entry": price, "peak_pnl_pct": 0.0, "entry_time": now, "spend": SPEND_PER_TRADE}
+            cash -= SPEND_PER_TRADE
+        max_concurrent = max(max_concurrent, len(open_positions))
+
+    # mark-to-market any still-open positions at each symbol's own last close
+    for ticker, pos in open_positions.items():
+        price = history[ticker][-1]
+        pnl_usd = pos["spend"] * (price - pos["entry"]) / pos["entry"]
+        trades.append({"product_id": ticker, "strategy": pos["strategy"], "pnl_usd": round(pnl_usd, 2)})
+
+    wins = [tr for tr in trades if tr["pnl_usd"] > 0]
+    mom_trades = [tr for tr in trades if tr["strategy"] == "momentum"]
+    mr_trades = [tr for tr in trades if tr["strategy"] == "mean_reversion"]
+    return {
+        "pool_usd": pool_usd,
+        "max_concurrent_positions": max_concurrent,
+        "total_trades": len(trades),
+        "win_rate": round(len(wins) / len(trades) * 100, 1) if trades else 0.0,
+        "total_pnl": round(sum(tr["pnl_usd"] for tr in trades), 2),
+        "momentum_trades": len(mom_trades),
+        "momentum_pnl": round(sum(tr["pnl_usd"] for tr in mom_trades), 2),
+        "mean_reversion_trades": len(mr_trades),
+        "mean_reversion_pnl": round(sum(tr["pnl_usd"] for tr in mr_trades), 2),
+    }
+
+
+async def run_combined_dual_strategy_backtest(
+    contract_codes=None, days: int = BACKTEST_DAYS, max_concurrent: int = 6, pool_usd: float = COMBINED_POOL_USD,
+) -> dict:
+    """SHADOW-MODE ONLY - never touches live trading, places no order.
+    Real answer to "would running momentum AND mean-reversion together make
+    more money than either alone." Fetches real Alpaca history ONCE per
+    symbol (with real timestamps this time, not just closes), merges every
+    symbol's bars into one real chronological timeline, then replays that
+    single timeline twice via _simulate_combined() - once against a real,
+    modest shared pool (constrained) and once against an effectively
+    unlimited one (unconstrained) - so both the realistic answer and the
+    theoretical ceiling come back from one real backtest run."""
+    codes = contract_codes or list(FUTURES.keys())
+    tickers = [(code, FUTURES[code]["symbol"]) for code in codes]
+    seen = set()
+    unique_tickers = []
+    for _code, ticker in tickers:
+        if ticker not in seen:
+            seen.add(ticker)
+            unique_tickers.append(ticker)
+
+    semaphore = asyncio.Semaphore(max_concurrent)
+    per_symbol = {}
+    skipped = []
+
+    async with aiohttp.ClientSession() as session:
+        async def _one(ticker):
+            async with semaphore:
+                bars, err = await _fetch_bars_with_times(session, ticker, days)
+                if bars is None:
+                    skipped.append({"product_id": ticker, "reason": err})
+                    return
+                per_symbol[ticker] = bars
+
+        await asyncio.gather(*[_one(t) for t in unique_tickers])
+
+    events = [(t, ticker, c) for ticker, bars in per_symbol.items() for t, c in bars]
+    events.sort(key=lambda e: e[0])
+
+    return {
+        "backtest_days": days,
+        "spend_per_trade": SPEND_PER_TRADE,
+        "symbols_tested": len(unique_tickers),
+        "symbols_with_results": len(per_symbol),
+        "skipped": skipped,
+        "constrained": _simulate_combined(events, pool_usd),
+        "unconstrained": _simulate_combined(events, UNCONSTRAINED_POOL_USD),
+    }

@@ -4676,6 +4676,95 @@ correctly.
 
 ---
 
+## Combined dual-strategy backtest - would momentum AND mean-reversion running together actually make more money?
+
+Direct real question from the account owner after seeing the momentum-vs-
+mean-reversion comparison's real totals (momentum +$68.08/67 trades/56.7%
+win rate vs. mean-reversion +$48.52/357 trades/51.3%): "are we putting them
+together... together looks like it'll make a whole lot more money in 30
+days if they was running together." A fair question given the numbers as
+shown - but `run_momentum_vs_mean_reversion_comparison()` replays each
+ruleset INDEPENDENTLY, each with its own always-available $150/trade -
+correct for answering "which ruleset is better," but not "would running
+both AT ONCE actually make more real money," since a real account sharing
+one pool of cash can't spend the same real dollar twice, and two live bots
+can't each hold a separate real position in the identical real symbol.
+
+Answered with real evidence rather than a guess, the same way every other
+strategy decision in this file has been - a new, additive, shadow-mode-only
+comparison tool (never touches live trading, places no order, same posture
+as every backtest here):
+
+- **`_fetch_bars_with_times()`** (`alpaca_selection_backtest.py`) - same
+  real historical 15-min Alpaca bars every other tool here already fetches,
+  but keeps each bar's own real timestamp too (the existing `_fetch_bars()`
+  only ever kept the close) - needed to merge multiple symbols onto one
+  real shared timeline, which plain array-index alignment can't guarantee
+  stays in sync across symbols with slightly different real session gaps.
+- **`_simulate_combined(events, pool_usd)`** - a pure, stateless replay
+  over one real chronologically-sorted event stream spanning every symbol.
+  Reuses the exact same real momentum trailing-stop math
+  (`_replay_symbol_momentum()`) and the exact same real
+  `should_exit_position()` mean-reversion call
+  (`_replay_symbol()`/`run_full_backtest()`) - just driven off real elapsed
+  wall-clock time between entry and now instead of a bar-index count, since
+  bar spacing can no longer be assumed uniform once multiple symbols are
+  interleaved on one timeline. A new signal only opens if `cash >=
+  SPEND_PER_TRADE` right now, out of a single shared `pool_usd` - real
+  capital competition, not two independent always-funded accounts.
+- **`run_combined_dual_strategy_backtest()`** - fetches every symbol once,
+  builds the one real shared timeline, then calls `_simulate_combined()`
+  TWICE against the identical data: once with `COMBINED_POOL_USD` (3x
+  `SPEND_PER_TRADE` - a real, modest pool, room for a few real concurrent
+  positions, matching the account's actual real trade size) and once with
+  `UNCONSTRAINED_POOL_USD` (effectively unlimited) - so both the realistic
+  number and the theoretical ceiling come back from one real run.
+
+**The honest caveat baked into the result, not hidden**: even the
+"unconstrained" number isn't a naive sum of the two strategies' standalone
+totals. Momentum only ever enters above RSI 55 and mean-reversion only
+below RSI 40, so the identical symbol can never be claimed by both at the
+exact same moment - but a real account running both strategies genuinely
+can't hold two separate real positions in the same real symbol just because
+two different rule sets both wanted in on it at different times either;
+that would just be one real position. `_simulate_combined()` picks
+whichever real signal claims a flat symbol first, the same as one real
+account actually would - a more honest answer than a spreadsheet sum, not
+a bug.
+
+New `POST /api/trading-dashboard/alpaca-selection-backtest/combined-strategy`
+(admin-key gated, same pattern as the other three backtest routes) and a
+fourth button + two result tables on `alpaca_selection_backtest.html`
+("▶ Run Combined Strategy Backtest"), right under the existing momentum
+comparison section - shows constrained vs. unconstrained totals/win
+rate/max-concurrent-positions, then each scenario's own split by which
+strategy actually placed the trade.
+
+Verified offline (`test_combined_dual_strategy_backtest.py`, RSI/SMA
+monkeypatched to fixed values, same technique already validated elsewhere
+in this file's backtest tests): a real constrained pool (room for exactly
+1) correctly lets only ONE of two simultaneous real signals actually open,
+while the identical scenario under an unconstrained pool lets BOTH open -
+proving the constrained case's limit is genuinely about shared capital, not
+a bug; a symbol whose RSI stays momentum-qualifying for many further bars
+never opens a second position (single-position-per-symbol, structurally,
+not just by convention); a position still open at the window's end is
+correctly mark-to-marked against its real last close, with the P&L
+hand-verified against the real entry/exit prices; and the full
+`run_combined_dual_strategy_backtest()` end-to-end path (real fetch mocked)
+correctly returns both a real `constrained` and `unconstrained` result from
+one call.
+
+**Not yet run against real historical data** - same documented gap as
+every other backtest tool in this file (no live network access to Alpaca's
+market-data API from this sandbox). The account owner needs to open
+`/alpaca-selection-backtest-view` after the next redeploy and click the new
+button themselves to get the real answer to their actual question - this
+tool only informs that decision, it doesn't change what the live bot does
+on its own.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

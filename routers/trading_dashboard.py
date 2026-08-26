@@ -1584,6 +1584,26 @@ async def run_alpaca_momentum_comparison():
     return await alpaca_selection_backtest_module.run_momentum_vs_mean_reversion_comparison()
 
 
+@router.post("/alpaca-selection-backtest/combined-strategy", dependencies=[Depends(require_admin_key)])
+async def run_alpaca_combined_strategy_backtest():
+    """SHADOW-MODE ONLY - never touches live trading, places no order.
+    Real answer to the account owner's direct question after seeing the
+    momentum-vs-mean-reversion comparison: "are we putting them together...
+    together looks like it'll make a whole lot more money." The comparison
+    above replays each ruleset independently, each with its own
+    always-available $150/trade - correct for "which ruleset is better,"
+    but not "would running both AT ONCE actually make more money," since a
+    real account sharing one pool of cash can't spend the same dollar
+    twice. This merges every symbol's real bars onto one real chronological
+    timeline and runs both entry gates against a single shared pool -
+    returns both a realistic "constrained" number (a real, modest shared
+    pool) and a theoretical "unconstrained" ceiling (capital never binds),
+    so the honest real effect of combining is directly visible either way."""
+    if alpaca_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+    return await alpaca_selection_backtest_module.run_combined_dual_strategy_backtest()
+
+
 def _safe_float(v):
     """Alpaca's real REST API returns numeric position fields as JSON
     strings (e.g. "150.25", not 150.25) - this converts them to real

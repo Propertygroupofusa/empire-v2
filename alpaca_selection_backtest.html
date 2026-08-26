@@ -98,6 +98,13 @@
     <button class="run-btn" id="momentumBtn" onclick="runMomentumComparison()">▶ Run Momentum vs. Mean-Reversion Comparison (real data, ~30-60 seconds)</button>
     <div id="momentumStatus"></div>
     <div id="momentumResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>Would running BOTH strategies together make more money?</strong> The comparison above tests each ruleset independently, each with its own always-available $150/trade — the right way to see which one's better, but not the right way to see what happens with real shared cash. This merges the same real bars onto one real timeline and runs both entry gates against a single pool at once, so a strong signal on one symbol can genuinely compete with a strong signal on another for the same real dollars — showing both a realistic number (a modest real shared pool) and the theoretical ceiling (unlimited capital).
+    </div>
+    <button class="run-btn" id="combinedBtn" onclick="runCombinedComparison()">▶ Run Combined Strategy Backtest (real data, ~30-60 seconds)</button>
+    <div id="combinedStatus"></div>
+    <div id="combinedResults"></div>
 </div>
 
 <script>
@@ -369,6 +376,97 @@ function renderMomentumComparison(data) {
             <thead><tr><th>Symbol</th><th>Mean-reversion</th><th>Momentum</th></tr></thead>
             <tbody>${symbolRows}</tbody>
         </table>
+    `;
+}
+
+async function runCombinedComparison() {
+    const btn = document.getElementById('combinedBtn');
+    const statusEl = document.getElementById('combinedStatus');
+    const resultsEl = document.getElementById('combinedResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (pulling real Alpaca history for 11 symbols)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-selection-backtest/combined-strategy', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        renderCombinedComparison(data);
+        statusEl.textContent = `Tested ${data.symbols_tested} symbols over ${data.backtest_days} days, ${data.symbols_with_results} produced real bars - merged onto one real timeline, replayed twice (constrained vs. unconstrained pool).`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Combined Strategy Backtest (real data, ~30-60 seconds)';
+    }
+}
+
+function renderCombinedComparison(data) {
+    const resultsEl = document.getElementById('combinedResults');
+    const c = data.constrained, u = data.unconstrained;
+    if (!c || !u) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No usable results.</p>';
+        return;
+    }
+    const cClass = c.total_pnl >= 0 ? 'pos' : 'neg';
+    const uClass = u.total_pnl >= 0 ? 'pos' : 'neg';
+
+    resultsEl.innerHTML = `
+        <p style="margin-top:16px;font-weight:700;">Combined totals — both strategies live at once, sharing one real pool:</p>
+        <table>
+            <thead><tr><th>Scenario</th><th>Shared pool</th><th>Trades</th><th>Win rate</th><th>Total P&amp;L</th><th>Max concurrent positions</th></tr></thead>
+            <tbody>
+                <tr>
+                    <td>Realistic (constrained)</td>
+                    <td>${fmtUsd(c.pool_usd)}</td>
+                    <td>${c.total_trades}</td>
+                    <td>${c.win_rate.toFixed(1)}%</td>
+                    <td class="${cClass}">${fmtUsd(c.total_pnl)}</td>
+                    <td>${c.max_concurrent_positions}</td>
+                </tr>
+                <tr>
+                    <td>Unlimited capital (theoretical ceiling)</td>
+                    <td>unlimited</td>
+                    <td>${u.total_trades}</td>
+                    <td>${u.win_rate.toFixed(1)}%</td>
+                    <td class="${uClass}">${fmtUsd(u.total_pnl)}</td>
+                    <td>${u.max_concurrent_positions}</td>
+                </tr>
+            </tbody>
+        </table>
+        <p style="margin-top:20px;font-weight:700;">Each scenario's own split by which strategy actually opened the trade:</p>
+        <table>
+            <thead><tr><th>Scenario</th><th>Momentum trades</th><th>Momentum P&amp;L</th><th>Mean-reversion trades</th><th>Mean-reversion P&amp;L</th></tr></thead>
+            <tbody>
+                <tr>
+                    <td>Realistic (constrained)</td>
+                    <td>${c.momentum_trades}</td><td class="${c.momentum_pnl >= 0 ? 'pos' : 'neg'}">${fmtUsd(c.momentum_pnl)}</td>
+                    <td>${c.mean_reversion_trades}</td><td class="${c.mean_reversion_pnl >= 0 ? 'pos' : 'neg'}">${fmtUsd(c.mean_reversion_pnl)}</td>
+                </tr>
+                <tr>
+                    <td>Unlimited capital</td>
+                    <td>${u.momentum_trades}</td><td class="${u.momentum_pnl >= 0 ? 'pos' : 'neg'}">${fmtUsd(u.momentum_pnl)}</td>
+                    <td>${u.mean_reversion_trades}</td><td class="${u.mean_reversion_pnl >= 0 ? 'pos' : 'neg'}">${fmtUsd(u.mean_reversion_pnl)}</td>
+                </tr>
+            </tbody>
+        </table>
+        <p style="margin-top:14px;font-size:0.85em;color:var(--text-dim);">
+            Even the "unlimited capital" row isn't a naive sum of the two standalone totals above it - the same real symbol
+            can never be claimed by both strategies at once (momentum only enters above RSI 55, mean-reversion only below
+            RSI 40), so this picks whichever real signal claims a flat symbol first, same as one real account actually would.
+        </p>
     `;
 }
 
