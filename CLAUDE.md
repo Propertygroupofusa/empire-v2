@@ -4560,6 +4560,63 @@ data referencing POL-USD, now manually excluded - unrelated).
 
 ---
 
+## Alpaca active trading can now be resumed after being retired to buy-and-hold SPY
+
+Per the account owner's explicit request ("let my alpaca bot keep doing
+what it was doing before the market closed"): earlier this session, active
+Alpaca trading was retired for a real buy-and-hold SPY position (see
+"Real, deliberate decision: retired active Alpaca trading" above) via
+`is_alpaca_passive_mode()`/`set_alpaca_passive_mode()` - a real, DB-persisted
+flag both `prop_bot.py`'s and `alpaca_swing_bot.py`'s own main loops check
+every cycle to fully stop all entries and exit-management. That flag had a
+real, deliberate ON path (the liquidate-and-buy-SPY endpoint) but no path
+back OFF at all - it was built and described as a one-way retirement, so
+resuming required a genuinely new capability, not just flipping a switch
+that already existed somewhere.
+
+Added `POST /api/trading-dashboard/alpaca-overview/resume-active-trading`
+(admin-key gated, `routers/trading_dashboard.py`) - calls the already-
+existing `set_alpaca_passive_mode(False)` and reports whether it was
+actually passive before the call (so a second, redundant click is a safe,
+honest no-op rather than silently pretending something changed). Both
+bots' own next cycle picks this up automatically - no restart needed,
+same as every other real-time flag check in this codebase (`STOP_TRADING`,
+the crypto side's own passive mode).
+
+**Deliberately does NOT touch the real SPY position** bought at retirement
+time - that buy was never added to `open_prop_positions` (passive mode
+means nothing ever reads that dict to manage it), so resuming doesn't
+suddenly try to manage or auto-sell it. It just keeps sitting in the
+account's real position list, sellable by hand via the existing manual
+close endpoint whenever the account owner wants - active trading resuming
+and the SPY holding are two independent, real decisions.
+
+`alpaca_dashboard.html`'s retired-state banner gained a
+"▶️ Resume active trading" button (with a real confirm dialog, since this
+re-enables real automatic order placement) that calls the new endpoint and
+refreshes the dashboard - the banner then switches back to the normal
+"Retire active trading" state, since `alpaca_passive_mode` in the overview
+payload already reflected this flag before this fix (only the way to turn
+it back off was missing).
+
+Verified offline (`test_resume_alpaca_active_trading.py`) against a real
+throwaway SQLite DB: starting in passive mode, the endpoint correctly
+reports `was_passive: true` and flips `is_alpaca_passive_mode()` to real
+`False`; calling it again while already active is a safe no-op reporting
+`was_passive: false`, not an error or a double-toggle back to passive.
+Confirmed via a real AST route-count parse that the new route is bound to
+the correct function with no duplicate registrations elsewhere in the
+file (the same discipline established after the earlier
+`_safe_float`/decorator-misplacement bug).
+
+**Not yet confirmed against real live trading outcomes** - the account
+owner needs to open `/alpaca-dashboard` after the next redeploy and click
+"▶️ Resume active trading" themselves; both bots should then start scanning
+for real momentum entries again on their very next cycle once the market
+is open, same as before retirement.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

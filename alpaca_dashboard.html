@@ -442,6 +442,14 @@ function renderPassiveModeBanner(data) {
         el.innerHTML = `<div class="panel" style="background: var(--green-bg); border: 1px solid var(--green); padding: 14px 18px; margin-bottom: 16px;">
             <strong>🔒📈 Active trading retired.</strong> This account now holds a real buy-and-hold SPY position only —
             no bot is opening or closing trades here anymore. See it under Open Positions below.
+            <div style="margin-top:10px;">
+                <button class="unlock-btn" onclick="confirmResumeActiveTrading()">▶️ Resume active trading</button>
+                <div style="font-size:0.8em; color: var(--text-dim); margin-top:6px;">
+                    Turns automatic entries and exit-management back on for both bots. Your real SPY position is left
+                    exactly as-is — it isn't sold or touched, it just won't be actively managed by either bot; sell it
+                    by hand anytime via Close under Open Positions.
+                </div>
+            </div>
         </div>`;
     } else {
         el.innerHTML = `<div class="panel" style="padding: 14px 18px; margin-bottom: 16px;">
@@ -475,6 +483,26 @@ async function confirmLiquidateAndBuySpy() {
         );
     } catch (e) {
         alert('Could not complete: ' + e.message);
+    } finally {
+        await refresh();
+    }
+}
+
+async function confirmResumeActiveTrading() {
+    if (!confirm('Turn active trading back on for this account? Both bots will start scanning for real automatic entries again on their next cycle. Your existing SPY position is left untouched either way.')) return;
+    const banner = document.getElementById('passive-mode-banner');
+    banner.innerHTML = '<div class="panel" style="padding:14px 18px;">Resuming active trading…</div>';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-overview/resume-active-trading', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        alert('Active trading resumed. Both bots will scan for real entries on their next cycle.');
+    } catch (e) {
+        alert('Could not resume: ' + e.message);
     } finally {
         await refresh();
     }

@@ -1882,6 +1882,29 @@ async def liquidate_alpaca_and_buy_spy(db: AsyncSession = Depends(get_db)):
     }
 
 
+@router.post("/alpaca-overview/resume-active-trading", dependencies=[Depends(require_admin_key)])
+async def resume_alpaca_active_trading():
+    """Reverses is_alpaca_passive_mode() - per the account owner's explicit
+    request to let prop_bot.py/alpaca_swing_bot.py resume real automatic
+    entries and exit-management on this account, after having retired to
+    the buy-and-hold SPY position (see liquidate_alpaca_and_buy_spy above).
+
+    Deliberately does NOT touch the real SPY position bought at retirement
+    time - that was never tracked in open_prop_positions (passive mode
+    means nothing ever read that dict to manage it), so resuming doesn't
+    suddenly try to manage or sell it. It just sits in the account's real
+    position list, sellable by hand via the existing manual close endpoint,
+    exactly as it did while passive mode was on - the two bots' own next
+    cycle will simply resume scanning for new momentum entries and start
+    managing whatever they open going forward."""
+    if prop_bot_module is None:
+        raise HTTPException(status_code=500, detail="prop_bot module not available")
+    was_passive = await prop_bot_module.is_alpaca_passive_mode()
+    await prop_bot_module.set_alpaca_passive_mode(False)
+    log.info("[dashboard] 🔓📉 Alpaca active trading resumed (passive/buy-and-hold-SPY mode turned off)")
+    return {"status": "active_trading_resumed", "was_passive": was_passive, "passive_mode": False}
+
+
 class AlpacaUnlockProfitRequest(BaseModel):
     amount: float
 
