@@ -3011,6 +3011,42 @@ async def run_branch_cycle(bot_name: str) -> bool:
             if real_balance is None:
                 log.warning(f"[TREE] {bot_name}: real balance unavailable ({real_balance_err}) - skipping this cycle")
                 return True
+
+            # Real bug found live: a flat non-root branch's own stored
+            # product_id can end up on a coin that's since become excluded
+            # (its own coin-switch search at exit time found no eligible
+            # replacement that exact moment, so it stayed put) - and
+            # nothing before this point ever re-checked that before the
+            # ordinary flat-branch buy below just blindly re-entered it.
+            # Confirmed live: crypto_tree_eth_usd_4 kept re-buying
+            # POL-USD - manually excluded for its real -$338+ loss and
+            # 14% win rate - every time it went flat. Exclusion is
+            # already enforced at every NEW-coin-pick decision point
+            # (spawn, reinforcement, coin-switch-after-exit); this closes
+            # the one remaining gap where a branch's OWN currently-stored
+            # coin was never re-checked. Root is exempt - it never
+            # switches off BTC-USD by design.
+            if bot_name != ROOT_BOT_NAME:
+                excluded_now = await get_effective_excluded_coins()
+                if branch.product_id in excluded_now:
+                    new_product_id, new_atr = await find_most_volatile_unclaimed_coin(session)
+                    if new_product_id:
+                        async with AsyncSessionLocal() as db:
+                            result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
+                            fresh = result.scalar_one_or_none()
+                            if fresh:
+                                fresh.product_id = new_product_id
+                                await db.commit()
+                        log.warning(
+                            f"[TREE] {bot_name}: was about to re-enter {branch.product_id}, which is now excluded - "
+                            f"switching to {new_product_id} (ATR {new_atr*100:.2f}%) instead"
+                        )
+                        branch.product_id = new_product_id
+                        price, atr_pct = await engine.get_price_and_volatility(session, branch.product_id)
+                    else:
+                        log.info(f"[TREE] {bot_name}: currently assigned to excluded coin {branch.product_id} with no eligible replacement available yet - waiting")
+                        return True
+
             # Locked/skimmed profit (see PROFIT_SKIM_PCT) is walled off from
             # the real balance here so it can never be redeployed by this
             # branch or any other - this is what actually makes "locked

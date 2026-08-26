@@ -5425,6 +5425,75 @@ figures.
 
 ---
 
+## Real bug found live: a flat branch kept re-buying its own now-excluded coin
+
+The account owner manually consolidated the POL-USD branches (see
+"Multiple branches can now share the same coin" / the reconciliation
+panel's consolidate tool above) and shared the real Live Activity feed
+afterward to check the outcome. It showed something unexpected:
+`crypto_tree_eth_usd_4` had SOLD its POL-USD position on a real PEAK
+PROFIT GIVEBACK exit, then immediately BOUGHT right back into POL-USD
+again - the exact coin manually excluded earlier this session
+specifically for its real -$338+ loss and 14% win rate.
+
+Root cause, confirmed by reading `run_branch_cycle()` directly rather
+than guessing: coin exclusion (`get_effective_excluded_coins()`) has
+only ever been checked at the moment a NEW coin gets picked - spawning a
+child, reinforcing a weak branch, or the coin-switch search that runs
+right after a sale. A flat branch's ordinary "time to buy" cycle never
+re-checked exclusion at all - it just bought whatever coin was already
+sitting in its own `product_id` column, unconditionally. The real gap:
+if the coin-switch search at exit time happened to find literally no
+eligible replacement in that exact moment (plausible now, with this many
+stacked filters - manual exclusion, the automated backtest+live-
+performance intersection, the top-15 rotation, RSI-overbought, BTC-
+relative-strength, the higher-timeframe downtrend filter, and the
+one-cycle sale cooldown, all having to agree at once), the branch was
+left sitting flat with its `product_id` still pointed at the now-
+excluded coin - and every later ordinary buy cycle just blindly re-
+entered it forever, with nothing ever revisiting that decision.
+
+Fixed in `run_branch_cycle()`: right before a flat NON-ROOT branch
+places its ordinary buy, it now re-checks whether its own stored
+`product_id` is currently excluded. If so, it tries a real coin-switch
+first via the exact same `find_most_volatile_unclaimed_coin()` every
+other switch already uses - updates the branch's `product_id` in the DB
+and buys the NEW real coin instead. If no eligible replacement exists
+yet, it does NOT fall back to buying the excluded coin either - it waits
+(no order placed at all) and re-checks next cycle. Root is completely
+exempt, matching its existing "never switches off BTC-USD by design"
+behavior - the new check is skipped entirely for `ROOT_BOT_NAME`.
+
+Verified offline (`test_flat_branch_avoids_excluded_coin.py`, new, 10
+checks) against a real throwaway SQLite DB: a flat branch on a
+now-excluded coin correctly switches to and buys a real eligible
+replacement (its stored `product_id` updated in the DB to match); with
+no eligible replacement available, it correctly places NO order at all
+and leaves its `product_id` unchanged rather than silently re-buying the
+excluded coin; root is confirmed completely unaffected (the exclusion
+check never even runs for it - proven by making the coin-switch function
+raise if called, and root's cycle still completing normally); and a
+branch on a coin that ISN'T excluded is completely unaffected too (same
+proof technique - the switch function would raise if it were ever
+called, and it isn't). Full related regression suite
+(`test_reinforcement_skips_excluded_coin.py`,
+`test_throne_respects_exclusion.py`, `test_auto_exclusion.py`,
+`test_live_performance_exclusion.py`, `test_manual_exclusion_fast_heal.py`)
+re-run clean alongside it; the two failures seen
+(`test_excluded_coins.py`, `test_pepe_wif_exclusion.py`) were confirmed
+pre-existing and unrelated via a direct `git stash` comparison against
+the prior commit - both fail identically without this change (a stale
+mock in each file returning a 4-tuple from `get_price_volatility_and_trend`
+where the real function has returned a 5-tuple since the BTC-relative-
+strength filter shipped earlier this session).
+
+**Not yet confirmed against real live trading** - the account owner
+needs to redeploy and watch whether any currently-flat branch sitting on
+an excluded coin now switches off it on its own next cycle, instead of
+continuing to re-buy it.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
