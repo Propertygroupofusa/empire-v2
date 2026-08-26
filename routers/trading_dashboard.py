@@ -807,6 +807,7 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         can_spawn = seed_usd is not None and spendable_for_spawn >= seed_usd
 
     crypto_passive_mode = await crypto_family_tree_bot_module.is_crypto_passive_mode() if crypto_family_tree_bot_module else False
+    rolling_expectancy = await crypto_family_tree_bot_module.get_rolling_expectancy() if crypto_family_tree_bot_module else None
 
     return {
         "branches": out,
@@ -817,6 +818,7 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         "seed_usd": seed_usd,
         "can_spawn": can_spawn,
         "crypto_passive_mode": crypto_passive_mode,
+        "rolling_expectancy": rolling_expectancy,
     }
 
 

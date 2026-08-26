@@ -470,6 +470,7 @@
     </div>
 
     <div id="crypto-passive-mode-banner" style="display:none;"></div>
+    <div id="rolling-expectancy-banner" style="display:none;"></div>
 
     <div class="narrative" id="narrative">Loading tree summary…</div>
 
@@ -1347,6 +1348,7 @@ async function refresh() {
         updateSpawnButtonState(data);
         updateUnlockButtonState(data);
         renderCryptoPassiveModeBanner(data);
+        renderRollingExpectancyBanner(data);
 
         const branches = data.branches || [];
         lastUnrealizedProfit = branches.reduce((sum, b) => {
@@ -1449,6 +1451,23 @@ function renderCryptoPassiveModeBanner(data) {
             </div>
         </div>`;
     }
+}
+
+function renderRollingExpectancyBanner(data) {
+    const el = document.getElementById('rolling-expectancy-banner');
+    const exp = data.rolling_expectancy;
+    if (!exp || !exp.negative) {
+        el.style.display = 'none';
+        el.innerHTML = '';
+        return;
+    }
+    el.style.display = '';
+    el.innerHTML = `<div class="panel" style="background: var(--red-bg); border: 1px solid var(--red); padding: 14px 18px; margin-bottom: 16px;">
+        <strong>🐢 New entries paused tree-wide.</strong> The real average P&amp;L across the tree's last
+        ${exp.num_trades} real completed trades is <strong>${fmtUsd(exp.expectancy)}/trade</strong> - negative -
+        so no branch will open a new position until this recovers. Existing open positions keep their own real
+        target/stop/breakeven protection unaffected; this only pauses new money going in.
+    </div>`;
 }
 
 async function confirmLiquidateAndBuyBtc() {

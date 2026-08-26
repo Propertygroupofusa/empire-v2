@@ -130,6 +130,22 @@ COORDINATOR_SCAN_SECONDS = engine._safe_int_env("TREE_COORDINATOR_SCAN_SECONDS",
 FLOOR_BREACH_COOLDOWN_SECONDS = engine._safe_int_env("TREE_FLOOR_BREACH_COOLDOWN_SECONDS", "300")  # 5 min default
 FLOOR_BREACH_COOLDOWN_KEY_PREFIX = "crypto_family_tree_floor_breach_cooldown_"
 
+# ROLLING EXPECTANCY KILL SWITCH - per the account owner's explicit
+# request, evaluating a pasted proposal: track real expectancy (average
+# real P&L per trade) across the tree's most recent real completed
+# trades, and automatically pause new entries tree-wide if it's gone
+# negative - closing losing positions (STOP/TARGET/breakeven/giveback)
+# always keeps running regardless, same "existing protection never
+# pauses, only new money does" principle every other kill switch in this
+# file already follows (STOP_TRADING, the floor-breach cooldown). Scoped
+# tree-wide (not per-coin/per-branch) since any single coin's real trade
+# count is usually too thin for a meaningful rolling window on its own.
+# Real, contestable, self-healing - recomputed fresh on every check, so
+# it lifts automatically the moment enough real winning trades roll into
+# the window and enough losers roll back out, never a one-way flag.
+ROLLING_EXPECTANCY_WINDOW = engine._safe_int_env("TREE_ROLLING_EXPECTANCY_WINDOW", "20")
+ROLLING_EXPECTANCY_MIN_TRADES = engine._safe_int_env("TREE_ROLLING_EXPECTANCY_MIN_TRADES", "15")
+
 # Per the account owner's explicit request: a coin a branch just sold
 # becomes "unclaimed" the instant that branch's row commits its new
 # product_id - with nothing else blocking it, a different branch (or
@@ -934,6 +950,34 @@ async def _floor_breach_cooldown_active(bot_name: str) -> bool:
             return False
         elapsed = (datetime.utcnow() - row.updated_at).total_seconds()
         return elapsed < FLOOR_BREACH_COOLDOWN_SECONDS
+
+
+async def get_rolling_expectancy() -> dict:
+    """Real, live expectancy across the tree's most recent real completed
+    trades - reads the exact same real CryptoCoinTradeHistory ledger the
+    Coin Trade History dashboard panel already reads (here scoped
+    tree-wide, not per-coin), most recent ROLLING_EXPECTANCY_WINDOW real
+    trades by real closed_at. Returns real, honest numbers - "negative"
+    only ever True once there are at least ROLLING_EXPECTANCY_MIN_TRADES
+    real trades to judge it on; fewer than that is never enough evidence
+    to act on, the same "no data = not excluded" default every other
+    contestable layer in this file already uses."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(CryptoCoinTradeHistory.pnl)
+            .order_by(desc(CryptoCoinTradeHistory.closed_at))
+            .limit(ROLLING_EXPECTANCY_WINDOW)
+        )
+        pnls = [row[0] for row in result.all()]
+    if len(pnls) < ROLLING_EXPECTANCY_MIN_TRADES:
+        return {"expectancy": None, "num_trades": len(pnls), "min_trades_required": ROLLING_EXPECTANCY_MIN_TRADES, "negative": False}
+    expectancy = sum(pnls) / len(pnls)
+    return {
+        "expectancy": round(expectancy, 4),
+        "num_trades": len(pnls),
+        "min_trades_required": ROLLING_EXPECTANCY_MIN_TRADES,
+        "negative": expectancy < 0,
+    }
 
 
 async def load_all_branches():
@@ -3024,6 +3068,14 @@ async def run_branch_cycle(bot_name: str) -> bool:
                 return True
             if await _floor_breach_cooldown_active(bot_name):
                 log.info(f"[TREE] {bot_name}: cooling down after a recent floor breach - entries paused a bit longer")
+                return True
+            expectancy_state = await get_rolling_expectancy()
+            if expectancy_state["negative"]:
+                log.warning(
+                    f"[TREE] {bot_name}: rolling expectancy over the tree's last {expectancy_state['num_trades']} "
+                    f"real trades is negative (${expectancy_state['expectancy']:.2f}/trade avg) - new entries "
+                    f"paused tree-wide until it recovers (existing positions still protected)"
+                )
                 return True
             if real_balance is None:
                 log.warning(f"[TREE] {bot_name}: real balance unavailable ({real_balance_err}) - skipping this cycle")

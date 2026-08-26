@@ -5724,6 +5724,73 @@ price weakness before the hard stop eventually catches it.
 
 ---
 
+## Rolling-expectancy kill switch for the crypto family tree
+
+Per the account owner's explicit request, after evaluating a pasted
+external proposal analyzing the system's real edge (see "so all these
+people on YouTube..."-style evaluations earlier this session for the
+established pattern: verify claims against the real code before acting,
+keep only what actually applies). That proposal's core diagnosis (an
+"RSI exit" mechanism) doesn't describe either live bot's real exit
+logic, so it wasn't adopted - but one piece of it was genuinely new and
+applicable: "automatic pause if rolling expectancy turns negative for N
+trades." Nothing in this codebase tracked that before.
+
+- **`get_rolling_expectancy()`** (new, `crypto_family_tree_bot.py`) -
+  reads the real `CryptoCoinTradeHistory` ledger (the same real per-coin
+  trade history the Coin Trade History dashboard panel already reads),
+  scoped tree-wide (not per-coin/per-branch, since any single coin's
+  real trade count is usually too thin for a meaningful rolling window
+  on its own) - the most recent `ROLLING_EXPECTANCY_WINDOW` (20 default)
+  real completed trades by real `closed_at`. Real, honest, contestable:
+  requires at least `ROLLING_EXPECTANCY_MIN_TRADES` (15) real trades
+  before it can report negative at all - the same "no data = not
+  excluded" default every other layer in this file already uses - and
+  recomputed fresh on every check, so it lifts automatically the moment
+  enough real winning trades roll into the window and losers roll back
+  out. Never a one-way flag.
+- Wired into `run_branch_cycle()`'s flat-branch buy gate, alongside the
+  existing `STOP_TRADING`/floor-breach-cooldown checks: when the real
+  rolling expectancy is negative, NO branch opens a new position -
+  tree-wide, root included. Existing open positions are completely
+  unaffected - their own real TARGET/STOP/breakeven/giveback protection
+  keeps running exactly as before; this only pauses new money going in,
+  the same "existing protection never pauses, only new entries do"
+  principle every other kill switch in this file already follows.
+  Confirmed this also correctly blocks the automatic post-sale rebuy
+  path (a branch that just exited immediately tries to redeploy into a
+  new coin) - not just the original per-cycle scan.
+- Exposed on `GET /family-tree-status` as `rolling_expectancy` and shown
+  as a real red banner on `family_tree_dashboard.html`
+  ("🐢 New entries paused tree-wide...") whenever active, naming the
+  real trade count and the real average $/trade - so a real pause is
+  visible on the dashboard instead of only inferable from a flatlined
+  balance, the same "make it visible instead of silent" discipline
+  applied to every other recent fix in this file.
+
+Verified offline (`test_rolling_expectancy_kill_switch.py`, new, 8
+checks) against a real throwaway SQLite DB: fewer than the real minimum
+trade count never reports negative regardless of how bad the trades
+look; a genuinely negative real average across enough real trades
+correctly reports negative with the real, hand-verified average; a
+genuinely positive real average correctly reports negative=False; an old
+real loss OUTSIDE the rolling window doesn't drag down a currently
+healthy average (only the real recent window counts); and end-to-end
+through `run_branch_cycle()`, a flat branch's real buy is genuinely
+paused while expectancy is negative (no order placed), while a real
+STOP-LOSS exit on an already-open position fires completely
+unaffected by the same negative state. Full related regression suite
+(`test_flat_branch_avoids_excluded_coin.py`,
+`test_giveback_net_of_fees.py`) re-run clean alongside it.
+
+**Not yet confirmed against real live trading** - this is a real, live
+protective change now shipped; the account owner should watch the
+dashboard for the new red banner if the tree's real rolling performance
+ever turns negative, and confirm it clears again once real wins bring
+the average back positive.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
