@@ -2256,6 +2256,25 @@ async def run_alpaca_momentum_comparison():
     return await alpaca_selection_backtest_module.run_momentum_vs_mean_reversion_comparison()
 
 
+@router.post("/alpaca-selection-backtest/momentum-comparison-multi-window", dependencies=[Depends(require_admin_key)])
+async def run_alpaca_momentum_comparison_multi_window(num_windows: int = 3):
+    """SHADOW-MODE ONLY - never touches live trading, places no order.
+    Built after the account owner ran the single-window momentum-vs-mean-
+    reversion comparison above for real and got the OPPOSITE result from
+    the run that originally justified switching the live bot to momentum
+    months earlier (mean-reversion won this time, $54.58/353 trades vs
+    momentum's $41.57/69 trades). A single 30-day window flipping isn't
+    itself proof the live strategy is wrong - the same "require several
+    consecutive results, not one" discipline the crypto side's
+    auto-exclusion layer already uses applies here too. Runs the identical
+    real comparison across `num_windows` consecutive, non-overlapping real
+    historical 30-day windows (most recent first) and reports how many
+    windows each strategy actually won, not just one sample's total."""
+    if alpaca_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+    return await alpaca_selection_backtest_module.run_momentum_vs_mean_reversion_multi_window(num_windows=num_windows)
+
+
 @router.post("/alpaca-selection-backtest/combined-strategy", dependencies=[Depends(require_admin_key)])
 async def run_alpaca_combined_strategy_backtest():
     """SHADOW-MODE ONLY - never touches live trading, places no order.

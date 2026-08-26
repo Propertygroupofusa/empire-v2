@@ -6222,6 +6222,97 @@ actually redeploys into whichever branch they pick.
 
 ---
 
+## Real entry-variant discrepancy found live: the account was running Variant B, not the empirically best A
+
+The account owner ran the real Entry-Signal A/B/C/D backtest on
+`/alpaca-selection-backtest-view` and shared the actual results table.
+Real data was unambiguous: **Variant A beat B, C, and D on every single
+metric** - total P&L ($41.59 vs $37.66/$31.32), win rate, profit factor
+(1.52 vs 1.45/1.38), Sharpe, Sortino, and losing-streak length. The extra
+filters (RSI-rising, SMA20-rising, an overextension cap) didn't improve
+anything on this real 30-day sample - they just cut good trades along
+with bad ones.
+
+But the same page's own "Currently live on the real account" badge read
+**Variant B** - the empirically WORSE choice, sitting live. Per the
+account owner's explicit confirmation, this was fixed by using the
+existing `set_live_entry_variant()` mechanism (built earlier this
+session, see "One-click promotion of a backtested entry variant" above)
+to switch the live account back to A, then resuming active trading via
+the existing `resume-active-trading` endpoint. No code changes were
+needed for this part - the promotion buttons and resume button already
+existed; this was a real, live decision made from real evidence, not a
+new feature.
+
+## Multi-window momentum-vs-mean-reversion check - is one strategy actually more consistent, or did a single sample flip by chance?
+
+The account owner's real momentum-vs-mean-reversion comparison run (same
+session) produced the OPPOSITE result from the run that originally
+justified switching the live bot to momentum months earlier:
+**mean-reversion won this time** ($54.58/353 trades vs momentum's
+$41.57/69 trades) - a real, direct contradiction of the earlier decision
+basis. A single 30-day window flipping isn't itself proof the live
+strategy is wrong: the exact same "require several consecutive results,
+not just one" discipline already used by the crypto side's automatic
+coin-exclusion layer (`AUTO_EXCLUDE_RUN_WINDOW`, 3 consecutive negative
+runs required before it acts - a single run is too noisy to act on
+alone) applies here too, and hadn't been asked for on the Alpaca side
+until now.
+
+- **`_fetch_bars()`** (`alpaca_selection_backtest.py`) gained an optional
+  `end` parameter (ISO string) - lets a caller fetch a real historical
+  window that ends in the past, not just "up to right now." `end=None`
+  (the default, every existing caller) reproduces the exact prior
+  request byte-for-byte - no `end` query param added, confirmed via a
+  direct URL-construction test.
+- **`run_momentum_vs_mean_reversion_multi_window(window_days=30,
+  num_windows=3)`** (new) - runs the identical real
+  `_replay_symbol()`/`_replay_symbol_momentum()` comparison
+  `run_momentum_vs_mean_reversion_comparison()` already uses, but across
+  `num_windows` consecutive, non-overlapping real historical windows
+  (most recent first - the default 3x30 covers the real last ~90 days as
+  three genuinely independent real samples, each its own fetch+replay,
+  not a rolling average). Returns each window's own totals plus a
+  summary: how many windows each strategy actually won, and the real sum
+  across all windows.
+- New `POST /api/trading-dashboard/alpaca-selection-backtest/momentum-comparison-multi-window`
+  (admin-key gated, `num_windows` query param, default 3) and a new
+  "▶ Run 3-Window Momentum vs. Mean-Reversion Check" button + results
+  table on `alpaca_selection_backtest.html`, right under the existing
+  single-window momentum comparison - shows a plain-language verdict
+  ("Momentum won 2 of 3 windows..."), a per-window breakdown with real
+  calendar dates and which strategy won each one, and the real summed
+  totals across all windows.
+
+Verified offline (`test_alpaca_momentum_multi_window.py`, 13 checks, no
+live network access from this sandbox - same documented gap as every
+backtest tool here): `_fetch_bars(end=None)` builds a URL with no `end`
+param at all (unchanged default behavior); `_fetch_bars(end=<iso>)`
+builds a URL with a real `end` param and a `start` computed backward from
+THAT time, not from now; the multi-window function genuinely fetches 3
+DIFFERENT windows (proven by feeding each window a different synthetic
+price path - a momentum-friendly climb for windows 0 and 2, a flat
+zero-trade path for window 1 - and confirming each window's own real P&L
+differs accordingly, not the same cached data replayed three times); the
+summary correctly counts which strategy won each window and sums real
+totals across all of them; and window dates are real, correctly ordered
+calendar dates (window 0 most recent, each later window further back).
+Existing momentum-comparison and live-momentum-swap regression tests
+re-run clean alongside it, confirming the new optional `end` parameter
+didn't disturb the existing single-window default path.
+
+**Not yet run against real historical data** - same documented gap as
+every backtest tool in this file (no live network access to Alpaca's
+market-data API from this sandbox). The account owner needs to open
+`/alpaca-selection-backtest-view` after the next redeploy and tap the
+new "▶ Run 3-Window Momentum vs. Mean-Reversion Check" button to see
+whether momentum's real recent loss was a one-off or a genuine, more
+consistent trend - that result should inform whether the live strategy
+family (momentum vs. mean-reversion) is worth reconsidering, separately
+from the entry-variant fix above.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

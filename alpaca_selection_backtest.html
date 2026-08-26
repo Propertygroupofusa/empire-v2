@@ -108,6 +108,13 @@
     <div id="momentumResults"></div>
 
     <div class="note" style="margin-top: 28px;">
+        <strong>Was that result a fluke, or does it hold up?</strong> A single 30-day window can flip either way by chance - the same "require several consecutive results, not one" rule the crypto side's auto-exclusion already uses. This re-runs the exact same real momentum-vs-mean-reversion replay across 3 separate, back-to-back real 30-day windows (the real last ~90 days) and reports how many of the 3 each strategy actually won, not just one sample's total.
+    </div>
+    <button class="run-btn" id="multiWindowBtn" onclick="runMultiWindowComparison()">▶ Run 3-Window Momentum vs. Mean-Reversion Check (real data, ~60-120 seconds)</button>
+    <div id="multiWindowStatus"></div>
+    <div id="multiWindowResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
         <strong>Would running BOTH strategies together make more money?</strong> The comparison above tests each ruleset independently, each with its own always-available $150/trade — the right way to see which one's better, but not the right way to see what happens with real shared cash. This merges the same real bars onto one real timeline and runs both entry gates against a single pool at once, so a strong signal on one symbol can genuinely compete with a strong signal on another for the same real dollars — showing both a realistic number (a modest real shared pool) and the theoretical ceiling (unlimited capital).
     </div>
     <button class="run-btn" id="combinedBtn" onclick="runCombinedComparison()">▶ Run Combined Strategy Backtest (real data, ~30-60 seconds)</button>
@@ -392,6 +399,76 @@ function renderMomentumComparison(data) {
             <thead><tr><th>Symbol</th><th>Mean-reversion</th><th>Momentum</th></tr></thead>
             <tbody>${symbolRows}</tbody>
         </table>
+    `;
+}
+
+async function runMultiWindowComparison() {
+    const btn = document.getElementById('multiWindowBtn');
+    const statusEl = document.getElementById('multiWindowStatus');
+    const resultsEl = document.getElementById('multiWindowResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (pulling 3 real historical windows for 11 symbols each)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-selection-backtest/momentum-comparison-multi-window', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        renderMultiWindowComparison(data);
+        statusEl.textContent = `${data.num_windows} real, back-to-back ${data.window_days}-day windows replayed, most recent first.`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run 3-Window Momentum vs. Mean-Reversion Check (real data, ~60-120 seconds)';
+    }
+}
+
+function renderMultiWindowComparison(data) {
+    const resultsEl = document.getElementById('multiWindowResults');
+    const s = data.summary;
+    if (!s) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No usable results.</p>';
+        return;
+    }
+
+    const verdict = s.momentum_windows_won > s.mean_reversion_windows_won
+        ? `Momentum won ${s.momentum_windows_won} of ${data.num_windows} windows - the more consistent real performer.`
+        : s.mean_reversion_windows_won > s.momentum_windows_won
+        ? `Mean-reversion won ${s.mean_reversion_windows_won} of ${data.num_windows} windows - the more consistent real performer.`
+        : `Tied at ${s.momentum_windows_won}-${s.mean_reversion_windows_won} across ${data.num_windows} windows - no consistent real edge either way.`;
+
+    const windowRows = (data.windows || []).map(w => {
+        const mrC = w.mean_reversion.total_pnl >= 0 ? 'pos' : 'neg';
+        const momC = w.momentum.total_pnl >= 0 ? 'pos' : 'neg';
+        const winnerLabel = w.mean_reversion.total_pnl > w.momentum.total_pnl ? 'Mean-reversion' : w.momentum.total_pnl > w.mean_reversion.total_pnl ? 'Momentum' : 'Tie';
+        return `<tr>
+            <td>${w.window_start} → ${w.window_end}</td>
+            <td class="${mrC}">${fmtUsd(w.mean_reversion.total_pnl)} <span style="color:var(--text-dim);font-weight:400;">(${w.mean_reversion.num_trades}tr, ${w.mean_reversion.win_rate.toFixed(0)}%)</span></td>
+            <td class="${momC}">${fmtUsd(w.momentum.total_pnl)} <span style="color:var(--text-dim);font-weight:400;">(${w.momentum.num_trades}tr, ${w.momentum.win_rate.toFixed(0)}%)</span></td>
+            <td>${winnerLabel}</td>
+        </tr>`;
+    }).join('');
+
+    resultsEl.innerHTML = `
+        <p style="margin-top:16px;font-weight:700;">${verdict}</p>
+        <table>
+            <thead><tr><th>Window (real dates)</th><th>Mean-reversion</th><th>Momentum</th><th>Won this window</th></tr></thead>
+            <tbody>${windowRows}</tbody>
+        </table>
+        <p style="margin-top:12px;color:var(--text-dim);font-size:0.85em;">Real totals across all ${data.num_windows} windows: mean-reversion ${fmtUsd(s.mean_reversion_total_pnl)}, momentum ${fmtUsd(s.momentum_total_pnl)}.</p>
     `;
 }
 

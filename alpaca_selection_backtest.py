@@ -40,12 +40,21 @@ MAX_GIVEBACK_PCT = 0.005
 BAR_MINUTES = 15  # matches the "15Min" timeframe requested below
 
 
-async def _fetch_bars(session, symbol: str, days: int):
+async def _fetch_bars(session, symbol: str, days: int, end: str = None):
     """Real historical 15-min bars from Alpaca's market-data API (IEX feed -
     free tier, same one prop_bot.py's own get_higher_tf_trend already
-    uses). Returns (closes: list[float], None) or (None, reason)."""
-    start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    uses). Returns (closes: list[float], None) or (None, reason).
+
+    `end` (optional, ISO string) lets a caller fetch a window that ends in
+    the past rather than right now - e.g. "the 30 days before the most
+    recent 30 days" - without changing the default single-window behavior
+    every existing caller relies on (end=None still means "up to now",
+    byte-for-byte the same request this function has always made)."""
+    end_dt = datetime.fromisoformat(end.replace("Z", "+00:00")) if end else datetime.now(timezone.utc)
+    start = (end_dt - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=15Min&start={start}&limit=10000&feed=iex"
+    if end:
+        url += f"&end={end_dt.strftime('%Y-%m-%dT%H:%M:%SZ')}"
     try:
         async with session.get(url, headers=get_headers(), timeout=aiohttp.ClientTimeout(total=20)) as r:
             if r.status != 200:
@@ -436,6 +445,113 @@ async def run_momentum_vs_mean_reversion_comparison(contract_codes=None, days: i
             },
         },
         "symbol_breakdown": rows,
+    }
+
+
+# ============================================================================
+# MULTI-WINDOW momentum-vs-mean-reversion comparison - is one strategy
+# consistently better, or did a single 30-day sample just get lucky/unlucky?
+# ============================================================================
+# The account owner ran run_momentum_vs_mean_reversion_comparison() above for
+# real and got the OPPOSITE result from the run that originally justified
+# switching the live bot to momentum months earlier: mean-reversion won this
+# time ($54.58/353 trades vs momentum's $41.57/69 trades). A single 30-day
+# window flipping isn't itself proof the earlier decision was wrong - the
+# same "don't act on one noisy run" discipline already used elsewhere in
+# this codebase (the crypto side's auto-exclusion layer requires several
+# consecutive bad runs, not one, before it acts) applies here too. This
+# answers the real question directly: run the identical comparison across
+# SEVERAL back-to-back real historical windows and see which strategy wins
+# more consistently, instead of trusting whichever window happened to be
+# fetched most recently. Shadow-mode only - never touches live trading.
+async def run_momentum_vs_mean_reversion_multi_window(
+    contract_codes=None, window_days: int = BACKTEST_DAYS, num_windows: int = 3, max_concurrent: int = 6
+) -> dict:
+    """Runs run_momentum_vs_mean_reversion_comparison()'s exact same real
+    replay logic across `num_windows` consecutive, non-overlapping real
+    historical windows (most recent window first, then the window
+    immediately before it, and so on) - e.g. the default 3x30 covers the
+    real last 90 days as three real independent 30-day samples. Each
+    window is a fully independent real fetch+replay, not a rolling
+    average, so a strategy that wins 3 windows out of 3 is real, repeated
+    evidence - not one lucky sample."""
+    codes = contract_codes or list(FUTURES.keys())
+    tickers = [(code, FUTURES[code]["symbol"]) for code in codes]
+    seen = set()
+    unique_tickers = []
+    for _code, ticker in tickers:
+        if ticker not in seen:
+            seen.add(ticker)
+            unique_tickers.append(ticker)
+
+    semaphore = asyncio.Semaphore(max_concurrent)
+    now = datetime.now(timezone.utc)
+    windows = []
+
+    async with aiohttp.ClientSession() as session:
+        for w in range(num_windows):
+            window_end = now - timedelta(days=w * window_days)
+            window_end_iso = window_end.strftime("%Y-%m-%dT%H:%M:%SZ")
+            per_symbol = {}
+            skipped = []
+
+            async def _one(ticker, window_end_iso=window_end_iso, per_symbol=per_symbol, skipped=skipped):
+                async with semaphore:
+                    closes, err = await _fetch_bars(session, ticker, window_days, end=window_end_iso)
+                    if closes is None:
+                        skipped.append({"product_id": ticker, "reason": err})
+                        return
+                    per_symbol[ticker] = closes
+
+            await asyncio.gather(*[_one(t) for t in unique_tickers])
+
+            mr_total, mom_total = 0.0, 0.0
+            mr_trades_total, mom_trades_total = 0, 0
+            mr_wins_total, mom_wins_total = 0, 0
+            for ticker, closes in per_symbol.items():
+                mr_trades = _replay_symbol(closes, symbol=ticker)
+                mom_trades = _replay_symbol_momentum(closes)
+                mr_total += sum(t["pnl_usd"] for t in mr_trades)
+                mom_total += sum(t["pnl_usd"] for t in mom_trades)
+                mr_trades_total += len(mr_trades)
+                mom_trades_total += len(mom_trades)
+                mr_wins_total += len([t for t in mr_trades if t["pnl_usd"] > 0])
+                mom_wins_total += len([t for t in mom_trades if t["pnl_usd"] > 0])
+
+            windows.append({
+                "window_index": w,
+                "window_start": (window_end - timedelta(days=window_days)).strftime("%Y-%m-%d"),
+                "window_end": window_end.strftime("%Y-%m-%d"),
+                "symbols_with_results": len(per_symbol),
+                "skipped": skipped,
+                "mean_reversion": {
+                    "num_trades": mr_trades_total,
+                    "win_rate": round(mr_wins_total / mr_trades_total * 100, 1) if mr_trades_total else 0.0,
+                    "total_pnl": round(mr_total, 2),
+                },
+                "momentum": {
+                    "num_trades": mom_trades_total,
+                    "win_rate": round(mom_wins_total / mom_trades_total * 100, 1) if mom_trades_total else 0.0,
+                    "total_pnl": round(mom_total, 2),
+                },
+            })
+
+    mr_wins_windows = sum(1 for wnd in windows if wnd["mean_reversion"]["total_pnl"] > wnd["momentum"]["total_pnl"])
+    mom_wins_windows = sum(1 for wnd in windows if wnd["momentum"]["total_pnl"] > wnd["mean_reversion"]["total_pnl"])
+    mr_total_all = round(sum(wnd["mean_reversion"]["total_pnl"] for wnd in windows), 2)
+    mom_total_all = round(sum(wnd["momentum"]["total_pnl"] for wnd in windows), 2)
+
+    return {
+        "window_days": window_days,
+        "num_windows": num_windows,
+        "spend_per_trade": SPEND_PER_TRADE,
+        "windows": windows,
+        "summary": {
+            "mean_reversion_windows_won": mr_wins_windows,
+            "momentum_windows_won": mom_wins_windows,
+            "mean_reversion_total_pnl": mr_total_all,
+            "momentum_total_pnl": mom_total_all,
+        },
     }
 
 
