@@ -23,7 +23,7 @@ from datetime import datetime, timezone, timedelta
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, func, case, text
+from sqlalchemy import select, func, case, text, delete
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1124,10 +1124,21 @@ async def get_btc_prediction_log(limit: int = 20):
     15-minute projection - per the account owner's explicit follow-up
     ("I need to know that too... did it hit it or did it [not]"). Read-
     only; resolution itself happens inside get_btc_price_projection()
-    above, piggybacked on the dashboard's own live poll."""
+    above, piggybacked on the dashboard's own live poll.
+
+    Real gap found and fixed: this endpoint never called the dedupe/
+    unique-index migration below - only the two endpoints that WRITE a
+    new prediction did. If this panel's own poll landed before the
+    ticker/projection panel's first poll after a fresh deploy (or before
+    either had fired at all), a real pre-existing duplicate could still
+    be shown here even though the write-side race that created it was
+    already fixed. Calling it here too - it's a cheap no-op once it's
+    already run once in this process - closes that gap so this list is
+    never stale regardless of poll ordering."""
     if btc_price_projection_module is None:
         raise HTTPException(status_code=500, detail="btc_price_projection module not available")
     product_id = btc_price_projection_module.PRODUCT_ID
+    await _ensure_btc_prediction_log_dedupe_and_unique_index()
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -1154,6 +1165,29 @@ async def get_btc_prediction_log(limit: int = 20):
         "resolved_count": len(resolved_rows),
         "live_hit_rate_1sigma": live_hit_rate_1sigma,
     }
+
+
+@router.post("/family-tree-status/btc-projection/log/reset", dependencies=[Depends(require_admin_key)])
+async def reset_btc_prediction_log():
+    """Per the account owner's explicit request, after spotting a real
+    duplicate row in their own "Recent Predictions" list (the exact
+    concurrent-poll race documented above - fixed for new rows, but this
+    wipes out any stale/duplicate history already sitting in the table
+    so the log the account owner is about to rely on for real percentage
+    questions is provably clean going forward). Deletes every real
+    PricePredictionLog row for BTC-USD - purely a diagnostic log, never
+    real trading data or money, and never read by anything that trades.
+    A fresh prediction gets logged again on the very next live poll,
+    same as any other cold start."""
+    if btc_price_projection_module is None:
+        raise HTTPException(status_code=500, detail="btc_price_projection module not available")
+    product_id = btc_price_projection_module.PRODUCT_ID
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            delete(PricePredictionLog).where(PricePredictionLog.product_id == product_id)
+        )
+        await db.commit()
+    return {"deleted": result.rowcount}
 
 
 @router.get("/family-tree-status/btc-projection/chart", dependencies=[Depends(require_admin_key)])
