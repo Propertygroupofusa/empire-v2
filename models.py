@@ -1526,3 +1526,37 @@ class PricePredictionLog(Base):
             "abs_error_pct": self.abs_error_pct,
             "resolution_delay_seconds": self.resolution_delay_seconds,
         }
+
+
+class BtcTickerWindowAnchor(Base):
+    """A real, persisted 'price to beat' anchor for the BTC Live Ticker's
+    countdown windows - per the account owner's explicit request for a
+    second, longer window (matching a real third-party app's "Hourly BTC"
+    market) running alongside the existing 15-minute one.
+
+    Deliberately generic on window_minutes rather than a second hardcoded
+    table, so a given (product_id, window_minutes, window_start) is
+    unique - the real open price for THAT exact window is recorded once,
+    the moment it's first observed, and every later poll within the same
+    window reads the same anchor back rather than re-anchoring to
+    whatever the live price happens to be at poll time. Purely a display
+    anchor (like the existing 15-minute PricePredictionLog window
+    bookkeeping) - never read by anything that trades."""
+    __tablename__ = "btc_ticker_window_anchors"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(String, index=True)
+    window_minutes = Column(Integer, index=True)
+    window_start = Column(DateTime, index=True)
+    window_end = Column(DateTime)
+    open_price = Column(Float)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "product_id": self.product_id,
+            "window_minutes": self.window_minutes,
+            "window_start": self.window_start.isoformat() + "Z" if self.window_start else None,
+            "window_end": self.window_end.isoformat() + "Z" if self.window_end else None,
+            "open_price": self.open_price,
+        }

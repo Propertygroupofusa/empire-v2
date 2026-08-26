@@ -150,14 +150,22 @@ async def fetch_live_ticker_price(session, product_id: str = PRODUCT_ID):
         return None
 
 
-def _compute_projection(closes: list, live_price: float = None) -> dict:
+def _compute_projection(closes: list, live_price: float = None, horizon_minutes: int = HORIZON_MINUTES) -> dict:
     """Pure computation from a real, chronological list of 1-minute
     closes (oldest-first, at least MIN_LOOKBACK_MINUTES long) - the
     current price, the naive and trend-adjusted point estimates, and a
-    real volatility band scaled to the 15-minute horizon (sigma scales
-    with the square root of time under a random-walk assumption - the
-    same standard, honest approach options pricing uses, not something
+    real volatility band scaled to the given horizon (sigma scales with
+    the square root of time under a random-walk assumption - the same
+    standard, honest approach options pricing uses, not something
     invented for this feature).
+
+    `horizon_minutes` defaults to the validated 15-minute horizon this
+    module was built and backtested for - existing callers are
+    byte-for-byte unchanged. Passing a different horizon (e.g. 60 for an
+    hourly ticker window) reuses the exact same real formula, just scaled
+    further out; it has NOT been separately backtested at that horizon,
+    so a caller showing it should say so rather than implying the same
+    calibration evidence applies.
 
     `live_price`, when provided, anchors the "current price" to a real,
     tighter real-time read (see fetch_live_ticker_price above) instead of
@@ -169,7 +177,7 @@ def _compute_projection(closes: list, live_price: float = None) -> dict:
 
     trend_window = closes[-(TREND_LOOKBACK_MINUTES + 1):]
     slope_per_min = (trend_window[-1] - trend_window[0]) / trend_window[0] / (len(trend_window) - 1)
-    trend_price = current_price * (1 + slope_per_min * HORIZON_MINUTES)
+    trend_price = current_price * (1 + slope_per_min * horizon_minutes)
 
     vol_window = closes[-(VOL_LOOKBACK_MINUTES + 1):]
     one_min_returns = [
@@ -179,17 +187,17 @@ def _compute_projection(closes: list, live_price: float = None) -> dict:
     mean_r = sum(one_min_returns) / len(one_min_returns)
     variance = sum((r - mean_r) ** 2 for r in one_min_returns) / len(one_min_returns)
     one_min_sigma = variance ** 0.5
-    sigma_15min = one_min_sigma * math.sqrt(HORIZON_MINUTES)  # a real fraction, e.g. 0.004 = 0.4%
+    sigma_h = one_min_sigma * math.sqrt(horizon_minutes)  # a real fraction, e.g. 0.004 = 0.4%
 
     return {
         "current_price": current_price,
         "naive_price": current_price,
         "trend_price": trend_price,
-        "sigma_15min_frac": sigma_15min,
-        "band_1sigma_low": current_price * (1 - sigma_15min),
-        "band_1sigma_high": current_price * (1 + sigma_15min),
-        "band_2sigma_low": current_price * (1 - 2 * sigma_15min),
-        "band_2sigma_high": current_price * (1 + 2 * sigma_15min),
+        "sigma_15min_frac": sigma_h,
+        "band_1sigma_low": current_price * (1 - sigma_h),
+        "band_1sigma_high": current_price * (1 + sigma_h),
+        "band_2sigma_low": current_price * (1 - 2 * sigma_h),
+        "band_2sigma_high": current_price * (1 + 2 * sigma_h),
     }
 
 

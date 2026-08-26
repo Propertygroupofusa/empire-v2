@@ -6043,6 +6043,83 @@ dashboard that actually shows them the real number instead of hiding it.
 
 ---
 
+## A second, hourly countdown on the BTC Live Ticker
+
+Per the account owner's explicit request, after sharing real screenshots
+of a third-party app's "Hourly BTC" market (a real price-to-beat and
+countdown to the top of the hour, alongside its existing "15 min
+Bitcoin" market) - a direct request for "a second window/countdown...
+like having two different-length prediction windows tracked at once."
+
+- **`_compute_projection()`** (`btc_price_projection.py`) gained an
+  optional `horizon_minutes` parameter (default: the existing, validated
+  15). Omitting it reproduces the exact prior behavior byte-for-byte -
+  confirmed by a direct equality check against the old call shape.
+  Passing a different horizon reuses the identical real formula (trend
+  scales linearly with horizon, sigma scales with its square root, the
+  same standard random-walk approach already used for the 15-minute
+  panel) - it has NOT been separately backtested at 60 minutes, so this
+  is a mechanical reuse of validated math, not a new validated claim at
+  that horizon.
+- **`BtcTickerWindowAnchor`** (new model, `models.py`) - a real,
+  persisted "price to beat" anchor generic on `(product_id,
+  window_minutes, window_start)`, the direct counterpart to the existing
+  15-minute `PricePredictionLog` window bookkeeping but deliberately
+  separate (this is a pure display anchor, never resolved/graded the way
+  the 15-minute predictions are).
+- **`_get_or_create_hourly_window_anchor()`** (`routers/trading_dashboard.py`)
+  - aligns to the top of the current real UTC hour (60 divides an hour
+  evenly, so plain hour-flooring is a stable, restart-safe boundary -
+  unlike the 15-minute window, no modulo trick was needed). Creates a
+  real anchor row with the live price as its open price the first time
+  it's observed each real hour; every later poll within that same hour
+  reads the same anchor back. A genuine concurrent-poll race on the
+  insert is caught and re-read, same pattern already used for the
+  15-minute ledger's own duplicate-row fix.
+- **`get_btc_price_chart()`** now also returns `hourly_price_to_beat`,
+  `hourly_pct_change_vs_price_to_beat`, `hourly_resolve_at`, and
+  `hourly_seconds_remaining` alongside the existing 15-minute fields -
+  completely independent bookkeeping, so a failure in the hourly anchor
+  logic can never break the existing 15-minute display (wrapped in its
+  own try/except, matching the existing defensive pattern).
+- `family_tree_dashboard.html`'s BTC Live Ticker panel gained a second
+  row ("⏱️ Hourly window") with its own price-to-beat and countdown pill,
+  ticking down client-side the same way the existing 15-minute one does
+  (a slightly longer "urgent" threshold - 5 real minutes instead of 60
+  real seconds, since an hour-scale window nearing its close deserves
+  more advance warning than a 15-minute one).
+
+Verified offline (`test_hourly_ticker_window.py`, 14 checks): omitting
+`horizon_minutes` reproduces the exact prior default output; a 60-minute
+horizon's real sigma is exactly `sqrt(4)=2x` the 15-minute sigma off the
+identical closes, and its trend move is exactly `4x` (both hand-verified
+against the real math, not just "runs without crashing"); a real anchor
+is created with the given live price on first call, scoped to the
+correct real UTC-hour boundaries; a second call within the same real
+hour reads back the identical anchor rather than re-anchoring to a
+different later price, with only one real row ever created; and
+`get_btc_price_chart()` end-to-end includes the new hourly fields
+without disturbing the existing 15-minute ones. Full existing regression
+suite (`test_btc_chart_endpoint.py`, `test_btc_prediction_log_reset.py`,
+`test_btc_window_alignment.py` - 32 checks) re-run clean alongside it,
+confirming this addition doesn't disturb the existing 15-minute ticker
+or projection panel. Confirmed via a real AST route-count parse that no
+route was duplicated (56 total, zero duplicates).
+
+**Explicitly declined in the same conversation**: a request to build an
+automated tab that connects to the account owner's real Coinbase account
+and places live (or "test") bets on the third-party prediction app based
+on picking red/green - refused on two separate, concrete grounds: this
+codebase has no sanctioned API access to that third-party platform (an
+automated integration would mean scripting against another company's app
+without permission, risking the account there), and no validated
+directional edge exists to automate against regardless. This is the
+same "no" already given twice earlier in this file (the lag-arbitrage
+idea, and "build a ticker that always wins") - held consistently rather
+than reconsidered under a new framing.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

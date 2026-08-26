@@ -1842,6 +1842,7 @@ async function runBtcDirectionalBacktest() {
 }
 
 let btcTickerResolveAtMs = null;
+let btcHourlyResolveAtMs = null;
 
 function fmtCountdown(msRemaining) {
     if (msRemaining === null) return '--:--';
@@ -1853,10 +1854,17 @@ function fmtCountdown(msRemaining) {
 
 function tickBtcCountdown() {
     const el = document.getElementById('btc-tick-countdown');
-    if (!el) return;
-    const msRemaining = btcTickerResolveAtMs === null ? null : (btcTickerResolveAtMs - Date.now());
-    el.textContent = fmtCountdown(msRemaining);
-    el.classList.toggle('urgent', msRemaining !== null && msRemaining < 60000);
+    if (el) {
+        const msRemaining = btcTickerResolveAtMs === null ? null : (btcTickerResolveAtMs - Date.now());
+        el.textContent = fmtCountdown(msRemaining);
+        el.classList.toggle('urgent', msRemaining !== null && msRemaining < 60000);
+    }
+    const hourlyEl = document.getElementById('btc-tick-hourly-countdown');
+    if (hourlyEl) {
+        const hourlyMsRemaining = btcHourlyResolveAtMs === null ? null : (btcHourlyResolveAtMs - Date.now());
+        hourlyEl.textContent = fmtCountdown(hourlyMsRemaining);
+        hourlyEl.classList.toggle('urgent', hourlyMsRemaining !== null && hourlyMsRemaining < 300000);
+    }
 }
 
 function buildBtcSparklineSvg(history, priceToBeat, isUp) {
@@ -1888,6 +1896,17 @@ function renderBtcTicker(data) {
     const isUp = data.current_price >= data.price_to_beat;
     const pctStr = (data.pct_change_vs_price_to_beat >= 0 ? '+' : '') + data.pct_change_vs_price_to_beat.toFixed(3) + '%';
     btcTickerResolveAtMs = data.resolve_at ? new Date(data.resolve_at).getTime() : null;
+    btcHourlyResolveAtMs = data.hourly_resolve_at ? new Date(data.hourly_resolve_at).getTime() : null;
+
+    const hourlyHtml = data.hourly_price_to_beat != null ? `
+        <div class="btc-tick-top" style="margin-top:10px; padding-top:10px; border-top:1px dashed var(--border);">
+            <div class="btc-tick-sub" style="align-self:center;">⏱️ Hourly window</div>
+            <div class="btc-tick-beat">
+                <div class="lbl">Hourly price to beat</div>
+                <div class="val">${fmtBtc(data.hourly_price_to_beat)}</div>
+                <div id="btc-tick-hourly-countdown" class="btc-tick-countdown">--:--</div>
+            </div>
+        </div>` : '';
 
     wrap.innerHTML = `
         <div class="btc-tick-top">
@@ -1901,6 +1920,7 @@ function renderBtcTicker(data) {
                 <div id="btc-tick-countdown" class="btc-tick-countdown">--:--</div>
             </div>
         </div>
+        ${hourlyHtml}
         <div class="btc-tick-chart-wrap">${buildBtcSparklineSvg(data.history, data.price_to_beat, isUp)}</div>
     `;
     tickBtcCountdown();

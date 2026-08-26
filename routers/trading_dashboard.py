@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db, AsyncSessionLocal
 from admin_auth import require_admin_key
-from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory, PricePredictionCalibration, PricePredictionLog
+from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory, PricePredictionCalibration, PricePredictionLog, BtcTickerWindowAnchor
 
 NUM_BOTS = int(os.getenv("PROP_NUM_BOTS", "8"))
 if NUM_BOTS <= 0:
@@ -1207,6 +1207,59 @@ async def reset_btc_prediction_log():
     return {"deleted": result.rowcount}
 
 
+HOURLY_TICKER_WINDOW_MINUTES = 60
+
+
+async def _get_or_create_hourly_window_anchor(db, product_id: str, live_price: float):
+    """Real, persisted 'price to beat' for an hourly ticker window - the
+    direct hourly counterpart to the existing 15-minute window bookkeeping
+    (_current_prediction_window/_log_new_btc_prediction_if_due), per the
+    account owner's explicit request to add a second countdown matching a
+    real third-party app's own "Hourly BTC" market. Aligned to the top of
+    the current real UTC hour (unlike the 15-minute window, 60 divides an
+    hour evenly, so plain hour-flooring is a real, stable, restart-safe
+    boundary with no need for the quarter-hour-style modulo trick).
+    Returns the real BtcTickerWindowAnchor row for the current hour,
+    creating it with `live_price` as the real open price the first time
+    it's ever observed - every later call within the same real hour reads
+    the same anchor back rather than re-anchoring to whatever the price
+    happens to be at that later poll."""
+    now = datetime.utcnow()
+    window_start = now.replace(minute=0, second=0, microsecond=0)
+    window_end = window_start + timedelta(hours=1)
+    result = await db.execute(
+        select(BtcTickerWindowAnchor).where(
+            BtcTickerWindowAnchor.product_id == product_id,
+            BtcTickerWindowAnchor.window_minutes == HOURLY_TICKER_WINDOW_MINUTES,
+            BtcTickerWindowAnchor.window_start == window_start,
+        )
+    )
+    anchor = result.scalar_one_or_none()
+    if anchor is not None:
+        return anchor
+    anchor = BtcTickerWindowAnchor(
+        product_id=product_id, window_minutes=HOURLY_TICKER_WINDOW_MINUTES,
+        window_start=window_start, window_end=window_end, open_price=live_price,
+    )
+    db.add(anchor)
+    try:
+        await db.commit()
+    except IntegrityError:
+        # A real concurrent poll already created this same hour's anchor -
+        # same race already fixed for the 15-min ledger; just read back
+        # whichever row actually won.
+        await db.rollback()
+        result = await db.execute(
+            select(BtcTickerWindowAnchor).where(
+                BtcTickerWindowAnchor.product_id == product_id,
+                BtcTickerWindowAnchor.window_minutes == HOURLY_TICKER_WINDOW_MINUTES,
+                BtcTickerWindowAnchor.window_start == window_start,
+            )
+        )
+        anchor = result.scalar_one_or_none()
+    return anchor
+
+
 @router.get("/family-tree-status/btc-projection/chart", dependencies=[Depends(require_admin_key)])
 async def get_btc_price_chart():
     """Real, live BTC ticker + countdown for the dashboard - per the
@@ -1260,6 +1313,24 @@ async def get_btc_price_chart():
     except Exception as e:
         log.warning(f"[btc-projection/chart] window bookkeeping failed (non-fatal): {e}")
 
+    # Second, longer real countdown - an hourly "price to beat," per the
+    # account owner's explicit request to match a real third-party app's
+    # own "Hourly BTC" market alongside the existing 15-minute one. Kept
+    # completely independent of the 15-minute ledger above - its own
+    # anchor table, its own real wall-clock alignment (top of hour).
+    hourly_price_to_beat = None
+    hourly_resolve_at = None
+    hourly_seconds_remaining = 0
+    try:
+        async with AsyncSessionLocal() as db:
+            hourly_anchor = await _get_or_create_hourly_window_anchor(db, bpp.PRODUCT_ID, current_price)
+            if hourly_anchor is not None:
+                hourly_price_to_beat = hourly_anchor.open_price
+                hourly_resolve_at = hourly_anchor.window_end.isoformat() + "Z"
+                hourly_seconds_remaining = max(0, int((hourly_anchor.window_end - datetime.utcnow()).total_seconds()))
+    except Exception as e:
+        log.warning(f"[btc-projection/chart] hourly window bookkeeping failed (non-fatal): {e}")
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(PricePredictionLog)
@@ -1283,6 +1354,11 @@ async def get_btc_price_chart():
 
     pct_change = round((current_price - price_to_beat) / price_to_beat * 100, 4) if price_to_beat else 0.0
 
+    hourly_pct_change = (
+        round((current_price - hourly_price_to_beat) / hourly_price_to_beat * 100, 4)
+        if hourly_price_to_beat else None
+    )
+
     return {
         "product_id": bpp.PRODUCT_ID,
         "current_price": current_price,
@@ -1290,6 +1366,10 @@ async def get_btc_price_chart():
         "pct_change_vs_price_to_beat": pct_change,
         "resolve_at": resolve_at,
         "seconds_remaining": seconds_remaining,
+        "hourly_price_to_beat": hourly_price_to_beat,
+        "hourly_pct_change_vs_price_to_beat": hourly_pct_change,
+        "hourly_resolve_at": hourly_resolve_at,
+        "hourly_seconds_remaining": hourly_seconds_remaining,
         "history": history,
     }
 
