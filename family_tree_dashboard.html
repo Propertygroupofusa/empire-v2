@@ -1700,15 +1700,15 @@ function renderBtcPredictionLog(data) {
         const targetColor = (p.resolved && p.hit_1sigma) ? 'var(--green)' : 'var(--text)';
         if (!p.resolved) {
             const resolveAt = new Date(p.resolve_at).toLocaleTimeString([], timeFmt);
-            statusHtml = `<span style="color:var(--text-dim);">&#8987; Pending (resolves ${resolveAt})</span>`;
+            statusHtml = `<strong>${madeAt}</strong> <span style="color:var(--text-dim);">&#8987; Pending (resolves ${resolveAt})</span>`;
         } else if (p.hit_1sigma) {
-            statusHtml = `<span style="color:var(--green); font-weight:700;">&#9989; HIT</span> - <span style="color:#c99a00; font-weight:700;">actual ${fmtBtc(p.actual_price)}</span> (${p.abs_error_pct}% off)`;
+            statusHtml = `<strong>${madeAt}</strong> <span style="color:var(--green); font-weight:700;">&#9989; HIT</span> - <span style="color:#c99a00; font-weight:700;">actual ${fmtBtc(p.actual_price)}</span> (${p.abs_error_pct}% off)`;
         } else {
-            statusHtml = `<span style="color:var(--red); font-weight:700;">&#10060; MISS</span> - <span style="color:#c99a00; font-weight:700;">actual ${fmtBtc(p.actual_price)}</span> (${p.abs_error_pct}% off)`;
+            statusHtml = `<strong>${madeAt}</strong> <span style="color:var(--red); font-weight:700;">&#10060; MISS</span> - <span style="color:#c99a00; font-weight:700;">actual ${fmtBtc(p.actual_price)}</span> (${p.abs_error_pct}% off)`;
         }
-        return `<div style="display:flex; justify-content:space-between; gap:10px; padding:7px 0; border-bottom:1px solid var(--border); font-size:0.82em; flex-wrap:wrap;">
+        return `<div style="display:flex; flex-direction:column; gap:2px; padding:7px 0; border-bottom:1px solid var(--border); font-size:0.82em;">
             <div>${statusHtml}</div>
-            <div><strong>${madeAt}</strong> predicted <strong style="color:${targetColor};">${fmtBtc(p.projected_price)}</strong> <span style="color:var(--text-dim);">(&plusmn;1&sigma; ${fmtBtc(p.band_1sigma_low)}&ndash;${fmtBtc(p.band_1sigma_high)})</span></div>
+            <div>predicted <strong style="color:${targetColor};">${fmtBtc(p.projected_price)}</strong> <span style="color:var(--text-dim);">(&plusmn;1&sigma; ${fmtBtc(p.band_1sigma_low)}&ndash;${fmtBtc(p.band_1sigma_high)})</span></div>
         </div>`;
     }).join('');
 }
