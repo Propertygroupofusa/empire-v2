@@ -6120,6 +6120,108 @@ than reconsidered under a new framing.
 
 ---
 
+## Move cash between branches - a real gap "Add cash" alone couldn't close
+
+The account owner converted USDC back to USD and asked to help redeploy
+that real cash into the tree ("help out the coins that's in my system so
+we can build them up"), then hit a real `POST .../add-cash/{bot_name}`
+error: **"Add cash failed: Only $0.31 in real free spendable cash right
+now - can't deploy $100.00"** - despite a real $847.54-$850.14 Coinbase
+USD balance across the same conversation's screenshots. Diagnosed
+directly (predicted the exact shape of the error from STATUS.md before
+the account owner even shared the screenshot, then confirmed
+byte-for-byte against it): `add_cash_to_branch()` only ever draws from
+`spendable_for_spawn` - real cash NOT already reserved by any FLAT
+branch's own `allocated_usd`. With two real flat branches (POL $797.66,
+SOL $49.58) already bookkeeping almost the entire real balance while
+holding nothing, there was no real bug here - just a genuine gap: no
+existing tool could move a flat branch's OWN reserved allocation into a
+DIFFERENT branch that could actually put it to work.
+
+**`POST /family-tree-status/reallocate-cash`** (`{from_bot_name,
+to_bot_name, amount}`, admin-key gated, `routers/trading_dashboard.py`) -
+built after the account owner confirmed via a direct question ("Build a
+real 'move cash between branches' feature?" → "Yes, build it"). Reuses
+`add_cash_to_branch()`'s exact real buy/blend/target-stop-recompute logic
+for the destination side (real market buy via `engine.place_market_buy()`,
+quantity-weighted blended entry if the destination already holds a
+position or a fresh position if it's flat, target/stop recomputed off the
+new blended entry via the same ATR-based formula) - not duplicated
+independently, reused directly.
+
+Real safety checks, all server-side:
+- **Source must be FLAT** (no open `BotPosition`) - refused (400)
+  otherwise. Pulling `allocated_usd` out from under an actively-trading
+  branch would desync its own bookkeeping (and the DB-vs-Coinbase
+  reconciliation panel) from what's genuinely deployed - this feature
+  only ever moves cash that's genuinely sitting idle.
+- Refused (400) if the amount isn't positive, exceeds the source's own
+  real `allocated_usd`, or source and destination are the same branch.
+- Refused (404) if either `bot_name` doesn't exist.
+- **The source's `allocated_usd` is only debited after a confirmed real
+  destination fill** - a failed real buy (order rejection, missing
+  price/volatility data) leaves the source completely untouched, with
+  the real captured Coinbase rejection reason surfaced via 502 (the same
+  `_last_order_error` pattern used everywhere else in this file). No real
+  dollars are ever debited from a branch without a confirmed fill to show
+  for it.
+- Respects `STOP_TRADING` the same way `add_cash_to_branch` already does
+  (400 refusal while set) - this deploys new capital, so the same kill
+  switch applies.
+- Logs a real `BUY` activity event on the destination (matching
+  `add_cash_to_branch`'s own event) plus a new `REALLOCATE` event type on
+  the source, naming both branches and the real amount moved - visible
+  in the Live Activity feed like every other real action this session
+  wired into it.
+- Settles the destination immediately via the existing
+  `_maybe_spawn_child(dest)` if this deposit pushes it over its own next
+  spawn tier - same "don't leave it sitting at 100% for up to ~30s"
+  reasoning `add_cash_to_branch` already established.
+
+**Dashboard UI** (`family_tree_dashboard.html`): a new "🔀 Move cash
+between branches" button in the Reconciliation panel (right under the
+existing "🔗 Combine branches sharing a coin" button - both panels deal
+with fixing up cash/positions across the tree) opens a real tappable
+modal - same pattern and CSS classes as the existing "🔓 Unlock Locked
+Profit" modal, not a chain of `prompt()` dialogs. The source list is
+filtered to only real FLAT branches (`!b.position`); the destination list
+shows every branch, marked `(flat)` where relevant; picking a branch
+already selected as the source as the destination is refused client-side
+with a clear message. A real confirm dialog states the exact dollar
+amount and both branch names before the real order fires.
+
+Verified offline (`test_reallocate_cash.py`, 21 checks) against a real
+throwaway SQLite DB, reproducing the exact real POL/SOL/XRP numbers from
+this conversation: a real reallocation from a flat POL branch into an
+XRP branch already holding a position correctly blends a real
+quantity-weighted entry and moves the exact dollar amount between both
+branches' `allocated_usd`; reallocating into a currently-flat destination
+opens a fresh position at the real fill price; a source branch holding an
+open position is refused (400); an amount exceeding the source's real
+balance is refused (400); source == destination is refused (400); a
+nonexistent source or destination `bot_name` is refused (404); and a
+failed real buy is surfaced as a 502 with the real captured rejection
+reason while leaving the source's `allocated_usd` completely untouched.
+Confirmed via a real AST route-count parse that the new route is bound to
+the correct function with no duplicate registrations (57 total routes,
+zero duplicates) - same discipline established after the earlier
+`_safe_float`/decorator-misplacement bug. `family_tree_dashboard.html`
+re-verified with a real Python `HTMLParser` tag-balance check (no
+mismatched/unclosed tags) and `node --check` on the extracted inline
+`<script>` block (no syntax errors). A 35-file sample of the existing
+regression suite showed pre-existing failures unrelated to this change -
+confirmed via a direct `git stash` comparison that a subset of them
+(`test_family_tree.py`, `test_root_add_cash.py`, `test_excluded_coins.py`,
+`test_pepe_wif_exclusion.py`, `test_spawn_race.py`) fail identically on
+the prior commit, before this change ever touched the repo.
+
+**Not yet confirmed against real live trading** - the account owner
+needs to open the family tree dashboard after the next redeploy, tap
+"🔀 Move cash between branches," and confirm the real POL/SOL idle cash
+actually redeploys into whichever branch they pick.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

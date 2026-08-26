@@ -500,6 +500,8 @@
         <button id="consolidate-btn" class="unlock-btn" style="margin-top:12px;" onclick="previewConsolidate()">🔗 Combine branches sharing a coin</button>
         <div id="consolidate-status" style="margin-top:8px; font-size:0.85em; color: var(--text-dim);"></div>
         <div id="consolidate-plan-wrap"></div>
+        <button id="reallocate-btn" class="unlock-btn" style="margin-top:12px;" onclick="openReallocateModal()">🔀 Move cash between branches</button>
+        <div style="margin-top:6px; font-size:0.78em; color:var(--text-dim);">Pulls real reserved cash from a FLAT branch (holding nothing right now) and deploys it into another branch's coin - for when a branch's own allocated_usd is sitting idle instead of working.</div>
     </div>
 
     <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
@@ -596,6 +598,28 @@
         <div class="modal-actions">
             <button type="button" class="modal-btn-secondary" onclick="closeUnlockModal()">Cancel</button>
             <button type="button" class="modal-btn-primary" id="unlock-confirm-btn" onclick="confirmUnlockProfit()">Unlock</button>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="reallocate-modal-overlay">
+    <div class="modal-card">
+        <div class="modal-title">🔀 Move Cash Between Branches</div>
+        <div class="modal-sub">Pulls real allocated cash out of a FLAT branch (only branches holding nothing right now can be a source - an actively-trading branch's own cash can't be pulled out from under it) and buys it into a DIFFERENT branch's coin.</div>
+
+        <label class="modal-label">From (must be flat)</label>
+        <div id="realloc-source-list" class="branch-pick-list"></div>
+
+        <label class="modal-label" style="margin-top:16px;">Amount to move</label>
+        <input type="number" id="realloc-amount-input" class="modal-input" step="0.01" min="0.01">
+        <div id="realloc-source-max" style="font-size:0.78em; color:var(--text-dim); margin-top:4px;"></div>
+
+        <label class="modal-label" style="margin-top:16px;">Into (any branch)</label>
+        <div id="realloc-dest-list" class="branch-pick-list"></div>
+
+        <div class="modal-actions">
+            <button type="button" class="modal-btn-secondary" onclick="closeReallocateModal()">Cancel</button>
+            <button type="button" class="modal-btn-primary" id="realloc-confirm-btn" onclick="confirmReallocateCash()">Move cash</button>
         </div>
     </div>
 </div>
@@ -1120,6 +1144,107 @@ async function confirmUnlockProfit() {
     } finally {
         confirmBtn.disabled = false;
         confirmBtn.textContent = 'Unlock';
+        await refresh();
+    }
+}
+
+// Real "move a flat branch's idle cash into a different branch" tool -
+// built after a real "Add cash failed: Only $0.31 in real free spendable
+// cash right now" error exposed that almost all real cash was already
+// bookkept as reserved for two flat branches (POL/SOL) holding nothing.
+// add_cash_to_branch only ever draws from cash NOT already reserved by a
+// flat branch - this is the one way to actually redeploy a flat branch's
+// OWN reserved allocation elsewhere. Same tappable-modal pattern as the
+// existing Unlock Locked Profit modal, reusing its exact CSS classes.
+let reallocModal = { branches: [], selectedSource: null, selectedDest: null };
+
+async function openReallocateModal() {
+    const statusData = await apiGet('/family-tree-status');
+    const branches = statusData.branches || [];
+    reallocModal = { branches, selectedSource: null, selectedDest: null };
+
+    const flatBranches = branches.filter(b => !b.position);
+    const sourceListEl = document.getElementById('realloc-source-list');
+    if (flatBranches.length === 0) {
+        sourceListEl.innerHTML = '<div class="coin-history-empty">No branches are currently flat - nothing to move.</div>';
+    } else {
+        sourceListEl.innerHTML = flatBranches.map(b => `
+            <button type="button" class="branch-pick-btn" data-bot="${b.bot_name}" onclick="selectReallocateSource('${b.bot_name}', this)">
+                <span class="coin-name">${b.product_id.replace('-USD', '')}</span>
+                <span class="bot-id">${b.bot_name} · ${fmtUsd(b.allocated_usd)} idle</span>
+            </button>
+        `).join('');
+    }
+
+    const destListEl = document.getElementById('realloc-dest-list');
+    destListEl.innerHTML = branches.map(b => `
+        <button type="button" class="branch-pick-btn" data-bot="${b.bot_name}" onclick="selectReallocateDest('${b.bot_name}', this)">
+            <span class="coin-name">${b.product_id.replace('-USD', '')}</span>
+            <span class="bot-id">${b.bot_name} · ${fmtUsd(b.allocated_usd)}${b.position ? '' : ' (flat)'}</span>
+        </button>
+    `).join('');
+
+    document.getElementById('realloc-amount-input').value = '';
+    document.getElementById('realloc-source-max').textContent = '';
+    document.getElementById('reallocate-modal-overlay').classList.add('open');
+}
+
+function selectReallocateSource(botName, btnEl) {
+    reallocModal.selectedSource = botName;
+    document.getElementById('realloc-source-list').querySelectorAll('.branch-pick-btn').forEach(el => el.classList.remove('selected'));
+    btnEl.classList.add('selected');
+    const branch = reallocModal.branches.find(b => b.bot_name === botName);
+    if (branch) {
+        document.getElementById('realloc-source-max').textContent = `${fmtUsd(branch.allocated_usd)} available from this branch`;
+        document.getElementById('realloc-amount-input').max = branch.allocated_usd.toFixed(2);
+    }
+    // A branch can't be both the source and destination of the same move.
+    if (reallocModal.selectedDest === botName) {
+        reallocModal.selectedDest = null;
+        document.getElementById('realloc-dest-list').querySelectorAll('.branch-pick-btn').forEach(el => el.classList.remove('selected'));
+    }
+}
+
+function selectReallocateDest(botName, btnEl) {
+    if (botName === reallocModal.selectedSource) { alert("Pick a different branch as the destination - it can't be the same as the source."); return; }
+    reallocModal.selectedDest = botName;
+    document.getElementById('realloc-dest-list').querySelectorAll('.branch-pick-btn').forEach(el => el.classList.remove('selected'));
+    btnEl.classList.add('selected');
+}
+
+function closeReallocateModal() {
+    document.getElementById('reallocate-modal-overlay').classList.remove('open');
+}
+
+async function confirmReallocateCash() {
+    const amount = parseFloat(document.getElementById('realloc-amount-input').value);
+    if (!amount || amount <= 0) { alert('Enter a positive dollar amount.'); return; }
+    if (!reallocModal.selectedSource) { alert('Tap a FLAT branch to move cash FROM first.'); return; }
+    if (!reallocModal.selectedDest) { alert('Tap a branch to move cash INTO first.'); return; }
+
+    const fromBot = reallocModal.selectedSource;
+    const toBot = reallocModal.selectedDest;
+    if (!confirm(`Move $${amount.toFixed(2)} real cash from ${fromBot} into ${toBot}? This places a real market buy and can't be undone.`)) return;
+
+    const confirmBtn = document.getElementById('realloc-confirm-btn');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Moving…';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/family-tree-status/reallocate-cash', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ from_bot_name: fromBot, to_bot_name: toBot, amount }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        closeReallocateModal();
+        alert(`Moved ${fmtUsd(data.amount_moved)} from ${data.from_bot_name} (now ${fmtUsd(data.from_new_balance)}) into ${data.to_bot_name}'s ${data.product_id} position - bought ${data.filled_qty.toFixed(8)} @ ${fmtUsd(data.filled_price)}, new balance ${fmtUsd(data.to_new_balance)}.`);
+    } catch (e) {
+        alert('Could not move cash: ' + e.message);
+    } finally {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Move cash';
         await refresh();
     }
 }

@@ -1613,6 +1613,135 @@ async def add_cash_to_branch(bot_name: str, payload: AddCashRequest, db: AsyncSe
     }
 
 
+class ReallocateCashRequest(BaseModel):
+    from_bot_name: str
+    to_bot_name: str
+    amount: float
+
+
+@router.post("/family-tree-status/reallocate-cash", dependencies=[Depends(require_admin_key)])
+async def reallocate_cash_between_branches(payload: ReallocateCashRequest, db: AsyncSession = Depends(get_db)):
+    """Moves real, already-bookkept cash directly from one FLAT branch's
+    allocated_usd into another branch's position - built after a real
+    "Add cash failed: Only $0.31 in real free spendable cash right now"
+    error exposed that almost all of the account's real cash was already
+    reserved for two flat branches (POL/SOL) with nothing currently
+    deployed in them, even though the real Coinbase account had plenty of
+    genuinely free cash sitting there. add_cash_to_branch() only ever
+    draws from spendable_for_spawn (real cash NOT already reserved by any
+    flat branch) - it can never touch a flat branch's own reserved
+    allocation, so there was no existing way to actually put an idle
+    branch's real dollars back to work in a DIFFERENT branch without first
+    manually waiting for/forcing that branch's own spawn cycle.
+
+    Source branch MUST be flat (no open BotPosition) - refused (400)
+    otherwise, since pulling allocated_usd out from under a branch that's
+    actively holding a real position would leave its own bookkeeping
+    (and the DB-vs-Coinbase reconciliation panel) out of sync with what's
+    genuinely deployed. Refused if the amount isn't positive, exceeds the
+    source's own real allocated_usd, or if either bot_name doesn't exist
+    or they're the same branch.
+
+    Places a real market buy for the amount into the DESTINATION branch,
+    via the exact same real buy/blend/target-stop-recompute logic
+    add_cash_to_branch() already uses (quantity-weighted blended entry,
+    ATR-based target/stop recompute) - reused directly here rather than
+    duplicated. If the real buy fails to fill, the source's allocated_usd
+    is left completely untouched (the deduction only happens after a
+    confirmed fill) - no real dollars are ever debited from the source
+    without a confirmed destination fill to show for it."""
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        raise HTTPException(status_code=400, detail="STOP_TRADING is set - new capital deployment is paused")
+    tree = crypto_family_tree_bot_module
+    engine = tree.engine
+
+    if payload.amount <= 0:
+        raise HTTPException(status_code=400, detail="amount must be positive")
+    if payload.from_bot_name == payload.to_bot_name:
+        raise HTTPException(status_code=400, detail="source and destination branches must be different")
+
+    source_result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == payload.from_bot_name))
+    source = source_result.scalar_one_or_none()
+    if source is None:
+        raise HTTPException(status_code=404, detail=f"No branch named {payload.from_bot_name}")
+
+    dest_result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == payload.to_bot_name))
+    dest = dest_result.scalar_one_or_none()
+    if dest is None:
+        raise HTTPException(status_code=404, detail=f"No branch named {payload.to_bot_name}")
+
+    source_position = await tree._load_branch_position(payload.from_bot_name)
+    if source_position is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{payload.from_bot_name} is currently holding a position on {source.product_id} - "
+                   f"only a FLAT branch's reserved cash can be reallocated",
+        )
+
+    if payload.amount > source.allocated_usd + 0.005:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{payload.from_bot_name} only has ${source.allocated_usd:.2f} of its own real allocated cash - can't move ${payload.amount:.2f}",
+        )
+
+    async with engine.aiohttp.ClientSession() as session:
+        price, atr_pct = await engine.get_price_and_volatility(session, dest.product_id)
+        if price is None or atr_pct is None:
+            raise HTTPException(status_code=503, detail=f"Could not fetch a live {dest.product_id} price/volatility right now - try again")
+
+        fill = await engine.place_market_buy(session, payload.amount, dest.product_id)
+        if not fill:
+            stuck_reason = engine._last_order_error.get(dest.product_id, "unknown reason")
+            raise HTTPException(status_code=502, detail=f"Real Coinbase order did not fill: {stuck_reason}")
+        filled_qty, filled_price = fill
+
+        existing_position = await tree._load_branch_position(payload.to_bot_name)
+        if existing_position is not None:
+            new_qty = existing_position.qty + filled_qty
+            blended_entry = (
+                existing_position.qty * existing_position.entry_price + filled_qty * filled_price
+            ) / new_qty
+        else:
+            new_qty = filled_qty
+            blended_entry = filled_price
+
+        position_dollar_size = new_qty * blended_entry
+        target_pct = max(engine.pick_target_pct(atr_pct), engine.min_profit_target_pct(position_dollar_size, atr_pct))
+        target_price = blended_entry * (1 + target_pct)
+        stop_price = blended_entry * (1 - tree.STOP_LOSS_PCT)
+        await tree._save_branch_position(payload.to_bot_name, dest.product_id, blended_entry, new_qty, target_price, stop_price)
+
+    source.allocated_usd -= payload.amount
+    dest.allocated_usd += payload.amount
+    await db.commit()
+
+    realloc_msg = (
+        f"🔀 Manually moved ${payload.amount:.2f} real cash from {payload.from_bot_name} (now ${source.allocated_usd:.2f}) "
+        f"into {payload.to_bot_name}'s {dest.product_id} position - bought {filled_qty:.8f} @ ${filled_price:,.2f}, "
+        f"blended entry now ${blended_entry:,.2f}, branch total now ${dest.allocated_usd:.2f}"
+    )
+    log.info(f"[dashboard] {realloc_msg}")
+    await tree._log_activity(payload.to_bot_name, dest.product_id, "BUY", realloc_msg)
+    await tree._log_activity(payload.from_bot_name, source.product_id, "REALLOCATE", realloc_msg)
+
+    await tree._maybe_spawn_child(dest)
+    return {
+        "status": "cash_reallocated",
+        "from_bot_name": payload.from_bot_name,
+        "from_new_balance": round(source.allocated_usd, 2),
+        "to_bot_name": payload.to_bot_name,
+        "product_id": dest.product_id,
+        "amount_moved": round(payload.amount, 2),
+        "filled_qty": filled_qty,
+        "filled_price": round(filled_price, 2),
+        "new_entry_price": round(blended_entry, 2),
+        "new_qty": new_qty,
+        "to_new_balance": round(dest.allocated_usd, 2),
+    }
+
+
 @router.post("/family-tree-status/consolidate-branches", dependencies=[Depends(require_admin_key)])
 async def consolidate_family_tree_branches(dry_run: bool = True):
     """Merges every real branch sharing the same coin into one - per the
