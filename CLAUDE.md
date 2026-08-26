@@ -4962,6 +4962,99 @@ provides the mechanism, it doesn't recommend which variant to pick.
 
 ---
 
+## BTC 15-minute-ahead price projection panel (informational only)
+
+Per the account owner's explicit request: "can we set up a system that
+can predict what the coin will hit in 15 minutes." Scoped, by their own
+explicit choice (asked directly via two clarifying questions before
+building anything), to **BTC only** and to a **purely informational
+dashboard panel** - this never places an order and is never imported by
+any live trading bot, unlike everything else built this session that
+eventually fed into real trades.
+
+Stated to the account owner up front, and baked into the feature's own
+copy rather than hidden: no honest system can predict the EXACT price a
+coin hits in 15 minutes - at that horizon, crypto is close to a random
+walk, and no simple model reliably beats "probably near where it is now"
+as a point estimate. What actually got built is the honest version of
+that request: a most-likely price plus a real, volatility-based RANGE,
+validated by a real backtest that checks how often the real price
+actually landed in that range on real historical data - the same
+"test before trust" discipline every other feature in this file follows.
+
+**`btc_price_projection.py`** (new module):
+- `_compute_projection(closes)` - pure function computing TWO point
+  estimates from a real, chronological list of 1-minute closes: `naive`
+  (price doesn't move - the honest zero-drift baseline) and `trend`
+  (current price adjusted by a real, un-tuned average per-minute return
+  over the last 30 minutes, extrapolated 15 minutes forward). Also
+  computes a real volatility band: 1-minute return standard deviation
+  over the last 60 minutes, scaled by `sqrt(15)` (volatility scales with
+  the square root of time under a random-walk assumption - the same
+  standard approach options pricing uses, not invented for this).
+- `get_live_projection(session, method)` - real live fetch (single,
+  unpaginated Coinbase candles call, same public endpoint
+  `crypto_btc_compound_bot.py`'s own `_fetch_candles` uses) plus the
+  computation above. `method` ("naive" or "trend") is passed in by the
+  caller, never hardcoded here - see below for how it's actually chosen.
+- `run_price_projection_backtest(product_id, days)` - SHADOW-MODE, never
+  touches live trading. Paginated real historical 1-minute candle fetch
+  (mirrors `crypto_selection_backtest.py`'s own pagination pattern),
+  then `_backtest_replay()` walks every real minute in the window,
+  computing both estimates from data available at that point and
+  comparing against the REAL price 15 real minutes later - real mean
+  absolute % error for each estimate, and real coverage of the ±1σ/±2σ
+  bands (should land near 68%/95% if the model is honestly calibrated,
+  not just asserted to be).
+
+**New `PricePredictionCalibration` model** (`models.py`) - one row per
+real backtest run, same pattern as `CryptoBacktestRun`/`AlpacaBacktestRun`.
+The live endpoint reads the MOST RECENT row to decide which point
+estimate to show as the headline number: `trend` only if a real backtest
+actually showed it beating `naive`, otherwise `naive` - a fancier-looking
+number never gets shown by default just because it exists, only once
+real evidence backs it, and it can flip back if a later real backtest
+shows naive winning again.
+
+New `GET /api/trading-dashboard/family-tree-status/btc-projection`
+(admin-key gated, live) and `POST .../btc-projection/backtest` (admin-key
+gated, runs the real backtest and persists a new calibration row) in
+`routers/trading_dashboard.py`. New "🔮 BTC — Next 15 Minutes" panel on
+`family_tree_dashboard.html`: current price, projected price, a real
+range bar (±1σ shaded inside ±2σ, current price marked), and the
+calibration sentence spelling out the real backtest's actual numbers -
+or an honest "not yet checked, don't trust this yet" message before the
+first real backtest ever runs. Refreshes every 30s; the backtest itself
+is a manual button (~10-40s, real paginated API calls), not something run
+automatically on every page load.
+
+Verified offline (`test_btc_price_projection.py`, `test_btc_projection_endpoints.py`,
+22 + 11 checks): on a perfectly flat synthetic price series, both
+estimates and sigma are exactly the mathematically-correct zero/current-price
+values; on a series with a real, known constant per-minute drift, the
+trend estimate matches a hand-computed extrapolation to within floating-point
+precision; on a series with known alternating returns, the computed sigma
+matches a hand-computed standard deviation exactly; the backtest replay's
+real sample count matches the expected window size exactly, and correctly
+reports 0% error / 100% band coverage on a flat series; and end-to-end,
+the live endpoint correctly defaults to `naive` with no backtest on
+record, correctly switches to `trend` after a real backtest shows it
+winning on a strongly-trending synthetic series, correctly switches back
+to `naive` after a later real backtest shows a tie, and a real live-fetch
+failure returns a clean 503 rather than a crash. Full existing regression
+suite re-run clean alongside it, confirming the new `PricePredictionCalibration`
+table doesn't disturb anything else sharing the same DB metadata.
+
+**Not yet run against real historical data** - same documented gap as
+every backtest tool in this file (no live network access to Coinbase from
+this sandbox). The account owner needs to open the family tree dashboard
+after the next redeploy, let the live panel populate, and click "Run
+accuracy check" to get the real, honest answer to whether this range is
+actually trustworthy on real BTC history - the panel says so plainly
+until that first real run happens.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

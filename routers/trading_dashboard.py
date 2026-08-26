@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db, AsyncSessionLocal
 from admin_auth import require_admin_key
-from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory
+from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory, PricePredictionCalibration
 
 NUM_BOTS = int(os.getenv("PROP_NUM_BOTS", "8"))
 if NUM_BOTS <= 0:
@@ -66,6 +66,12 @@ try:
 except Exception as e:
     log.warning(f"alpaca_selection_backtest not importable, /alpaca-selection-backtest will report unavailable: {e}")
     alpaca_selection_backtest_module = None
+
+try:
+    import btc_price_projection as btc_price_projection_module
+except Exception as e:
+    log.warning(f"btc_price_projection not importable, /family-tree-status/btc-projection will report unavailable: {e}")
+    btc_price_projection_module = None
 
 ALPACA_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
@@ -878,6 +884,76 @@ async def get_activity_feed(limit: int = 50):
         raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
     events = await crypto_family_tree_bot_module.get_activity_feed(limit=limit)
     return {"events": events, "event_count": len(events)}
+
+
+@router.get("/family-tree-status/btc-projection", dependencies=[Depends(require_admin_key)])
+async def get_btc_price_projection():
+    """Real, live 15-minute-ahead price projection for BTC - per the
+    account owner's explicit request: "can we set up a system that can
+    predict what the coin will hit in 15 minutes." Purely informational
+    (never touches live trading, places no order) per their own explicit
+    scoping choice. Reads the most recent real backtest (see the
+    /btc-projection/backtest endpoint below) to decide which of the two
+    point estimates (naive vs trend) to surface as the headline number -
+    whichever real evidence showed was actually more accurate - and
+    always returns the calibration numbers alongside the live projection
+    so the dashboard never shows a number with no real track record
+    attached."""
+    if btc_price_projection_module is None:
+        raise HTTPException(status_code=500, detail="btc_price_projection module not available")
+    bpp = btc_price_projection_module
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(PricePredictionCalibration)
+            .where(PricePredictionCalibration.product_id == bpp.PRODUCT_ID)
+            .order_by(PricePredictionCalibration.run_at.desc())
+            .limit(1)
+        )
+        latest_calibration = result.scalar_one_or_none()
+
+    method = "naive"
+    if latest_calibration and latest_calibration.trend_mae_pct is not None and latest_calibration.naive_mae_pct is not None:
+        if latest_calibration.trend_mae_pct < latest_calibration.naive_mae_pct:
+            method = "trend"
+
+    async with aiohttp.ClientSession() as session:
+        projection = await bpp.get_live_projection(session, method=method)
+    if projection is None:
+        raise HTTPException(status_code=503, detail="Could not fetch a live BTC price right now - try again")
+
+    projection["calibration"] = latest_calibration.to_dict() if latest_calibration else None
+    return projection
+
+
+@router.post("/family-tree-status/btc-projection/backtest", dependencies=[Depends(require_admin_key)])
+async def run_btc_price_projection_backtest(days: float = 3.0):
+    """SHADOW-MODE - never touches live trading, places no order. Runs a
+    real backtest of the 15-minute-ahead projection above against real
+    historical Coinbase 1-minute candles, persists the result (so the
+    live panel always has a real track record to show), and returns it.
+    Pulls ~days*1440 real 1-minute candles in paginated real API calls -
+    can take a real ~10-40 seconds depending on the window."""
+    if btc_price_projection_module is None:
+        raise HTTPException(status_code=500, detail="btc_price_projection module not available")
+    result = await btc_price_projection_module.run_price_projection_backtest(days=days)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result["error"])
+
+    async with AsyncSessionLocal() as db:
+        row = PricePredictionCalibration(
+            product_id=result["product_id"],
+            window_days=result["window_days"],
+            num_samples=result["num_samples"],
+            naive_mae_pct=result["naive_mae_pct"],
+            trend_mae_pct=result["trend_mae_pct"],
+            pct_within_1sigma=result["pct_within_1sigma"],
+            pct_within_2sigma=result["pct_within_2sigma"],
+        )
+        db.add(row)
+        await db.commit()
+
+    return result
 
 
 @router.post("/family-tree-status/root-take-profit", dependencies=[Depends(require_admin_key)])

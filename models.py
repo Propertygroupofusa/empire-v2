@@ -1407,3 +1407,40 @@ class CryptoActivityEvent(Base):
             "message": self.message,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class PricePredictionCalibration(Base):
+    """One real backtest run of btc_price_projection.py's 15-minute-ahead
+    price projection - per the account owner's explicit request for "a
+    system that can predict what the coin will hit in 15 minutes."
+    Deliberately stores real, honest accuracy numbers (how the naive
+    no-change baseline and the trend-adjusted estimate actually compared
+    on real history, and how often the real price actually landed inside
+    the volatility band) rather than just the projection itself - the
+    live dashboard panel reads the latest row here so it can show a real
+    "here's how trustworthy this has actually been" figure next to the
+    live number, instead of a number with no track record attached."""
+    __tablename__ = "price_prediction_calibrations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(String, index=True)
+    run_at = Column(DateTime, default=datetime.utcnow, index=True)
+    window_days = Column(Float)
+    num_samples = Column(Integer)
+    naive_mae_pct = Column(Float)  # mean absolute % error of the "price stays the same" baseline
+    trend_mae_pct = Column(Float)  # mean absolute % error of the trend-adjusted estimate
+    pct_within_1sigma = Column(Float)  # real coverage of the +/-1 sigma band (should be ~68% if honest)
+    pct_within_2sigma = Column(Float)  # real coverage of the +/-2 sigma band (should be ~95% if honest)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "product_id": self.product_id,
+            "run_at": self.run_at.isoformat() if self.run_at else None,
+            "window_days": self.window_days,
+            "num_samples": self.num_samples,
+            "naive_mae_pct": self.naive_mae_pct,
+            "trend_mae_pct": self.trend_mae_pct,
+            "pct_within_1sigma": self.pct_within_1sigma,
+            "pct_within_2sigma": self.pct_within_2sigma,
+        }

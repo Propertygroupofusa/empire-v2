@@ -510,6 +510,15 @@
         <div id="activity-feed-wrap"><div class="coin-history-empty">Loading…</div></div>
     </div>
 
+    <div class="section-title" style="display:flex; justify-content:space-between; align-items:center;">
+        <span>🔮 BTC — Next 15 Minutes</span>
+        <button id="btc-projection-backtest-btn" class="unlock-btn" style="margin-top:0;" onclick="runBtcProjectionBacktest()">▶ Run accuracy check</button>
+    </div>
+    <div class="panel">
+        <div class="panel-sub">A real, honest range based on how much BTC has actually been moving in the last hour - not a guess at an exact number. No honest system can predict the exact price; this shows the most likely price plus a real range, and how often that range has actually been right. Purely informational - never feeds into any trade. Updates every 30s.</div>
+        <div id="btc-projection-wrap"><div class="coin-history-empty">Loading…</div></div>
+    </div>
+
     <div class="section-title">📜 Coin Trade History</div>
     <div class="panel">
         <div class="panel-sub">Real trade count and P&amp;L per coin, tracked across every branch and every time it's been bought and sold - buying a coin back after selling it picks up right where its history left off. Tap a coin to see its individual trades.</div>
@@ -1510,6 +1519,79 @@ async function loadActivityFeed() {
     }
 }
 
+function fmtBtc(n) {
+    return '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function renderBtcProjection(data) {
+    const wrap = document.getElementById('btc-projection-wrap');
+    if (!data) {
+        wrap.innerHTML = '<div class="coin-history-empty">Could not load a live BTC price right now.</div>';
+        return;
+    }
+    const lo2 = data.band_2sigma_low, hi2 = data.band_2sigma_high;
+    const lo1 = data.band_1sigma_low, hi1 = data.band_1sigma_high;
+    const range = (hi2 - lo2) || 1;
+    const pct = (v) => Math.max(0, Math.min(100, ((v - lo2) / range) * 100));
+    const cal = data.calibration;
+    const calHtml = cal
+        ? `Last checked ${new Date(cal.run_at).toLocaleString()}: the real price landed inside the &plusmn;1&sigma; band <strong>${cal.pct_within_1sigma}%</strong> of ${cal.num_samples} real 15-minute windows over ${cal.window_days} real day(s) (&plusmn;2&sigma;: ${cal.pct_within_2sigma}%). Real error - naive ${cal.naive_mae_pct}% vs trend ${cal.trend_mae_pct}% - currently showing <strong>${data.method}</strong> as the headline number since it's the one real evidence favors.`
+        : `Not yet checked against real history - hit "Run accuracy check" above before trusting this range. Defaulting to the honest zero-drift (naive) estimate until a real backtest says otherwise.`;
+
+    wrap.innerHTML = `
+        <div style="display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:12px; margin-bottom:14px;">
+            <div>
+                <div style="font-size:0.78em; color:var(--text-dim);">Right now</div>
+                <div style="font-size:1.6em; font-weight:800; color:var(--navy);">${fmtBtc(data.current_price)}</div>
+            </div>
+            <div>
+                <div style="font-size:0.78em; color:var(--text-dim);">Most likely in 15 min (${data.method})</div>
+                <div style="font-size:1.6em; font-weight:800; color:var(--gold);">${fmtBtc(data.projected_price)}</div>
+            </div>
+        </div>
+        <div style="position:relative; height:26px; background:var(--red-bg); border-radius:8px; overflow:hidden; margin-bottom:6px;">
+            <div style="position:absolute; left:${pct(lo1)}%; right:${(100 - pct(hi1))}%; top:0; bottom:0; background:var(--green-bg);"></div>
+            <div style="position:absolute; left:${pct(data.current_price)}%; top:0; bottom:0; width:2px; background:var(--navy);"></div>
+        </div>
+        <div style="display:flex; justify-content:space-between; font-size:0.7em; color:var(--text-dim); margin-bottom:14px;">
+            <span>${fmtBtc(lo2)} (&minus;2&sigma;)</span><span>${fmtBtc(lo1)} (&minus;1&sigma;)</span><span>${fmtBtc(hi1)} (+1&sigma;)</span><span>${fmtBtc(hi2)} (+2&sigma;)</span>
+        </div>
+        <div style="font-size:0.85em; color:var(--text-dim);">${calHtml}</div>
+    `;
+}
+
+async function loadBtcProjection() {
+    try {
+        const data = await apiGet('/family-tree-status/btc-projection');
+        renderBtcProjection(data);
+    } catch (e) {
+        document.getElementById('btc-projection-wrap').innerHTML = `<div class="coin-history-empty">Could not load: ${e.message}</div>`;
+    }
+}
+
+async function runBtcProjectionBacktest() {
+    const btn = document.getElementById('btc-projection-backtest-btn');
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Running... (~10-40s)';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/family-tree-status/btc-projection/backtest', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        await loadBtcProjection();
+        alert(`Real backtest done: ${data.num_samples} real 15-minute windows over ${data.window_days} real day(s). The +/-1-sigma band captured the real price ${data.pct_within_1sigma}% of the time (naive error ${data.naive_mae_pct}% vs trend error ${data.trend_mae_pct}%).`);
+    } catch (e) {
+        alert('Could not run the accuracy check: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = original;
+    }
+}
+
 async function loadTicker() {
     const track = document.getElementById('ticker-track');
     try {
@@ -1534,10 +1616,12 @@ async function loadTicker() {
 
 refresh();
 loadTicker();
+loadBtcProjection();
 loadActivityFeed();
 setInterval(refresh, 15000);
 setInterval(loadTicker, 30000);
 setInterval(loadActivityFeed, 5000);
+setInterval(loadBtcProjection, 30000);
 </script>
 </body>
 </html>
