@@ -5972,6 +5972,77 @@ call.
 
 ---
 
+## The real USDC blind spot, confirmed live and fixed (visibility only)
+
+This was flagged as a real, undecided gap earlier in this file's own
+history: "unclear whether Coinbase's Advanced Trade API can fund a
+BTC-USD-style market order directly from a USDC balance... needs
+confirming before deciding whether the fix is 'the bot also reads/uses
+USDC' or 'convert back to USD, the bot's view is correct as-is.' Account
+owner's choice, for now: convert back to USD manually when this
+happens." It happened, for real: the account owner shared a real
+Coinbase screenshot showing $698.43 in USDC + $150.33 in USD ($848.76
+real total cash), while manual "Trade this"/"Add cash"/"Start new
+branch" actions were all refusing for lack of real spendable cash - and,
+understandably, this looked like the app had lost or was hiding real
+money, since the account genuinely had plenty of it.
+
+Root cause, confirmed exactly: `get_usd_balance()` only ever reads the
+literal "USD" Coinbase account - `spendable_for_spawn`
+(`routers/trading_dashboard.py`) is `real_balance - locked_usd -
+(every FLAT branch's own allocated_usd)`, and with real_balance blind to
+the $698.43 in USDC, that math came out deeply negative even though the
+account was genuinely healthy. Reproduced exactly against the account
+owner's own real numbers in the offline test below: -$696.91 spendable,
+matching the real "won't let me place a trade" symptom precisely.
+
+**Deliberately fixed as VISIBILITY only, not as new trading behavior** -
+the underlying question from before ("can a BTC-USD order actually be
+funded from USDC directly?") is still unconfirmed from this sandbox (no
+live Coinbase access to test it), and guessing wrong on a real-money
+order-execution path is exactly the class of risk this file's whole
+history argues against. The account owner's own already-documented
+choice for this exact scenario - convert back to USD manually when it
+happens - is still respected; this only makes sure that choice can be
+made with the real number in front of them instead of a confusing "why
+does it say I have no money" moment:
+
+- **`get_usdc_balance()`** (new, `crypto_btc_compound_bot.py`) - a thin
+  wrapper reusing the exact same `get_asset_balance()` helper
+  `get_usd_balance()` already calls, just for `"USDC"` instead of
+  `"USD"`.
+- **`get_family_tree_status()`** now also fetches the real USDC balance
+  alongside the existing USD fetch, and returns both as
+  `real_usd_balance`/`real_usdc_balance` in its response -
+  `spendable_for_spawn` itself is completely untouched, still computed
+  from USD-only `real_balance` exactly as before, confirmed by a
+  dedicated test assertion.
+- New "💵 $X sitting in USDC isn't counted as spendable cash" banner on
+  `family_tree_dashboard.html`, shown whenever `real_usdc_balance` is at
+  least $5, right under the rolling-expectancy banner - explains exactly
+  what's happening and what to do about it (convert on Coinbase, not the
+  "earn APY" slider which pushes the wrong direction) in plain language,
+  reassuring that the money is real and safe, just in a currency the bot
+  can't spend directly yet.
+
+Verified offline (`test_usdc_visibility.py`, 6 checks, real Coinbase API
+call mocked - no live network access from this sandbox):
+`get_usdc_balance()` correctly fetches the real USDC balance via the
+same generic helper; `get_family_tree_status()`'s response carries both
+real balances, matching the account owner's own exact real numbers from
+the screenshot; and `spendable_for_spawn` is confirmed byte-for-byte
+unchanged by this fix (still USD-only), reproducing the real, deeply
+negative -$696.91 figure that caused the actual live "can't place a
+trade" symptom.
+
+**Still not decided**: whether to eventually make the bot actually
+capable of spending USDC directly (would need confirming Coinbase's real
+order-funding behavior first) versus leaving manual conversion as the
+permanent answer - that's the account owner's call, informed now by a
+dashboard that actually shows them the real number instead of hiding it.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

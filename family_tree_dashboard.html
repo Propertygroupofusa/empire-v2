@@ -471,6 +471,7 @@
 
     <div id="crypto-passive-mode-banner" style="display:none;"></div>
     <div id="rolling-expectancy-banner" style="display:none;"></div>
+    <div id="usdc-blindspot-banner" style="display:none;"></div>
 
     <div class="narrative" id="narrative">Loading tree summary…</div>
 
@@ -1361,6 +1362,7 @@ async function refresh() {
         updateUnlockButtonState(data);
         renderCryptoPassiveModeBanner(data);
         renderRollingExpectancyBanner(data);
+        renderUsdcBlindSpotBanner(data);
 
         const branches = data.branches || [];
         lastUnrealizedProfit = branches.reduce((sum, b) => {
@@ -1463,6 +1465,24 @@ function renderCryptoPassiveModeBanner(data) {
             </div>
         </div>`;
     }
+}
+
+function renderUsdcBlindSpotBanner(data) {
+    const el = document.getElementById('usdc-blindspot-banner');
+    const usdc = data.real_usdc_balance;
+    if (usdc == null || usdc < 5) {
+        el.style.display = 'none';
+        el.innerHTML = '';
+        return;
+    }
+    el.style.display = '';
+    el.innerHTML = `<div class="panel" style="background: var(--gold-bg); border: 1px solid var(--gold); padding: 14px 18px; margin-bottom: 16px;">
+        <strong>💵 ${fmtUsd(usdc)} sitting in USDC isn't counted as spendable cash.</strong> Real USD balance is only
+        ${fmtUsd(data.real_usd_balance || 0)} - the bot can't place a real trade using USDC directly, so it's invisible
+        to "Trade this," "Add cash," and "Start new branch" until it's converted. If a manual action is refusing for
+        lack of cash, convert this USDC back to USD on Coinbase (not the "earn APY" slider, which goes the other way) -
+        this money is real and safe, just sitting in the wrong currency for the bot to use.
+    </div>`;
 }
 
 function renderRollingExpectancyBanner(data) {

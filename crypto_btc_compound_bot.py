@@ -309,6 +309,40 @@ async def get_usd_balance(session) -> tuple:
     return await get_asset_balance(session, "USD")
 
 
+async def get_usdc_balance(session) -> tuple:
+    """Real available USDC balance. Returns (balance, None) or (None, reason).
+
+    Real, confirmed-live gap this closes VISIBILITY into (not yet the
+    trading behavior itself - see the account owner's own documented
+    choice below): get_usd_balance() only ever reads the literal "USD"
+    Coinbase account. If a meaningful chunk of real cash sits in USDC
+    (Coinbase's own "Earn 3.50% APY by converting USD to USDC" prompt,
+    or auto-rewards enrollment, can do this), every downstream real-cash
+    calculation that uses get_usd_balance() alone - spendable_for_spawn,
+    buy sizing, the dust sweep - is blind to it, and can make a real,
+    healthy account look like it has $0 or even negative real spendable
+    cash. Confirmed live: the account owner's own real Coinbase screen
+    showed $698.43 in USDC + $150.33 in USD ($848.76 total real cash),
+    while the dashboard's manual "Trade this"/"Add cash"/"Start new
+    branch" actions were all refusing for lack of real spendable cash -
+    because real_balance (USD-only) minus the two flat branches' own
+    allocated_usd came out deeply negative, with the $698.43 in USDC
+    never once part of that math.
+
+    Deliberately NOT wired into spendable_for_spawn or any real order-
+    execution path here - Coinbase's BTC-USD market orders need real USD
+    as the quote currency; whether the API can fund one directly from a
+    USDC balance instead is unconfirmed (this sandbox has no live
+    Coinbase access to test it), and guessing wrong on a real-money order
+    path is exactly the kind of risk this whole codebase's history argues
+    against. The account owner's own explicit, already-documented choice
+    for this exact scenario is "convert back to USD manually when this
+    happens" - this function exists so that choice can be made with the
+    real number in front of them (surfaced on the dashboard) instead of
+    a confusing "why does it say I have no money" moment."""
+    return await get_asset_balance(session, "USDC")
+
+
 async def get_product_size_decimals(session, product_id: str) -> int:
     """How many decimal places Coinbase allows for order size on this
     product, from its base_increment (e.g. BTC-USD allows 8 decimals but a

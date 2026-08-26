@@ -716,6 +716,7 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     # for why this can't just subtract every branch's allocated_usd.
     current_price_by_bot = {}
     real_balance = None
+    real_usdc_balance = None
     if crypto_family_tree_bot_module is not None:
         engine = crypto_family_tree_bot_module.engine
         async with engine.aiohttp.ClientSession() as session:
@@ -724,6 +725,20 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
                 if price is not None:
                     current_price_by_bot[bot_name] = price
             real_balance, _err = await engine.get_usd_balance(session)
+            # Real, read-only visibility into a confirmed-live confusion:
+            # get_usd_balance() (and therefore spendable_for_spawn below)
+            # only ever sees the literal USD account - a real balance
+            # sitting in USDC (Coinbase's own "Earn APY by converting USD
+            # to USDC" feature can put it there) is invisible to it and
+            # can make a genuinely healthy account look like it has $0 or
+            # negative real spendable cash. Never folded into
+            # spendable_for_spawn or any order-execution path - whether a
+            # BTC-USD order can be funded directly from USDC is
+            # unconfirmed from this sandbox, and the account owner's own
+            # documented choice for this exact scenario is to convert it
+            # back to USD by hand. This is purely so that choice can be
+            # made with the real number in front of them.
+            real_usdc_balance, _usdc_err = await engine.get_usdc_balance(session)
 
     out = []
     for b in branches:
@@ -819,6 +834,8 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         "can_spawn": can_spawn,
         "crypto_passive_mode": crypto_passive_mode,
         "rolling_expectancy": rolling_expectancy,
+        "real_usd_balance": round(real_balance, 2) if real_balance is not None else None,
+        "real_usdc_balance": round(real_usdc_balance, 2) if real_usdc_balance is not None else None,
     }
 
 
