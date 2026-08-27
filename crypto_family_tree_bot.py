@@ -181,6 +181,29 @@ def _coin_sale_cooldown_active(product_id: str) -> bool:
 # still underwater is governed by the ordinary stop, not this.
 MAX_PROFIT_GIVEBACK_USD = engine._safe_float_env("TREE_MAX_PROFIT_GIVEBACK_USD", "3.75")
 
+# Per the account owner's explicit request ("buy and sell with a profit
+# within a short period of time... if it's a profit... allow it to be
+# taken and do it again, if not then keep it until it grows"): a real,
+# fast profit-take exit, checked on the SAME per-branch cycle every other
+# exit already runs on (~27-33s with jitter - well inside the "every 5
+# minutes" the account owner asked for, no separate timer needed). Reuses
+# the exact same real fee-adjusted net-P&L formula the giveback-net-of-
+# fees fix already validated (price * qty * (1 - ROUND_TRIP_FEE_RATE/2) -
+# entry_price * qty) - if that number is ever genuinely positive, right
+# now, the position closes and the branch is immediately free to look for
+# its next opportunity (the existing post-sale coin-switch/rebuy path
+# already handles "do it again," no new logic needed there). Deliberately
+# does NOT force-close while net-negative - a position that hasn't
+# cleared real fees yet is left completely alone, still governed only by
+# its own TARGET/STOP/breakeven/giveback protection, exactly matching the
+# account owner's explicit "never force it into the negative" requirement
+# (the OPPOSITE of a blind timeout that closes whatever's still
+# undecided). QUICK_PROFIT_MIN_NET_USD (0.0 default - literally "any real
+# profit, however small") is a real dollar floor above the already-
+# fee-adjusted number, env-overridable if a minimum worth bothering with
+# turns out to matter more than taking every real cent on offer.
+QUICK_PROFIT_MIN_NET_USD = engine._safe_float_env("TREE_QUICK_PROFIT_MIN_NET_USD", "0.0")
+
 # Per the account owner (a king/throne model, corrected after an earlier
 # "permanent once earned" version): BTC (the root) is King - always stays
 # on BTC-USD, never contested, never changes - see the ROOT_BOT_NAME check
@@ -2803,7 +2826,15 @@ async def _maybe_spawn_child(branch, allow_reinforce: bool = True):
     await _log_activity(child_name, next_product, "SPAWN", spawn_msg)
 
 
-async def _branch_sell_and_settle(session, bot_name, product_id, position, reason):
+async def _branch_sell_and_settle(session, bot_name, product_id, position, reason) -> bool:
+    """Returns True if the branch's real state actually changed (a genuine
+    fill, or the phantom-position self-heal clearing a stale tracked
+    position) - safe for a caller to immediately recurse into an updated
+    world. Returns False when the real sell attempt simply failed to fill
+    and nothing changed - the caller must NOT recurse in that case (see
+    run_branch_cycle's own comment at its call site: recursing on an
+    unchanged state re-tries the identical doomed sell against the
+    identical price forever, a real RecursionError risk)."""
     fill = await engine.place_market_sell(session, position.qty, product_id)
     if not fill:
         stuck_reason = engine._last_order_error.get(product_id, "")
@@ -2849,9 +2880,9 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
                                 f"[TREE] 🔀 {bot_name} switching {old_product_id} -> {new_product_id} "
                                 f"(ATR {new_product_atr*100:.2f}%) after phantom-position self-heal"
                             )
-            return
+            return True  # real state change (position cleared) - safe to recurse
         log.warning(f"[TREE] {bot_name}: {reason} but sell did not fill - will retry next cycle")
-        return
+        return False  # nothing changed - the caller must not recurse on this
     filled_qty, filled_price = fill
     # Starts this coin's one-cycle cooldown (see _coin_sale_cooldown_active)
     # right away, before find_most_volatile_unclaimed_coin() runs a few
@@ -2979,6 +3010,7 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
         await _log_activity(bot_name, product_id, "LOCK", lock_msg)
     if row is not None:
         await _maybe_spawn_child(row)
+    return True  # a genuine fill - real state changed, safe to recurse
 
 
 async def run_branch_cycle(bot_name: str) -> bool:
@@ -3304,6 +3336,12 @@ async def run_branch_cycle(bot_name: str) -> bool:
         projected_net_pnl = (price * position.qty * (1 - ROUND_TRIP_FEE_RATE / 2)) - (position.entry_price * position.qty)
         giveback_would_realize_loss = stored_peak > 0 and peak_giveback >= MAX_PROFIT_GIVEBACK_USD and projected_net_pnl <= 0
         giveback_exceeded = stored_peak > 0 and peak_giveback >= MAX_PROFIT_GIVEBACK_USD and projected_net_pnl > 0
+        # Real, fast profit-take: any genuine real profit (after real
+        # round-trip fees) gets taken now rather than waiting for the
+        # formal, bigger TARGET price - see QUICK_PROFIT_MIN_NET_USD
+        # above. Never fires on a net-negative or break-even position -
+        # that case is left completely alone under existing protection.
+        quick_profit_available = projected_net_pnl > QUICK_PROFIT_MIN_NET_USD
         if giveback_would_realize_loss:
             log.info(
                 f"[TREE] {bot_name}: peak-profit giveback cap reached (${peak_giveback:.2f} given back from "
@@ -3312,23 +3350,42 @@ async def run_branch_cycle(bot_name: str) -> bool:
                 f"force-selling into a loss labeled as a win"
             )
 
-        if price >= position.target_price or price <= position.stop_price or giveback_exceeded:
+        if price >= position.target_price or price <= position.stop_price or giveback_exceeded or quick_profit_available:
             if price >= position.target_price:
                 exit_reason = "TARGET HIT"
             elif price <= position.stop_price:
                 exit_reason = "STOP HIT"
-            else:
+            elif giveback_exceeded:
                 exit_reason = "PEAK PROFIT GIVEBACK - locking in gains"
                 log.warning(
                     f"[TREE] 💰 {bot_name} gave back ${peak_giveback:.2f} from its ${stored_peak:.2f} peak "
                     f"profit - force-selling to lock in what's left"
                 )
-            await _branch_sell_and_settle(session, bot_name, branch.product_id, position, exit_reason)
-            # _branch_sell_and_settle already picked the branch's next coin -
-            # re-run immediately (same reasoning as the floor-breach path
-            # above) so the rebuy happens in this same pass instead of
-            # waiting for the next scheduled cycle.
-            return await run_branch_cycle(bot_name)
+            else:
+                exit_reason = "QUICK PROFIT - real net gain taken fast"
+                log.info(
+                    f"[TREE] ⚡ {bot_name} showing a real ${projected_net_pnl:.2f} net profit (after fees) - "
+                    f"taking it now instead of waiting for the bigger ${position.target_price:,.2f} target"
+                )
+            sold = await _branch_sell_and_settle(session, bot_name, branch.product_id, position, exit_reason)
+            if sold:
+                # _branch_sell_and_settle already picked the branch's next
+                # coin - re-run immediately (same reasoning as the
+                # floor-breach path above) so the rebuy happens in this
+                # same pass instead of waiting for the next scheduled cycle.
+                return await run_branch_cycle(bot_name)
+            # Real, previously-latent bug: recursing here unconditionally
+            # (the old behavior) re-evaluates the identical exit condition
+            # against the identical price and retries the identical doomed
+            # sell forever whenever a real sell attempt simply fails to
+            # fill - a genuine RecursionError risk, confirmed while testing
+            # the QUICK PROFIT exit above (it fires far more often than
+            # TARGET/STOP/GIVEBACK ever did, and was the first thing to
+            # actually exercise this gap at scale). Nothing about this
+            # position's state changed, so don't recurse - _branch_sell_
+            # and_settle already logged "will retry next cycle"; let that
+            # actually happen instead of retrying inside this same call.
+            return True
         else:
             if (position.stop_price is not None and position.stop_price < position.entry_price
                     and price >= position.entry_price * (1 + BREAKEVEN_TRIGGER_PCT)):

@@ -6794,6 +6794,123 @@ anything already open.
 
 ---
 
+## New live exit rule: QUICK PROFIT - take any real gain fast, never force a loss
+
+Per the account owner's explicit, carefully-clarified request. Their first
+framing sounded like a blind force-close timer, which they correctly
+pushed back on once it was explained plainly: a timer that force-closes
+whatever's still open after a fixed window would frequently close
+positions that are down or merely undecided, not just winners - the
+opposite of what "take a profit fast" should mean. Walked through what
+they actually wanted via two follow-up rounds of clarification, landing
+on: check the position often (every cycle already does - ~27-33s with
+jitter, well inside the "every 5 minutes" they asked for, no separate
+timer needed), and if it's showing a REAL profit right now (net of real
+fees), take it and let the branch look for its next opportunity
+immediately. If it's NOT yet profitable, never force it - leave it
+completely alone under its existing protection so it can still grow.
+
+**`QUICK_PROFIT_MIN_NET_USD`** (0.0 default - literally "any real profit,
+however small," env-overridable via `TREE_QUICK_PROFIT_MIN_NET_USD`) and
+a new `quick_profit_available` check in `run_branch_cycle()`, wired into
+the exact same TARGET/STOP/GIVEBACK exit block every other exit already
+uses. Reuses the EXACT SAME real fee-adjusted net-P&L formula the
+giveback-net-of-fees fix already validated (`price * qty * (1 -
+ROUND_TRIP_FEE_RATE/2) - entry_price * qty`) - not a new or separately-
+computed number. Checked as a genuine catch-all, in this priority order:
+TARGET HIT (the bigger, more specific win, never demoted) → STOP HIT →
+PEAK PROFIT GIVEBACK → QUICK PROFIT (any remaining real net-positive
+case). Applies to every branch, root included - TARGET/STOP/breakeven/
+giveback already applied equally to root, and root's "never manually
+sold" rule is specifically about the MANUAL dashboard button, not
+automatic risk/profit exits.
+
+**Real, honest, deliberate consequence, not a bug**: since real round-trip
+fees are well under 1% and the existing breakeven-ratchet trigger is +1%,
+QUICK PROFIT will almost always fire before a position ever reaches the
+breakeven ratchet or builds any meaningful peak for the giveback rule to
+protect. In practice, this makes the tree take many more, smaller real
+wins instead of waiting for the bigger formal ATR-based target - exactly
+what was asked for, but a real, structural behavior change worth being
+plain about: the older "let a winner run and protect it as it grows"
+machinery (breakeven ratchet, peak tracking, giveback) will engage far
+less often now, since most positions won't stay open long enough to reach
+it.
+
+**A second, more serious bug found and fixed while building this**:
+`run_branch_cycle()` recursed into itself (`return await
+run_branch_cycle(bot_name)`) UNCONDITIONALLY right after calling
+`_branch_sell_and_settle()` on every TARGET/STOP/GIVEBACK exit -
+regardless of whether the sell actually filled. `_branch_sell_and_settle()`
+never returned a real success/failure signal at all (every path,
+including "sell did not fill - will retry next cycle," implicitly
+returned `None`), so the caller had no way to tell a genuine fill apart
+from a failed one. This meant a real sell that repeatedly failed to fill
+(a real rejection, a network hiccup) while the price stayed the same
+between two near-instantaneous recursive calls would retry the identical
+doomed sell against the identical price forever, in the same call stack -
+a genuine, live `RecursionError` risk that could crash a branch's thread,
+predating this session's change entirely. It was never actually triggered
+in production or in any prior test because every existing test only
+mocked scenarios where the sell was guaranteed to succeed; QUICK PROFIT's
+much broader trigger condition was the first thing to exercise this gap
+at scale (surfaced immediately as real `RecursionError`s across more than
+a dozen regression tests the moment QUICK PROFIT started firing in
+fixtures that never mocked a successful sell).
+
+Fixed by making `_branch_sell_and_settle()` return a real bool: `True` on
+a genuine fill OR the phantom-position self-heal (both are real state
+changes, safe to recurse into), `False` when the sell attempt simply
+failed and nothing changed. `run_branch_cycle()`'s recursive call site now
+only recurses when `sold` is `True`; on `False` it returns immediately
+without recursing, exactly matching the log line that already said "will
+retry next cycle" - now it actually does, instead of retrying inside the
+same call.
+
+Verified offline (`test_quick_profit_take.py`, new, 16 checks) against a
+real throwaway SQLite DB: a real, small net profit (well below the formal
+target) triggers an immediate sell labeled "QUICK PROFIT - real net gain
+taken fast," with the recorded P&L genuinely positive; a real net-negative
+position is NEVER force-sold by this rule (the account owner's explicit
+"never force it into the negative" requirement) and is left completely
+untouched; a position at EXACTLY real fee-adjusted break-even (strict `>`,
+not `>=`) is not sold; a real TARGET hit is still labeled "TARGET HIT,"
+never demoted to QUICK PROFIT even though it also clears real fees; a real
+STOP-LOSS hit is completely unaffected and still fires unconditionally;
+and `QUICK_PROFIT_MIN_NET_USD` is honestly wired in (a real profit below a
+configured floor does not trigger the exit). The recursion-safety fix
+itself is implicitly verified by every one of these 16 checks actually
+completing rather than hanging - the exact class of failure it fixes.
+
+Two pre-existing test files (`test_breakeven_ratchet.py`,
+`test_peak_profit_giveback.py`) needed real updates, not just re-runs:
+both build up a peak/crossing scenario that QUICK PROFIT now preempts
+before the mechanism they're actually testing ever gets a chance to
+engage (confirmed directly: on the OLD code, `test_peak_profit_giveback.py`'s
+own Case 4 assertion was secretly riding on a STOP HIT the breakeven
+ratchet had already set up in Case 1, not the giveback rule its own
+docstring claims to test). Both now set `QUICK_PROFIT_MIN_NET_USD` to a
+real, very high floor for their own duration, isolating the mechanism
+each file is meant to test - QUICK PROFIT's own precedence and
+interaction with every other exit is validated separately, directly, in
+`test_quick_profit_take.py`. Full broader regression sweep (~28 related
+test files) re-run clean alongside all of this; every other failure seen
+was confirmed pre-existing and unrelated via direct `git stash`
+comparison against the prior commit (the already-documented 4-tuple/
+5-tuple mock staleness, a stale `_ensure_product_id_unique_index`
+reference, and others), plus one flaky failure (`test_adoption.py`)
+traced to shared-dev-DB pollution from running many real-DB-backed test
+files back to back in this sandbox, not a real regression - confirmed
+clean on a freshly reset DB.
+
+**Not yet confirmed against real live trading** - this is a real, live
+exit-rule change now shipped; the account owner should watch the
+dashboard and Live Activity feed after the next redeploy to confirm
+positions are now closing out with small real profits much faster than
+before, and that nothing ever closes while genuinely underwater.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
