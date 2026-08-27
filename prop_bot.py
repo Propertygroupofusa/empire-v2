@@ -18,9 +18,9 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import aiohttp
 import uuid
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func, case
 from database import AsyncSessionLocal
-from models import BotPosition, Payment, AlpacaBacktestRun, TradingBotState, AlpacaBranch
+from models import BotPosition, Payment, AlpacaBacktestRun, TradingBotState, AlpacaBranch, AlpacaBranchTradeHistory
 import bot_mandates
 from bot_mandates import APEX_MANDATE, validate_entry, MOMENTUM_ENTRY, MEAN_REVERSION_ENTRY
 from alpaca_mean_reversion import should_exit_position_momentum, should_exit_position
@@ -2355,6 +2355,64 @@ async def load_alpaca_branch_positions():
         log.error(f"[ALPACA-BRANCH] Failed to reload branch positions from DB: {e}")
 
 
+async def _log_alpaca_branch_trade(bot_name: str, contract: str, symbol: str, entry_price: float, exit_price: float, qty: float, pnl: float, exit_reason: str, opened_at):
+    """Real, persisted record of one completed Alpaca branch round-trip -
+    per the account owner's explicit request to see real Capital and win
+    rate "adding up" for a branch, not just the current allocated_usd
+    number with no history behind it. Best-effort, deliberately never
+    allowed to raise: a logging failure here must never affect the real
+    trade or the real allocated_usd update that already happened at the
+    call site - same defensive pattern crypto_family_tree_bot.py's own
+    _log_activity() already uses."""
+    try:
+        async with AsyncSessionLocal() as db:
+            db.add(AlpacaBranchTradeHistory(
+                bot_name=bot_name, contract=contract, symbol=symbol,
+                entry_price=entry_price, exit_price=exit_price, qty=qty, pnl=pnl,
+                exit_reason=exit_reason, opened_at=opened_at,
+            ))
+            await db.commit()
+    except Exception as e:
+        log.warning(f"[ALPACA-BRANCH] trade-history log failed for {bot_name} (non-fatal, real trade unaffected): {e}")
+
+
+async def get_alpaca_branch_trade_history(limit_recent: int = 50):
+    """Real, per-branch trade-history aggregation - the direct Alpaca-side
+    counterpart to crypto_family_tree_bot.get_coin_trade_history(). Reads
+    AlpacaBranchTradeHistory (written the moment a real branch sell
+    fills) and returns, per bot_name: real trade_count/win_rate/total_pnl/
+    avg_pnl (via a real SQL GROUP BY, not computed row-by-row in Python),
+    plus the most recent individual trades overall for a detail view.
+    Read-only - never places an order."""
+    async with AsyncSessionLocal() as db:
+        agg_result = await db.execute(
+            select(
+                AlpacaBranchTradeHistory.bot_name,
+                func.count(AlpacaBranchTradeHistory.id).label("trade_count"),
+                func.sum(AlpacaBranchTradeHistory.pnl).label("total_pnl"),
+                func.avg(AlpacaBranchTradeHistory.pnl).label("avg_pnl"),
+                func.sum(case((AlpacaBranchTradeHistory.pnl > 0, 1), else_=0)).label("wins"),
+            ).group_by(AlpacaBranchTradeHistory.bot_name)
+        )
+        branches = []
+        for bot_name, trade_count, total_pnl, avg_pnl, wins in agg_result.all():
+            branches.append({
+                "bot_name": bot_name,
+                "trade_count": trade_count,
+                "total_pnl": round(total_pnl, 2) if total_pnl is not None else 0.0,
+                "avg_pnl": round(avg_pnl, 2) if avg_pnl is not None else 0.0,
+                "win_rate": round(wins / trade_count * 100, 1) if trade_count else 0.0,
+            })
+        branches.sort(key=lambda b: b["total_pnl"], reverse=True)
+
+        recent_result = await db.execute(
+            select(AlpacaBranchTradeHistory).order_by(desc(AlpacaBranchTradeHistory.closed_at)).limit(limit_recent)
+        )
+        recent_trades = [row.to_dict() for row in recent_result.scalars().all()]
+
+    return {"branches": branches, "recent_trades": recent_trades}
+
+
 async def run_alpaca_branch_cycle(session, branch, equity, buying_power, strategy_family, live_entry_variant, kill_halted: bool):
     """One real cycle for one Alpaca branch - reuses the exact same real
     entry/exit gate functions and order-placement path the whole-account
@@ -2442,6 +2500,10 @@ async def run_alpaca_branch_cycle(session, branch, equity, buying_power, strateg
                         fresh.allocated_usd += pnl
                         await db.commit()
                         new_balance = fresh.allocated_usd
+                await _log_alpaca_branch_trade(
+                    branch.bot_name, contract, config["symbol"], entry, price, qty, pnl, reason,
+                    position.get("open_time"),
+                )
                 log.info(
                     f"[ALPACA-BRANCH] {'📈' if pnl >= 0 else '📉'} {branch.bot_name} SOLD {contract} ({config['symbol']}) "
                     f"@ ${price:.2f} ({reason}) | entry ${entry:.2f} | P&L: ${pnl:+.2f} | branch now ${new_balance:.2f}"

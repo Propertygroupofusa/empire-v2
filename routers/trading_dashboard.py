@@ -3154,6 +3154,22 @@ async def get_alpaca_branches_status():
     }
 
 
+@router.get("/alpaca-overview/branch-trade-history", dependencies=[Depends(require_admin_key)])
+async def get_alpaca_branch_trade_history_endpoint():
+    """Real, per-branch win rate and cumulative P&L for the Alpaca
+    branches - per the account owner's explicit request to see the real
+    money "adding up" for a branch, not just its current Allocated
+    number with no history behind it. Reads AlpacaBranchTradeHistory
+    (written the moment a real branch sell fills, in
+    prop_bot.run_alpaca_branch_cycle()) via
+    prop_bot.get_alpaca_branch_trade_history() - the exact same real
+    aggregation, not a second, separately-computed number. Read-only -
+    never places an order."""
+    if prop_bot_module is None:
+        raise HTTPException(status_code=500, detail="prop_bot module not available")
+    return await prop_bot_module.get_alpaca_branch_trade_history()
+
+
 @router.get("/alpaca-overview/branch-symbol-rankings", dependencies=[Depends(require_admin_key)])
 async def get_alpaca_branch_symbol_rankings():
     """Real backtested ROI per contract, ranked best to worst - per the

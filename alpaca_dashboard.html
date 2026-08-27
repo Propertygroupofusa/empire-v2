@@ -882,7 +882,7 @@ const ALPACA_CONTRACTS = {
 
 let branchModeActive = false;
 
-function renderBranches(data) {
+function renderBranches(data, tradeHistoryByBot) {
     branchModeActive = !!data.mode_active;
     const modeBadge = document.getElementById('branch-mode-badge');
     modeBadge.textContent = branchModeActive ? '🟢 branch trading ON' : '⚪ branch trading off';
@@ -898,6 +898,7 @@ function renderBranches(data) {
         content.innerHTML = '<div class="empty">No real branches yet - create one above.</div>';
         return;
     }
+    tradeHistoryByBot = tradeHistoryByBot || {};
     content.innerHTML = `
         <div style="margin-bottom:10px; color:var(--text-dim); font-size:0.85em;">
             ${fmtUsd(data.total_allocated_usd)} total real capital allocated across ${branches.length} branch(es).
@@ -906,6 +907,7 @@ function renderBranches(data) {
             <thead><tr style="text-align:left; border-bottom:1px solid var(--border);">
                 <th style="padding:6px 8px;">Branch</th><th style="padding:6px 8px;">Symbol</th>
                 <th style="padding:6px 8px;">Allocated</th><th style="padding:6px 8px;">Position</th>
+                <th style="padding:6px 8px;">Real results</th>
                 <th style="padding:6px 8px;">Status</th><th style="padding:6px 8px;"></th>
             </tr></thead>
             <tbody>
@@ -920,11 +922,21 @@ function renderBranches(data) {
                             <div class="branch-progress-label"><span>Next reinforcement</span><span>${pct.toFixed(0)}%</span></div>
                             <div class="branch-progress-bar-bg"><div class="branch-progress-bar-fill" style="width:${pct}%;"></div></div>
                         </div>`;
+                    const hist = tradeHistoryByBot[b.bot_name];
+                    let resultsStr;
+                    if (!hist || hist.trade_count === 0) {
+                        resultsStr = '<span style="color:var(--text-dim);">No closed trades yet</span>';
+                    } else {
+                        const pnlColor = hist.total_pnl >= 0 ? 'var(--green)' : '#c0392b';
+                        resultsStr = `<span style="color:${pnlColor}; font-weight:600;">${hist.total_pnl >= 0 ? '+' : ''}${fmtUsd(hist.total_pnl)}</span>`
+                            + `<div style="font-size:0.8em; color:var(--text-dim); margin-top:2px;">${hist.trade_count} trade${hist.trade_count === 1 ? '' : 's'} · ${hist.win_rate.toFixed(0)}% win</div>`;
+                    }
                     return `<tr style="border-bottom:1px solid var(--border);">
                         <td style="padding:6px 8px;">${b.bot_name}</td>
                         <td style="padding:6px 8px;">${b.contract} (${b.symbol || '?'})</td>
                         <td style="padding:6px 8px;">${fmtUsd(b.allocated_usd)}${progressHtml}</td>
                         <td style="padding:6px 8px;">${posStr}</td>
+                        <td style="padding:6px 8px;">${resultsStr}</td>
                         <td style="padding:6px 8px;">${b.active ? '🟢 active' : '⏸️ paused'}</td>
                         <td style="padding:6px 8px;">
                             <a href="#" onclick="toggleBranchActive('${b.bot_name}', ${!b.active}); return false;" style="color:var(--navy);">
@@ -939,13 +951,20 @@ function renderBranches(data) {
             "Next reinforcement" is real progress toward this branch's own tier - once it crosses 100%, its extra
             capital is moved into whichever OTHER active branch is currently weakest (never a brand-new branch or a
             new symbol - only the branches already listed above can receive it, and only while they're flat).
+            "Real results" is this branch's own real, closed-trade history - the P&L already folded into its real
+            Allocated balance above, broken out here so you can see how it got there.
         </p>`;
 }
 
 async function loadBranches() {
     try {
-        const data = await apiGet('/alpaca-overview/branches');
-        renderBranches(data);
+        const [data, history] = await Promise.all([
+            apiGet('/alpaca-overview/branches'),
+            apiGet('/alpaca-overview/branch-trade-history').catch(function () { return { branches: [] }; }),
+        ]);
+        const tradeHistoryByBot = {};
+        (history.branches || []).forEach(function (h) { tradeHistoryByBot[h.bot_name] = h; });
+        renderBranches(data, tradeHistoryByBot);
     } catch (e) {
         document.getElementById('branches-content').innerHTML = `<div class="empty">Could not load: ${e.message}</div>`;
     }

@@ -8773,6 +8773,89 @@ negative) on the branch cards after the next cycle.
 
 ---
 
+## Real per-branch trade history and win rate for the Alpaca side
+
+Right after building an illustrative demo of what a branch does (a
+looping animated artifact, kept private, never touching the live app),
+the account owner asked directly: "where is this money at adding up in
+my Capital I need to see that in here as well" - they wanted the real
+version, not the illustration: a real "Capital" and "win rate" for each
+Alpaca branch, sourced from what a branch has actually done, not just
+its current `allocated_usd` number with no history behind it.
+
+Checked the real code first rather than assuming this existed:
+`run_alpaca_branch_cycle()`'s real exit path already computes real P&L
+(`pnl = (price - entry) * qty`) and folds it straight into
+`branch.allocated_usd` - that's the real, correct "Capital" figure,
+already shown as "Allocated" on the dashboard. But nothing persisted the
+INDIVIDUAL trade that produced each move - unlike the crypto side's
+`CryptoCoinTradeHistory`, there was no Alpaca-side ledger at all, so a
+real win rate was structurally impossible to show.
+
+**New `AlpacaBranchTradeHistory` model** (`models.py`) - the direct
+Alpaca-side counterpart to `CryptoCoinTradeHistory`, one row per real
+completed round-trip. Scoped by `bot_name` (not by contract) - an Alpaca
+branch is fixed to one real contract for its whole life in this first
+slice, so bot_name and contract are always in lockstep, and grouping by
+bot_name is what actually answers "how is THIS branch doing."
+
+**`_log_alpaca_branch_trade()`** (`prop_bot.py`) - best-effort, wrapped
+in try/except so a logging failure can never block or unwind the real
+trade already recorded at the call site (same defensive pattern
+`crypto_family_tree_bot._log_activity()` already established). Wired
+into `run_alpaca_branch_cycle()`'s real sell-fill branch, right where
+`pnl` is already computed - logs the exact same real entry/exit/qty/pnl/
+exit_reason/opened_at that already went into the Railway log line and
+the real `allocated_usd` update, so this can never disagree with either.
+
+**`get_alpaca_branch_trade_history()`** - real per-branch aggregation via
+a genuine SQL `GROUP BY bot_name` (not computed row-by-row in Python):
+`trade_count`/`total_pnl`/`avg_pnl`/`win_rate`, sorted best-P&L-first,
+plus the most recent individual trades overall. A branch with zero real
+trades never appears - no fabricated 0-trade row.
+
+New `GET /alpaca-overview/branch-trade-history` (admin-key gated,
+`routers/trading_dashboard.py`) - a thin pass-through to the function
+above, so the endpoint can never disagree with the real aggregation.
+Read-only, never places an order.
+
+`alpaca_dashboard.html`'s Real Branches table gained a "Real results"
+column - `fmtUsd` net P&L color-coded green/red, with real trade
+count/win rate underneath, or an honest "No closed trades yet" for a
+branch (like both of the account owner's real branches today) that
+hasn't completed one. A note under the table makes explicit that this is
+the real, closed-trade breakdown of how the branch's own Allocated
+balance got where it is - not a separate or competing number.
+
+Verified offline (`test_alpaca_branch_trade_history.py`, new, 15 checks)
+against a real throwaway SQLite DB: a real logged trade round-trips with
+its exact entry/exit/qty/pnl/reason/opened_at; a real mixed win/loss
+sequence for one branch aggregates to the correct hand-verified
+trade_count/total_pnl/avg_pnl/win_rate; two different branches' histories
+stay correctly separated by `bot_name`; a branch with zero real trades is
+correctly absent from the aggregation; the real endpoint returns byte-
+identical output to the underlying function; and a simulated real DB
+failure inside the logger is swallowed, never raised to the caller. Also
+added 3 new checks directly to the existing real-dev-DB
+`test_alpaca_branches.py` (35 total now, up from 32) confirming the ACTUAL
+`run_alpaca_branch_cycle()` exit call site - not just the standalone
+helper - writes a real row with the exact real entry/exit/pnl from that
+cycle's own real sell, and that `get_alpaca_branch_trade_history()`
+correctly picks it up. Confirmed via a real AST route-count parse that
+the new route is bound correctly with no duplicate registrations (70
+total routes, zero duplicates). `alpaca_dashboard.html` re-verified with
+a real Python `HTMLParser` tag-balance check and `node --check` on the
+extracted inline `<script>` block.
+
+**Not yet confirmed live** - both of the account owner's real branches
+are currently flat with zero completed trades, so the new "Real results"
+column will honestly read "No closed trades yet" until one actually
+closes a real position - the account owner needs to redeploy and watch
+for the first real completed trade to confirm the column populates
+correctly with genuine data.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

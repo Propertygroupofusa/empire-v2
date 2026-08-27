@@ -1449,6 +1449,58 @@ class CryptoCoinTradeHistory(Base):
         }
 
 
+class AlpacaBranchTradeHistory(Base):
+    """One row per completed real round-trip trade in an Alpaca branch
+    (prop_bot.py's ALPACA BRANCHES section) - the direct Alpaca-side
+    counterpart to CryptoCoinTradeHistory above. Written the moment a
+    branch's real sell fills, right where its P&L is already computed in
+    run_alpaca_branch_cycle().
+
+    Scoped by bot_name (not by contract, the way the crypto side scopes
+    by product_id) - an Alpaca branch is fixed to ONE real contract for
+    its whole life in this first slice (no coin-switching yet, see
+    AlpacaBranch's own docstring), so bot_name and contract are always in
+    lockstep here; grouping by bot_name is what actually answers "how is
+    THIS branch doing," which is what the account owner asked to see
+    ("I need to see that... adding up in my Capital").
+
+    Deliberately append-only, never deleted - same "the value is in the
+    accumulated history" reasoning as every other trade-history table in
+    this codebase."""
+    __tablename__ = "alpaca_branch_trade_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot_name = Column(String, index=True)
+    contract = Column(String, index=True)
+    symbol = Column(String)
+    entry_price = Column(Float)
+    exit_price = Column(Float)
+    qty = Column(Float)
+    pnl = Column(Float, index=True)
+    exit_reason = Column(String)
+    opened_at = Column(DateTime, nullable=True)
+    closed_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "bot_name": self.bot_name,
+            "contract": self.contract,
+            "symbol": self.symbol,
+            "entry_price": self.entry_price,
+            "exit_price": self.exit_price,
+            "qty": self.qty,
+            "pnl": self.pnl,
+            "exit_reason": self.exit_reason,
+            # Same real "+Z" UTC-marker fix already applied to every other
+            # trade-history table in this file - a bare isoformat() string
+            # with no timezone designator gets silently misread as the
+            # viewer's LOCAL time by the browser's Date parser.
+            "opened_at": self.opened_at.isoformat() + "Z" if self.opened_at else None,
+            "closed_at": self.closed_at.isoformat() + "Z" if self.closed_at else None,
+        }
+
+
 class CryptoActivityEvent(Base):
     """One row per real, visible thing the family-tree bot just did - a
     buy, a sell, a new branch spawning, a reinforcement seed landing
