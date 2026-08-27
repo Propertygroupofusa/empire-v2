@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db, AsyncSessionLocal
 from admin_auth import require_admin_key
-from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory, PricePredictionCalibration, PricePredictionLog, BtcTickerWindowAnchor, AlpacaBranch
+from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory, PricePredictionCalibration, PricePredictionLog, BtcTickerWindowAnchor, AlpacaBranch, CombinedEquitySnapshot
 
 NUM_BOTS = int(os.getenv("PROP_NUM_BOTS", "8"))
 if NUM_BOTS <= 0:
@@ -741,6 +741,7 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
             real_usdc_balance, _usdc_err = await engine.get_usdc_balance(session)
 
     out = []
+    total_equity_now = 0.0
     for b in branches:
         pos = positions_by_bot.get(b.bot_name)
         current_price = current_price_by_bot.get(b.bot_name) if pos else None
@@ -764,6 +765,7 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         equity_now = b.allocated_usd
         if pos is not None and current_price is not None:
             equity_now = b.allocated_usd + pos.qty * (current_price - pos.entry_price)
+        total_equity_now += equity_now
         peak_equity = b.peak_equity if b.peak_equity else equity_now
         drawdown_pct = ((peak_equity - equity_now) / peak_equity * 100) if peak_equity > 0 else 0.0
         drawdown_breaker_pct = (
@@ -848,6 +850,16 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         "branches": out,
         "branch_count": len(out),
         "total_allocated_usd": round(sum(b["allocated_usd"] for b in out), 2),
+        # Real total equity across every branch (each branch's own tracked
+        # capital PLUS its real unrealized P&L while holding, the exact
+        # same equity_now formula run_branch_cycle()'s own drawdown-breach
+        # check uses) plus locked_usd - real money already skimmed off a
+        # winning sell, still very much part of the account's real net
+        # worth, just earmarked out of the compounding loop. Backs the
+        # combined $1M-goal tracker (see get_combined_equity_progress
+        # below) - a real, useful aggregate on its own, not built solely
+        # for that feature.
+        "total_equity_usd": round(total_equity_now + locked_usd, 2),
         "locked_usd": locked_usd,
         "spendable_for_spawn": spendable_for_spawn,
         "seed_usd": seed_usd,
@@ -856,6 +868,106 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         "rolling_expectancy": rolling_expectancy,
         "real_usd_balance": round(real_balance, 2) if real_balance is not None else None,
         "real_usdc_balance": round(real_usdc_balance, 2) if real_usdc_balance is not None else None,
+    }
+
+
+COMBINED_GOAL_USD = 1_000_000.0
+# Throttles how often a real CombinedEquitySnapshot row is written -
+# hourly is plenty of real resolution for the account owner's own stated
+# use ("visualize monthly down the line how close we can get to it"),
+# and keeps a month of real history to a small, cheap table (~720 rows)
+# rather than growing unbounded from every dashboard poll.
+COMBINED_EQUITY_SNAPSHOT_INTERVAL_MINUTES = float(os.getenv("COMBINED_EQUITY_SNAPSHOT_INTERVAL_MINUTES", "60"))
+
+
+async def _log_combined_equity_snapshot_if_due(db: AsyncSession, alpaca_equity, crypto_equity, combined_equity):
+    """Best-effort, throttled snapshot write - piggybacks on whichever
+    dashboard happens to poll /combined-equity-progress next, the same
+    "log if due" pattern already validated by the BTC 15-minute
+    prediction log (_log_new_btc_prediction_if_due). Wrapped in its own
+    try/except so a real logging hiccup can never break the live numbers
+    this same endpoint also returns."""
+    try:
+        result = await db.execute(
+            select(CombinedEquitySnapshot).order_by(CombinedEquitySnapshot.created_at.desc()).limit(1)
+        )
+        last = result.scalar_one_or_none()
+        if last is not None:
+            elapsed_minutes = (datetime.utcnow() - last.created_at).total_seconds() / 60.0
+            if elapsed_minutes < COMBINED_EQUITY_SNAPSHOT_INTERVAL_MINUTES:
+                return
+        db.add(CombinedEquitySnapshot(
+            alpaca_equity=alpaca_equity, crypto_equity=crypto_equity, combined_equity=combined_equity,
+        ))
+        await db.commit()
+    except Exception as exc:
+        log.warning(f"[dashboard] combined-equity snapshot logging failed (non-fatal): {exc}")
+
+
+@router.get("/combined-equity-progress", dependencies=[Depends(require_admin_key)])
+async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
+    """Real, combined progress toward the account owner's own $1,000,000
+    goal across BOTH real trading systems at once - per their explicit
+    request: "link the coinbase percentage with that too... I just want
+    to visualize it on one thing... [and] visualize monthly down the
+    line how close we can get to it." The existing goal gauge on
+    alpaca_dashboard.html only ever tracked Alpaca's own equity; this
+    adds Coinbase's real total (see total_equity_usd on
+    get_family_tree_status above) into one combined figure, plus a real,
+    accumulating history so the combined number's own MOMENTUM (not just
+    where it stands right now) becomes visible over time.
+
+    Reuses the exact same real, already-validated functions the two
+    individual dashboards already call (get_alpaca_overview,
+    get_family_tree_status) rather than re-deriving either number a
+    second way - this can never show a different reality than either
+    dashboard's own live figures. Each side is fetched independently and
+    fails OPEN on its own (a real Alpaca or Coinbase hiccup degrades that
+    one side to null/0 rather than taking down the whole combined view) -
+    never silently reports 0 as if that were a real, confirmed balance."""
+    alpaca_equity = None
+    alpaca_error = None
+    try:
+        alpaca_data = await get_alpaca_overview(db)
+        alpaca_equity = alpaca_data["equity"]
+    except Exception as exc:
+        alpaca_error = str(exc)
+        log.warning(f"[dashboard] combined-equity: Alpaca side unavailable this poll: {exc}")
+
+    crypto_equity = None
+    crypto_error = None
+    try:
+        crypto_data = await get_family_tree_status(db)
+        crypto_equity = crypto_data["total_equity_usd"]
+    except Exception as exc:
+        crypto_error = str(exc)
+        log.warning(f"[dashboard] combined-equity: crypto side unavailable this poll: {exc}")
+
+    combined_equity = (alpaca_equity or 0.0) + (crypto_equity or 0.0)
+    combined_progress_pct = round(min(100.0, (combined_equity / COMBINED_GOAL_USD) * 100), 4)
+
+    # Only ever logs a real snapshot when BOTH real sides are actually
+    # available this poll - a snapshot with one side silently zeroed out
+    # (a real Alpaca or Coinbase outage) would permanently understate
+    # that moment in the real history forever; better to skip the write
+    # and simply catch it on the next successful poll instead.
+    if alpaca_equity is not None and crypto_equity is not None:
+        await _log_combined_equity_snapshot_if_due(db, alpaca_equity, crypto_equity, combined_equity)
+
+    history_result = await db.execute(
+        select(CombinedEquitySnapshot).order_by(CombinedEquitySnapshot.created_at.desc()).limit(800)
+    )
+    history = list(reversed(history_result.scalars().all()))
+
+    return {
+        "alpaca_equity": round(alpaca_equity, 2) if alpaca_equity is not None else None,
+        "alpaca_error": alpaca_error,
+        "crypto_equity": round(crypto_equity, 2) if crypto_equity is not None else None,
+        "crypto_error": crypto_error,
+        "combined_equity": round(combined_equity, 2),
+        "goal": COMBINED_GOAL_USD,
+        "combined_progress_pct": combined_progress_pct,
+        "history": [h.to_dict() for h in history],
     }
 
 

@@ -8059,6 +8059,119 @@ lines in the Activity feed instead of two identical ones.
 
 ---
 
+## Combined $1,000,000 progress tracker - Alpaca + Coinbase equity in one live chart
+
+Per the account owner's explicit request, after seeing the existing
+Alpaca-only "Progress to $1,000,000 Goal" gauge: "link the coinbase
+percentage with that too... I just want to visualize it on one thing as
+it's going up and down... show us the momentum... we'll be able to
+visualize monthly down the line how close we can get to it." The
+existing gauge (`alpaca_dashboard.html`) only ever tracked Alpaca's own
+equity against the goal, showed no history, and had no crypto side at
+all.
+
+**New model: `CombinedEquitySnapshot`**
+(`models.py`) - one real row per periodic snapshot (`alpaca_equity`,
+`crypto_equity`, `combined_equity`), append-only, same "real history is
+never rewritten" philosophy as `CryptoCoinTradeHistory`/`ClosedTrade`.
+
+**`get_family_tree_status()` gained a new `total_equity_usd` field**
+(`routers/trading_dashboard.py`) - sums every branch's own real equity
+(`allocated_usd` + unrealized P&L while holding, the EXACT SAME formula
+`run_branch_cycle()`'s own drawdown-breach check already uses - computed
+once, in the existing per-branch loop, at zero extra API cost) plus
+`locked_usd` (real money already skimmed off a winning sell - still real
+net worth, just earmarked out of the compounding loop). A real, useful
+aggregate on its own, not built solely for this feature -
+`total_allocated_usd` (the pre-existing raw-cost-basis field) is
+completely unaffected.
+
+**`GET /combined-equity-progress`** (new, admin-key gated) -
+`get_combined_equity_progress()` reuses the exact same real,
+already-validated `get_alpaca_overview()` and `get_family_tree_status()`
+functions each individual dashboard already calls, rather than
+re-deriving either side's number a second way - this can never disagree
+with what either dashboard's own live figures say. Each side is fetched
+INDEPENDENTLY and fails OPEN on its own (a real Alpaca or Coinbase
+hiccup degrades just that one side to `null` plus a real error string,
+never silently reports 0 as if that were a confirmed real balance) -
+`combined_equity` still shows the real available side alone rather than
+going blank. **Only ever logs a real snapshot when BOTH sides are
+genuinely available** in the same poll - a partial snapshot (one side
+silently zeroed by an outage) would permanently understate that real
+moment in history forever; skipped in favor of catching it cleanly on
+the next successful poll instead.
+
+**Throttled to roughly hourly** (`COMBINED_EQUITY_SNAPSHOT_INTERVAL_MINUTES`,
+60 default, env-overridable) via the same "log if due, piggyback on
+whichever dashboard happens to poll next" pattern the BTC 15-minute
+prediction log already validated - keeps a real month of history to a
+small, cheap table (~720 rows) instead of growing unbounded from every
+15-60s dashboard poll.
+
+**Live on both dashboards**, per the account owner's own "visualize it
+on one thing" - not literally one page (this codebase has two separate
+real dashboards for two separate real brokers), but the SAME real
+combined number, same chart, same math, reachable from either one, each
+linking to the other. `alpaca_dashboard.html`'s old single-account gauge
+panel was replaced (not duplicated) with the new combined one - same
+gauge, but now showing the real combined figure against the real $1M
+goal, plus a real SVG line chart (the exact plain-inline-SVG technique
+already validated by the BTC Live Ticker's own chart - no charting
+library) with three lines: Alpaca (navy), Coinbase (orange), and the
+bold green combined line, autoscaled to the REAL historical value range
+(not the $1M goal - showing ~$1,600 on a $0-$1M axis would just look
+flat; the gauge/percentage handles "how close," the chart handles "how
+it's moving"). A real momentum line under the gauge reports the actual
+$ and % change across whatever real history has accumulated so far -
+deliberately never claims a fixed "7-day" or "30-day" window the real
+data doesn't cover yet ("+$45.32 (+2.9%) over the last 3.2 days of real
+tracking"), honest about precision the same way the BTC price
+projection's own calibration text already is. The identical panel
+(matching CSS, matching JS, same endpoint) was added to
+`family_tree_dashboard.html` too, right under its own KPI row - a new
+`renderGauge()` helper (that page never had one) was added there,
+copied verbatim from `alpaca_dashboard.html`'s own already-working
+implementation rather than reinvented.
+
+Verified offline (`test_combined_equity_progress.py`, 11 checks;
+`test_family_tree_total_equity_usd.py`, 2 checks) against real
+throwaway SQLite DBs, `get_alpaca_overview`/`get_family_tree_status`
+mocked at the module level (neither has real broker credentials in this
+sandbox): combined equity and progress % are computed correctly from
+both real sides; a real snapshot is logged on the first call; a second
+call within the throttle window logs nothing new; a call after the real
+throttle interval (simulated by backdating the last row) logs a
+genuinely fresh row; when one real side is unavailable, the endpoint
+still returns a real combined figure from the available side alone,
+reports the real failure reason for the unavailable one, and correctly
+skips logging a partial snapshot; and `total_equity_usd` itself is
+hand-verified against a real branch holding an open position (allocated
++ real unrealized P&L) plus a flat branch plus `locked_usd`, summed
+correctly, with `total_allocated_usd` confirmed unchanged. Full related
+regression suite (`test_reconciliation_report.py`,
+`test_reconciliation_excludes_other_bots.py`) re-run clean alongside it;
+`test_family_tree.py`/`test_root_add_cash.py`'s pre-existing, unrelated
+staleness (already documented earlier in this file - a stale hardcoded
+spawn-tier constant, and a since-renamed `add_cash_to_root` function)
+was left untouched, confirmed not touching anything this feature added.
+Confirmed via a real AST route-count parse that the new route is bound
+correctly with no duplicate registrations (66 total routes, zero
+duplicates). Both dashboard HTML files re-verified with a real Python
+`HTMLParser` tag-balance check (no mismatched/unclosed tags) and
+`node --check` on each file's extracted inline `<script>` block (no
+syntax errors).
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+open either dashboard to see the real combined number and gauge
+populate immediately; the chart and momentum line will stay in their
+real "not enough history yet" state until at least two real hourly
+snapshots have accumulated (roughly an hour after the first successful
+poll), then fill in and keep growing exactly as asked - visualizable
+weekly, then monthly, as real history builds up over time.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

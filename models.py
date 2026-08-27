@@ -1627,3 +1627,39 @@ class BtcTickerWindowAnchor(Base):
             "window_end": self.window_end.isoformat() + "Z" if self.window_end else None,
             "open_price": self.open_price,
         }
+
+
+class CombinedEquitySnapshot(Base):
+    """A real, periodic snapshot of total account equity across BOTH real
+    trading systems - Alpaca (stocks/futures/ETFs) and Coinbase (the
+    crypto family tree) - toward the account owner's own explicit
+    long-standing $1,000,000 goal (already tracked separately on the
+    Alpaca dashboard's own gauge). Per the account owner's explicit
+    request: "link the coinbase percentage with that too... I just want
+    to visualize it on one thing... we'll be able to visualize monthly
+    down the line how close we can get to it" - a single combined,
+    real historical track record, not just a live snapshot of where
+    things stand right now.
+
+    One row per real snapshot, throttled to roughly hourly (see
+    COMBINED_EQUITY_SNAPSHOT_INTERVAL_MINUTES in
+    routers/trading_dashboard.py) so a month of real history stays a
+    small, cheap table rather than growing unbounded from every dashboard
+    poll. Append-only, never deleted or edited - same "real history is
+    never rewritten" philosophy as CryptoCoinTradeHistory/ClosedTrade
+    elsewhere in this file."""
+    __tablename__ = "combined_equity_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    alpaca_equity = Column(Float)
+    crypto_equity = Column(Float)
+    combined_equity = Column(Float)
+
+    def to_dict(self):
+        return {
+            "created_at": self.created_at.isoformat() + "Z" if self.created_at else None,
+            "alpaca_equity": self.alpaca_equity,
+            "crypto_equity": self.crypto_equity,
+            "combined_equity": self.combined_equity,
+        }

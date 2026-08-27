@@ -107,6 +107,24 @@
     .panel-title { font-size: 0.95em; font-weight: 700; color: var(--navy); margin-bottom: 4px; }
     .panel-sub { font-size: 0.78em; color: var(--text-dim); margin-bottom: 14px; }
 
+    /* Gauge (shared with the combined $1M progress panel) */
+    .gauge-wrap { display: flex; flex-direction: column; align-items: center; }
+    .gauge-value { font-size: 1.7em; font-weight: 800; color: var(--navy); margin-top: 6px; }
+    .gauge-caption { font-size: 0.78em; color: var(--text-dim); margin-top: 2px; }
+
+    /* Combined $1M progress panel */
+    .combined-progress-layout { display: flex; gap: 24px; align-items: center; flex-wrap: wrap; }
+    .combined-chart-col { flex: 1; min-width: 260px; }
+    .combined-momentum { font-size: 0.85em; color: var(--text-dim); margin-bottom: 6px; text-align: center; }
+    .combined-momentum .up { color: var(--green); font-weight: 700; }
+    .combined-momentum .down { color: var(--red); font-weight: 700; }
+    .combined-split { display: flex; justify-content: center; gap: 22px; margin-top: 8px; font-size: 0.8em; }
+    .combined-split .side { display: flex; align-items: center; gap: 5px; color: var(--text-dim); }
+    .combined-split .swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+    .combined-split .num { color: var(--text); font-weight: 700; }
+    .combined-chart-empty { text-align: center; color: var(--text-dim); font-size: 0.82em; padding: 30px 0; }
+    @media (max-width: 700px) { .combined-progress-layout { flex-direction: column; } }
+
     .coin-history-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
     .coin-history-table th, .coin-history-table td { padding: 9px 10px; text-align: right; border-bottom: 1px solid var(--border); }
     .coin-history-table th:first-child, .coin-history-table td:first-child { text-align: left; }
@@ -490,6 +508,19 @@
             <button id="unlock-profit-btn" class="unlock-btn" onclick="unlockProfit()" disabled title="Loading...">🔓 Unlock</button>
         </div>
         <div class="kpi"><div class="label">Refreshed</div><div class="value" id="stat-refreshed" style="font-size:1em">—</div></div>
+    </div>
+
+    <div class="panel" id="combined-progress-panel">
+        <div class="panel-title">🎯 Combined Progress to $1,000,000</div>
+        <div class="panel-sub">Real Alpaca + Coinbase equity combined, tracked over time — the same real total shows on the <a href="/alpaca-dashboard" style="color:inherit;">Alpaca dashboard</a> too. Refreshes every 60s.</div>
+        <div class="combined-progress-layout">
+            <div id="combined-goal-gauge" class="gauge-wrap"></div>
+            <div class="combined-chart-col">
+                <div id="combined-momentum" class="combined-momentum">—</div>
+                <div id="combined-chart-wrap"></div>
+                <div id="combined-split" class="combined-split"></div>
+            </div>
+        </div>
     </div>
 
     <div class="panel">
@@ -2105,17 +2136,114 @@ async function loadTicker() {
     }
 }
 
+function renderGauge(containerId, pct, caption) {
+    const clamped = Math.max(0, Math.min(100, pct));
+    const r = 70, cx = 90, cy = 90;
+    const startAngle = Math.PI, endAngle = Math.PI - (clamped / 100) * Math.PI;
+    const x1 = cx + r * Math.cos(startAngle), y1 = cy + r * Math.sin(startAngle);
+    const x2 = cx + r * Math.cos(endAngle), y2 = cy + r * Math.sin(endAngle);
+    const largeArc = clamped > 50 ? 1 : 0;
+    const svg = `
+        <svg width="180" height="100" viewBox="0 0 180 100">
+            <path d="M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}" fill="none" stroke="#eef1f6" stroke-width="16" stroke-linecap="round"/>
+            <path d="M ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2}" fill="none" stroke="#009845" stroke-width="16" stroke-linecap="round"/>
+        </svg>`;
+    document.getElementById(containerId).innerHTML = svg +
+        `<div class="gauge-value">${clamped.toFixed(2)}%</div><div class="gauge-caption">${caption}</div>`;
+}
+
+// Combined $1M progress: Alpaca + Coinbase real equity in one place, per
+// the account owner's explicit request - "link the coinbase percentage
+// with that too... visualize it on one thing... visualize monthly down
+// the line how close we can get to it." Same plain-inline-SVG technique
+// already validated by this page's own BTC Live Ticker chart above - no
+// charting library. This copy is deliberately identical to the one on
+// alpaca_dashboard.html (same backend endpoint, same math) so the two
+// dashboards can never disagree about the real combined number.
+function buildCombinedEquitySparklineSvg(history) {
+    const W = 600, H = 160, PAD = 8;
+    const all = history.flatMap(h => [h.combined_equity, h.alpaca_equity, h.crypto_equity]).filter(v => v != null);
+    let lo = Math.min(...all), hi = Math.max(...all);
+    if (hi === lo) { hi += 1; lo -= 1; }
+    const x = (i) => PAD + (i / (history.length - 1)) * (W - PAD * 2);
+    const y = (v) => H - PAD - ((v - lo) / (hi - lo)) * (H - PAD * 2);
+    const line = (key, color, width) => {
+        const pts = history
+            .map((h, i) => (h[key] != null ? `${x(i).toFixed(1)},${y(h[key]).toFixed(1)}` : null))
+            .filter(Boolean).join(' ');
+        return `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="${width}" stroke-linejoin="round" stroke-linecap="round"/>`;
+    };
+    const lastX = x(history.length - 1).toFixed(1);
+    const lastY = y(history[history.length - 1].combined_equity).toFixed(1);
+    return `
+        <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+            ${line('alpaca_equity', '#1f3864', 1.5)}
+            ${line('crypto_equity', '#e8752c', 1.5)}
+            ${line('combined_equity', '#009845', 3)}
+            <circle cx="${lastX}" cy="${lastY}" r="4.5" fill="#009845"/>
+        </svg>`;
+}
+
+function fmtCombinedMomentum(history) {
+    if (!history || history.length < 2) return null;
+    const first = history[0], last = history[history.length - 1];
+    const deltaUsd = last.combined_equity - first.combined_equity;
+    const deltaPct = first.combined_equity > 0 ? (deltaUsd / first.combined_equity) * 100 : 0;
+    const spanDays = (new Date(last.created_at) - new Date(first.created_at)) / (1000 * 60 * 60 * 24);
+    const spanStr = spanDays >= 1
+        ? `${spanDays.toFixed(1)} day${spanDays >= 2 ? 's' : ''}`
+        : `${(spanDays * 24).toFixed(1)} hour${spanDays * 24 >= 2 ? 's' : ''}`;
+    const cls = deltaUsd >= 0 ? 'up' : 'down';
+    const arrow = deltaUsd >= 0 ? '▲' : '▼';
+    const sign = deltaUsd >= 0 ? '+' : '-';
+    return `<span class="${cls}">${arrow} ${sign}${fmtUsd(Math.abs(deltaUsd))} (${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%)</span> over the last ${spanStr} of real tracking`;
+}
+
+function renderCombinedProgress(data) {
+    renderGauge('combined-goal-gauge', data.combined_progress_pct, fmtUsd(data.combined_equity) + ' of ' + fmtUsd(data.goal));
+
+    const momentumEl = document.getElementById('combined-momentum');
+    const momentum = fmtCombinedMomentum(data.history);
+    momentumEl.innerHTML = momentum || 'A real snapshot logs roughly once an hour - momentum shows up here once at least two exist.';
+
+    const chartWrap = document.getElementById('combined-chart-wrap');
+    if (data.history && data.history.length >= 2) {
+        chartWrap.innerHTML = buildCombinedEquitySparklineSvg(data.history);
+    } else {
+        chartWrap.innerHTML = '<div class="combined-chart-empty">Chart fills in as real history accumulates - check back in about an hour.</div>';
+    }
+
+    const splitEl = document.getElementById('combined-split');
+    const alpacaStr = data.alpaca_equity != null ? fmtUsd(data.alpaca_equity) : (data.alpaca_error ? 'unavailable' : '—');
+    const cryptoStr = data.crypto_equity != null ? fmtUsd(data.crypto_equity) : (data.crypto_error ? 'unavailable' : '—');
+    splitEl.innerHTML = `
+        <span class="side"><span class="swatch" style="background:#1f3864;"></span>Alpaca <span class="num">${alpacaStr}</span></span>
+        <span class="side"><span class="swatch" style="background:#e8752c;"></span>Coinbase <span class="num">${cryptoStr}</span></span>
+    `;
+}
+
+async function loadCombinedProgress() {
+    try {
+        const data = await apiGet('/combined-equity-progress');
+        renderCombinedProgress(data);
+    } catch (e) {
+        document.getElementById('combined-chart-wrap').innerHTML = '<div class="combined-chart-empty">Could not load combined progress right now.</div>';
+    }
+}
+
 refresh();
 loadTicker();
 loadBtcTicker();
 loadBtcProjection();
 loadActivityFeed();
+loadCombinedProgress();
 setInterval(refresh, 15000);
 setInterval(loadTicker, 30000);
 setInterval(loadActivityFeed, 5000);
 setInterval(loadBtcProjection, 30000);
 setInterval(loadBtcTicker, 10000);
 setInterval(tickBtcCountdown, 1000);
+setInterval(loadCombinedProgress, 60000);
 </script>
 </body>
 </html>
