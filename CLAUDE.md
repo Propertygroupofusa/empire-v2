@@ -7201,6 +7201,73 @@ specific reason.
 
 ---
 
+## QUICK_PROFIT vs. a real percentage trailing stop (shadow mode, additive only)
+
+A pasted proposal argued for a real exit redesign: don't snap profit the
+instant a position clears fees - instead let a winner run, protected by a
+trailing stop that moves up behind price, only exiting on a genuine
+reversal. That's a well-reasoned idea on its own, but it directly
+contradicts something already live: the QUICK_PROFIT rule shipped earlier
+this same session, at the account owner's own explicit request ("take any
+real profit fast, never wait for the bigger target"). The two behaviors
+are mutually exclusive on the same position - one can't both snap profit
+immediately and hold for more. Rather than silently pick a side (or worse,
+implement a fourth reversal of this same decision without being asked),
+the account owner was asked directly and chose "backtest both first" -
+the same evidence-before-live-money discipline every other strategy
+change in this file already follows.
+
+- **`_replay_with_exit_mode(closes, highs, lows, mode, entry_gate=None,
+  spend=None)`** (`crypto_selection_backtest.py`) - shares the identical
+  real entry, ATR-based target/stop, and breakeven ratchet as the
+  existing `backtest_one_coin()`. The two modes diverge only in what
+  happens once a position is open: `mode="quick_profit"` mirrors the real
+  live rule exactly - exits the instant its real fee-adjusted net P&L
+  clears $0, matching `QUICK_PROFIT_MIN_NET_USD=0.0` live.
+  `mode="trailing_stop"` instead only activates real trailing protection
+  once price reaches the SAME real ATR-based target - from there its stop
+  trails `TRAILING_STOP_PCT` (2.5%, the real effective size of the
+  existing live dollar-based giveback cap at this module's $150 spend
+  size - $3.75/$150 - not an arbitrary new number) behind the highest
+  real price seen since entry, only exiting on an actual reversal.
+- **`run_quick_profit_vs_trailing_stop_comparison()`** - fetches every
+  coin's real historical candles once, replays both modes against the
+  identical data, and returns both a per-coin comparison and real summed
+  totals (`quick_profit_total_pnl`/`trailing_stop_total_pnl`/how many
+  coins each mode "won" on).
+- New `POST /api/trading-dashboard/crypto-selection-backtest/quick-profit-vs-trailing-stop`
+  (admin-key gated) and a new "▶ Run QUICK_PROFIT vs. Trailing Stop
+  Comparison" button + results table on `crypto_selection_backtest.html`,
+  right under the existing higher-timeframe-trend comparison.
+
+Verified offline (16 checks, hand-computed exact fee math, no live
+network access from this sandbox - same documented gap as every backtest
+tool in this file): on a small move that clears fees but never continues,
+`quick_profit` locks in the real small gain (hand-verified to the exact
+cent) while `trailing_stop` holds waiting for the real target and ends up
+capturing nothing when the move stalls; on a sustained real uptrend that
+runs well past target before reversing, `trailing_stop` produces exactly
+one trade riding the whole move (hand-verified exit price and P&L) that
+comes out meaningfully AHEAD of `quick_profit`'s several small chopped
+exits (each paying the full round-trip fee again on re-entry) on the
+identical path; the real hard stop-loss still fires unconditionally in
+both modes before profit ever activates; and the end-to-end comparison
+function correctly totals real P&L and counts which mode won per coin.
+Confirmed via AST route-count parse the new route is bound correctly
+with no duplicate registrations (65 total routes, zero duplicates). HTML
+tag-balance and extracted-script `node --check` both clean on
+`crypto_selection_backtest.html`.
+
+**Not yet run against real historical data** - same documented gap as
+every backtest tool in this file. The account owner needs to open
+`/crypto-selection-backtest-view` after the next redeploy and tap the new
+button to get the real answer to which exit philosophy actually makes
+more money - this tool only informs that decision; nothing here changes
+live behavior on its own. QUICK_PROFIT stays exactly as it is, live,
+until the account owner sees real numbers and explicitly says to change it.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

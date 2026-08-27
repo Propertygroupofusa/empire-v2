@@ -109,6 +109,13 @@
     <button class="run-btn" id="tfBtn" onclick="runHigherTfTrend()">▶ Run Higher-Timeframe Trend Comparison (~30-90 seconds)</button>
     <div id="tfStatus"></div>
     <div id="tfResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>QUICK_PROFIT vs. trailing stop:</strong> the live bot right now takes ANY real profit the instant it clears fees (QUICK_PROFIT). This tests the alternative - hold past the real target and trail a 2.5% stop behind the peak instead, only exiting on a genuine reversal. Same real entry, hard stop-loss, and breakeven ratchet either way - only what happens once a position is profitable differs. Shadow mode only - does not change what the live bot does.
+    </div>
+    <button class="run-btn" id="qpBtn" onclick="runQuickProfitVsTrailingStop()">▶ Run QUICK_PROFIT vs. Trailing Stop Comparison (~30-90 seconds)</button>
+    <div id="qpStatus"></div>
+    <div id="qpResults"></div>
 </div>
 
 <script>
@@ -510,6 +517,77 @@ function renderHigherTfTrendResults(data) {
             <tbody>${rows}</tbody>
         </table>
         <p class="trade-note">"Filtered" only enters a position when the coin's own real SMA${data.sma_short} is above its SMA${data.sma_long} (hourly) - same real target/stop/breakeven/giveback exit rules either way. A positive "ROI change" means the trend filter would have genuinely helped that coin; negative means it would have cost real trades that were actually fine.</p>
+    `;
+}
+
+async function runQuickProfitVsTrailingStop() {
+    const btn = document.getElementById('qpBtn');
+    const statusEl = document.getElementById('qpStatus');
+    const resultsEl = document.getElementById('qpResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real data, two replays per coin)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/crypto-selection-backtest/quick-profit-vs-trailing-stop', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderQuickProfitVsTrailingStopResults(data);
+        const t = data.totals;
+        const overall = t.quick_profit_total_pnl >= t.trailing_stop_total_pnl ? 'QUICK_PROFIT' : 'trailing stop';
+        statusEl.textContent = `Compared ${data.coins_with_results} coins over ${data.backtest_days} days. QUICK_PROFIT total: $${t.quick_profit_total_pnl.toFixed(2)} (won on ${t.quick_profit_coins_won} coins). Trailing stop total: $${t.trailing_stop_total_pnl.toFixed(2)} (won on ${t.trailing_stop_coins_won} coins). Overall: ${overall} made more real money on this sample.`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run QUICK_PROFIT vs. Trailing Stop Comparison (~30-90 seconds)';
+    }
+}
+
+function renderQuickProfitVsTrailingStopResults(data) {
+    const resultsEl = document.getElementById('qpResults');
+    if (!data.comparison || data.comparison.length === 0) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No coins produced usable comparison results.</p>';
+        return;
+    }
+    const rows = data.comparison.map(r => {
+        const qp = r.quick_profit;
+        const ts = r.trailing_stop;
+        const qpPnl = qp ? qp.total_pnl : 0;
+        const tsPnl = ts ? ts.total_pnl : 0;
+        const delta = tsPnl - qpPnl;
+        const deltaHtml = `<span class="${delta >= 0 ? 'pos' : 'neg'}">${delta >= 0 ? '+' : ''}$${delta.toFixed(2)}</span>`;
+        return `<tr>
+            <td>${r.product_id}</td>
+            <td>${qp ? qp.num_trades : 0}</td>
+            <td class="${qpPnl >= 0 ? 'pos' : 'neg'}">${qp ? (qpPnl >= 0 ? '+' : '') + '$' + qpPnl.toFixed(2) : '—'}</td>
+            <td>${ts ? ts.num_trades : 0}</td>
+            <td class="${tsPnl >= 0 ? 'pos' : 'neg'}">${ts ? (tsPnl >= 0 ? '+' : '') + '$' + tsPnl.toFixed(2) : '—'}</td>
+            <td>${deltaHtml}</td>
+        </tr>`;
+    }).join('');
+
+    resultsEl.innerHTML = `
+        <table>
+            <thead><tr>
+                <th>Coin</th><th>QUICK_PROFIT trades</th><th>QUICK_PROFIT P&amp;L</th><th>Trailing stop trades</th><th>Trailing stop P&amp;L</th><th>Difference</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+        <p class="trade-note">QUICK_PROFIT (fewer dollars per trade, more trades) matches what the live bot does right now. Trailing stop (fewer, bigger trades) only exits once price genuinely reverses after reaching the real target. A positive "Difference" means letting it run would have made more real money on that coin; negative means taking it fast was the better real call.</p>
     `;
 }
 

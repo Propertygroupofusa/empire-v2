@@ -50,6 +50,12 @@ from models import CryptoTreeBranch
 
 SPEND = 150.0
 BACKTEST_DAYS = 30
+# Real, effective size of the existing live dollar-based giveback cap
+# (MAX_PROFIT_GIVEBACK_USD, $3.75) at the module's own $150 spend size -
+# $3.75 / $150 = 2.5%. Used as the trailing-stop comparison's percentage
+# trail so the two exit philosophies are sized comparably rather than
+# one being an arbitrary tighter/looser number than the other.
+TRAILING_STOP_PCT = 0.025
 GRANULARITY_SECONDS = 3600  # 1-hour candles
 ATR_WINDOW = 15  # matches _atr_pct_from_candles' 14-period + 1
 
@@ -188,6 +194,184 @@ def backtest_one_coin(closes, highs, lows, entry_gate=None, spend=None):
     if entry_gate is not None:
         result["entries_skipped_by_gate"] = entries_skipped_by_gate
     return result
+
+
+def _replay_with_exit_mode(closes, highs, lows, mode, entry_gate=None, spend=None):
+    """Real, shared replay for the QUICK_PROFIT-vs-trailing-stop
+    comparison (run_quick_profit_vs_trailing_stop_comparison below) -
+    built after a pasted proposal argued for letting winners run with a
+    percentage trailing stop, which directly conflicts with the real,
+    live QUICK_PROFIT rule (crypto_family_tree_bot.py's run_branch_cycle)
+    shipped earlier this same session at the account owner's own explicit
+    request ("take any real profit fast, never wait"). Rather than guess
+    which is actually better, this replays BOTH real exit philosophies
+    against the identical real historical candles.
+
+    Entry and the real hard stop-loss are IDENTICAL to backtest_one_coin()
+    above - same ATR-based target/stop, same real fee formula, same
+    breakeven ratchet. The two modes diverge ONLY in what happens once a
+    position is open:
+
+    mode="quick_profit" mirrors the real live behavior: the position
+    exits the INSTANT its real, fee-adjusted net P&L clears $0, exactly
+    matching QUICK_PROFIT_MIN_NET_USD=0.0 live - it never holds through a
+    pullback hoping for more, win or lose.
+
+    mode="trailing_stop" instead only activates real trailing protection
+    once price reaches the SAME real ATR-based target price used in
+    quick_profit mode (so both modes agree on what a 'good' move looks
+    like) - from that point its stop trails TRAILING_STOP_PCT behind the
+    highest real price seen since entry, only exiting on an actual
+    reversal, never for reaching profit itself. Before target is reached,
+    it behaves identically to the existing hard stop-loss/breakeven
+    ratchet - this isolates the one real question being asked (snap
+    profit immediately vs. let a winner run) rather than testing a
+    different strategy altogether.
+
+    A position still open when the real historical window ends is
+    dropped without being marked-to-market - the same simplification
+    backtest_one_coin() already documents and accepts; good enough for
+    comparing the two exit philosophies against each other, not a precise
+    P&L forecast."""
+    spend = spend if spend is not None else SPEND
+    trades = []
+    i = ATR_WINDOW
+    n = len(closes)
+    position = None  # entry, qty, target, stop, peak_price, profit_activated
+
+    while i < n:
+        price = closes[i]
+        window_closes = closes[max(0, i - ATR_WINDOW):i + 1]
+        window_highs = highs[max(0, i - ATR_WINDOW):i + 1]
+        window_lows = lows[max(0, i - ATR_WINDOW):i + 1]
+        atr_pct = engine._atr_pct_from_candles(window_closes, window_highs, window_lows)
+
+        if position is None:
+            if entry_gate is not None and not entry_gate(i):
+                i += 1
+                continue
+            target_pct = max(engine.pick_target_pct(atr_pct), engine.min_profit_target_pct(spend, atr_pct))
+            qty = spend / price
+            position = {
+                "entry": price, "qty": qty,
+                "target": price * (1 + target_pct),
+                "stop": price * (1 - engine.STOP_LOSS_PCT),
+                "peak_price": price,
+                "profit_activated": False,
+            }
+            i += 1
+            continue
+
+        if price > position["peak_price"]:
+            position["peak_price"] = price
+
+        # Real breakeven ratchet - identical to backtest_one_coin().
+        if position["stop"] < position["entry"] and price >= position["entry"] * (1 + BREAKEVEN_TRIGGER_PCT):
+            position["stop"] = position["entry"]
+
+        exit_reason = None
+        if mode == "quick_profit":
+            gross = position["qty"] * (price - position["entry"])
+            fee = position["qty"] * (position["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            net = gross - fee
+            if price <= position["stop"]:
+                exit_reason = "STOP"
+            elif net > 0:
+                exit_reason = "QUICK_PROFIT"
+        else:  # "trailing_stop"
+            if not position["profit_activated"] and price >= position["target"]:
+                position["profit_activated"] = True
+            if position["profit_activated"]:
+                trailing_stop = position["peak_price"] * (1 - TRAILING_STOP_PCT)
+                effective_stop = max(position["stop"], trailing_stop)
+            else:
+                effective_stop = position["stop"]
+            if price <= effective_stop:
+                exit_reason = "TRAILING_STOP" if position["profit_activated"] else "STOP"
+
+        if exit_reason:
+            gross = position["qty"] * (price - position["entry"])
+            fee = position["qty"] * (position["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            net = gross - fee
+            trades.append((exit_reason, net))
+            position = None
+        i += 1
+
+    if not trades:
+        return None
+    total_pnl = sum(net for _, net in trades)
+    wins = [net for _, net in trades if net > 0]
+    win_rate = len(wins) / len(trades) * 100
+    avg_trade_pct = (total_pnl / len(trades)) / spend * 100
+    return {
+        "num_trades": len(trades),
+        "win_rate": win_rate,
+        "total_pnl": total_pnl,
+        "roi_pct_of_spend": total_pnl / spend * 100,
+        "avg_trade_pct": avg_trade_pct,
+    }
+
+
+async def run_quick_profit_vs_trailing_stop_comparison(coins=None, days=BACKTEST_DAYS, max_concurrent=6):
+    """SHADOW-MODE, additive comparison - never touches live trading,
+    places no real order. Answers a real, direct question: does the live
+    QUICK_PROFIT rule (take any real profit the instant it clears fees)
+    actually make more real money than letting a winner run behind a
+    percentage trailing stop once it reaches the same real ATR-based
+    target? Runs BOTH real exit philosophies against the identical real
+    historical candles for every coin, so the comparison is fair."""
+    coins = coins or COIN_FAMILY_TREE
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def _one(product_id):
+        async with semaphore:
+            candles = await fetch_historical_candles(session, product_id, days=days)
+        if candles is None:
+            return product_id, None, "not enough historical data"
+        closes, highs, lows, _times = candles
+        quick_profit = _replay_with_exit_mode(closes, highs, lows, mode="quick_profit")
+        trailing_stop = _replay_with_exit_mode(closes, highs, lows, mode="trailing_stop")
+        return product_id, {"quick_profit": quick_profit, "trailing_stop": trailing_stop}, None
+
+    async with aiohttp.ClientSession() as session:
+        outcomes = await asyncio.gather(*(_one(pid) for pid in coins))
+
+    comparison = []
+    skipped = []
+    for product_id, result, skip_reason in outcomes:
+        if result is None:
+            skipped.append({"product_id": product_id, "reason": skip_reason})
+            continue
+        comparison.append({"product_id": product_id, **result})
+
+    def _total(key):
+        return sum((row[key]["total_pnl"] if row[key] else 0.0) for row in comparison)
+
+    quick_profit_wins = 0
+    trailing_stop_wins = 0
+    for row in comparison:
+        qp_pnl = row["quick_profit"]["total_pnl"] if row["quick_profit"] else 0.0
+        ts_pnl = row["trailing_stop"]["total_pnl"] if row["trailing_stop"] else 0.0
+        if qp_pnl > ts_pnl:
+            quick_profit_wins += 1
+        elif ts_pnl > qp_pnl:
+            trailing_stop_wins += 1
+
+    return {
+        "backtest_days": days,
+        "spend_per_trade": SPEND,
+        "trailing_stop_pct": TRAILING_STOP_PCT,
+        "coins_tested": len(coins),
+        "coins_with_results": len(comparison),
+        "skipped": skipped,
+        "totals": {
+            "quick_profit_total_pnl": _total("quick_profit"),
+            "trailing_stop_total_pnl": _total("trailing_stop"),
+            "quick_profit_coins_won": quick_profit_wins,
+            "trailing_stop_coins_won": trailing_stop_wins,
+        },
+        "comparison": comparison,
+    }
 
 
 def calculate_relative_strength(coin_closes_window: list, btc_closes_window: list) -> float:

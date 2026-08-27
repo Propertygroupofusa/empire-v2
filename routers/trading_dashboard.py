@@ -2223,6 +2223,30 @@ async def run_higher_tf_trend_backtest():
     return await crypto_selection_backtest_module.run_higher_tf_trend_comparison()
 
 
+@router.post("/crypto-selection-backtest/quick-profit-vs-trailing-stop", dependencies=[Depends(require_admin_key)])
+async def run_quick_profit_vs_trailing_stop_backtest():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    Built after a pasted proposal argued for letting winners run behind a
+    percentage trailing stop, which directly conflicts with the real,
+    live QUICK_PROFIT rule (crypto_family_tree_bot.py's run_branch_cycle)
+    shipped earlier this same session at the account owner's own explicit
+    request - take any real profit the instant it clears fees, never wait.
+    Rather than guess which is actually better, this replays BOTH real
+    exit philosophies against the exact same real historical candles for
+    every coin: does QUICK_PROFIT's snap-it-fast approach make more real
+    money, or does letting a winner run behind a real trailing stop once
+    it reaches the same ATR-based target capture more of a sustained real
+    move? Does not change what the live bot does unless/until the account
+    owner sees these real numbers and explicitly decides to wire a change
+    into the live path - this is a read-only comparison report.
+
+    Pulls real historical data from Coinbase's public candles endpoint -
+    can take 30-90 seconds depending on that endpoint's response time."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_quick_profit_vs_trailing_stop_comparison()
+
+
 @router.post("/alpaca-selection-backtest", dependencies=[Depends(require_admin_key)])
 async def run_alpaca_selection_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
