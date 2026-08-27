@@ -2276,12 +2276,15 @@ async def _pick_weakest_branch_for_reinforcement(exclude_bot_name: str, also_exc
 
     also_exclude_bot_names: an additional set of bot_names to skip, on top
     of exclude_bot_name - used when a just-picked weakest branch's real
-    reinforcement buy permanently fails (see _maybe_spawn_child) and a
-    different candidate needs to be picked in the same call, instead of
-    retrying the identical doomed order against the same branch forever
-    next cycle (real gap found live: a flat, permanently-rejected branch's
-    balance never changes, so it stays "weakest" and gets picked again
-    every single cycle).
+    reinforcement buy fails, for ANY reason (see _maybe_spawn_child, which
+    now hops through every other real candidate in turn rather than only
+    falling back on a confirmed-permanent rejection), and a different
+    candidate needs to be picked in the same call, instead of retrying the
+    identical doomed order against the same branch forever next cycle
+    (real gap found live: a branch whose reinforcement keeps failing -
+    permanently rejected, or just genuinely out of real free cash - never
+    has its own balance change on a failed attempt, so it stays "weakest"
+    and gets picked again every single cycle).
 
     Returns the CryptoTreeBranch row, or None if there's no other real
     eligible branch to reinforce (e.g. the very first spawn in a fresh
@@ -2754,20 +2757,39 @@ async def _maybe_spawn_child(branch, allow_reinforce: bool = True):
             # rejection (UNSUPPORTED_ORDER_CONFIGURATION) every time, and
             # refunded - but since that branch's own balance never changes
             # on a failed attempt, it stayed the objectively "weakest"
-            # candidate and got picked again next cycle, forever. Try ONE
-            # different real candidate (excluding the one that just
-            # permanently failed) in this same call, instead of waiting a
-            # full cycle just to make the identical doomed attempt again.
-            first_stuck_reason = engine._last_order_error.get(weakest.product_id, "unknown reason")
-            if engine._is_permanent_order_rejection(first_stuck_reason):
+            # candidate and got picked again next cycle, forever.
+            #
+            # Originally this only tried ONE fallback candidate, and only
+            # for a confirmed-PERMANENT rejection - a real transient
+            # failure (INSUFFICIENT_FUND: root drained to near-$0 by a
+            # manual cash move, no real free cash anywhere to fund a $50
+            # top-up) still just refunded and waited a full cycle to make
+            # the identical doomed attempt again, confirmed live:
+            # crypto_tree_sol_usd sitting at 100% "Next spawn" for many
+            # minutes straight, repeating the same failed reinforcement
+            # into root every cycle. Per the account owner's explicit
+            # request ("I would like if it just kept hopping around...
+            # kept on spawning different") - now tries every OTHER real
+            # candidate, weakest-first, regardless of WHY the previous one
+            # failed (permanent or transient), until one actually succeeds
+            # or every real branch has been tried. A branch that's
+            # genuinely cash-starved right now (like root, mid-drawdown-
+            # breach) just gets skipped in favor of whichever weak branch
+            # CAN actually use the money this cycle - it can still be
+            # reinforced again later once real cash frees up and it's
+            # picked as weakest on some future spawn.
+            tried_bot_names = {weakest.bot_name}
+            while not deployed:
                 fallback = await _pick_weakest_branch_for_reinforcement(
-                    exclude_bot_name=branch.bot_name, also_exclude_bot_names=frozenset({weakest.bot_name})
+                    exclude_bot_name=branch.bot_name, also_exclude_bot_names=frozenset(tried_bot_names)
                 )
-                if fallback is not None:
-                    weakest = fallback
-                    weakest_pct_before = (weakest.allocated_usd / weakest.next_unlock_tier) * 100
-                    async with engine.aiohttp.ClientSession() as session:
-                        deployed = await _deploy_seed_into_weakest_branch(session, weakest.bot_name, SEED_USD)
+                if fallback is None:
+                    break
+                weakest = fallback
+                tried_bot_names.add(weakest.bot_name)
+                weakest_pct_before = (weakest.allocated_usd / weakest.next_unlock_tier) * 100
+                async with engine.aiohttp.ClientSession() as session:
+                    deployed = await _deploy_seed_into_weakest_branch(session, weakest.bot_name, SEED_USD)
 
         if deployed:
             reinforce_msg = (

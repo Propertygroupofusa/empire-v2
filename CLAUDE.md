@@ -7485,6 +7485,60 @@ harmless, if noisy.
 
 ---
 
+## Reinforcement now hops to a different real branch on ANY failure, not just a permanent one
+
+Right after the diagnosis above, the account owner watched the same real
+pattern continue - `crypto_tree_sol_usd` sitting at 100% "Next spawn" for
+many minutes straight, repeating an identical failed reinforcement into
+root every cycle - and asked directly: "why is it just sitting there...
+I would like if it just kept hopping around and just kept on spawning
+different." A fair, buildable ask: the existing fallback mechanism (see
+"a failed reinforcement retry loop looked identical to being frozen" and
+the permanent-rejection fallback above) only ever tried a SECOND real
+candidate when the first one's rejection was confirmed PERMANENT
+(`PERMISSION_DENIED`, `Invalid product_id`, `UNSUPPORTED_ORDER_CONFIGURATION`)
+- a real but TRANSIENT failure like `INSUFFICIENT_FUND` (root drained
+near-$0 by the account owner's own earlier "Move Cash Between Branches"
+click) never triggered it, so `_maybe_spawn_child()` just refunded and
+waited a full cycle to make the identical doomed attempt again,
+indefinitely, exactly matching what was on screen.
+
+`_maybe_spawn_child()`'s reinforcement path no longer gates the fallback
+on `_is_permanent_order_rejection()` at all - on ANY failed deploy
+(permanent or transient), it now loops through every other real
+candidate in turn (via the existing `_pick_weakest_branch_for_reinforcement(
+..., also_exclude_bot_names=...)` mechanism, now called repeatedly rather
+than once) until one succeeds or every real branch has been tried, same
+call, same cycle. A branch that's genuinely cash-starved right now (like
+root, mid-drawdown-breach) simply gets skipped in favor of whichever weak
+branch CAN actually use the money this cycle - it isn't excluded forever,
+just not picked while it can't help; a later spawn can still pick it
+again once real cash frees up. If every real candidate is exhausted, the
+existing safety net is unchanged: the seed is refunded and a real
+`REINFORCE_FAILED` activity event still fires - no real money is ever
+lost, this only changes how hard one cycle tries before giving up.
+
+Verified offline (`test_reinforcement_permanent_rejection_fallback.py`,
+updated in place - the file's original point 5 asserted the OLD "no
+fallback on a transient rejection" behavior, now updated to assert the
+new one, 13 checks total): the two existing permanent-rejection cases
+(fallback succeeds; every candidate exhausted) are completely unchanged;
+a new case reproducing the exact real transient shape (INSUFFICIENT_FUND
+against the first candidate) now correctly hops to and succeeds against
+the real fallback candidate in the same call, logging a real `REINFORCE`
+success event with no `REINFORCE_FAILED`. Full related regression suite
+(`test_reinforcement_skips_excluded_coin.py`, `test_reallocate_cash.py`,
+`test_drawdown_breaker.py`, `test_place_market_buy_clamp.py`) re-run
+clean alongside it.
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+watch whether `crypto_tree_sol_usd` actually completes its stuck
+reinforcement into a different real branch (LINK is the next real
+candidate given root's current cash-starved state) instead of sitting at
+100% indefinitely.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
