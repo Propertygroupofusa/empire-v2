@@ -8248,6 +8248,103 @@ least 2 real hourly snapshots exist, same as the chart itself.
 
 ---
 
+## One-click promotion of QUICK_PROFIT vs. Trailing Stop to the live crypto bot
+
+Per the account owner's explicit request - "I don't have a option like
+what was that alpaca to pick... I need some different options like that
+alpaca" - after looking at the real QUICK_PROFIT-vs-trailing-stop
+backtest table and seeing trailing stop beat QUICK_PROFIT on almost
+every coin (STX +$127.90, AAVE +$87.46, ADA +$61.44, and more). Ports
+`prop_bot.py`'s own A/B/C/D entry-variant promotion mechanism to the
+crypto side's exit philosophy, so real evidence can be acted on directly
+from the dashboard instead of requiring a manual code change.
+
+**`get_live_exit_mode()`/`set_live_exit_mode()`** (`crypto_family_tree_bot.py`)
+- DB-persisted (same generic `TradingBotState` bucket every other
+real-time flag in this file already uses, not a Railway env var - avoids
+the exact stray-quote-character class of bug that silently disabled the
+crypto coordinator earlier this session). Defaults to `"quick_profit"`
+(today's live rule, unchanged) until explicitly promoted. Restricted to
+exactly the 2 modes `crypto_selection_backtest.py`'s own
+`run_quick_profit_vs_trailing_stop_comparison` already tested - no way
+to push an untested exit rule.
+
+**`run_branch_cycle()`'s exit-check block was restructured** around a
+real `exit_mode` branch, read once per cycle for every held position:
+- `"quick_profit"` - the original live logic, completely byte-for-byte
+  unchanged (verified by re-running the full pre-existing
+  `test_quick_profit_take.py` suite clean).
+- `"trailing_stop"` - real, validated mechanics identical to
+  `crypto_selection_backtest.py`'s own already-tested
+  `_replay_with_exit_mode(mode="trailing_stop")`: the existing hard
+  stop-loss/breakeven ratchet applies exactly as before UNTIL price
+  first reaches the real ATR-based target; from that moment the stop
+  trails `TRAILING_STOP_PCT` (2.5%, matching the backtest's own constant
+  exactly) behind the highest real price seen since entry - never
+  loosening below the original stop/breakeven level (a real `max()`
+  guard, not just an assumption), only ever tightening - and the
+  position exits on a genuine reversal from its own peak rather than the
+  instant it clears fees. Reaching TARGET is never an immediate-exit
+  condition in this mode, only arms the trail.
+- The real peak PRICE trailing mode needs is deliberately NOT a new
+  persisted column - it's derived from the existing `position.peak_pct`
+  (peak dollar profit, already tracked for the giveback cap in
+  `quick_profit` mode) via `entry_price + peak_pct/qty`, since `qty` is
+  fixed for the life of a position and the two are always mathematically
+  equivalent. No schema change needed.
+
+**`POST /family-tree-status/set-exit-mode`** (`{mode}`, admin-key gated,
+`routers/trading_dashboard.py`) - the direct crypto-side counterpart to
+`set_alpaca_entry_variant`. `get_family_tree_status()` gained a matching
+`exit_mode` field so the dashboard can show which mode is currently
+live. `crypto_selection_backtest.html` gained a live-mode badge plus two
+promote buttons under the QUICK_PROFIT vs. Trailing Stop comparison
+results (same `.promote-btn`/confirm-dialog pattern as Alpaca's own
+entry-variant buttons), and `family_tree_dashboard.html` gained a small
+"🎯 Live exit rule: ..." badge near the top linking back to the backtest
+page, mirroring `alpaca_dashboard.html`'s own entry-variant badge
+exactly.
+
+Verified offline (`test_live_exit_mode_trailing_stop.py`, new, 16
+checks; `test_set_crypto_exit_mode_endpoint.py`, new, 7 checks) against
+real throwaway SQLite DBs: `get_live_exit_mode()` defaults to
+`"quick_profit"` and round-trips correctly through `set_live_exit_mode()`,
+rejecting an unknown mode; in `trailing_stop` mode, a real profit that
+would trigger `QUICK_PROFIT` in the other mode is correctly HELD until
+target is reached; a real 3-cycle sequence (price climbs above target,
+climbs to a new peak, then reverses past the trail while staying above
+the hard stop) sells with exit_reason `"TRAILING STOP - reversed from
+peak"` on exactly the cycle the trail is breached, with the trailing-stop
+price hand-verified at each step; a position that falls straight to the
+real hard stop without ever reaching target still exits labeled `"STOP
+HIT"`, never mislabeled; the `max()` guard is proven both via a direct,
+isolated formula check and via a real end-to-end scenario chosen so a
+naive (unguarded) trailing calculation would have let a losing position
+sit unprotected below the real stop; the new `POST .../set-exit-mode`
+endpoint promotes correctly, refuses an unknown mode with a real 400
+leaving the live mode untouched, and `get_family_tree_status()`'s
+response correctly surfaces the real current mode. Full existing
+regression suite (`test_quick_profit_take.py`, `test_giveback_net_of_fees.py`,
+`test_peak_profit_giveback.py`, `test_breakeven_ratchet.py`,
+`test_bounded_reinforcement_chain.py`, `test_reinforcement_market_quality_gate.py`,
+`test_drawdown_breaker.py`, `test_floor_below_seed_self_heal.py`)
+re-run clean alongside it, confirming `quick_profit` mode (the default)
+is completely unaffected by this restructure. Confirmed via a real AST
+route-count parse that the new route is bound correctly with no
+duplicate registrations (67 total routes, zero duplicates). All three
+touched HTML files re-verified with a real Python `HTMLParser`
+tag-balance check and `node --check` on each file's extracted inline
+`<script>` block.
+
+**Not yet confirmed against real live trading** - `quick_profit` stays
+live by default; the account owner needs to redeploy, open
+`/crypto-selection-backtest-view`, and tap "Promote Trailing Stop" (or
+leave it as-is) once they've weighed the real backtest evidence - this
+feature only provides the mechanism, exactly like its Alpaca
+counterpart, it doesn't make the call on its own.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

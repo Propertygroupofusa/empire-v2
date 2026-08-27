@@ -495,6 +495,7 @@
         </div>
     </div>
 
+    <div id="exit-mode-badge" style="display:none; font-size:0.8em; color: var(--text-dim); margin-bottom: 8px;"></div>
     <div id="crypto-passive-mode-banner" style="display:none;"></div>
     <div id="rolling-expectancy-banner" style="display:none;"></div>
     <div id="usdc-blindspot-banner" style="display:none;"></div>
@@ -1549,6 +1550,7 @@ async function refresh() {
         renderCryptoPassiveModeBanner(data);
         renderRollingExpectancyBanner(data);
         renderUsdcBlindSpotBanner(data);
+        renderExitModeBadge(data.exit_mode);
 
         const branches = data.branches || [];
         lastUnrealizedProfit = branches.reduce((sum, b) => {
@@ -1631,6 +1633,16 @@ function renderReconciliation(data) {
         <thead><tr><th>Asset</th><th>Branches</th><th>Tracked qty (DB)</th><th>Real balance (Coinbase)</th><th>Status</th></tr></thead>
         <tbody>${rows}</tbody>
     </table></div>`;
+}
+
+const EXIT_MODE_BADGE_LABELS = { quick_profit: 'QUICK_PROFIT (take any real profit fast)', trailing_stop: 'Trailing Stop (let winners run, trail off peak)' };
+
+function renderExitModeBadge(mode) {
+    const el = document.getElementById('exit-mode-badge');
+    if (!mode) { el.style.display = 'none'; return; }
+    el.style.display = '';
+    el.innerHTML = `🎯 Live exit rule: <strong style="color:var(--navy);">${EXIT_MODE_BADGE_LABELS[mode] || mode}</strong> — ` +
+        `<a href="/crypto-selection-backtest-view" style="color: var(--navy);">run the backtest to compare or promote a different one →</a>`;
 }
 
 function renderCryptoPassiveModeBanner(data) {

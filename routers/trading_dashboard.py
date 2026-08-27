@@ -845,6 +845,7 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
 
     crypto_passive_mode = await crypto_family_tree_bot_module.is_crypto_passive_mode() if crypto_family_tree_bot_module else False
     rolling_expectancy = await crypto_family_tree_bot_module.get_rolling_expectancy() if crypto_family_tree_bot_module else None
+    exit_mode = await crypto_family_tree_bot_module.get_live_exit_mode() if crypto_family_tree_bot_module else "quick_profit"
 
     return {
         "branches": out,
@@ -866,6 +867,7 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         "can_spawn": can_spawn,
         "crypto_passive_mode": crypto_passive_mode,
         "rolling_expectancy": rolling_expectancy,
+        "exit_mode": exit_mode,
         "real_usd_balance": round(real_balance, 2) if real_balance is not None else None,
         "real_usdc_balance": round(real_usdc_balance, 2) if real_usdc_balance is not None else None,
     }
@@ -2504,6 +2506,36 @@ async def run_quick_profit_vs_trailing_stop_backtest():
     if crypto_selection_backtest_module is None:
         raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
     return await crypto_selection_backtest_module.run_quick_profit_vs_trailing_stop_comparison()
+
+
+class SetExitModeRequest(BaseModel):
+    mode: str
+
+
+@router.post("/family-tree-status/set-exit-mode", dependencies=[Depends(require_admin_key)])
+async def set_crypto_exit_mode(payload: SetExitModeRequest):
+    """Promotes one of the 2 real, backtested exit philosophies (see
+    crypto_selection_backtest.py's run_quick_profit_vs_trailing_stop_comparison,
+    and crypto_family_tree_bot.py's run_branch_cycle which actually enforces
+    whichever one is live) to production - the direct crypto-side
+    counterpart to set_alpaca_entry_variant above, per the account owner's
+    explicit request for "an option like that alpaca" after seeing the
+    real QUICK_PROFIT-vs-trailing-stop comparison evidence.
+
+    Deliberately restricted to exactly the 2 modes the backtest tool
+    itself tested (quick_profit/trailing_stop) - there is no way to
+    request an untested exit rule. Takes effect on the live bot's very
+    next cycle for every branch - no restart needed, same as every other
+    real-time flag in this codebase (STOP_TRADING, passive mode, the
+    Alpaca entry variant)."""
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+    mode = payload.mode.strip().lower()
+    if mode not in crypto_family_tree_bot_module.EXIT_MODE_LEVELS:
+        raise HTTPException(status_code=400, detail=f"mode must be one of {crypto_family_tree_bot_module.EXIT_MODE_LEVELS}, got {payload.mode!r}")
+    await crypto_family_tree_bot_module.set_live_exit_mode(mode)
+    log.info(f"[dashboard] 🎯 Live crypto exit mode promoted to '{mode}'")
+    return {"status": "promoted", "exit_mode": mode}
 
 
 @router.post("/alpaca-selection-backtest", dependencies=[Depends(require_admin_key)])

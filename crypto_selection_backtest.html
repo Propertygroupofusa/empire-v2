@@ -41,6 +41,15 @@
         background: var(--navy); color: #fff; font-weight: 700; font-size: 0.95em; cursor: pointer;
     }
     .run-btn:disabled { opacity: 0.6; cursor: default; }
+    .promote-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+    .promote-btn {
+        padding: 9px 16px; border-radius: 8px; border: 1.5px solid var(--gold); background: var(--gold-bg);
+        color: var(--gold); font-weight: 700; font-size: 0.85em; cursor: pointer;
+    }
+    .promote-btn:hover { background: var(--gold); color: #fff; }
+    .promote-btn:disabled { opacity: 0.55; cursor: default; background: var(--gold-bg); color: var(--gold); }
+    .promote-btn.is-live { background: var(--gold); color: #fff; cursor: default; }
+    .live-exit-mode-badge { display: inline-block; margin-bottom: 10px; padding: 4px 10px; border-radius: 6px; background: var(--gold-bg); color: var(--gold); font-weight: 700; font-size: 0.8em; }
     #status { margin-top: 12px; font-size: 0.85em; color: var(--text-dim); }
     #status.error { color: var(--red); font-weight: 600; }
     table { width: 100%; border-collapse: collapse; margin-top: 20px; background: var(--panel); border-radius: 10px; overflow: hidden; box-shadow: var(--shadow); }
@@ -236,6 +245,7 @@ function renderWatchlist(data) {
 }
 
 window.addEventListener('DOMContentLoaded', loadWatchlist);
+window.addEventListener('DOMContentLoaded', loadLiveExitMode);
 
 async function runBacktest() {
     const btn = document.getElementById('runBtn');
@@ -588,7 +598,71 @@ function renderQuickProfitVsTrailingStopResults(data) {
             <tbody>${rows}</tbody>
         </table>
         <p class="trade-note">QUICK_PROFIT (fewer dollars per trade, more trades) matches what the live bot does right now. Trailing stop (fewer, bigger trades) only exits once price genuinely reverses after reaching the real target. A positive "Difference" means letting it run would have made more real money on that coin; negative means taking it fast was the better real call.</p>
+        <p style="margin-top:20px;font-weight:700;">Push an exit mode to the live bot:</p>
+        <div id="exitModeBadgeWrap"></div>
+        <div class="promote-row" id="exitModePromoteRow"></div>
+        <p style="margin-top:8px;font-size:0.78em;color:var(--text-dim);">
+            A real, immediate change to how every branch's own exits work - takes effect on the live bot's very next cycle,
+            no restart needed. Only these 2 tested modes can ever be promoted - there's no way to push an untested exit rule.
+        </p>
     `;
+    renderExitModePromoteRow();
+}
+
+let currentLiveExitMode = 'quick_profit';
+const EXIT_MODE_LABELS = { quick_profit: 'QUICK_PROFIT (take any real profit fast)', trailing_stop: 'Trailing Stop (let winners run, trail 2.5% off peak)' };
+
+async function loadLiveExitMode() {
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/family-tree-status', { headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' } });
+        const data = await res.json();
+        if (res.ok && data.exit_mode) {
+            currentLiveExitMode = data.exit_mode;
+            renderExitModePromoteRow();
+        }
+    } catch (e) { /* badge just stays at its default until this succeeds */ }
+}
+
+function renderExitModePromoteRow() {
+    const badgeWrap = document.getElementById('exitModeBadgeWrap');
+    const row = document.getElementById('exitModePromoteRow');
+    if (!row) return;
+    if (badgeWrap) {
+        badgeWrap.innerHTML = `<span class="live-exit-mode-badge">🎯 Live now: ${EXIT_MODE_LABELS[currentLiveExitMode] || currentLiveExitMode}</span>`;
+    }
+    row.innerHTML = Object.keys(EXIT_MODE_LABELS).map(mode => {
+        const isLive = mode === currentLiveExitMode;
+        return `<button class="promote-btn${isLive ? ' is-live' : ''}" data-mode="${mode}" ${isLive ? 'disabled' : ''}
+            onclick="promoteExitMode('${mode}', this)">${isLive ? '✓ Live now' : `Promote ${EXIT_MODE_LABELS[mode]}`}</button>`;
+    }).join('');
+}
+
+async function promoteExitMode(mode, btn) {
+    if (!confirm(
+        `Promote "${EXIT_MODE_LABELS[mode]}" to the LIVE crypto bot? From its very next cycle onward, every branch's real ` +
+        `automatic exits will use this rule instead of whatever's live now. This is a real, immediate change to how real ` +
+        `money gets traded - not a backtest.`
+    )) return;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Promoting...';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/family-tree-status/set-exit-mode', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        currentLiveExitMode = data.exit_mode;
+        renderExitModePromoteRow();
+    } catch (e) {
+        alert('Could not promote exit mode: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = original;
+    }
 }
 
 async function tradeCoin(productId, btn) {

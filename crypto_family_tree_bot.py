@@ -257,6 +257,59 @@ MAX_PROFIT_GIVEBACK_USD = engine._safe_float_env("TREE_MAX_PROFIT_GIVEBACK_USD",
 # turns out to matter more than taking every real cent on offer.
 QUICK_PROFIT_MIN_NET_USD = engine._safe_float_env("TREE_QUICK_PROFIT_MIN_NET_USD", "0.0")
 
+# Real, live-switchable exit philosophy - per the account owner's explicit
+# request for "an option like that alpaca" (prop_bot.py's own A/B/C/D
+# entry-variant promotion) after seeing real evidence from
+# crypto_selection_backtest.py's run_quick_profit_vs_trailing_stop_comparison:
+# a real 30-coin comparison where trailing stop beat QUICK_PROFIT on almost
+# every coin (STX +$127.90, AAVE +$87.46, ADA +$61.44, and more). Values
+# match exactly what that backtest tool tested, so promoting a mode to live
+# can never run an untested exit rule. TRAILING_STOP_PCT mirrors
+# crypto_selection_backtest.py's own constant of the same name exactly -
+# the real value the comparison was actually run with.
+EXIT_MODE_LEVELS = ["quick_profit", "trailing_stop"]
+TRAILING_STOP_PCT = 0.025
+LIVE_EXIT_MODE_KEY = "crypto_live_exit_mode"
+
+
+async def get_live_exit_mode() -> str:
+    """Which of the two real, backtested exit philosophies the live bot
+    currently runs - "quick_profit" (today's original rule: take any real
+    net gain fast) or "trailing_stop" (let a winner run, protected by a
+    real percentage trail off its own peak once it reaches target).
+    DB-persisted (same generic TradingBotState bucket every other
+    real-time flag in this file already uses) rather than a Railway env
+    var - avoids the exact stray-quote-character class of bug that
+    silently disabled the crypto coordinator earlier this session.
+    Defaults to "quick_profit" (today's live rule, unchanged) if never
+    explicitly promoted - a fresh deployment never silently runs an
+    unvalidated exit mode."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == LIVE_EXIT_MODE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None or row.base_capital is None:
+            return "quick_profit"
+        level = int(row.base_capital)
+        if 0 <= level < len(EXIT_MODE_LEVELS):
+            return EXIT_MODE_LEVELS[level]
+        return "quick_profit"
+
+
+async def set_live_exit_mode(mode: str):
+    if mode not in EXIT_MODE_LEVELS:
+        raise ValueError(f"unknown exit mode {mode!r} - must be one of {EXIT_MODE_LEVELS}")
+    level = float(EXIT_MODE_LEVELS.index(mode))
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == LIVE_EXIT_MODE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = TradingBotState(bot_name=LIVE_EXIT_MODE_KEY, base_capital=level)
+            db.add(row)
+        else:
+            row.base_capital = level
+        await db.commit()
+
+
 # Per the account owner (a king/throne model, corrected after an earlier
 # "permanent once earned" version): BTC (the root) is King - always stays
 # on BTC-USD, never contested, never changes - see the ROOT_BOT_NAME check
@@ -3615,10 +3668,12 @@ async def run_branch_cycle(bot_name: str) -> bool:
 
         unrealized_pct = (price / position.entry_price - 1) * 100
 
-        # Peak-profit giveback tracking (see MAX_PROFIT_GIVEBACK_USD): once
-        # this position has ever shown a real profit, it can never give
-        # back more than that many dollars from its best point without
-        # being force-sold - independent of the fixed target/stop prices.
+        # Peak-profit tracking - shared by BOTH live exit modes below.
+        # QUICK_PROFIT mode uses this as a real DOLLAR peak (for the
+        # giveback cap); TRAILING_STOP mode derives a real PEAK PRICE from
+        # it (peak_price = entry + stored_peak/qty) rather than needing a
+        # separate persisted column - qty is fixed for the life of a
+        # position, so the two are always mathematically equivalent.
         unrealized_usd = position.qty * (price - position.entry_price)
         stored_peak = position.peak_pct or 0.0
         if unrealized_usd > stored_peak:
@@ -3626,58 +3681,105 @@ async def run_branch_cycle(bot_name: str) -> bool:
             position.peak_pct = unrealized_usd
             stored_peak = unrealized_usd
         peak_giveback = stored_peak - unrealized_usd
-
-        # Real bug found live: this exit is labeled "locking in gains,"
-        # but the dollar-giveback check above is purely GROSS (raw price
-        # move x qty) - it never checked whether what's actually left,
-        # AFTER the real round-trip Coinbase fee, is still genuinely a
-        # profit. Confirmed live: a position whose peak was small enough
-        # that giving back $3.75 of it left less than the real fee cost
-        # force-sold anyway, and the real settled P&L came back at -$6.65
-        # - a real loss, from an exit that called itself profit-locking.
-        # Fixed the same way the real TARGET exit's own min-profit floor
-        # already works: mirror _branch_sell_and_settle's own real fee
-        # formula here (half the round-trip rate, matching how the actual
-        # settlement computes real P&L) and only let the giveback path
-        # fire when the real, fee-adjusted proceeds would still be a
-        # genuine profit. If not, this exit is skipped entirely and the
-        # position keeps running under its own real TARGET/STOP/breakeven
-        # protection instead - never force-sold into a real loss dressed
-        # up as a win.
         projected_net_pnl = (price * position.qty * (1 - ROUND_TRIP_FEE_RATE / 2)) - (position.entry_price * position.qty)
-        giveback_would_realize_loss = stored_peak > 0 and peak_giveback >= MAX_PROFIT_GIVEBACK_USD and projected_net_pnl <= 0
-        giveback_exceeded = stored_peak > 0 and peak_giveback >= MAX_PROFIT_GIVEBACK_USD and projected_net_pnl > 0
-        # Real, fast profit-take: any genuine real profit (after real
-        # round-trip fees) gets taken now rather than waiting for the
-        # formal, bigger TARGET price - see QUICK_PROFIT_MIN_NET_USD
-        # above. Never fires on a net-negative or break-even position -
-        # that case is left completely alone under existing protection.
-        quick_profit_available = projected_net_pnl > QUICK_PROFIT_MIN_NET_USD
-        if giveback_would_realize_loss:
-            log.info(
-                f"[TREE] {bot_name}: peak-profit giveback cap reached (${peak_giveback:.2f} given back from "
-                f"${stored_peak:.2f} peak) but the real fee-adjusted proceeds right now would be a loss "
-                f"(${projected_net_pnl:.2f} net) - holding under its own target/stop protection instead of "
-                f"force-selling into a loss labeled as a win"
-            )
 
-        if price >= position.target_price or price <= position.stop_price or giveback_exceeded or quick_profit_available:
-            if price >= position.target_price:
-                exit_reason = "TARGET HIT"
-            elif price <= position.stop_price:
-                exit_reason = "STOP HIT"
-            elif giveback_exceeded:
-                exit_reason = "PEAK PROFIT GIVEBACK - locking in gains"
-                log.warning(
-                    f"[TREE] 💰 {bot_name} gave back ${peak_giveback:.2f} from its ${stored_peak:.2f} peak "
-                    f"profit - force-selling to lock in what's left"
-                )
+        # Real, live-switchable exit philosophy - per the account owner's
+        # explicit request for "an option like that alpaca" after seeing
+        # the QUICK_PROFIT vs Trailing Stop backtest evidence (trailing
+        # stop beat QUICK_PROFIT on almost every coin: STX +$127.90,
+        # AAVE +$87.46, ADA +$61.44, and more - see
+        # crypto_selection_backtest.py's run_quick_profit_vs_trailing_stop_comparison).
+        # Mirrors prop_bot.py's own entry-variant promotion pattern
+        # exactly (get_live_exit_mode/set_live_exit_mode, DB-persisted via
+        # TradingBotState, defaults to "quick_profit" - today's live rule,
+        # unchanged - until explicitly promoted from the dashboard).
+        exit_mode = await get_live_exit_mode()
+        exit_now = False
+        exit_reason = None
+        effective_stop = position.stop_price  # overridden below in trailing_stop mode once armed
+
+        if exit_mode == "trailing_stop":
+            # Real, validated trailing-stop mechanics - byte-for-byte the
+            # same logic crypto_selection_backtest.py's own
+            # _replay_with_exit_mode(mode="trailing_stop") already tested:
+            # the real hard stop-loss/breakeven ratchet applies exactly as
+            # before UNTIL price first reaches the real ATR-based target;
+            # from that moment on, the stop trails TRAILING_STOP_PCT
+            # behind the highest real price seen since entry (never
+            # loosening below the original stop/breakeven level - only
+            # ever tightening), and the position exits on a genuine
+            # reversal from its own peak rather than the instant it
+            # clears fees. TARGET itself is never an immediate-exit
+            # condition in this mode - reaching it only ARMS the trail.
+            peak_price = position.entry_price + (stored_peak / position.qty) if position.qty else position.entry_price
+            profit_activated = peak_price >= position.target_price
+            if profit_activated:
+                trailing_stop_price = peak_price * (1 - TRAILING_STOP_PCT)
+                effective_stop = max(position.stop_price, trailing_stop_price)
             else:
-                exit_reason = "QUICK PROFIT - real net gain taken fast"
+                effective_stop = position.stop_price
+            if price <= effective_stop:
+                exit_now = True
+                exit_reason = "TRAILING STOP - reversed from peak" if profit_activated else "STOP HIT"
+                if profit_activated:
+                    log.info(
+                        f"[TREE] 📉 {bot_name} reversed ${peak_price - price:,.2f} from its ${peak_price:,.2f} peak "
+                        f"(trailing {TRAILING_STOP_PCT*100:.1f}%) - selling to lock in the real move"
+                    )
+        else:  # "quick_profit" - today's original live rule, unchanged
+            # Real bug found live: this exit is labeled "locking in gains,"
+            # but the dollar-giveback check above is purely GROSS (raw price
+            # move x qty) - it never checked whether what's actually left,
+            # AFTER the real round-trip Coinbase fee, is still genuinely a
+            # profit. Confirmed live: a position whose peak was small enough
+            # that giving back $3.75 of it left less than the real fee cost
+            # force-sold anyway, and the real settled P&L came back at -$6.65
+            # - a real loss, from an exit that called itself profit-locking.
+            # Fixed the same way the real TARGET exit's own min-profit floor
+            # already works: mirror _branch_sell_and_settle's own real fee
+            # formula here (half the round-trip rate, matching how the actual
+            # settlement computes real P&L) and only let the giveback path
+            # fire when the real, fee-adjusted proceeds would still be a
+            # genuine profit. If not, this exit is skipped entirely and the
+            # position keeps running under its own real TARGET/STOP/breakeven
+            # protection instead - never force-sold into a real loss dressed
+            # up as a win.
+            giveback_would_realize_loss = stored_peak > 0 and peak_giveback >= MAX_PROFIT_GIVEBACK_USD and projected_net_pnl <= 0
+            giveback_exceeded = stored_peak > 0 and peak_giveback >= MAX_PROFIT_GIVEBACK_USD and projected_net_pnl > 0
+            # Real, fast profit-take: any genuine real profit (after real
+            # round-trip fees) gets taken now rather than waiting for the
+            # formal, bigger TARGET price - see QUICK_PROFIT_MIN_NET_USD
+            # above. Never fires on a net-negative or break-even position -
+            # that case is left completely alone under existing protection.
+            quick_profit_available = projected_net_pnl > QUICK_PROFIT_MIN_NET_USD
+            if giveback_would_realize_loss:
                 log.info(
-                    f"[TREE] ⚡ {bot_name} showing a real ${projected_net_pnl:.2f} net profit (after fees) - "
-                    f"taking it now instead of waiting for the bigger ${position.target_price:,.2f} target"
+                    f"[TREE] {bot_name}: peak-profit giveback cap reached (${peak_giveback:.2f} given back from "
+                    f"${stored_peak:.2f} peak) but the real fee-adjusted proceeds right now would be a loss "
+                    f"(${projected_net_pnl:.2f} net) - holding under its own target/stop protection instead of "
+                    f"force-selling into a loss labeled as a win"
                 )
+
+            if price >= position.target_price or price <= position.stop_price or giveback_exceeded or quick_profit_available:
+                exit_now = True
+                if price >= position.target_price:
+                    exit_reason = "TARGET HIT"
+                elif price <= position.stop_price:
+                    exit_reason = "STOP HIT"
+                elif giveback_exceeded:
+                    exit_reason = "PEAK PROFIT GIVEBACK - locking in gains"
+                    log.warning(
+                        f"[TREE] 💰 {bot_name} gave back ${peak_giveback:.2f} from its ${stored_peak:.2f} peak "
+                        f"profit - force-selling to lock in what's left"
+                    )
+                else:
+                    exit_reason = "QUICK PROFIT - real net gain taken fast"
+                    log.info(
+                        f"[TREE] ⚡ {bot_name} showing a real ${projected_net_pnl:.2f} net profit (after fees) - "
+                        f"taking it now instead of waiting for the bigger ${position.target_price:,.2f} target"
+                    )
+
+        if exit_now:
             sold = await _branch_sell_and_settle(session, bot_name, branch.product_id, position, exit_reason)
             if sold:
                 # _branch_sell_and_settle already picked the branch's next
@@ -3709,7 +3811,8 @@ async def run_branch_cycle(bot_name: str) -> bool:
             log.info(
                 f"[TREE] {bot_name} HOLDING {position.qty:.8f} {branch.product_id} | entry ${position.entry_price:,.2f} | "
                 f"now ${price:,.2f} ({unrealized_pct:+.2f}%) | target ${position.target_price:,.2f} | "
-                f"stop ${position.stop_price:,.2f} | peak profit ${stored_peak:.2f} | equity ${equity:.2f} | floor ${branch.equity_floor:,.2f}"
+                f"stop ${effective_stop:,.2f}{' (trailing)' if exit_mode == 'trailing_stop' and effective_stop != position.stop_price else ''} | "
+                f"peak profit ${stored_peak:.2f} | equity ${equity:.2f} | floor ${branch.equity_floor:,.2f}"
             )
         return True
 
