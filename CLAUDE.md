@@ -8345,6 +8345,69 @@ counterpart, it doesn't make the call on its own.
 
 ---
 
+## Real backtested ROI shown directly inside the New Real Branch modal
+
+Per the account owner's explicit request, after having to bounce between
+the Alpaca dashboard and the separate Stock/ETF Selection Backtest page
+to pick a symbol for a new branch: "I don't want to have to be going
+back and forth... I want to be able to see it right here and then I can
+make the decision from the same page."
+
+**`GET /alpaca-overview/branch-symbol-rankings`** (new, admin-key gated,
+`routers/trading_dashboard.py`) - reuses the exact same real data
+prop_bot.py's own top-N concentration filter and auto-exclusion layer
+already read (`AlpacaBacktestRun`, `_compute_top_ranked_symbols()`,
+`get_effective_excluded_symbols()`, `describe_symbol_exclusion_reason()`)
+rather than a second, separately-computed number - this can never
+disagree with what the live bot (or a branch) would actually be allowed
+to trade. Returns all 11 real `FUTURES` contracts, each with its most
+recent real `num_trades`/`win_rate`/`roi_pct_of_spend` (or honest `None`
+values for a symbol that's never been backtested - never a fabricated
+number), whether it's currently excluded, and the real specific reason
+if so. Sorted best real ROI first; every never-backtested symbol sorts
+after every real-data symbol regardless of ROI, since there's nothing
+real to compare it on. Read-only - never places an order, never
+triggers a new backtest run (that stays the separate manual "Run
+Backtest" button on the other page).
+
+**`alpaca_dashboard.html`**'s "New Real Branch" modal gained a scrollable
+ranked list right above the Contract dropdown, loaded fresh every time
+the modal opens - each row shows the contract, its real trade count/win
+rate (or "never backtested yet"), and its real ROI color-coded
+green/red, with a real `⚠️` exclusion reason inline when applicable.
+Tapping a row selects that contract in the dropdown below it (and the
+dropdown's own `onchange` keeps the row highlighting in sync if picked
+the other way) - the account owner can read the real evidence and make
+the branch-creation decision without ever leaving this modal.
+
+Verified offline (`test_branch_symbol_rankings.py`, new, 12 checks)
+against a real throwaway SQLite DB (both `routers.trading_dashboard`'s
+own `AsyncSessionLocal` and prop_bot.py's separate import of the same
+symbol pointed at it, since the endpoint's own reads and prop_bot's
+internal ranking/exclusion functions both need to see the identical
+real seeded data): all 11 real contracts appear even ones with zero
+real backtest history (reported as honest `None`, not fabricated); a
+real best-ROI symbol reports its exact real trade count/win rate/ROI;
+real-data rows sort best-to-worst by ROI with every never-backtested
+row sorting after all of them; a real 3-consecutive-negative-run
+auto-excluded symbol is flagged with the exact same reason text
+`describe_symbol_exclusion_reason()` itself would produce (proving the
+endpoint can't drift out of sync with the real exclusion logic); and a
+real top-ranked, non-excluded symbol correctly reports `excluded_reason:
+None`. Confirmed via a real AST route-count parse that the new route is
+bound correctly with no duplicate registrations (68 total routes, zero
+duplicates). Full related regression suite (`test_alpaca_branches.py`,
+`test_alpaca_top_n_concentration.py`, `test_alpaca_auto_exclusion.py`)
+re-run clean alongside it. `alpaca_dashboard.html` re-verified with a
+real Python `HTMLParser` tag-balance check and `node --check` on the
+extracted inline `<script>` block.
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+open "New branch" on the Alpaca dashboard to confirm the real ranked
+list populates and that tapping a row correctly selects that contract.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

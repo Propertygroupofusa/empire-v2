@@ -110,6 +110,22 @@
         font-size: 1em; font-family: inherit; color: var(--text);
     }
     .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+    .branch-rankings-wrap { max-height: 200px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 16px; }
+    .branch-rank-row {
+        display: flex; justify-content: space-between; align-items: center; gap: 8px;
+        padding: 8px 10px; border-bottom: 1px solid var(--border); cursor: pointer; font-size: 0.85em;
+    }
+    .branch-rank-row:last-child { border-bottom: none; }
+    .branch-rank-row:hover { background: var(--gold-bg); }
+    .branch-rank-row.selected { background: var(--gold-bg); border-left: 3px solid var(--gold); }
+    .branch-rank-row.is-excluded { opacity: 0.55; }
+    .branch-rank-left { display: flex; flex-direction: column; }
+    .branch-rank-contract { font-weight: 700; color: var(--navy); }
+    .branch-rank-meta { font-size: 0.85em; color: var(--text-dim); }
+    .branch-rank-roi { font-weight: 800; font-size: 1.05em; }
+    .branch-rank-roi.pos { color: var(--green); }
+    .branch-rank-roi.neg { color: var(--red); }
+    .branch-rank-roi.na { color: var(--text-dim); font-size: 0.85em; font-weight: 600; }
     .modal-btn-secondary {
         font-family: inherit; padding: 9px 16px; border-radius: 8px; border: 1px solid var(--border);
         background: #fff; color: var(--text-dim); cursor: pointer; font-weight: 600; font-size: 0.9em;
@@ -376,8 +392,10 @@
         <div class="modal-card">
             <div class="modal-title">🌱 New Real Branch</div>
             <div class="modal-sub">Claims one real contract and allocates real capital to it — a bookkeeping split of the account's own real buying power, not a trade by itself.</div>
+            <label class="modal-label">Real backtested ROI by symbol (tap a row to pick it)</label>
+            <div id="branch-rankings-wrap" class="branch-rankings-wrap"><div class="empty">Loading…</div></div>
             <label class="modal-label">Contract</label>
-            <select id="create-branch-contract" class="modal-input"></select>
+            <select id="create-branch-contract" class="modal-input" onchange="selectBranchContract(this.value)"></select>
             <label class="modal-label">Allocated capital ($)</label>
             <input type="number" id="create-branch-amount" class="modal-input" step="1" min="1">
             <div id="create-branch-error" style="color:var(--red); font-size:0.85em; margin-top:6px; display:none;"></div>
@@ -919,6 +937,53 @@ function openCreateBranchModal() {
     document.getElementById('create-branch-amount').value = '';
     document.getElementById('create-branch-error').style.display = 'none';
     document.getElementById('create-branch-modal-overlay').classList.add('open');
+    loadBranchRankings();
+}
+
+function selectBranchContract(contract) {
+    document.getElementById('create-branch-contract').value = contract;
+    document.querySelectorAll('.branch-rank-row').forEach(el => {
+        el.classList.toggle('selected', el.dataset.contract === contract);
+    });
+}
+
+// Real backtested ROI per symbol, shown directly inside the New Real
+// Branch modal - per the account owner's explicit request to decide
+// right here instead of cross-referencing the separate backtest page by
+// hand. Reuses the exact same real data (AlpacaBacktestRun, the top-N
+// ranking, the exclusion layer) the live bot itself already uses to pick
+// what it trades - this can never disagree with that.
+async function loadBranchRankings() {
+    const wrap = document.getElementById('branch-rankings-wrap');
+    wrap.innerHTML = '<div class="empty">Loading real backtested ROI…</div>';
+    try {
+        const data = await apiGet('/alpaca-overview/branch-symbol-rankings');
+        const rows = data.rankings || [];
+        if (rows.length === 0) {
+            wrap.innerHTML = '<div class="empty">No real backtest data yet — run the Stock/ETF Selection Backtest first.</div>';
+            return;
+        }
+        const currentContract = document.getElementById('create-branch-contract').value;
+        wrap.innerHTML = rows.map(r => {
+            const roiClass = r.roi_pct == null ? 'na' : (r.roi_pct >= 0 ? 'pos' : 'neg');
+            const roiText = r.roi_pct == null ? 'no data' : `${r.roi_pct >= 0 ? '+' : ''}${r.roi_pct.toFixed(1)}%`;
+            const meta = r.num_trades != null
+                ? `${r.num_trades} trades, ${r.win_rate.toFixed(0)}% win rate${r.excluded ? ` · ⚠️ ${r.excluded_reason}` : ''}`
+                : 'never backtested yet';
+            const selected = r.contract === currentContract ? ' selected' : '';
+            const excludedCls = r.excluded ? ' is-excluded' : '';
+            return `
+                <div class="branch-rank-row${selected}${excludedCls}" data-contract="${r.contract}" onclick="selectBranchContract('${r.contract}')">
+                    <div class="branch-rank-left">
+                        <span class="branch-rank-contract">${r.contract} — ${r.name}</span>
+                        <span class="branch-rank-meta">${meta}</span>
+                    </div>
+                    <span class="branch-rank-roi ${roiClass}">${roiText}</span>
+                </div>`;
+        }).join('');
+    } catch (e) {
+        wrap.innerHTML = `<div class="empty">Could not load real backtest rankings: ${e.message}</div>`;
+    }
 }
 
 function closeCreateBranchModal() {

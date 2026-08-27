@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db, AsyncSessionLocal
 from admin_auth import require_admin_key
-from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory, PricePredictionCalibration, PricePredictionLog, BtcTickerWindowAnchor, AlpacaBranch, CombinedEquitySnapshot
+from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory, PricePredictionCalibration, PricePredictionLog, BtcTickerWindowAnchor, AlpacaBranch, CombinedEquitySnapshot, AlpacaBacktestRun
 
 NUM_BOTS = int(os.getenv("PROP_NUM_BOTS", "8"))
 if NUM_BOTS <= 0:
@@ -3071,6 +3071,57 @@ async def get_alpaca_branches_status():
         "branches": rows,
         "total_allocated_usd": round(sum(b.allocated_usd for b in branches), 2),
     }
+
+
+@router.get("/alpaca-overview/branch-symbol-rankings", dependencies=[Depends(require_admin_key)])
+async def get_alpaca_branch_symbol_rankings():
+    """Real backtested ROI per contract, ranked best to worst - per the
+    account owner's explicit request to see this directly inside the New
+    Real Branch modal instead of having to leave the page and cross-
+    reference the separate Stock/ETF Selection Backtest page by hand.
+    Reuses the exact same real data prop_bot.py's own top-N concentration
+    filter and auto-exclusion layer already read
+    (AlpacaBacktestRun/_compute_top_ranked_symbols/describe_symbol_exclusion_reason)
+    - this can never disagree with what the live bot itself would
+    actually trade. Read-only - never places an order, never runs a new
+    backtest (that's still the separate manual "Run Backtest" button)."""
+    if prop_bot_module is None:
+        raise HTTPException(status_code=500, detail="prop_bot module not available")
+
+    top_ranked = await prop_bot_module._compute_top_ranked_symbols()
+    excluded = await prop_bot_module.get_effective_excluded_symbols()
+
+    rows = []
+    for contract, config in prop_bot_module.FUTURES.items():
+        symbol = config["symbol"]
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(AlpacaBacktestRun)
+                .where(AlpacaBacktestRun.product_id == symbol)
+                .order_by(AlpacaBacktestRun.run_at.desc())
+                .limit(1)
+            )
+            latest = result.scalar_one_or_none()
+
+        is_excluded = symbol in excluded
+        rows.append({
+            "contract": contract,
+            "name": config["name"],
+            "symbol": symbol,
+            "num_trades": latest.num_trades if latest else None,
+            "win_rate": round(latest.win_rate, 1) if latest else None,
+            "roi_pct": round(latest.roi_pct_of_spend, 2) if latest else None,
+            "run_at": (latest.run_at.isoformat() + "Z") if latest and latest.run_at else None,
+            "in_top_n": (top_ranked is None) or (symbol in top_ranked),
+            "excluded": is_excluded,
+            "excluded_reason": (await prop_bot_module.describe_symbol_exclusion_reason(symbol)) if is_excluded else None,
+        })
+
+    # Real backtested symbols (highest ROI first) come before symbols with
+    # no real run on record yet - a symbol nobody has ever backtested
+    # shouldn't outrank one with real, if mediocre, evidence behind it.
+    rows.sort(key=lambda r: (r["roi_pct"] is None, -(r["roi_pct"] or 0)))
+    return {"rankings": rows, "top_n": prop_bot_module.TOP_N_ELIGIBLE_SYMBOLS}
 
 
 class CreateAlpacaBranchRequest(BaseModel):
