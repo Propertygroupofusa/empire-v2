@@ -7201,6 +7201,52 @@ specific reason.
 
 ---
 
+## Follow-up, same day: the floor's minimum clamp changed from $0 to the $50 seed, deliberately
+
+Right after the negative-floor fix above shipped, the account owner asked
+for the clamp to sit somewhere other than $0 - "clamp at profit." Walked
+through the real consequence with two direct clarifying questions before
+touching anything, since `BRANCH_FLOOR_TIER` and the $50 seed share the
+same value, meaning a $50 clamp would leave any branch whose real balance
+drops below $50 sitting permanently below its own floor - unable to
+self-heal, unable to resume trading on its own, the same "stuck forever"
+shape as the BTC $121.93/$150 and LDO $155.05/$200 incidents already
+fixed earlier this session. The account owner confirmed that's exactly
+what they want: a branch that loses past its own $50 seed should stop
+digging and stay paused, not keep self-healing its floor down and
+continuing to trade with dwindling capital.
+
+`_floor_tier_for_balance()` now clamps at `SEED_USD` ($50), not $0 -
+`max(SEED_USD, math.floor(balance / BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER)`.
+This is a real behavior change, not just a display fix: every self-heal
+call site (`_force_root_spawn_ready`, `consolidate_branches_by_coin`,
+`_maybe_spawn_child`, `_branch_sell_and_settle`'s post-sale reset, and the
+flat-branch floor-breach self-heal) now stops lowering a floor once it
+reaches $50, even if the branch's real balance keeps dropping below that.
+A brand-new branch's real starting floor of $0.00 at spawn is untouched -
+`CryptoTreeBranch` is still created with `equity_floor=0.0` directly,
+never through this function; only paths that LOWER an already-existing
+floor go through the clamp. The flat-branch self-heal's own log line was
+also fixed to stop claiming "entries resume next cycle" when that isn't
+actually true anymore - it now distinguishes a real resume from a branch
+that's healed its floor down to $50 but is still genuinely below it
+(stays paused, needs manual cash added).
+
+Verified offline: the clamp holds at exactly $50 for a tiny negative
+balance (the original fee-drift bug), a real balance of $0, and a real
+balance anywhere below $50 from genuine trading losses - never lower,
+never $0.00 again; a real mid-tier balance (e.g. $153.20) still floors at
+its own real tier unchanged. Full existing exclusion/reinforcement/
+consolidate/reallocate/quick-profit regression suite re-run clean
+alongside it.
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+confirm a branch that's genuinely lost past its own $50 seed now shows a
+real $50.00 floor (never $0.00) and stays paused rather than quietly
+resuming on its own.
+
+---
+
 ## QUICK_PROFIT vs. a real percentage trailing stop (shadow mode, additive only)
 
 A pasted proposal argued for a real exit redesign: don't snap profit the

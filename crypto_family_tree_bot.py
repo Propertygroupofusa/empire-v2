@@ -113,17 +113,29 @@ COORDINATOR_SCAN_SECONDS = engine._safe_int_env("TREE_COORDINATOR_SCAN_SECONDS",
 
 
 def _floor_tier_for_balance(balance: float) -> float:
-    """The real floor-tier formula every self-heal path below uses,
-    clamped so it can never go negative. Real fee/rounding drift can
-    leave a branch's allocated_usd sitting a few cents below zero (a
-    flat branch that's sold down to nothing, its qty-weighted math
-    settling a hair negative) - without the clamp, math.floor(balance /
-    BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER produces a real negative
-    floor (e.g. -$50.00 off a -$0.00-ish balance), which is meaningless
-    and confusing on the dashboard - a floor exists to protect real
-    money, and there's no real money below $0 left to protect. Found
-    live: crypto_tree_xrp_usd_4 showing Balance $-0.00 / Floor -$50.00."""
-    return max(0.0, math.floor(balance / BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER)
+    """The real floor-tier formula every self-heal path below uses.
+    Originally clamped at $0 to fix a real bug (fee/rounding drift could
+    leave a branch's allocated_usd sitting a few cents below zero,
+    producing a meaningless negative floor like -$50.00 off a -$0.00-ish
+    balance - found live: crypto_tree_xrp_usd_4 showing Balance $-0.00 /
+    Floor -$50.00).
+
+    Per the account owner's explicit, deliberate follow-up choice
+    (confirmed after being shown the real consequence): the clamp is now
+    SEED_USD ($50), not $0 - a branch's floor can never self-heal down
+    below its own original seed capital. This is a REAL behavior change,
+    not just a display fix: a branch whose genuine trading losses take
+    its balance below $50 will now sit permanently below its own floor
+    (paused, no new entries) instead of self-healing its floor down to
+    keep trading with dwindling capital - the account owner's explicit
+    choice was "pause it, don't let it dig further." Reviving a branch in
+    that state requires manual action (Add Cash, Move Cash Between
+    Branches, or consolidating it into another branch), not automatic
+    self-heal. This does NOT affect a brand-new branch's real starting
+    floor of $0.00 at spawn (CryptoTreeBranch created with
+    equity_floor=0.0 directly, never through this function) - only paths
+    that LOWER an existing floor call this helper."""
+    return max(SEED_USD, math.floor(balance / BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER)
 
 # A floor-breach forced exit resets the floor down to only ~3-4% below the
 # fresh post-sale balance (see the tier-reset in _branch_sell_and_settle) -
@@ -3216,10 +3228,23 @@ async def run_branch_cycle(bot_name: str) -> bool:
                     if row:
                         row.equity_floor = new_tier_floor
                         await db.commit()
-                log.info(
-                    f"[TREE] 🪜 {bot_name} floor lowered ${branch.equity_floor:,.2f} -> ${new_tier_floor:,.2f} "
-                    f"to match its own real balance ${equity:.2f} - entries resume next cycle"
-                )
+                # _floor_tier_for_balance() is clamped at SEED_USD - a
+                # branch whose real balance has fallen below its own $50
+                # seed self-heals its floor down toward $50, never below
+                # it, so it can still stay genuinely stuck (equity < the
+                # new floor) rather than actually resuming - say so
+                # honestly instead of always claiming "entries resume."
+                if equity >= new_tier_floor:
+                    log.info(
+                        f"[TREE] 🪜 {bot_name} floor lowered ${branch.equity_floor:,.2f} -> ${new_tier_floor:,.2f} "
+                        f"to match its own real balance ${equity:.2f} - entries resume next cycle"
+                    )
+                else:
+                    log.info(
+                        f"[TREE] 🪜 {bot_name} floor lowered ${branch.equity_floor:,.2f} -> ${new_tier_floor:,.2f} "
+                        f"(clamped at the $50 seed) but its real balance ${equity:.2f} is still below that - "
+                        f"stays paused until manual cash is added (it lost past its own starting capital)"
+                    )
             else:
                 log.info(f"[TREE] 🛑 {bot_name}: ${equity:.2f} below floor ${branch.equity_floor:,.2f} - entries paused until it recovers")
             return True
