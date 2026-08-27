@@ -326,6 +326,37 @@
         <div id="positions" style="padding: 8px 20px;"></div>
     </div>
 
+    <div class="section-title">🌳 Real Branches <span id="branch-mode-badge" style="font-size:0.7em; font-weight:600; margin-left:8px;"></span></div>
+    <p class="panel-sub" style="margin-bottom:10px;">
+        A real, smaller first slice toward something like the crypto family tree's compounding branches —
+        each branch is a real, independent capital slice trading its own dedicated symbol, sized only
+        against its own allocation (clamped to real buying power). Off by default: existing branches can be
+        created below, but nothing trades until "Enable branch trading" is switched on.
+    </p>
+    <div class="panel" id="branches-panel">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+            <button id="branch-mode-toggle-btn" class="unlock-btn" onclick="toggleBranchMode()" disabled>Loading…</button>
+            <button class="unlock-btn" onclick="openCreateBranchModal()">🌱 New branch</button>
+        </div>
+        <div id="branches-content" class="empty">Loading…</div>
+    </div>
+
+    <div class="modal-overlay" id="create-branch-modal-overlay">
+        <div class="modal-card">
+            <div class="modal-title">🌱 New Real Branch</div>
+            <div class="modal-sub">Claims one real contract and allocates real capital to it — a bookkeeping split of the account's own real buying power, not a trade by itself.</div>
+            <label class="modal-label">Contract</label>
+            <select id="create-branch-contract" class="modal-input"></select>
+            <label class="modal-label">Allocated capital ($)</label>
+            <input type="number" id="create-branch-amount" class="modal-input" step="1" min="1">
+            <div id="create-branch-error" style="color:var(--red); font-size:0.85em; margin-top:6px; display:none;"></div>
+            <div class="modal-actions">
+                <button type="button" class="modal-btn-secondary" onclick="closeCreateBranchModal()">Cancel</button>
+                <button type="button" class="modal-btn-primary" id="create-branch-confirm-btn" onclick="confirmCreateBranch()">Create</button>
+            </div>
+        </div>
+    </div>
+
     <div class="section-title">Next Best Trade</div>
     <p class="panel-sub" id="next-trade-note" style="margin-bottom:10px;">
         The strongest real setup right now that clears every entry check the bot itself uses (RSI above 55
@@ -727,9 +758,171 @@ async function refresh() {
         } else if (isAlpacaPassive) {
             renderNextBestTrade({ passive: true });
         }
+
+        // Cheap (DB-only read, no live broker calls) - refreshed every
+        // cycle along with everything else, unlike Next Best Trade above.
+        loadBranches();
     } catch (e) {
         statusEl.textContent = 'Error: ' + e.message;
         statusEl.className = 'error';
+    }
+}
+
+// ============================================================================
+// REAL ALPACA BRANCHES - a real, smaller first slice toward something like
+// the crypto family tree's compounding branches, per the account owner's
+// explicit request. Off by default - see prop_bot.py's own ALPACA BRANCHES
+// section for the full real design.
+// ============================================================================
+
+const ALPACA_CONTRACTS = {
+    MES: 'Micro E-mini S&P 500 (SPY)', MNQ: 'Micro E-mini Nasdaq (QQQ)',
+    MYM: 'Micro E-mini Dow (DIA)', M2K: 'Micro E-mini Russell (IWM)',
+    MGC: 'Micro Gold (GLD)', MCL: 'Micro Crude Oil (USO)', SIL: 'Micro Silver (SLV)',
+    SH: 'Short S&P 500 (SH)', PSQ: 'Short Nasdaq (PSQ)', DOG: 'Short Dow 30 (DOG)', RWM: 'Short Russell 2000 (RWM)',
+};
+
+let branchModeActive = false;
+
+function renderBranches(data) {
+    branchModeActive = !!data.mode_active;
+    const modeBadge = document.getElementById('branch-mode-badge');
+    modeBadge.textContent = branchModeActive ? '🟢 branch trading ON' : '⚪ branch trading off';
+    modeBadge.style.color = branchModeActive ? 'var(--green)' : 'var(--text-dim)';
+
+    const toggleBtn = document.getElementById('branch-mode-toggle-btn');
+    toggleBtn.disabled = false;
+    toggleBtn.textContent = branchModeActive ? '⏸️ Disable branch trading' : '▶️ Enable branch trading';
+
+    const content = document.getElementById('branches-content');
+    const branches = data.branches || [];
+    if (branches.length === 0) {
+        content.innerHTML = '<div class="empty">No real branches yet - create one above.</div>';
+        return;
+    }
+    content.innerHTML = `
+        <div style="margin-bottom:10px; color:var(--text-dim); font-size:0.85em;">
+            ${fmtUsd(data.total_allocated_usd)} total real capital allocated across ${branches.length} branch(es).
+        </div>
+        <table style="width:100%; border-collapse:collapse; font-size:0.9em;">
+            <thead><tr style="text-align:left; border-bottom:1px solid var(--border);">
+                <th style="padding:6px 8px;">Branch</th><th style="padding:6px 8px;">Symbol</th>
+                <th style="padding:6px 8px;">Allocated</th><th style="padding:6px 8px;">Position</th>
+                <th style="padding:6px 8px;">Status</th><th style="padding:6px 8px;"></th>
+            </tr></thead>
+            <tbody>
+                ${branches.map(b => {
+                    const pos = b.position;
+                    const posStr = pos
+                        ? `${pos.side.toUpperCase()} ${Number(pos.qty).toFixed(4)} @ ${fmtUsd(pos.entry)}`
+                        : '<span style="color:var(--text-dim);">flat</span>';
+                    return `<tr style="border-bottom:1px solid var(--border);">
+                        <td style="padding:6px 8px;">${b.bot_name}</td>
+                        <td style="padding:6px 8px;">${b.contract} (${b.symbol || '?'})</td>
+                        <td style="padding:6px 8px;">${fmtUsd(b.allocated_usd)}</td>
+                        <td style="padding:6px 8px;">${posStr}</td>
+                        <td style="padding:6px 8px;">${b.active ? '🟢 active' : '⏸️ paused'}</td>
+                        <td style="padding:6px 8px;">
+                            <a href="#" onclick="toggleBranchActive('${b.bot_name}', ${!b.active}); return false;" style="color:var(--navy);">
+                                ${b.active ? 'Pause' : 'Resume'}
+                            </a>
+                        </td>
+                    </tr>`;
+                }).join('')}
+            </tbody>
+        </table>`;
+}
+
+async function loadBranches() {
+    try {
+        const data = await apiGet('/alpaca-overview/branches');
+        renderBranches(data);
+    } catch (e) {
+        document.getElementById('branches-content').innerHTML = `<div class="empty">Could not load: ${e.message}</div>`;
+    }
+}
+
+async function toggleBranchMode() {
+    const enabling = !branchModeActive;
+    const msg = enabling
+        ? 'Enable real branch trading? Every active branch will start entering and exiting real positions on its own dedicated symbol on the next cycle.'
+        : 'Disable real branch trading? No branch will open a new position until re-enabled - any currently open branch position keeps running under its own real exit protection either way.';
+    if (!confirm(msg)) return;
+    const btn = document.getElementById('branch-mode-toggle-btn');
+    btn.disabled = true;
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-overview/branches/mode', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: enabling }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    } catch (e) {
+        alert('Could not update: ' + e.message);
+    } finally {
+        await loadBranches();
+    }
+}
+
+async function toggleBranchActive(botName, newActive) {
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + `/alpaca-overview/branches/${botName}/active`, {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ active: newActive }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    } catch (e) {
+        alert('Could not update: ' + e.message);
+    } finally {
+        await loadBranches();
+    }
+}
+
+function openCreateBranchModal() {
+    const select = document.getElementById('create-branch-contract');
+    select.innerHTML = Object.entries(ALPACA_CONTRACTS).map(([k, v]) => `<option value="${k}">${k} — ${v}</option>`).join('');
+    document.getElementById('create-branch-amount').value = '';
+    document.getElementById('create-branch-error').style.display = 'none';
+    document.getElementById('create-branch-modal-overlay').classList.add('open');
+}
+
+function closeCreateBranchModal() {
+    document.getElementById('create-branch-modal-overlay').classList.remove('open');
+}
+
+async function confirmCreateBranch() {
+    const contract = document.getElementById('create-branch-contract').value;
+    const amount = parseFloat(document.getElementById('create-branch-amount').value);
+    const errorEl = document.getElementById('create-branch-error');
+    errorEl.style.display = 'none';
+    if (!amount || amount <= 0) {
+        errorEl.textContent = 'Enter a real positive dollar amount.';
+        errorEl.style.display = 'block';
+        return;
+    }
+    const confirmBtn = document.getElementById('create-branch-confirm-btn');
+    confirmBtn.disabled = true;
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-overview/branches', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ contract, allocated_usd: amount }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        closeCreateBranchModal();
+    } catch (e) {
+        errorEl.textContent = e.message;
+        errorEl.style.display = 'block';
+    } finally {
+        confirmBtn.disabled = false;
+        await loadBranches();
     }
 }
 

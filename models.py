@@ -889,6 +889,45 @@ class CryptoTreeBranch(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class AlpacaBranch(Base):
+    """The Alpaca-side counterpart to CryptoTreeBranch, per the account
+    owner's explicit request for something like the crypto family tree's
+    compounding branches. Scoped, by explicit agreement, to a real but
+    SMALLER first slice: real independent capital partitioning and
+    per-branch position tracking, proven out on a couple of branches -
+    NOT yet the full spawn-on-milestone tree (no next_unlock_tier here,
+    unlike CryptoTreeBranch - that's the deliberate next step once this
+    slice is validated live).
+
+    Same real-money shape as the crypto side: there is no such thing as a
+    real per-branch Alpaca sub-account, only ONE real account/buying-power
+    number. allocated_usd is this branch's VIRTUAL slice of that one real
+    pool - a branch only ever sizes an order against min(its own
+    allocated_usd, the real account buying power at that exact moment),
+    the same hard real-balance clamp the crypto side's place_market_buy()
+    already uses, so branches can never collectively overspend the real
+    account.
+
+    contract is a FIXED, single real FUTURES key (see prop_bot.py) chosen
+    at creation time - a branch trades exactly one contract for its whole
+    life in this first slice (no coin-switching yet, unlike crypto
+    branches). prop_bot.py's own whole-account scan (try_open) skips any
+    contract claimed by an active branch here, so a branch's dedicated
+    symbol is never double-traded by both the account-wide engine and its
+    own branch cycle at once - see get_alpaca_branch_claimed_contracts()."""
+    __tablename__ = "alpaca_branches"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot_name = Column(String, unique=True, index=True)  # e.g. "alpaca_branch_1"
+    contract = Column(String)  # a real FUTURES key, e.g. "MES" - fixed for this branch's whole life in this first slice
+
+    allocated_usd = Column(Float)  # this branch's current virtual slice, cash-equivalent
+    active = Column(Boolean, default=True)  # a disabled branch is skipped by the cycle driver but keeps its own history/row
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class ClosedTrade(Base):
     """One completed round trip, with the conditions that caused it.
 

@@ -20,7 +20,7 @@ import aiohttp
 import uuid
 from sqlalchemy import select, desc
 from database import AsyncSessionLocal
-from models import BotPosition, Payment, AlpacaBacktestRun, TradingBotState
+from models import BotPosition, Payment, AlpacaBacktestRun, TradingBotState, AlpacaBranch
 import bot_mandates
 from bot_mandates import APEX_MANDATE, validate_entry, MOMENTUM_ENTRY, MEAN_REVERSION_ENTRY
 from alpaca_mean_reversion import should_exit_position_momentum, should_exit_position
@@ -1278,9 +1278,19 @@ def size_position(cash_remaining, slots_remaining, price, account_equity=None):
     return qty if qty > 0 else None
 
 
-def check_margin_safety(buying_power, equity, open_positions_count):
+def check_margin_safety(buying_power, equity, open_positions_count, extra_open_notional=0.0):
     """Hard check: is it safe to open a new position?
-    Returns (is_safe, reason_if_not)"""
+    Returns (is_safe, reason_if_not)
+
+    extra_open_notional: real notional value held OUTSIDE open_prop_positions
+    that also needs counting against the same real account-wide risk cap -
+    added for the Alpaca branch system (see run_alpaca_branch_cycle), whose
+    positions live in a separate open_alpaca_branch_positions dict so they
+    were previously invisible to this check entirely, letting the real
+    total risk across the whole account exceed MAX_RISK_PERCENT without
+    this function ever seeing it. Defaults to 0.0 so the existing
+    prop_apex-only call site (open_prop_positions alone) is byte-for-byte
+    unchanged."""
     # Buying power must be positive with minimum buffer
     if buying_power < MIN_BUYING_POWER_BUFFER:
         return False, f"Insufficient buying power: ${buying_power:.2f} < ${MIN_BUYING_POWER_BUFFER:.2f} buffer"
@@ -1290,7 +1300,7 @@ def check_margin_safety(buying_power, equity, open_positions_count):
         return False, f"CRITICAL: Buying power ${buying_power:.2f} near zero — halting new positions"
 
     # Total open position risk can't exceed max % of equity
-    total_open_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in open_prop_positions.values())
+    total_open_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in open_prop_positions.values()) + extra_open_notional
     if equity > 0 and total_open_notional > (equity * MAX_RISK_PERCENT):
         return False, f"Risk limit exceeded: ${total_open_notional:.2f} > {MAX_RISK_PERCENT*100:.0f}% of ${equity:.2f} equity"
 
@@ -1662,6 +1672,17 @@ async def run_prop_cycle():
             log.warning(f"[MANDATE] {contract} ({config['symbol']}) excluded - {reason} - SKIPPING")
             return False
 
+        # A real Alpaca branch (see the ALPACA BRANCHES section below) may
+        # have claimed this exact contract as its own dedicated symbol -
+        # skip it here so the whole-account scan and that branch's own
+        # independent cycle can never both decide to buy the same real
+        # contract at once. A no-op call (empty set) whenever branch mode
+        # is off or no branch has claimed anything.
+        branch_claimed = await get_alpaca_branch_claimed_contracts()
+        if contract in branch_claimed:
+            log.info(f"[MANDATE] {contract} is claimed by a real Alpaca branch - SKIPPING (managed independently)")
+            return False
+
         # MANDATE CHECK 2: Entry conditions validation
         total_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in open_prop_positions.values())
         is_valid, mandate_reason = validate_entry(
@@ -1678,9 +1699,13 @@ async def run_prop_cycle():
             log.warning(f"[APEX_589296] ⛔ MANDATE BLOCKED: {contract} {side} — {mandate_reason}")
             return False
 
-        # HARD MARGIN SAFETY CHECK — prevent over-leverage
+        # HARD MARGIN SAFETY CHECK — prevent over-leverage. Real notional
+        # held by the Alpaca branch system (see the ALPACA BRANCHES section
+        # below) counts against this same real account-wide risk cap too -
+        # those positions live in a separate dict, invisible to this check
+        # otherwise.
         buying_power = await get_account_buying_power(session)
-        is_safe, reason = check_margin_safety(buying_power, equity, len(open_prop_positions))
+        is_safe, reason = check_margin_safety(buying_power, equity, len(open_prop_positions), extra_open_notional=_total_alpaca_branch_notional())
         if not is_safe:
             log.warning(f"[APEX_589296] ⛔ MARGIN SAFETY: Blocking {contract} entry — {reason}")
             return False
@@ -2097,6 +2122,367 @@ async def record_daily_earnings(pnl_amount):
         log.error(f"[APEX_589296] Failed to record daily earnings: {e}")
 
 
+# ============================================================================
+# ALPACA BRANCHES - a real, smaller first slice toward something like the
+# crypto family tree's compounding branches, per the account owner's
+# explicit request ("is there any way we can make something like that
+# happen with those alpaca bots"). OFF by default
+# (is_alpaca_branch_mode_active) - this whole section is a true no-op
+# until the account owner explicitly turns it on, exactly like the
+# strategy-family toggle before it.
+#
+# The real architectural gap this closes: the existing 8 bot_N "buckets"
+# (routers/trading_dashboard.py) are proportional SHARES of one real
+# account - prop_bot.py sizes every real order off the account's single
+# real buying-power number, so there's no such thing as "bucket 3's
+# trade." A branch here is different: it's a real, independent capital
+# slice with its OWN dedicated contract and its OWN position tracking,
+# sized only against min(its own allocated_usd, real buying power) - the
+# same real-balance clamp crypto's place_market_buy() already uses, so
+# branches can never collectively overspend the real account.
+#
+# Deliberately scoped down from the full crypto-tree design, by explicit
+# agreement: no spawn-on-milestone yet, no coin-switching - just proving
+# real capital partitioning and independent per-branch tracking work
+# safely on 2-3 real branches first. Reuses the EXACT SAME real functions
+# the account-wide scan already uses for market data, entry/exit signals,
+# and order placement - never a separate, reimplemented copy of this
+# codebase's real trading logic.
+# ============================================================================
+
+ALPACA_BRANCH_MODE_KEY = "alpaca_branch_mode"
+
+
+async def is_alpaca_branch_mode_active() -> bool:
+    """DB-persisted (same generic TradingBotState bucket pattern every
+    other real-time flag in this file already uses, not a Railway env var
+    - avoids the exact stray-quote-character bug class that silently
+    disabled the crypto coordinator earlier this session). False (off) by
+    default - the whole Alpaca branch system is a true no-op until the
+    account owner explicitly turns it on."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == ALPACA_BRANCH_MODE_KEY))
+        row = result.scalar_one_or_none()
+        return bool(row and row.base_capital and row.base_capital >= 1.0)
+
+
+async def set_alpaca_branch_mode(enabled: bool):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == ALPACA_BRANCH_MODE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = TradingBotState(bot_name=ALPACA_BRANCH_MODE_KEY, base_capital=0.0)
+            db.add(row)
+        row.base_capital = 1.0 if enabled else 0.0
+        await db.commit()
+
+
+# Real per-branch position tracking, kept SEPARATE from open_prop_positions
+# (which is keyed by contract, account-wide, and every existing part of
+# this file assumes exactly one position per contract there) - keyed by
+# branch bot_name instead, so a branch's own position can never collide
+# with or be silently overwritten by the whole-account scan's own state.
+open_alpaca_branch_positions = {}
+
+
+def _total_alpaca_branch_notional() -> float:
+    """Real notional value currently held across every open Alpaca branch
+    position - see check_margin_safety's extra_open_notional param."""
+    return sum(p.get("qty", 0) * p.get("entry", 0) for p in open_alpaca_branch_positions.values())
+
+
+async def get_alpaca_branch_claimed_contracts() -> set:
+    """Real FUTURES contract keys currently claimed by an ACTIVE branch -
+    checked by try_open's own MANDATE CHECK 1.5 so the whole-account scan
+    never independently buys a contract a branch already owns (which would
+    double up on the same real symbol from two different, uncoordinated
+    decision processes). A disabled branch (active=False) releases its
+    claim."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(AlpacaBranch.contract).where(AlpacaBranch.active == True))
+        return {row[0] for row in result.all()}
+
+
+async def get_alpaca_branches() -> list:
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(AlpacaBranch).order_by(AlpacaBranch.bot_name))
+        return list(result.scalars().all())
+
+
+async def create_alpaca_branch(contract: str, allocated_usd: float) -> AlpacaBranch:
+    """Creates a real new branch claiming `contract` with a real, initial
+    virtual capital slice - a pure bookkeeping operation, never a trade
+    (mirrors CryptoTreeBranch's own "spawning is a bookkeeping transfer,
+    not a trade" reasoning - the real dollars this slice represents were
+    already sitting in the one real Alpaca account before this call, and
+    still are after it)."""
+    if contract not in FUTURES:
+        raise ValueError(f"{contract!r} is not a real FUTURES contract")
+    if allocated_usd <= 0:
+        raise ValueError("allocated_usd must be positive")
+    claimed = await get_alpaca_branch_claimed_contracts()
+    if contract in claimed:
+        raise ValueError(f"{contract} is already claimed by an active branch")
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(AlpacaBranch))
+        existing = list(result.scalars().all())
+        used_nums = {
+            int(b.bot_name.rsplit("_", 1)[-1])
+            for b in existing if b.bot_name.rsplit("_", 1)[-1].isdigit()
+        }
+        next_num = 1
+        while next_num in used_nums:
+            next_num += 1
+        bot_name = f"alpaca_branch_{next_num}"
+        branch = AlpacaBranch(bot_name=bot_name, contract=contract, allocated_usd=allocated_usd, active=True)
+        db.add(branch)
+        await db.commit()
+        await db.refresh(branch)
+    log.info(f"[ALPACA-BRANCH] 🌱 Created {bot_name} on {contract} ({FUTURES[contract]['symbol']}) with ${allocated_usd:.2f}")
+    return branch
+
+
+async def _db_save_branch_open(bot_name: str, contract: str, side: str, entry: float, qty: float):
+    # Self-heals before inserting (same pattern the crypto side's
+    # _save_branch_position already uses, after a real production
+    # incident there): clears any stale row(s) under this exact
+    # bot_name+contract first, so this branch can never accumulate a
+    # duplicate BotPosition row under its own name.
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(BotPosition).where(BotPosition.bot == bot_name, BotPosition.symbol == contract))
+            for row in result.scalars().all():
+                await db.delete(row)
+            db.add(BotPosition(bot=bot_name, symbol=contract, side=side, entry_price=entry, qty=qty))
+            await db.commit()
+    except Exception as e:
+        log.error(f"[ALPACA-BRANCH] Failed to persist opened position for {bot_name}: {e}")
+
+
+async def _db_update_branch_peak_pct(bot_name: str, contract: str, peak_pnl_pct: float):
+    # Real production lesson already learned once on the crypto side
+    # (a duplicate BotPosition row under one bot_name crashed
+    # scalar_one_or_none() with MultipleResultsFound, every cycle,
+    # forever) - defense in depth here from the start: order by id desc
+    # and take the most recent row instead of assuming exactly 0-or-1.
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(BotPosition).where(BotPosition.bot == bot_name, BotPosition.symbol == contract).order_by(BotPosition.id.desc())
+            )
+            row = result.scalars().first()
+            if row:
+                row.peak_pct = peak_pnl_pct
+                await db.commit()
+    except Exception as e:
+        log.error(f"[ALPACA-BRANCH] Failed to persist peak_pct for {bot_name}: {e}")
+
+
+async def _db_delete_branch_open(bot_name: str, contract: str):
+    # Deletes EVERY matching row, not just one - same defense-in-depth
+    # reasoning as _db_update_branch_peak_pct above, so this branch can
+    # never leave a stray duplicate row behind under its own bot_name.
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(BotPosition).where(BotPosition.bot == bot_name, BotPosition.symbol == contract))
+            rows = result.scalars().all()
+            for row in rows:
+                await db.delete(row)
+            if rows:
+                await db.commit()
+    except Exception as e:
+        log.error(f"[ALPACA-BRANCH] Failed to delete closed position for {bot_name}: {e}")
+
+
+async def load_alpaca_branch_positions():
+    """Reload open_alpaca_branch_positions from the DB once at startup -
+    same reasoning as load_open_positions() for prop_apex: a Railway
+    restart must not wipe a real open branch position while it's still
+    open for real on Alpaca."""
+    try:
+        branches = await get_alpaca_branches()
+        bot_names = {b.bot_name for b in branches}
+        if not bot_names:
+            return
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(BotPosition).where(BotPosition.bot.in_(bot_names)))
+            rows = result.scalars().all()
+            for row in rows:
+                if not row.symbol or row.symbol not in FUTURES:
+                    log.error(f"[ALPACA-BRANCH] ⚠️ Skipping BotPosition id={row.id} (bot={row.bot!r}) with invalid symbol {row.symbol!r}")
+                    continue
+                open_time = row.opened_at
+                if open_time is not None and open_time.tzinfo is None:
+                    open_time = open_time.replace(tzinfo=timezone.utc)
+                open_alpaca_branch_positions[row.bot] = {
+                    "side": row.side, "entry": row.entry_price, "qty": row.qty,
+                    "open_time": open_time, "peak_pnl_pct": row.peak_pct or 0.0,
+                }
+            if rows:
+                log.info(f"[ALPACA-BRANCH] Reloaded {len(open_alpaca_branch_positions)} open branch position(s) from DB")
+    except Exception as e:
+        log.error(f"[ALPACA-BRANCH] Failed to reload branch positions from DB: {e}")
+
+
+async def run_alpaca_branch_cycle(session, branch, equity, buying_power, strategy_family, live_entry_variant, kill_halted: bool):
+    """One real cycle for one Alpaca branch - reuses the exact same real
+    entry/exit gate functions and order-placement path the whole-account
+    scan uses (get_price_momentum/get_price_rsi, check_momentum_entry_gate/
+    check_mean_reversion_entry_gate, should_exit_position_momentum/
+    should_exit_position, execute_futures_trade), sized only against this
+    branch's own real capital slice.
+
+    kill_halted: the SAME real account-wide kill-condition check
+    (check_kill_conditions) the caller already computed once this outer
+    cycle - a branch NEVER opens a new position while it's true. Real
+    protection is never weaker for a branch than for the main account. An
+    EXISTING held position still gets its own real exit check regardless
+    - a kill condition halts new entries, it doesn't strand real risk
+    unmanaged."""
+    contract = branch.contract
+    config = FUTURES.get(contract)
+    if config is None:
+        log.error(f"[ALPACA-BRANCH] {branch.bot_name}: {contract!r} is not a real FUTURES contract - skipping, needs a manual look")
+        return
+
+    data = await (get_price_rsi(session, config["symbol"]) if strategy_family == "mean_reversion" else get_price_momentum(session, config["symbol"]))
+    if not data:
+        log.warning(f"[ALPACA-BRANCH] {branch.bot_name}: could not fetch live data for {config['symbol']} - skipping this cycle")
+        return
+    price, rsi, trend = data["price"], data["rsi"], data["trend"]
+
+    position = open_alpaca_branch_positions.get(branch.bot_name)
+
+    if position is not None:
+        # ---- Holding: real exit check, identical logic to the whole-account scan ----
+        now = datetime.now(ET)
+        position_open_time = position.get("open_time", now)
+        if position_open_time.tzinfo is None:
+            position_open_time = position_open_time.replace(tzinfo=timezone.utc)
+        position_age_seconds = int((now - position_open_time).total_seconds())
+
+        if strategy_family == "mean_reversion":
+            should_exit, reason, exit_type, new_peak_pnl_pct = should_exit_position(
+                symbol=contract, entry_price=position["entry"], current_price=price, current_rsi=rsi,
+                position_age_seconds=position_age_seconds, direction="long",
+                max_hold_seconds=MEAN_REVERSION_MAX_HOLD_SECONDS, stop_loss_pct=MEAN_REVERSION_STOP_LOSS_PCT,
+                min_profit_target_pct=MEAN_REVERSION_PROFIT_TARGET_PCT, rsi_profit_threshold_long=MEAN_REVERSION_RSI_PROFIT_THRESHOLD,
+                peak_pnl_pct=position.get("peak_pnl_pct", 0.0), breakeven_trigger_pct=MEAN_REVERSION_BREAKEVEN_TRIGGER_PCT,
+                max_giveback_pct=MEAN_REVERSION_GIVEBACK_PCT,
+            )
+        else:
+            should_exit, reason, exit_type, new_peak_pnl_pct = should_exit_position_momentum(
+                symbol=contract, entry_price=position["entry"], current_price=price,
+                position_age_seconds=position_age_seconds, peak_pnl_pct=position.get("peak_pnl_pct", 0.0),
+                max_hold_seconds=MOMENTUM_MAX_HOLD_SECONDS, trail_pct=MOMENTUM_TRAIL_PCT,
+            )
+        if new_peak_pnl_pct > position.get("peak_pnl_pct", 0.0):
+            position["peak_pnl_pct"] = new_peak_pnl_pct
+            await _db_update_branch_peak_pct(branch.bot_name, contract, new_peak_pnl_pct)
+
+        if should_exit:
+            entry = position["entry"]
+            qty = position["qty"]
+            pnl = (price - entry) * qty
+            filled = await execute_futures_trade(session, contract, "SELL", qty, price, rsi, trend, target=price)
+            if filled:
+                open_alpaca_branch_positions.pop(branch.bot_name, None)
+                await _db_delete_branch_open(branch.bot_name, contract)
+                async with AsyncSessionLocal() as db:
+                    result = await db.execute(select(AlpacaBranch).where(AlpacaBranch.bot_name == branch.bot_name))
+                    fresh = result.scalar_one_or_none()
+                    new_balance = branch.allocated_usd + pnl
+                    if fresh:
+                        fresh.allocated_usd += pnl
+                        await db.commit()
+                        new_balance = fresh.allocated_usd
+                log.info(
+                    f"[ALPACA-BRANCH] {'📈' if pnl >= 0 else '📉'} {branch.bot_name} SOLD {contract} ({config['symbol']}) "
+                    f"@ ${price:.2f} ({reason}) | entry ${entry:.2f} | P&L: ${pnl:+.2f} | branch now ${new_balance:.2f}"
+                )
+            else:
+                log.warning(f"[ALPACA-BRANCH] {branch.bot_name}: real sell into {contract} did not fill - will retry next cycle")
+        return
+
+    # ---- Flat: real entry check, identical gates to the whole-account scan ----
+    if kill_halted:
+        return
+    excluded_symbols = await get_effective_excluded_symbols()
+    if config["symbol"] in excluded_symbols:
+        return  # stays flat and waits - fixed to this one contract in this first slice, doesn't switch
+    if strategy_family == "mean_reversion":
+        should_enter, _reason = check_mean_reversion_entry_gate(rsi)
+    else:
+        should_enter, _reason = check_momentum_entry_gate(data, live_entry_variant)
+    if not should_enter:
+        return
+
+    is_safe, margin_reason = check_margin_safety(
+        buying_power, equity, len(open_prop_positions), extra_open_notional=_total_alpaca_branch_notional(),
+    )
+    if not is_safe:
+        log.warning(f"[ALPACA-BRANCH] {branch.bot_name}: margin safety blocked entry - {margin_reason}")
+        return
+
+    spend = min(branch.allocated_usd, buying_power)
+    if spend < MIN_POSITION_NOTIONAL:
+        log.info(f"[ALPACA-BRANCH] {branch.bot_name}: only ${spend:.2f} real spendable (min ${MIN_POSITION_NOTIONAL:.2f}) - waiting")
+        return
+    qty = round(spend / price, 6)
+    if qty <= 0:
+        return
+
+    filled = await execute_futures_trade(session, contract, "BUY", qty, price, rsi, trend, stop_loss=price * 0.98, target=price * 1.03)
+    if not filled:
+        log.warning(f"[ALPACA-BRANCH] {branch.bot_name}: real buy into {contract} did not fill - will retry next cycle")
+        return
+    open_alpaca_branch_positions[branch.bot_name] = {"side": "long", "entry": price, "qty": qty, "open_time": datetime.now(ET), "peak_pnl_pct": 0.0}
+    await _db_save_branch_open(branch.bot_name, contract, "long", price, qty)
+    log.info(f"[ALPACA-BRANCH] 🟢 {branch.bot_name} BOUGHT {qty} {contract} ({config['symbol']}) @ ${price:.2f} (${spend:.2f} deployed)")
+
+
+async def run_alpaca_branches_cycle():
+    """Real per-cycle driver for every active Alpaca branch - a true
+    no-op unless is_alpaca_branch_mode_active() is on. Runs sequentially
+    in the same real event loop run_prop_cycle() already uses (this file
+    is deliberately single-threaded - see run()'s own comment on why one
+    persistent loop matters here), right after the whole-account scan
+    each pass. Respects the exact same STOP_TRADING and passive-mode
+    checks the whole-account scan's own outer loop already does."""
+    if not await is_alpaca_branch_mode_active():
+        return
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        return
+    if await is_alpaca_passive_mode():
+        return
+    branches = [b for b in await get_alpaca_branches() if b.active]
+    if not branches:
+        return
+
+    connector = aiohttp.TCPConnector(use_dns_cache=True, limit=10, limit_per_host=5, ttl_dns_cache=300)
+    timeout = aiohttp.ClientTimeout(total=60, connect=20, sock_read=30, sock_connect=10)
+    async with aiohttp.ClientSession(connector=connector, trust_env=False, timeout=timeout) as session:
+        equity = await get_account_equity(session)
+        if equity is None:
+            log.warning("[ALPACA-BRANCH] could not fetch real account equity - skipping this cycle")
+            return
+        buying_power = await get_account_buying_power(session)
+        should_halt, halt_reason = check_kill_conditions(
+            buying_power=buying_power, equity=equity, daily_loss=daily_pnl, open_position_count=len(open_prop_positions),
+        )
+        if should_halt:
+            log.warning(f"[ALPACA-BRANCH] real account-wide kill condition active ({halt_reason}) - no branch entries this cycle")
+        strategy_family = await get_live_strategy_family()
+        live_entry_variant = await get_live_entry_variant()
+
+        for branch in branches:
+            try:
+                await run_alpaca_branch_cycle(session, branch, equity, buying_power, strategy_family, live_entry_variant, kill_halted=should_halt)
+            except Exception as e:
+                log.error(f"[ALPACA-BRANCH] {branch.bot_name} cycle error: {e}")
+            await asyncio.sleep(0.5)
+
+
 def check_credentials():
     """Verify Alpaca API credentials are configured before starting."""
     api_key = os.getenv("ALPACA_API_KEY", "").strip()
@@ -2145,6 +2531,11 @@ def run():
     except Exception as e:
         log.error(f"[APEX_589296] Startup equity floor reload failed: {e}")
 
+    try:
+        asyncio.run(load_alpaca_branch_positions())
+    except Exception as e:
+        log.error(f"[APEX_589296] Startup Alpaca branch position reload failed: {e}")
+
     # One persistent event loop for this thread's entire life, not a fresh
     # asyncio.run() per cycle - the same repeated create/destroy pattern
     # already caused a full thread crash in alpaca_swing_bot.py today
@@ -2176,6 +2567,25 @@ def run():
         except Exception as e:
             log.error(f"Prop cycle error: {e}")
             log.error(f"Traceback: {traceback.format_exc()}")
+
+        # Real Alpaca branches (see the ALPACA BRANCHES section above) -
+        # a true no-op unless explicitly turned on. Run right after the
+        # whole-account scan, in the same real event loop/single-threaded
+        # design as everything else in this file.
+        try:
+            loop.run_until_complete(run_alpaca_branches_cycle())
+        except RuntimeError as e:
+            if "attached to a different loop" in str(e):
+                log.warning(f"[ALPACA-BRANCH] Event loop mismatch detected: {e} - recreating event loop")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            else:
+                log.error(f"Alpaca branch cycle error: {e}")
+                log.error(f"Traceback: {traceback.format_exc()}")
+        except Exception as e:
+            log.error(f"Alpaca branch cycle error: {e}")
+            log.error(f"Traceback: {traceback.format_exc()}")
+
         time.sleep(30)
 
 

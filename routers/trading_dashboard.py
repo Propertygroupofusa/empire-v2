@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db, AsyncSessionLocal
 from admin_auth import require_admin_key
-from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory, PricePredictionCalibration, PricePredictionLog, BtcTickerWindowAnchor
+from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory, PricePredictionCalibration, PricePredictionLog, BtcTickerWindowAnchor, AlpacaBranch
 
 NUM_BOTS = int(os.getenv("PROP_NUM_BOTS", "8"))
 if NUM_BOTS <= 0:
@@ -2725,6 +2725,130 @@ async def set_alpaca_strategy_family(payload: SetStrategyFamilyRequest):
     await prop_bot_module.set_live_strategy_family(family)
     log.info(f"[dashboard] 🔀 Live Alpaca strategy family switched to '{family}'")
     return {"status": "switched", "strategy_family": family}
+
+
+@router.get("/alpaca-overview/branches", dependencies=[Depends(require_admin_key)])
+async def get_alpaca_branches_status():
+    """Real status of the Alpaca branch system - a smaller, real first
+    slice toward something like the crypto family tree's compounding
+    branches, per the account owner's explicit request. See prop_bot.py's
+    own ALPACA BRANCHES section docstring for the full real design (why
+    it's scoped down from the full spawn-tree, how capital partitioning
+    works, why it's off by default). Read-only - never places an order."""
+    if prop_bot_module is None:
+        raise HTTPException(status_code=500, detail="prop_bot module not available")
+    branches = await prop_bot_module.get_alpaca_branches()
+    mode_active = await prop_bot_module.is_alpaca_branch_mode_active()
+    rows = []
+    for b in branches:
+        position = prop_bot_module.open_alpaca_branch_positions.get(b.bot_name)
+        config = prop_bot_module.FUTURES.get(b.contract, {})
+        rows.append({
+            "bot_name": b.bot_name,
+            "contract": b.contract,
+            "symbol": config.get("symbol"),
+            "allocated_usd": round(b.allocated_usd, 2),
+            "active": b.active,
+            "position": position,
+        })
+    return {
+        "mode_active": mode_active,
+        "branches": rows,
+        "total_allocated_usd": round(sum(b.allocated_usd for b in branches), 2),
+    }
+
+
+class CreateAlpacaBranchRequest(BaseModel):
+    contract: str
+    allocated_usd: float
+
+
+@router.post("/alpaca-overview/branches", dependencies=[Depends(require_admin_key)])
+async def create_alpaca_branch_endpoint(payload: CreateAlpacaBranchRequest):
+    """Creates a real new Alpaca branch - a pure bookkeeping operation
+    (see prop_bot.create_alpaca_branch's own docstring), never a trade by
+    itself. Refuses if the requested amount exceeds real free buying
+    power (real account buying power minus whatever's already allocated
+    to other active branches - the same real-affordability reasoning the
+    crypto side's spawn-branch endpoint already uses), if the contract
+    isn't a real FUTURES key, or if it's already claimed by another
+    active branch."""
+    if prop_bot_module is None:
+        raise HTTPException(status_code=500, detail="prop_bot module not available")
+    if payload.contract not in prop_bot_module.FUTURES:
+        raise HTTPException(status_code=400, detail=f"{payload.contract!r} is not a real FUTURES contract. Choose one of: {list(prop_bot_module.FUTURES.keys())}")
+    if payload.allocated_usd <= 0:
+        raise HTTPException(status_code=400, detail="allocated_usd must be positive")
+
+    async with aiohttp.ClientSession() as session:
+        buying_power = await prop_bot_module.get_account_buying_power(session)
+    if buying_power is None:
+        raise HTTPException(status_code=502, detail="could not fetch real Alpaca buying power right now - try again shortly")
+
+    existing = await prop_bot_module.get_alpaca_branches()
+    already_allocated = sum(b.allocated_usd for b in existing if b.active)
+    real_spendable = buying_power - already_allocated
+    if payload.allocated_usd > real_spendable:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Only ${real_spendable:.2f} in real free buying power right now "
+                f"(${buying_power:.2f} total buying power - ${already_allocated:.2f} already allocated to "
+                f"other active branches) - can't allocate ${payload.allocated_usd:.2f}"
+            ),
+        )
+
+    try:
+        branch = await prop_bot_module.create_alpaca_branch(payload.contract, payload.allocated_usd)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "created", "bot_name": branch.bot_name, "contract": branch.contract, "allocated_usd": round(branch.allocated_usd, 2)}
+
+
+class SetAlpacaBranchModeRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/alpaca-overview/branches/mode", dependencies=[Depends(require_admin_key)])
+async def set_alpaca_branch_mode_endpoint(payload: SetAlpacaBranchModeRequest):
+    """The real master switch for the whole Alpaca branch system - off by
+    default (is_alpaca_branch_mode_active). While off, every branch cycle
+    is a true no-op regardless of how many branches exist. Real branches
+    can be created while the mode is off (so they're ready before flipping
+    it on), but nothing trades until this is explicitly enabled."""
+    if prop_bot_module is None:
+        raise HTTPException(status_code=500, detail="prop_bot module not available")
+    await prop_bot_module.set_alpaca_branch_mode(payload.enabled)
+    log.info(f"[dashboard] 🔀 Alpaca branch mode {'ENABLED - real branch trading is now live' if payload.enabled else 'disabled'}")
+    return {"status": "updated", "mode_active": payload.enabled}
+
+
+class SetAlpacaBranchActiveRequest(BaseModel):
+    active: bool
+
+
+@router.post("/alpaca-overview/branches/{bot_name}/active", dependencies=[Depends(require_admin_key)])
+async def set_alpaca_branch_active_endpoint(bot_name: str, payload: SetAlpacaBranchActiveRequest):
+    """Pauses or resumes ONE specific branch without touching the master
+    switch or any other branch. A paused branch's own contract is also
+    released back to the whole-account scan (get_alpaca_branch_claimed_contracts
+    only ever returns ACTIVE branches) - it does NOT force-close a
+    currently-open position on that branch, matching the "never force a
+    real position closed by a settings change" principle used elsewhere
+    in this codebase; the position keeps running under its own real
+    exit protection until it closes normally, it just won't open a new
+    one while paused."""
+    if prop_bot_module is None:
+        raise HTTPException(status_code=500, detail="prop_bot module not available")
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(AlpacaBranch).where(AlpacaBranch.bot_name == bot_name))
+        branch = result.scalar_one_or_none()
+        if branch is None:
+            raise HTTPException(status_code=404, detail=f"no branch named {bot_name!r}")
+        branch.active = payload.active
+        await db.commit()
+    log.info(f"[dashboard] {'▶️ Resumed' if payload.active else '⏸️ Paused'} Alpaca branch {bot_name}")
+    return {"status": "updated", "bot_name": bot_name, "active": payload.active}
 
 
 class AlpacaUnlockProfitRequest(BaseModel):

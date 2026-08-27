@@ -6989,6 +6989,155 @@ decision.
 
 ---
 
+## Real Alpaca branches - a smaller first slice toward something like the crypto family tree's compounding branches
+
+Per the account owner's explicit request ("is there any way we can make
+something like that happen with those alpaca bots and if so show them on
+the dashboard working"). The real architectural gap this closes: the
+existing 8 `bot_N` "buckets" (`routers/trading_dashboard.py`,
+`_rebalance_bots`) are proportional SHARES of one real account -
+`prop_bot.py` sizes every real order off the account's single real
+buying-power number, so there's no such thing as "bucket 3's trade." A
+branch here is different: a real, independent capital slice with its OWN
+dedicated FUTURES contract and its OWN position tracking, sized only
+against `min(its own allocated_usd, real account buying power at that
+exact moment)` - the same real-balance clamp the crypto side's
+`place_market_buy()` already uses, so branches can never collectively
+overspend the real account.
+
+Deliberately scoped DOWN from the full crypto-tree design, by explicit
+agreement after walking through the real architecture gap together: no
+spawn-on-milestone yet, no coin-switching - just proving real capital
+partitioning and independent per-branch tracking work safely first.
+**Off by default** (`is_alpaca_branch_mode_active`, DB-persisted, same
+pattern as the strategy-family toggle) - the whole system is a true
+no-op until explicitly turned on from the dashboard.
+
+**`AlpacaBranch`** (new model, `models.py`) - `bot_name` (e.g.
+`alpaca_branch_1`), `contract` (a fixed real FUTURES key for this
+branch's whole life in this first slice - no coin-switching),
+`allocated_usd` (its real virtual capital slice), `active` (a paused
+branch releases its contract claim but keeps its own history/row).
+
+**`prop_bot.py`'s new ALPACA BRANCHES section** reuses the EXACT SAME
+real functions the account-wide scan already uses for market data,
+entry/exit signals, and order placement (`get_price_momentum`/
+`get_price_rsi`, `check_momentum_entry_gate`/`check_mean_reversion_entry_gate`,
+`should_exit_position_momentum`/`should_exit_position`,
+`execute_futures_trade`, `get_account_buying_power`,
+`check_kill_conditions`) - never a separate, reimplemented copy of this
+codebase's real trading logic:
+
+- `run_alpaca_branch_cycle()` - one real cycle for one branch: if
+  holding, real exit check identical to the whole-account scan's own
+  Pass 1, settling real P&L into the branch's own `allocated_usd`; if
+  flat, real entry gate check (same function the manual "Trade this"
+  endpoint uses), real margin-safety check, sized at the real capital
+  clamp above, placed via the real order-execution path. A branch
+  **never opens a new position while a real account-wide kill condition
+  is active** (`kill_halted`, computed once per outer cycle and passed
+  in) - real protection is never weaker for a branch than for the main
+  account. An EXISTING held position still gets its own real exit check
+  regardless of `kill_halted` - a kill condition halts new entries, it
+  doesn't strand real risk unmanaged.
+- `run_alpaca_branches_cycle()` - the real per-cycle driver, called
+  right after `run_prop_cycle()` in `run()`'s same single-threaded loop
+  (this file is deliberately single-threaded - see `run()`'s own
+  comment on why one persistent event loop matters here). A true no-op
+  unless `is_alpaca_branch_mode_active()` - checked first, before
+  anything else, including a real branch list fetch.
+- **Real, previously-invisible risk gap closed**: `check_margin_safety()`
+  only ever summed `open_prop_positions`' real notional against the
+  account-wide 20%-of-equity risk cap - branch positions, living in a
+  separate `open_alpaca_branch_positions` dict, were completely invisible
+  to it. Gained a new `extra_open_notional` parameter (default `0.0`, so
+  the existing prop_apex-only call site is byte-for-byte unchanged) - the
+  whole-account scan's own margin-safety check now also passes real total
+  branch notional in, so the real account-wide risk cap actually sees
+  everything real money is exposed to, not just prop_apex's own slice.
+- **`try_open`'s new MANDATE CHECK**: a contract already claimed by an
+  active branch is skipped by the whole-account scan
+  (`get_alpaca_branch_claimed_contracts()`) - so the same real contract
+  can never be independently bought by both the branch cycle and the
+  main scan at once.
+- `create_alpaca_branch()` - a pure bookkeeping operation (mirrors
+  `CryptoTreeBranch`'s own "spawning is a bookkeeping transfer, not a
+  trade" reasoning), never a trade by itself. Rejects an unknown
+  contract, a non-positive amount, or a contract already claimed by
+  another active branch.
+- **A real, previously-latent bug found and fixed while building this,
+  proactively**: `_db_save_branch_open`/`_db_update_branch_peak_pct`/
+  `_db_delete_branch_open` all originally assumed exactly 0-or-1
+  `BotPosition` row per branch - the EXACT same class of bug that
+  already crashed a real crypto branch in production once
+  (`MultipleResultsFound` on `scalar_one_or_none()`, confirmed live on
+  `crypto_tree_xrp_usd`, documented earlier in this file). Confirmed
+  this could genuinely recur here too (reproduced directly while writing
+  this feature's own test). Fixed proactively, before ever shipping,
+  with the exact same established defense-in-depth pattern the crypto
+  side already uses: `_db_save_branch_open` self-heals by clearing any
+  stale row(s) before inserting; `_db_update_branch_peak_pct` orders by
+  `id desc` and takes the most recent row instead of assuming a single
+  result; `_db_delete_branch_open` deletes EVERY matching row, not just
+  one.
+
+**New admin endpoints** (`routers/trading_dashboard.py`): `GET
+/alpaca-overview/branches` (real status - branches, positions, mode);
+`POST /alpaca-overview/branches` (create - refuses if the requested
+amount exceeds real free buying power, same real-affordability reasoning
+the crypto side's spawn-branch endpoint already uses); `POST
+/alpaca-overview/branches/mode` (the real master on/off switch); `POST
+/alpaca-overview/branches/{bot_name}/active` (pause/resume ONE branch
+without force-closing its position - it keeps running under its own real
+exit protection until it closes normally, matching the "never force a
+real position closed by a settings change" principle used elsewhere in
+this codebase).
+
+**Dashboard** (`alpaca_dashboard.html`): new "🌳 Real Branches" panel
+under Open Positions - a live mode badge, an enable/disable button (with
+a real confirm dialog), a "🌱 New branch" modal (pick a contract, enter a
+real dollar amount), and a table of existing branches (symbol, allocated
+capital, current position if any, pause/resume per branch). Refreshes
+every cycle alongside the rest of the page (cheap - DB-only read, no live
+broker calls, unlike Next Best Trade).
+
+Verified offline (`test_alpaca_branches.py`, new, 32 checks) against the
+real local dev DB: the mode toggle round-trips and defaults off;
+`create_alpaca_branch` assigns sequential bot_names and correctly rejects
+an unknown contract, a non-positive amount, and an already-claimed
+contract; a paused branch correctly releases its contract claim;
+`check_margin_safety`'s new `extra_open_notional` param is byte-for-byte
+inert when omitted and correctly tightens the real risk cap when
+supplied; a flat branch with a real qualifying signal opens a position
+sized at `min(allocated_usd, buying_power)`, tracked under its own
+bot_name with `open_prop_positions` completely untouched; the real spend
+is genuinely clamped when buying power is less than the branch's own
+allocation; a real account-wide kill-condition halt blocks a new branch
+entry even with a qualifying signal, while a real excluded symbol also
+correctly blocks entry; a held branch's real exit fires, settles real P&L
+into its own `allocated_usd`, and cleanly deletes its `BotPosition` row;
+`run_alpaca_branches_cycle()` is a true no-op while branch mode is off,
+even with real active branches and a qualifying signal ready to fire; and
+`try_open`'s real source is confirmed (via direct inspection, not a
+reimplementation) to call the real claimed-contracts check and skip a
+claimed contract. Full broader Alpaca regression suite (13 related test
+files) re-run clean alongside it; the one pre-existing failure seen
+(`test_price_rsi_diagnosis.py`, a stale bar-count assertion) was confirmed
+unrelated via a direct `git stash` comparison - fails identically on the
+prior commit.
+
+**Not yet confirmed against real live trading** - this is real, live
+infrastructure now shipped, but stays a true no-op until the account
+owner explicitly creates real branches and flips "Enable branch trading"
+on from the dashboard. Deliberately NOT done in this pass, by explicit
+agreement: spawn-on-milestone (a branch crossing a real tier seeding a
+new one, mirroring the crypto tree) and coin-switching (a branch
+abandoning its fixed contract for a different one) - both real, separate
+next steps once this first slice is validated live with 2-3 real
+branches.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
