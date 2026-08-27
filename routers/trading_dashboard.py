@@ -2378,6 +2378,47 @@ async def family_tree_coin_watchlist():
     return await crypto_family_tree_bot_module.get_live_coin_snapshot()
 
 
+class SetManualCoinOverrideRequest(BaseModel):
+    product_id: str
+    excluded: bool
+
+
+@router.post("/family-tree-status/coin-manual-override", dependencies=[Depends(require_admin_key)])
+async def set_family_tree_manual_coin_override(payload: SetManualCoinOverrideRequest):
+    """Real, dashboard-driven toggle of one coin's manual-exclusion status
+    - per the account owner's explicit complaint that the live watchlist's
+    "Manual" status badge just sat there with no way to actually press it
+    and change it, forcing a code change and a redeploy to touch manual
+    exclusion at all. `excluded=True` adds the coin to the effective
+    manual-exclusion set (subject to the same real self-heal rule every
+    other manually-excluded coin already uses - never a one-way verdict);
+    `excluded=False` is an explicit decision to pull it back out right
+    now, even one that's in the hardcoded starting list, without waiting
+    on the same heal bar. See CryptoManualCoinOverride's own docstring for
+    the full real semantics. Never places an order or force-sells an
+    existing position - this only ever changes which coin a FUTURE spawn/
+    reinforcement/coin-switch is allowed to pick."""
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+    tree = crypto_family_tree_bot_module
+    try:
+        await tree.set_manual_coin_override(payload.product_id, payload.excluded)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    action = "Manually excluded" if payload.excluded else "Manually un-excluded"
+    log.info(f"[dashboard] 🔀 {action} {payload.product_id} via the live watchlist")
+    await tree._log_activity("dashboard", payload.product_id, "MANUAL_OVERRIDE", f"{action} {payload.product_id} from the live watchlist")
+
+    reasons = await tree.get_effective_excluded_coins_with_reasons()
+    return {
+        "status": "updated",
+        "product_id": payload.product_id,
+        "excluded": payload.product_id in reasons,
+        "exclusion_reason": reasons.get(payload.product_id),
+    }
+
+
 @router.get("/family-tree-status/reconciliation", dependencies=[Depends(require_admin_key)])
 async def family_tree_reconciliation():
     """Real DB-vs-Coinbase reconciliation, per the account owner's direct

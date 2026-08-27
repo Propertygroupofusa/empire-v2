@@ -8543,6 +8543,95 @@ when nothing is currently eligible.
 
 ---
 
+## Manual coin exclusion is now a real, live toggle on the watchlist - not just a hardcoded list
+
+The account owner looked at the "What's bullish right now" watchlist and
+asked directly: a coin's status badge says "Manual" - why can't they
+press it right there to actually change it? Confirmed: `MANUAL_EXCLUDED_COINS`
+in `crypto_family_tree_bot.py` has always been a plain, hardcoded Python
+set - touching it required a code change and a redeploy, with no dashboard
+control at all.
+
+**New `CryptoManualCoinOverride` model** (`models.py`) - one row per coin
+with an explicit dashboard override on record (`product_id` unique,
+`excluded` bool). `get_manual_coin_overrides()`/`set_manual_coin_override()`
+in `crypto_family_tree_bot.py` read/write it; `set_manual_coin_override()`
+refuses a product_id that isn't a real coin this tree trades.
+
+**Two real, distinct directions, both wired into `_manually_excluded_still_excluded()`**:
+- `excluded=True` on a coin NOT in the hardcoded list adds it to the
+  effective starting set for the manual layer - subject to the EXACT SAME
+  real self-heal rule every hardcoded entry already uses (heals out
+  automatically the instant a real backtest run turns positive). Never a
+  one-way verdict, same philosophy as every other exclusion layer in this
+  file.
+- `excluded=False` on a coin that IS in the hardcoded starting set pulls
+  it OUT of the manual layer immediately - a genuinely faster, more
+  direct real action than waiting on the same heal bar. It only ever
+  removes MANUAL-layer protection: a force-included coin is still fully
+  subject to the automatic backtest+live-performance intersection and the
+  top-N rotation, exactly like any other coin - the override can never
+  bypass those.
+
+`get_effective_excluded_coins_with_reasons()` now folds `get_manual_coin_overrides()`
+through and gives a dashboard-added exclusion its own distinct reason
+text ("Manually excluded (dashboard)") separate from the hardcoded set's
+existing "Manually excluded (real live losses)" - so the watchlist can
+tell the two apart. `get_live_coin_snapshot()` gained a per-coin
+`manual_override` field (`None`/`True`/`False`) reporting the real,
+current override state.
+
+**New `POST /family-tree-status/coin-manual-override`** (`{product_id,
+excluded}`, admin-key gated, `routers/trading_dashboard.py`) - toggles
+the real override and logs a real `MANUAL_OVERRIDE` activity event
+(`_log_activity`) so the change shows up in the Live Activity feed like
+every other real dashboard action this session. Never places an order or
+force-sells an existing position - a branch already holding a coin that
+gets manually excluded keeps running under its own protection exactly as
+before; this only changes what a FUTURE spawn/reinforcement/coin-switch
+is allowed to pick.
+
+`crypto_selection_backtest.html`'s watchlist table gained a real
+"🔒 Manually exclude" / "🔓 Un-exclude" toggle link under every coin's
+status badge - always shows the opposite of the coin's real current
+manual state, with a real confirm dialog spelling out exactly what
+changes (and what doesn't) before it fires.
+
+Verified offline (`test_manual_coin_override.py`, new, 20 checks) against
+a real throwaway SQLite DB: toggling a coin not in the hardcoded list ON
+adds it with the correct distinct reason text; that dashboard-added
+exclusion self-heals automatically once a real backtest run turns
+positive; toggling a hardcoded coin OFF immediately pulls it out of
+manual exclusion without waiting for a backtest; that same force-included
+coin is STILL correctly caught by the real bad-backtest+bad-live-performance
+intersection (the override never bypasses it); an invalid product_id is
+rejected by both the function and the real endpoint (400), with no stray
+row created; `get_live_coin_snapshot()`'s `manual_override` field
+correctly reports `None`/`True`/`False` for a coin with no override, a
+dashboard-added exclusion, and a dashboard-removed one; and the real
+end-to-end POST endpoint toggles the coin, logs a real `MANUAL_OVERRIDE`
+activity event, and returns the correct real updated state. Full related
+regression suite (`test_auto_exclusion.py`, `test_manual_exclusion_fast_heal.py`,
+`test_live_performance_exclusion.py`, `test_reinforcement_skips_excluded_coin.py`,
+`test_throne_respects_exclusion.py`, `test_top_n_rotation.py`,
+`test_flat_branch_avoids_excluded_coin.py`, `test_manual_exclusion_live_performance_gate.py`)
+re-run clean alongside it; the one failure seen
+(`test_pepe_wif_exclusion.py`) was confirmed pre-existing and unrelated
+via a direct `git stash` comparison - fails identically on the prior
+commit (the already-documented 4-tuple/5-tuple mock staleness from the
+BTC-relative-strength filter). Confirmed via a real AST route-count parse
+that the new route is bound correctly with no duplicate registrations (69
+total routes, zero duplicates). `crypto_selection_backtest.html`
+re-verified with a real Python `HTMLParser` tag-balance check and
+`node --check` on the extracted inline `<script>` block.
+
+**Not yet confirmed live** - the account owner needs to redeploy and open
+the watchlist page to confirm the new toggle link appears under each
+coin's status badge and actually changes its manual-exclusion state on
+tap.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

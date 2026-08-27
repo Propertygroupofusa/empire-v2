@@ -60,7 +60,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, text, desc
 from sqlalchemy.exc import IntegrityError
 from database import AsyncSessionLocal
-from models import BotPosition, CryptoTreeBranch, TradingBotState, CryptoBacktestRun, CryptoCoinTradeHistory, CryptoActivityEvent
+from models import BotPosition, CryptoTreeBranch, TradingBotState, CryptoBacktestRun, CryptoCoinTradeHistory, CryptoActivityEvent, CryptoManualCoinOverride
 
 import crypto_btc_compound_bot as engine
 
@@ -627,7 +627,41 @@ async def _compute_auto_excluded_coins() -> set:
     return auto_excluded
 
 
-async def _manually_excluded_still_excluded(live_bad: set = None) -> set:
+async def get_manual_coin_overrides() -> dict:
+    """Real, dashboard-driven manual-exclusion overrides - per the account
+    owner's explicit request to be able to press a coin's status badge on
+    the live watchlist and toggle its manual-exclusion state right there,
+    instead of MANUAL_EXCLUDED_COINS only ever being editable by a code
+    change and a redeploy. Returns {product_id: excluded_bool} for every
+    coin that currently has an explicit override on record - a coin with
+    no row here is untouched by this mechanism entirely."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoManualCoinOverride.product_id, CryptoManualCoinOverride.excluded))
+        return {product_id: excluded for product_id, excluded in result.all()}
+
+
+async def set_manual_coin_override(product_id: str, excluded: bool) -> None:
+    """Real, persisted upsert for one coin's dashboard manual-exclusion
+    toggle - see CryptoManualCoinOverride's own docstring for the real
+    semantics of each direction. `excluded=True` behaves like adding the
+    coin to MANUAL_EXCLUDED_COINS (subject to the same real self-heal
+    rule); `excluded=False` is an explicit dashboard decision to pull it
+    OUT of manual exclusion right now, even one that's in the hardcoded
+    starting set - it only ever removes MANUAL-layer protection, never
+    the automatic backtest/live-performance/top-N layers."""
+    if product_id not in COIN_FAMILY_TREE:
+        raise ValueError(f"{product_id!r} is not a real coin this tree trades")
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoManualCoinOverride).where(CryptoManualCoinOverride.product_id == product_id))
+        row = result.scalar_one_or_none()
+        if row is None:
+            db.add(CryptoManualCoinOverride(product_id=product_id, excluded=excluded))
+        else:
+            row.excluded = excluded
+        await db.commit()
+
+
+async def _manually_excluded_still_excluded(live_bad: set = None, overrides: dict = None) -> set:
     """Per the account owner's later explicit choice: MANUAL_EXCLUDED_COINS
     is no longer a one-way permanent blacklist. Per a further explicit
     follow-up ("if it become profitable faster than that allow it to
@@ -669,12 +703,29 @@ async def _manually_excluded_still_excluded(live_bad: set = None) -> set:
     _compute_live_performance_excluded_coins() result, so
     get_effective_excluded_coins() doesn't pay for the same real DB scan
     twice in one call. Computed internally when omitted (e.g. a
-    standalone caller or a test)."""
+    standalone caller or a test).
+
+    Real, dashboard-driven overrides (CryptoManualCoinOverride, see the
+    account owner's explicit "let me press the badge to toggle it"
+    request) are folded into the starting set before the heal check runs:
+    a coin the dashboard just added is treated exactly like a
+    MANUAL_EXCLUDED_COINS entry (subject to the same real heal rule
+    below); a coin the dashboard just explicitly un-excluded is pulled
+    OUT of the starting set entirely, even if it's in the hardcoded list -
+    an immediate, explicit decision rather than waiting on the same heal
+    bar. overrides: the caller's own already-computed
+    get_manual_coin_overrides() result, computed internally when omitted."""
     if live_bad is None:
         live_bad = await _compute_live_performance_excluded_coins()
+    if overrides is None:
+        overrides = await get_manual_coin_overrides()
+    dashboard_added = {p for p, exc in overrides.items() if exc}
+    dashboard_removed = {p for p, exc in overrides.items() if not exc}
+    starting_set = (MANUAL_EXCLUDED_COINS | dashboard_added) - dashboard_removed
+
     still_excluded = set()
     async with AsyncSessionLocal() as db:
-        for product_id in MANUAL_EXCLUDED_COINS:
+        for product_id in starting_set:
             if product_id in live_bad:
                 still_excluded.add(product_id)
                 continue
@@ -702,16 +753,26 @@ async def get_effective_excluded_coins_with_reasons() -> dict:
     off a coin that looks great RIGHT NOW. Returns {product_id: reason}
     for every currently-excluded coin. get_effective_excluded_coins() is a
     thin wrapper around this returning just the key set, so the two can
-    never disagree with each other."""
+    never disagree with each other.
+
+    A coin that's excluded purely from a dashboard toggle (see
+    get_manual_coin_overrides/set_manual_coin_override) rather than the
+    hardcoded MANUAL_EXCLUDED_COINS starting set gets its own distinct
+    reason text ("Manually excluded (dashboard)") so the watchlist can
+    tell the two apart."""
     live_bad = await _compute_live_performance_excluded_coins()
-    manual = await _manually_excluded_still_excluded(live_bad=live_bad)
+    overrides = await get_manual_coin_overrides()
+    manual = await _manually_excluded_still_excluded(live_bad=live_bad, overrides=overrides)
     backtest_bad = await _compute_auto_excluded_coins()
     signal_agreed_bad = backtest_bad & live_bad
     top_ranked = await _compute_top_ranked_coins()
 
     reasons = {}
     for product_id in manual:
-        reasons[product_id] = "Manually excluded (real live losses)"
+        if product_id in overrides and overrides[product_id] and product_id not in MANUAL_EXCLUDED_COINS:
+            reasons[product_id] = "Manually excluded (dashboard)"
+        else:
+            reasons[product_id] = "Manually excluded (real live losses)"
     for product_id in signal_agreed_bad:
         if product_id not in reasons:
             reasons[product_id] = "Bad recent backtest AND bad real live trades"
@@ -1884,6 +1945,7 @@ async def get_live_coin_snapshot():
     plain "Excluded" tag with no way to tell whether that was deserved."""
     exclusion_reasons = await get_effective_excluded_coins_with_reasons()
     excluded = set(exclusion_reasons.keys())
+    manual_overrides = await get_manual_coin_overrides()
     async with engine.aiohttp.ClientSession() as session:
         vol_results, trend_results = await asyncio.gather(
             asyncio.gather(
@@ -1912,6 +1974,12 @@ async def get_live_coin_snapshot():
             "excluded": product_id in excluded,
             "exclusion_reason": exclusion_reasons.get(product_id),
             "cooldown": _coin_sale_cooldown_active(product_id),
+            # None = no dashboard override on record; True/False = the
+            # real, currently-active manual toggle direction - lets the
+            # frontend show "Un-exclude" vs "Manually exclude" correctly
+            # for the exact real state of THIS coin, not just whatever the
+            # hardcoded MANUAL_EXCLUDED_COINS starting set says.
+            "manual_override": manual_overrides.get(product_id),
         }
         if isinstance(result, Exception) or result is None:
             row.update({

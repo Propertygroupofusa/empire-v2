@@ -1482,6 +1482,49 @@ class CryptoActivityEvent(Base):
         }
 
 
+class CryptoManualCoinOverride(Base):
+    """A real, dashboard-driven override of one coin's manual-exclusion
+    status - per the account owner's explicit request to be able to press
+    a coin's status badge on the "What's bullish right now" watchlist and
+    toggle it right there, instead of manual exclusion only ever being a
+    hardcoded MANUAL_EXCLUDED_COINS entry that needs a code change and a
+    redeploy to touch.
+
+    `excluded=True` adds product_id to the effective manual-exclusion set
+    for this session, on top of (or in addition to) MANUAL_EXCLUDED_COINS
+    - subject to the exact same real self-heal rule every other manually-
+    excluded coin already uses (see _manually_excluded_still_excluded in
+    crypto_family_tree_bot.py): it heals out on its own the instant a real
+    backtest run turns positive, same contestable philosophy as
+    everywhere else in this system, never a one-way verdict.
+
+    `excluded=False` is the opposite direction - an explicit dashboard
+    decision to pull a coin OUT of manual exclusion right now, even one
+    that's in the hardcoded MANUAL_EXCLUDED_COINS starting set, instead of
+    waiting on the same auto-heal bar. It only ever removes MANUAL-layer
+    protection - a coin freed this way is still fully subject to the
+    automatic backtest+live-performance and top-N rotation layers, exactly
+    like any other coin; this can never bypass those.
+
+    One row per coin (product_id unique) - the latest toggle always wins,
+    this isn't a history log (CryptoActivityEvent already records each
+    real toggle as its own event for the Live Activity feed)."""
+    __tablename__ = "crypto_manual_coin_overrides"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(String, unique=True, index=True)
+    excluded = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "product_id": self.product_id,
+            "excluded": self.excluded,
+            "updated_at": (self.updated_at.isoformat() + "Z") if self.updated_at else None,
+        }
+
+
 class PricePredictionCalibration(Base):
     """One real backtest run of btc_price_projection.py's 15-minute-ahead
     price projection - per the account owner's explicit request for "a

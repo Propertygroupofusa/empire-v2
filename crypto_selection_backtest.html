@@ -71,6 +71,14 @@
     .wl-badge { display: inline-block; padding: 3px 9px; border-radius: 20px; font-size: 0.82em; font-weight: 700; white-space: nowrap; }
     .wl-eligible { background: var(--green-bg); color: var(--green); }
     .wl-blocked { background: #eef1f6; color: var(--text-dim); }
+    .wl-status-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+    .wl-manual-toggle {
+        border: none; background: none; padding: 0; cursor: pointer;
+        font-size: 0.76em; font-weight: 600; color: var(--navy); text-decoration: underline;
+        white-space: nowrap;
+    }
+    .wl-manual-toggle:hover { color: var(--gold); }
+    .wl-manual-toggle:disabled { color: var(--text-dim); cursor: default; text-decoration: none; }
 </style>
 </head>
 <body>
@@ -180,6 +188,30 @@ async function loadWatchlist() {
     }
 }
 
+// Real, dashboard-driven manual-exclusion toggle - per the account
+// owner's explicit request to press a coin's status badge right here
+// instead of manual exclusion only ever being a hardcoded code change.
+// Never force-sells an existing position - this only ever changes which
+// coin a FUTURE spawn/reinforcement/coin-switch is allowed to pick.
+async function toggleManualOverride(productId, currentlyManual) {
+    const excluded = !currentlyManual;
+    const verb = excluded ? 'Manually exclude' : 'Remove the manual exclusion on';
+    if (!confirm(`${verb} ${productId}?\n\nThis only changes which coin a future spawn, reinforcement, or coin-switch can pick - it never force-sells a branch already holding it.`)) return;
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/family-tree-status/coin-manual-override', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ product_id: productId, excluded }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        loadWatchlist();
+    } catch (e) {
+        alert('Could not update: ' + e.message);
+    }
+}
+
 function renderWatchlist(data) {
     const resultsEl = document.getElementById('wlResults');
     const coins = data.coins || [];
@@ -203,11 +235,11 @@ function renderWatchlist(data) {
             : '<span style="color:var(--text-dim)">n/a</span>';
 
         let badge;
+        let fullReason = null;
         if (c.eligible_now) {
             badge = '<span class="wl-badge wl-eligible">✅ Eligible now</span>';
         } else {
             let reason = 'Blocked';
-            let fullReason = null;
             if (c.excluded) {
                 fullReason = c.exclusion_reason || 'Excluded';
                 if (fullReason.startsWith('Manually excluded')) reason = 'Manual';
@@ -222,6 +254,15 @@ function renderWatchlist(data) {
             badge = `<span class="wl-badge wl-blocked"${fullReason ? ` title="${fullReason}"` : ''}>${reason}</span>`;
         }
 
+        // A coin sits in the MANUAL exclusion layer specifically when its
+        // real reason starts with "Manually excluded" - whether that's the
+        // hardcoded MANUAL_EXCLUDED_COINS starting set or a dashboard
+        // override. The toggle always shows the opposite action of the
+        // real current state, so pressing it never needs a second guess.
+        const isCurrentlyManual = fullReason != null && fullReason.startsWith('Manually excluded');
+        const toggleLabel = isCurrentlyManual ? '🔓 Un-exclude' : '🔒 Manually exclude';
+        const toggleHtml = `<button type="button" class="wl-manual-toggle" onclick="toggleManualOverride('${c.product_id}', ${isCurrentlyManual})">${toggleLabel}</button>`;
+
         return `<tr>
             <td>${c.product_id}</td>
             <td>${bullishHtml}</td>
@@ -229,7 +270,7 @@ function renderWatchlist(data) {
             <td>${rsiHtml}</td>
             <td>${c.atr_pct != null ? c.atr_pct.toFixed(2) + '%' : '—'}</td>
             <td>${alphaHtml}</td>
-            <td>${badge}</td>
+            <td><div class="wl-status-cell">${badge}${toggleHtml}</div></td>
         </tr>`;
     }).join('');
 
