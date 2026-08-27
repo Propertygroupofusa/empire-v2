@@ -939,6 +939,19 @@ class AlpacaBranch(Base):
     allocated_usd = Column(Float)  # this branch's current virtual slice, cash-equivalent
     active = Column(Boolean, default=True)  # a disabled branch is skipped by the cycle driver but keeps its own history/row
 
+    # The real spawn-milestone tier this branch's own bookkeeping-only
+    # reinforcement chain (see prop_bot.py's _alpaca_maybe_spawn_or_reinforce)
+    # advances toward - the deliberate "next step" this file's own docstring
+    # already flagged, now built: mirrors CryptoTreeBranch.next_unlock_tier,
+    # but set relative to THIS branch's own real starting allocation
+    # (allocated_usd + ALPACA_UNLOCK_TIER_USD at creation) rather than a
+    # flat absolute number, since Alpaca branches are manually created at
+    # whatever real size the account owner picks, unlike crypto's uniform
+    # $50 seed. Nullable so a pre-existing branch row (created before this
+    # column existed) reads back NULL and is treated as "not yet
+    # participating in the chain mechanism" rather than crashing.
+    next_unlock_tier = Column(Float, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

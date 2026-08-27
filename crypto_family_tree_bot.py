@@ -2316,6 +2316,59 @@ async def _pick_weakest_branch_for_reinforcement(exclude_bot_name: str, also_exc
     return min(candidates, key=lambda b: b.allocated_usd / b.next_unlock_tier)
 
 
+async def _coin_currently_qualifies_for_entry(session, product_id: str) -> tuple:
+    """Real, standalone single-coin version of the three live entry-quality
+    checks find_most_volatile_unclaimed_coin() already applies when picking
+    a NEW coin for a branch to switch onto - RSI-overbought
+    (engine.ENTRY_MAX_RSI), BTC-relative strength (coin_return - btc_return
+    > 0), and the higher-timeframe (hourly SMA20/SMA50) trend filter
+    (engine.get_higher_tf_trend). Factored out here so a reinforcement
+    about to hand a branch a BRAND-NEW position (not blend into one it
+    already holds) can require the exact same "is this actually a good
+    real entry right now" bar an organic coin-switch already does - per
+    the account owner's own explicit requirement: "Chain opportunity !=
+    automatic trade... the next branch still needs to pass the
+    market-quality filter." Being numerically weakest earns a branch first
+    look at fresh capital; it does not waive the real market-quality bar
+    every other new entry on this coin already has to clear.
+
+    BTC-USD is exempt from the BTC-relative-strength leg specifically (a
+    coin can't meaningfully beat its own return) - root reinforcing itself
+    back onto BTC-USD while momentarily flat still gets the real
+    RSI-overbought and higher-timeframe-trend checks, just not a
+    self-comparison that would always read as a tie and incorrectly block
+    it.
+
+    Fails OPEN on the BTC-relative-strength and higher-timeframe-trend legs
+    when their own real data can't be fetched, matching
+    find_most_volatile_unclaimed_coin()'s own documented behavior - a
+    missing benchmark or missing hourly history isn't grounds to block a
+    real reinforcement.
+
+    Returns (True, "") if the coin currently clears every real gate, or
+    (False, <reason>) naming the first one it fails."""
+    price, atr_pct, is_bullish, rsi, coin_return = await engine.get_price_volatility_and_trend(session, product_id)
+    if price is None or atr_pct is None:
+        return False, "no live price/volatility data available right now"
+    if rsi is not None and rsi >= engine.ENTRY_MAX_RSI:
+        return False, f"RSI {rsi:.1f} is already overbought (>= {engine.ENTRY_MAX_RSI:.0f})"
+    if product_id != "BTC-USD":
+        btc_return = None
+        try:
+            _, _, _, _, btc_return = await engine.get_price_volatility_and_trend(session, "BTC-USD")
+        except Exception as exc:
+            log.warning(f"[TREE] entry-quality check: BTC-USD lookup failed ({exc}) - BTC-relative-strength filter fails open")
+        if btc_return is not None and coin_return is not None and (coin_return - btc_return) <= 0:
+            return False, f"not beating BTC-USD over the same ~25h window (coin {coin_return:+.2%} vs BTC {btc_return:+.2%})"
+    try:
+        trend_ok = await engine.get_higher_tf_trend(session, product_id)
+    except Exception:
+        trend_ok = None
+    if trend_ok is False:
+        return False, "hourly SMA20/SMA50 trend is DOWN"
+    return True, ""
+
+
 async def _deploy_seed_into_weakest_branch(session, target_bot_name: str, usd_amount: float) -> bool:
     """Places a real market buy for usd_amount into target_bot_name's
     current coin and blends it into its existing position (or opens a
@@ -2324,13 +2377,35 @@ async def _deploy_seed_into_weakest_branch(session, target_bot_name: str, usd_am
     button already uses (add_cash_to_branch in routers/trading_dashboard.py),
     reimplemented here so the automatic every-other-spawn reinforcement
     path can call it without a FastAPI/HTTPException dependency. Returns
-    True on a real successful deploy; False (order didn't fill, or price
-    data unavailable) leaves it to the caller to not lose the seed money."""
+    True on a real successful deploy; False (order didn't fill, price data
+    unavailable, or the target coin doesn't currently qualify for a
+    brand-new entry) leaves it to the caller to not lose the seed money.
+
+    "Chain opportunity != automatic trade": when the target branch is
+    currently FLAT, this reinforcement would open a genuinely NEW real
+    position - so it must first clear the same real entry-quality gate
+    (_coin_currently_qualifies_for_entry) any other fresh entry on that
+    coin already has to. When the target branch already HOLDS a position,
+    this only blends fresh cash into it - the same real behavior the
+    "Add cash" dashboard button already uses today, deliberately left
+    ungated (re-checking market quality on an ADD to a position already
+    under its own real target/stop protection was never part of what was
+    asked)."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == target_bot_name))
         target_branch = result.scalar_one_or_none()
     if target_branch is None:
         return False
+
+    existing_position = await _load_branch_position(target_bot_name)
+    if existing_position is None:
+        qualifies, reason = await _coin_currently_qualifies_for_entry(session, target_branch.product_id)
+        if not qualifies:
+            log.info(
+                f"[TREE] reinforcement: {target_branch.product_id} does not currently qualify for a brand-new entry "
+                f"({reason}) - {target_bot_name} skipped this turn"
+            )
+            return False
 
     price, atr_pct = await engine.get_price_and_volatility(session, target_branch.product_id)
     if price is None or atr_pct is None:
@@ -2344,7 +2419,6 @@ async def _deploy_seed_into_weakest_branch(session, target_bot_name: str, usd_am
         return False
     filled_qty, filled_price = fill
 
-    existing_position = await _load_branch_position(target_bot_name)
     if existing_position is not None:
         new_qty = existing_position.qty + filled_qty
         blended_entry = (

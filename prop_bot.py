@@ -2150,6 +2150,34 @@ async def record_daily_earnings(pnl_amount):
 # codebase's real trading logic.
 # ============================================================================
 
+# Real bounded multi-hop reinforcement chain for Alpaca branches, the
+# direct counterpart to crypto_family_tree_bot.py's own
+# _maybe_spawn_child() chain - built after the account owner explicitly
+# asked for the same "chain reaction" mechanism on this side too, with
+# one deliberate addition specific to this design: a reinforcement
+# target must independently re-qualify against the SAME real entry gate
+# (check_momentum_entry_gate/check_mean_reversion_entry_gate) a normal
+# flat-branch entry would need to pass - "chain opportunity is not an
+# automatic trade." Scoped narrower than the crypto side in two ways,
+# both explicit, both stated plainly rather than hidden:
+# 1. Reinforcement only ever targets a FLAT branch (opens a fresh
+#    position). Blending more real capital into an ALREADY-HELD futures
+#    position would mean re-deriving its stop/target and margin exposure
+#    mid-trade - real complexity this first version doesn't take on;
+#    a branch already holding is simply not an eligible reinforcement
+#    target this pass.
+# 2. If no other real branch is currently eligible (none flat, or none
+#    pass the real entry gate), the seed is refunded and the tier
+#    increment reverted - same real money-safety pattern as the crypto
+#    side - but there is no automatic "spawn a brand-new branch" fallback
+#    yet, since Alpaca branches are manually created (a specific real
+#    contract chosen by the account owner), unlike crypto's uniform $50
+#    auto-spawn onto the next eligible coin. The account owner creates
+#    more branches by hand via the dashboard.
+ALPACA_REINFORCEMENT_SEED_USD = _safe_float_env("ALPACA_REINFORCEMENT_SEED_USD", "50")
+ALPACA_UNLOCK_TIER_USD = _safe_float_env("ALPACA_UNLOCK_TIER_USD", "100")
+ALPACA_MAX_CHAIN_HOPS = _safe_int_env("ALPACA_MAX_CHAIN_HOPS", "5")
+
 ALPACA_BRANCH_MODE_KEY = "alpaca_branch_mode"
 
 
@@ -2234,7 +2262,10 @@ async def create_alpaca_branch(contract: str, allocated_usd: float) -> AlpacaBra
         while next_num in used_nums:
             next_num += 1
         bot_name = f"alpaca_branch_{next_num}"
-        branch = AlpacaBranch(bot_name=bot_name, contract=contract, allocated_usd=allocated_usd, active=True)
+        branch = AlpacaBranch(
+            bot_name=bot_name, contract=contract, allocated_usd=allocated_usd, active=True,
+            next_unlock_tier=allocated_usd + ALPACA_UNLOCK_TIER_USD,
+        )
         db.add(branch)
         await db.commit()
         await db.refresh(branch)
@@ -2339,6 +2370,21 @@ async def run_alpaca_branch_cycle(session, branch, equity, buying_power, strateg
     EXISTING held position still gets its own real exit check regardless
     - a kill condition halts new entries, it doesn't strand real risk
     unmanaged."""
+    # Real catch-up chain check, every cycle - mirrors the crypto side's
+    # own "_maybe_spawn_child() called every cycle, not just after a
+    # sell" reasoning, so a branch that crossed its tier gets a real
+    # chance to reinforce a sibling even if the first attempt (right
+    # after its own last trade) found nothing eligible. Reload branch
+    # fresh afterward since this may have changed its own allocated_usd
+    # and next_unlock_tier.
+    await _alpaca_maybe_spawn_or_reinforce(branch)
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(AlpacaBranch).where(AlpacaBranch.bot_name == branch.bot_name))
+        fresh_branch = result.scalar_one_or_none()
+    if fresh_branch is None:
+        return
+    branch = fresh_branch
+
     contract = branch.contract
     config = FUTURES.get(contract)
     if config is None:
@@ -2439,6 +2485,184 @@ async def run_alpaca_branch_cycle(session, branch, equity, buying_power, strateg
     open_alpaca_branch_positions[branch.bot_name] = {"side": "long", "entry": price, "qty": qty, "open_time": datetime.now(ET), "peak_pnl_pct": 0.0}
     await _db_save_branch_open(branch.bot_name, contract, "long", price, qty)
     log.info(f"[ALPACA-BRANCH] 🟢 {branch.bot_name} BOUGHT {qty} {contract} ({config['symbol']}) @ ${price:.2f} (${spend:.2f} deployed)")
+
+
+async def _pick_weakest_alpaca_branch_for_reinforcement(exclude_bot_name: str, also_exclude_bot_names: frozenset = frozenset()):
+    """The direct Alpaca-side counterpart to crypto_family_tree_bot.py's
+    _pick_weakest_branch_for_reinforcement() - picks the real branch with
+    the lowest allocated_usd/next_unlock_tier ratio (the same real
+    percentage the dashboard's own progress bars would show), excluding
+    the branch doing the reinforcing and every bot_name already touched
+    in this chain. A branch with no real next_unlock_tier yet (a legacy
+    row created before this column existed) is never picked - it isn't
+    participating in the chain mechanism until it has one. Returns the
+    AlpacaBranch row, or None if there's no other real eligible branch."""
+    branches = await get_alpaca_branches()
+    candidates = [
+        b for b in branches
+        if b.active and b.bot_name != exclude_bot_name and b.bot_name not in also_exclude_bot_names
+        and b.next_unlock_tier and b.next_unlock_tier > 0
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda b: b.allocated_usd / b.next_unlock_tier)
+
+
+async def _deploy_seed_into_weakest_alpaca_branch(
+    session, target_branch, usd_amount: float, strategy_family: str, live_entry_variant: str
+) -> bool:
+    """Places a real market buy for usd_amount into target_branch's own
+    fixed contract - but ONLY if target_branch is currently FLAT and its
+    contract independently passes the exact same real entry gate a normal
+    flat-branch cycle would require (check_momentum_entry_gate/
+    check_mean_reversion_entry_gate off a fresh live price/RSI/trend
+    fetch). Per the account owner's own explicit design: "chain
+    opportunity is not an automatic trade" - reinforcement money is never
+    forced into a contract that doesn't currently qualify on its own
+    merits, even though the whole point of this call is to give it real
+    capital. Returns True on a real successful fill; False (not flat,
+    doesn't qualify right now, real order didn't fill, no live data)
+    leaves the seed for the caller to refund."""
+    if target_branch.bot_name in open_alpaca_branch_positions:
+        log.info(f"[ALPACA-BRANCH] reinforcement: {target_branch.bot_name} is already holding a position - not an eligible target this pass")
+        return False
+
+    contract = target_branch.contract
+    config = FUTURES.get(contract)
+    if config is None:
+        log.error(f"[ALPACA-BRANCH] reinforcement: {target_branch.bot_name}'s contract {contract!r} is not real - skipping")
+        return False
+
+    excluded_symbols = await get_effective_excluded_symbols()
+    if config["symbol"] in excluded_symbols:
+        log.info(f"[ALPACA-BRANCH] reinforcement: {config['symbol']} is currently auto-excluded - {target_branch.bot_name} doesn't qualify")
+        return False
+
+    data = await (get_price_rsi(session, config["symbol"]) if strategy_family == "mean_reversion" else get_price_momentum(session, config["symbol"]))
+    if not data:
+        log.warning(f"[ALPACA-BRANCH] reinforcement: could not fetch live data for {config['symbol']} - {target_branch.bot_name} doesn't qualify this cycle")
+        return False
+    price, rsi = data["price"], data["rsi"]
+
+    if strategy_family == "mean_reversion":
+        should_enter, reason = check_mean_reversion_entry_gate(rsi)
+    else:
+        should_enter, reason = check_momentum_entry_gate(data, live_entry_variant)
+    if not should_enter:
+        log.info(f"[ALPACA-BRANCH] reinforcement: {config['symbol']} does not currently qualify for entry ({reason}) - {target_branch.bot_name} skipped")
+        return False
+
+    qty = round(usd_amount / price, 6)
+    if qty <= 0:
+        return False
+    filled = await execute_futures_trade(session, contract, "BUY", qty, price, rsi, data["trend"], stop_loss=price * 0.98, target=price * 1.03)
+    if not filled:
+        log.warning(f"[ALPACA-BRANCH] reinforcement: real buy into {target_branch.bot_name} ({contract}) did not fill")
+        return False
+
+    open_alpaca_branch_positions[target_branch.bot_name] = {"side": "long", "entry": price, "qty": qty, "open_time": datetime.now(ET), "peak_pnl_pct": 0.0}
+    await _db_save_branch_open(target_branch.bot_name, contract, "long", price, qty)
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(AlpacaBranch).where(AlpacaBranch.bot_name == target_branch.bot_name))
+        fresh = result.scalar_one_or_none()
+        if fresh:
+            fresh.allocated_usd += usd_amount
+            await db.commit()
+    return True
+
+
+async def _alpaca_maybe_spawn_or_reinforce(branch, chain_visited: frozenset = frozenset(), chain_hops_remaining: int = None):
+    """The Alpaca-side counterpart to crypto_family_tree_bot.py's
+    _maybe_spawn_child() bounded chain - per the account owner's explicit
+    request to bring the same "chain reaction" mechanism here. Called at
+    the top of every real branch cycle (mirrors the crypto side's
+    per-cycle catch-up spawn check, not just right after a sell).
+
+    Same two independent real guarantees against a runaway chain as the
+    crypto side:
+    1. chain_visited - every bot_name touched anywhere in this chain is
+       permanently excluded from being reinforced again in that same
+       chain - a bounce-back to an earlier branch is structurally
+       impossible.
+    2. chain_hops_remaining (ALPACA_MAX_CHAIN_HOPS, 5 default) - a hard
+       cap that strictly decrements every real hop.
+
+    Deliberately narrower than the crypto side in two explicit ways (see
+    the constants' own comments above): only ever reinforces a FLAT
+    branch, gated by a real, independent re-check of the entry-quality
+    gate; and there is no automatic new-branch spawn fallback yet - if no
+    real eligible candidate exists, the seed is refunded and the tier
+    reverted, same as a real order-fill failure."""
+    if branch.allocated_usd is None or branch.next_unlock_tier is None:
+        return
+    if branch.allocated_usd < branch.next_unlock_tier:
+        return
+
+    effective_hops_remaining = chain_hops_remaining if chain_hops_remaining is not None else ALPACA_MAX_CHAIN_HOPS
+    if effective_hops_remaining <= 0:
+        return
+
+    weakest = await _pick_weakest_alpaca_branch_for_reinforcement(
+        exclude_bot_name=branch.bot_name, also_exclude_bot_names=chain_visited
+    )
+    if weakest is None:
+        log.info(f"[ALPACA-BRANCH] {branch.bot_name} crossed ${branch.next_unlock_tier:,.2f} but no other real branch is eligible to reinforce right now")
+        return
+
+    milestone = branch.next_unlock_tier
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(AlpacaBranch).where(AlpacaBranch.bot_name == branch.bot_name))
+        fresh = result.scalar_one_or_none()
+        if not fresh or fresh.allocated_usd < fresh.next_unlock_tier:
+            return
+        fresh.allocated_usd -= ALPACA_REINFORCEMENT_SEED_USD
+        fresh.next_unlock_tier += ALPACA_UNLOCK_TIER_USD
+        await db.commit()
+        remaining = fresh.allocated_usd
+
+    strategy_family = await get_live_strategy_family()
+    live_entry_variant = await get_live_entry_variant()
+
+    tried_bot_names = {weakest.bot_name}
+    connector = aiohttp.TCPConnector(use_dns_cache=True, limit=10, limit_per_host=5, ttl_dns_cache=300)
+    timeout = aiohttp.ClientTimeout(total=60, connect=20, sock_read=30, sock_connect=10)
+    async with aiohttp.ClientSession(connector=connector, trust_env=False, timeout=timeout) as session:
+        deployed = await _deploy_seed_into_weakest_alpaca_branch(session, weakest, ALPACA_REINFORCEMENT_SEED_USD, strategy_family, live_entry_variant)
+        while not deployed:
+            fallback = await _pick_weakest_alpaca_branch_for_reinforcement(
+                exclude_bot_name=branch.bot_name, also_exclude_bot_names=chain_visited | tried_bot_names
+            )
+            if fallback is None:
+                break
+            weakest = fallback
+            tried_bot_names.add(weakest.bot_name)
+            deployed = await _deploy_seed_into_weakest_alpaca_branch(session, weakest, ALPACA_REINFORCEMENT_SEED_USD, strategy_family, live_entry_variant)
+
+    if deployed:
+        log.info(
+            f"[ALPACA-BRANCH] 🌱💪 {branch.bot_name} crossed ${milestone:,.2f} - its ${ALPACA_REINFORCEMENT_SEED_USD:.2f} seed "
+            f"went into {weakest.bot_name} ({weakest.contract}) | {branch.bot_name} continues with ${remaining:.2f}"
+        )
+        new_chain_visited = chain_visited | {branch.bot_name} | tried_bot_names
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(AlpacaBranch).where(AlpacaBranch.bot_name == weakest.bot_name))
+            fresh_recipient = result.scalar_one_or_none()
+        if fresh_recipient is not None:
+            await _alpaca_maybe_spawn_or_reinforce(
+                fresh_recipient, chain_visited=new_chain_visited, chain_hops_remaining=effective_hops_remaining - 1
+            )
+    else:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(AlpacaBranch).where(AlpacaBranch.bot_name == branch.bot_name))
+            fresh2 = result.scalar_one_or_none()
+            if fresh2:
+                fresh2.allocated_usd += ALPACA_REINFORCEMENT_SEED_USD
+                fresh2.next_unlock_tier -= ALPACA_UNLOCK_TIER_USD
+                await db.commit()
+        log.warning(
+            f"[ALPACA-BRANCH] ⚠️ {branch.bot_name} crossed ${milestone:,.2f} but no real candidate could be reinforced "
+            f"(none flat and qualifying) - refunded the ${ALPACA_REINFORCEMENT_SEED_USD:.2f} seed, will retry next cycle"
+        )
 
 
 async def run_alpaca_branches_cycle():

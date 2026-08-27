@@ -7784,6 +7784,192 @@ curl http://localhost:8000/crypto/analytics/trades/recent
 
 ---
 
+## Bounded multi-hop reinforcement chain, ported to the Alpaca side too
+
+Right after the crypto family tree's bounded multi-hop reinforcement chain
+shipped (see the section above), the account owner asked for the Alpaca
+side too, explicitly time-boxed to trading hours: "go ahead and hook
+alpaca up now since it's only trading during the day so I can get a
+couple hours in." Built as the direct Alpaca counterpart to the crypto
+mechanism - same two independent safety guarantees (a `chain_visited`
+set making a bounce-back structurally impossible, and a hard
+`ALPACA_MAX_CHAIN_HOPS` cap, 5 default) - with two DELIBERATE scope
+narrowings versus the crypto side, both stated directly rather than
+silently cut for time:
+
+1. **Only ever reinforces a FLAT branch.** Blending fresh cash into an
+   already-open real futures position would mean re-deriving its stop/
+   target/margin math mid-trade - the crypto side's own "Add cash" blend-in
+   already has real, validated math for its spot-position case; futures
+   margin is a different, riskier shape of problem not worth taking on
+   under this session's real time pressure. A branch already holding a
+   position is simply never an eligible reinforcement target - the chain
+   skips straight past it to the next real weakest FLAT branch.
+2. **No automatic new-branch-spawn fallback.** Crypto branches spawn
+   automatically off a $50 seed when reinforcement finds nothing eligible;
+   Alpaca branches are created manually from the dashboard at
+   account-owner-chosen sizes and contracts, so there's no equivalent
+   "just make a new one" fallback here. If no other real FLAT, eligible
+   branch exists, the seed is simply refunded and the tier increment
+   reverted - the exact same safe "no real money lost" outcome the crypto
+   side's own total-exhaustion case already has.
+
+**`AlpacaBranch.next_unlock_tier`** (new nullable column, `models.py`) -
+the real spawn-milestone tier this branch's own chain advances toward,
+set at creation as `allocated_usd + ALPACA_UNLOCK_TIER_USD` ($100 default)
+relative to THIS branch's own real starting size - unlike crypto's flat
+absolute tier, since Alpaca branches are manually created at whatever
+real size the account owner picks, not a uniform $50 seed. Nullable so a
+pre-existing branch row (created before this column existed) reads back
+`NULL` and is treated as "not yet participating in the chain mechanism"
+rather than crashing.
+
+**`_pick_weakest_alpaca_branch_for_reinforcement()`** (`prop_bot.py`) -
+mirrors the crypto picker exactly: filters to active, FLAT-eligible
+branches (excluding the source and every `chain_visited` bot_name), picks
+the real minimum `allocated_usd / next_unlock_tier`.
+
+**`_deploy_seed_into_weakest_alpaca_branch()`** - the real "chain
+opportunity != automatic trade" enforcement, built in from the start on
+this side (not retrofitted the way the crypto side needed a follow-up
+for): refuses outright if the target branch is already holding a
+position (should never happen given the picker above, but checked
+directly rather than assumed), then reuses the EXACT SAME real
+entry-quality gate every other real entry on this account already has to
+clear - `check_mean_reversion_entry_gate(rsi)` or
+`check_momentum_entry_gate(data, live_entry_variant)`, whichever
+`strategy_family` is currently live - via the same real
+`get_price_rsi`/`get_price_momentum` fetch the automatic scan itself
+uses. A branch being numerically weakest earns it first look at fresh
+capital; it does not waive the real market-quality bar every other fresh
+entry on that symbol already has to clear. On a real qualifying signal,
+places the order via the same real `execute_futures_trade` the automatic
+and manual "Trade this" paths already use, then updates
+`open_alpaca_branch_positions`, `_db_save_branch_open`, and the target's
+own `allocated_usd`.
+
+**`_alpaca_maybe_spawn_or_reinforce()`** - the direct counterpart to
+crypto's `_maybe_spawn_child()`: same tier-crossing check, same hop-budget
+check, same weakest-pick excluding `chain_visited`, same local
+retry-hunting loop across other real candidates on a failed deploy, same
+recursive settle on a real success (carrying the accumulated chain state
+forward), same refund-and-revert-tier on total exhaustion (seed money
+never lost). `run_alpaca_branch_cycle()` calls it once at the top of every
+real cycle (mirroring the crypto side's own per-cycle catch-up check),
+then reloads the branch from the DB before continuing - its own
+`allocated_usd`/`next_unlock_tier` may have changed from a chain that
+just settled through it.
+
+Verified offline (`test_alpaca_bounded_chain.py`, 16 checks, real
+throwaway SQLite DB): a real 2-hop chain cascades with hand-computed
+ratios (a fresh $50 into the real weakest branch pushes it over its own
+tier, which then reinforces the next real weakest, which does NOT cross
+its own tier and the chain stops there naturally); a candidate failing
+the real entry-quality gate (bad RSI/trend) is correctly skipped in favor
+of a genuinely qualifying one - directly proving "chain opportunity !=
+automatic trade" on this side; a branch already HOLDING a position is
+never an eligible reinforcement target; `chain_visited` prevents a
+ping-pong in a deliberately-prone 2-branch setup; `ALPACA_MAX_CHAIN_HOPS=1`
+hard-stops a chain that would otherwise keep cascading; and a total-failure
+scenario (no other real branch exists) correctly refunds the seed and
+reverts the tier with zero real buy attempted. Full existing Alpaca
+regression suite (`test_alpaca_branches.py` - 32 checks - plus
+`test_manual_trade_this_stock.py`, `test_live_strategy_family_switch.py`,
+`test_live_momentum_swap.py`, `test_alpaca_entry_eligibility.py`,
+`test_inverse_etfs.py`) re-run clean alongside it.
+
+**Not yet confirmed against real live trading** - the account owner needs
+to redeploy and actually create 2-3 real Alpaca branches from the
+dashboard, enable branch trading, and watch whether a real reinforcement
+chain fires during market hours the way the crypto side's already has.
+
+---
+
+## "Chain opportunity != automatic trade" - a real market-quality gate on the crypto reinforcement path
+
+Right after the Alpaca chain shipped, the account owner's own detailed
+technical proposal (validating the bounded-chain design, then extending
+it) made one real, concrete point worth acting on immediately, separate
+from the larger `CHAIN_STATE`-tracking/historical-backtest ask deferred
+below: "Chain opportunity != automatic trade... the next branch still
+needs to pass the market-quality filter." Checked directly against the
+real code rather than assumed - confirmed `_deploy_seed_into_weakest_branch()`
+had ZERO market-quality checking: a branch being numerically weakest was
+the only real criterion for handing it fresh capital, regardless of
+whether its current coin was actually a good real entry right now.
+
+**`_coin_currently_qualifies_for_entry(session, product_id)`** (new,
+`crypto_family_tree_bot.py`) - factors the exact same three real checks
+`find_most_volatile_unclaimed_coin()` already applies when picking a NEW
+coin for an organic coin-switch (RSI-overbought via `engine.ENTRY_MAX_RSI`,
+BTC-relative-strength via `coin_return - btc_return > 0`, and the
+higher-timeframe SMA20/SMA50 trend filter via `engine.get_higher_tf_trend`)
+into a reusable single-coin helper. Fails OPEN on the BTC-relative-strength
+and higher-timeframe-trend legs when their own real data can't be fetched -
+matching the organic picker's own already-validated behavior, a missing
+benchmark isn't grounds to block a real reinforcement. BTC-USD is
+exempted from the BTC-relative-strength leg specifically (a coin can't
+meaningfully beat its own return) - root reinforcing itself back onto
+BTC-USD while momentarily flat (e.g. right after "Take profit now") still
+gets the real RSI-overbought and trend checks, just not a self-comparison
+that would always read as a tie and incorrectly block it.
+
+**`_deploy_seed_into_weakest_branch()`** now calls this gate, but ONLY
+when the target branch is currently FLAT - about to open a genuinely NEW
+real position off this reinforcement, the exact case the account owner's
+proposal was concerned with. When the target already HOLDS a position,
+this only blends fresh cash into it via the existing real
+quantity-weighted blended-entry math - the same real behavior the
+dashboard's "Add cash" button already uses today, deliberately left
+ungated (re-checking market quality on an ADD to a position already under
+its own real target/stop protection was never part of what was asked,
+and would risk blocking a legitimate top-up of a position that's simply
+between signals right now).
+
+Verified offline (`test_reinforcement_market_quality_gate.py`, new, 10
+checks): a FLAT target whose coin is currently overbought is correctly
+refused with no real buy attempted; a FLAT target whose coin genuinely
+qualifies (not overbought, beats BTC, real uptrend) receives the real
+reinforcement buy normally; a target that already holds a position is
+NEVER gated at all - the entry-quality helper is proven never even called
+- matching the "Add cash" button's existing, deliberately-ungated
+blend-in behavior; and a flat root reinforcing itself back onto BTC-USD
+is not incorrectly blocked by a self-comparison. Full related regression
+suite (`test_bounded_reinforcement_chain.py`,
+`test_reinforcement_recipient_immediate_settle.py`,
+`test_reinforcement_permanent_rejection_fallback.py`,
+`test_reinforcement_skips_excluded_coin.py`, `test_drawdown_breaker.py`,
+`test_flat_branch_avoids_excluded_coin.py`, `test_throne_respects_exclusion.py`)
+re-run clean alongside it - two pre-existing test files
+(`test_bounded_reinforcement_chain.py`,
+`test_reinforcement_recipient_immediate_settle.py`) needed their own
+fixtures updated to mock the two new real dependencies this gate
+introduces (`engine.get_price_volatility_and_trend`,
+`engine.get_higher_tf_trend`) so their own, unrelated chain/settlement
+assertions keep exercising what they were actually built to test, not
+this new gate; both were confirmed via a real `git stash` comparison to
+pass cleanly on the prior commit, proving the failure was genuinely
+caused by this new dependency and not a pre-existing issue.
+
+**Deliberately deferred to a future session, per the account owner's own
+prioritization** ("go ahead and hook alpaca up now" came first): the
+full `CHAIN_STATE` per-chain database tracking table (chain_id,
+origin_branch, current_branch, visited_branches, hop_count, capital
+deployed, realized/unrealized profit, chain status) and a dedicated
+historical-candle-driven backtest tool replaying the real 5-hop/no-repeat
+chain rules against real Coinbase history to measure whether the chain
+mechanism itself improves the underlying strategy's expectancy or merely
+creates more trading activity - the account owner's own stated next
+question, too large to build under the same time pressure as the two
+pieces above.
+
+**Not yet confirmed against real live trading** - the account owner needs
+to redeploy and watch whether a real reinforcement chain on the crypto
+side now correctly skips a numerically-weakest-but-currently-overbought
+(or otherwise disqualified) branch in favor of the next real eligible one.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md
