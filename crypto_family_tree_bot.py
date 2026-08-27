@@ -126,6 +126,18 @@ COORDINATOR_SCAN_SECONDS = engine._safe_int_env("TREE_COORDINATOR_SCAN_SECONDS",
 # earned, not a flat dollar line every branch shares.
 DRAWDOWN_BREAKER_PCT = engine._safe_float_env("TREE_DRAWDOWN_BREAKER_PCT", "0.40")
 
+# Real, hard cap on how many real reinforcement hops one single tier
+# crossing can chain through in _maybe_spawn_child() - per the account
+# owner's explicit request for a real "one event triggers another, which
+# triggers another" chain, deliberately bounded rather than the unbounded
+# version already found dangerous once (the real ping-pong bug: an
+# earlier, unbounded recursive settle could bounce real Coinbase orders
+# back and forth between two branches within a single call). This is one
+# of TWO independent real guarantees the chain can't run away - see
+# _maybe_spawn_child's own docstring for the other (chain_visited, which
+# makes a bounce-back structurally impossible regardless of this cap).
+MAX_CHAIN_HOPS = engine._safe_int_env("TREE_MAX_CHAIN_HOPS", "5")
+
 
 def _floor_tier_for_balance(balance: float) -> float:
     """The real floor-tier formula every self-heal path below uses.
@@ -2674,19 +2686,38 @@ async def liquidate_family_tree_and_buy_btc() -> dict:
     }
 
 
-async def _maybe_spawn_child(branch, allow_reinforce: bool = True):
+async def _maybe_spawn_child(branch, chain_visited: frozenset = frozenset(), chain_hops_remaining: int = None):
     """Called right after a branch's allocated_usd is updated (always right
     after a real sell, when the number is freshly accurate). If it just
     crossed a new unlock tier, isn't floor-breached, and a coin remains
     unclaimed, spins off a new branch - a bookkeeping transfer only.
 
-    allow_reinforce=False is used for exactly one case: settling a
-    reinforcement RECIPIENT immediately (see the reinforcement block below).
-    It hard-disables this call from reinforcing anyone else - it can only
-    spawn a brand-new branch or do nothing - which makes a bounce back to
-    an existing branch structurally impossible, not just unlikely. This is
-    deliberately narrower than the full recursive recheck that was tried
-    and reverted earlier (see the account owner's real ping-pong bug)."""
+    A real reinforcement can now chain: the recipient is settled
+    immediately, and if THAT push carried it over its own tier too, it can
+    reinforce onward again, real hop after real hop - per the account
+    owner's explicit request for a bounded version of this ("one event
+    triggers another, which triggers another"). This is a deliberately
+    SAFER redesign of a real, dangerous version tried and reverted earlier
+    this session (see the ping-pong bug: an unbounded recursive settle let
+    a recipient reinforce back whichever branch just paid it, bouncing
+    real Coinbase orders back and forth within one call before the
+    naturally-growing tier thresholds happened to stop it). Two real,
+    independent guarantees against that ever happening again, not just
+    avoided by luck:
+
+    1. `chain_visited` - every bot_name touched anywhere in this chain so
+       far (every branch that has GIVEN money, RECEIVED money, or even
+       been tried and failed as a target) - is threaded through every hop
+       and always excluded from being picked as the next target. A branch
+       already touched in this chain can never be reinforced again in the
+       same chain, so a bounce-back to an earlier branch (the exact shape
+       of the ping-pong bug) is structurally impossible, not just unlikely.
+    2. `chain_hops_remaining` - a hard real cap (MAX_CHAIN_HOPS, defaults
+       to the full cap on a fresh, top-level call) that strictly decrements
+       every real hop and disables further reinforcement entirely once it
+       hits zero - a real, independent guarantee the chain terminates even
+       in a hypothetical large tree where guarantee 1 alone wouldn't run
+       out of fresh candidates for a long time."""
     if branch.allocated_usd < branch.next_unlock_tier:
         return
     if branch.allocated_usd < branch.equity_floor:
@@ -2733,7 +2764,11 @@ async def _maybe_spawn_child(branch, allow_reinforce: bool = True):
     # branch only ever gets created once there's no OTHER branch left to
     # reinforce at all (see the None case below - the very first spawn in
     # a fresh tree, or a tree of exactly one branch).
-    weakest = await _pick_weakest_branch_for_reinforcement(exclude_bot_name=branch.bot_name) if allow_reinforce else None
+    effective_hops_remaining = chain_hops_remaining if chain_hops_remaining is not None else MAX_CHAIN_HOPS
+    can_reinforce = effective_hops_remaining > 0
+    weakest = await _pick_weakest_branch_for_reinforcement(
+        exclude_bot_name=branch.bot_name, also_exclude_bot_names=chain_visited
+    ) if can_reinforce else None
     if weakest is not None:
         own_increment = ROOT_UNLOCK_TIER_USD if branch.bot_name == ROOT_BOT_NAME else UNLOCK_TIER_USD
         milestone = branch.next_unlock_tier
@@ -2748,6 +2783,7 @@ async def _maybe_spawn_child(branch, allow_reinforce: bool = True):
             remaining = fresh.allocated_usd
 
         weakest_pct_before = (weakest.allocated_usd / weakest.next_unlock_tier) * 100
+        tried_bot_names = {weakest.bot_name}
         async with engine.aiohttp.ClientSession() as session:
             deployed = await _deploy_seed_into_weakest_branch(session, weakest.bot_name, SEED_USD)
 
@@ -2778,10 +2814,9 @@ async def _maybe_spawn_child(branch, allow_reinforce: bool = True):
             # CAN actually use the money this cycle - it can still be
             # reinforced again later once real cash frees up and it's
             # picked as weakest on some future spawn.
-            tried_bot_names = {weakest.bot_name}
             while not deployed:
                 fallback = await _pick_weakest_branch_for_reinforcement(
-                    exclude_bot_name=branch.bot_name, also_exclude_bot_names=frozenset(tried_bot_names)
+                    exclude_bot_name=branch.bot_name, also_exclude_bot_names=chain_visited | tried_bot_names
                 )
                 if fallback is None:
                     break
@@ -2802,23 +2837,27 @@ async def _maybe_spawn_child(branch, allow_reinforce: bool = True):
             # Settle the RECIPIENT immediately too, per the account owner's
             # real complaint that a branch sitting at 100% "Next spawn" was
             # visibly waiting up to a full cycle (~30s, felt like "a
-            # minute") before anything happened. A full recursive recheck
-            # was tried here before and reverted - it let the recipient
-            # reinforce back whichever branch just gave it money, which
-            # could bounce back and forth firing real Coinbase orders each
-            # hop (confirmed live in testing). This is deliberately
-            # narrower: allow_reinforce=False means the recipient, even if
-            # this reinforcement pushed it over its OWN tier, can only ever
-            # spawn a brand-new branch or do nothing - it can never send
-            # money to another existing branch. That makes a bounce back to
-            # branch.bot_name (or anyone else) structurally impossible, not
-            # just unlikely, while still collapsing the wait to this same
-            # call instead of the recipient's own next scheduled cycle.
+            # minute") before anything happened - and per their later,
+            # explicit request for a real bounded chain: if this
+            # reinforcement pushed the recipient over ITS OWN tier too, let
+            # IT reinforce onward again, real hop after real hop, instead
+            # of capping the chain at exactly one settle. Every bot_name
+            # touched so far in this chain (the branch that just gave money,
+            # every candidate tried this hop whether it worked or not) is
+            # threaded into chain_visited so none of them can ever be
+            # reinforced again in this same chain - a bounce-back to
+            # branch.bot_name or anyone else already touched is structurally
+            # impossible, not just unlikely - and chain_hops_remaining
+            # strictly decrements, so the chain always terminates even if
+            # guarantee 1 alone hasn't run out of fresh candidates yet.
+            new_chain_visited = chain_visited | {branch.bot_name} | tried_bot_names
             async with AsyncSessionLocal() as db:
                 result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == weakest.bot_name))
                 fresh_recipient = result.scalar_one_or_none()
             if fresh_recipient is not None:
-                await _maybe_spawn_child(fresh_recipient, allow_reinforce=False)
+                await _maybe_spawn_child(
+                    fresh_recipient, chain_visited=new_chain_visited, chain_hops_remaining=effective_hops_remaining - 1
+                )
         else:
             # Real buy failed (order rejection, price fetch failure) -
             # the seed was already deducted from the parent above, so

@@ -7539,6 +7539,90 @@ candidate given root's current cash-starved state) instead of sitting at
 
 ---
 
+## Bounded multi-hop reinforcement chain, per an explicit "chain reaction" request - checked for safety first
+
+Right after the hop-to-a-different-branch fix above, the account owner
+described exactly what they wanted next in their own words: "A chain
+reaction is a sequence of events where one single event triggers
+another, which triggers another, creating a self-sustaining or rapidly
+growing loop... make sure this is what we have." That description is
+literally the shape of a real bug already found and deliberately
+reverted earlier this same session - the "ping-pong bug," where an
+unbounded recursive settle let a reinforcement recipient immediately
+reinforce back whichever branch had just paid it, firing multiple real
+Coinbase orders in a bounce before the naturally-growing tier thresholds
+happened to stop it. Rather than build what was literally described (a
+real financial risk) or silently substitute something else, the tradeoff
+was explained directly and the account owner was asked to choose between
+three concrete options - they picked the safe, recommended one: a real
+chain that cascades through several branches, but bounded by two
+independent guarantees so it can never become the dangerous unbounded
+version.
+
+`_maybe_spawn_child()` no longer takes an `allow_reinforce` flag - it's
+replaced by two threaded parameters:
+- **`chain_visited`** (a frozenset) - every bot_name touched anywhere in
+  the current chain so far, whether it gave money, received money, or was
+  even just tried-and-failed as a target this hop. Passed as
+  `also_exclude_bot_names` into every real
+  `_pick_weakest_branch_for_reinforcement()` call in the chain, so a
+  branch already touched can never be picked again in that same chain -
+  a bounce-back to an earlier branch (the exact shape of the ping-pong
+  bug) is structurally impossible, not a behavior that just happens not
+  to occur.
+- **`MAX_CHAIN_HOPS`** (5 default, `TREE_MAX_CHAIN_HOPS` env-overridable)
+  - a real, independent hard cap threaded as `chain_hops_remaining`,
+  strictly decremented every real hop and disabling further
+  reinforcement entirely once it hits zero (the recipient can still spawn
+  a brand-new branch at that point - only further reinforcement is
+  capped). A second, completely independent guarantee the chain
+  terminates even in a hypothetical large tree where guarantee 1 alone
+  wouldn't run out of fresh candidates for a while.
+
+A fresh, top-level call (from `run_branch_cycle`'s catch-up check,
+`_branch_sell_and_settle`, or `add_cash_to_branch`) starts a brand-new
+chain with `chain_visited=frozenset()` and the full `MAX_CHAIN_HOPS`
+budget - only the internal recursive settle call passes the accumulated
+chain state forward.
+
+Verified offline (`test_bounded_reinforcement_chain.py`, new, 11 checks,
+real throwaway SQLite DB, the real unmocked
+`_pick_weakest_branch_for_reinforcement()` - only the underlying real
+Coinbase price/order calls are mocked): a real, deliberately-constructed
+4-branch scenario (ratios chosen so each hop's $50 pushes the NEXT real
+branch over its own tier) cascades through a genuine 3-hop real chain in
+one call (root -> B -> C -> D) and stops naturally at D once its own
+tier isn't crossed - not because of the cap; exactly 3 real
+`place_market_buy` calls fire, one per hop, never a 4th; a deliberately
+ping-pong-prone 2-branch setup (A and B only) confirms B, after crossing
+its own tier from A's reinforcement, can never reinforce A back - it
+falls through to spawning a genuinely new branch instead, proving the
+old bug's exact shape can't recur; and a real, artificially-tight
+`MAX_CHAIN_HOPS=1` correctly halts an otherwise-continuing chain after
+exactly 1 real hop even though fresh, eligible candidates for further
+hops still exist, confirming the cap is a real, working, independent
+guarantee and not just theoretical. Full related regression suite
+(reinforcement fallback, exclusion-layer, drawdown-breaker, quick-profit,
+throne, reallocate-cash, consolidate) re-run clean alongside it -
+`test_reinforce_failure_visibility.py` and
+`test_reinforcement_recipient_immediate_settle.py` (both pre-existing,
+touching this exact function) were updated in place for the new
+`also_exclude_bot_names`-carrying call signature and the removed
+`allow_reinforce` parameter; their own original intent (failed-deploy
+visibility; no bounce-back) is completely preserved and still passes.
+
+**Deliberately NOT built**: the Alpaca side. The account owner explicitly
+asked to finish Coinbase first and said Alpaca "can go" later - this was
+scoped to the crypto family tree only, on purpose.
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+watch the Live Activity feed for a real multi-hop chain actually firing
+(more than one real `REINFORCE` event in quick succession from a single
+tier crossing) the next time a real spawn cascades through more than one
+branch.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
