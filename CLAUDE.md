@@ -6654,6 +6654,146 @@ no longer appear there.
 
 ---
 
+## Real, live infinite-retry bug found and fixed: a permanently-rejected reinforcement kept hammering the same doomed branch every cycle forever
+
+Real Live Activity screenshots showed `crypto_btc_compound` (root)
+repeating the identical real line every ~29s, for many consecutive
+cycles: `⚠️ crypto_btc_compound crossed $1,000 but the reinforcement buy
+into crypto_tree_xrp_usd_4 (POL-USD) failed
+(UNSUPPORTED_ORDER_CONFIGURATION) - refunded the $50.00 seed, will retry
+next cycle`. A genuinely new real Coinbase rejection code, never seen
+before this session - and unlike the flat-branch buy path's own
+"permanent rejection -> switch coins" fix (built earlier this session for
+`PERMISSION_DENIED`/`Invalid product_id`), nothing in the reinforcement
+path recognized this class of failure at all.
+
+Root cause: `_pick_weakest_branch_for_reinforcement()` always picks the
+branch with the lowest `allocated_usd / next_unlock_tier` ratio - and a
+branch whose reinforcement deploy keeps failing (the $50 seed refunded
+every time on a real rejection) never has its ratio change, so it stays
+the objectively "weakest" candidate and gets picked again next cycle,
+forever. `UNSUPPORTED_ORDER_CONFIGURATION` repeating identically across
+many real consecutive retries with zero variation is exactly the
+"retrying the identical order can never fix it" signature
+`_is_permanent_order_rejection()` already exists to catch - it just
+wasn't in the pattern list, and even once recognized, nothing in the
+reinforcement path acted on it the way the flat-branch buy path already
+does.
+
+Fixed in two parts:
+1. `UNSUPPORTED_ORDER_CONFIGURATION` added to
+   `crypto_btc_compound_bot._PERMANENT_REJECTION_PATTERNS`, alongside
+   `PERMISSION_DENIED` and `Invalid product_id` - same confirmed-live bar
+   those two were added under.
+2. `_maybe_spawn_child()`'s reinforcement path: on a permanently-rejected
+   deploy, `_pick_weakest_branch_for_reinforcement()` gained an
+   `also_exclude_bot_names` parameter, and the reinforcement logic now
+   tries ONE different real candidate (excluding the one that just
+   permanently failed) in the SAME call, instead of waiting a full cycle
+   just to make the identical doomed attempt again. If the fallback also
+   fails (or none exists), the seed is still correctly refunded and a
+   real `REINFORCE_FAILED` activity event still fires - no real money is
+   ever lost, this only changes how hard the same cycle tries before
+   giving up.
+
+Verified offline (`test_reinforcement_permanent_rejection_fallback.py`,
+new, 11 checks) against a real throwaway SQLite DB: confirms
+`UNSUPPORTED_ORDER_CONFIGURATION` is now recognized as permanent while a
+real transient rejection (`INSUFFICIENT_FUND`) still correctly is not;
+confirms a permanent rejection against the real weakest branch correctly
+falls back to and succeeds against the next real candidate in the same
+call, with the real `REINFORCE` success message naming the fallback
+recipient (not the one that permanently failed) and root's seed genuinely
+deducted rather than refunded; confirms that if the fallback ALSO fails,
+the seed is still correctly refunded and `REINFORCE_FAILED` still fires;
+and confirms a real transient (non-permanent) rejection tries ONLY the
+original weakest branch - no fallback hunt, matching the pre-existing
+behavior exactly for a failure that might resolve on its own. Full
+related regression suite (`test_reinforce_failure_visibility.py`,
+`test_reinforcement_skips_excluded_coin.py`,
+`test_flat_branch_avoids_excluded_coin.py`, `test_throne_respects_exclusion.py`)
+re-run clean alongside it.
+
+## A second, more consequential real bug found while investigating the above: a manually-excluded coin could heal purely off a good backtest, even while genuinely losing real money live
+
+While tracing why `crypto_btc_compound`'s reinforcement kept targeting
+`crypto_tree_xrp_usd_4` (POL-USD) at all, the real answer turned out to
+matter more than the retry-loop symptom itself: POL-USD is in
+`MANUAL_EXCLUDED_COINS` - added earlier this session specifically because
+of catastrophic real live losses (-$392.43, 15% win rate, the worst coin
+in the entire tree) - and `_pick_weakest_branch_for_reinforcement()`
+explicitly filters out any coin in the effective excluded set. For POL-USD
+to have been picked as a real reinforcement target at all, it must have
+already healed back into eligibility.
+
+Root cause, confirmed directly in the code:
+`_manually_excluded_still_excluded()` only ever checked the single most
+recent `CryptoBacktestRun.roi_pct_of_spend` for a manually-excluded coin -
+the instant a fresh SIMULATED backtest run shows positive ROI, the coin
+heals, with zero regard for how it's actually performing in real trading.
+This is the EXACT backtest-good/live-bad divergence
+`get_effective_excluded_coins()`'s own docstring already documents as the
+reason the automatic dual-signal exclusion layer (`_compute_auto_excluded_coins`
+∩ `_compute_live_performance_excluded_coins`) requires BOTH signals to
+agree before it acts - but that protection was only ever wired into the
+automatic layer, never into this separate manual-list healing check. A
+coin the account owner manually excluded FROM real live losses could
+silently heal back into eligibility purely because a later backtest
+simulation happened to like it - directly contradicting the reason it was
+excluded in the first place, and confirmed live: POL-USD, still
+catastrophically losing real money, was picked as root's real
+reinforcement target once this let it heal.
+
+Fixed: `_manually_excluded_still_excluded()` now also stays excluded
+while `_compute_live_performance_excluded_coins()` currently flags the
+coin as bad, regardless of what its most recent backtest run says - real
+live losses can no longer be out-voted by a simulated result. A coin with
+too little real live trade history to have an opinion either way is
+unaffected (same "needs real evidence" default every other layer already
+uses) - only a CONFIRMED-bad live track record blocks the heal. Takes an
+optional `live_bad` parameter so `get_effective_excluded_coins()` can pass
+its own already-computed live-performance set through instead of paying
+for the same real DB scan twice in one call.
+
+Verified offline (`test_manual_exclusion_live_performance_gate.py`, new,
+5 checks) against a real throwaway SQLite DB, using an isolated test coin
+(not the real POL-USD entry, so the test doesn't depend on that set's own
+evolving real membership): a manually-excluded coin with a positive
+backtest run but genuinely bad real live trades (POL-USD's exact real
+shape) now correctly STAYS excluded; a manually-excluded coin with a
+positive backtest run and too little real live history to judge still
+correctly heals (absence of data doesn't block a heal, only confirmed-bad
+data does); a manually-excluded coin with a positive backtest AND
+genuinely GOOD real live trades correctly heals; `get_effective_excluded_coins()`
+end-to-end keeps the real problem coin excluded, directly proving the
+live symptom (reinforcement/coin-switch picking it as a target) can no
+longer happen; and a coin never in `MANUAL_EXCLUDED_COINS` at all is
+completely unaffected by this change, even with bad real live trades of
+its own. Full related regression suite (`test_auto_exclusion.py`,
+`test_live_performance_exclusion.py`, `test_manual_exclusion_fast_heal.py`,
+`test_reinforcement_skips_excluded_coin.py`, `test_throne_respects_exclusion.py`,
+`test_top_n_rotation.py`, `test_flat_branch_avoids_excluded_coin.py`)
+re-run clean alongside it; the two failures seen
+(`test_excluded_coins.py`, `test_pepe_wif_exclusion.py`) were confirmed
+pre-existing and unrelated via a direct `git stash` comparison against
+the prior commit - both fail identically without this change (a stale
+mock returning a 4-tuple from `get_price_volatility_and_trend` where the
+real function has returned a 5-tuple since the BTC-relative-strength
+filter shipped earlier this session).
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+watch the Live Activity feed to confirm the real
+`UNSUPPORTED_ORDER_CONFIGURATION` retry loop on POL-USD is gone, and that
+POL-USD itself no longer shows up as a reinforcement or coin-switch
+target while its real live trade history stays bad - it will still show
+up in the Coin Trade History table's existing rows (nothing here rewrites
+history), but no NEW branch should be handed fresh capital into it. The
+existing branches still holding POL-USD are unaffected either way - this
+fix only stops the coin from being offered again, it doesn't touch
+anything already open.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

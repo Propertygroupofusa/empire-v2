@@ -498,7 +498,7 @@ async def _compute_auto_excluded_coins() -> set:
     return auto_excluded
 
 
-async def _manually_excluded_still_excluded() -> set:
+async def _manually_excluded_still_excluded(live_bad: set = None) -> set:
     """Per the account owner's later explicit choice: MANUAL_EXCLUDED_COINS
     is no longer a one-way permanent blacklist. Per a further explicit
     follow-up ("if it become profitable faster than that allow it to
@@ -515,10 +515,40 @@ async def _manually_excluded_still_excluded() -> set:
     no history is never excluded in the first place. Nothing here is a
     one-way verdict either direction: a coin that heals out of this set
     can still get caught by _compute_auto_excluded_coins later if its
-    performance turns negative again, exactly like any other coin."""
+    performance turns negative again, exactly like any other coin.
+
+    Real gap found live: this heal check used to read ONLY the backtest
+    side - POL-USD's most recent backtest run (44 sim trades, 50% win
+    rate, +6.3% ROI) let it heal out of this set entirely, while its real
+    live trade history stayed catastrophic (79 real trades, 14% win rate,
+    -$392+) - the exact backtest-good/live-bad divergence
+    get_effective_excluded_coins()'s own docstring already documents as
+    the reason the automatic exclusion layer requires BOTH signals to
+    agree. That protection never applied to this manual-list heal check,
+    which read only the backtest - confirmed live: POL-USD, still
+    catastrophically losing in real trading, got picked as
+    crypto_btc_compound's real reinforcement target once it healed this
+    way. Fixed: a manually-excluded coin now also stays excluded while
+    _compute_live_performance_excluded_coins currently flags it as bad,
+    regardless of what its backtest says - real live losses can't be
+    out-voted by a simulated result. A coin with too little real live
+    trade history to have an opinion either way is unaffected (same
+    "needs real evidence" default every other layer already uses) - only
+    a CONFIRMED-bad live track record blocks the heal.
+
+    live_bad: the caller's own already-computed
+    _compute_live_performance_excluded_coins() result, so
+    get_effective_excluded_coins() doesn't pay for the same real DB scan
+    twice in one call. Computed internally when omitted (e.g. a
+    standalone caller or a test)."""
+    if live_bad is None:
+        live_bad = await _compute_live_performance_excluded_coins()
     still_excluded = set()
     async with AsyncSessionLocal() as db:
         for product_id in MANUAL_EXCLUDED_COINS:
+            if product_id in live_bad:
+                still_excluded.add(product_id)
+                continue
             result = await db.execute(
                 select(CryptoBacktestRun.roi_pct_of_spend)
                 .where(CryptoBacktestRun.product_id == product_id)
@@ -563,9 +593,9 @@ async def get_effective_excluded_coins() -> set:
     problem coin without waiting on signal agreement - manual exclusion
     is a deliberate human decision, not an automated-signal question, and
     is completely unaffected by this change."""
-    manual = await _manually_excluded_still_excluded()
-    backtest_bad = await _compute_auto_excluded_coins()
     live_bad = await _compute_live_performance_excluded_coins()
+    manual = await _manually_excluded_still_excluded(live_bad=live_bad)
+    backtest_bad = await _compute_auto_excluded_coins()
     signal_agreed_bad = backtest_bad & live_bad
     excluded = manual | signal_agreed_bad
     top_ranked = await _compute_top_ranked_coins()
@@ -2122,7 +2152,7 @@ async def adopt_orphaned_positions(session):
         )
 
 
-async def _pick_weakest_branch_for_reinforcement(exclude_bot_name: str):
+async def _pick_weakest_branch_for_reinforcement(exclude_bot_name: str, also_exclude_bot_names: frozenset = frozenset()):
     """Picks the branch with the lowest real progress toward its own next
     spawn tier (allocated_usd / next_unlock_tier) - the exact same real
     percentage shown on the dashboard's "Next spawn" bars. Excludes the
@@ -2146,6 +2176,15 @@ async def _pick_weakest_branch_for_reinforcement(exclude_bot_name: str):
     target/stop, it just isn't handed more capital) in favor of the next
     real weakest branch on a coin that's actually still eligible.
 
+    also_exclude_bot_names: an additional set of bot_names to skip, on top
+    of exclude_bot_name - used when a just-picked weakest branch's real
+    reinforcement buy permanently fails (see _maybe_spawn_child) and a
+    different candidate needs to be picked in the same call, instead of
+    retrying the identical doomed order against the same branch forever
+    next cycle (real gap found live: a flat, permanently-rejected branch's
+    balance never changes, so it stays "weakest" and gets picked again
+    every single cycle).
+
     Returns the CryptoTreeBranch row, or None if there's no other real
     eligible branch to reinforce (e.g. the very first spawn in a fresh
     tree, or every other branch's coin is currently excluded)."""
@@ -2155,7 +2194,8 @@ async def _pick_weakest_branch_for_reinforcement(exclude_bot_name: str):
     excluded_coins = await get_effective_excluded_coins()
     candidates = [
         b for b in branches
-        if b.bot_name != exclude_bot_name and b.next_unlock_tier and b.next_unlock_tier > 0
+        if b.bot_name != exclude_bot_name and b.bot_name not in also_exclude_bot_names
+        and b.next_unlock_tier and b.next_unlock_tier > 0
         and b.product_id not in excluded_coins
     ]
     if not candidates:
@@ -2598,6 +2638,27 @@ async def _maybe_spawn_child(branch, allow_reinforce: bool = True):
         weakest_pct_before = (weakest.allocated_usd / weakest.next_unlock_tier) * 100
         async with engine.aiohttp.ClientSession() as session:
             deployed = await _deploy_seed_into_weakest_branch(session, weakest.bot_name, SEED_USD)
+
+        if not deployed:
+            # Real gap found live: crypto_btc_compound reinforced the same
+            # flat POL branch every single cycle, hit a real permanent
+            # rejection (UNSUPPORTED_ORDER_CONFIGURATION) every time, and
+            # refunded - but since that branch's own balance never changes
+            # on a failed attempt, it stayed the objectively "weakest"
+            # candidate and got picked again next cycle, forever. Try ONE
+            # different real candidate (excluding the one that just
+            # permanently failed) in this same call, instead of waiting a
+            # full cycle just to make the identical doomed attempt again.
+            first_stuck_reason = engine._last_order_error.get(weakest.product_id, "unknown reason")
+            if engine._is_permanent_order_rejection(first_stuck_reason):
+                fallback = await _pick_weakest_branch_for_reinforcement(
+                    exclude_bot_name=branch.bot_name, also_exclude_bot_names=frozenset({weakest.bot_name})
+                )
+                if fallback is not None:
+                    weakest = fallback
+                    weakest_pct_before = (weakest.allocated_usd / weakest.next_unlock_tier) * 100
+                    async with engine.aiohttp.ClientSession() as session:
+                        deployed = await _deploy_seed_into_weakest_branch(session, weakest.bot_name, SEED_USD)
 
         if deployed:
             reinforce_msg = (

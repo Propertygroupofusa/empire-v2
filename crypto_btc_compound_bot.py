@@ -621,13 +621,20 @@ def _describe_order_rejection(resp: dict) -> str:
 
 # Real, confirmed-live rejection patterns that can NEVER succeed on retry -
 # a fixed account-level permission ("PERMISSION_DENIED", confirmed on
-# RNDR-USD) or a dead/never-listed pair ("Invalid product_id", confirmed
-# on MATIC-USD before its POL-USD migration, and on JUP-USD) - as opposed
-# to something that might resolve on its own (insufficient funds, a rate
-# limit, a network hiccup). Deliberately narrow: only patterns actually
-# observed in real production rejections, not a guess at every possible
-# Coinbase error code.
-_PERMANENT_REJECTION_PATTERNS = ("PERMISSION_DENIED", "Invalid product_id")
+# RNDR-USD), a dead/never-listed pair ("Invalid product_id", confirmed
+# on MATIC-USD before its POL-USD migration, and on JUP-USD), or an
+# order-structure mismatch the product itself will never accept
+# ("UNSUPPORTED_ORDER_CONFIGURATION", confirmed live: crypto_btc_compound's
+# reinforcement buy into a POL-USD branch failed with this exact code on
+# every single retry across many consecutive real cycles with zero
+# variation - the market_market_ioc/quote_size configuration this bot
+# always sends is apparently incompatible with how that specific product
+# is configured, which retrying the identical order can never fix) - as
+# opposed to something that might resolve on its own (insufficient funds,
+# a rate limit, a network hiccup). Deliberately narrow: only patterns
+# actually observed in real production rejections, not a guess at every
+# possible Coinbase error code.
+_PERMANENT_REJECTION_PATTERNS = ("PERMISSION_DENIED", "Invalid product_id", "UNSUPPORTED_ORDER_CONFIGURATION")
 
 
 def _is_permanent_order_rejection(reason: str) -> bool:
