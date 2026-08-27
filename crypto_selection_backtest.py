@@ -41,8 +41,12 @@ os.environ.setdefault("COINBASE_API_PRIVATE_KEY", "unused-public-endpoint-only")
 import aiohttp
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import select
+
 import crypto_btc_compound_bot as engine
 from crypto_family_tree_bot import COIN_FAMILY_TREE, BREAKEVEN_TRIGGER_PCT, MAX_PROFIT_GIVEBACK_USD
+from database import AsyncSessionLocal
+from models import CryptoTreeBranch
 
 SPEND = 150.0
 BACKTEST_DAYS = 30
@@ -87,9 +91,16 @@ async def fetch_historical_candles(session, product_id, days=BACKTEST_DAYS):
     return closes, highs, lows, times
 
 
-def backtest_one_coin(closes, highs, lows, entry_gate=None):
+def backtest_one_coin(closes, highs, lows, entry_gate=None, spend=None):
     """Replays the REAL live rules candle-by-candle. Returns a dict of
     results, or None if there wasn't enough data to trade at all.
+
+    `spend` (optional) overrides the fixed SPEND module constant for this
+    one coin - used by run_full_backtest_with_real_allocations() below to
+    simulate each coin's REAL current branch dollars instead of the flat
+    $150 every coin gets by default. `spend=None` (the default, every
+    existing caller) reproduces the exact original behavior - falls back
+    to the module-level SPEND constant, byte-for-byte unchanged.
 
     entry_gate, if given, is called as entry_gate(i) at each flat decision
     point (i = index into closes/highs/lows) and must return True to allow
@@ -98,6 +109,7 @@ def backtest_one_coin(closes, highs, lows, entry_gate=None):
     replay loop. None (the default) means always enter the moment flat -
     the original, unchanged behavior every existing caller (including the
     live auto-exclusion system's daily backtest run) already depends on."""
+    spend = spend if spend is not None else SPEND
     trades = []
     entries_skipped_by_gate = 0
     i = ATR_WINDOW
@@ -117,8 +129,8 @@ def backtest_one_coin(closes, highs, lows, entry_gate=None):
                 entries_skipped_by_gate += 1
                 i += 1
                 continue
-            target_pct = max(engine.pick_target_pct(atr_pct), engine.min_profit_target_pct(SPEND, atr_pct))
-            qty = SPEND / price
+            target_pct = max(engine.pick_target_pct(atr_pct), engine.min_profit_target_pct(spend, atr_pct))
+            qty = spend / price
             position = {
                 "entry": price, "qty": qty,
                 "target": price * (1 + target_pct),
@@ -160,13 +172,14 @@ def backtest_one_coin(closes, highs, lows, entry_gate=None):
     total_pnl = sum(net for _, net in trades)
     wins = [net for _, net in trades if net > 0]
     win_rate = len(wins) / len(trades) * 100
-    avg_trade_pct = (total_pnl / len(trades)) / SPEND * 100
+    avg_trade_pct = (total_pnl / len(trades)) / spend * 100
     result = {
         "num_trades": len(trades),
         "win_rate": win_rate,
         "total_pnl": total_pnl,
-        "roi_pct_of_spend": total_pnl / SPEND * 100,
+        "roi_pct_of_spend": total_pnl / spend * 100,
         "avg_trade_pct": avg_trade_pct,
+        "spend_used": spend,
     }
     # Only added when a gate was actually used, so the baseline schema
     # (what _run_scheduled_backtest_and_update_exclusions persists to
@@ -370,16 +383,31 @@ async def run_btc_relative_strength_comparison(coins=None, days=BACKTEST_DAYS, l
     }
 
 
-async def _backtest_one_coin_with_semaphore(session, product_id, semaphore):
+async def _backtest_one_coin_with_semaphore(session, product_id, semaphore, spend=None):
     async with semaphore:
         candles = await fetch_historical_candles(session, product_id)
     if candles is None:
         return product_id, None, "not enough historical data"
     closes, highs, lows, _times = candles
-    result = backtest_one_coin(closes, highs, lows)
+    result = backtest_one_coin(closes, highs, lows, spend=spend)
     if result is None:
         return product_id, None, "no trades triggered in this window"
     return product_id, result, None
+
+
+async def _get_real_branch_allocations() -> dict:
+    """Real, current allocated_usd per coin from CryptoTreeBranch - summed
+    across every branch holding that coin, since multiple branches can
+    share one coin (see "Multiple branches can now share the same coin"
+    in CLAUDE.md) and Coinbase's real balance for it is pooled the same
+    way. Same aggregation-by-product_id pattern the per-coin trade
+    history already uses. Root (BTC-USD) included like any other coin."""
+    allocations = {}
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoTreeBranch.product_id, CryptoTreeBranch.allocated_usd))
+        for product_id, allocated_usd in result.all():
+            allocations[product_id] = allocations.get(product_id, 0.0) + allocated_usd
+    return allocations
 
 
 async def run_full_backtest(coins=None, days=BACKTEST_DAYS, max_concurrent=6):
@@ -414,6 +442,49 @@ async def run_full_backtest(coins=None, days=BACKTEST_DAYS, max_concurrent=6):
         "coins_with_results": len(ranked),
         "skipped": skipped,
         "ranked": [{"product_id": pid, **r} for pid, r in ranked],
+    }
+
+
+async def run_full_backtest_with_real_allocations(coins=None, days=BACKTEST_DAYS, max_concurrent=6):
+    """The account owner's own real point: a flat $150 for every coin is
+    deliberately apples-to-apples for RANKING coins by quality, but it
+    doesn't reflect what your actual money would have done - the real
+    tree has $881.76 on BTC, $797.66 on POL, $49.58 on SOL, not an equal
+    $150 each. This is the direct counterpart to run_full_backtest() that
+    simulates each coin's REAL current branch dollars instead.
+
+    A coin with no real branch/allocation right now still gets tested -
+    falls back to the same $150 default every other coin in
+    run_full_backtest() uses, so the table stays complete rather than
+    only showing the 2-3 coins the tree happens to be holding today.
+    Every coin's `spend_used` in the result tells you which case applied.
+
+    Real network calls to Coinbase's public candles endpoint - same host
+    every other backtest in this file already depends on."""
+    coins = coins or COIN_FAMILY_TREE
+    allocations = await _get_real_branch_allocations()
+    semaphore = asyncio.Semaphore(max_concurrent)
+    skipped = []
+    async with aiohttp.ClientSession() as session:
+        outcomes = await asyncio.gather(
+            *(_backtest_one_coin_with_semaphore(session, pid, semaphore, spend=allocations.get(pid)) for pid in coins)
+        )
+    results = {}
+    for product_id, result, skip_reason in outcomes:
+        if result is None:
+            skipped.append({"product_id": product_id, "reason": skip_reason})
+        else:
+            results[product_id] = result
+
+    ranked = sorted(results.items(), key=lambda kv: kv[1]["roi_pct_of_spend"], reverse=True)
+    return {
+        "backtest_days": days,
+        "default_spend_per_trade": SPEND,
+        "coins_tested": len(coins),
+        "coins_with_results": len(ranked),
+        "coins_with_real_allocation": len([pid for pid in results if pid in allocations]),
+        "skipped": skipped,
+        "ranked": [{"product_id": pid, "has_real_allocation": pid in allocations, **r} for pid, r in ranked],
     }
 
 

@@ -2156,6 +2156,27 @@ async def run_crypto_selection_backtest():
     return await crypto_selection_backtest_module.run_full_backtest()
 
 
+@router.post("/crypto-selection-backtest/real-allocations", dependencies=[Depends(require_admin_key)])
+async def run_crypto_selection_backtest_real_allocations():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    Per the account owner's explicit request: the main backtest above
+    deliberately spends a flat $150 on every coin so they're comparable
+    by quality alone - but that doesn't reflect what your REAL money
+    would have done, since the real tree has very uneven real balances
+    per branch ($881.76 on BTC, $797.66 on POL, $49.58 on SOL, not an
+    equal $150 each). Runs the identical real target/stop/breakeven/
+    giveback replay, but simulates each coin's REAL current branch dollar
+    amount (summed across every branch holding it) instead of the flat
+    default - a coin with no real allocation right now still gets tested,
+    falling back to the same $150 default so the table stays complete.
+
+    Pulls real historical data from Coinbase's public candles endpoint -
+    can take 30-90 seconds depending on that endpoint's response time."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_full_backtest_with_real_allocations()
+
+
 @router.post("/crypto-selection-backtest/btc-relative-strength", dependencies=[Depends(require_admin_key)])
 async def run_btc_relative_strength_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders,

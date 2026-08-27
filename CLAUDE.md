@@ -6395,6 +6395,86 @@ across the whole universe.
 
 ---
 
+## Coin backtest can now simulate each coin's REAL branch dollars instead of a flat $150
+
+The account owner pushed back on the crypto coin-selection backtest's
+existing flat $150-per-coin simulated spend: "this needs to change
+because it's not always the same so I need to fluctuate." Clarified via
+a direct question (rather than guessing) into a specific, real ask:
+simulate each coin's REAL current branch allocation instead of an equal
+$150 for every coin, so the table reflects what the tree's actual uneven
+real money ($881.76 on BTC, $797.66 on POL, $49.58 on SOL - not an equal
+split) would have done, alongside the existing "which coin is best in
+the abstract" view the flat $150 already provides.
+
+- **`backtest_one_coin()`** gained an optional `spend` parameter -
+  `spend=None` (the default, every existing caller including the live
+  daily auto-exclusion backtest and the top-15 rotation) reproduces the
+  exact original $150 behavior byte-for-byte. A real, non-obvious effect
+  worth documenting: a bigger real spend can genuinely change WHEN a
+  trade exits, not just its size - `min_profit_target_pct(spend_usd,
+  atr_pct)` in `crypto_btc_compound_bot.py` has `spend_usd` in its
+  denominator, so a bigger real position needs a SMALLER percentage move
+  to clear the same fixed-dollar minimum-profit floor. That's real,
+  intentional, pre-existing bot behavior (a bigger branch's target is
+  easier to reach in percentage terms) surfacing for the first time in
+  this backtest - not a bug introduced by this change.
+- **`_get_real_branch_allocations()`** (new) - reads real, current
+  `allocated_usd` from `CryptoTreeBranch`, SUMMED across every branch
+  sharing a coin (branches can share a coin - see "Multiple branches can
+  now share the same coin" above - and Coinbase's real balance for it is
+  pooled the same way, so summing is the only real answer).
+- **`run_full_backtest_with_real_allocations()`** (new) - the direct
+  counterpart to `run_full_backtest()`: same real replay, same real
+  historical Coinbase candles, but each coin's simulated spend comes from
+  its real branch allocation when one exists, falling back to the same
+  $150 default otherwise so the table stays complete rather than only
+  showing the 2-3 coins the tree happens to hold today. Each row reports
+  `spend_used` and `has_real_allocation` so it's clear which case
+  applied. Never touches live trading or places an order - shadow mode,
+  same as every other backtest in this file.
+- New `POST /api/trading-dashboard/crypto-selection-backtest/real-allocations`
+  (admin-key gated) and a new "▶ Run Backtest With Real Allocations"
+  button + results table on `crypto_selection_backtest.html`, right
+  under the existing flat-$150 table - a 💰 marks a coin simulated with
+  its real allocation; every other coin shows "(default)" next to its
+  $150.
+
+Verified offline (`test_real_allocations_backtest.py`, 13 checks):
+`spend=None` reproduces the exact original result byte-for-byte,
+including the module-level `$150` constant as `spend_used`; a custom
+spend is correctly recorded and a bigger real spend is hand-verified
+(via the real `min_profit_target_pct` function directly) to never
+require a LARGER minimum-profit target than a smaller spend, confirming
+the real mechanism rather than assuming trade timing is spend-
+independent; `_get_real_branch_allocations()` correctly SUMS two real
+branches sharing POL-USD into one real $797.66 figure, not an arbitrary
+single row; and the full end-to-end backtest correctly simulates
+BTC-USD/POL-USD with their real allocations (`has_real_allocation=True`)
+while a coin with no real branch (ETH-USD) falls back to the $150
+default (`has_real_allocation=False`). Existing schema-sensitive
+regression tests (`test_btc_relative_strength.py`,
+`test_higher_tf_trend_gate.py`) re-run clean alongside it, confirming
+the new `spend_used` field doesn't break the "baseline schema must not
+gain fields" assertion those tests already carry. Broader related suite
+(`test_top_n_rotation.py`, `test_auto_exclusion.py`,
+`test_manual_exclusion_fast_heal.py`, `test_live_performance_exclusion.py`,
+`test_reinforcement_skips_excluded_coin.py`) also re-run clean. Confirmed
+via a real AST route-count parse that the new route is bound to the
+correct function with no duplicate registrations (59 total routes, zero
+duplicates). `crypto_selection_backtest.html` re-verified with a real
+Python `HTMLParser` tag-balance check and `node --check` on the extracted
+inline `<script>` block.
+
+**Not yet run against real historical data** - same documented gap as
+every backtest tool in this file (no live network access to Coinbase
+from this sandbox). The account owner needs to open
+`/crypto-selection-backtest-view` after the next redeploy and tap
+"▶ Run Backtest With Real Allocations" to see the real numbers for the
+tree's actual current branches.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

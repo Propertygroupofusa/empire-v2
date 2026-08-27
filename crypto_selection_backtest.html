@@ -90,6 +90,13 @@
     <div id="results"></div>
 
     <div class="note" style="margin-top: 28px;">
+        <strong>What would my REAL money have actually done?</strong> The table above deliberately spends a flat $150 on every coin, on purpose - it's what makes coins comparable to each other by quality alone. But your real tree doesn't have an equal $150 on every coin: it has real, uneven balances per branch. This runs the identical real replay, but simulates each coin's REAL current branch dollars instead of the flat $150 - a coin with no real branch right now still gets tested, falling back to the same $150 default so the table stays complete.
+    </div>
+    <button class="run-btn" id="realAllocBtn" onclick="runRealAllocationsBacktest()">▶ Run Backtest With Real Allocations (real data, ~30-90 seconds)</button>
+    <div id="realAllocStatus"></div>
+    <div id="realAllocResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
         <strong>BTC-relative strength comparison:</strong> the check above only asks "is this coin up over the last ~25 hours?" - in a market where everything grinds up together, that's a weak signal. This runs the exact same real target/stop/breakeven/giveback replay TWICE per coin on the same real historical data - once as-is (baseline, identical to the table above), and once requiring the coin to be genuinely beating BTC-USD's own real return over the identical window before ever entering. Shadow mode only - this does not change what the live bot buys.
     </div>
     <button class="run-btn" id="rsBtn" onclick="runRelativeStrength()">▶ Run BTC-Relative Strength Comparison (~60-120 seconds)</button>
@@ -286,6 +293,77 @@ function renderResults(data) {
             <tbody>${rows}</tbody>
         </table>
         <p class="trade-note">"Trade this" starts a real new $50 branch on that coin right now, using your actual unallocated Coinbase cash - same as the dashboard's "Start new $50 branch" button, just pointed at a coin you picked instead of the bot's auto-pick. Refused if the coin is already held by another branch, currently excluded, or there isn't enough real free cash.</p>
+        ${skippedHtml}
+    `;
+}
+
+async function runRealAllocationsBacktest() {
+    const btn = document.getElementById('realAllocBtn');
+    const statusEl = document.getElementById('realAllocStatus');
+    const resultsEl = document.getElementById('realAllocResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (pulling real Coinbase history for 36 coins)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/crypto-selection-backtest/real-allocations', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        renderRealAllocationsResults(data);
+        statusEl.textContent = `Tested ${data.coins_tested} coins over ${data.backtest_days} days - ${data.coins_with_real_allocation} simulated with real branch dollars, the rest at the $${data.default_spend_per_trade} default.`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Backtest With Real Allocations (real data, ~30-90 seconds)';
+    }
+}
+
+function renderRealAllocationsResults(data) {
+    const resultsEl = document.getElementById('realAllocResults');
+    if (!data.ranked || data.ranked.length === 0) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No coins produced usable backtest results.</p>';
+        return;
+    }
+    let rows = data.ranked.map(r => {
+        const pnlClass = r.total_pnl >= 0 ? 'pos' : 'neg';
+        const roiClass = r.roi_pct_of_spend >= 0 ? 'pos' : 'neg';
+        return `<tr>
+            <td>${r.product_id}${r.has_real_allocation ? ' 💰' : ''}</td>
+            <td>${fmtUsd(r.spend_used)}${r.has_real_allocation ? '' : ' <span style="color:var(--text-dim);font-weight:400;">(default)</span>'}</td>
+            <td>${r.num_trades}</td>
+            <td>${r.win_rate.toFixed(1)}%</td>
+            <td class="${pnlClass}">${fmtUsd(r.total_pnl)}</td>
+            <td class="${roiClass}">${r.roi_pct_of_spend >= 0 ? '+' : ''}${r.roi_pct_of_spend.toFixed(1)}%</td>
+        </tr>`;
+    }).join('');
+
+    let skippedHtml = '';
+    if (data.skipped && data.skipped.length > 0) {
+        const items = data.skipped.map(s => `<li>${s.product_id}: ${s.reason}</li>`).join('');
+        skippedHtml = `<details class="skipped"><summary>${data.skipped.length} coin(s) skipped</summary><ul>${items}</ul></details>`;
+    }
+
+    resultsEl.innerHTML = `
+        <table>
+            <thead><tr>
+                <th>Coin</th><th>💰 Real $ simulated</th><th>Trades</th><th>Win rate</th><th>Total P&amp;L</th><th>ROI</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+        <p class="trade-note">💰 marks a coin currently held by a real branch - its own real allocated_usd was used as the simulated spend. Every other coin fell back to the $${data.default_spend_per_trade} default so the table stays complete. ROI is on that coin's own simulated amount, so ROI% is still comparable across rows even though the dollar amounts differ.</p>
         ${skippedHtml}
     `;
 }
