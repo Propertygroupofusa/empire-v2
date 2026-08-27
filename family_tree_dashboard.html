@@ -1212,6 +1212,11 @@ function selectReallocateSource(botName, btnEl) {
     if (branch) {
         document.getElementById('realloc-source-max').textContent = `${fmtUsd(branch.allocated_usd)} available from this branch`;
         document.getElementById('realloc-amount-input').max = branch.allocated_usd.toFixed(2);
+        // Auto-fill the full real idle balance as the default amount, per
+        // the account owner's explicit request ("make the price
+        // automatically show up... so I won't have to type that in") -
+        // they can still edit it down to move less than the full amount.
+        document.getElementById('realloc-amount-input').value = branch.allocated_usd.toFixed(2);
     }
     // A branch can't be both the source and destination of the same move.
     if (reallocModal.selectedDest === botName) {
