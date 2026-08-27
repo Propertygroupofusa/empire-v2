@@ -7410,6 +7410,81 @@ note and stops taking new entries.
 
 ---
 
+## Real repeating INSUFFICIENT_FUND loop diagnosed - a manual cash move, not a bug, plus one real minor fix found along the way
+
+The account owner shared live screenshots showing `crypto_tree_sol_usd`
+repeating the identical real line every ~30s for several minutes:
+"crossed $300 but the reinforcement buy into crypto_btc_compound
+(BTC-USD) failed (INSUFFICIENT_FUND...) - refunded the $50.00 seed, will
+retry next cycle" - and root's own card showing Balance $50.00 against a
+$1,000.00 floor, "Peak / drawdown $1,005.16 (-95%)", paused by the new
+drawdown breaker.
+
+Traced to the real, actual cause via a screenshot of the account owner's
+own action a few minutes earlier: they used the "Move Cash Between
+Branches" tool to move the FULL real $1,005.16 sitting idle in root
+(BTC) into `crypto_tree_sol_usd`'s SOL-USD position ("Moved $1,005.16
+from crypto_btc_compound (now $0.00) into crypto_tree_sol_usd's SOL-USD
+position... new balance $1,054.93"). This is not a bug - the tool did
+exactly what it was asked to do, and root (BTC) is a valid source for
+this tool like any other flat branch. But it left root sitting at
+essentially $0 (a small $50 was added back afterward, matching a seed
+amount), which is deeply below both root's $1,000 floor and - correctly
+- the new drawdown breaker (95% below its own $1,005.16 peak), pausing
+it exactly as designed.
+
+The repeating retry itself is the tree working as built: SOL, now sitting
+at $1,004.93, keeps re-crossing its own $300 spawn tier every cycle
+(a failed reinforcement refunds the seed AND reverts the tier increment,
+so the same crossing condition is true again next cycle) and keeps
+picking root as the real weakest branch to reinforce (root's own
+allocated_usd/next_unlock_tier ratio is now the lowest in the tree) - but
+there is no real free cash anywhere in the account to fund that $50
+reinforcement right now (LINK's own $98.99 is real but it's LINK's OWN
+allocation, not shared automatically). This is designed retry-until-it-
+can-succeed behavior (see "a failed reinforcement retry loop looked
+identical to being frozen" above, which made this exact pattern VISIBLE
+on purpose rather than silencing it) - not a new bug, and no real money
+is lost on any single retry (the $50 seed is refunded every time).
+
+**One real, minor bug found and fixed while investigating this**:
+`place_market_buy()`'s real-balance clamp (added earlier this session)
+only skips placing an order when the clamped amount is `<= 0` - a real,
+nonzero but genuinely too-thin balance (a few cents of unclaimed dust,
+below Coinbase's own practical minimum trade size) survived that check
+and still submitted a doomed order to Coinbase every single cycle,
+producing the exact repeating raw `INSUFFICIENT_FUND` rejection text
+seen live. Fixed by also skipping (without ever hitting Coinbase) when
+the clamped amount is below the existing `MIN_TRADE_USD` constant (the
+same real floor the stranded-dust sweep already uses for "too small to
+ever trade") - tags a clear, honest `_last_order_error` reason ("only
+$X.XX real free cash right now - below the $Y minimum trade size")
+instead of a raw Coinbase rejection. Purely a noise/API-call reduction -
+never changes any financial outcome, since the seed was already being
+refunded either way.
+
+Verified offline (`test_place_market_buy_clamp.py`, extended with 2 new
+checks, 6 total): a real $0.42 balance (below the $5.00 minimum) is now
+skipped locally and never reaches Coinbase, tagging the clear reason; a
+real balance exactly AT the minimum still proceeds normally (strict `<`,
+not `<=`, so this isn't overly conservative). The 4 pre-existing checks
+(clamp-down, unchanged-when-sufficient, fail-open-on-fetch-error,
+zero-balance-returns-None) all re-run clean, confirming this is purely
+additive. Full related regression suite
+(`test_reinforcement_permanent_rejection_fallback.py`,
+`test_reallocate_cash.py`, `test_drawdown_breaker.py`) re-run clean
+alongside it.
+
+**What actually resolves the live retry loop**: not a code fix - the
+account owner needs to move some real cash back into root (via "Move
+Cash Between Branches," pulling from a flat branch with real idle cash
+like LINK's $98.99, or "Add cash to BTC" directly) to bring root back
+above both its floor and within 40% of its own peak. Until then it stays
+paused, and SOL will keep quietly retrying and refunding every ~30s -
+harmless, if noisy.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

@@ -544,6 +544,30 @@ async def place_market_buy(session, usd_amount: float, product_id: str = PRODUCT
     if usd_amount <= 0:
         log.warning(f"[BTC-COMPOUND] {product_id}: nothing to spend after real-balance clamp")
         return None
+    # Real gap found live: a request for real free cash that's genuinely
+    # too thin to ever fill (a few residual cents of unclaimed dust, not
+    # actual spendable money) survived the clamp above (still > 0) and
+    # went on to hit Coinbase anyway, which correctly rejected it with a
+    # real INSUFFICIENT_FUND every single time - the same identical,
+    # non-resolving rejection repeating every cycle (confirmed live:
+    # crypto_btc_compound reinforcement retrying forever against a real
+    # account with virtually all its cash already claimed by other
+    # branches' own allocated_usd). This never loses real money (the seed
+    # is refunded either way) but it's a pointless real API call and a
+    # confusing raw Coinbase error where an honest "not enough real cash
+    # to even try" is clearer. MIN_TRADE_USD is the same real practical
+    # floor the stranded-dust sweep already uses for "too small to ever
+    # trade."
+    if usd_amount < MIN_TRADE_USD:
+        log.warning(
+            f"[BTC-COMPOUND] {product_id}: only ${usd_amount:.2f} real free cash after clamp - below the "
+            f"${MIN_TRADE_USD:.2f} minimum trade size, skipping without hitting Coinbase"
+        )
+        _last_order_error[product_id] = (
+            f"INSUFFICIENT_FUND: only ${usd_amount:.2f} real free cash right now - below the "
+            f"${MIN_TRADE_USD:.2f} minimum trade size"
+        )
+        return None
 
     path = "/api/v3/brokerage/orders"
     order = {
