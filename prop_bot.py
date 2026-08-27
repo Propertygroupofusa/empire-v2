@@ -21,8 +21,9 @@ import uuid
 from sqlalchemy import select, desc
 from database import AsyncSessionLocal
 from models import BotPosition, Payment, AlpacaBacktestRun, TradingBotState
-from bot_mandates import APEX_MANDATE, validate_entry
-from alpaca_mean_reversion import should_exit_position_momentum
+import bot_mandates
+from bot_mandates import APEX_MANDATE, validate_entry, MOMENTUM_ENTRY, MEAN_REVERSION_ENTRY
+from alpaca_mean_reversion import should_exit_position_momentum, should_exit_position
 from profit_tracker import FiveHourProfitTracker
 
 # Measurement system: Trade logging with full signal context
@@ -664,6 +665,75 @@ async def set_live_entry_variant(variant: str):
         else:
             row.base_capital = level
         await db.commit()
+
+
+# Real, DB-persisted choice of which strategy FAMILY is live - momentum
+# (buy strength, trailing stop) or mean-reversion (buy oversold, fixed
+# target/stop/breakeven/giveback). Built after a real, repeated finding:
+# run_momentum_vs_mean_reversion_multi_window() (3 separate real 30-day
+# windows) showed mean-reversion winning all 3, $77.51 vs momentum's
+# $14.30 total - directly contradicting the single-window comparison that
+# originally justified switching TO momentum. Per the account owner's
+# explicit real decision from that evidence, this is a real, reversible
+# toggle (same DB-not-env-var reasoning as get_live_entry_variant) rather
+# than a one-way code change, since tonight already showed this same
+# comparison can flip between real windows - a future re-run showing
+# momentum ahead again should be just as easy to act on.
+MEAN_REVERSION_RSI_ENTRY = 40.0  # matches alpaca_selection_backtest.py's RSI_LONG_THRESHOLD exactly - the real value validated 3-for-3, not the original pre-momentum live value (30)
+MEAN_REVERSION_RSI_PROFIT_THRESHOLD = 60.0
+MEAN_REVERSION_STOP_LOSS_PCT = 0.015
+MEAN_REVERSION_PROFIT_TARGET_PCT = 0.03  # "moderate" - already the account's own prior real decision (see CLAUDE.md), reconfirmed by tonight's fresh exit-rule-sensitivity re-run
+MEAN_REVERSION_GIVEBACK_PCT = 0.015
+MEAN_REVERSION_BREAKEVEN_TRIGGER_PCT = 0.01
+MEAN_REVERSION_MAX_HOLD_SECONDS = 7200  # matches should_exit_position()'s own default, the same one every backtest run tonight implicitly used
+STRATEGY_FAMILIES = ["momentum", "mean_reversion"]
+ALPACA_STRATEGY_FAMILY_KEY = "alpaca_strategy_family"
+
+
+async def get_live_strategy_family() -> str:
+    """Which real strategy family is currently live - "momentum" (the
+    default, unchanged behavior if never explicitly switched) or
+    "mean_reversion". Also re-syncs bot_mandates.APEX_MANDATE["entry"] to
+    match on every call (this function is already called once per real
+    prop_bot cycle) - APEX_MANDATE is a plain in-process module dict, so a
+    Railway restart would otherwise silently reset it to the momentum
+    default even after a real mean-reversion switch was persisted to the
+    DB, leaving validate_entry()'s own mandate check out of sync with
+    every other part of this file."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == ALPACA_STRATEGY_FAMILY_KEY))
+        row = result.scalar_one_or_none()
+        family = "mean_reversion" if (row is not None and row.base_capital == 1.0) else "momentum"
+    APEX_MANDATE["entry"] = MEAN_REVERSION_ENTRY if family == "mean_reversion" else MOMENTUM_ENTRY
+    return family
+
+
+async def set_live_strategy_family(family: str):
+    if family not in STRATEGY_FAMILIES:
+        raise ValueError(f"unknown strategy family {family!r} - must be one of {STRATEGY_FAMILIES}")
+    level = 1.0 if family == "mean_reversion" else 0.0
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == ALPACA_STRATEGY_FAMILY_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = TradingBotState(bot_name=ALPACA_STRATEGY_FAMILY_KEY, base_capital=level)
+            db.add(row)
+        else:
+            row.base_capital = level
+        await db.commit()
+    APEX_MANDATE["entry"] = MEAN_REVERSION_ENTRY if family == "mean_reversion" else MOMENTUM_ENTRY
+
+
+def check_mean_reversion_entry_gate(rsi: float):
+    """The mean-reversion counterpart to check_momentum_entry_gate() -
+    the ONE real place every entry path checks the mean-reversion signal,
+    so the automatic scan, manual "Trade this", and the "Right now"
+    dry-run can never disagree. A real oversold RSI is the only real
+    condition (no trend/SMA requirement - that's a momentum-specific
+    idea). Returns (passes: bool, reason: str)."""
+    if rsi >= MEAN_REVERSION_RSI_ENTRY:
+        return False, f"RSI {rsi:.1f} not oversold (threshold: <{MEAN_REVERSION_RSI_ENTRY:.0f})"
+    return True, "oversold - real mean-reversion signal"
 
 
 def check_momentum_entry_gate(data: dict, variant: str):
@@ -1702,12 +1772,21 @@ async def run_prop_cycle():
         if not shorting_enabled:
             log.info("[APEX_589296] 📈 LONG-ONLY MODE: 3 concurrent long positions | RSI < 30 entry, 2% profit target, -1.5% stop")
 
+        # Which real strategy family is live right now - read once per
+        # cycle (also re-syncs APEX_MANDATE["entry"] as a side effect, see
+        # get_live_strategy_family()'s own docstring). Defaults to
+        # "momentum" (today's unchanged behavior) until explicitly
+        # switched via the dashboard.
+        strategy_family = await get_live_strategy_family()
+
         scans = {}
         for contract, config in FUTURES.items():
             # Scan all symbols 24/7 — crypto, commodities, indices all available on Alpaca
-            # Momentum strategy (real 15-min bars/20-bar SMA), not mean-reversion's
-            # get_price_rsi() - see MOMENTUM_RSI_ENTRY above for why.
-            data = await get_price_momentum(session, config["symbol"])
+            # Momentum strategy uses real 15-min bars/20-bar SMA
+            # (get_price_momentum); mean-reversion uses the original
+            # 5-min/SMA50 fetch (get_price_rsi) - see MEAN_REVERSION_RSI_ENTRY
+            # / MOMENTUM_RSI_ENTRY above for why each strategy needs its own.
+            data = await (get_price_rsi(session, config["symbol"]) if strategy_family == "mean_reversion" else get_price_momentum(session, config["symbol"]))
             if data:
                 scans[contract] = data
                 log.info(f"[APEX_589296] {contract} ({config['symbol']}) | ${data['price']:.2f} | RSI:{data['rsi']} | Momentum:{data.get('momentum', 0):+.2f}% | {data['trend']}")
@@ -1802,15 +1881,32 @@ async def run_prop_cycle():
             # BotPosition.peak_pct so a Railway restart can't wipe it and
             # silently reset the trailing stop on exactly the positions
             # that ran up the most.
-            should_exit, reason, exit_type, new_peak_pnl_pct = should_exit_position_momentum(
-                symbol=contract,
-                entry_price=entry,
-                current_price=price,
-                position_age_seconds=position_age_seconds,
-                peak_pnl_pct=position.get("peak_pnl_pct", 0.0),
-                max_hold_seconds=MOMENTUM_MAX_HOLD_SECONDS,
-                trail_pct=MOMENTUM_TRAIL_PCT,
-            )
+            if strategy_family == "mean_reversion":
+                should_exit, reason, exit_type, new_peak_pnl_pct = should_exit_position(
+                    symbol=contract,
+                    entry_price=entry,
+                    current_price=price,
+                    current_rsi=rsi,
+                    position_age_seconds=position_age_seconds,
+                    direction="long",
+                    max_hold_seconds=MEAN_REVERSION_MAX_HOLD_SECONDS,
+                    stop_loss_pct=MEAN_REVERSION_STOP_LOSS_PCT,
+                    min_profit_target_pct=MEAN_REVERSION_PROFIT_TARGET_PCT,
+                    rsi_profit_threshold_long=MEAN_REVERSION_RSI_PROFIT_THRESHOLD,
+                    peak_pnl_pct=position.get("peak_pnl_pct", 0.0),
+                    breakeven_trigger_pct=MEAN_REVERSION_BREAKEVEN_TRIGGER_PCT,
+                    max_giveback_pct=MEAN_REVERSION_GIVEBACK_PCT,
+                )
+            else:
+                should_exit, reason, exit_type, new_peak_pnl_pct = should_exit_position_momentum(
+                    symbol=contract,
+                    entry_price=entry,
+                    current_price=price,
+                    position_age_seconds=position_age_seconds,
+                    peak_pnl_pct=position.get("peak_pnl_pct", 0.0),
+                    max_hold_seconds=MOMENTUM_MAX_HOLD_SECONDS,
+                    trail_pct=MOMENTUM_TRAIL_PCT,
+                )
             if new_peak_pnl_pct > position.get("peak_pnl_pct", 0.0):
                 position["peak_pnl_pct"] = new_peak_pnl_pct
                 await _db_update_peak_pct(contract, new_peak_pnl_pct)
@@ -1838,22 +1934,29 @@ async def run_prop_cycle():
             price, rsi, trend = data["price"], data["rsi"], data["trend"]
             momentum = data.get("momentum", 0)
 
-            # Momentum Entry Validation - reuses the exact same real gate
-            # (check_momentum_entry_gate) the manual "Trade this" endpoint
-            # and the "Right now" eligibility dry-run both call, so all
-            # three can never drift out of sync with each other or with
-            # whichever variant is currently live. Long-only, matching
-            # this account's real shorting-disabled constraint (unchanged
-            # from before).
-            should_enter, reason = check_momentum_entry_gate(data, live_entry_variant)
+            # Entry validation - reuses the exact same real gate function
+            # (check_momentum_entry_gate / check_mean_reversion_entry_gate)
+            # the manual "Trade this" endpoint and the "Right now"
+            # eligibility dry-run both call, so all three can never drift
+            # out of sync with each other or with whichever strategy
+            # family/variant is currently live. Long-only, matching this
+            # account's real shorting-disabled constraint (unchanged from
+            # before).
+            if strategy_family == "mean_reversion":
+                should_enter, reason = check_mean_reversion_entry_gate(rsi)
+            else:
+                should_enter, reason = check_momentum_entry_gate(data, live_entry_variant)
             direction = "long" if should_enter else "hold"
 
             if should_enter:
-                # Real momentum signal: record confidence as how far above
-                # the threshold RSI is - a stronger, more confirmed move
-                # gets prioritized first when several symbols qualify the
-                # same cycle.
-                confidence = rsi - MOMENTUM_RSI_ENTRY
+                # Confidence ranking: momentum ranks by how far ABOVE the
+                # threshold RSI is (stronger move = higher confidence);
+                # mean-reversion ranks by how far BELOW its own threshold
+                # RSI is (more oversold = higher confidence) - the mirror
+                # image, so a stronger, more confirmed signal is
+                # prioritized first either way when several symbols
+                # qualify the same cycle.
+                confidence = (MEAN_REVERSION_RSI_ENTRY - rsi) if strategy_family == "mean_reversion" else (rsi - MOMENTUM_RSI_ENTRY)
                 candidates.append((confidence, contract, config, direction, price, rsi, trend))
                 status = f"{direction.upper()}_SETUP"
             else:

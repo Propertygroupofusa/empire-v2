@@ -21,6 +21,35 @@ class BotRole(Enum):
 # APEX PROP BOT MANDATE
 # ============================================================================
 
+# Two real, named entry-rule profiles - prop_bot.py's
+# set_live_strategy_family() swaps APEX_MANDATE["entry"] between these two
+# at runtime (never invents a third combination). MEAN_REVERSION_ENTRY's
+# rsi_threshold (40) matches alpaca_selection_backtest.py's own
+# RSI_LONG_THRESHOLD exactly - the precise value validated 3-for-3 across
+# 3 separate real 30-day windows, not the original pre-momentum live
+# value (30), which was never actually the thing re-tested.
+MOMENTUM_ENTRY = {
+    "rsi_threshold": 55,
+    "momentum": True,
+    "trend_required": True,
+    "min_buying_power": 150,
+    "min_position_size": 50,
+    "max_open_positions": 6,
+    "max_total_notional_pct": 0.50,
+    "require_live_data": True,
+    "data_staleness_max_sec": 120,
+}
+MEAN_REVERSION_ENTRY = {
+    "rsi_threshold": 40,
+    "trend_required": True,
+    "min_buying_power": 150,
+    "min_position_size": 50,
+    "max_open_positions": 6,
+    "max_total_notional_pct": 0.50,
+    "require_live_data": True,
+    "data_staleness_max_sec": 120,
+}
+
 APEX_MANDATE = {
     "role": BotRole.APEX_EVALUATION,
     "name": "prop_bot",
@@ -63,17 +92,17 @@ APEX_MANDATE = {
     # trades (less fee drag), and a better win rate, all on the same data.
     # See alpaca_selection_backtest.py's run_momentum_vs_mean_reversion_comparison()
     # for the real comparison tool, and CLAUDE.md for the full real numbers.
-    "entry": {
-        "rsi_threshold": 55,  # RSI > 55 = real, confirmed momentum (not oversold anymore)
-        "momentum": True,  # tells validate_entry() to require RSI ABOVE this threshold, not below
-        "trend_required": True,  # Must confirm with SMA5/SMA10
-        "min_buying_power": 150,
-        "min_position_size": 50,
-        "max_open_positions": 6,  # 3 longs + 3 shorts for dual-direction mean reversion
-        "max_total_notional_pct": 0.50,  # 50% of equity
-        "require_live_data": True,
-        "data_staleness_max_sec": 120,
-    },
+    #
+    # Later re-tested with run_momentum_vs_mean_reversion_multi_window()
+    # across 3 separate real 30-day windows (~90 real days) after a single
+    # fresh window flipped the other way - mean-reversion won all 3
+    # windows, $77.51 vs momentum's $14.30 total. Per the account owner's
+    # explicit real decision from that evidence, prop_bot.py now switches
+    # this dict at runtime between MOMENTUM_ENTRY and MEAN_REVERSION_ENTRY
+    # via get_live_strategy_family()/set_live_strategy_family() - this
+    # dict is just the process's real starting default (momentum) until
+    # that DB-persisted choice is read on the very first cycle.
+    "entry": MOMENTUM_ENTRY,  # real starting default - see set_live_strategy_family() in prop_bot.py
 
     # Exit: When it must close positions
     "exit": {

@@ -410,11 +410,20 @@ const ENTRY_VARIANT_LABELS = {
     D: 'D — + overextension cap',
 };
 
-function renderEntryVariantBadge(variant) {
+const STRATEGY_FAMILY_LABELS = { momentum: 'Momentum', mean_reversion: 'Mean-Reversion (RSI &lt; 40)' };
+
+function renderEntryVariantBadge(variant, strategyFamily) {
     const el = document.getElementById('entry-variant-badge');
-    if (!variant) { el.style.display = 'none'; return; }
+    if (!variant && !strategyFamily) { el.style.display = 'none'; return; }
     el.style.display = '';
-    el.innerHTML = `🎯 Live entry rule: <strong style="color:var(--navy);">Variant ${ENTRY_VARIANT_LABELS[variant] || variant}</strong> — ` +
+    // Variant A/B/C/D is a momentum-only concept - while mean-reversion is
+    // live, only the strategy-family line is meaningful.
+    if (strategyFamily === 'mean_reversion') {
+        el.innerHTML = `🔀 Live strategy: <strong style="color:var(--navy);">${STRATEGY_FAMILY_LABELS.mean_reversion}</strong> — ` +
+            `<a href="/alpaca-selection-backtest-view" style="color: var(--navy);">run the backtest to compare or switch back →</a>`;
+        return;
+    }
+    el.innerHTML = `🎯 Live entry rule: <strong style="color:var(--navy);">Variant ${ENTRY_VARIANT_LABELS[variant] || variant}</strong> (${STRATEGY_FAMILY_LABELS.momentum}) — ` +
         `<a href="/alpaca-selection-backtest-view" style="color: var(--navy);">run the backtest to compare or promote a different one →</a>`;
 }
 
@@ -696,7 +705,7 @@ async function refresh() {
         renderGauge('goal-gauge', data.progress_to_goal_pct, fmtUsd(data.equity) + ' of ' + fmtUsd(data.goal));
         isAlpacaPassive = !!data.alpaca_passive_mode;
         renderPassiveModeBanner(data);
-        renderEntryVariantBadge(data.entry_variant);
+        renderEntryVariantBadge(data.entry_variant, data.strategy_family);
 
         const bots = data.bots || [];
         renderBarList('bots-bar', bots.map(b => ({ label: b.name, value: b.profit })));

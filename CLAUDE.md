@@ -6475,6 +6475,125 @@ tree's actual current branches.
 
 ---
 
+## Live Alpaca strategy switched back to mean-reversion - a real, reversible toggle
+
+Right after the multi-window comparison shipped, the account owner ran it
+for real and got a conclusive answer: **mean-reversion won all 3 real
+30-day windows** ($54.59 vs $41.59, then $41.96 vs $34.23, then even the
+one losing window both ways mean-reversion lost less: -$19.04 vs
+momentum's -$61.52) - **$77.51 total vs momentum's $14.30**. That
+directly contradicts the single-window comparison that originally
+justified switching TO momentum months earlier. Per the account owner's
+explicit real decision from this evidence ("yes, switch"), the live
+strategy is back to mean-reversion - but built as a real, reversible
+toggle rather than a one-way code revert, since this same comparison
+already flipped once between real windows this very session and a future
+re-run favoring momentum again should be just as easy to act on.
+
+**A real precision question, resolved by matching what was actually
+tested**: the original pre-momentum live mandate used `RSI < 30` as its
+oversold entry threshold, but `alpaca_selection_backtest.py`'s own
+`RSI_LONG_THRESHOLD` (the value every mean-reversion backtest in this
+file - including tonight's 3-window run - has always replayed against)
+is `40`. These were never the same number. Reverting to the old `RSI <
+30` would have meant running something that was never actually
+re-validated tonight; the real, evidence-backed choice was to match
+`RSI < 40` exactly, since that's the precise rule that just won 3-for-3.
+Exit parameters use the "moderate" scenario (1.5% stop, 3% target, 1.5%
+giveback, 1% breakeven trigger) - already the account's own prior real
+decision from the earlier exit-rule-sensitivity work, and reconfirmed by
+tonight's fresh re-run of that same comparison still favoring moderate
+over current.
+
+**`bot_mandates.py`**: `APEX_MANDATE["entry"]` is no longer a single
+static dict - `MOMENTUM_ENTRY` (`rsi_threshold=55, momentum=True`, the
+exact prior live values) and `MEAN_REVERSION_ENTRY` (`rsi_threshold=40`,
+no momentum flag) are now two named, real profiles; `APEX_MANDATE["entry"]`
+starts pointing at `MOMENTUM_ENTRY` (the real default for a fresh
+process) and gets swapped in place by `set_live_strategy_family()`.
+
+**`prop_bot.py`**:
+- `get_live_strategy_family()`/`set_live_strategy_family()` - DB-persisted
+  (same generic `TradingBotState` bucket every other real-time flag in
+  this file already uses, not a Railway env var - avoids the exact
+  stray-quote-character class of bug that silently disabled the crypto
+  coordinator earlier this session). `get_live_strategy_family()` also
+  re-syncs `APEX_MANDATE["entry"]` to match on every call (it's already
+  called once per real cycle) - real protection against a Railway
+  restart silently resetting the in-process mandate dict to momentum's
+  default even after a real mean-reversion switch was persisted.
+- `check_mean_reversion_entry_gate(rsi)` - the mean-reversion counterpart
+  to `check_momentum_entry_gate()`: the one real function every entry
+  path (automatic scan, manual "Trade this", the "Right now" dry-run)
+  calls, so none of the three can ever disagree about whether a real RSI
+  is oversold enough.
+- The scan loop, Pass 1 (exit management), and Pass 2 (new entries) all
+  now branch on `strategy_family`, read once per cycle: momentum keeps
+  calling `get_price_momentum()`/`should_exit_position_momentum()`/
+  `check_momentum_entry_gate()` exactly as before (byte-for-byte
+  unchanged when the family is "momentum", confirmed by regression
+  tests); mean-reversion calls `get_price_rsi()`/`should_exit_position()`
+  (the original 4-tuple mean-reversion exit function, which was never
+  removed - `alpaca_selection_backtest.py`'s backtest tools have kept
+  using it as their real baseline this whole time) with the moderate
+  exit parameters, and `check_mean_reversion_entry_gate()`. Confidence
+  ranking for candidate ordering mirrors momentum's own "how far past
+  threshold" logic in the opposite direction for mean-reversion (more
+  oversold = higher confidence).
+
+**`routers/trading_dashboard.py`**: `manual_open_prop_position` ("Trade
+this") and `alpaca_entry_eligibility` (the "Right now" dry-run column)
+both branch the same way, so a manual click or the eligibility preview
+can never disagree with what the automatic cycle would actually do.
+`/alpaca-overview`'s response gained a `strategy_family` field. New
+`POST /alpaca-overview/set-strategy-family` (`{"family": "momentum"|"mean_reversion"}`,
+admin-key gated) - restricted to exactly these two real, already-defined
+profiles, so it can never run an untested combination.
+
+**Dashboard UI**: `alpaca_selection_backtest.html` gained a "🔀 Currently
+live: Momentum/Mean-Reversion" badge plus two switch buttons, right under
+the 3-window comparison results (auto-refreshes after either that or the
+single-window comparison runs) - same real confirm-dialog pattern as the
+existing entry-variant promotion buttons. `alpaca_dashboard.html`'s
+existing entry-variant badge now also shows the live strategy family, and
+switches to a mean-reversion-specific message (no variant letter, since
+A/B/C/D is a momentum-only concept) when that's what's live.
+
+Verified offline (`test_live_strategy_family_switch.py`, 20 checks)
+against the real local dev DB: the default is genuinely "momentum" with
+`APEX_MANDATE["entry"]` pointing at `MOMENTUM_ENTRY`; switching persists
+and re-syncs the mandate to `MEAN_REVERSION_ENTRY`; an unknown family
+string is rejected; `check_mean_reversion_entry_gate()` correctly
+requires `RSI < 40` (a real 45 is rejected, exactly 40 is rejected per
+the strict `<`, a real 25 passes); `bot_mandates.validate_entry()`
+independently agrees with the gate function once the mean-reversion
+mandate is active (RSI 25 passes both, RSI 65 fails both); and,
+critically, a real end-to-end call through `POST .../trade-this/{ticker}`
+confirms `get_price_rsi` (not `get_price_momentum`) is genuinely the
+function invoked while mean-reversion is live (proven by making
+`get_price_momentum` raise if ever called), a real oversold candidate
+opens successfully, a real non-oversold candidate is refused with the
+correct real reason, and switching back to momentum restores the exact
+original momentum behavior end-to-end. Full existing regression suite
+(`test_manual_trade_this_stock.py`, `test_alpaca_entry_eligibility.py`,
+`test_inverse_etfs.py`, `test_live_entry_variant_promotion.py`,
+`test_alpaca_top_n_concentration.py`, `test_alpaca_auto_exclusion.py`,
+`test_resume_alpaca_active_trading.py`, `test_price_rsi_bar_floor.py`)
+re-run clean alongside it, confirming the momentum path is completely
+byte-for-byte unaffected when the family stays at its default. Confirmed
+via a real AST route-count parse that the new route is bound correctly
+with no duplicate registrations (60 total routes, zero duplicates).
+
+**Not yet confirmed against real live trading** - this is a real, live
+strategy-family change now shipped; its actual effect can only be judged
+by watching real trades over the coming days/weeks, same as every other
+live strategy change in this file. The account owner should watch the
+dashboard's entry-variant/strategy badge and the "Right now" eligibility
+column after the next redeploy to confirm real entries are now firing
+under the RSI<40 oversold condition instead of RSI>55 momentum.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

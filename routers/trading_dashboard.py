@@ -2402,11 +2402,13 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
     locked_usd = round(await get_alpaca_locked_usd(), 2)
     alpaca_passive_mode = await prop_bot_module.is_alpaca_passive_mode() if prop_bot_module else False
     entry_variant = await prop_bot_module.get_live_entry_variant() if prop_bot_module else "A"
+    strategy_family = await prop_bot_module.get_live_strategy_family() if prop_bot_module else "momentum"
 
     return {
         "equity": round(equity, 2),
         "alpaca_passive_mode": alpaca_passive_mode,
         "entry_variant": entry_variant,
+        "strategy_family": strategy_family,
         "cash": round(cash, 2),
         "session_pl": round(session_pl, 2),
         "session_pl_pct": round(session_pl_pct, 2),
@@ -2688,6 +2690,43 @@ async def set_alpaca_entry_variant(payload: SetEntryVariantRequest):
     return {"status": "promoted", "entry_variant": variant}
 
 
+class SetStrategyFamilyRequest(BaseModel):
+    family: str
+
+
+@router.post("/alpaca-overview/set-strategy-family", dependencies=[Depends(require_admin_key)])
+async def set_alpaca_strategy_family(payload: SetStrategyFamilyRequest):
+    """Switches the live Alpaca strategy between "momentum" (buy strength,
+    trailing stop) and "mean_reversion" (buy oversold, fixed target/stop/
+    breakeven/giveback) - a real, reversible toggle, not a one-way code
+    change, per the account owner's explicit real decision after
+    run_momentum_vs_mean_reversion_multi_window() showed mean-reversion
+    winning 3 of 3 real 30-day windows ($77.51 vs momentum's $14.30
+    total), directly contradicting the single-window comparison that
+    originally justified switching TO momentum. See
+    prop_bot.get_live_strategy_family()'s own docstring for why this is
+    reversible: the same real comparison already flipped once between
+    real windows tonight, so a future re-run favoring momentum again
+    should be just as easy to act on.
+
+    Mean-reversion's real entry threshold (RSI < 40) and exit parameters
+    (1.5% stop, 3% target / 1.5% giveback - the "moderate" scenario,
+    already the account's own prior real decision and reconfirmed by
+    tonight's fresh exit-rule-sensitivity re-run) are fixed constants in
+    prop_bot.py, not user-supplied - this can only ever switch between
+    the two real, already-validated configurations, never an untested
+    combination. Takes effect on prop_bot.py's very next cycle - no
+    restart needed, same as every other real-time flag in this codebase."""
+    if prop_bot_module is None:
+        raise HTTPException(status_code=500, detail="prop_bot module not available")
+    family = payload.family.strip().lower()
+    if family not in prop_bot_module.STRATEGY_FAMILIES:
+        raise HTTPException(status_code=400, detail=f"family must be one of {prop_bot_module.STRATEGY_FAMILIES}, got {payload.family!r}")
+    await prop_bot_module.set_live_strategy_family(family)
+    log.info(f"[dashboard] 🔀 Live Alpaca strategy family switched to '{family}'")
+    return {"status": "switched", "strategy_family": family}
+
+
 class AlpacaUnlockProfitRequest(BaseModel):
     amount: float
 
@@ -2771,7 +2810,13 @@ async def manual_open_prop_position(ticker: str):
         if should_halt:
             raise HTTPException(status_code=400, detail=f"Trading halted by kill condition: {halt_reason}")
 
-        price_data = await pb.get_price_momentum(session, ticker)
+        # Which real strategy family is live right now - also re-syncs
+        # bot_mandates.APEX_MANDATE["entry"] as a side effect (see
+        # get_live_strategy_family()'s own docstring), so the mandate
+        # check right below always matches whichever family is actually
+        # live, not a stale in-process default after a restart.
+        strategy_family = await pb.get_live_strategy_family()
+        price_data = await (pb.get_price_rsi(session, ticker) if strategy_family == "mean_reversion" else pb.get_price_momentum(session, ticker))
         if price_data is None:
             reason = pb._price_rsi_last_failure.get(ticker, "unknown reason")
             raise HTTPException(status_code=503, detail=f"Could not fetch a live price/RSI for {ticker}: {reason} - try again")
@@ -2787,15 +2832,19 @@ async def manual_open_prop_position(ticker: str):
         if not is_valid:
             raise HTTPException(status_code=400, detail=f"Mandate check failed: {mandate_reason}")
 
-        # Reuses the exact same real gate (check_momentum_entry_gate) the
-        # automatic Pass 2 scan and the "Right now" eligibility dry-run
-        # both call - covers momentum's price>SMA20 condition (which
-        # validate_entry's mandate check above doesn't) plus whichever
-        # variant (A/B/C/D - see get_live_entry_variant) is currently
-        # promoted to live, so a manual click can never enter something
-        # the live logic itself wouldn't.
-        live_variant = await pb.get_live_entry_variant()
-        gate_ok, gate_reason = pb.check_momentum_entry_gate(price_data, live_variant)
+        # Reuses the exact same real gate function
+        # (check_momentum_entry_gate / check_mean_reversion_entry_gate)
+        # the automatic Pass 2 scan and the "Right now" eligibility
+        # dry-run both call - covers momentum's price>SMA20 condition
+        # (which validate_entry's mandate check above doesn't) plus
+        # whichever variant (A/B/C/D - see get_live_entry_variant) is
+        # currently promoted to live, so a manual click can never enter
+        # something the live logic itself wouldn't.
+        if strategy_family == "mean_reversion":
+            gate_ok, gate_reason = pb.check_mean_reversion_entry_gate(rsi)
+        else:
+            live_variant = await pb.get_live_entry_variant()
+            gate_ok, gate_reason = pb.check_momentum_entry_gate(price_data, live_variant)
         if not gate_ok:
             raise HTTPException(status_code=400, detail=f"Mandate check failed: {gate_reason}")
 
@@ -2880,6 +2929,11 @@ async def alpaca_entry_eligibility():
                 if not is_safe:
                     shared_block_reason = f"Margin safety check failed: {safety_reason}"
 
+        # Which real strategy family is live right now - also re-syncs
+        # bot_mandates.APEX_MANDATE["entry"] as a side effect, so this
+        # preview's own mandate check always matches whichever family is
+        # actually live.
+        strategy_family = await pb.get_live_strategy_family()
         live_variant = await pb.get_live_entry_variant()
         results = {}
         for contract, config in pb.FUTURES.items():
@@ -2898,7 +2952,7 @@ async def alpaca_entry_eligibility():
                 results[ticker] = {"eligible": False, "reason": f"Excluded - {reason}", "rsi": None}
                 continue
 
-            price_data = await pb.get_price_momentum(session, ticker)
+            price_data = await (pb.get_price_rsi(session, ticker) if strategy_family == "mean_reversion" else pb.get_price_momentum(session, ticker))
             if price_data is None:
                 reason = pb._price_rsi_last_failure.get(ticker, "unknown reason")
                 results[ticker] = {"eligible": False, "reason": f"Could not fetch a live price/RSI: {reason}", "rsi": None}
@@ -2912,12 +2966,17 @@ async def alpaca_entry_eligibility():
                 total_notional=total_notional, equity=equity,
             )
             if is_valid:
-                # Reuses the exact same real gate check_momentum_entry_gate
+                # Reuses the exact same real gate function
+                # (check_momentum_entry_gate / check_mean_reversion_entry_gate)
                 # the automatic Pass 2 scan and manual_open_prop_position
                 # both call - covers price>SMA20 plus whichever variant is
-                # currently live, so this preview can never show a symbol
-                # as eligible that a real click would actually refuse.
-                is_valid, mandate_reason = pb.check_momentum_entry_gate(price_data, live_variant)
+                # currently live (momentum only), so this preview can
+                # never show a symbol as eligible that a real click would
+                # actually refuse.
+                if strategy_family == "mean_reversion":
+                    is_valid, mandate_reason = pb.check_mean_reversion_entry_gate(rsi)
+                else:
+                    is_valid, mandate_reason = pb.check_momentum_entry_gate(price_data, live_variant)
             results[ticker] = {"eligible": is_valid, "reason": None if is_valid else mandate_reason, "rsi": rsi}
 
     return {"tickers": results}

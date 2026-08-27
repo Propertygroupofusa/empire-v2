@@ -117,6 +117,10 @@
     <button class="run-btn" id="multiWindowBtn" onclick="runMultiWindowComparison()">▶ Run 3-Window Momentum vs. Mean-Reversion Check (real data, ~60-120 seconds)</button>
     <div id="multiWindowStatus"></div>
     <div id="multiWindowResults"></div>
+    <div id="liveStrategyFamilyBadge" style="margin-top:14px;font-size:0.85em;color:var(--text-dim);"></div>
+    <p style="margin-top:12px;font-weight:700;">Switch the live strategy family:</p>
+    <div id="strategyFamilyBtns" style="display:flex;gap:10px;flex-wrap:wrap;"></div>
+    <p style="margin-top:8px;color:var(--text-dim);font-size:0.85em;">A real, reversible switch (not a one-way code change) between the two whole real rule sets - momentum's own entry variant (A/B/C/D above) only applies while momentum is live. Takes effect on the bot's very next cycle.</p>
 
     <div class="note" style="margin-top: 28px;">
         <strong>Would running BOTH strategies together make more money?</strong> The comparison above tests each ruleset independently, each with its own always-available $150/trade — the right way to see which one's better, but not the right way to see what happens with real shared cash. This merges the same real bars onto one real timeline and runs both entry gates against a single pool at once, so a strong signal on one symbol can genuinely compete with a strong signal on another for the same real dollars — showing both a realistic number (a modest real shared pool) and the theoretical ceiling (unlimited capital).
@@ -358,6 +362,7 @@ async function runMomentumComparison() {
         const data = await res.json();
         renderMomentumComparison(data);
         statusEl.textContent = `Tested ${data.symbols_tested} symbols over ${data.backtest_days} days, ${data.symbols_with_results} produced real bars - same real history replayed under each strategy.`;
+        await loadLiveStrategyFamily();
     } catch (e) {
         statusEl.textContent = 'Error: ' + e.message;
         statusEl.className = 'error';
@@ -431,6 +436,7 @@ async function runMultiWindowComparison() {
         const data = await res.json();
         renderMultiWindowComparison(data);
         statusEl.textContent = `${data.num_windows} real, back-to-back ${data.window_days}-day windows replayed, most recent first.`;
+        await loadLiveStrategyFamily();
     } catch (e) {
         statusEl.textContent = 'Error: ' + e.message;
         statusEl.className = 'error';
@@ -661,6 +667,68 @@ async function promoteEntryVariant(variant, btn) {
         btn.disabled = false;
         btn.textContent = original;
         alert('Could not promote: ' + e.message);
+    }
+}
+
+let currentLiveStrategyFamily = null;
+const STRATEGY_FAMILY_LABELS = { momentum: 'Momentum', mean_reversion: 'Mean-Reversion' };
+
+async function loadLiveStrategyFamily() {
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-overview', {
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        currentLiveStrategyFamily = data.strategy_family || 'momentum';
+    } catch (e) {
+        currentLiveStrategyFamily = null;
+    }
+    renderLiveStrategyFamily();
+}
+
+function renderLiveStrategyFamily() {
+    const badgeEl = document.getElementById('liveStrategyFamilyBadge');
+    const btnsEl = document.getElementById('strategyFamilyBtns');
+    if (!currentLiveStrategyFamily) {
+        badgeEl.textContent = '';
+        btnsEl.innerHTML = '';
+        return;
+    }
+    badgeEl.innerHTML = `🔀 Currently live: <strong style="color:var(--gold)">${STRATEGY_FAMILY_LABELS[currentLiveStrategyFamily]}</strong>`;
+    btnsEl.innerHTML = Object.keys(STRATEGY_FAMILY_LABELS).map(family => {
+        const isLive = family === currentLiveStrategyFamily;
+        return `<button class="promote-btn${isLive ? ' is-live' : ''}" data-family="${family}" ${isLive ? 'disabled' : ''}
+            onclick="promoteStrategyFamily('${family}', this)">${isLive ? '✓ Live now' : `Switch to ${STRATEGY_FAMILY_LABELS[family]}`}</button>`;
+    }).join('');
+}
+
+async function promoteStrategyFamily(family, btn) {
+    if (!confirm(
+        `Switch the LIVE Alpaca bot to ${STRATEGY_FAMILY_LABELS[family]}? From its next cycle onward, prop_bot.py's real ` +
+        `automatic entries and exits (and manual "Trade this" clicks) will use this whole rule set instead of whatever's ` +
+        `live now. This is a real, immediate change to how real money gets traded - not a backtest.`
+    )) return;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Switching...';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-overview/set-strategy-family', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ family }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        currentLiveStrategyFamily = data.strategy_family;
+        renderLiveStrategyFamily();
+        alert(`${STRATEGY_FAMILY_LABELS[family]} is now live. Takes effect on the bot's very next cycle.`);
+    } catch (e) {
+        btn.disabled = false;
+        btn.textContent = original;
+        alert('Could not switch: ' + e.message);
     }
 }
 
