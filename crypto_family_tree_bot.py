@@ -3252,6 +3252,32 @@ async def run_branch_cycle(bot_name: str) -> bool:
     if branch is None:
         return False
 
+    # Real invariant self-heal: a branch's floor must never sit below
+    # SEED_USD ($50) - the account owner's own explicit decision (a
+    # branch that's lost past its own seed should stay paused, never dig
+    # lower - see _floor_tier_for_balance's own docstring). Found live:
+    # crypto_tree_xrp_usd_4 (POL) showed Floor $-50.00 on the dashboard -
+    # almost certainly stale data written before that $50 clamp existed
+    # (math.floor(-0.004 / 50) * 50 = -50, the exact unclamped formula).
+    # The floor-breach self-heal further below can never repair this on
+    # its own: it only fires when equity < the CURRENT floor, and a
+    # broken -$50 floor is already lower than POL's real $-0.00 equity,
+    # so the branch never even registers as breached - the corrupted
+    # value just sits there silently. Corrected unconditionally, every
+    # cycle, independent of whether the branch is currently breached.
+    if branch.equity_floor < SEED_USD:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
+            row = result.scalar_one_or_none()
+            if row and row.equity_floor < SEED_USD:
+                log.info(
+                    f"[TREE] 🪜 {bot_name} floor corrected ${row.equity_floor:,.2f} -> ${SEED_USD:,.2f} "
+                    f"(a floor can never sit below the ${SEED_USD:.0f} seed)"
+                )
+                row.equity_floor = SEED_USD
+                await db.commit()
+        branch.equity_floor = SEED_USD
+
     # Catch-up spawn check, every cycle - not just right after a sell.
     # _maybe_spawn_child() is also called directly inside
     # _branch_sell_and_settle() at the moment a sale crosses the tier, but

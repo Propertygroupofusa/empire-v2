@@ -1737,14 +1737,30 @@ async def reallocate_cash_between_branches(payload: ReallocateCashRequest, db: A
     dest.allocated_usd += payload.amount
     await db.commit()
 
-    realloc_msg = (
-        f"🔀 Manually moved ${payload.amount:.2f} real cash from {payload.from_bot_name} (now ${source.allocated_usd:.2f}) "
-        f"into {payload.to_bot_name}'s {dest.product_id} position - bought {filled_qty:.8f} @ ${filled_price:,.2f}, "
-        f"blended entry now ${blended_entry:,.2f}, branch total now ${dest.allocated_usd:.2f}"
+    # Two real rows for one real action - a REALLOCATE on the source branch
+    # and a BUY on the destination - deliberately worded from each
+    # branch's own perspective rather than sharing one identical string.
+    # Found live: the Activity feed showed two byte-identical lines back
+    # to back for a single real reallocate-cash click, which reads
+    # exactly like an accidental duplicate log entry even though both
+    # rows are real and correctly tied to their own bot_name.
+    log.info(
+        f"[dashboard] 🔀 Manually moved ${payload.amount:.2f} real cash from {payload.from_bot_name} "
+        f"(now ${source.allocated_usd:.2f}) into {payload.to_bot_name}'s {dest.product_id} position - "
+        f"bought {filled_qty:.8f} @ ${filled_price:,.2f}, blended entry now ${blended_entry:,.2f}, "
+        f"branch total now ${dest.allocated_usd:.2f}"
     )
-    log.info(f"[dashboard] {realloc_msg}")
-    await tree._log_activity(payload.to_bot_name, dest.product_id, "BUY", realloc_msg)
-    await tree._log_activity(payload.from_bot_name, source.product_id, "REALLOCATE", realloc_msg)
+    dest_msg = (
+        f"🔀 Received ${payload.amount:.2f} manually reallocated cash from {payload.from_bot_name} - "
+        f"bought {filled_qty:.8f} {dest.product_id} @ ${filled_price:,.2f}, blended entry now ${blended_entry:,.2f}, "
+        f"branch total now ${dest.allocated_usd:.2f}"
+    )
+    source_msg = (
+        f"🔀 Manually moved ${payload.amount:.2f} of its own idle real cash to {payload.to_bot_name} "
+        f"({dest.product_id}) - branch total now ${source.allocated_usd:.2f}"
+    )
+    await tree._log_activity(payload.to_bot_name, dest.product_id, "BUY", dest_msg)
+    await tree._log_activity(payload.from_bot_name, source.product_id, "REALLOCATE", source_msg)
 
     await tree._maybe_spawn_child(dest)
     return {

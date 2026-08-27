@@ -7970,6 +7970,95 @@ side now correctly skips a numerically-weakest-but-currently-overbought
 
 ---
 
+## Two real bugs found from a live screenshot review: a floor stuck at -$50.00, and a confusing "duplicate" in the Activity feed
+
+The account owner shared a large batch of live dashboard screenshots
+with a general "look at all of this and figure out how it can be
+better" ask. Two concrete, fixable bugs turned up on direct inspection.
+
+### 1. A branch's floor can get permanently stuck below the $50 seed minimum, invisible to the existing self-heal
+
+`crypto_tree_xrp_usd_4` (POL) showed **Floor $-50.00** on the dashboard -
+a value the earlier "floor never below the $50 seed" decision (see
+"Reinforcement rule revised again" / the floor-clamp section above)
+should have made impossible. Root cause: `-50.00 = math.floor(-0.004 /
+50) * 50` - the exact unclamped formula from BEFORE `_floor_tier_for_balance()`'s
+`max(SEED_USD, ...)` clamp existed - almost certainly stale data written
+before that fix was deployed. The clamp itself is correct and every
+current write path uses it, but nothing ever repairs an ALREADY-broken
+value: the one self-heal that touches a breached branch's floor
+(`run_branch_cycle`'s flat-branch path) only fires when `equity <
+branch.equity_floor`, and only ever LOWERS the floor - a broken -$50
+floor is already lower than POL's real $-0.00 equity, so the branch
+never even registered as breached and the corrupted value just sat
+there silently, invisible to the very check that exists to catch this.
+
+Fixed with a new, unconditional invariant check at the very top of
+`run_branch_cycle()` (right after loading the branch, before anything
+else runs): if `branch.equity_floor < SEED_USD`, correct it to exactly
+`SEED_USD` - every cycle, for every branch, independent of whether it's
+currently breached. A real, useful side effect confirmed in testing:
+once POL's floor genuinely reads $50.00, it correctly starts reporting
+as floor-paused (equity $-0.00 < $50.00 floor) instead of repeatedly
+attempting and failing a doomed buy against essentially $0 - the
+INSUFFICIENT_FUND rejections visible on the live screenshot stop.
+
+Verified offline (`test_floor_below_seed_self_heal.py`, 3 checks):
+POL's exact real broken state (-$50.00 floor, $-0.004 balance) corrects
+to exactly $50.00 on its very next cycle; a branch with a real, valid
+floor already at or above $50 is completely untouched (no spurious
+write or log line); and a branch with its own real earned tier (e.g.
+$150 for a healthy mid-size balance) is unaffected - this only ever
+repairs a floor below the $50 minimum, never below a branch's own
+legitimately higher tier. Full related regression suite
+(`test_drawdown_breaker.py`, `test_floor_never_negative.py`,
+`test_flat_branch_avoids_excluded_coin.py`,
+`test_reinforcement_skips_excluded_coin.py`,
+`test_bounded_reinforcement_chain.py`,
+`test_reinforcement_recipient_immediate_settle.py`,
+`test_reinforcement_market_quality_gate.py`) re-run clean alongside it.
+
+### 2. "Move cash between branches" logged two byte-identical Activity feed lines for one real action
+
+The same screenshot batch showed the Live Activity feed with the exact
+same real line - "Manually moved $751.19 real cash from
+crypto_tree_sol_usd (now $-0.00) into crypto_btc_compound's BTC-USD
+position - bought 0.00928378 @ $80,511.30, blended entry now $80,519.64,
+branch total now $1051.19" - appearing TWICE in a row. Not an accidental
+duplicate write: `reallocate_cash_between_branches()`
+(`routers/trading_dashboard.py`) has always correctly logged two real,
+separately-tagged rows for one reallocation (a REALLOCATE event on the
+source bot_name, a BUY event on the destination bot_name) - it just
+built both from the exact same shared message string, so the two
+genuinely-different real rows read as an indistinguishable duplicate on
+the dashboard.
+
+Fixed by wording each row from its own branch's real perspective instead
+of sharing one string: the destination's BUY message now says "Received
+$X manually reallocated cash from {source} - bought Y {coin} @ $Z..."
+(its own fill, its own coin); the source's REALLOCATE message now says
+"Manually moved $X of its own idle real cash to {destination} ({coin}) -
+branch total now $Y" (its own remaining balance, naming where the cash
+went). Purely a display/clarity fix - no financial logic changed, both
+rows already carried the correct real bot_name/event_type/amounts.
+
+Verified offline (`test_reallocate_cash_distinct_messages.py`, new, 6
+checks): exactly 2 real activity rows are logged for one real
+reallocation; the destination's row is BUY-tagged and mentions its own
+real coin and fill price; the source's row is REALLOCATE-tagged and
+names the destination branch; and the two messages are no longer
+byte-identical - the real bug reproduced and confirmed fixed. Full
+existing `test_reallocate_cash.py` suite (21 checks covering the actual
+financial logic - blended entries, refusals, failed-buy safety) re-run
+clean alongside it, confirming this was purely a wording change.
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+confirm POL's floor now reads $50.00 (not $-50.00), and that the next
+real "Move cash between branches" action produces two distinct real
+lines in the Activity feed instead of two identical ones.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md
