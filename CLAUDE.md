@@ -8473,6 +8473,76 @@ in the real correct figure.
 
 ---
 
+## Two real bugs found and fixed: the "Next Best Trade" panel was stuck describing the old momentum rule and sorting the wrong direction after the live strategy switched to mean-reversion
+
+The account owner shared a screenshot of the "Next Best Trade" panel
+sitting empty ("Nothing clears every entry check right now — momentum
+setups are rare by design") and asked for it to be fixed. Two real bugs,
+both stemming from the same root cause: this panel was built while
+momentum was the live Alpaca strategy, and nothing was updated when the
+live strategy was switched back to mean-reversion later this same
+session (see "Live Alpaca strategy switched back to mean-reversion"
+above).
+
+1. **The panel's own description text was hardcoded** to the OLD
+   momentum entry rule ("RSI above 55 *and* price above its 20-bar
+   average") - genuinely misleading once the live strategy switched to
+   mean-reversion's real RSI<40 oversold rule, since the account owner
+   had no way to know the panel was checking for the wrong thing.
+   `GET /alpaca-overview/entry-eligibility` (`routers/trading_dashboard.py`)
+   now returns a real `strategy_family` field - read straight from
+   `prop_bot.get_live_strategy_family()`, the SAME function that already
+   gates the real entry logic itself (both in the normal response path
+   and the `STOP_TRADING` early-return, which previously carried no such
+   field at all) - so the label can never disagree with what's actually
+   being checked. `alpaca_dashboard.html`'s `loadNextBestTrade()` now
+   reads this field and updates the panel's description text dynamically
+   between the two real, already-implemented rule descriptions.
+2. **The frontend's sort was hardcoded descending-by-RSI** - correct only
+   for momentum (a HIGHER real RSI is the stronger signal), but backwards
+   for mean-reversion (a LOWER real RSI, deeper oversold, is the stronger
+   signal). Fixed by sorting ascending when `strategy_family ===
+   'mean_reversion'`, descending otherwise - applied to both the eligible
+   picks list and the new near-miss list below.
+3. **A real, honest "closest candidates" fallback** replaces the old
+   blank/generic empty state: when nothing is fully eligible,
+   `loadNextBestTrade()` now also asks for the real per-symbol data the
+   endpoint already returns (RSI + the specific mandate reason for every
+   symbol, not just the eligible ones) and shows the closest real
+   candidates - symbols with genuine live market data that just haven't
+   cleared the gate yet - each with its real RSI and the real reason,
+   instead of leaving the panel looking broken. Deliberately excludes any
+   symbol blocked for a structural reason (already held, excluded, a real
+   kill condition, no real market data) from this fallback list - those
+   aren't "close," they're blocked for an unrelated reason.
+
+Verified offline (`test_next_best_trade_strategy_family.py`, new, 5
+checks) against a real throwaway SQLite DB: the normal response path
+reports the real live `strategy_family`, matching
+`get_live_strategy_family()` directly; switching to `mean_reversion` is
+reflected fresh on the very next call, with the real entry gate itself
+(not just the label) confirmed to have switched too; and the
+`STOP_TRADING` early-return path now also reports the real
+`strategy_family`, where it previously carried none at all. Full existing
+`test_alpaca_entry_eligibility.py` (pre-existing, unchanged) and
+`test_manual_trade_this_stock.py`/`test_live_strategy_family_switch.py`
+regression suites re-run clean alongside it. Confirmed via a real AST
+route-count parse that no route was duplicated (68 total, unchanged - no
+new route was added). `alpaca_dashboard.html` re-verified with a real
+Python `HTMLParser` tag-balance check and `node --check` on the extracted
+inline `<script>` block. The JS sort-direction fix itself isn't
+independently unit-testable from this sandbox (no JS test harness in this
+codebase) - verified by manual review of the ascending/descending sorter
+logic and the syntax check above.
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+confirm the panel's description text now correctly reads "RSI below 40
+(oversold)" (matching the real live mean-reversion strategy), and that
+it shows real closest-candidate RSI values instead of a blank message
+when nothing is currently eligible.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

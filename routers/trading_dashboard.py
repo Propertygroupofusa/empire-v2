@@ -3415,7 +3415,10 @@ async def alpaca_entry_eligibility():
     pb = prop_bot_module
 
     if os.getenv("STOP_TRADING", "false").lower() == "true":
-        return {"tickers": {c["symbol"]: {"eligible": False, "reason": "STOP_TRADING is set - all entries paused", "rsi": None} for c in pb.FUTURES.values()}}
+        return {
+            "tickers": {c["symbol"]: {"eligible": False, "reason": "STOP_TRADING is set - all entries paused", "rsi": None} for c in pb.FUTURES.values()},
+            "strategy_family": await pb.get_live_strategy_family(),
+        }
 
     excluded_symbols = await pb.get_effective_excluded_symbols()
     approved_universe = (
@@ -3494,7 +3497,7 @@ async def alpaca_entry_eligibility():
                     is_valid, mandate_reason = pb.check_momentum_entry_gate(price_data, live_variant)
             results[ticker] = {"eligible": is_valid, "reason": None if is_valid else mandate_reason, "rsi": rsi}
 
-    return {"tickers": results}
+    return {"tickers": results, "strategy_family": strategy_family}
 
 
 async def get_alpaca_locked_usd() -> float:
