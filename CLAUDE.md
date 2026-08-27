@@ -6594,6 +6594,66 @@ under the RSI<40 oversold condition instead of RSI>55 momentum.
 
 ---
 
+## Real bug found and fixed: prop_bot.py's Alpaca futures positions (MES, MNQ) showing up as false SHORTFALLs on the crypto tree's own reconciliation panel
+
+The account owner's own screenshot, taken while working through the
+"Move cash between branches" flow, showed something that didn't belong:
+the crypto family tree's DB-vs-Coinbase reconciliation panel (see
+"DB-vs-Coinbase reconciliation report, made visible on the dashboard"
+above) listed `MES` and `MNQ` - real Alpaca futures contract codes
+(Micro E-mini S&P / Nasdaq) that `prop_bot.py`'s `prop_apex` bot holds,
+never a Coinbase asset - as "Asset" rows with a real `⚠️ SHORTFALL`
+warning, on a panel that should only ever show real Coinbase coins
+(BTC-USD, POL-USD, etc).
+
+Root cause: `bot_positions` (`BotPosition`) is a table SHARED across
+every bot in this codebase - `prop_apex`'s Alpaca futures, the older
+`crypto_coinbase` bot, and every family-tree branch alike - distinguished
+only by the `bot` column, never a separate table per bot. `get_reconciliation_report()`
+did `select(BotPosition)` with **no filter at all**, pulling in every
+bot's rows indiscriminately. Since a futures contract code like `"MES"`
+has no `-` in it, `pos.symbol.split("-")[0]` returned the literal
+contract code as a "currency" and looked IT up against real Coinbase
+balances - which of course never have an MES or MNQ account, producing a
+false `SHORTFALL` on a real, healthy Alpaca position that was never a
+Coinbase asset to begin with, and never should have appeared on this
+panel in the first place.
+
+Fixed by scoping the query to only real, currently-existing family-tree
+branches: fetches every `CryptoTreeBranch.bot_name` first, then filters
+`BotPosition` to `bot.in_(tree_bot_names)` before doing anything else -
+so a `prop_apex` or `crypto_coinbase` position can never enter this
+panel's math at all, regardless of its symbol shape. This panel now only
+ever reports on what it was always meant to: real Coinbase coins the
+family tree itself tracks.
+
+Verified offline (`test_reconciliation_excludes_other_bots.py`, new, 6
+checks) against a real throwaway SQLite DB seeded with two real
+family-tree branches (BTC-USD, POL-USD) plus a real `prop_apex` MES/MNQ
+position and a real older `crypto_coinbase` ETH-USD position sharing the
+identical table: the report correctly includes BTC/POL and correctly
+excludes MES, MNQ, and ETH entirely - not as false shortfalls, just
+absent, matching the panel's real intended scope. The pre-existing
+`test_reconciliation_report.py` was updated in place (not deleted) to
+seed a matching `CryptoTreeBranch` row for every `BotPosition` it seeds
+(now required by the fix - the old fixture never needed one, since the
+old, buggy query had no scoping at all) and gained a new case
+reproducing the exact real MES shape, confirming it's excluded; its
+original assertions (shared-coin summing, exact-match/dust-tolerance/
+missing-currency SHORTFALL logic, whole-fetch-failure handling) are all
+unchanged and still pass. `test_consolidate_branches_by_coin.py` and
+`test_consolidate_pol_dryrun.py` (the reconciliation panel's neighboring
+consolidate-branches feature, which reads real `BotPosition` rows
+directly rather than through this report function) re-run clean
+alongside it, confirming this fix doesn't touch anything outside
+`get_reconciliation_report()` itself.
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+open the family tree dashboard's Reconciliation panel to confirm MES/MNQ
+no longer appear there.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

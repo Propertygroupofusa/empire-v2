@@ -1784,9 +1784,24 @@ async def get_reconciliation_report():
     tolerance for fee/rounding dust), "SHORTFALL" (real balance is
     meaningfully below what the tree thinks it holds - the dangerous
     direction: a phantom position, or one about to become one), or
-    "unchecked" (the real balance lookup itself failed)."""
+    "unchecked" (the real balance lookup itself failed).
+
+    Real bug fixed here: bot_positions is a table SHARED across every bot
+    in this codebase (prop_apex's Alpaca futures, crypto_coinbase, and
+    every family-tree branch), distinguished only by the bot column - an
+    earlier version of this query had no filter at all, so it pulled in
+    prop_apex's real Alpaca futures positions (MES, MNQ, ...) too. Those
+    have no "-" in their symbol, so pos.symbol.split("-")[0] returned the
+    literal contract code as a "currency" and looked it up against real
+    Coinbase balances - which of course never have an MES/MNQ account,
+    producing a false SHORTFALL on a real Alpaca position that was never
+    a Coinbase asset to begin with. Scoped to only real family-tree branch
+    bot_names below, so this panel only ever reports on what it's actually
+    meant to: Coinbase coins the tree itself tracks."""
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(BotPosition))
+        branch_result = await db.execute(select(CryptoTreeBranch.bot_name))
+        tree_bot_names = {row[0] for row in branch_result.all()}
+        result = await db.execute(select(BotPosition).where(BotPosition.bot.in_(tree_bot_names)))
         positions = result.scalars().all()
 
     tracked_by_currency = {}
