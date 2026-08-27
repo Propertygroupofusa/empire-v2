@@ -111,6 +111,20 @@ ROOT_UNLOCK_TIER_USD = engine._safe_float_env("TREE_ROOT_UNLOCK_TIER_USD", "50")
 BRANCH_FLOOR_TIER = engine._safe_float_env("TREE_BRANCH_FLOOR_TIER", "50")
 COORDINATOR_SCAN_SECONDS = engine._safe_int_env("TREE_COORDINATOR_SCAN_SECONDS", "20")
 
+
+def _floor_tier_for_balance(balance: float) -> float:
+    """The real floor-tier formula every self-heal path below uses,
+    clamped so it can never go negative. Real fee/rounding drift can
+    leave a branch's allocated_usd sitting a few cents below zero (a
+    flat branch that's sold down to nothing, its qty-weighted math
+    settling a hair negative) - without the clamp, math.floor(balance /
+    BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER produces a real negative
+    floor (e.g. -$50.00 off a -$0.00-ish balance), which is meaningless
+    and confusing on the dashboard - a floor exists to protect real
+    money, and there's no real money below $0 left to protect. Found
+    live: crypto_tree_xrp_usd_4 showing Balance $-0.00 / Floor -$50.00."""
+    return max(0.0, math.floor(balance / BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER)
+
 # A floor-breach forced exit resets the floor down to only ~3-4% below the
 # fresh post-sale balance (see the tier-reset in _branch_sell_and_settle) -
 # real, but thin. Confirmed live tonight on crypto_tree_dot_usd: AAVE ->
@@ -585,6 +599,37 @@ async def _manually_excluded_still_excluded(live_bad: set = None) -> set:
     return still_excluded
 
 
+async def get_effective_excluded_coins_with_reasons() -> dict:
+    """Same real exclusion computation as get_effective_excluded_coins()
+    below, but returns WHY each excluded coin is excluded instead of just
+    a flat set - built after the account owner pointed out that the live
+    coin-watchlist/backtest page was showing real, hot, bullish coins
+    tagged with a bare "Excluded" badge and no explanation at all, making
+    it impossible to tell whether the exclusion was actually deserved
+    (real bad live trades) or just an artifact of the top-N rotation cutting
+    off a coin that looks great RIGHT NOW. Returns {product_id: reason}
+    for every currently-excluded coin. get_effective_excluded_coins() is a
+    thin wrapper around this returning just the key set, so the two can
+    never disagree with each other."""
+    live_bad = await _compute_live_performance_excluded_coins()
+    manual = await _manually_excluded_still_excluded(live_bad=live_bad)
+    backtest_bad = await _compute_auto_excluded_coins()
+    signal_agreed_bad = backtest_bad & live_bad
+    top_ranked = await _compute_top_ranked_coins()
+
+    reasons = {}
+    for product_id in manual:
+        reasons[product_id] = "Manually excluded (real live losses)"
+    for product_id in signal_agreed_bad:
+        if product_id not in reasons:
+            reasons[product_id] = "Bad recent backtest AND bad real live trades"
+    if top_ranked is not None:
+        for product_id in COIN_FAMILY_TREE:
+            if product_id not in top_ranked and product_id not in reasons:
+                reasons[product_id] = f"Outside the current top {TOP_N_ELIGIBLE_COINS} by backtested ROI"
+    return reasons
+
+
 async def get_effective_excluded_coins() -> set:
     """The real, live set of coins no branch will ever be offered right
     now - whichever of MANUAL_EXCLUDED_COINS hasn't yet healed (see
@@ -616,15 +661,8 @@ async def get_effective_excluded_coins() -> set:
     problem coin without waiting on signal agreement - manual exclusion
     is a deliberate human decision, not an automated-signal question, and
     is completely unaffected by this change."""
-    live_bad = await _compute_live_performance_excluded_coins()
-    manual = await _manually_excluded_still_excluded(live_bad=live_bad)
-    backtest_bad = await _compute_auto_excluded_coins()
-    signal_agreed_bad = backtest_bad & live_bad
-    excluded = manual | signal_agreed_bad
-    top_ranked = await _compute_top_ranked_coins()
-    if top_ranked is not None:
-        excluded |= {p for p in COIN_FAMILY_TREE if p not in top_ranked}
-    return excluded
+    reasons = await get_effective_excluded_coins_with_reasons()
+    return set(reasons.keys())
 
 
 async def get_latest_backtest_result(product_id: str):
@@ -1377,7 +1415,7 @@ async def _force_root_spawn_ready():
         if root.allocated_usd < root.next_unlock_tier:
             log.info("[TREE] _force_root_spawn_ready: root hasn't crossed its own tier yet - nothing to force")
             return
-        new_tier_floor = math.floor(root.allocated_usd / BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER
+        new_tier_floor = _floor_tier_for_balance(root.allocated_usd)
         if root.equity_floor > new_tier_floor:
             async with AsyncSessionLocal() as db:
                 result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == ROOT_BOT_NAME))
@@ -1745,8 +1783,14 @@ async def get_live_coin_snapshot():
 
     Returns {"btc_return_25h": ..., "coins": [...]}, one row per coin in
     COIN_FAMILY_TREE, sorted eligible-right-now first, then by ATR%
-    descending (the same volatility tiebreak the live picker uses)."""
-    excluded = await get_effective_excluded_coins()
+    descending (the same volatility tiebreak the live picker uses). Each
+    row's "exclusion_reason" names the REAL, specific cause when excluded
+    (manual list, bad backtest+bad live combined, or outside the current
+    top-N rotation) rather than a bare true/false - per the account
+    owner's real, direct complaint that hot/bullish coins were showing a
+    plain "Excluded" tag with no way to tell whether that was deserved."""
+    exclusion_reasons = await get_effective_excluded_coins_with_reasons()
+    excluded = set(exclusion_reasons.keys())
     async with engine.aiohttp.ClientSession() as session:
         vol_results, trend_results = await asyncio.gather(
             asyncio.gather(
@@ -1773,6 +1817,7 @@ async def get_live_coin_snapshot():
         row = {
             "product_id": product_id,
             "excluded": product_id in excluded,
+            "exclusion_reason": exclusion_reasons.get(product_id),
             "cooldown": _coin_sale_cooldown_active(product_id),
         }
         if isinstance(result, Exception) or result is None:
@@ -2352,7 +2397,7 @@ async def consolidate_branches_by_coin(dry_run: bool = True) -> dict:
 
         combined_allocated = sum(b.allocated_usd for b in branches)
         new_next_tier = max(b.next_unlock_tier for b in branches if b.next_unlock_tier)
-        new_floor = math.floor(combined_allocated / BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER
+        new_floor = _floor_tier_for_balance(combined_allocated)
 
         positions = []
         for b in branches:
@@ -2620,7 +2665,7 @@ async def _maybe_spawn_child(branch, allow_reinforce: bool = True):
         # the held position's own risk management at all - the floor
         # breach only ever force-sells a healthy held position when its
         # OWN stop has also failed, which this doesn't change either way.
-        new_tier_floor = math.floor(branch.allocated_usd / BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER
+        new_tier_floor = _floor_tier_for_balance(branch.allocated_usd)
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == branch.bot_name))
             row = result.scalar_one_or_none()
@@ -2970,7 +3015,7 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
             # pause. Reset the floor down to match the new balance's own
             # tier so the branch can resume trading immediately; it will
             # only ratchet back up again from here as it earns real gains.
-            new_tier_floor = math.floor(new_allocated / BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER
+            new_tier_floor = _floor_tier_for_balance(new_allocated)
             if new_tier_floor < row.equity_floor:
                 log.info(f"[TREE] 🪜 {bot_name} floor lowered ${row.equity_floor:,.2f} -> ${new_tier_floor:,.2f} to match post-sale balance ${new_allocated:.2f}")
                 row.equity_floor = new_tier_floor
@@ -3163,7 +3208,7 @@ async def run_branch_cycle(bot_name: str) -> bool:
             # current tier - the same reset _branch_sell_and_settle
             # already applies right after a sale - instead of leaving
             # real money frozen waiting for a balance it can't earn.
-            new_tier_floor = math.floor(equity / BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER
+            new_tier_floor = _floor_tier_for_balance(equity)
             if new_tier_floor < branch.equity_floor:
                 async with AsyncSessionLocal() as db:
                     result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))

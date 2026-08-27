@@ -7138,6 +7138,69 @@ branches.
 
 ---
 
+## Real bug found live: a branch's floor could go negative from fee-rounding drift, and the exclusion-reason gap on the live watchlist
+
+Two real, direct reports from the account owner's own screenshots.
+
+**1. `crypto_tree_xrp_usd_4` (POL) showing Balance $-0.00 / Floor -$50.00.**
+A floor should never be negative - it exists to protect real money, and
+there's no real money below $0 left to protect. Root cause: every
+floor-tier self-heal path in this file computed `math.floor(balance /
+BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER` directly, with no floor of its
+own on the result. Real fee/rounding drift (a flat branch sold down to
+genuinely nothing, its qty-weighted math settling a few cents negative)
+produces a real, meaningless negative floor from that formula (e.g.
+`math.floor(-0.004 / 50) * 50 = -50.0`) - exactly reproducing the live
+screenshot. Fixed with one shared `_floor_tier_for_balance(balance)`
+helper (`max(0.0, math.floor(balance / BRANCH_FLOOR_TIER) *
+BRANCH_FLOOR_TIER)`), swapped into every self-heal call site that could
+receive a non-positive balance (`_force_root_spawn_ready`,
+`consolidate_branches_by_coin`, `_maybe_spawn_child`,
+`_branch_sell_and_settle`'s post-sale reset, and the flat-branch
+floor-breach self-heal) - the one raise-only call site
+(`run_branch_cycle`'s floor-raise check) was left untouched since it's
+already guarded by `if equity >= BRANCH_FLOOR_TIER` and can never see a
+negative input.
+
+**2. The live coin watchlist / backtest page tagging hot, bullish coins
+with a bare "Excluded" badge and zero explanation.** The account owner's
+real, direct complaint: real 🔥 bullish coins (BLUR-USD +21.8%,
+UNI-USD +4.95%, SOL-USD +7.8%) were shown "Excluded" with no way to tell
+whether that was deserved (a real problem coin) or just an artifact of
+the top-15 rotation cutting off a coin that looks great this exact
+moment. `get_effective_excluded_coins()` was a black box - it only ever
+returned a flat set, discarding which of its 3 real layers (manual list,
+backtest+live-performance both agreeing bad, or outside the top-N
+ranking) actually fired for a given coin. New
+`get_effective_excluded_coins_with_reasons()` computes the same real
+sets and returns `{product_id: reason}` instead of just the keys -
+`get_effective_excluded_coins()` is now a thin wrapper around it
+returning just the key set, so the two can never disagree.
+`get_live_coin_snapshot()` (the live watchlist's own data source) now
+carries a real `exclusion_reason` per coin, and
+`crypto_selection_backtest.html`'s badge shows the actual real reason
+("Manual", "Bad backtest+live", "Outside top 15 by ROI") with the full
+sentence in a hover/tap tooltip, instead of a bare "Excluded."
+
+Verified offline: `_floor_tier_for_balance` clamps a tiny negative
+balance (the exact real drift shape) to $0.00 instead of -$50.00, a
+zero balance to $0.00, and a real mid-tier balance to its own unchanged
+tier; full existing exclusion-layer regression suite (auto-exclusion,
+live-performance exclusion, manual fast-heal, manual+live-performance
+gate, top-N rotation, flat-branch-avoids-excluded-coin, reinforcement-
+skips-excluded-coin, throne-respects-exclusion) re-run clean, confirming
+the reason-tracking refactor didn't change which coins get excluded,
+only whether the real cause is now visible. HTML tag-balance and
+extracted-script `node --check` both clean on
+`crypto_selection_backtest.html`.
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+check that no branch's floor is negative anymore, and that the
+coin-selection backtest page's "Excluded" badges now show a real,
+specific reason.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

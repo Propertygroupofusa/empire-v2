@@ -191,12 +191,19 @@ function renderWatchlist(data) {
             badge = '<span class="wl-badge wl-eligible">✅ Eligible now</span>';
         } else {
             let reason = 'Blocked';
-            if (c.excluded) reason = 'Excluded';
+            let fullReason = null;
+            if (c.excluded) {
+                fullReason = c.exclusion_reason || 'Excluded';
+                if (fullReason.startsWith('Manually excluded')) reason = 'Manual';
+                else if (fullReason.startsWith('Bad recent backtest')) reason = 'Bad backtest+live';
+                else if (fullReason.startsWith('Outside the current top')) reason = fullReason.replace('the current ', '').replace(' by backtested ROI', '');
+                else reason = 'Excluded';
+            }
             else if (c.cooldown) reason = 'Cooling down';
             else if (c.overbought) reason = 'Overbought';
             else if (c.beats_btc === false) reason = 'Trailing BTC';
             else if (c.higher_tf_uptrend === false) reason = 'Downtrend (1H)';
-            badge = `<span class="wl-badge wl-blocked">${reason}</span>`;
+            badge = `<span class="wl-badge wl-blocked"${fullReason ? ` title="${fullReason}"` : ''}>${reason}</span>`;
         }
 
         return `<tr>
