@@ -126,6 +126,45 @@ async def _fetch_1min_candles_paginated(session, product_id: str, days: float):
     return [float(c[4]) for c in all_candles]
 
 
+async def _fetch_1min_candles_and_volumes_paginated(session, product_id: str, days: float):
+    """Same real, paginated historical fetch as
+    _fetch_1min_candles_paginated above, but also keeps each candle's real
+    volume (Coinbase candle array: [time, low, high, open, close, volume])
+    - needed for the volume_weighted_momentum directional signal below.
+    Kept as a separate function rather than changing the existing one's
+    return shape, since _fetch_1min_candles_paginated already has one
+    real caller (the price-LEVEL backtest) that never needed volume and
+    shouldn't have its return type silently changed. Returns
+    (closes, volumes) - both oldest-first, same length - or (None, None)."""
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=days)
+    all_candles = []
+    cursor = start
+    while cursor < end:
+        page_end = min(cursor + timedelta(seconds=GRANULARITY_SECONDS * 299), end)
+        url = (
+            f"https://api.exchange.coinbase.com/products/{product_id}/candles"
+            f"?granularity={GRANULARITY_SECONDS}&start={cursor.isoformat()}&end={page_end.isoformat()}"
+        )
+        try:
+            async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    if data:
+                        all_candles.extend(data)
+        except Exception as e:
+            log.warning(f"[BTC-PROJECTION] backtest page fetch failed for {cursor.isoformat()}: {e}")
+        cursor = page_end
+        await asyncio.sleep(0.15)  # be polite to the public endpoint
+
+    if len(all_candles) < MIN_LOOKBACK_MINUTES + HORIZON_MINUTES + 10:
+        return None, None
+    all_candles.sort(key=lambda c: c[0])  # oldest-first
+    closes = [float(c[4]) for c in all_candles]
+    volumes = [float(c[5]) for c in all_candles]
+    return closes, volumes
+
+
 async def fetch_live_ticker_price(session, product_id: str = PRODUCT_ID):
     """Real-time last-trade price straight from Coinbase's own real
     `/ticker` endpoint - per the account owner's explicit request to
@@ -303,7 +342,18 @@ async def run_price_projection_backtest(product_id: str = PRODUCT_ID, days: floa
 # trend up above does NOT by itself answer this section's question.
 # ============================================================================
 
-DIRECTIONAL_SIGNAL_NAMES = ["momentum_25min", "rsi_reversion", "prior_window_persistence"]
+DIRECTIONAL_SIGNAL_NAMES = [
+    "momentum_25min", "rsi_reversion", "prior_window_persistence",
+    # Added per the account owner's explicit follow-up request, after the
+    # first three signals all came back essentially at the coin-flip
+    # baseline (49.6%-51.6%): a shorter and a longer lookback variant of
+    # the same "does recent direction persist" idea (maybe 25 minutes is
+    # simply the wrong window, not that momentum has no real signal at
+    # all), plus a genuinely different hypothesis - momentum CONFIRMED by
+    # above-average volume, since a move on high volume is more likely to
+    # be a real, sustained shift than the same move on quiet volume.
+    "momentum_10min", "momentum_60min", "volume_weighted_momentum",
+]
 
 
 def _rsi_from_closes(closes, period: int = 14):
@@ -323,7 +373,47 @@ def _rsi_from_closes(closes, period: int = 14):
     return 100 - (100 / (1 + rs))
 
 
-def _directional_signal_predictions(closes, window_start_idx):
+VOLUME_MOMENTUM_LOOKBACK_MINUTES = 25  # same window as momentum_25min, so the two are a fair apples-to-apples comparison
+VOLUME_BASELINE_LOOKBACK_MINUTES = 60  # what "average volume" is measured against
+
+
+def _momentum_signal(closes, window_start_idx, lookback_minutes):
+    """Shared real logic behind momentum_10min/25min/60min: does price now
+    vs. `lookback_minutes` real minutes ago predict the next window's real
+    direction? Returns None if there isn't yet enough real history."""
+    if window_start_idx < lookback_minutes:
+        return None
+    return "up" if closes[window_start_idx] > closes[window_start_idx - lookback_minutes] else "down"
+
+
+def _volume_weighted_momentum(closes, volumes, window_start_idx):
+    """A real, genuinely different hypothesis from plain momentum: the
+    same 25-minute price move, but only trusted as a real signal when it
+    happened on ABOVE-AVERAGE real volume (average volume over the last
+    VOLUME_MOMENTUM_LOOKBACK_MINUTES vs. the longer
+    VOLUME_BASELINE_LOOKBACK_MINUTES baseline) - a move on real above-
+    average volume is more likely to reflect genuine, sustained buying/
+    selling pressure than the identical price move on quiet volume, which
+    could just as easily be noise. Returns None (no opinion) whenever
+    there isn't enough real history, OR the move happened on real
+    below-average volume - deliberately conservative, matching
+    rsi_reversion's own "undecided in the dead zone" pattern rather than
+    forcing a guess on thin evidence."""
+    if volumes is None or window_start_idx < VOLUME_BASELINE_LOOKBACK_MINUTES:
+        return None
+    direction = _momentum_signal(closes, window_start_idx, VOLUME_MOMENTUM_LOOKBACK_MINUTES)
+    if direction is None:
+        return None
+    recent_window = volumes[window_start_idx - VOLUME_MOMENTUM_LOOKBACK_MINUTES + 1: window_start_idx + 1]
+    baseline_window = volumes[window_start_idx - VOLUME_BASELINE_LOOKBACK_MINUTES + 1: window_start_idx + 1]
+    if not recent_window or not baseline_window:
+        return None
+    avg_recent_vol = sum(recent_window) / len(recent_window)
+    avg_baseline_vol = sum(baseline_window) / len(baseline_window)
+    return direction if avg_recent_vol > avg_baseline_vol else None
+
+
+def _directional_signal_predictions(closes, window_start_idx, volumes=None):
     """Given the real chronological closes array and the real index a
     15-minute window is about to open at, computes each real candidate
     signal's predicted direction using ONLY data available up to that
@@ -331,20 +421,26 @@ def _directional_signal_predictions(closes, window_start_idx):
     "down", or None (signal undecided / not enough real history yet) per
     signal name.
 
-    Three real, simple, un-tuned candidates - not an exhaustive search:
-    - momentum_25min: price now vs. 25 real minutes ago - does recent
-      short-term direction persist into the next window?
+    Six real, simple, un-tuned candidates - not an exhaustive search:
+    - momentum_10min / momentum_25min / momentum_60min: price now vs. N
+      real minutes ago - does recent short-term direction persist into
+      the next window, at three different real lookback lengths?
     - rsi_reversion: RSI < 45 predicts up (mean-reversion), RSI > 55
       predicts down, otherwise undecided - the opposite-direction
       analog of the family tree's own overbought-entry filter.
     - prior_window_persistence: did the PREVIOUS real 15-minute window
-      go up or down - does window-to-window momentum persist?"""
+      go up or down - does window-to-window momentum persist?
+    - volume_weighted_momentum: the same 25-minute move as momentum_25min,
+      but only trusted when it happened on real above-average volume -
+      see _volume_weighted_momentum above. `volumes` is optional
+      (omitted/None means this signal reports no opinion every time,
+      matching every other signal's own "not enough evidence" default)
+      so existing price-only callers are unaffected."""
     preds = {}
 
-    if window_start_idx >= 25:
-        preds["momentum_25min"] = "up" if closes[window_start_idx] > closes[window_start_idx - 25] else "down"
-    else:
-        preds["momentum_25min"] = None
+    preds["momentum_10min"] = _momentum_signal(closes, window_start_idx, 10)
+    preds["momentum_25min"] = _momentum_signal(closes, window_start_idx, 25)
+    preds["momentum_60min"] = _momentum_signal(closes, window_start_idx, 60)
 
     rsi = _rsi_from_closes(closes[:window_start_idx + 1])
     if rsi is None:
@@ -361,10 +457,12 @@ def _directional_signal_predictions(closes, window_start_idx):
     else:
         preds["prior_window_persistence"] = None
 
+    preds["volume_weighted_momentum"] = _volume_weighted_momentum(closes, volumes, window_start_idx)
+
     return preds
 
 
-def _directional_backtest_replay(closes: list) -> dict:
+def _directional_backtest_replay(closes: list, volumes: list = None) -> dict:
     """Pure computation, no I/O: walks real, NON-overlapping 15-minute
     windows (matching how a real prediction-market app's own windows work
     - overlapping windows would inflate the sample count with heavily
@@ -373,7 +471,11 @@ def _directional_backtest_replay(closes: list) -> dict:
     candidate signal's predicted direction using only data up to that
     point, then compares against the REAL direction price actually moved
     over that window. Returns real, honest per-signal hit rates plus the
-    real sample size each is based on - never a fabricated result."""
+    real sample size each is based on - never a fabricated result.
+
+    `volumes` (optional, same length/order as closes) feeds
+    volume_weighted_momentum - omitted means that one signal reports zero
+    real predictions, every price-only signal is unaffected either way."""
     correct = {name: 0 for name in DIRECTIONAL_SIGNAL_NAMES}
     total = {name: 0 for name in DIRECTIONAL_SIGNAL_NAMES}
     num_windows = 0
@@ -381,7 +483,7 @@ def _directional_backtest_replay(closes: list) -> dict:
     i = MIN_LOOKBACK_MINUTES
     while i + HORIZON_MINUTES < len(closes):
         actual_direction = "up" if closes[i + HORIZON_MINUTES] > closes[i] else "down"
-        preds = _directional_signal_predictions(closes, i)
+        preds = _directional_signal_predictions(closes, i, volumes=volumes)
         for name in DIRECTIONAL_SIGNAL_NAMES:
             pred = preds[name]
             if pred is None:
@@ -415,12 +517,16 @@ async def run_directional_signal_backtest(product_id: str = PRODUCT_ID, days: fl
     whether any simple real signal predicts BTC's real 15-minute
     DIRECTION better than a real 50/50 coin flip, on real historical
     Coinbase 1-minute candles. Returns {"error": ...} on a real fetch or
-    data-sufficiency failure, never a fabricated result."""
+    data-sufficiency failure, never a fabricated result.
+
+    Fetches real volume alongside closes (see
+    _fetch_1min_candles_and_volumes_paginated) so volume_weighted_momentum
+    gets real data to work with, not just the price-only signals."""
     async with aiohttp.ClientSession() as session:
-        closes = await _fetch_1min_candles_paginated(session, product_id, days)
+        closes, volumes = await _fetch_1min_candles_and_volumes_paginated(session, product_id, days)
     if closes is None:
         return {"error": f"could not fetch enough real 1-minute history for {product_id} over the last {days} day(s)"}
-    result = _directional_backtest_replay(closes)
+    result = _directional_backtest_replay(closes, volumes=volumes)
     if result is None:
         return {"error": "not enough real candles in the fetched window to produce any samples"}
     result["product_id"] = product_id

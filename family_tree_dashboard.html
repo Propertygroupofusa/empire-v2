@@ -1918,9 +1918,12 @@ async function runBtcProjectionBacktest() {
 }
 
 const DIRECTIONAL_SIGNAL_LABELS = {
+    momentum_10min: 'Momentum (last 10 min)',
     momentum_25min: 'Momentum (last 25 min)',
+    momentum_60min: 'Momentum (last 60 min)',
     rsi_reversion: 'RSI mean-reversion',
     prior_window_persistence: 'Prior window persistence',
+    volume_weighted_momentum: 'Momentum confirmed by volume',
 };
 
 function renderBtcDirectionalResult(data) {

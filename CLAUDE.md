@@ -6911,6 +6911,84 @@ before, and that nothing ever closes while genuinely underwater.
 
 ---
 
+## Three more candidate direction signals added to the BTC direction-signal backtest
+
+Per the account owner's explicit follow-up request, after the original
+three signals (momentum_25min, rsi_reversion, prior_window_persistence)
+all came back essentially at the coin-flip baseline (49.6%-51.6%): rather
+than concluding "no signal exists" from one lookback length and one idea,
+tried a shorter and a longer lookback of the same momentum question, plus
+a genuinely different hypothesis - momentum confirmed by real volume.
+Still shadow-mode only, still never wired to any trade or bet - this is
+the same validated-evidence-first tool the account owner asked for in
+place of a real-money betting mechanism, extended with more real
+candidates.
+
+- **`momentum_10min` / `momentum_60min`** - the same "does recent
+  direction persist" idea as the existing `momentum_25min`, at a shorter
+  and a longer real lookback - maybe 25 minutes was simply the wrong
+  window, not that momentum carries no real signal at all. Shares a new
+  `_momentum_signal(closes, window_start_idx, lookback_minutes)` helper;
+  `momentum_25min` itself is unchanged, just now expressed through the
+  shared helper.
+- **`volume_weighted_momentum`** - a genuinely different hypothesis: the
+  same 25-minute move as `momentum_25min`, but only trusted as a real
+  signal when it happened on real ABOVE-average volume (the last 25
+  minutes' average volume vs. a real 60-minute baseline) - a move on real
+  above-average volume is more likely to reflect genuine, sustained
+  pressure than the identical price move on quiet volume, which could
+  just as easily be noise. Reports no opinion (`None`) on real
+  below-average-volume moves, matching `rsi_reversion`'s own "undecided
+  in the dead zone" pattern rather than forcing a guess on thin evidence.
+
+Required real volume data, which nothing in this module previously
+fetched (only `close` was ever extracted from Coinbase's candle array).
+Added `_fetch_1min_candles_and_volumes_paginated()` as a new, separate
+function rather than changing the existing `_fetch_1min_candles_paginated()`'s
+return shape - that one has a real existing caller (the price-LEVEL
+backtest) that never needed volume and shouldn't have its return type
+silently changed. `run_directional_signal_backtest()` now uses the new
+volume-aware fetch; the price-level backtest and live projection panel
+are completely untouched.
+
+`_directional_signal_predictions()` gained an optional `volumes=None`
+parameter - omitted (every pre-existing call site) means
+`volume_weighted_momentum` reports `None` every time, exactly matching
+every other signal's own "not enough evidence" default; nothing about
+the existing three signals' behavior changed. `DIRECTIONAL_SIGNAL_NAMES`
+(now 6 real candidates) and the dashboard's `DIRECTIONAL_SIGNAL_LABELS`
+map both extended - the frontend's own rendering was already a generic
+loop over whatever `signals` the backend returns, so no other UI change
+was needed beyond adding display labels for the 3 new names.
+
+Verified offline (`test_directional_signal_backtest.py`, extended, 37
+checks total, 10 new): `_momentum_signal` correctly detects a real short
+and longer-lookback rise and returns `None` with too little real history;
+`momentum_10min`/`momentum_60min` flow correctly through
+`_directional_signal_predictions`; `volume_weighted_momentum` correctly
+predicts the real direction when confirmed by real above-average volume,
+correctly reports `None` (not a guess) on the identical real price move
+when volume was actually below-average, correctly returns `None` when
+`volumes` is omitted entirely (safe default, never crashes) or there's
+too little real history for the baseline window, and flows correctly
+end-to-end through `_directional_signal_predictions` when real volumes
+are supplied. Broader BTC-projection regression suite (9 related test
+files) re-run clean alongside it - two files completed all their own
+assertions successfully before hitting the same pre-existing "hangs after
+finishing" sandbox quirk already documented elsewhere in this file,
+unrelated to this change.
+
+**Not yet run against real historical data** - same documented gap as
+every backtest tool in this file (no live network access to Coinbase from
+this sandbox). The account owner needs to open the family tree dashboard
+after the next redeploy and tap "▶ Run signal test" to see whether any of
+the 3 new candidates actually clears the coin-flip bar on real data -
+this tool stays diagnostic only regardless of the outcome; wiring any
+signal into a real trade or bet would be a new, separate, explicit
+decision.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)
