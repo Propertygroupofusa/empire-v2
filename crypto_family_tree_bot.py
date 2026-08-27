@@ -3399,6 +3399,28 @@ async def run_branch_cycle(bot_name: str) -> bool:
                 await db.commit()
         branch.equity_floor = SEED_USD
 
+    # Real invariant self-heal: a branch's own allocated_usd must never sit
+    # below $0.00 - real fee/rounding drift on a flat branch (the same
+    # underlying drift that produced the -$50.00 floor bug above,
+    # math.floor(-0.004 / 50) * 50 = -50) can leave allocated_usd itself a
+    # tiny negative number, e.g. -$0.004. Found live: the account owner
+    # saw POL and SOL both showing "$-0.00 idle" on the "Move Cash Between
+    # Branches" modal - a confusing, misleading real number (there is
+    # genuinely nothing there, but a negative sign implies debt, not
+    # zero) that also meant any attempt to move cash FROM one of these
+    # branches was doomed from the start. Corrected unconditionally, every
+    # cycle, to exactly $0.00 - a flat branch's own bookkept capital can
+    # never be legitimately negative in real terms, this is always drift.
+    if branch.allocated_usd < 0:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
+            row = result.scalar_one_or_none()
+            if row and row.allocated_usd < 0:
+                log.info(f"[TREE] 🪜 {bot_name} allocated_usd corrected ${row.allocated_usd:,.4f} -> $0.00 (fee/rounding drift, never legitimately negative)")
+                row.allocated_usd = 0.0
+                await db.commit()
+        branch.allocated_usd = 0.0
+
     # Catch-up spawn check, every cycle - not just right after a sell.
     # _maybe_spawn_child() is also called directly inside
     # _branch_sell_and_settle() at the moment a sale crosses the tier, but

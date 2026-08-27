@@ -8697,6 +8697,82 @@ for the $776 MCL branch, at today's tiers).
 
 ---
 
+## Real bug found live: "$-0.00 idle" branches were offered as valid cash-move sources, and the display itself was misleading
+
+The account owner shared two real screenshots: the "Move Cash Between
+Branches" modal showing POL (`crypto_tree_xrp_usd_4`) and SOL
+(`crypto_tree_sol_usd`) both listed as "$-0.00 idle" - selectable as a
+real cash source - and a real error after attempting one:
+`Could not move cash: Real Coinbase order did not fill: INSUFFICIENT_FUND:
+Insufficient balance in source account`. Their own read was exactly
+right: "it's saying that is available and it is not."
+
+Two real, separate bugs, both traced to the same root cause already
+documented once for `equity_floor` (the -$50.00 floor bug): a flat
+branch's own `allocated_usd` can drift a tiny amount negative from real
+fee/rounding - e.g. -$0.004 - never legitimately negative in real terms,
+just never self-healed for `allocated_usd` itself the way `equity_floor`
+already was.
+
+1. **The display was actively misleading.** `fmtUsd()` (`family_tree_dashboard.html`)
+   formatted any negative number with a literal minus sign, so a real
+   -$0.004 balance printed as "$-0.00" - a minus sign implying real debt,
+   when the true state was "there is genuinely nothing here." Fixed by
+   clamping any value that ROUNDS to zero to display as a plain "$0.00" -
+   a genuinely negative amount that doesn't round away (e.g. -$5.23, or
+   a real -$0.006 that rounds to -$0.01) still shows its real sign.
+2. **The modal offered these branches as sources at all.** `openReallocateModal()`
+   listed every flat branch as a valid "Move cash FROM" choice regardless
+   of how much real cash it actually held - selecting POL or SOL and
+   hitting submit was always going to fail, since there was nothing real
+   to move. Fixed: the FROM list now filters to branches with at least
+   $0.01 of real idle cash, with a plain-language note explaining how
+   many near-empty branches are hidden and why, instead of offering a
+   choice that can only ever fail.
+3. **The underlying drift itself is now self-healed, not just hidden.**
+   `run_branch_cycle()` (`crypto_family_tree_bot.py`) now corrects any
+   branch's `allocated_usd` back to exactly `$0.00` whenever it drifts
+   negative, every cycle, unconditionally - same "an invariant that can
+   never be negative in real terms gets corrected on sight" pattern the
+   equity_floor fix already established, just applied to the other real
+   number that same drift can corrupt.
+
+No real money was lost from the specific failed attempt shown in the
+screenshot - a real Coinbase order that doesn't fill never charges a
+fee, it simply doesn't execute. The account owner's separate, broader
+"I'm down losing money 10 more extra dollars on a coinbase" concern is a
+different, real question about actual trading P&L, not this UI bug -
+worth a direct look at the Coin Trade History table or a fresh screenshot
+if they want that investigated specifically, rather than assuming it's
+explained by this fix.
+
+Verified offline (`test_allocated_usd_self_heal.py`, new, 3 checks)
+against a real throwaway SQLite DB: a branch with a real non-negative
+`allocated_usd` is left completely untouched (no spurious write); the
+EXACT real -$0.004 drift from the live screenshots heals to precisely
+$0.00 on its very next cycle; and a larger, hypothetical real negative
+drift (-$3.21) also correctly clamps to $0.00, confirming the fix isn't
+narrowly scoped to only the one observed magnitude. The `fmtUsd()` fix
+was verified with a dedicated Node.js reproduction (8 cases): every value
+that rounds to zero (including the real -$0.004 and -$0.0001 cases, and
+literal `-0`) displays as a clean "$0.00"; a real, larger negative value
+(-$5.23) and a real value that rounds to a nonzero negative (-$0.006 →
+"$-0.01") both still show their true sign, unchanged from before. Full
+related regression suite (`test_floor_below_seed_self_heal.py`,
+`test_drawdown_breaker.py`, `test_reallocate_cash.py`,
+`test_reallocate_cash_distinct_messages.py`) re-run clean alongside it.
+`family_tree_dashboard.html` re-verified with a real Python `HTMLParser`
+tag-balance check and `node --check` on the extracted inline `<script>`
+block.
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+confirm POL/SOL no longer show a "$-0.00" minus sign (should read plain
+"$0.00"), that they no longer appear as selectable sources in the Move
+Cash modal, and that their real `allocated_usd` reads exactly $0.00 (not
+negative) on the branch cards after the next cycle.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

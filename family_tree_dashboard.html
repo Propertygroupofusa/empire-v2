@@ -692,7 +692,17 @@ async function apiGet(path) {
 }
 
 function fmtUsd(n) {
-    return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    // A tiny real negative value (fee/rounding drift, e.g. -$0.004) rounds
+    // to "-0.00" once formatted to 2 decimals - a real, confusing display
+    // bug (a minus sign implies debt, not "basically nothing here") that
+    // directly misled the account owner into thinking a near-empty branch
+    // had real cash available to move. Clamp anything that ROUNDS to zero
+    // so it displays as a plain "$0.00" - a genuinely negative value that
+    // doesn't round away (e.g. -$5.23) still shows its real minus sign.
+    const num = Number(n);
+    const rounded = Math.round(num * 100) / 100;
+    const display = rounded === 0 ? 0 : num;
+    return '$' + display.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function spawnPctColor(pct) {
@@ -1220,17 +1230,26 @@ async function openReallocateModal() {
     const branches = statusData.branches || [];
     reallocModal = { branches, selectedSource: null, selectedDest: null };
 
-    const flatBranches = branches.filter(b => !b.position);
+    // Real bug found live: a flat branch with essentially nothing in it
+    // (a few tenths of a cent, sometimes fee/rounding-drifted slightly
+    // negative) still showed up here as a selectable "Move cash FROM"
+    // source - the account owner picked one, and the real Coinbase order
+    // predictably failed with INSUFFICIENT_FUND. There is genuinely
+    // nothing to move from a branch like that, so it's excluded outright
+    // rather than offered and left to fail.
+    const MIN_REALLOC_SOURCE_USD = 0.01;
+    const flatBranches = branches.filter(b => !b.position && b.allocated_usd >= MIN_REALLOC_SOURCE_USD);
+    const emptyFlatCount = branches.filter(b => !b.position && b.allocated_usd < MIN_REALLOC_SOURCE_USD).length;
     const sourceListEl = document.getElementById('realloc-source-list');
     if (flatBranches.length === 0) {
-        sourceListEl.innerHTML = '<div class="coin-history-empty">No branches are currently flat - nothing to move.</div>';
+        sourceListEl.innerHTML = `<div class="coin-history-empty">No branches have real idle cash worth moving right now${emptyFlatCount > 0 ? ` (${emptyFlatCount} flat branch(es) have essentially $0.00)` : ''}.</div>`;
     } else {
         sourceListEl.innerHTML = flatBranches.map(b => `
             <button type="button" class="branch-pick-btn" data-bot="${b.bot_name}" onclick="selectReallocateSource('${b.bot_name}', this)">
                 <span class="coin-name">${b.product_id.replace('-USD', '')}</span>
                 <span class="bot-id">${b.bot_name} · ${fmtUsd(b.allocated_usd)} idle</span>
             </button>
-        `).join('');
+        `).join('') + (emptyFlatCount > 0 ? `<div class="coin-history-empty" style="padding:8px 4px 0; font-size:0.78em;">${emptyFlatCount} other flat branch(es) hidden - they have essentially $0.00 real idle cash, nothing to move.</div>` : '');
     }
 
     const destListEl = document.getElementById('realloc-dest-list');
