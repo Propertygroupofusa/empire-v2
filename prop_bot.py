@@ -945,13 +945,64 @@ AUTO_EXCLUDE_RUN_WINDOW = _safe_int_env("PROP_AUTO_EXCLUDE_RUN_WINDOW", "3")
 
 _last_auto_backtest_at = 0.0
 
+# Per the account owner's explicit request, mirroring the crypto family
+# tree's own top-N coin rotation (see TOP_N_ELIGIBLE_COINS in
+# crypto_family_tree_bot.py): rather than spread capital evenly across
+# every symbol in the universe (a real, strong performer like USO - 74.2%
+# win rate, +19.4% ROI in one real run - diluted by weak ones like DOG or
+# RWM), concentrate new entries on only the top TOP_N_ELIGIBLE_SYMBOLS
+# symbols by latest real backtested ROI. 5 of 11 (roughly half) is the
+# default - a smaller, tighter universe than crypto's 15-of-37, matching
+# how much smaller this real universe is to begin with.
+TOP_N_ELIGIBLE_SYMBOLS = _safe_int_env("PROP_TOP_N_SYMBOLS", "5")
+
+
+async def _compute_top_ranked_symbols():
+    """Real, live ranking by latest AlpacaBacktestRun.roi_pct_of_spend per
+    symbol - the exact same real backtest data get_effective_excluded_
+    symbols() and the dashboard's own table already read, not a new or
+    separately-computed number. Returns the set of the top
+    TOP_N_ELIGIBLE_SYMBOLS symbols by ROI, or None if fewer than
+    TOP_N_ELIGIBLE_SYMBOLS symbols have ANY real backtest run yet - a
+    deliberate cold-start guard, same reasoning as the crypto side's
+    _compute_top_ranked_coins(): with too little real evidence to
+    meaningfully fill a top-N cut, get_effective_excluded_symbols() skips
+    this filter entirely rather than accidentally excluding most of the
+    real universe because most symbols still show as "unranked". One
+    query regardless of universe size (ordered by run_at descending,
+    first row per product_id kept) rather than one query per symbol."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(AlpacaBacktestRun.product_id, AlpacaBacktestRun.roi_pct_of_spend)
+            .order_by(AlpacaBacktestRun.product_id, desc(AlpacaBacktestRun.run_at))
+        )
+        rows = result.all()
+    latest_roi = {}
+    for product_id, roi in rows:
+        if product_id not in latest_roi:
+            latest_roi[product_id] = roi
+    if len(latest_roi) < TOP_N_ELIGIBLE_SYMBOLS:
+        return None
+    ranked = sorted(latest_roi.items(), key=lambda kv: kv[1], reverse=True)
+    return {product_id for product_id, _roi in ranked[:TOP_N_ELIGIBLE_SYMBOLS]}
+
 
 async def get_effective_excluded_symbols() -> set:
     """Real tickers (e.g. "PSQ", not a contract code) currently excluded
     from new entries - both the automatic path (try_open's MANDATE CHECK)
     and the manual "Trade this" endpoint check this before acting. A
     symbol with fewer than AUTO_EXCLUDE_RUN_WINDOW real backtest runs on
-    record is never excluded - there isn't enough evidence yet."""
+    record is never excluded by the auto-exclusion layer - there isn't
+    enough evidence yet.
+
+    Unions two real layers: the existing auto-exclusion (a symbol whose
+    last AUTO_EXCLUDE_RUN_WINDOW runs were ALL negative-ROI) and the
+    top-N concentration filter (see _compute_top_ranked_symbols) - a
+    symbol outside the current top TOP_N_ELIGIBLE_SYMBOLS by real ROI is
+    excluded here too, once enough real evidence exists to rank the whole
+    universe. Neither layer force-closes an existing position - both only
+    ever stop NEW entries, same "never one-way, never touches what's
+    already open" philosophy as every exclusion layer on the crypto side."""
     excluded = set()
     async with AsyncSessionLocal() as db:
         for symbol in {config["symbol"] for config in FUTURES.values()}:
@@ -964,7 +1015,38 @@ async def get_effective_excluded_symbols() -> set:
             recent = result.scalars().all()
             if len(recent) >= AUTO_EXCLUDE_RUN_WINDOW and all(roi < 0 for roi in recent):
                 excluded.add(symbol)
+
+    top_ranked = await _compute_top_ranked_symbols()
+    if top_ranked is not None:
+        for symbol in {config["symbol"] for config in FUTURES.values()}:
+            if symbol not in top_ranked:
+                excluded.add(symbol)
+
     return excluded
+
+
+async def describe_symbol_exclusion_reason(symbol: str) -> str:
+    """The real, specific reason a symbol is currently in
+    get_effective_excluded_symbols()'s set - which of the two real layers
+    (negative-ROI auto-exclusion, or outside the top-N ROI ranking)
+    actually applies - so the dashboard can show an accurate reason
+    instead of always assuming it's the auto-exclusion layer. Only
+    meaningful to call on a symbol already confirmed excluded; returns a
+    generic fallback otherwise."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(AlpacaBacktestRun.roi_pct_of_spend)
+            .where(AlpacaBacktestRun.product_id == symbol)
+            .order_by(desc(AlpacaBacktestRun.run_at))
+            .limit(AUTO_EXCLUDE_RUN_WINDOW)
+        )
+        recent = result.scalars().all()
+    if len(recent) >= AUTO_EXCLUDE_RUN_WINDOW and all(roi < 0 for roi in recent):
+        return f"last {AUTO_EXCLUDE_RUN_WINDOW} real backtest runs were all negative ROI"
+    top_ranked = await _compute_top_ranked_symbols()
+    if top_ranked is not None and symbol not in top_ranked:
+        return f"outside the current top {TOP_N_ELIGIBLE_SYMBOLS} symbols by real backtested ROI"
+    return "currently excluded"
 
 
 async def _run_scheduled_backtest_and_update_exclusions():
@@ -1498,13 +1580,16 @@ async def run_prop_cycle():
             log.warning(f"[MANDATE] {contract} NOT in approved universe - SKIPPING")
             return False
 
-        # MANDATE CHECK 1.5: real-backtest auto-exclusion (see
-        # get_effective_excluded_symbols) - a symbol whose last
-        # AUTO_EXCLUDE_RUN_WINDOW real backtest runs were all negative-ROI
-        # is skipped here, same as the crypto side's coin exclusion.
+        # MANDATE CHECK 1.5: real-backtest auto-exclusion + top-N ROI
+        # concentration (see get_effective_excluded_symbols) - a symbol
+        # whose last AUTO_EXCLUDE_RUN_WINDOW real backtest runs were all
+        # negative-ROI, OR that's currently outside the top
+        # TOP_N_ELIGIBLE_SYMBOLS by real ROI, is skipped here, same as the
+        # crypto side's coin exclusion + top-N rotation.
         excluded_symbols = await get_effective_excluded_symbols()
         if config["symbol"] in excluded_symbols:
-            log.warning(f"[MANDATE] {contract} ({config['symbol']}) auto-excluded - last {AUTO_EXCLUDE_RUN_WINDOW} backtest runs all negative ROI - SKIPPING")
+            reason = await describe_symbol_exclusion_reason(config["symbol"])
+            log.warning(f"[MANDATE] {contract} ({config['symbol']}) excluded - {reason} - SKIPPING")
             return False
 
         # MANDATE CHECK 2: Entry conditions validation

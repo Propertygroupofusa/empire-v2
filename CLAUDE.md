@@ -6313,6 +6313,88 @@ from the entry-variant fix above.
 
 ---
 
+## Top-N ROI concentration filter for the Alpaca side, mirroring the crypto tree's top-15 rotation
+
+The account owner's real point, after seeing USO post a genuine 74.2%
+win rate in one real backtest run while the blended, whole-portfolio
+average sat in the mid-50s: "that win more than losing... 75% win rate
+that's fine... I ain't got to be guarantee." A fair, groundable ask -
+spreading new entries evenly across the whole 11-symbol universe means a
+real standout like USO gets diluted by real laggards like DOG and RWM
+in the same average. The crypto family tree already solved exactly this
+with `TOP_N_ELIGIBLE_COINS` (trade only the top 15 of 37 coins by real
+backtested ROI) - this ports the identical idea to the Alpaca side.
+
+- **`TOP_N_ELIGIBLE_SYMBOLS`** (`prop_bot.py`, `PROP_TOP_N_SYMBOLS`
+  env-overridable, 5 default) - out of the real 11-symbol universe
+  (SPY/QQQ/DIA/IWM/GLD/USO/SLV/SH/PSQ/DOG/RWM), roughly half. Smaller
+  than crypto's 15-of-37 top-N, matching how much smaller this real
+  universe already is.
+- **`_compute_top_ranked_symbols()`** - reads the single latest real ROI
+  per symbol from `AlpacaBacktestRun` (one query, ordered by `run_at`
+  descending, first row per `product_id` kept - the same efficient
+  pattern `_compute_top_ranked_coins()` already uses) and returns the top
+  N, or `None` if fewer than N real symbols have any backtest run on
+  record yet. That `None` is the same deliberate cold-start guard the
+  crypto side uses: `get_effective_excluded_symbols()` skips the top-N
+  filter entirely in that case, rather than accidentally excluding most
+  of a still-unranked universe.
+- **`get_effective_excluded_symbols()`** now unions the top-N filter with
+  the existing negative-ROI auto-exclusion layer - not a replacement, a
+  second real layer stacked on top. Every existing call site
+  (`try_open`'s MANDATE CHECK 1.5, `manual_open_prop_position`,
+  `alpaca_entry_eligibility`) already reads this one function, so no
+  call-site logic needed to change to pick up the new filter - same "one
+  function, every caller inherits it" design the crypto side's
+  `get_effective_excluded_coins()` already established.
+- **`describe_symbol_exclusion_reason(symbol)`** (new) - since a symbol
+  can now be excluded by either of two real, different reasons, the
+  three places that used to hardcode "auto-excluded - last N runs
+  negative" (a 400 on manual "Trade this", the "Right now" eligibility
+  column, and the automatic MANDATE CHECK's own log line) now call this
+  to report whichever real reason actually applies - "last N runs
+  negative ROI" or "outside the current top N by real backtested ROI" -
+  instead of a reason that could be wrong for half of what it now covers.
+- Live, not a snapshot, same as the crypto side: a fresh real backtest
+  run immediately re-ranks the top N on the very next call - a symbol
+  whose real performance improves can rotate IN, and whichever symbol it
+  displaces rotates OUT, with nothing permanent about either direction.
+  Neither layer ever force-closes an existing position - both only ever
+  stop NEW entries.
+- New note on `alpaca_selection_backtest.html` explaining the filter
+  directly above the backtest button, so a symbol newly showing
+  "Excluded - outside the current top 5 by real backtested ROI" in the
+  Right Now column isn't a surprise.
+
+Verified offline (`test_alpaca_top_n_concentration.py`, 14 checks)
+against the real local dev DB: the cold-start guard correctly leaves
+every symbol untouched by the top-N layer until enough real symbols are
+ranked; once ranked, the real top 3 (test uses a smaller N for a
+deterministic scenario) stay eligible while the rest are excluded by the
+top-N layer alone, even with only 1 real run on record (fewer than the
+separate 3-negative-run auto-exclusion threshold would ever act on);
+`describe_symbol_exclusion_reason()` correctly attributes a top-N
+exclusion to ranking and a negative-streak exclusion to its own real
+reason, never conflating the two; and a fresh real run immediately
+re-ranks the top N on the next call, rotating a real improved performer
+in and the symbol it displaces out. `test_alpaca_auto_exclusion.py`
+(pre-existing) was updated in place for the new, more general exclusion
+message text - its actual point (3 consecutive negative runs correctly
+auto-excludes a symbol) is unchanged and still passes. Full related
+regression suite (`test_alpaca_entry_eligibility.py`,
+`test_manual_trade_this_stock.py`, `test_inverse_etfs.py`,
+`test_live_entry_variant_promotion.py`,
+`test_resume_alpaca_active_trading.py`, `test_live_momentum_swap.py`,
+`test_price_rsi_bar_floor.py`) re-run clean alongside it.
+
+**Not yet confirmed against real live trading** - the account owner
+needs to watch the dashboard's "Right now" eligibility column and
+Railway logs after the next redeploy to confirm real entries are now
+concentrating on the top-5 real performers instead of spreading evenly
+across the whole universe.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

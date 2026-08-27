@@ -2734,10 +2734,8 @@ async def manual_open_prop_position(ticker: str):
 
     excluded_symbols = await pb.get_effective_excluded_symbols()
     if ticker in excluded_symbols:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{ticker} is currently auto-excluded - its last {pb.AUTO_EXCLUDE_RUN_WINDOW} real backtest runs were all negative ROI",
-        )
+        reason = await pb.describe_symbol_exclusion_reason(ticker)
+        raise HTTPException(status_code=400, detail=f"{ticker} is currently excluded - {reason}")
 
     async with aiohttp.ClientSession() as session:
         equity = await pb.get_account_equity(session)
@@ -2875,7 +2873,8 @@ async def alpaca_entry_eligibility():
                 results[ticker] = {"eligible": False, "reason": "Not in the approved trading universe", "rsi": None}
                 continue
             if ticker in excluded_symbols:
-                results[ticker] = {"eligible": False, "reason": f"Auto-excluded - last {pb.AUTO_EXCLUDE_RUN_WINDOW} real backtest runs were all negative ROI", "rsi": None}
+                reason = await pb.describe_symbol_exclusion_reason(ticker)
+                results[ticker] = {"eligible": False, "reason": f"Excluded - {reason}", "rsi": None}
                 continue
 
             price_data = await pb.get_price_momentum(session, ticker)
