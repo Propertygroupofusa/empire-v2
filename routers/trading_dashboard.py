@@ -754,6 +754,22 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
             crypto_family_tree_bot_module.engine._last_order_error.get(b.product_id)
             if crypto_family_tree_bot_module is not None else None
         )
+        # Real, live equity - same formula run_branch_cycle() uses to
+        # decide the drawdown breach (allocated_usd + unrealized P&L while
+        # holding) - so the dashboard's own drawdown% can never disagree
+        # with what actually pauses the branch. peak_equity can be NULL on
+        # a row from before this column existed - treat that the same
+        # "not yet initialized, self-heals to today's equity" way the
+        # live bot's own read does, rather than showing a fabricated 0%.
+        equity_now = b.allocated_usd
+        if pos is not None and current_price is not None:
+            equity_now = b.allocated_usd + pos.qty * (current_price - pos.entry_price)
+        peak_equity = b.peak_equity if b.peak_equity else equity_now
+        drawdown_pct = ((peak_equity - equity_now) / peak_equity * 100) if peak_equity > 0 else 0.0
+        drawdown_breaker_pct = (
+            crypto_family_tree_bot_module.DRAWDOWN_BREAKER_PCT * 100 if crypto_family_tree_bot_module is not None else None
+        )
+
         out.append({
             "bot_name": b.bot_name,
             "product_id": b.product_id,
@@ -761,6 +777,10 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
             "allocated_usd": round(b.allocated_usd, 2),
             "equity_floor": round(b.equity_floor, 2),
             "next_unlock_tier": round(b.next_unlock_tier, 2),
+            "peak_equity": round(peak_equity, 2),
+            "drawdown_pct": round(drawdown_pct, 1),
+            "drawdown_breaker_pct": round(drawdown_breaker_pct, 1) if drawdown_breaker_pct is not None else None,
+            "drawdown_breached": drawdown_pct >= drawdown_breaker_pct if drawdown_breaker_pct is not None else False,
             "created_at": b.created_at.isoformat() if b.created_at else None,
             "last_order_error": last_order_error,
             "position": None if pos is None else {

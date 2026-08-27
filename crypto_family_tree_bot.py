@@ -111,6 +111,21 @@ ROOT_UNLOCK_TIER_USD = engine._safe_float_env("TREE_ROOT_UNLOCK_TIER_USD", "50")
 BRANCH_FLOOR_TIER = engine._safe_float_env("TREE_BRANCH_FLOOR_TIER", "50")
 COORDINATOR_SCAN_SECONDS = engine._safe_int_env("TREE_COORDINATOR_SCAN_SECONDS", "20")
 
+# Real, per-branch circuit breaker on top of the fixed-dollar equity_floor
+# ratchet - per the account owner's explicit request, after seeing a
+# real side-by-side comparison showing this catches a losing streak
+# earlier and protects more real capital than the $50-seed floor alone
+# (55% vs. 29% of a hypothetical $150 branch's original balance on the
+# same illustrative losing run). The $50 floor only ever protects an
+# ABSOLUTE dollar minimum - it does nothing for a branch that's grown to
+# several hundred real dollars and then gives back a large chunk of that
+# real growth, since it never gets anywhere near $50. This tracks each
+# branch's own real all-time-high equity (CryptoTreeBranch.peak_equity)
+# and pauses new entries once real equity has fallen this fraction below
+# that branch's own peak - proportional to what THAT branch has actually
+# earned, not a flat dollar line every branch shares.
+DRAWDOWN_BREAKER_PCT = engine._safe_float_env("TREE_DRAWDOWN_BREAKER_PCT", "0.40")
+
 
 def _floor_tier_for_balance(balance: float) -> float:
     """The real floor-tier formula every self-heal path below uses.
@@ -1187,6 +1202,7 @@ async def spawn_child_branch_with_retry(product_id: str, parent_bot_name, attemp
             db.add(CryptoTreeBranch(
                 bot_name=child_name, product_id=product_id, parent_bot_name=parent_bot_name,
                 allocated_usd=SEED_USD, next_unlock_tier=UNLOCK_TIER_USD, equity_floor=0.0,
+                peak_equity=SEED_USD,
             ))
             try:
                 await db.commit()
@@ -2124,6 +2140,7 @@ async def ensure_root_exists(session):
         db.add(CryptoTreeBranch(
             bot_name=ROOT_BOT_NAME, product_id=ROOT_PRODUCT_ID, parent_bot_name=None,
             allocated_usd=starting_equity, next_unlock_tier=UNLOCK_TIER_USD, equity_floor=inherited_floor,
+            peak_equity=starting_equity,
         ))
         await db.commit()
 
@@ -2204,6 +2221,7 @@ async def adopt_orphaned_positions(session):
                 db.add(CryptoTreeBranch(
                     bot_name=bot_name, product_id=product_id, parent_bot_name=None,
                     allocated_usd=position_value, next_unlock_tier=UNLOCK_TIER_USD, equity_floor=0.0,
+                    peak_equity=position_value,
                 ))
                 result = await db.execute(select(BotPosition).where(BotPosition.id == position.id))
                 row = result.scalar_one_or_none()
@@ -2410,6 +2428,15 @@ async def consolidate_branches_by_coin(dry_run: bool = True) -> dict:
         combined_allocated = sum(b.allocated_usd for b in branches)
         new_next_tier = max(b.next_unlock_tier for b in branches if b.next_unlock_tier)
         new_floor = _floor_tier_for_balance(combined_allocated)
+        # The survivor's own real peak_equity (for the drawdown breaker)
+        # never gets LOWERED by a merge - only raised if the new combined
+        # balance is itself a new real high for the survivor. Discarding
+        # the losers' own individual peaks is intentional: post-merge,
+        # "how far below peak" should be measured against the branch's
+        # new real combined total, not a stale pre-merge number from a
+        # branch that no longer exists on its own.
+        new_peak_equity = max((b.peak_equity or 0.0) for b in branches if b.bot_name == survivor.bot_name)
+        new_peak_equity = max(new_peak_equity, combined_allocated)
 
         positions = []
         for b in branches:
@@ -2427,6 +2454,7 @@ async def consolidate_branches_by_coin(dry_run: bool = True) -> dict:
             "combined_allocated_usd": round(combined_allocated, 2),
             "new_next_unlock_tier": new_next_tier,
             "new_equity_floor": new_floor,
+            "new_peak_equity": new_peak_equity,
             "combined_qty": combined_qty,
             "blended_entry_price": blended_entry,
         })
@@ -2464,6 +2492,7 @@ async def consolidate_branches_by_coin(dry_run: bool = True) -> dict:
                     survivor_row.allocated_usd = item["combined_allocated_usd"]
                     survivor_row.next_unlock_tier = item["new_next_unlock_tier"]
                     survivor_row.equity_floor = item["new_equity_floor"]
+                    survivor_row.peak_equity = item["new_peak_equity"]
                     await db.commit()
 
                 for loser_bot_name in item["merged_bot_names"]:
@@ -2851,6 +2880,7 @@ async def _maybe_spawn_child(branch, allow_reinforce: bool = True):
                 db.add(CryptoTreeBranch(
                     bot_name=child_name, product_id=next_product, parent_bot_name=branch.bot_name,
                     allocated_usd=SEED_USD, next_unlock_tier=UNLOCK_TIER_USD, equity_floor=0.0,
+                    peak_equity=SEED_USD,
                 ))
                 await db.commit()
                 remaining = fresh.allocated_usd
@@ -3142,6 +3172,27 @@ async def run_branch_cycle(bot_name: str) -> bool:
             unrealized_pnl = position.qty * (price - position.entry_price)
             equity = branch.allocated_usd + unrealized_pnl
 
+        # Real per-branch peak-equity ratchet, backing DRAWDOWN_BREAKER_PCT
+        # below. NULL means an existing row from before this column
+        # existed (added nullable by main.py's generic column migration,
+        # never backfilled) - self-heal it to this branch's own current
+        # equity on first read, the same "treat an uninitialized value as
+        # today's real number" pattern every other added-later column in
+        # this codebase already uses.
+        stored_peak_equity = branch.peak_equity if branch.peak_equity else equity
+        if equity > stored_peak_equity:
+            stored_peak_equity = equity
+        if stored_peak_equity != branch.peak_equity:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
+                row = result.scalar_one_or_none()
+                if row:
+                    row.peak_equity = stored_peak_equity
+                    await db.commit()
+            branch.peak_equity = stored_peak_equity
+        drawdown_pct = (stored_peak_equity - equity) / stored_peak_equity if stored_peak_equity > 0 else 0.0
+        drawdown_breached = drawdown_pct >= DRAWDOWN_BREAKER_PCT
+
         new_floor = branch.equity_floor
         if equity >= BRANCH_FLOOR_TIER:
             candidate = math.floor(equity / BRANCH_FLOOR_TIER) * BRANCH_FLOOR_TIER
@@ -3156,30 +3207,43 @@ async def run_branch_cycle(bot_name: str) -> bool:
                 log.info(f"[TREE] 🪜 {bot_name} floor raised to ${new_floor:,.2f}")
                 branch.equity_floor = new_floor
 
-        breached = equity < branch.equity_floor
+        floor_breached = equity < branch.equity_floor
+        breached = floor_breached or drawdown_breached
+        # Human-readable, so every log line and the flat-branch self-heal
+        # message below can say WHICH real condition actually fired -
+        # a branch can trip either one independently, or both at once.
+        breach_reason = (
+            f"${equity:.2f} < ${branch.equity_floor:,.2f} floor"
+            if floor_breached and not drawdown_breached else
+            f"down {drawdown_pct*100:.0f}% from its own real ${stored_peak_equity:,.2f} peak"
+            if drawdown_breached and not floor_breached else
+            f"${equity:.2f} < ${branch.equity_floor:,.2f} floor AND down {drawdown_pct*100:.0f}% from its own real ${stored_peak_equity:,.2f} peak"
+            if breached else ""
+        )
 
         if breached and position is not None:
             if price is None:
-                log.warning(f"[TREE] {bot_name}: floor breach but no price available to force-sell - retry next cycle")
+                log.warning(f"[TREE] {bot_name}: breach ({breach_reason}) but no price available to force-sell - retry next cycle")
                 return True
-            # The branch-level floor is a compounding checkpoint unrelated
-            # to THIS position's own entry price - it has no idea whether
-            # the position is still healthy. Forcing an exit here
-            # unconditionally could cut short a position that's still above
-            # its own stop (possibly already breakeven-ratcheted, or
-            # heading to target), realizing a loss the position's own
-            # protections were specifically built to prevent. Only force
-            # the floor-breach exit when the position's OWN stop has
-            # ALSO already failed (price <= stop_price) - at that point
-            # it's exiting anyway, so nothing is lost by labeling it a
-            # floor breach and applying the rebuy cooldown. Otherwise,
-            # leave the position alone and let it run under its own
-            # target/stop/breakeven/giveback protection below - the floor
-            # stays breached (still blocks new entries elsewhere) but this
-            # held position isn't punished for an unrelated milestone.
+            # The branch-level floor/drawdown check is a compounding
+            # checkpoint unrelated to THIS position's own entry price - it
+            # has no idea whether the position is still healthy. Forcing
+            # an exit here unconditionally could cut short a position
+            # that's still above its own stop (possibly already
+            # breakeven-ratcheted, or heading to target), realizing a loss
+            # the position's own protections were specifically built to
+            # prevent. Only force the exit when the position's OWN stop
+            # has ALSO already failed (price <= stop_price) - at that
+            # point it's exiting anyway, so nothing is lost by labeling it
+            # a breach and applying the rebuy cooldown. Otherwise, leave
+            # the position alone and let it run under its own
+            # target/stop/breakeven/giveback protection below - the
+            # breach stays active (still blocks new entries elsewhere)
+            # but this held position isn't punished for an unrelated
+            # milestone.
             if price <= position.stop_price:
-                log.warning(f"[TREE] 🛑 {bot_name} EQUITY FLOOR BREACH: ${equity:.2f} < floor ${branch.equity_floor:,.2f} - force-selling, pausing entries")
-                await _branch_sell_and_settle(session, bot_name, branch.product_id, position, "EQUITY FLOOR BREACH - forced exit")
+                log.warning(f"[TREE] 🛑 {bot_name} BRANCH BREACH: {breach_reason} - force-selling, pausing entries")
+                await _branch_sell_and_settle(session, bot_name, branch.product_id, position, "BRANCH BREACH - forced exit")
                 # Per the account owner, after real evidence of this
                 # exact loop happening live (crypto_tree_dot_usd: AAVE ->
                 # STOP HIT -> instant rebuy into XRP -> breached again ->
@@ -3220,33 +3284,49 @@ async def run_branch_cycle(bot_name: str) -> bool:
             # current tier - the same reset _branch_sell_and_settle
             # already applies right after a sale - instead of leaving
             # real money frozen waiting for a balance it can't earn.
-            new_tier_floor = _floor_tier_for_balance(equity)
-            if new_tier_floor < branch.equity_floor:
-                async with AsyncSessionLocal() as db:
-                    result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
-                    row = result.scalar_one_or_none()
-                    if row:
-                        row.equity_floor = new_tier_floor
-                        await db.commit()
-                # _floor_tier_for_balance() is clamped at SEED_USD - a
-                # branch whose real balance has fallen below its own $50
-                # seed self-heals its floor down toward $50, never below
-                # it, so it can still stay genuinely stuck (equity < the
-                # new floor) rather than actually resuming - say so
-                # honestly instead of always claiming "entries resume."
-                if equity >= new_tier_floor:
+            #
+            # This self-heal only ever concerns the FIXED-DOLLAR floor -
+            # it has nothing to do with a real drawdown breach. Per the
+            # account owner's own explicit choice, a branch paused for
+            # being down DRAWDOWN_BREAKER_PCT from its own real peak is
+            # deliberately one-way: no auto-resume, regardless of what
+            # happens to its floor tier here - it needs real cash
+            # manually added to bring the drawdown back under the
+            # threshold, same "pause it, don't let it dig further"
+            # philosophy already applied to the $50-seed floor clamp.
+            effective_floor = branch.equity_floor
+            if floor_breached:
+                new_tier_floor = _floor_tier_for_balance(equity)
+                if new_tier_floor < branch.equity_floor:
+                    async with AsyncSessionLocal() as db:
+                        result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))
+                        row = result.scalar_one_or_none()
+                        if row:
+                            row.equity_floor = new_tier_floor
+                            await db.commit()
                     log.info(
                         f"[TREE] 🪜 {bot_name} floor lowered ${branch.equity_floor:,.2f} -> ${new_tier_floor:,.2f} "
-                        f"to match its own real balance ${equity:.2f} - entries resume next cycle"
+                        f"to match its own real balance ${equity:.2f}"
                     )
-                else:
-                    log.info(
-                        f"[TREE] 🪜 {bot_name} floor lowered ${branch.equity_floor:,.2f} -> ${new_tier_floor:,.2f} "
-                        f"(clamped at the $50 seed) but its real balance ${equity:.2f} is still below that - "
-                        f"stays paused until manual cash is added (it lost past its own starting capital)"
-                    )
+                    effective_floor = new_tier_floor
+
+            resumes = equity >= effective_floor and not drawdown_breached
+            if resumes:
+                log.info(
+                    f"[TREE] 🪜 {bot_name}: entries resume next cycle (${equity:.2f} now clears its "
+                    f"${effective_floor:,.2f} floor, no real drawdown breach active)"
+                )
+            elif drawdown_breached:
+                log.info(
+                    f"[TREE] 🛑 {bot_name}: paused - real equity ${equity:.2f} is down {drawdown_pct*100:.0f}% "
+                    f"from its own ${stored_peak_equity:,.2f} peak (breaker at {DRAWDOWN_BREAKER_PCT*100:.0f}%) - "
+                    f"stays paused until manual cash is added, no auto-resume"
+                )
             else:
-                log.info(f"[TREE] 🛑 {bot_name}: ${equity:.2f} below floor ${branch.equity_floor:,.2f} - entries paused until it recovers")
+                log.info(
+                    f"[TREE] 🛑 {bot_name}: ${equity:.2f} still below its ${effective_floor:,.2f} floor "
+                    f"(clamped at the $50 seed) - stays paused until manual cash is added"
+                )
             return True
 
         if position is None:

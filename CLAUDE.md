@@ -7314,6 +7314,102 @@ until the account owner sees real numbers and explicitly says to change it.
 
 ---
 
+## Real per-branch drawdown circuit breaker, chosen live from a visual comparison
+
+Right after the $50-seed floor clamp shipped, the account owner asked
+whether it was actually better than the old $0 clamp - answered honestly
+(it only helps a branch that's already lost nearly everything; most of
+this tree's real damage happened well above $50, where this floor never
+engages) and offered an alternative: a real circuit breaker that pauses a
+branch once it's down some percentage from its OWN recent peak, which
+would catch a losing streak earlier regardless of dollar size. Built a
+real visual artifact comparing all three (old $0 clamp, live $50 floor,
+proposed drawdown breaker) running the identical hypothetical losing
+streak - the drawdown breaker preserved 55% of the original balance vs.
+the $50 floor's 29%. The account owner picked it directly from the
+numbers: "this is better than 29% so do this one."
+
+Implemented as an ADDITIONAL layer on top of the existing $50-seed floor,
+not a replacement - the floor protects an absolute dollar minimum every
+branch shares; the drawdown breaker protects a real PERCENTAGE of
+whatever that specific branch has actually earned, which matters most for
+a branch that's grown well past $50 and would never trip the fixed floor
+at all. Both can independently pause a branch; whichever fires first
+does.
+
+- **`CryptoTreeBranch.peak_equity`** (new column, `models.py`) - each
+  branch's own real all-time-high equity (`allocated_usd` + any real
+  unrealized P&L while holding), a pure ratchet that only ever rises.
+  Added nullable via the existing generic startup column migration
+  (`main.py` - no custom migration needed); an existing row reads back
+  `NULL` and self-heals to that branch's own current real equity on its
+  very next cycle, the same "treat uninitialized as today's real number"
+  pattern every other added-later column in this file already uses. Set
+  explicitly at every real branch-creation site (manual spawn, root
+  seeding, orphan adoption, organic spawn) so a brand-new branch never
+  needs the self-heal path at all.
+- **`DRAWDOWN_BREAKER_PCT`** (40% default, `TREE_DRAWDOWN_BREAKER_PCT`
+  env-overridable) - `run_branch_cycle()` now computes real
+  `drawdown_pct = (peak_equity - equity) / peak_equity` every cycle
+  alongside the existing fixed-dollar floor check, using the exact same
+  real equity figure (`allocated_usd` + unrealized P&L) the floor-breach
+  fix already established. `breached = floor_breached or drawdown_breached`
+  - either real condition alone pauses new entries; a held position still
+  only ever force-sells here when its OWN stop has ALSO already failed
+  (the existing "never punish a healthy position for an unrelated
+  milestone" rule, completely unchanged and now shared by both breach
+  types).
+- **Deliberately one-way, no auto-resume, matching the $50-floor
+  follow-up's own philosophy**: a branch paused for real drawdown does
+  NOT self-heal on its own the way the fixed-dollar floor tier does -
+  `peak_equity` never lowers itself to make the drawdown look smaller.
+  It only clears once real cash is manually added (Add Cash / Move Cash
+  Between Branches / consolidate) and brings equity back within
+  `DRAWDOWN_BREAKER_PCT` of the real peak - the account owner's own
+  explicit "pause it, don't let it dig further" choice, applied
+  consistently to both protections.
+- **`consolidate_branches_by_coin()`** - the survivor's `peak_equity`
+  after a merge is `max(its own real prior peak, the new combined
+  balance)` - never lowered by folding branches together (a merge isn't
+  a loss), but does ratchet up if the combined total is itself a genuine
+  new real high.
+- **Visible on the dashboard**, not just in logs: `GET /family-tree-status`
+  now returns `peak_equity`/`drawdown_pct`/`drawdown_breached` per branch
+  (computed with the identical real equity formula the live bot itself
+  uses, so the dashboard can never disagree with what's actually pausing
+  a branch). `family_tree_dashboard.html` shows a real "Peak / drawdown"
+  row on every branch once it's down more than a trivial amount, and a
+  red "🛑 Paused: down X% from its own $Y peak..." note (reusing the
+  existing order-error-note styling) once a branch is actually breached
+  this way.
+
+Verified offline (`test_drawdown_breaker.py`, 15 checks, real throwaway
+SQLite DB): a branch down exactly 40% from its own real peak - while
+still comfortably above the $50 floor the whole time, proving this is a
+genuinely NEW protection the fixed floor alone would never catch - pauses
+with no buy; the same branch down just 39% buys normally; a `NULL`
+`peak_equity` (a legacy row) self-heals to today's real equity and the
+branch trades normally with no false breach; `peak_equity` ratchets UP on
+a genuine new real high and is confirmed untouched on a dip; a held
+position still above its own real stop is NOT force-sold by a drawdown
+breach alone; a held position whose own stop has ALSO failed still
+force-sells correctly under a drawdown breach; and real cash added that
+brings equity back within the threshold resumes trading on its own, no
+manual override needed beyond the cash itself. `test_consolidate_peak_equity.py`
+(5 checks) separately confirms the merge-time peak handling: never
+lowered by a merge, but ratchets up on a genuine new combined high. Full
+existing regression suite (floor-clamp, quick-profit, exclusion-layer,
+reallocate-cash, consolidate, reinforcement-fallback tests) re-run clean
+alongside both. HTML tag-balance and extracted-script `node --check`
+both clean on `family_tree_dashboard.html`.
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+watch for the new "Peak / drawdown" row on branch cards, and confirm a
+branch that's genuinely down 40%+ from its own peak shows the red paused
+note and stops taking new entries.
+
+---
+
 ## Known Limitations & TODOs
 
 - **Email:** Gmail not configured (skip for now, test with HeyGen generation only)

@@ -885,6 +885,21 @@ class CryptoTreeBranch(Base):
     # account - each branch protects its own banked progress independently.
     equity_floor = Column(Float, default=0.0)
 
+    # Real, per-branch all-time high-water mark of this branch's own
+    # equity (allocated_usd + any unrealized P&L while holding) - a pure
+    # ratchet, never lowered except when a branch is folded into another
+    # via consolidate_branches_by_coin. Backs the real drawdown circuit
+    # breaker in run_branch_cycle() (DRAWDOWN_BREAKER_PCT): unlike
+    # equity_floor (a fixed dollar tier), this protects a branch that's
+    # GROWN a lot from giving back a large real percentage of its own
+    # gains, which a $50-tier floor would never catch on a branch with
+    # hundreds of real dollars in it. Existing rows get this column added
+    # as NULL by the generic startup column migration (main.py) - treated
+    # as "not yet initialized" and self-healed to the branch's own current
+    # equity on first read, same as every other added-later column in
+    # this codebase.
+    peak_equity = Column(Float, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

@@ -894,6 +894,19 @@ function branchCardHtml(b) {
         ? `<div class="order-error-note">⚠️ Last order rejected: ${b.last_order_error}</div>`
         : '';
 
+    // Real per-branch drawdown circuit breaker, per the account owner's
+    // explicit choice (a real side-by-side comparison showed it protects
+    // more real capital, earlier, than the $50-seed floor alone). Shown
+    // for every branch so "how far below its own peak" is always
+    // visible, not just at the moment it trips - the breach note only
+    // appears once it actually pauses new entries.
+    const drawdownHtml = (b.drawdown_pct != null && b.drawdown_pct > 0.5)
+        ? `<div class="row"><span class="k">Peak / drawdown</span><span class="v">${fmtUsd(b.peak_equity)} <span style="color:${b.drawdown_breached ? 'var(--red)' : 'var(--text-dim)'}">(&minus;${b.drawdown_pct.toFixed(0)}%)</span></span></div>`
+        : '';
+    const drawdownBreachHtml = b.drawdown_breached
+        ? `<div class="order-error-note">🛑 Paused: down ${b.drawdown_pct.toFixed(0)}% from its own ${fmtUsd(b.peak_equity)} peak (breaker at ${b.drawdown_breaker_pct}%) - needs manual cash to resume</div>`
+        : '';
+
     return `
         <div class="card ${isRoot ? 'root' : ''}">
             <div class="card-top" style="margin-bottom:2px;">
@@ -902,6 +915,7 @@ function branchCardHtml(b) {
             <div class="bot-name" style="margin-bottom:8px;">${b.bot_name}</div>
             <div class="row"><span class="k">Balance</span><span class="v">${fmtUsd(b.allocated_usd)}</span></div>
             <div class="row"><span class="k">Floor</span><span class="v">${fmtUsd(b.equity_floor)}</span></div>
+            ${drawdownHtml}
             ${profitRowHtml}
             ${feeRowHtml}
             <div class="progress-wrap">
@@ -912,6 +926,7 @@ function branchCardHtml(b) {
             ${sellBtnHtml}
             ${adviceHtml}
             ${orderErrorHtml}
+            ${drawdownBreachHtml}
         </div>`;
 }
 
