@@ -110,6 +110,11 @@
         font-size: 1em; font-family: inherit; color: var(--text);
     }
     .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+    .branch-progress-wrap { margin-top: 5px; min-width: 110px; }
+    .branch-progress-label { display: flex; justify-content: space-between; font-size: 0.72em; color: var(--text-dim); margin-bottom: 2px; }
+    .branch-progress-bar-bg { width: 100%; height: 7px; background: #eef1f6; border-radius: 4px; overflow: hidden; }
+    .branch-progress-bar-fill { height: 100%; background: linear-gradient(90deg, var(--green), #00c46a); transition: width 0.4s ease; }
+
     .branch-rankings-wrap { max-height: 200px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 16px; }
     .branch-rank-row {
         display: flex; justify-content: space-between; align-items: center; gap: 8px;
@@ -909,10 +914,16 @@ function renderBranches(data) {
                     const posStr = pos
                         ? `${pos.side.toUpperCase()} ${Number(pos.qty).toFixed(4)} @ ${fmtUsd(pos.entry)}`
                         : '<span style="color:var(--text-dim);">flat</span>';
+                    const pct = b.reinforcement_progress_pct;
+                    const progressHtml = pct == null ? '' : `
+                        <div class="branch-progress-wrap">
+                            <div class="branch-progress-label"><span>Next reinforcement</span><span>${pct.toFixed(0)}%</span></div>
+                            <div class="branch-progress-bar-bg"><div class="branch-progress-bar-fill" style="width:${pct}%;"></div></div>
+                        </div>`;
                     return `<tr style="border-bottom:1px solid var(--border);">
                         <td style="padding:6px 8px;">${b.bot_name}</td>
                         <td style="padding:6px 8px;">${b.contract} (${b.symbol || '?'})</td>
-                        <td style="padding:6px 8px;">${fmtUsd(b.allocated_usd)}</td>
+                        <td style="padding:6px 8px;">${fmtUsd(b.allocated_usd)}${progressHtml}</td>
                         <td style="padding:6px 8px;">${posStr}</td>
                         <td style="padding:6px 8px;">${b.active ? '🟢 active' : '⏸️ paused'}</td>
                         <td style="padding:6px 8px;">
@@ -923,7 +934,12 @@ function renderBranches(data) {
                     </tr>`;
                 }).join('')}
             </tbody>
-        </table>`;
+        </table>
+        <p style="margin-top:10px; font-size:0.76em; color:var(--text-dim); line-height:1.5;">
+            "Next reinforcement" is real progress toward this branch's own tier - once it crosses 100%, its extra
+            capital is moved into whichever OTHER active branch is currently weakest (never a brand-new branch or a
+            new symbol - only the branches already listed above can receive it, and only while they're flat).
+        </p>`;
 }
 
 async function loadBranches() {

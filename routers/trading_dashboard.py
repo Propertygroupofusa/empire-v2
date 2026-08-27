@@ -3101,7 +3101,17 @@ async def get_alpaca_branches_status():
     Fails open on a real buying-power fetch hiccup (returns null for
     those three fields rather than erroring the whole status call) -
     this endpoint's job is to inform, not to gate; the real, blocking
-    affordability check still lives in the create endpoint."""
+    affordability check still lives in the create endpoint.
+
+    Also reports each branch's real progress toward its own
+    `next_unlock_tier` - per the account owner's explicit "let me know
+    when it's about ready to [reinforce] some more money" request. This
+    is the real, live number `prop_bot._alpaca_maybe_spawn_or_reinforce()`
+    itself checks every cycle (`allocated_usd >= next_unlock_tier`), not a
+    separately-estimated one - so the dashboard can never show "ready"
+    when the bot itself isn't. `reinforcement_progress_pct` is `None` for
+    a legacy branch with no `next_unlock_tier` on record yet (a row
+    created before this column existed)."""
     if prop_bot_module is None:
         raise HTTPException(status_code=500, detail="prop_bot module not available")
     branches = await prop_bot_module.get_alpaca_branches()
@@ -3110,6 +3120,9 @@ async def get_alpaca_branches_status():
     for b in branches:
         position = prop_bot_module.open_alpaca_branch_positions.get(b.bot_name)
         config = prop_bot_module.FUTURES.get(b.contract, {})
+        progress_pct = None
+        if b.next_unlock_tier:
+            progress_pct = round(min(100.0, (b.allocated_usd / b.next_unlock_tier) * 100), 1)
         rows.append({
             "bot_name": b.bot_name,
             "contract": b.contract,
@@ -3117,6 +3130,8 @@ async def get_alpaca_branches_status():
             "allocated_usd": round(b.allocated_usd, 2),
             "active": b.active,
             "position": position,
+            "next_unlock_tier": round(b.next_unlock_tier, 2) if b.next_unlock_tier else None,
+            "reinforcement_progress_pct": progress_pct,
         })
 
     buying_power = None

@@ -8632,6 +8632,71 @@ tap.
 
 ---
 
+## Real "Next reinforcement" progress bar added to the Alpaca branches table
+
+The account owner asked directly: "let me know when [a branch] is about
+ready to spawn into some more money and that more money will pick
+another stock." Two things worth being precise about, both addressed
+here:
+
+1. **A real misunderstanding worth correcting up front**: Alpaca
+   branches do NOT spawn a brand-new branch on a new symbol the way
+   crypto branches do - see "Bounded multi-hop reinforcement chain,
+   ported to the Alpaca side too" above. Crossing its own tier moves that
+   branch's extra capital into whichever OTHER existing, flat Alpaca
+   branch is currently weakest - never a new branch, never a new symbol.
+   With only two real branches today (MES→SPY, MCL→USO), a reinforcement
+   can only ever move capital between those same two.
+2. **This session has no live network access to the deployed app** (confirmed
+   repeatedly throughout this file - a request to the production URL gets
+   a real 403 at the outbound proxy), so a Claude session can't
+   proactively "let you know" the moment this happens. The real, honest
+   fix is to make that progress visible on the dashboard itself, so it's
+   answerable at a glance without needing to ask.
+
+`GET /alpaca-overview/branches` (`routers/trading_dashboard.py`) now
+also returns `next_unlock_tier` and `reinforcement_progress_pct` per
+branch, computed from the EXACT SAME real check
+`prop_bot._alpaca_maybe_spawn_or_reinforce()` itself runs every cycle
+(`allocated_usd >= next_unlock_tier`) - reused, not re-derived, so the
+dashboard can never show "ready" when the bot itself isn't. Clamped to
+100% max (a branch can sit above its own tier for one cycle before the
+reinforcement actually fires). A legacy branch with no `next_unlock_tier`
+on record (a row created before that column existed) reports both fields
+as honest `None`, never a fabricated percentage.
+
+`alpaca_dashboard.html`'s Real Branches table shows a real "Next
+reinforcement" progress bar under each branch's Allocated amount (same
+green gradient bar/label styling already used on the crypto family tree
+dashboard's own "Next spawn" bar, for visual consistency across both
+dashboards), plus a plain-language note under the table making explicit
+that this only ever moves capital between the branches already listed,
+never onto a new symbol.
+
+Verified offline (`test_alpaca_branch_reinforcement_progress.py`, new, 6
+checks) against a real throwaway SQLite DB, reproducing the account
+owner's own real two branches: a $37 branch against its own real $137
+tier reports ~27.0%; a $776 branch against its own real $876 tier
+reports ~88.6%; a branch whose real balance has grown past its own tier
+(hasn't been reinforced yet this cycle) still clamps to 100%, never
+over; and a legacy branch with no `next_unlock_tier` on record reports
+both new fields as honest `None` rather than crashing or fabricating a
+number. Full existing regression suite (`test_alpaca_branches.py`,
+`test_branch_symbol_rankings.py`, `test_branch_spendable_hint.py`)
+re-run clean alongside it. Confirmed via a real AST route-count parse
+that no route was duplicated (69 total, unchanged - this extended an
+existing endpoint). `alpaca_dashboard.html` re-verified with a real
+Python `HTMLParser` tag-balance check and `node --check` on the
+extracted inline `<script>` block.
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+open the Alpaca dashboard to see the real "Next reinforcement" bars
+under each branch, and confirm the percentages match what the branch's
+own real numbers imply (roughly 27% for the $37 MES branch, roughly 89%
+for the $776 MCL branch, at today's tiers).
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md
