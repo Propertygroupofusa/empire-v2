@@ -904,6 +904,109 @@ async def _log_combined_equity_snapshot_if_due(db: AsyncSession, alpaca_equity, 
         log.warning(f"[dashboard] combined-equity snapshot logging failed (non-fatal): {exc}")
 
 
+def _project_years_to_goal(history_rows, combined_equity: float, goal: float):
+    """Real, honest linear extrapolation from the same real momentum the
+    dashboard's own momentum line already shows - "at this pace, how long
+    to $1M" - per the account owner's explicit request for a report that
+    "makes sense of this" and "let us know how to move forward." NOT a
+    promise or a trading-performance grade: the real delta between the
+    first and last real snapshot reflects everything that happened in
+    that window, real trading gains AND any new cash added - the caller
+    is expected to caveat it that way.
+
+    Returns (years, basis_days) - years is None when there isn't enough
+    real history yet (fewer than 2 snapshots) OR when the real recent
+    trend is flat/negative (extrapolating a falling or flat line to a
+    HIGHER goal is meaningless - reported as None, not a nonsensical
+    negative or infinite number). basis_days is returned even when years
+    is None so the caller can still say how much real history the "no
+    projection yet" verdict itself is based on."""
+    if not history_rows or len(history_rows) < 2:
+        return None, None
+    first, last = history_rows[0], history_rows[-1]
+    span_days = (last.created_at - first.created_at).total_seconds() / 86400.0
+    if span_days <= 0:
+        return None, None
+    delta = last.combined_equity - first.combined_equity
+    if delta <= 0:
+        return None, round(span_days, 2)
+    daily_rate = delta / span_days
+    remaining = goal - combined_equity
+    if remaining <= 0:
+        return 0.0, round(span_days, 2)
+    years = (remaining / daily_rate) / 365.25
+    return round(years, 1), round(span_days, 2)
+
+
+def _build_progress_observations(alpaca_data, crypto_data):
+    """Real, concrete observations about what's currently helping or
+    hurting progress toward the combined goal - per the account owner's
+    explicit ask for "how we can get there and keep moving forward."
+    Built entirely from data alpaca_data/crypto_data already computed
+    this same poll (get_alpaca_overview/get_family_tree_status, no new
+    live API calls) - never fabricates a prediction or a dollar-amount
+    promise, only reports real, already-verified system state and points
+    at real, already-built levers (a paused branch, idle cash, a paused
+    rolling-expectancy gate) the account owner can actually act on right
+    now. Returns a list of {icon, tone, text} - tone is 'warn' (orange),
+    'info' (navy), or 'good' (green), for the dashboard to color-code."""
+    observations = []
+
+    if crypto_data:
+        if crypto_data.get("crypto_passive_mode"):
+            observations.append({
+                "icon": "🔒", "tone": "warn",
+                "text": "Crypto family tree is retired (passive mode) - no new entries or exits are happening on that side at all.",
+            })
+        rolling = crypto_data.get("rolling_expectancy")
+        if rolling and rolling.get("negative"):
+            observations.append({
+                "icon": "🐢", "tone": "warn",
+                "text": (
+                    f"Crypto entries are tree-wide paused - the last {rolling['num_trades']} real trades "
+                    f"averaged ${rolling['expectancy']:.2f} each. Clears automatically once real recent wins "
+                    f"bring the average back positive - no action needed, just something worth knowing about."
+                ),
+            })
+        branches = crypto_data.get("branches") or []
+        paused_dd = [b for b in branches if b.get("drawdown_breached")]
+        if paused_dd:
+            names = ", ".join(
+                b["bot_name"].replace("crypto_tree_", "").replace("_usd", "").upper() for b in paused_dd[:4]
+            )
+            more = f" (+{len(paused_dd) - 4} more)" if len(paused_dd) > 4 else ""
+            observations.append({
+                "icon": "🛑", "tone": "warn",
+                "text": f"{len(paused_dd)} branch(es) paused by the drawdown breaker - {names}{more}. Add real cash to resume, or leave them paused on purpose.",
+            })
+        spendable = crypto_data.get("spendable_for_spawn")
+        if spendable is not None and spendable >= 25:
+            observations.append({
+                "icon": "💵", "tone": "info",
+                "text": f"${spendable:,.2f} of real free crypto cash isn't deployed anywhere in the tree right now - Move Cash Between Branches or Add Cash can put it to work.",
+            })
+
+    if alpaca_data:
+        if alpaca_data.get("alpaca_passive_mode"):
+            observations.append({
+                "icon": "🔒", "tone": "warn",
+                "text": "Alpaca active trading is retired (passive mode) - only the held SPY position moves with the market, nothing new is being traded.",
+            })
+        elif alpaca_data.get("cash") is not None and alpaca_data["cash"] >= 25:
+            observations.append({
+                "icon": "💵", "tone": "info",
+                "text": f"${alpaca_data['cash']:,.2f} of real Alpaca cash is sitting uninvested right now.",
+            })
+
+    if not observations:
+        observations.append({
+            "icon": "✅", "tone": "good",
+            "text": "Nothing is currently paused or sitting idle on either side - both systems are actively working with what they have.",
+        })
+
+    return observations
+
+
 @router.get("/combined-equity-progress", dependencies=[Depends(require_admin_key)])
 async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
     """Real, combined progress toward the account owner's own $1,000,000
@@ -925,6 +1028,7 @@ async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
     fails OPEN on its own (a real Alpaca or Coinbase hiccup degrades that
     one side to null/0 rather than taking down the whole combined view) -
     never silently reports 0 as if that were a real, confirmed balance."""
+    alpaca_data = None
     alpaca_equity = None
     alpaca_error = None
     try:
@@ -934,6 +1038,7 @@ async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
         alpaca_error = str(exc)
         log.warning(f"[dashboard] combined-equity: Alpaca side unavailable this poll: {exc}")
 
+    crypto_data = None
     crypto_equity = None
     crypto_error = None
     try:
@@ -959,6 +1064,9 @@ async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
     )
     history = list(reversed(history_result.scalars().all()))
 
+    projected_years_to_goal, projection_basis_days = _project_years_to_goal(history, combined_equity, COMBINED_GOAL_USD)
+    observations = _build_progress_observations(alpaca_data, crypto_data)
+
     return {
         "alpaca_equity": round(alpaca_equity, 2) if alpaca_equity is not None else None,
         "alpaca_error": alpaca_error,
@@ -968,6 +1076,9 @@ async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
         "goal": COMBINED_GOAL_USD,
         "combined_progress_pct": combined_progress_pct,
         "history": [h.to_dict() for h in history],
+        "projected_years_to_goal": projected_years_to_goal,
+        "projection_basis_days": projection_basis_days,
+        "observations": observations,
     }
 
 

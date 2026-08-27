@@ -8172,6 +8172,82 @@ weekly, then monthly, as real history builds up over time.
 
 ---
 
+## Combined progress tracker gained an honest "at this pace" projection plus real observations - what's helping/hurting, and what to do about it
+
+Right after the combined $1M tracker shipped, the account owner asked
+for it to go further: "give me a report about what's been done and what
+the outcome is going to be by percentage wise or money wise... I think
+this would be a good observation option as well... let us know how to
+move forward." Two additive, backend-computed fields (so both dashboards
+render the identical numbers, never derived twice):
+
+**`_project_years_to_goal(history_rows, combined_equity, goal)`**
+(`routers/trading_dashboard.py`) - a real, honest linear extrapolation
+from the same real momentum the chart already shows: (real $ delta over
+the tracked window) / (real days in that window) = a daily rate, then
+(remaining $ to $1M) / (daily rate) = years. Deliberately NOT a promise -
+returns `None` (never a nonsensical negative or infinite number) when
+there's fewer than 2 real snapshots yet, or when the real recent trend
+is flat/negative (extrapolating a falling line to a HIGHER goal is
+meaningless). Always returns the real `basis_days` alongside the years
+figure (or alone, when years is None) so the frontend can caveat
+accordingly - "at this pace" quietly incorporates real trading gains AND
+any new cash added during that window, not trading performance alone,
+and the UI says so explicitly.
+
+**`_build_progress_observations(alpaca_data, crypto_data)`** - real,
+concrete "what's currently helping or hurting" bullets, built entirely
+from data `get_alpaca_overview`/`get_family_tree_status` already
+computed this same poll (zero new live API calls). Checks: crypto
+passive mode, a real negative rolling expectancy (tree-wide entries
+paused), real drawdown-breached branches (named, up to 4 then "+N more"),
+real idle crypto cash sitting undeployed (`spendable_for_spawn` >= $25),
+Alpaca passive mode, and real idle Alpaca cash (>= $25, only checked when
+NOT passive - `elif`, not two separate warnings for the same state).
+Never fabricates a suggestion or a prediction - only surfaces real,
+already-verified system state and points at real, already-built levers
+(Add Cash, Move Cash Between Branches) the account owner can actually
+use right now. A completely clean state (nothing paused, no idle cash)
+returns exactly one real "✅ all clear" observation rather than an empty
+list, so the panel never looks broken when everything's fine.
+
+Both new fields (`projected_years_to_goal`, `projection_basis_days`,
+`observations`) ride the existing `GET /combined-equity-progress`
+response - no new endpoint. `alpaca_dashboard.html` and
+`family_tree_dashboard.html` both gained a `fmtProjection()` line under
+the momentum text (color-coded confidence caveat: "well under a week" /
+"under a month" / no caveat once real history is substantial) and a
+`renderObservations()` list of color-coded rows (orange for `warn`,
+navy-blue for `info`, green for `good`) under the chart - same JS, same
+CSS, copied verbatim between the two files exactly as the rest of this
+panel already was.
+
+Verified offline (`test_progress_report.py`, new, 23 checks): fewer than
+2 real history rows, a real hand-verified positive-growth case (exact
+years hand-computed independently and matched), a real flat trend, a
+real negative trend, and `combined_equity` already at/above goal all
+produce the correct real `(years, basis_days)` pair, never a fabricated
+or nonsensical number; each individual observation trigger (crypto
+passive mode, negative rolling expectancy with the real trade
+count/average, drawdown-paused branches named correctly with a
+NOT-breached branch confirmed never named, idle crypto cash above/below
+the $25 floor, Alpaca passive mode correctly suppressing the separate
+idle-cash check via `elif`, idle Alpaca cash) fires with the real exact
+numbers; a completely clean state returns exactly one real observation,
+not zero; and the full `get_combined_equity_progress()` endpoint
+end-to-end correctly wires both new fields into its response. Full
+existing `test_combined_equity_progress.py` suite (11 checks) re-run
+clean alongside it, confirming this was purely additive. Both dashboard
+HTML files re-verified with a real Python `HTMLParser` tag-balance check
+and `node --check` on each file's extracted inline `<script>` block.
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+watch the new projection line and observations list populate on either
+dashboard; the projection stays "not enough real history yet" until at
+least 2 real hourly snapshots exist, same as the chart itself.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

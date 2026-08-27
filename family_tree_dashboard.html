@@ -123,6 +123,14 @@
     .combined-split .swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
     .combined-split .num { color: var(--text); font-weight: 700; }
     .combined-chart-empty { text-align: center; color: var(--text-dim); font-size: 0.82em; padding: 30px 0; }
+    .combined-projection { font-size: 0.82em; color: var(--text-dim); text-align: center; margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px dashed var(--border); }
+    .combined-projection .years { font-weight: 700; color: var(--navy); }
+    .combined-observations { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+    .obs-row { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: 8px; font-size: 0.83em; line-height: 1.4; }
+    .obs-row.warn { background: #fff4e8; border: 1px solid #f3d9b3; color: var(--text); }
+    .obs-row.info { background: #eef2fa; border: 1px solid #cdd8ee; color: var(--text); }
+    .obs-row.good { background: var(--green-bg); border: 1px solid #b7e4c7; color: var(--text); }
+    .obs-row .obs-icon { flex-shrink: 0; }
     @media (max-width: 700px) { .combined-progress-layout { flex-direction: column; } }
 
     .coin-history-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
@@ -517,10 +525,12 @@
             <div id="combined-goal-gauge" class="gauge-wrap"></div>
             <div class="combined-chart-col">
                 <div id="combined-momentum" class="combined-momentum">—</div>
+                <div id="combined-projection" class="combined-projection"></div>
                 <div id="combined-chart-wrap"></div>
                 <div id="combined-split" class="combined-split"></div>
             </div>
         </div>
+        <div class="combined-observations" id="combined-observations"></div>
     </div>
 
     <div class="panel">
@@ -2199,12 +2209,48 @@ function fmtCombinedMomentum(history) {
     return `<span class="${cls}">${arrow} ${sign}${fmtUsd(Math.abs(deltaUsd))} (${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%)</span> over the last ${spanStr} of real tracking`;
 }
 
+// Real, honest "at this pace" projection - per the account owner's
+// explicit request for "what the outcome is going to be... percentage
+// wise or money wise." Never a promise - the confidence caveat scales
+// with how much real history the estimate is actually drawn from.
+function fmtProjection(data) {
+    if (data.projected_years_to_goal == null) {
+        if (data.projection_basis_days == null) {
+            return 'Not enough real history yet for a pace estimate - check back once a few real snapshots have logged.';
+        }
+        return `Real recent pace over the last ${data.projection_basis_days.toFixed(1)} day(s) is flat or negative - at the current path, $1M isn't projected. More real capital or a stronger real edge would move this.`;
+    }
+    const years = data.projected_years_to_goal;
+    const basisDays = data.projection_basis_days;
+    let confidence = '';
+    if (basisDays < 7) confidence = ' (based on well under a week of real tracking - a very rough, early estimate that will sharpen over time)';
+    else if (basisDays < 30) confidence = ' (based on under a month of real tracking - still an early estimate)';
+    const yearsStr = years < 1 ? `${Math.round(years * 12)} month(s)` : `${years.toFixed(1)} year(s)`;
+    const spanStr = basisDays < 1 ? `${(basisDays * 24).toFixed(1)} hour(s)` : `${basisDays.toFixed(1)} day(s)`;
+    return `At the real pace of the last ${spanStr}, reaching $1,000,000 would take roughly <span class="years">${yearsStr}</span> if nothing changes${confidence}. This reflects any real trading gains AND any new cash added during that window - not trading performance alone.`;
+}
+
+// Real, concrete "what's currently helping or hurting" bullets - per the
+// account owner's explicit ask for "how we can get there and keep moving
+// forward." Built entirely from real system state the backend already
+// computed (see _build_progress_observations in
+// routers/trading_dashboard.py) - never a fabricated suggestion.
+function renderObservations(observations) {
+    const el = document.getElementById('combined-observations');
+    if (!observations || observations.length === 0) { el.innerHTML = ''; return; }
+    el.innerHTML = observations.map(o => `
+        <div class="obs-row ${o.tone}"><span class="obs-icon">${o.icon}</span><span>${o.text}</span></div>
+    `).join('');
+}
+
 function renderCombinedProgress(data) {
     renderGauge('combined-goal-gauge', data.combined_progress_pct, fmtUsd(data.combined_equity) + ' of ' + fmtUsd(data.goal));
 
     const momentumEl = document.getElementById('combined-momentum');
     const momentum = fmtCombinedMomentum(data.history);
     momentumEl.innerHTML = momentum || 'A real snapshot logs roughly once an hour - momentum shows up here once at least two exist.';
+
+    document.getElementById('combined-projection').innerHTML = fmtProjection(data);
 
     const chartWrap = document.getElementById('combined-chart-wrap');
     if (data.history && data.history.length >= 2) {
@@ -2220,6 +2266,8 @@ function renderCombinedProgress(data) {
         <span class="side"><span class="swatch" style="background:#1f3864;"></span>Alpaca <span class="num">${alpacaStr}</span></span>
         <span class="side"><span class="swatch" style="background:#e8752c;"></span>Coinbase <span class="num">${cryptoStr}</span></span>
     `;
+
+    renderObservations(data.observations);
 }
 
 async function loadCombinedProgress() {
