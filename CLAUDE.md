@@ -8408,6 +8408,71 @@ list populates and that tapping a row correctly selects that contract.
 
 ---
 
+## Live "$X available to allocate" hint added to the New Real Branch modal's Allocated Capital field
+
+Right after the ROI-ranking table shipped inside the New Real Branch
+modal, the account owner hit the next real gap in the same flow, in
+their own words: "where is the option for the allocated Capital once I
+push down there it's not showing an option for different prices or what
+I even have in capital... I got to leave out the page again to go see
+what I got in my capital like make it make sense." The ranked-ROI list
+answered "which contract" - the Allocated Capital field still gave zero
+guidance on "how much," forcing exactly the same back-and-forth the ROI
+table was just built to eliminate.
+
+**`GET /alpaca-overview/branches`** (`routers/trading_dashboard.py`)
+gained three new real fields - `buying_power`, `already_allocated_usd`,
+`real_spendable_usd` - computed with the EXACT SAME real formula
+`create_alpaca_branch_endpoint()` already enforces at submit time
+(`real_spendable = buying_power - sum(allocated_usd for active
+branches)`, via the same real `prop_bot_module.get_account_buying_power()`
+live Alpaca call) - reused, not re-derived a second way, so the modal's
+hint can never disagree with what actually gets accepted or rejected a
+moment later. **Fails open**: a real buying-power fetch hiccup returns
+`None` for those three fields (never a fabricated number) while the rest
+of the response (the branches list, `mode_active`) still comes back
+normally - this endpoint's job is to inform, not to gate; the real,
+blocking affordability check stays exactly where it already was, in the
+create endpoint.
+
+`alpaca_dashboard.html`'s New Real Branch modal gained a live hint line
+directly above the Allocated Capital input (`loadBranchSpendableHint()`,
+called fresh every time `openCreateBranchModal()` opens - never stale
+page-load data, per the account owner's own explicit "I don't want to
+leave the page" complaint): "💰 $X real free buying power right now ($Y
+total − $Z already in other active branches)" plus a one-click "Use max"
+link (`useMaxSpendable()`) that fills the input with the real spendable
+figure, floored to a whole dollar. A real fetch failure shows an honest
+"could not fetch right now - still checked at Create" message rather
+than a blank or fabricated number.
+
+Verified offline (`test_branch_spendable_hint.py`, new, 12 checks)
+against a real throwaway SQLite DB: with real active branches already
+holding allocation, `real_spendable_usd` matches `buying_power` minus
+their exact sum; a request 1 cent over that reported figure is refused
+by the real create endpoint (400) while a request exactly at that figure
+is accepted - direct proof the hint and the real enforcement can never
+disagree; a PAUSED branch's allocation is correctly excluded from
+`already_allocated_usd` (and `real_spendable_usd` updates accordingly),
+matching the create endpoint's own existing `if b.active` filter; and a
+simulated real buying-power fetch failure returns honest `None` for the
+three new fields while the branches list and `mode_active` still come
+back correctly, rather than the whole call erroring. Full existing
+`test_alpaca_branches.py` (32 checks) and `test_branch_symbol_rankings.py`
+(12 checks) suites re-run clean alongside it. Confirmed via a real AST
+route-count parse that no route was duplicated (68 total, unchanged -
+this extended an existing endpoint rather than adding a new one).
+`alpaca_dashboard.html` re-verified with a real Python `HTMLParser`
+tag-balance check and `node --check` on the extracted inline `<script>`
+block.
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+open "New branch" on the Alpaca dashboard to confirm the real available-
+capital hint populates above the amount field and that "Use max" fills
+in the real correct figure.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

@@ -397,6 +397,7 @@
             <label class="modal-label">Contract</label>
             <select id="create-branch-contract" class="modal-input" onchange="selectBranchContract(this.value)"></select>
             <label class="modal-label">Allocated capital ($)</label>
+            <div id="branch-spendable-hint" style="font-size:0.85em; color:var(--muted); margin-bottom:6px;">Checking real available capital…</div>
             <input type="number" id="create-branch-amount" class="modal-input" step="1" min="1">
             <div id="create-branch-error" style="color:var(--red); font-size:0.85em; margin-top:6px; display:none;"></div>
             <div class="modal-actions">
@@ -938,6 +939,43 @@ function openCreateBranchModal() {
     document.getElementById('create-branch-error').style.display = 'none';
     document.getElementById('create-branch-modal-overlay').classList.add('open');
     loadBranchRankings();
+    loadBranchSpendableHint();
+}
+
+// Real, live "$X available to allocate right now" hint - per the account
+// owner's explicit complaint that the Allocated Capital field gave zero
+// guidance and forced them to leave the page to check. Fetched fresh every
+// time the modal opens (never stale page-load data) from the SAME real
+// buying_power/already_allocated_usd/real_spendable_usd figures
+// create_alpaca_branch_endpoint() itself enforces at submit time - this
+// hint can never disagree with what actually gets accepted or rejected.
+let lastKnownSpendableUsd = null;
+
+async function loadBranchSpendableHint() {
+    const hintEl = document.getElementById('branch-spendable-hint');
+    hintEl.textContent = 'Checking real available capital…';
+    lastKnownSpendableUsd = null;
+    try {
+        const data = await apiGet('/alpaca-overview/branches');
+        if (data.real_spendable_usd == null) {
+            hintEl.textContent = 'Could not fetch real buying power right now - the amount will still be checked when you hit Create.';
+            return;
+        }
+        lastKnownSpendableUsd = data.real_spendable_usd;
+        const spendable = fmtUsd(data.real_spendable_usd);
+        const total = fmtUsd(data.buying_power);
+        const allocated = fmtUsd(data.already_allocated_usd);
+        hintEl.innerHTML = `💰 <strong>${spendable}</strong> real free buying power right now `
+            + `(${total} total − ${allocated} already in other active branches) `
+            + `<a href="javascript:void(0)" onclick="useMaxSpendable()" style="color:var(--accent);">Use max</a>`;
+    } catch (e) {
+        hintEl.textContent = 'Could not fetch real buying power right now - the amount will still be checked when you hit Create.';
+    }
+}
+
+function useMaxSpendable() {
+    if (lastKnownSpendableUsd == null || lastKnownSpendableUsd <= 0) return;
+    document.getElementById('create-branch-amount').value = Math.floor(lastKnownSpendableUsd);
 }
 
 function selectBranchContract(contract) {

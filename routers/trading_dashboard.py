@@ -3049,7 +3049,18 @@ async def get_alpaca_branches_status():
     branches, per the account owner's explicit request. See prop_bot.py's
     own ALPACA BRANCHES section docstring for the full real design (why
     it's scoped down from the full spawn-tree, how capital partitioning
-    works, why it's off by default). Read-only - never places an order."""
+    works, why it's off by default). Read-only - never places an order.
+
+    Also reports real, current buying-power affordability
+    (buying_power/already_allocated_usd/real_spendable_usd) using the
+    EXACT SAME formula create_alpaca_branch_endpoint() enforces at submit
+    time - per the account owner's explicit complaint that the "New Real
+    Branch" modal's Allocated Capital field gave zero guidance on what
+    they actually had free, forcing them to leave the page to check.
+    Fails open on a real buying-power fetch hiccup (returns null for
+    those three fields rather than erroring the whole status call) -
+    this endpoint's job is to inform, not to gate; the real, blocking
+    affordability check still lives in the create endpoint."""
     if prop_bot_module is None:
         raise HTTPException(status_code=500, detail="prop_bot module not available")
     branches = await prop_bot_module.get_alpaca_branches()
@@ -3066,10 +3077,24 @@ async def get_alpaca_branches_status():
             "active": b.active,
             "position": position,
         })
+
+    buying_power = None
+    try:
+        async with aiohttp.ClientSession() as session:
+            buying_power = await prop_bot_module.get_account_buying_power(session)
+    except Exception as e:
+        log.warning(f"[dashboard] real buying-power fetch failed for branch status: {e}")
+
+    already_allocated = sum(b.allocated_usd for b in branches if b.active)
+    real_spendable = (buying_power - already_allocated) if buying_power is not None else None
+
     return {
         "mode_active": mode_active,
         "branches": rows,
         "total_allocated_usd": round(sum(b.allocated_usd for b in branches), 2),
+        "buying_power": round(buying_power, 2) if buying_power is not None else None,
+        "already_allocated_usd": round(already_allocated, 2),
+        "real_spendable_usd": round(real_spendable, 2) if real_spendable is not None else None,
     }
 
 
