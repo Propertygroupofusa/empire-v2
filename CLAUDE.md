@@ -8980,6 +8980,59 @@ attempts instead of failing outright.
 
 ---
 
+## "Hide empty branches" toggle on the Tree view
+
+The account owner looked at the real Tree view and asked directly why
+POL and SOL - both sitting at a genuine real $0.00 - were still taking
+up space when they weren't "helping in some kind of way." Honest answer
+given first: they're not helping anything, they're just inert (POL has
+never been funded; SOL lost its entire real $1,010.93 peak and tripped
+the drawdown breaker) - but the dashboard shows every real branch
+regardless of balance so nothing gets hidden by default, including a
+paused branch that genuinely needs attention. Offered a real toggle
+instead of silently removing anything; the account owner said to add it.
+
+`filterBranchesForTree()` (`family_tree_dashboard.html`) only filters the
+TREE view's cards, nothing else (the Branch Ranking bar list and Branch
+Sizes treemap panels still show every real branch, balance included - a
+zero-length bar or invisible treemap tile is already effectively "hidden"
+there without losing any real row). A branch counts as empty only when
+its real `allocated_usd` rounds to $0.00 AND it isn't currently holding a
+position AND no OTHER branch is parented under it - hiding a branch with
+real children would orphan them in the tree's own parent/child layout
+(confirmed exactly this shape live: SOL is genuinely at $0.00 but LINK is
+parented under it, so SOL has to stay visible as a structural node even
+though it's empty). Root (`crypto_btc_compound`) is never hidden
+regardless of its real balance, same check already used for the ROOT
+badge elsewhere in this file.
+
+A real, per-viewer preference (checkbox next to "🌱 Start new $50
+branch"), persisted to `localStorage` so it survives a reload - never
+sent to the server, since this is display-only and never changes what
+any branch actually does. A small note under the header says exactly how
+many real branches are currently hidden and why, so it's never a silent
+"where did POL go" moment.
+
+Verified with a standalone Node.js reproduction of the pure filtering
+logic (`test_filter_branches.js`, 8 checks - no DOM/browser available in
+this sandbox, same technique already used for this file's tree-layout
+math): the real screenshot's exact shape (root, an empty leaf POL, an
+empty-but-parent SOL, a real-balance LINK child of SOL) correctly hides
+only POL with the toggle on, and shows all 4 with it off; confirms SOL
+stays visible specifically because it has a real child, not despite it;
+confirms a $0.00 branch that's still holding an open position is never
+hidden; and confirms root is never hidden even at a hypothetical $0.00
+balance. Re-verified the whole file with a real Python `HTMLParser`
+tag-balance check (no mismatched/unclosed tags) and `node --check` on the
+extracted inline `<script>` block (no syntax errors).
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+check the new "🙈 Hide empty branches" checkbox above the Tree view;
+checking it should immediately drop POL from the cards (SOL should stay,
+since LINK depends on it), with a note explaining exactly what's hidden.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

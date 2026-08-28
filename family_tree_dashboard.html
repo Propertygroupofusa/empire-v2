@@ -559,10 +559,17 @@
         </div>
     </div>
 
-    <div class="section-title" style="display:flex; justify-content:space-between; align-items:center;">
+    <div class="section-title" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
         <span>Tree</span>
-        <button id="spawn-branch-btn" class="sell-btn" style="width:auto; margin-top:0;" onclick="spawnBranch(this)" disabled title="Checking real free cash...">🌱 Start new $50 branch</button>
+        <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
+            <label style="display:flex; align-items:center; gap:6px; font-size:0.78em; font-weight:400; color:var(--text-dim); cursor:pointer;">
+                <input type="checkbox" id="hide-empty-branches-toggle" onchange="onHideEmptyBranchesToggle()">
+                🙈 Hide empty branches
+            </label>
+            <button id="spawn-branch-btn" class="sell-btn" style="width:auto; margin-top:0;" onclick="spawnBranch(this)" disabled title="Checking real free cash...">🌱 Start new $50 branch</button>
+        </div>
     </div>
+    <div id="hide-empty-branches-note" style="font-size:0.78em; color:var(--text-dim); margin:-4px 0 10px;"></div>
     <div class="tree-canvas"><div class="tree-canvas-inner" id="tree"></div></div>
 
     <div class="section-title" style="display:flex; justify-content:space-between; align-items:center;">
@@ -1409,6 +1416,57 @@ function layoutTree(branches, heights) {
     return { positions, width, height, byParent };
 }
 
+// Per-viewer preference, not real trading state - persisted to
+// localStorage so it survives a reload, but never sent to the server.
+const HIDE_EMPTY_BRANCHES_KEY = 'familyTree.hideEmptyBranches';
+
+function initHideEmptyBranchesToggle() {
+    let stored = '0';
+    try { stored = localStorage.getItem(HIDE_EMPTY_BRANCHES_KEY) || '0'; } catch (e) {}
+    const toggle = document.getElementById('hide-empty-branches-toggle');
+    if (toggle) toggle.checked = stored === '1';
+}
+
+function onHideEmptyBranchesToggle() {
+    const toggle = document.getElementById('hide-empty-branches-toggle');
+    try { localStorage.setItem(HIDE_EMPTY_BRANCHES_KEY, toggle.checked ? '1' : '0'); } catch (e) {}
+    refresh();
+}
+
+// Per the account owner's explicit request, after seeing POL/SOL sitting
+// at real $0.00 cluttering the tree view while contributing nothing:
+// "why is the ones with zero on there if they are at zero they should
+// not be on there." A branch only counts as "empty" here when its real
+// allocated_usd rounds to $0.00 AND it isn't currently holding a
+// position AND no OTHER branch is parented under it - hiding a branch
+// with real children would orphan them in the tree's own parent/child
+// layout, so a branch still structurally holding the tree together stays
+// visible even at $0. Root (BTC) is never hidden regardless of balance -
+// same `bot_name === 'crypto_btc_compound'` check already used for the
+// ROOT badge elsewhere in this file.
+function filterBranchesForTree(branches) {
+    const toggle = document.getElementById('hide-empty-branches-toggle');
+    if (!toggle || !toggle.checked) return { visible: branches, hiddenCount: 0 };
+
+    const hasChildren = {};
+    branches.forEach(b => {
+        if (b.parent_bot_name) hasChildren[b.parent_bot_name] = true;
+    });
+
+    const visible = [];
+    let hiddenCount = 0;
+    branches.forEach(b => {
+        const isRoot = b.bot_name === 'crypto_btc_compound';
+        const isEmpty = Math.round((b.allocated_usd || 0) * 100) === 0 && !b.position && !hasChildren[b.bot_name];
+        if (isEmpty && !isRoot) {
+            hiddenCount++;
+        } else {
+            visible.push(b);
+        }
+    });
+    return { visible, hiddenCount };
+}
+
 function renderTree(branches) {
     const container = document.getElementById('tree');
     if (!branches.length) {
@@ -1586,7 +1644,14 @@ async function refresh() {
         })));
         renderTreemap('branches-treemap', branches.map(b => ({ label: b.product_id.replace('-USD', ''), value: b.allocated_usd })));
         renderNarrative(data);
-        renderTree(branches);
+        const { visible: treeBranches, hiddenCount } = filterBranchesForTree(branches);
+        renderTree(treeBranches);
+        const hideNote = document.getElementById('hide-empty-branches-note');
+        if (hideNote) {
+            hideNote.textContent = hiddenCount > 0
+                ? `${hiddenCount} empty branch${hiddenCount === 1 ? '' : 'es'} hidden ($0.00, nothing deployed, no children) - uncheck "Hide empty branches" to see ${hiddenCount === 1 ? 'it' : 'them'}.`
+                : '';
+        }
         statusEl.textContent = '';
         statusEl.className = '';
     } catch (e) {
@@ -2310,6 +2375,7 @@ async function loadCombinedProgress() {
     }
 }
 
+initHideEmptyBranchesToggle();
 refresh();
 loadTicker();
 loadBtcTicker();
