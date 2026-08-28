@@ -46,7 +46,7 @@ from sqlalchemy import select
 import crypto_btc_compound_bot as engine
 from crypto_family_tree_bot import COIN_FAMILY_TREE, BREAKEVEN_TRIGGER_PCT, MAX_PROFIT_GIVEBACK_USD
 from database import AsyncSessionLocal
-from models import CryptoTreeBranch
+from models import CryptoTreeBranch, CryptoCoinTradeHistory
 
 SPEND = 150.0
 BACKTEST_DAYS = 30
@@ -60,13 +60,15 @@ GRANULARITY_SECONDS = 3600  # 1-hour candles
 ATR_WINDOW = 15  # matches _atr_pct_from_candles' 14-period + 1
 
 
-async def fetch_historical_candles(session, product_id, days=BACKTEST_DAYS):
+async def fetch_candles_window(session, product_id, start, end, min_candles=ATR_WINDOW + 5):
     """Paginated pull of real Coinbase historical candles (public,
-    unauthenticated endpoint - same one the live bot's own
-    _fetch_candles uses, just with an explicit start/end window instead
-    of 'whatever the last 300 are')."""
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=days)
+    unauthenticated endpoint - same one the live bot's own _fetch_candles
+    uses) between two explicit real UTC datetimes. Factored out of
+    fetch_historical_candles() below so a caller anchored on a real past
+    EVENT (not "the last N days from right now") can reuse the identical
+    real pagination logic - see run_stop_hit_reversal_backtest(), which
+    needs a real forward window starting at each real stop-loss's own
+    closed_at, not the module's usual now-minus-days window."""
     all_candles = []
     cursor = start
     while cursor < end:
@@ -87,7 +89,7 @@ async def fetch_historical_candles(session, product_id, days=BACKTEST_DAYS):
         cursor = page_end
         await asyncio.sleep(0.15)  # be polite to the public endpoint
 
-    if len(all_candles) < ATR_WINDOW + 5:
+    if len(all_candles) < min_candles:
         return None
     all_candles.sort(key=lambda c: c[0])  # oldest first
     closes = [float(c[4]) for c in all_candles]
@@ -95,6 +97,16 @@ async def fetch_historical_candles(session, product_id, days=BACKTEST_DAYS):
     lows = [float(c[1]) for c in all_candles]
     times = [int(c[0]) for c in all_candles]
     return closes, highs, lows, times
+
+
+async def fetch_historical_candles(session, product_id, days=BACKTEST_DAYS):
+    """Real, unauthenticated Coinbase candles for the last `days` days
+    from right now - the module's original, most common shape. Now a thin
+    wrapper around fetch_candles_window() (see above), unchanged in
+    return shape/behavior for every existing caller."""
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=days)
+    return await fetch_candles_window(session, product_id, start, end)
 
 
 def backtest_one_coin(closes, highs, lows, entry_gate=None, spend=None):
@@ -801,6 +813,211 @@ async def run_full_backtest_with_real_allocations(coins=None, days=BACKTEST_DAYS
         "coins_with_real_allocation": len([pid for pid in results if pid in allocations]),
         "skipped": skipped,
         "ranked": [{"product_id": pid, "has_real_allocation": pid in allocations, **r} for pid, r in ranked],
+    }
+
+
+STOP_HIT_REVERSAL_HOURS_FORWARD = 24
+STOP_HIT_REVERSAL_TARGET_PCT = 0.02
+STOP_HIT_REVERSAL_STOP_PCT = 0.02
+STOP_HIT_REVERSAL_EVENT_LIMIT = 300
+
+
+async def _load_real_stop_hit_events(limit=STOP_HIT_REVERSAL_EVENT_LIMIT, hours_forward=STOP_HIT_REVERSAL_HOURS_FORWARD):
+    """Real CryptoCoinTradeHistory rows where exit_reason is exactly
+    'STOP HIT' - a genuine, price-driven hard-stop exit, not one of this
+    same window's other real exit types (BRANCH BREACH/EQUITY FLOOR
+    BREACH are structural safety forced-exits, PEAK PROFIT GIVEBACK/
+    QUICK PROFIT are legacy exit modes that no longer exist on the live
+    bot at all). Only a genuine STOP HIT is the real, testable "did the
+    price come back after this" question the account owner actually
+    asked about.
+
+    Only returns events with at least `hours_forward` of real elapsed
+    time since closed_at - an event too recent to have that much real
+    history yet is skipped rather than scored on a truncated window,
+    which would understate its real forward return."""
+    cutoff = datetime.utcnow() - timedelta(hours=hours_forward)
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(CryptoCoinTradeHistory)
+            .where(CryptoCoinTradeHistory.exit_reason == "STOP HIT")
+            .where(CryptoCoinTradeHistory.closed_at <= cutoff)
+            .order_by(CryptoCoinTradeHistory.closed_at.desc())
+            .limit(limit)
+        )
+        return result.scalars().all()
+
+
+def _simulate_reversal_trade(closes, times, start_idx, entry_price, target_pct, stop_pct):
+    """Real, simple hypothesis test: what if the tree had immediately
+    bought back in at the real stop-loss's own exit price, right after
+    getting stopped out? Walks forward from start_idx (the first real
+    candle at or after the stop event) looking for the first real close
+    that clears a modest real profit target, or a second real hard stop
+    protecting the reversal trade itself, whichever comes first; if
+    neither fires before the window (the candles passed in) runs out,
+    marks-to-market against the real last close instead of leaving the
+    hypothetical trade open forever. No fees modeled - stated plainly,
+    same as the module's other single-position replay simplifications.
+
+    Real bug fixed here: recovered_to_breakeven originally checked
+    EVERY candle including the very first one in the window (the candle
+    AT the stop event itself), whose real close is often at or extremely
+    near the entry price by construction - falsely counting that as a
+    genuine "recovery" before any real forward price movement had even
+    happened. Now only counts a candle strictly AFTER the starting one -
+    a real recovery has to happen from actual forward movement, not the
+    coincidence of the first candle sharing (or nearly sharing) the
+    entry price."""
+    target_price = entry_price * (1 + target_pct)
+    stop_price = entry_price * (1 - stop_pct)
+    recovered_to_breakeven = False
+    for offset, i in enumerate(range(start_idx, len(closes))):
+        price = closes[i]
+        if offset > 0 and price >= entry_price:
+            recovered_to_breakeven = True
+        if price >= target_price:
+            return {"exit_reason": "TARGET", "exit_price": price, "pnl_pct": (price - entry_price) / entry_price, "recovered_to_breakeven": True}
+        if price <= stop_price:
+            return {"exit_reason": "STOP", "exit_price": price, "pnl_pct": (price - entry_price) / entry_price, "recovered_to_breakeven": recovered_to_breakeven}
+    # Window ran out with neither hit - mark to the real last close.
+    last_price = closes[-1]
+    return {
+        "exit_reason": "TIME", "exit_price": last_price, "pnl_pct": (last_price - entry_price) / entry_price,
+        "recovered_to_breakeven": recovered_to_breakeven,
+    }
+
+
+async def run_stop_hit_reversal_backtest(
+    hours_forward=STOP_HIT_REVERSAL_HOURS_FORWARD, target_pct=STOP_HIT_REVERSAL_TARGET_PCT,
+    stop_pct=STOP_HIT_REVERSAL_STOP_PCT, event_limit=STOP_HIT_REVERSAL_EVENT_LIMIT, max_concurrent=6,
+):
+    """SHADOW-MODE, additive - never touches live trading, places no real
+    order. Built directly from the account owner's own real question,
+    right after the exit-reason breakdown surfaced that most of a real
+    losing window's damage wasn't from real price-based stop-losses at
+    all (1 real STOP HIT vs 7 legacy PEAK PROFIT GIVEBACK trades and 3
+    structural BRANCH/EQUITY FLOOR BREACH forced exits in that specific
+    window): "if we figure out a way to make money on it losing... we can
+    make money off stops." Tests the real, honest version of that idea -
+    does the real coin's price tend to recover after a real STOP HIT, and
+    would a hypothetical "buy back in right after the stop" trade have
+    been profitable - using the FULL real historical STOP HIT ledger
+    (every coin, not just one rolling 20-trade window), not a guess.
+
+    For every real STOP HIT event with enough real elapsed time since it
+    closed, fetches that coin's real hourly candles from the event's own
+    real closed_at through hours_forward hours later (grouped by
+    product_id and fetched once per coin, sliced per event via
+    _closest_close_at_or_before - the same real time-alignment technique
+    run_btc_relative_strength_comparison() already uses), then:
+      - the real forward price return at the end of the window
+      - whether the real price ever recovered back to the stop's own
+        real exit price within the window
+      - a real, simple hypothetical "buy back at the stop-exit price,
+        exit at a modest target or a second hard stop" trade
+        (_simulate_reversal_trade above)
+
+    Real, honest limitations stated plainly: no fees are modeled on the
+    hypothetical reversal trades (a real one would need to clear the
+    real round-trip fee on top of target_pct to be a genuine profit);
+    this never accounts for whether real free cash would actually have
+    been available to take the hypothetical trade; and coins with very
+    few real STOP HIT events don't carry the same statistical weight as
+    POL-USD's real 80+ trade history. This is diagnostic only - it never
+    reads into any live trading decision on its own."""
+    events = await _load_real_stop_hit_events(limit=event_limit, hours_forward=hours_forward)
+    if not events:
+        return {"events_tested": 0, "events_skipped_no_data": 0, "per_event": [], "summary": None}
+
+    by_product = {}
+    for ev in events:
+        by_product.setdefault(ev.product_id, []).append(ev)
+
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def _fetch_for_product(session, product_id, product_events):
+        earliest = min(e.closed_at for e in product_events)
+        start = earliest.replace(tzinfo=timezone.utc)
+        end = datetime.now(timezone.utc)
+        async with semaphore:
+            candles = await fetch_candles_window(session, product_id, start, end, min_candles=2)
+        return product_id, candles
+
+    # One real shared session for every coin's fetch, semaphore-limited -
+    # same pattern every other multi-coin comparison in this file already
+    # uses (see run_trailing_stop_pct_sweep_comparison above).
+    async with aiohttp.ClientSession() as session:
+        fetch_results = await asyncio.gather(*(_fetch_for_product(session, pid, evs) for pid, evs in by_product.items()))
+
+    per_event = []
+    skipped_no_data = 0
+    for product_id, candles in fetch_results:
+        if candles is None:
+            skipped_no_data += len(by_product[product_id])
+            continue
+        closes, _highs, _lows, times = candles
+        for ev in by_product[product_id]:
+            event_time = int(ev.closed_at.replace(tzinfo=timezone.utc).timestamp())
+            start_idx = bisect.bisect_left(times, event_time)
+            if start_idx >= len(closes):
+                skipped_no_data += 1
+                continue
+            end_time = event_time + hours_forward * 3600
+            end_idx = bisect.bisect_right(times, end_time)
+            window_closes = closes[start_idx:end_idx] or [closes[start_idx]]
+            entry_price = ev.exit_price
+            if not entry_price:
+                skipped_no_data += 1
+                continue
+            forward_return_pct = (window_closes[-1] - entry_price) / entry_price if entry_price else 0.0
+            # Real bug fixed here: this used to compute recovery separately
+            # as any(c >= entry_price for c in window_closes), which
+            # (like the same bug inside _simulate_reversal_trade, now
+            # fixed) counted the very first candle in the window - the one
+            # AT the stop event itself, whose real close is often at or
+            # extremely near the entry price by construction - as a false
+            # "recovery" before any genuine forward movement happened.
+            # Now uses _simulate_reversal_trade's own fixed, single
+            # computation instead of a second, inconsistent one.
+            sim = _simulate_reversal_trade(window_closes, times[start_idx:end_idx] or [times[start_idx]], 0, entry_price, target_pct, stop_pct)
+            recovered = sim["recovered_to_breakeven"]
+            per_event.append({
+                "product_id": product_id,
+                "original_stop_closed_at": ev.closed_at.isoformat() + "Z",
+                "original_stop_pnl": ev.pnl,
+                "stop_exit_price": entry_price,
+                "forward_return_pct": round(forward_return_pct * 100, 2),
+                "recovered_to_breakeven": recovered,
+                "reversal_trade_pnl_pct": round(sim["pnl_pct"] * 100, 2),
+                "reversal_trade_exit_reason": sim["exit_reason"],
+            })
+
+    if not per_event:
+        return {"events_tested": 0, "events_skipped_no_data": skipped_no_data, "per_event": [], "summary": None}
+
+    recovered_count = sum(1 for e in per_event if e["recovered_to_breakeven"])
+    reversal_wins = sum(1 for e in per_event if e["reversal_trade_pnl_pct"] > 0)
+    avg_forward_return_pct = round(sum(e["forward_return_pct"] for e in per_event) / len(per_event), 2)
+    avg_reversal_pnl_pct = round(sum(e["reversal_trade_pnl_pct"] for e in per_event) / len(per_event), 2)
+
+    per_event.sort(key=lambda e: e["reversal_trade_pnl_pct"], reverse=True)
+
+    return {
+        "events_tested": len(per_event),
+        "events_skipped_no_data": skipped_no_data,
+        "hours_forward": hours_forward,
+        "target_pct": target_pct,
+        "stop_pct": stop_pct,
+        "per_event": per_event,
+        "summary": {
+            "recovered_to_breakeven_count": recovered_count,
+            "recovered_to_breakeven_rate_pct": round(100.0 * recovered_count / len(per_event), 1),
+            "avg_forward_return_pct": avg_forward_return_pct,
+            "reversal_trade_win_count": reversal_wins,
+            "reversal_trade_win_rate_pct": round(100.0 * reversal_wins / len(per_event), 1),
+            "avg_reversal_trade_pnl_pct": avg_reversal_pnl_pct,
+        },
     }
 
 

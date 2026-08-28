@@ -135,11 +135,18 @@
     <div id="qpResults"></div>
 
     <div class="note" style="margin-top: 28px;">
-        <strong>Refine the trailing-stop width itself:</strong> the live 2.5% trail was never actually tested against any alternative width - it was only sized to match the OLD QUICK_PROFIT dollar-giveback cap, a coincidence of the comparison it won. This replays the real trailing-stop exit rule under several candidate trail widths (1.5% to 5%) against the same real historical candles for every coin, so a genuinely better width can be found with real evidence. Same real entry, target, hard stop-loss, and breakeven ratchet across every candidate - only the trail width itself varies. Shadow mode only - does not change what the live bot does until a candidate is promoted below.
+        <strong>Refine the trailing-stop width itself:</strong> the live trail was never actually tested against every alternative width - it was only sized to match the OLD QUICK_PROFIT dollar-giveback cap, a coincidence of the comparison it won. This replays the real trailing-stop exit rule under several candidate trail widths (3% to 7.5% today, trimmed down to the widths that actually performed - see the badge below for the exact live list) against the same real historical candles for every coin, so a genuinely better width can be found with real evidence. Same real entry, target, hard stop-loss, and breakeven ratchet across every candidate - only the trail width itself varies. Shadow mode only - does not change what the live bot does until a candidate is promoted below.
     </div>
     <button class="run-btn" id="tsBtn" onclick="runTrailingStopPctSweep()">▶ Run Trailing Stop Width Sweep (~30-90 seconds)</button>
     <div id="tsStatus"></div>
     <div id="tsResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>Can we make money off the stops themselves?</strong> Right after the exit-reason breakdown showed that a real losing window's damage was mostly OLD exit types and structural forced exits rather than genuine price-based stops, the direct question came back: does price tend to recover after a real STOP HIT, and would buying back in right at the stop-exit price have actually made money? This replays that against the FULL real historical STOP HIT ledger (every coin, every real hard-stop exit ever recorded - not just one 20-trade window): the real forward price move in the hours after each stop, whether it ever recovered back to the stop's own exit price, and a simple hypothetical "buy back at the stop price, sell at a modest target or a second hard stop" trade. Shadow mode only - purely diagnostic, never wired to any real trade. No fees are modeled on the hypothetical trades and real cash availability isn't checked, so treat this as a real, honest first look, not a final answer.
+    </div>
+    <button class="run-btn" id="shrBtn" onclick="runStopHitReversalBacktest()">▶ Run Stop-Hit Reversal Backtest (~10-60 seconds)</button>
+    <div id="shrStatus"></div>
+    <div id="shrResults"></div>
 </div>
 
 <script>
@@ -803,6 +810,84 @@ async function promoteTrailPct(pct, btn) {
         btn.disabled = false;
         btn.textContent = original;
     }
+}
+
+async function runStopHitReversalBacktest() {
+    const btn = document.getElementById('shrBtn');
+    const statusEl = document.getElementById('shrStatus');
+    const resultsEl = document.getElementById('shrResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real data, one fetch per coin with STOP HIT history)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/crypto-selection-backtest/stop-hit-reversal', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - try again');
+        }
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+
+        renderStopHitReversalResults(data);
+        if (data.events_tested === 0) {
+            statusEl.textContent = 'No real STOP HIT events with enough elapsed real history to test yet.';
+        } else {
+            statusEl.textContent = `Tested ${data.events_tested} real STOP HIT event(s) (${data.events_skipped_no_data} skipped for missing real data) over the ${data.hours_forward}h window after each.`;
+        }
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Stop-Hit Reversal Backtest (~10-60 seconds)';
+    }
+}
+
+function renderStopHitReversalResults(data) {
+    const resultsEl = document.getElementById('shrResults');
+    if (!data.summary || data.events_tested === 0) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No real STOP HIT events available to test yet - real trades need to accumulate first.</p>';
+        return;
+    }
+    const s = data.summary;
+    const rows = data.per_event.map(e => {
+        const pnlCls = e.reversal_trade_pnl_pct >= 0 ? 'pos' : 'neg';
+        const fwdCls = e.forward_return_pct >= 0 ? 'pos' : 'neg';
+        return `<tr>
+            <td>${e.product_id}</td>
+            <td>${new Date(e.original_stop_closed_at).toLocaleDateString()}</td>
+            <td class="neg">$${e.original_stop_pnl.toFixed(2)}</td>
+            <td class="${fwdCls}">${e.forward_return_pct >= 0 ? '+' : ''}${e.forward_return_pct}%</td>
+            <td>${e.recovered_to_breakeven ? '✅ yes' : '—'}</td>
+            <td class="${pnlCls}">${e.reversal_trade_pnl_pct >= 0 ? '+' : ''}${e.reversal_trade_pnl_pct}% (${e.reversal_trade_exit_reason})</td>
+        </tr>`;
+    }).join('');
+
+    resultsEl.innerHTML = `
+        <table>
+            <thead><tr><th>Real summary</th><th></th></tr></thead>
+            <tbody>
+                <tr><td>Events tested</td><td>${data.events_tested}</td></tr>
+                <tr><td>Recovered to breakeven within ${data.hours_forward}h</td><td>${s.recovered_to_breakeven_count} of ${data.events_tested} (${s.recovered_to_breakeven_rate_pct}%)</td></tr>
+                <tr><td>Avg real forward return (${data.hours_forward}h)</td><td class="${s.avg_forward_return_pct >= 0 ? 'pos' : 'neg'}">${s.avg_forward_return_pct >= 0 ? '+' : ''}${s.avg_forward_return_pct}%</td></tr>
+                <tr><td>Hypothetical "buy back at stop price" win rate</td><td>${s.reversal_trade_win_count} of ${data.events_tested} (${s.reversal_trade_win_rate_pct}%)</td></tr>
+                <tr><td>Avg hypothetical reversal trade P&amp;L</td><td class="${s.avg_reversal_trade_pnl_pct >= 0 ? 'pos' : 'neg'}">${s.avg_reversal_trade_pnl_pct >= 0 ? '+' : ''}${s.avg_reversal_trade_pnl_pct}%</td></tr>
+            </tbody>
+        </table>
+        <table style="margin-top:14px;">
+            <thead><tr><th>Coin</th><th>Stop date</th><th>Real stop P&amp;L</th><th>Fwd return</th><th>Recovered?</th><th>Hypothetical reversal trade</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+        <p class="trade-note">No fees modeled on the hypothetical reversal trades, and real cash availability at the time isn't checked - this is a real, honest first look at whether the idea has merit, not a final answer or something wired into live trading.</p>
+    `;
 }
 
 // QUICK_PROFIT removed from here entirely per the account owner's explicit

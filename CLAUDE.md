@@ -9688,6 +9688,125 @@ instead of going stale.
 
 ---
 
+## Stop-Hit Reversal Backtest - the real, testable version of "can we make money off the stops themselves"
+
+Right after the exit-reason breakdown surfaced that a real losing window
+was mostly driven by legacy exit types (`PEAK PROFIT GIVEBACK`, from the
+already-removed `QUICK_PROFIT` era) and structural forced exits (`BRANCH
+BREACH`, `EQUITY FLOOR BREACH`) rather than genuine price-based stops
+(only 1 of 20 real trades in that window), the account owner asked the
+direct next question, across a few voice-to-text messages: "if we figure
+out a way to make money on it losing... we'll make a killing" - the idea
+being that if price often reverses after a real stop-loss, buying back in
+right after the stop could turn what looks like a loss machine into a
+real second profit stream.
+
+Built the honest, testable version of that idea - SHADOW MODE ONLY, same
+posture as every other backtest tool in this file, never wired to any
+live trade. Deliberately tested against the FULL real historical `STOP
+HIT` ledger (every coin, every genuine hard-stop exit ever recorded -
+POL-USD alone has dozens), not just one rolling 20-trade window, since a
+real pattern needs more than 1-2 data points to mean anything.
+
+- `fetch_candles_window(session, product_id, start, end, min_candles=...)`
+  (`crypto_selection_backtest.py`) - the module's existing real Coinbase
+  candle-pagination logic, factored out of `fetch_historical_candles()` so
+  a caller anchored on a real past EVENT (not "the last N days from right
+  now") can reuse it. `fetch_historical_candles()` itself is now a thin
+  wrapper around it - byte-for-byte unchanged behavior for every existing
+  caller.
+- `_load_real_stop_hit_events(limit, hours_forward)` - real
+  `CryptoCoinTradeHistory` rows with `exit_reason == "STOP HIT"` exactly
+  (never `TRAILING STOP`, `PEAK PROFIT GIVEBACK`, or any other real exit
+  type - only a genuine price-driven stop is the real, testable question
+  here), skipping any event too recent to have `hours_forward` (24h
+  default) of real elapsed history yet, so it's never scored on a
+  truncated window.
+- `_simulate_reversal_trade(closes, times, start_idx, entry_price,
+  target_pct, stop_pct)` - a real, simple hypothesis test: buy back at
+  the stop's own real exit price, exit at the first candle that clears a
+  modest real target (2% default) or a second real hard stop protecting
+  the reversal trade itself (2% default), or mark-to-market at the real
+  last close if neither fires within the window.
+- `run_stop_hit_reversal_backtest()` - fetches each coin's real candles
+  from its earliest relevant stop event through now (once per coin,
+  grouped and semaphore-limited, same real shared-session pattern every
+  other multi-coin comparison in this file already uses), then per event
+  reports the real forward price return, whether it recovered back to the
+  stop's own exit price, and the hypothetical reversal trade's real
+  outcome - plus a real aggregate summary (recovery rate, hypothetical
+  win rate, average hypothetical P&L).
+
+New `POST /crypto-selection-backtest/stop-hit-reversal` (admin-key gated)
+and a new "▶ Run Stop-Hit Reversal Backtest" button + results panel on
+`crypto_selection_backtest.html`, right under the trailing-stop-width
+sweep - a real summary table (events tested, recovery rate, avg forward
+return, hypothetical win rate, avg hypothetical P&L) plus a per-event
+breakdown, worst-... best sorted by the hypothetical trade's own P&L.
+Also fixed the sweep note's stale "1.5% to 5%" text while touching that
+section, matching the candidate-set change above.
+
+**A real bug found and fixed in this same build, before it ever
+shipped**: the original `recovered_to_breakeven` check (both inside
+`_simulate_reversal_trade` and in a separate, redundant calculation in
+the wrapper) counted the very FIRST candle in each event's forward
+window - the one AT the stop event itself, whose real close is often at
+or extremely near the stop's own exit price by construction - as a
+"recovery," even with zero genuine forward price movement. Caught by the
+test suite's own `DOGE-USD` continued-decline case (a real, steadily
+FALLING price path still reported `recovered_to_breakeven: True`, which
+is impossible for a coin that never came back up). Fixed by only
+counting a candle strictly AFTER the starting one, and by consolidating
+the wrapper's separate, redundant computation to use
+`_simulate_reversal_trade`'s own single, now-fixed one instead of two
+inconsistent copies of similar logic.
+
+**Real, honest limitations stated plainly, in the code and the dashboard
+note itself**: no fees are modeled on the hypothetical reversal trades (a
+real one would need to clear the real round-trip fee on top of
+`target_pct` to be a genuine profit); this never checks whether real free
+cash would actually have been available to take the hypothetical trade at
+that moment; and a coin with very few real `STOP HIT` events doesn't
+carry the same statistical weight as POL-USD's real 80+ trade history.
+This is diagnostic only - it never reads into any live trading decision
+on its own, and nothing here is wired to a real trade.
+
+Verified offline (`test_stop_hit_reversal_backtest.py`, new, 23 checks,
+no live network access from this sandbox - same documented gap as every
+backtest tool in this file, real Coinbase candle fetches mocked with
+hand-crafted synthetic price paths): `_simulate_reversal_trade()` alone
+correctly identifies a real TARGET exit, a real second-STOP exit, and a
+real mark-to-market TIME exit, each with hand-verified P&L; the exact
+real bug above is reproduced and confirmed fixed (a continued-decline
+synthetic path no longer falsely reports recovery); `_load_real_stop_hit_events()`
+correctly excludes a real too-recent event (not enough forward history
+yet) and a real `TRAILING STOP` exit (wrong exit_reason entirely); and
+the full end-to-end backtest correctly scores a real recovering coin
+(XRP-USD, synthetic climb through the target) as a win and a real
+continued-decline coin (DOGE-USD) as a loss, with the real aggregate
+summary (50% recovery rate, 50% hypothetical win rate) matching by hand.
+Full existing `test_quick_profit_vs_trailing_stop.py` suite (16 checks)
+re-run clean alongside it, confirming the `fetch_historical_candles()`
+refactor didn't change its existing behavior. Confirmed via a real AST
+route-count parse that the new route is bound correctly with no
+duplicate registrations (73 total routes, zero duplicates).
+`crypto_selection_backtest.html` re-verified with a real Python
+`HTMLParser` tag-balance check and `node --check` on the extracted inline
+`<script>` block.
+
+**Not yet run against real historical data** - same documented gap as
+every backtest tool in this file (no live network access to Coinbase from
+this sandbox). The account owner needs to open
+`/crypto-selection-backtest-view` after the next redeploy and tap "▶ Run
+Stop-Hit Reversal Backtest" to see the real numbers - whether real
+recovery/win rates here are actually strong enough to justify building
+this into a live strategy is a decision for AFTER seeing that real data,
+the same "evidence before any live change" discipline every other tool in
+this file already follows. Nothing here changes what the live bot does on
+its own.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

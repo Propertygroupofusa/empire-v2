@@ -2687,6 +2687,34 @@ async def set_crypto_trailing_stop_pct(payload: SetTrailingStopPctRequest):
     return {"status": "promoted", "trailing_stop_pct": payload.pct}
 
 
+@router.post("/crypto-selection-backtest/stop-hit-reversal", dependencies=[Depends(require_admin_key)])
+async def run_crypto_stop_hit_reversal_backtest():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    Built directly from the account owner's own real question, right
+    after the exit-reason breakdown surfaced that most of a real losing
+    window's damage wasn't from genuine price-based stop-losses at all
+    (mostly legacy exit types that no longer exist, plus structural
+    branch/floor-breach forced exits): "if we figure out a way to make
+    money on it losing... we can make money off stops."
+
+    Tests the honest, real version of that idea against the FULL real
+    historical STOP HIT ledger (every coin, every real hard-stop exit
+    ever recorded - not just one rolling 20-trade window): does price
+    tend to recover after a real stop-loss, and would a simple
+    hypothetical "buy back in right at the stop-exit price" trade have
+    actually been profitable? See
+    crypto_selection_backtest.py's run_stop_hit_reversal_backtest() for
+    the full real methodology and its stated limitations (no fees
+    modeled on the hypothetical trades, doesn't check real cash
+    availability).
+
+    Pulls real historical data from Coinbase's public candles endpoint -
+    time depends on how many distinct coins have real STOP HIT history."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_stop_hit_reversal_backtest()
+
+
 @router.post("/alpaca-selection-backtest", dependencies=[Depends(require_admin_key)])
 async def run_alpaca_selection_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
