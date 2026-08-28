@@ -545,6 +545,25 @@ LIVE_PERFORMANCE_MIN_TRADES = engine._safe_int_env("TREE_LIVE_PERF_MIN_TRADES", 
 LIVE_PERFORMANCE_MIN_WIN_RATE = engine._safe_float_env("TREE_LIVE_PERF_MIN_WIN_RATE", "0.25")
 LIVE_PERFORMANCE_MIN_PNL_USD = engine._safe_float_env("TREE_LIVE_PERF_MIN_PNL_USD", "-50.0")
 
+# Per the account owner's explicit request ("make bots for each coin...
+# ever spawn a bot is assigned to it to trade it and make [a real] win
+# rate then it's able to spawn"): a branch can only organically spawn a
+# BRAND NEW child once its own coin has actually proven itself, not just
+# earned enough dollars. Their own first number (88%) was checked against
+# real history before building this - the single best real win rate this
+# whole session has ever produced anywhere (crypto or Alpaca) is ~73%
+# (USO, stock side); most crypto coins run well under 50%. An 88% bar
+# would freeze every future spawn permanently, so - per the account
+# owner's own explicit choice after being told that - this uses a real,
+# achievable bar instead. Same "needs real evidence, rolling window heals
+# itself" philosophy as LIVE_PERFORMANCE_* above; deliberately a SEPARATE
+# set of constants since this gates a different real decision (whether a
+# branch has EARNED the right to spawn) from that layer's own purpose
+# (whether a coin is currently too dangerous to trade at all).
+SPAWN_WIN_RATE_TRADE_WINDOW = engine._safe_int_env("TREE_SPAWN_WIN_RATE_TRADE_WINDOW", "20")
+SPAWN_MIN_TRADES_FOR_WIN_RATE_GATE = engine._safe_int_env("TREE_SPAWN_MIN_TRADES_FOR_GATE", "5")
+SPAWN_MIN_WIN_RATE = engine._safe_float_env("TREE_SPAWN_MIN_WIN_RATE", "0.55")
+
 _last_auto_backtest_at = 0.0
 
 
@@ -580,6 +599,30 @@ async def _compute_live_performance_excluded_coins() -> set:
             if win_rate < LIVE_PERFORMANCE_MIN_WIN_RATE or total_pnl < LIVE_PERFORMANCE_MIN_PNL_USD:
                 excluded.add(product_id)
     return excluded
+
+
+async def _coin_spawn_win_rate(product_id: str):
+    """Real win rate for one coin's own most recent SPAWN_WIN_RATE_TRADE_WINDOW
+    closed trades, from the exact same real CryptoCoinTradeHistory ledger
+    _compute_live_performance_excluded_coins() already reads (a different
+    window/threshold - see the real reasoning above SPAWN_MIN_WIN_RATE).
+    Returns (win_rate_0_to_1, trade_count), or (None, trade_count) when
+    there isn't yet SPAWN_MIN_TRADES_FOR_WIN_RATE_GATE real evidence to
+    judge it by - "not enough evidence yet" is deliberately NOT the same
+    as "proven," so a coin with too little history can't spawn either,
+    same as one with a real, confirmed-bad win rate."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(CryptoCoinTradeHistory.pnl)
+            .where(CryptoCoinTradeHistory.product_id == product_id)
+            .order_by(desc(CryptoCoinTradeHistory.closed_at))
+            .limit(SPAWN_WIN_RATE_TRADE_WINDOW)
+        )
+        recent_pnls = result.scalars().all()
+    if len(recent_pnls) < SPAWN_MIN_TRADES_FOR_WIN_RATE_GATE:
+        return None, len(recent_pnls)
+    wins = sum(1 for pnl in recent_pnls if pnl > 0)
+    return wins / len(recent_pnls), len(recent_pnls)
 
 
 async def _compute_top_ranked_coins():
@@ -1389,33 +1432,35 @@ async def get_next_eligible_product_id():
     """Picks a coin for a brand-new $50 branch to start on - not currently
     excluded (see get_effective_excluded_coins), not still cooling down
     from having been sold within the last cycle (see
-    _coin_sale_cooldown_active).
+    _coin_sale_cooldown_active), and - reversed back per the account
+    owner's own later, explicit follow-up request ("each coin gets its
+    own bot... if it spawn a coin that's already got an agent running, it
+    goes back to USD balance") - genuinely UNCLAIMED: no other branch may
+    already be trading it. Returns None when nothing free-and-eligible
+    exists, same as the original pre-shared-coin behavior; the caller
+    (spawn_family_tree_branch endpoint, and _maybe_spawn_child's own
+    dormant new-branch fallback) already handles a None return by simply
+    not spawning and leaving the real cash exactly where it already was -
+    nothing forces it onto an occupied coin.
 
-    Per the account owner's explicit choice, no longer REQUIRES the coin
-    to be unclaimed - multiple branches can now hold the same coin at
-    once. Still prefers spreading out where possible though: among all
-    eligible coins, picks whichever currently has the FEWEST branches
-    already on it - a coin with zero branches always wins first, same
-    practical result as the old "must be unclaimed" rule in the common
-    case, but this degrades to piling onto the least-crowded coin instead
-    of returning None once every coin has at least one branch, rather
-    than hard-blocking new branches from spawning at all.
+    Scoped deliberately narrow: this is the picker for AUTOMATIC/auto-pick
+    new-branch creation only. The manual "Trade this" endpoint
+    (spawn_family_tree_branch_on_coin, where the account owner names the
+    exact coin themselves) still deliberately allows landing on an
+    already-claimed coin - that was its own separate, explicit earlier
+    request ("Multiple branches can now share the same coin") and is left
+    untouched, along with every branch that's already sharing a coin
+    today (POL-USD's group included) - this only changes where a NEW
+    auto-picked branch is allowed to go from here forward. Coin-switching
+    an EXISTING branch after it exits (find_most_volatile_unclaimed_coin)
+    is also untouched - a different mechanism (moving an existing bot to
+    a better coin, not creating a new one) outside the scope of what was
+    asked here.
 
-    Real production evidence: exhausting even 12 retries+jitter in
-    spawn_child_branch_with_retry() on a real, repeated basis (not a
-    one-off) meant the collision rate itself was too high for retry
-    timing alone to fix - the OLD tie-break (fixed COIN_FAMILY_TREE list
-    order) made every concurrent spawner - manual clicks, "Trade this" on
-    the backtest page, and the coordinator's own per-cycle catch-up spawn
-    across every branch - deterministically agree on the IDENTICAL single
-    target coin whenever several coins were tied at the same lowest
-    count, funneling all of that real concurrent demand onto one coin
-    instead of spreading it out. Ties are now broken with a real random
-    pick among every coin AT the minimum count, so simultaneous spawners
-    naturally spread their targets across however many coins are tied
-    (often several, when most coins sit at 0-1 branches) instead of all
-    piling onto the same one - directly cutting the real collision rate,
-    not just retrying around it."""
+    Ties among multiple genuinely-unclaimed eligible coins are still
+    broken with a real random pick (not fixed list order) - the same real
+    fix that stopped every concurrent spawner from deterministically
+    piling onto the identical single coin whenever several were tied."""
     excluded = await get_effective_excluded_coins()
     eligible = [
         p for p in COIN_FAMILY_TREE
@@ -1425,24 +1470,24 @@ async def get_next_eligible_product_id():
         return None
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoTreeBranch.product_id))
-        held = list(result.scalars().all())
-    counts = {p: held.count(p) for p in eligible}
-    min_count = min(counts.values())
-    tied = [p for p in eligible if counts[p] == min_count]
-    return random.choice(tied)
+        held = set(result.scalars().all())
+    unclaimed = [p for p in eligible if p not in held]
+    if not unclaimed:
+        return None
+    return random.choice(unclaimed)
 
 
 async def _drop_product_id_unique_index():
-    """One-time reversal, safe to call on every startup: per the account
-    owner's explicit choice, branches are no longer required to each
-    trade a different coin - multiple branches can now hold the same
-    coin at once. The real DB-level UNIQUE index this same startup
-    sequence used to create (ix_crypto_tree_branches_product_id_unique)
-    would reject that outright at the database layer regardless of what
-    the Python-level "claimed" checks say (already removed from
-    get_next_eligible_product_id(), find_most_volatile_unclaimed_coin(),
-    and the manual spawn-branch endpoint), so it has to come off too, on
-    any deployment that already created it in an earlier session.
+    """One-time reversal, safe to call on every startup: the real DB-level
+    UNIQUE index this same startup sequence used to create
+    (ix_crypto_tree_branches_product_id_unique) must stay off, even though
+    get_next_eligible_product_id() (the AUTOMATIC new-branch picker) was
+    later reverted back to requiring an unclaimed coin - the manual "Trade
+    this" endpoint (spawn_family_tree_branch_on_coin) and every branch
+    already sharing a coin today (POL-USD's group included) still
+    genuinely rely on the DB permitting more than one branch per
+    product_id; only the automatic picker's own Python-level choice
+    changed, not what the database itself allows.
 
     Real production gap found live: `DROP INDEX IF EXISTS` never raises
     even when nothing was actually removed, so the old version of this
@@ -3096,6 +3141,28 @@ async def _maybe_spawn_child(branch, chain_visited: frozenset = frozenset(), cha
     # spawn in a fresh tree, or a tree of exactly one branch) - fall
     # through to the normal new-branch path below instead of silently
     # skipping this spawn opportunity.
+
+    # Per the account owner's explicit request: a branch has to have
+    # actually PROVEN itself on its own coin before it's trusted to spawn
+    # a brand-new child, not just earned enough dollars. Real evidence
+    # required first (SPAWN_MIN_TRADES_FOR_WIN_RATE_GATE closed trades) -
+    # too little history is treated the same as a real, confirmed-bad
+    # win rate: not yet earned, so the seed stays put in USD and this
+    # spawn attempt just waits for next time, exactly like the
+    # no-eligible-coin case right below.
+    spawn_win_rate, spawn_trade_count = await _coin_spawn_win_rate(branch.product_id)
+    if spawn_win_rate is None or spawn_win_rate < SPAWN_MIN_WIN_RATE:
+        evidence = (
+            "no real closed trades yet" if spawn_trade_count == 0
+            else f"only {spawn_trade_count} real trade(s) so far (needs {SPAWN_MIN_TRADES_FOR_WIN_RATE_GATE}+)" if spawn_win_rate is None
+            else f"real win rate {spawn_win_rate * 100:.0f}% over its last {spawn_trade_count} trades"
+        )
+        log.info(
+            f"[TREE] {branch.bot_name} crossed ${branch.next_unlock_tier:,.0f} but its own coin "
+            f"({branch.product_id}) hasn't proven a real {SPAWN_MIN_WIN_RATE * 100:.0f}%+ win rate yet "
+            f"({evidence}) - holding the ${SEED_USD:.2f} seed in USD instead of spawning a new bot"
+        )
+        return
 
     next_product = await get_next_eligible_product_id()
     if next_product is None:

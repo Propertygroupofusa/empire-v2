@@ -9033,6 +9033,103 @@ since LINK depends on it), with a note explaining exactly what's hidden.
 
 ---
 
+## Back to one bot per coin for NEW auto-spawns, plus a real win-rate gate before a branch is trusted to spawn at all
+
+Per the account owner's own direct request: "make bots for each coin...
+ever spawn a bot is assigned to it to trade it and make [a real] win rate
+then it's able to spawn... if it spawn a coin that's already have an
+agent running, it goes back to usd balance." Checked their first number
+(88%) against real history before building anything: the single best
+real win rate this whole session has ever produced ANYWHERE (crypto or
+Alpaca) is ~73% (USO, stock side) - most crypto coins run well under 50%.
+Told them directly that 88% would freeze every future spawn permanently,
+and they confirmed via `AskUserQuestion` a realistic 55% bar instead, and
+that this should only govern NEW spawns going forward - every branch
+already sharing a coin today (POL-USD's group included) stays exactly as
+it is.
+
+**Two real, separate changes**, both scoped to the AUTOMATIC/auto-pick
+new-branch path only:
+
+1. **`get_next_eligible_product_id()`** (the coin-picker for a brand-new
+   $50 branch) reverted back to requiring a genuinely UNCLAIMED coin - no
+   other branch may already be trading it - instead of degrading to
+   piling onto the least-crowded coin once every coin has at least one
+   branch (the real "shared coin" behavior from earlier this session).
+   Returns `None` when nothing free exists, exactly like the original
+   pre-shared-coin behavior - the caller already handles that by simply
+   not spawning, leaving the real cash fully in place. Deliberately does
+   NOT touch: the manual "Trade this" endpoint
+   (`spawn_family_tree_branch_on_coin`, where the account owner names an
+   exact coin themselves - still their own explicit earlier request to
+   allow sharing on purpose), coin-switching an EXISTING branch after it
+   exits (`find_most_volatile_unclaimed_coin` - a different mechanism,
+   moving an existing bot, not creating a new one), or the real DB-level
+   unique-index drop (`_drop_product_id_unique_index()` stays as-is - the
+   database still has to permit sharing for the paths that still
+   deliberately use it).
+2. **New win-rate spawn gate** - `_coin_spawn_win_rate()` reads the real
+   most recent `SPAWN_WIN_RATE_TRADE_WINDOW` (20) closed trades for a
+   coin from the same real `CryptoCoinTradeHistory` ledger the
+   live-performance exclusion layer already reads. Wired into
+   `_maybe_spawn_child()`'s new-branch fallback (only reached when
+   there's no OTHER existing branch left to reinforce, since
+   reinforcement still always wins first when one exists): a branch can
+   only spawn a brand-new child once ITS OWN current coin has a real,
+   proven win rate `>= SPAWN_MIN_WIN_RATE` (55% default,
+   `TREE_SPAWN_MIN_WIN_RATE` env-overridable) over at least
+   `SPAWN_MIN_TRADES_FOR_WIN_RATE_GATE` (5) real trades. Too little real
+   evidence is treated the same as a real, confirmed-bad rate - not
+   "innocent until proven guilty" the way every OTHER exclusion layer in
+   this file defaults, since this is a "prove you've earned it" gate, not
+   an "exclude if proven bad" one. Either way, the seed stays completely
+   untouched in the branch's own `allocated_usd` and the attempt just
+   waits for next time - no real money is ever lost or force-deployed.
+
+**Real, honest scope note, given directly to the account owner**: since
+reinforcement already unconditionally wins over new-branch creation
+whenever ANY other branch exists (see "Reinforcement rule revised again"
+above), this whole new-branch path is naturally rare in a mature,
+20+-branch tree - most real spawns today are reinforcements into
+existing weak branches, not new bots on new coins. Both changes here
+still matter (they govern the manual auto-pick button's coin choice, and
+the rare cases a genuinely new branch does get created), but this
+explains why the practical effect won't be as constant as "every spawn
+now needs 55%" might suggest.
+
+Verified offline (`test_one_bot_per_coin_and_win_rate_gate.py`, 14
+checks, real throwaway SQLite DB): a genuinely unclaimed real coin is
+still picked normally; once every real coin in the family tree is
+claimed, `None` is correctly returned instead of piling onto one; `_coin_spawn_win_rate()`
+correctly reports "not enough evidence" below the trade-count floor, a
+real 75% rate, and a real bad 37.5% rate; and end-to-end through
+`_maybe_spawn_child()`'s actual new-branch fallback - zero real trade
+history blocks the spawn with the seed untouched, a real confirmed-bad
+win rate (17% over 6 trades) still blocks it, and a real proven win rate
+(75% over 8 trades, history cleared first to isolate the case) lets the
+spawn go through with the $50 seed genuinely deducted and a real,
+different, unclaimed coin picked for the child.
+
+**Not run as a historical backtest** - this is fundamentally a different,
+bigger kind of test than every price-replay backtest already built this
+session (QUICK_PROFIT vs trailing stop, momentum vs mean-reversion, and
+so on all replay ONE position's entry/exit against real historical
+candles); simulating whether this spawn/win-rate POLICY itself would have
+grown the whole tree faster over real history would mean simulating every
+branch's spawning and capital growth over months, a substantially larger
+build this session didn't take on, and this sandbox has no live access to
+the real historical spawn data it would need regardless. Told the account
+owner this directly rather than fabricating a number.
+
+**Not yet confirmed live** - the account owner needs to redeploy; from
+there, real evidence accumulates the honest way - any future spawn (or a
+real blocked spawn, with the reason logged) shows up in the Live Activity
+feed, and any new coin spawned under this rule builds its own real trade
+history in the Coin Trade History table, directly comparable against
+older coins like POL that predate this change.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md
