@@ -386,9 +386,12 @@
         created below, but nothing trades until "Enable branch trading" is switched on.
     </p>
     <div class="panel" id="branches-panel">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px; flex-wrap:wrap; gap:8px;">
             <button id="branch-mode-toggle-btn" class="unlock-btn" onclick="toggleBranchMode()" disabled>Loading…</button>
-            <button class="unlock-btn" onclick="openCreateBranchModal()">🌱 New branch</button>
+            <div style="text-align:right;">
+                <button class="unlock-btn" onclick="openCreateBranchModal()">🌱 New branch</button>
+                <div id="branch-available-balance" style="font-size:0.8em; color:var(--text-dim); margin-top:4px;">Checking real available balance…</div>
+            </div>
         </div>
         <div id="branches-content" class="empty">Loading…</div>
     </div>
@@ -909,6 +912,26 @@ function renderBranches(data, tradeHistoryByBot) {
     const toggleBtn = document.getElementById('branch-mode-toggle-btn');
     toggleBtn.disabled = false;
     toggleBtn.textContent = branchModeActive ? '⏸️ Disable branch trading' : '▶️ Enable branch trading';
+
+    // Real "available balance to make a branch" - per the account owner's
+    // explicit request to see this right under the New branch button
+    // itself, not only after opening the create modal or reading the
+    // deficit banner below. Same real buying_power/already_allocated_usd/
+    // real_spendable_usd figures both of those already use - reused here,
+    // not a second, separately-computed number.
+    const availEl = document.getElementById('branch-available-balance');
+    if (availEl) {
+        if (data.real_spendable_usd == null) {
+            availEl.textContent = 'Could not check real available balance right now';
+            availEl.style.color = 'var(--text-dim)';
+        } else if (data.real_spendable_usd > 0) {
+            availEl.textContent = `💰 ${fmtUsd(data.real_spendable_usd)} available to start a new branch`;
+            availEl.style.color = 'var(--green)';
+        } else {
+            availEl.textContent = `$0.00 available right now (real cash is already fully committed)`;
+            availEl.style.color = 'var(--text-dim)';
+        }
+    }
 
     const content = document.getElementById('branches-content');
     const branches = data.branches || [];
