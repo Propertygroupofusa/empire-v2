@@ -9525,6 +9525,97 @@ instead of just the bare average.
 
 ---
 
+## Real exit-reason breakdown added, using the account owner's own real 20-trade numbers as the concrete case
+
+Real numbers came in from the redeployed win/loss breakdown above: 8
+wins averaging $2.80 each, 12 losses averaging $-7.60 each, 40% win
+rate, real total -$68.78 over the last 20 real trades - matching the
+tree's real "Total Profit -$482.21" (realized -$464.21). The account
+owner's direct follow-up, after being told a 99.9% win rate isn't a real
+thing any trading system can promise (and that the honest lever here is
+the loss-vs-win dollar ratio, not the win rate itself - 2.7x bigger
+average loss than average win is what actually produced the negative
+expectancy despite 8 real wins): "figure out why is not getting better
+and what is stopping it from winning."
+
+The concrete next question that answers that: WHAT kind of exit is
+actually producing those 12 real losses? With `trailing_stop` as the
+only live exit mode (`QUICK_PROFIT` removed outright earlier this
+session), a real loss can only really come from `STOP HIT` (the hard
+stop or breakeven ratchet firing before price ever reached the real
+target) - a real `TRAILING STOP - reversed from peak` exit only fires
+AFTER price already reached target, so by design it should rarely if
+ever show a real loss. Grouping the rolling window by real `exit_reason`
+makes that verifiable directly from the data instead of assumed.
+
+`get_rolling_expectancy()` (`crypto_family_tree_bot.py`) now also
+returns `by_exit_reason`: `{reason: {count, total_pnl, avg_pnl}}`,
+sorted worst-total-first so the real biggest driver of the window's
+losses is always what's seen first. A real trade with no `exit_reason`
+on record (an older/legacy row) buckets as `"unknown"` rather than being
+silently dropped. `None` below the real minimum trade-count floor, same
+default every other field here already uses.
+
+Surfaced directly on the tree-wide pause banner
+(`family_tree_dashboard.html`'s `renderRollingExpectancyBanner()`) as a
+real per-reason table under the existing win/loss breakdown - "What kind
+of exit is actually driving this (worst first)" - reusing the existing
+reconciliation-table's green/red status classes so a losing reason reads
+red and a winning one reads green at a glance.
+
+**What this actually tells the account owner, once real data populates
+it**: if the 12 real losses cluster almost entirely under `STOP HIT`,
+that's the honest, expected cost of protecting against a wrong-direction
+entry - the same 12 losses could just as easily have been 12 much
+BIGGER losses without that stop firing, so a cluster there isn't a sign
+of something broken, it's the safety net doing its job. If a real loss
+shows up under `TRAILING STOP` instead, that's structurally unexpected
+(the trail only arms after target is already reached) and worth a
+direct, real look rather than an assumption either way. This doesn't
+change any real trading behavior on its own - it's a diagnostic, the
+same posture as the cash-reconciliation banner above - but it's the
+concrete next fact needed before deciding whether the real fix is a
+tighter/wider hard stop, a different trail width (the trailing-stop-
+width sweep tool already built this session), or something about entry
+quality itself.
+
+Verified offline (`test_rolling_expectancy_exit_reason.py`, new, 3
+checks) against a real throwaway SQLite DB: the account owner's own
+exact real shape (8 real `TRAILING STOP` wins at $2.80, 12 real
+`STOP HIT` losses at $-7.60) is attributed correctly per reason with the
+real hand-verified totals, and `STOP HIT` (the worst total) sorts first;
+a real `NULL` exit_reason is bucketed as `"unknown"` and still counted,
+never silently dropped; and too few real trades returns `None` for
+`by_exit_reason` too, not a fabricated breakdown. Full existing
+`test_rolling_expectancy_breakdown.py` (4 checks) and
+`test_rolling_expectancy_kill_switch.py` (8 checks) suites re-run clean
+alongside it, confirming this is purely additive. `family_tree_dashboard.html`
+re-verified with a real Python `HTMLParser` tag-balance check and
+`node --check` on the extracted inline `<script>` block.
+
+**Directly, honestly said to the account owner in this same
+conversation, not just documented here**: a 99.9% win rate is not a real
+thing any live trading system can promise - not this one, not any other.
+The real, achievable target is a positive expectancy (average $/trade),
+which this exact data shows is currently failed by a 2.7x loss-to-win
+dollar ratio despite a real 40% win rate - improving THAT ratio (via a
+tighter stop, a different trail width once more real trailing_stop data
+exists, or filtering out whichever setups are producing the worst real
+`STOP HIT` losses) is the real, honest lever, not chasing a win-rate
+number that doesn't reflect how the system's real risk is structured.
+The account owner was also reminded the "🔒📈 Retire the tree & buy real
+BTC" button already exists as a real, one-way way to stop this specific
+kind of risk entirely, given their own words ("I will sit and watch, I'm
+tired") - not pushed, just made sure it's known.
+
+**Not yet confirmed live** - the account owner needs to redeploy; the
+next time the tree-wide pause banner shows (or right now, since it was
+showing at the time this was built), it will carry the real per-exit-
+reason table described above, which is the concrete next piece of
+evidence needed before any further change to the stop/trail parameters.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

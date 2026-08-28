@@ -1814,11 +1814,28 @@ function renderRollingExpectancyBanner(data) {
            loss when the losses run bigger on average than the wins do — that's what's happening here, which is why
            this pauses on the real average $/trade rather than the win rate alone.`
         : '';
+    let reasonRows = '';
+    if (exp.by_exit_reason) {
+        const entries = Object.entries(exp.by_exit_reason);
+        reasonRows = entries.map(([reason, r]) => {
+            const cls = r.total_pnl < 0 ? 'status-shortfall' : r.total_pnl > 0 ? 'status-ok' : '';
+            return `<tr><td>${reason}</td><td>${r.count}</td><td class="${cls}">${fmtUsd(r.total_pnl)}</td><td>${fmtUsd(r.avg_pnl)}/ea</td></tr>`;
+        }).join('');
+    }
+    const reasonTable = reasonRows
+        ? `<div style="margin-top:10px; overflow-x:auto;">
+             <div style="font-size:0.85em; margin-bottom:4px;">What kind of exit is actually driving this (worst first):</div>
+             <table style="width:100%; font-size:0.85em;">
+               <thead><tr><th style="text-align:left;">Exit reason</th><th style="text-align:left;">Count</th><th style="text-align:left;">Real total</th><th style="text-align:left;">Avg/trade</th></tr></thead>
+               <tbody>${reasonRows}</tbody>
+             </table>
+           </div>`
+        : '';
     el.innerHTML = `<div class="panel" style="background: var(--red-bg); border: 1px solid var(--red); padding: 14px 18px; margin-bottom: 16px;">
         <strong>🐢 New entries paused tree-wide.</strong> The real average P&amp;L across the tree's last
         ${exp.num_trades} real completed trades is <strong>${fmtUsd(exp.expectancy)}/trade</strong> - negative${totalText} -
         so no branch will open a new position until this recovers. Existing open positions keep their own real
-        target/stop/breakeven protection unaffected; this only pauses new money going in.${breakdownText}
+        target/stop/breakeven protection unaffected; this only pauses new money going in.${breakdownText}${reasonTable}
     </div>`;
 }
 

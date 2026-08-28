@@ -1333,19 +1333,37 @@ async def get_rolling_expectancy() -> dict:
     negative expectancy when losses run bigger than wins on average - but
     it makes the full real picture (how many real wins, how many real
     losses, and the real dollar size of each) visible everywhere the
-    average itself is shown, instead of just the one number."""
+    average itself is shown, instead of just the one number.
+
+    Also breaks the window down BY real exit_reason - added after the
+    account owner's real numbers (8 wins/$2.80 avg, 12 losses/$-7.60 avg,
+    40% win rate) raised the obvious next question: WHAT kind of exit is
+    producing those losses? With trailing_stop as the only live exit mode
+    (QUICK_PROFIT was removed outright earlier this session), a loss can
+    only really come from a real "STOP HIT" (the hard stop or breakeven
+    ratchet firing before price ever reached the real target) - a real
+    "TRAILING STOP - reversed from peak" exit only ever fires AFTER price
+    already reached target, so by design it should rarely if ever show a
+    real loss. Grouping the window by exit_reason makes that verifiable
+    directly instead of assumed - if losses cluster almost entirely under
+    STOP HIT, that's the real, honest, expected cost of protecting against
+    a wrong-direction entry (the same 12 losses could just as easily have
+    been 12 much BIGGER losses without that stop), not a sign anything is
+    broken; if a real loss shows up under TRAILING STOP, that's worth a
+    direct look since it shouldn't structurally happen often."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(CryptoCoinTradeHistory.pnl)
+            select(CryptoCoinTradeHistory.pnl, CryptoCoinTradeHistory.exit_reason)
             .order_by(desc(CryptoCoinTradeHistory.closed_at))
             .limit(ROLLING_EXPECTANCY_WINDOW)
         )
-        pnls = [row[0] for row in result.all()]
+        rows = result.all()
+        pnls = [row[0] for row in rows]
     if len(pnls) < ROLLING_EXPECTANCY_MIN_TRADES:
         return {
             "expectancy": None, "num_trades": len(pnls), "min_trades_required": ROLLING_EXPECTANCY_MIN_TRADES,
             "negative": False, "win_count": None, "loss_count": None, "win_rate": None,
-            "avg_win": None, "avg_loss": None, "total_pnl": None,
+            "avg_win": None, "avg_loss": None, "total_pnl": None, "by_exit_reason": None,
         }
     expectancy = sum(pnls) / len(pnls)
     wins = [p for p in pnls if p > 0]
@@ -1359,6 +1377,21 @@ async def get_rolling_expectancy() -> dict:
     win_rate = round(100.0 * win_count / len(pnls), 1)
     avg_win = round(sum(wins) / win_count, 4) if win_count else None
     avg_loss = round(sum(losses) / loss_count, 4) if loss_count else None
+
+    by_reason = {}
+    for pnl, reason in rows:
+        reason = reason or "unknown"
+        bucket = by_reason.setdefault(reason, {"count": 0, "total_pnl": 0.0})
+        bucket["count"] += 1
+        bucket["total_pnl"] += pnl
+    for bucket in by_reason.values():
+        bucket["avg_pnl"] = round(bucket["total_pnl"] / bucket["count"], 4)
+        bucket["total_pnl"] = round(bucket["total_pnl"], 2)
+    # Most damaging reason first (most negative total_pnl), so the real
+    # biggest driver of the window's losses is always the first thing
+    # anyone reading this sees.
+    by_exit_reason = dict(sorted(by_reason.items(), key=lambda kv: kv[1]["total_pnl"]))
+
     return {
         "expectancy": round(expectancy, 4),
         "num_trades": len(pnls),
@@ -1370,6 +1403,7 @@ async def get_rolling_expectancy() -> dict:
         "avg_win": avg_win,
         "avg_loss": avg_loss,
         "total_pnl": round(sum(pnls), 2),
+        "by_exit_reason": by_exit_reason,
     }
 
 
