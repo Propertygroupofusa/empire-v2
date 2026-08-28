@@ -2770,11 +2770,23 @@ async def _deploy_seed_into_weakest_branch(session, target_bot_name: str, usd_am
                 f"[TREE] reinforcement: {target_branch.product_id} does not currently qualify for a brand-new entry "
                 f"({reason}) - {target_bot_name} skipped this turn"
             )
+            # Real bug found live: this real reason was computed and
+            # logged here but never written into the same _last_order_error
+            # dict the caller (_maybe_spawn_child) reads from when it
+            # builds its own REINFORCE_FAILED message - so a genuine,
+            # specific rejection (RSI overbought, trailing BTC, downtrend)
+            # showed up on the dashboard as a bare "unknown reason" every
+            # single cycle instead of the real cause. Reusing the exact
+            # same dict every other real-reason-surfacing path already
+            # writes to, so the caller's existing lookup picks it up with
+            # no other change needed.
+            engine._last_order_error[target_branch.product_id] = f"entry gate: {reason}"
             return False
 
     price, atr_pct = await engine.get_price_and_volatility(session, target_branch.product_id)
     if price is None or atr_pct is None:
         log.warning(f"[TREE] reinforcement: could not fetch a live price for {target_branch.product_id} - skipping this turn")
+        engine._last_order_error[target_branch.product_id] = "no live price/volatility data available right now"
         return False
 
     fill = await engine.place_market_buy(session, usd_amount, target_branch.product_id)
