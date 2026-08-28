@@ -965,12 +965,27 @@ def _build_progress_observations(alpaca_data, crypto_data):
             })
         rolling = crypto_data.get("rolling_expectancy")
         if rolling and rolling.get("negative"):
+            win_rate = rolling.get("win_rate")
+            win_count = rolling.get("win_count")
+            loss_count = rolling.get("loss_count")
+            avg_win = rolling.get("avg_win")
+            avg_loss = rolling.get("avg_loss")
+            total_pnl = rolling.get("total_pnl")
+            breakdown = ""
+            if win_rate is not None:
+                breakdown = (
+                    f" Breakdown: {win_count} win(s) averaging ${avg_win:.2f} each, {loss_count} loss(es) "
+                    f"averaging ${avg_loss:.2f} each ({win_rate:.1f}% win rate) - real total across the window: "
+                    f"${total_pnl:.2f}. A high win rate can still add up to a real net loss when the losses run "
+                    f"bigger on average than the wins do, which is what's happening here."
+                )
+            total_text = f" (a real total of ${total_pnl:.2f} across the window, not just ${rolling['expectancy']:.2f})" if total_pnl is not None else ""
             observations.append({
                 "icon": "🐢", "tone": "warn",
                 "text": (
                     f"Crypto entries are tree-wide paused - the last {rolling['num_trades']} real trades "
-                    f"averaged ${rolling['expectancy']:.2f} each. Clears automatically once real recent wins "
-                    f"bring the average back positive - no action needed, just something worth knowing about."
+                    f"averaged ${rolling['expectancy']:.2f} each{total_text}.{breakdown} Clears automatically "
+                    f"once real recent wins bring the average back positive - no action needed, just something worth knowing about."
                 ),
             })
         branches = crypto_data.get("branches") or []

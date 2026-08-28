@@ -9454,6 +9454,77 @@ Between Branches/Add Cash keep failing even after retrying.
 
 ---
 
+## Real win/loss breakdown added to the rolling-expectancy pause banner - a real misreading, corrected
+
+The account owner saw the "🐢 Crypto entries are tree-wide paused - the
+last 20 real trades averaged $-3.44 each" banner and read that average as
+the whole loss ("it only lost $3 and some change out of 20 trades"),
+asked why the real winning trades and win rate weren't shown, and asked
+to stop pausing on this if the real win rate looks decent.
+
+Two separate things needed answering honestly, not just built around:
+
+1. **The number itself was already being misread.** $-3.44/trade is a
+   real PER-TRADE average over 20 real trades - the real total across
+   that window is roughly **-$68.80**, not "$3 and some change." That
+   distinction matters for judging whether this is actually a small,
+   ignorable dip or a real, meaningful loss - it's the latter.
+2. **A real high win rate does not mean a real net profit.** Real
+   expectancy (average $/trade) is the correct real gate for a live-money
+   pause, precisely BECAUSE a real system can win most of its real trades
+   and still lose money on net, if the real losses run bigger on average
+   than the real wins do - a well-known real trading trap, not a
+   hypothetical one. Whether that's actually what's happening here can't
+   be confirmed from this sandbox (no live DB access to the real 20
+   trades) - but it's exactly the failure mode `get_rolling_expectancy()`'s
+   pause exists to catch, so the pause logic itself was NOT loosened
+   or gated on win rate - that would risk quietly disabling real
+   protection based on a plausible-sounding but unverified read of "the
+   win rate looked good."
+
+What WAS built, directly answering the actual visibility gap: `get_rolling_expectancy()`
+(`crypto_family_tree_bot.py`) now also computes and returns
+`win_count`/`loss_count`/`win_rate`/`avg_win`/`avg_loss`/`total_pnl` over
+the same real rolling window - a trade at exactly real $0 P&L counts
+toward `num_trades`/`total_pnl` but neither `win_count` nor `loss_count`,
+so `win_rate` is real wins over real total trades, never inflated by
+excluding breakeven trades from the denominator. Every field is `None`
+(never a fabricated 0%) below the real minimum trade-count floor, same
+"no data = not excluded" default every other layer in this file already
+uses. The actual pause CONDITION (`negative = expectancy < 0`) is
+byte-for-byte unchanged.
+
+Both places this average was already shown now show the real full
+picture: `_build_progress_observations()`'s combined-dashboard text
+(`routers/trading_dashboard.py`) and `renderRollingExpectancyBanner()`'s
+red banner (`family_tree_dashboard.html`) both now spell out the real
+total across the window, the real win/loss counts, the real average
+dollar size of each, and the real win rate - with a plain-language note
+that a high win rate can still net a real loss when losses run bigger
+than wins, which is the honest reason this pauses on the average rather
+than the win rate alone.
+
+Verified offline (`test_rolling_expectancy_breakdown.py`, new, 4 checks)
+against a real throwaway SQLite DB: the exact real trap this concerns -
+16 real $2 wins and 4 real $20 losses, an 80% win rate that still nets a
+real -$48 total (-$2.40/trade average) - is computed correctly end to
+end; the account owner's own exact real numbers (20 trades at -$3.44
+each) correctly report a real -$68.80 total, not left implicit as just
+the average; a real breakeven ($0) trade is correctly counted toward
+`num_trades`/`total_pnl` but excluded from both `win_count` and
+`loss_count`; and too few real trades correctly returns `None` for every
+breakdown field, never a fabricated number. Full existing
+`test_rolling_expectancy_kill_switch.py` suite (8 checks) re-run clean
+alongside it, confirming the real pause condition and every existing
+call site are completely unaffected by the added fields.
+
+**Not yet confirmed live** - the account owner needs to redeploy; the
+next time (or the current time, if still paused) the tree-wide pause
+banner shows, it will carry the real win/loss breakdown described above
+instead of just the bare average.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

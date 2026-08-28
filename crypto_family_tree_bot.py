@@ -1319,7 +1319,21 @@ async def get_rolling_expectancy() -> dict:
     only ever True once there are at least ROLLING_EXPECTANCY_MIN_TRADES
     real trades to judge it on; fewer than that is never enough evidence
     to act on, the same "no data = not excluded" default every other
-    contestable layer in this file already uses."""
+    contestable layer in this file already uses.
+
+    Also breaks the window down into win_count/loss_count/win_rate/avg_win/
+    avg_loss/total_pnl - added after the account owner, seeing only the
+    plain "-$3.44 each" average on the dashboard, read it as a small $3-ish
+    total loss rather than a real per-trade average (over 20 trades, an
+    average of -$3.44/trade is a real total of roughly -$68.80 across the
+    window, not "$3 and some change") and asked why a decent-looking win
+    rate wasn't being weighed at all. This doesn't change what pauses new
+    entries - expectancy (real average $/trade) is still the correct real
+    gate, since a real, high win rate can still coexist with a real
+    negative expectancy when losses run bigger than wins on average - but
+    it makes the full real picture (how many real wins, how many real
+    losses, and the real dollar size of each) visible everywhere the
+    average itself is shown, instead of just the one number."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(CryptoCoinTradeHistory.pnl)
@@ -1328,13 +1342,34 @@ async def get_rolling_expectancy() -> dict:
         )
         pnls = [row[0] for row in result.all()]
     if len(pnls) < ROLLING_EXPECTANCY_MIN_TRADES:
-        return {"expectancy": None, "num_trades": len(pnls), "min_trades_required": ROLLING_EXPECTANCY_MIN_TRADES, "negative": False}
+        return {
+            "expectancy": None, "num_trades": len(pnls), "min_trades_required": ROLLING_EXPECTANCY_MIN_TRADES,
+            "negative": False, "win_count": None, "loss_count": None, "win_rate": None,
+            "avg_win": None, "avg_loss": None, "total_pnl": None,
+        }
     expectancy = sum(pnls) / len(pnls)
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p < 0]
+    win_count = len(wins)
+    loss_count = len(losses)
+    # Trades that closed at exactly breakeven (p == 0, real but rare) count
+    # toward num_trades and total_pnl but toward neither win_count nor
+    # loss_count - win_rate is real wins over real total trades, not just
+    # over decided trades, so it's never inflated by excluding breakeven.
+    win_rate = round(100.0 * win_count / len(pnls), 1)
+    avg_win = round(sum(wins) / win_count, 4) if win_count else None
+    avg_loss = round(sum(losses) / loss_count, 4) if loss_count else None
     return {
         "expectancy": round(expectancy, 4),
         "num_trades": len(pnls),
         "min_trades_required": ROLLING_EXPECTANCY_MIN_TRADES,
         "negative": expectancy < 0,
+        "win_count": win_count,
+        "loss_count": loss_count,
+        "win_rate": win_rate,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "total_pnl": round(sum(pnls), 2),
     }
 
 
