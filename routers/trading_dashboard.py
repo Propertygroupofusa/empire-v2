@@ -2715,6 +2715,27 @@ async def run_crypto_stop_hit_reversal_backtest():
     return await crypto_selection_backtest_module.run_stop_hit_reversal_backtest()
 
 
+@router.post("/crypto-selection-backtest/forced-exit-reversal", dependencies=[Depends(require_admin_key)])
+async def run_crypto_forced_exit_reversal_backtest():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    The direct follow-up to the Stop-Hit Reversal Backtest above, per the
+    account owner's own real question after seeing that a real losing
+    window was mostly driven by structural forced exits (a branch's own
+    floor/drawdown-breach safety nets firing) rather than genuine STOP HIT
+    price-stops: "how is there a way that we can make money off a system
+    like that." Tests the identical real reversal hypothesis, scoped to
+    the real, still-live BRANCH BREACH/EQUITY FLOOR BREACH exit types
+    (never the legacy PEAK PROFIT GIVEBACK/QUICK PROFIT exit types from
+    the removed QUICK_PROFIT era, which can never happen again live).
+
+    See crypto_selection_backtest.py's run_forced_exit_reversal_backtest()
+    for the full real methodology - identical to the stop-hit version,
+    only the source exit_reason filter differs."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_forced_exit_reversal_backtest()
+
+
 @router.post("/alpaca-selection-backtest", dependencies=[Depends(require_admin_key)])
 async def run_alpaca_selection_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.

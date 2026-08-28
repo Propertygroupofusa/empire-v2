@@ -939,7 +939,7 @@ function renderBranches(data, tradeHistoryByBot) {
                     const pct = b.reinforcement_progress_pct;
                     const progressHtml = pct == null ? '' : `
                         <div class="branch-progress-wrap">
-                            <div class="branch-progress-label"><span>Next reinforcement</span><span>${pct.toFixed(0)}%</span></div>
+                            <div class="branch-progress-label"><span>Next reinforcement (capital tier, not performance)</span><span>${pct.toFixed(0)}%</span></div>
                             <div class="branch-progress-bar-bg"><div class="branch-progress-bar-fill" style="width:${pct}%;"></div></div>
                         </div>`;
                     const hist = tradeHistoryByBot[b.bot_name];
@@ -948,7 +948,15 @@ function renderBranches(data, tradeHistoryByBot) {
                         resultsStr = '<span style="color:var(--text-dim);">No closed trades yet</span>';
                     } else {
                         const pnlColor = hist.total_pnl >= 0 ? 'var(--green)' : '#c0392b';
-                        resultsStr = `<span style="color:${pnlColor}; font-weight:600;">${hist.total_pnl >= 0 ? '+' : ''}${fmtUsd(hist.total_pnl)}</span>`
+                        // Real % return on this branch's own current allocated
+                        // capital - per the account owner's direct ask for
+                        // "the percentage of the work" a branch is actually
+                        // doing (distinct from the "Next reinforcement" % bar
+                        // above, which tracks progress toward a capital
+                        // milestone, not real trading performance).
+                        const returnPct = b.allocated_usd ? (hist.total_pnl / b.allocated_usd) * 100 : 0;
+                        const returnStr = `${returnPct >= 0 ? '+' : ''}${returnPct.toFixed(1)}%`;
+                        resultsStr = `<span style="color:${pnlColor}; font-weight:600;">${hist.total_pnl >= 0 ? '+' : ''}${fmtUsd(hist.total_pnl)} (${returnStr})</span>`
                             + `<div style="font-size:0.8em; color:var(--text-dim); margin-top:2px;">${hist.trade_count} trade${hist.trade_count === 1 ? '' : 's'} · ${hist.win_rate.toFixed(0)}% win</div>`;
                     }
                     return `<tr style="border-bottom:1px solid var(--border);">
@@ -968,11 +976,16 @@ function renderBranches(data, tradeHistoryByBot) {
             </tbody>
         </table>
         <p style="margin-top:10px; font-size:0.76em; color:var(--text-dim); line-height:1.5;">
-            "Next reinforcement" is real progress toward this branch's own tier - once it crosses 100%, its extra
-            capital is moved into whichever OTHER active branch is currently weakest (never a brand-new branch or a
-            new symbol - only the branches already listed above can receive it, and only while they're flat).
-            "Real results" is this branch's own real, closed-trade history - the P&L already folded into its real
-            Allocated balance above, broken out here so you can see how it got there.
+            "Next reinforcement" is real progress toward this branch's own CAPITAL tier - once it crosses 100%, its
+            extra capital is moved into whichever OTHER active branch is currently weakest (never a brand-new branch
+            or a new symbol - only the branches already listed above can receive it, and only while they're flat).
+            It's a bookkeeping milestone, not a performance score - it doesn't mean the branch is "doing well," just
+            that it's grown big enough to help another branch out.
+            "Real results" is this branch's own real, closed-trade PERFORMANCE - the real dollar P&amp;L (already
+            folded into its Allocated balance above) plus the real % return that P&amp;L represents on the branch's
+            own current allocated capital, so you can see how well the branch is actually trading, not just how big
+            it's gotten. Reads "No closed trades yet" until a branch's own first real trade actually closes - there's
+            no real performance number to show before that.
         </p>`;
 }
 

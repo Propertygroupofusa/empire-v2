@@ -147,6 +147,13 @@
     <button class="run-btn" id="shrBtn" onclick="runStopHitReversalBacktest()">▶ Run Stop-Hit Reversal Backtest (~10-60 seconds)</button>
     <div id="shrStatus"></div>
     <div id="shrResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>What about the OTHER real losses - the forced exits?</strong> The exit-reason breakdown showed most of a real losing window's damage actually came from BRANCH BREACH / EQUITY FLOOR BREACH - a branch's own real floor/drawdown-breach safety net force-selling it, not a genuine price-based stop. Unlike the OLD exit types from before QUICK_PROFIT was removed (which can never happen again), these two are real and still live today - so the same reversal question applies: does price tend to recover after one of these forced exits, and would buying back in right at that exit price have made money? Same real methodology as the Stop-Hit test above, same honest limitations (no fees modeled, real cash availability not checked) - only the source exit type differs. Shadow mode only.
+    </div>
+    <button class="run-btn" id="ferBtn" onclick="runForcedExitReversalBacktest()">▶ Run Forced-Exit Reversal Backtest (~10-60 seconds)</button>
+    <div id="ferStatus"></div>
+    <div id="ferResults"></div>
 </div>
 
 <script>
@@ -812,19 +819,19 @@ async function promoteTrailPct(pct, btn) {
     }
 }
 
-async function runStopHitReversalBacktest() {
-    const btn = document.getElementById('shrBtn');
-    const statusEl = document.getElementById('shrStatus');
-    const resultsEl = document.getElementById('shrResults');
+async function runReversalBacktest(opts) {
+    const btn = document.getElementById(opts.btnId);
+    const statusEl = document.getElementById(opts.statusId);
+    const resultsEl = document.getElementById(opts.resultsId);
     btn.disabled = true;
-    btn.textContent = 'Running... (real data, one fetch per coin with STOP HIT history)';
+    btn.textContent = `Running... (real data, one fetch per coin with ${opts.eventLabel} history)`;
     statusEl.textContent = '';
     statusEl.className = '';
     resultsEl.innerHTML = '';
 
     try {
         const key = getAdminKey();
-        const res = await fetch(API_BASE + '/crypto-selection-backtest/stop-hit-reversal', {
+        const res = await fetch(API_BASE + opts.endpoint, {
             method: 'POST',
             headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
         });
@@ -836,25 +843,25 @@ async function runStopHitReversalBacktest() {
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
 
-        renderStopHitReversalResults(data);
+        renderReversalBacktestResults(opts.resultsId, opts.eventLabel, data);
         if (data.events_tested === 0) {
-            statusEl.textContent = 'No real STOP HIT events with enough elapsed real history to test yet.';
+            statusEl.textContent = `No real ${opts.eventLabel} events with enough elapsed real history to test yet.`;
         } else {
-            statusEl.textContent = `Tested ${data.events_tested} real STOP HIT event(s) (${data.events_skipped_no_data} skipped for missing real data) over the ${data.hours_forward}h window after each.`;
+            statusEl.textContent = `Tested ${data.events_tested} real ${opts.eventLabel} event(s) (${data.events_skipped_no_data} skipped for missing real data) over the ${data.hours_forward}h window after each.`;
         }
     } catch (e) {
         statusEl.textContent = 'Error: ' + e.message;
         statusEl.className = 'error';
     } finally {
         btn.disabled = false;
-        btn.textContent = '▶ Run Stop-Hit Reversal Backtest (~10-60 seconds)';
+        btn.textContent = opts.btnLabel;
     }
 }
 
-function renderStopHitReversalResults(data) {
-    const resultsEl = document.getElementById('shrResults');
+function renderReversalBacktestResults(resultsId, eventLabel, data) {
+    const resultsEl = document.getElementById(resultsId);
     if (!data.summary || data.events_tested === 0) {
-        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No real STOP HIT events available to test yet - real trades need to accumulate first.</p>';
+        resultsEl.innerHTML = `<p style="margin-top:16px;color:var(--text-dim)">No real ${eventLabel} events available to test yet - real trades need to accumulate first.</p>`;
         return;
     }
     const s = data.summary;
@@ -878,16 +885,32 @@ function renderStopHitReversalResults(data) {
                 <tr><td>Events tested</td><td>${data.events_tested}</td></tr>
                 <tr><td>Recovered to breakeven within ${data.hours_forward}h</td><td>${s.recovered_to_breakeven_count} of ${data.events_tested} (${s.recovered_to_breakeven_rate_pct}%)</td></tr>
                 <tr><td>Avg real forward return (${data.hours_forward}h)</td><td class="${s.avg_forward_return_pct >= 0 ? 'pos' : 'neg'}">${s.avg_forward_return_pct >= 0 ? '+' : ''}${s.avg_forward_return_pct}%</td></tr>
-                <tr><td>Hypothetical "buy back at stop price" win rate</td><td>${s.reversal_trade_win_count} of ${data.events_tested} (${s.reversal_trade_win_rate_pct}%)</td></tr>
+                <tr><td>Hypothetical "buy back at exit price" win rate</td><td>${s.reversal_trade_win_count} of ${data.events_tested} (${s.reversal_trade_win_rate_pct}%)</td></tr>
                 <tr><td>Avg hypothetical reversal trade P&amp;L</td><td class="${s.avg_reversal_trade_pnl_pct >= 0 ? 'pos' : 'neg'}">${s.avg_reversal_trade_pnl_pct >= 0 ? '+' : ''}${s.avg_reversal_trade_pnl_pct}%</td></tr>
             </tbody>
         </table>
         <table style="margin-top:14px;">
-            <thead><tr><th>Coin</th><th>Stop date</th><th>Real stop P&amp;L</th><th>Fwd return</th><th>Recovered?</th><th>Hypothetical reversal trade</th></tr></thead>
+            <thead><tr><th>Coin</th><th>Exit date</th><th>Real exit P&amp;L</th><th>Fwd return</th><th>Recovered?</th><th>Hypothetical reversal trade</th></tr></thead>
             <tbody>${rows}</tbody>
         </table>
         <p class="trade-note">No fees modeled on the hypothetical reversal trades, and real cash availability at the time isn't checked - this is a real, honest first look at whether the idea has merit, not a final answer or something wired into live trading.</p>
     `;
+}
+
+function runStopHitReversalBacktest() {
+    return runReversalBacktest({
+        btnId: 'shrBtn', statusId: 'shrStatus', resultsId: 'shrResults',
+        endpoint: '/crypto-selection-backtest/stop-hit-reversal',
+        eventLabel: 'STOP HIT', btnLabel: '▶ Run Stop-Hit Reversal Backtest (~10-60 seconds)',
+    });
+}
+
+function runForcedExitReversalBacktest() {
+    return runReversalBacktest({
+        btnId: 'ferBtn', statusId: 'ferStatus', resultsId: 'ferResults',
+        endpoint: '/crypto-selection-backtest/forced-exit-reversal',
+        eventLabel: 'forced-exit (branch/floor breach)', btnLabel: '▶ Run Forced-Exit Reversal Backtest (~10-60 seconds)',
+    });
 }
 
 // QUICK_PROFIT removed from here entirely per the account owner's explicit

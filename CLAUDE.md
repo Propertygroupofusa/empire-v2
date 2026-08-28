@@ -9875,6 +9875,123 @@ Real Branches table.
 
 ---
 
+## Forced-Exit Reversal Backtest - the direct follow-up to Stop-Hit Reversal, for the exit types that actually caused most of the real damage
+
+Right after the Stop-Hit Reversal Backtest shipped, the account owner
+asked the direct follow-up: since the exit-reason breakdown showed most
+of a real losing window's damage was actually `BRANCH BREACH`/`EQUITY
+FLOOR BREACH` (a branch's own real floor/drawdown-breach safety net
+force-selling it) rather than genuine `STOP HIT` price-stops, "how is
+there a way that we can make money off a system like that." Also asked
+directly to have this "put down there with the rest of the stuff... same
+as we've been doing" - the same backtest page, same real-evidence-first
+posture.
+
+Refactored the Stop-Hit tool's core into shared pieces rather than
+duplicating it:
+- `_load_real_exit_events(exit_reasons, limit, hours_forward)` (renamed
+  and generalized from `_load_real_stop_hit_events`) - exact-match against
+  a LIST of real exit_reason strings, never a substring match, so it can
+  never accidentally sweep in a real legacy exit type it wasn't asked
+  for.
+- `FORCED_EXIT_REASONS = ["BRANCH BREACH - forced exit", "EQUITY FLOOR
+  BREACH - forced exit"]` - the two real, confirmed exit_reason strings
+  actually used live (`crypto_family_tree_bot.py`'s non-root branch path
+  and `crypto_btc_compound_bot.py`'s root path respectively). Deliberately
+  does NOT include `PEAK PROFIT GIVEBACK`/`QUICK PROFIT` (the OTHER real
+  exit types in that same losing window) - both are legacy exit modes
+  from the already-removed `QUICK_PROFIT` era that can never happen again
+  on the live bot, so a reversal test on them would answer a question
+  about a strategy that no longer runs, not something actionable today.
+  Stated this distinction directly to the account owner rather than
+  building a test that would look complete but answer the wrong question.
+- `_run_reversal_backtest_for_events(events, hours_forward, target_pct,
+  stop_pct, max_concurrent)` - the shared real scoring core (candle fetch,
+  `_simulate_reversal_trade`, aggregation), used by both
+  `run_stop_hit_reversal_backtest()` (unchanged real behavior, now just a
+  thin wrapper) and the new `run_forced_exit_reversal_backtest()`.
+
+New `POST /crypto-selection-backtest/forced-exit-reversal` (admin-key
+gated) and a new "▶ Run Forced-Exit Reversal Backtest" button + results
+panel on `crypto_selection_backtest.html`, right under the Stop-Hit one -
+identical real methodology and honest limitations (no fees modeled, real
+cash availability not checked), only the source exit-reason filter
+differs. The JS rendering itself was generalized into a single
+`runReversalBacktest(opts)`/`renderReversalBacktestResults(...)` pair
+shared by both buttons, rather than duplicating the render logic a
+second time.
+
+Verified offline (`test_forced_exit_reversal_backtest.py`, new, 12
+checks, no live network access from this sandbox - real Coinbase candle
+fetches mocked with hand-crafted synthetic price paths, same technique as
+the Stop-Hit test): `_load_real_exit_events(FORCED_EXIT_REASONS)`
+correctly picks up both a real `BRANCH BREACH` row and a real `EQUITY
+FLOOR BREACH` row, while correctly excluding a real `STOP HIT` (a
+different, already-separately-tested exit type) and a real legacy `PEAK
+PROFIT GIVEBACK` row; `run_stop_hit_reversal_backtest()` still works
+identically after being refactored to share the new core (a real
+recovering STOP HIT event still correctly hits TARGET); and the full new
+`run_forced_exit_reversal_backtest()` correctly scores a real recovering
+forced-exit event as a win and a real continued-decline one as a loss,
+with the real aggregate summary matching by hand. Confirmed via a real
+AST route-count parse that the new route is bound correctly with no
+duplicate registrations (74 total routes, zero duplicates).
+`crypto_selection_backtest.html` re-verified with a real Python
+`HTMLParser` tag-balance check and `node --check` on the extracted inline
+`<script>` block.
+
+**Not yet run against real historical data** - same documented gap as
+every backtest tool in this file (no live network access to Coinbase from
+this sandbox). The account owner needs to open
+`/crypto-selection-backtest-view` after the next redeploy and tap "▶ Run
+Forced-Exit Reversal Backtest" to see the real numbers - this tool only
+informs whether the idea has merit for the exit types that are actually
+still live, it doesn't change what the live bot does on its own.
+
+---
+
+## Real % return added to the Alpaca branches table, and the "Next reinforcement" bar relabeled to stop it being read as performance
+
+The account owner circled the "Next reinforcement" progress bars (27%,
+89%) on a screenshot and asked directly for "the percentage of the work
+that the [branch] is doing... so I can know what I need to do to make it
+better." A real, understandable mix-up: that % tracks progress toward a
+branch's own CAPITAL milestone (when it's grown big enough to help
+reinforce another branch) - it says nothing about whether the branch is
+actually trading well. Neither branch shown had a real performance
+percentage displayed anywhere on the page at all - "Real results" only
+ever showed a raw dollar P&L (or "No closed trades yet"), never a % return
+relative to what's actually allocated.
+
+Fixed both real problems in `renderBranches()` (`alpaca_dashboard.html`):
+1. The "Next reinforcement" bar's own label now reads "Next reinforcement
+   (capital tier, not performance)" - directly disambiguating it inline,
+   not just in the footer note below the table.
+2. "Real results" now shows a real % return alongside the existing dollar
+   P&L - `hist.total_pnl / b.allocated_usd * 100`, i.e. the branch's own
+   real realized P&L as a percentage of what it currently has allocated -
+   once it has at least one real closed trade. Still correctly reads "No
+   closed trades yet" beforehand - there's genuinely no real performance
+   number to show before a branch's first real trade closes, and this
+   doesn't fabricate one. The table's own footer note was rewritten to
+   spell out the real distinction between the two percentages explicitly,
+   not just describe each column in isolation.
+
+Purely a display change - no backend calculation changed, `hist.total_pnl`
+and `b.allocated_usd` were both already being fetched and shown, just
+never combined into a % before. `alpaca_dashboard.html` re-verified with a
+real Python `HTMLParser` tag-balance check and `node --check` on the
+extracted inline `<script>` block; no dedicated backend test needed since
+no backend logic changed.
+
+**Not yet confirmed live** - the account owner needs to redeploy; both of
+today's real branches (MES, MCL) still show "No closed trades yet," so
+the new % figure won't actually appear until one of them completes its
+first real trade - but the relabeled "Next reinforcement" bar and the
+updated footer note should be visible immediately.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

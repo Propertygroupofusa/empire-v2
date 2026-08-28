@@ -821,16 +821,25 @@ STOP_HIT_REVERSAL_TARGET_PCT = 0.02
 STOP_HIT_REVERSAL_STOP_PCT = 0.02
 STOP_HIT_REVERSAL_EVENT_LIMIT = 300
 
+# Real, genuinely-recurring structural forced-exit reasons - the branch's
+# own floor/drawdown-breach safety nets firing, distinct from a real
+# price-based STOP HIT. Unlike PEAK PROFIT GIVEBACK/QUICK PROFIT (legacy
+# exit types from the removed QUICK_PROFIT era - can never happen again,
+# so a reversal test on them would answer a question about a strategy
+# that no longer runs), these two CAN still happen live today, so a real
+# "does price recover after this" test on them is genuinely actionable.
+FORCED_EXIT_REASONS = ["BRANCH BREACH - forced exit", "EQUITY FLOOR BREACH - forced exit"]
 
-async def _load_real_stop_hit_events(limit=STOP_HIT_REVERSAL_EVENT_LIMIT, hours_forward=STOP_HIT_REVERSAL_HOURS_FORWARD):
-    """Real CryptoCoinTradeHistory rows where exit_reason is exactly
-    'STOP HIT' - a genuine, price-driven hard-stop exit, not one of this
-    same window's other real exit types (BRANCH BREACH/EQUITY FLOOR
-    BREACH are structural safety forced-exits, PEAK PROFIT GIVEBACK/
-    QUICK PROFIT are legacy exit modes that no longer exist on the live
-    bot at all). Only a genuine STOP HIT is the real, testable "did the
-    price come back after this" question the account owner actually
-    asked about.
+
+async def _load_real_exit_events(exit_reasons, limit=STOP_HIT_REVERSAL_EVENT_LIMIT, hours_forward=STOP_HIT_REVERSAL_HOURS_FORWARD):
+    """Real CryptoCoinTradeHistory rows whose exit_reason is exactly one
+    of `exit_reasons` - e.g. ["STOP HIT"] for a genuine, price-driven
+    hard-stop exit, or FORCED_EXIT_REASONS for the branch's own real
+    floor/drawdown-breach safety nets firing. Deliberately exact-match,
+    never a substring match, so this can never accidentally sweep in a
+    real legacy exit type (PEAK PROFIT GIVEBACK/QUICK PROFIT, from the
+    removed QUICK_PROFIT era) that shares no real relationship with what's
+    being tested.
 
     Only returns events with at least `hours_forward` of real elapsed
     time since closed_at - an event too recent to have that much real
@@ -840,7 +849,7 @@ async def _load_real_stop_hit_events(limit=STOP_HIT_REVERSAL_EVENT_LIMIT, hours_
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(CryptoCoinTradeHistory)
-            .where(CryptoCoinTradeHistory.exit_reason == "STOP HIT")
+            .where(CryptoCoinTradeHistory.exit_reason.in_(exit_reasons))
             .where(CryptoCoinTradeHistory.closed_at <= cutoff)
             .order_by(CryptoCoinTradeHistory.closed_at.desc())
             .limit(limit)
@@ -926,7 +935,46 @@ async def run_stop_hit_reversal_backtest(
     few real STOP HIT events don't carry the same statistical weight as
     POL-USD's real 80+ trade history. This is diagnostic only - it never
     reads into any live trading decision on its own."""
-    events = await _load_real_stop_hit_events(limit=event_limit, hours_forward=hours_forward)
+    events = await _load_real_exit_events(["STOP HIT"], limit=event_limit, hours_forward=hours_forward)
+    return await _run_reversal_backtest_for_events(events, hours_forward, target_pct, stop_pct, max_concurrent)
+
+
+async def run_forced_exit_reversal_backtest(
+    hours_forward=STOP_HIT_REVERSAL_HOURS_FORWARD, target_pct=STOP_HIT_REVERSAL_TARGET_PCT,
+    stop_pct=STOP_HIT_REVERSAL_STOP_PCT, event_limit=STOP_HIT_REVERSAL_EVENT_LIMIT, max_concurrent=6,
+):
+    """SHADOW-MODE, additive - never touches live trading, places no real
+    order. The direct follow-up to run_stop_hit_reversal_backtest() above,
+    per the account owner's own real follow-up question after seeing that
+    a real losing window was mostly driven by structural forced exits
+    (BRANCH BREACH/EQUITY FLOOR BREACH - a branch's own floor/drawdown-
+    breach safety nets firing) rather than genuine STOP HIT price-stops:
+    "how is there a way that we can make money off a system like that."
+
+    Deliberately does NOT test the OTHER real exit type in that same
+    losing window - PEAK PROFIT GIVEBACK (and QUICK_PROFIT wins) - since
+    both are legacy exit types from the removed QUICK_PROFIT era that can
+    never happen again on the live bot; a reversal test on a dead exit
+    rule would answer a question about a strategy that no longer runs,
+    not something actionable today. BRANCH BREACH/EQUITY FLOOR BREACH are
+    real, still-live exit types (see FORCED_EXIT_REASONS above), so this
+    is a genuinely actionable real test.
+
+    Identical real methodology to run_stop_hit_reversal_backtest() -
+    same _simulate_reversal_trade hypothesis, same real historical
+    candle fetch, same honest limitations (no fees modeled, real cash
+    availability not checked) - only the source exit_reason filter
+    differs. See run_stop_hit_reversal_backtest()'s own docstring for
+    the full real methodology."""
+    events = await _load_real_exit_events(FORCED_EXIT_REASONS, limit=event_limit, hours_forward=hours_forward)
+    return await _run_reversal_backtest_for_events(events, hours_forward, target_pct, stop_pct, max_concurrent)
+
+
+async def _run_reversal_backtest_for_events(events, hours_forward, target_pct, stop_pct, max_concurrent):
+    """Shared real reversal-scoring core for both
+    run_stop_hit_reversal_backtest() and run_forced_exit_reversal_backtest()
+    above - fetches real candles per coin and scores every real event
+    identically regardless of which exit_reason(s) produced it."""
     if not events:
         return {"events_tested": 0, "events_skipped_no_data": 0, "per_event": [], "summary": None}
 
