@@ -656,7 +656,15 @@ async function promoteEntryVariant(variant, btn) {
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
         currentLiveVariant = data.entry_variant;
         renderLiveVariantBadge();
-        document.querySelectorAll('.promote-btn').forEach(b => {
+        // Real bug found and fixed here: this used to select EVERY
+        // `.promote-btn` on the page, including the unrelated strategy-
+        // family buttons (Momentum/Mean-Reversion, which use data-family
+        // not data-variant) - overwriting their correct "Switch to X" /
+        // "✓ Live now" labels with "Promote undefined to live" the moment
+        // any entry variant got promoted. Scoped to only the entry-variant
+        // buttons (the ones that actually carry data-variant) so it can
+        // never touch the strategy-family buttons again.
+        document.querySelectorAll('.promote-btn[data-variant]').forEach(b => {
             const isLive = b.dataset.variant === currentLiveVariant;
             b.classList.toggle('is-live', isLive);
             b.disabled = isLive;
