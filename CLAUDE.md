@@ -8912,6 +8912,74 @@ fees, going forward.
 
 ---
 
+## Manual cash-movement clicks (Move Cash Between Branches, Add Cash) now retry a transient real INSUFFICIENT_FUND instead of failing the click outright
+
+Real, live-confirmed bug: the account owner tried "Move Cash Between
+Branches" with a genuinely different, legitimate pair this time - FROM
+LINK ($98.99 idle, matching its own real `allocated_usd`), INTO BTC
+($1,051.19) - and got a raw `Real Coinbase order did not fill:
+INSUFFICIENT_FUND: Insufficient balance in source account`, even though
+the dashboard itself showed LINK genuinely holding that much idle cash.
+Not a display bug this time (unlike the earlier `$-0.00`-branch issue) -
+`place_market_buy()`'s own docstring already documents the real,
+unresolved gap this exposed: its real-balance clamp fetches the account's
+current USD balance right before submitting, but "doesn't eliminate the
+race outright - two branches could still both clamp against the real
+balance before either order lands." With ~20+ branches each running their
+own independent, jittered ~30s cycle against one shared real Coinbase cash
+pool, another branch's ordinary automatic buy can genuinely spend the real
+cash in the gap between this call's balance-fetch and the manual order
+actually landing. The automatic per-cycle paths already tolerate this
+(they just wait for their own next cycle); a one-off manual dashboard
+click had no equivalent fallback - it just failed outright and handed the
+account owner a raw Coinbase error string.
+
+New `_place_buy_with_retry()` (`routers/trading_dashboard.py`) wraps
+`engine.place_market_buy()` with up to 3 real attempts (a short randomized
+0.4-1.2s jitter between retries, so a rapid back-to-back retry isn't
+racing the exact same other branches again) before giving up - used by
+both real manual money-movement endpoints, `add_cash_to_branch()` and
+`reallocate_cash_between_branches()`, which previously each called
+`place_market_buy()` once with no retry at all. Reuses
+`engine._is_permanent_order_rejection()` (already built for the
+reinforcement-retry paths) to fail FAST after exactly 1 attempt on a real
+permanent rejection (`PERMISSION_DENIED`, invalid product, unsupported
+order config) - retrying an identical doomed order can never fix those,
+so it doesn't waste real API calls or the account owner's time pretending
+otherwise. `INSUFFICIENT_FUND` specifically is NOT on that permanent list
+- it's exactly the transient, real-time balance race this fix targets - so
+it gets the full retry budget.
+
+Verified offline (`test_place_buy_with_retry.py`, 11 checks, `place_market_buy`
+mocked - no live Coinbase access from this sandbox, real
+`_is_permanent_order_rejection` imported and used unmocked so the
+permanent/transient branching is tested against the actual real
+classifier): a transient failure that succeeds on a later attempt returns
+that real fill; a transient failure that never succeeds exhausts all 3
+real attempts and surfaces the real last rejection reason; a permanent
+rejection fails after exactly 1 attempt (a queued 2nd "success" response
+is confirmed never reached); and an immediate real success never retries
+at all. Confirmed via a real AST route-count parse that no route was
+duplicated (70 total, unchanged - this only extended two existing
+endpoints, no new route added).
+
+**What this does NOT fix**: the underlying race itself. Several real
+concurrent branches sharing one real Coinbase cash pool with no live
+reservation between them is the same, already-documented architecture
+choice from earlier this session - this only gives a one-off manual click
+a fair few real chances to land before failing, the same way the
+automatic paths already get one on their own next cycle. A sustained,
+genuine cash shortage (not just a brief timing race) will still correctly
+fail after 3 tries, with the real reason shown plainly instead of hidden.
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+retry the exact same real LINK-into-BTC move; if the real balance race
+was brief (the likely case, given LINK's own allocated_usd genuinely
+matched what the modal showed), it should now succeed within the 3 real
+attempts instead of failing outright.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

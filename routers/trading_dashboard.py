@@ -17,6 +17,7 @@ once you've done that - this is bookkeeping, not a real money-movement API.
 import os
 import logging
 import asyncio
+import random
 import uuid
 from datetime import datetime, timezone, timedelta
 
@@ -1731,6 +1732,46 @@ async def take_root_profit():
     }
 
 
+async def _place_buy_with_retry(engine, session, amount: float, product_id: str, attempts: int = 3):
+    """Retries a manual real market buy through a transient real-balance
+    race, before surfacing a raw rejection to a human waiting on a click.
+
+    place_market_buy() already clamps to the real Coinbase USD balance
+    right before submitting, but its own docstring is explicit that this
+    "doesn't eliminate the race outright (two branches could still both
+    clamp against the real balance before either order lands)" - real,
+    confirmed live evidence of exactly this: a manual "Move cash" from a
+    real, genuinely-flat LINK branch ($98.99 idle, matching its own
+    allocated_usd) into BTC failed with a raw real INSUFFICIENT_FUND,
+    because one of the ~20+ other branches' own independent ~30s cycles
+    spent the real shared cash pool in the gap between this call's
+    balance-fetch and the order actually landing at Coinbase. The
+    automatic per-cycle paths already tolerate this by just waiting for
+    their own next cycle; a one-off manual dashboard click has no "next
+    cycle" to fall back on, so it deserves a couple of real retries
+    first instead of immediately failing the person's click.
+
+    Never retries a PERMANENT rejection (PERMISSION_DENIED, invalid
+    product, unsupported order config, via engine's own
+    _is_permanent_order_rejection) - retrying an identical doomed order
+    can never fix those, so it fails fast on the first attempt instead
+    of burning real API calls and the user's time.
+
+    Returns (fill, None) on success, or (None, last_real_reason) once
+    every attempt is exhausted or a permanent rejection is hit."""
+    last_reason = "unknown reason"
+    for attempt in range(attempts):
+        fill = await engine.place_market_buy(session, amount, product_id)
+        if fill:
+            return fill, None
+        last_reason = engine._last_order_error.get(product_id, "unknown reason")
+        if engine._is_permanent_order_rejection(last_reason):
+            break
+        if attempt < attempts - 1:
+            await asyncio.sleep(random.uniform(0.4, 1.2))
+    return None, last_reason
+
+
 class AddCashRequest(BaseModel):
     amount: float
 
@@ -1804,10 +1845,9 @@ async def add_cash_to_branch(bot_name: str, payload: AddCashRequest, db: AsyncSe
         if price is None or atr_pct is None:
             raise HTTPException(status_code=503, detail=f"Could not fetch a live {branch.product_id} price/volatility right now - try again")
 
-        fill = await engine.place_market_buy(session, payload.amount, branch.product_id)
+        fill, stuck_reason = await _place_buy_with_retry(engine, session, payload.amount, branch.product_id)
         if not fill:
-            stuck_reason = engine._last_order_error.get(branch.product_id, "unknown reason")
-            raise HTTPException(status_code=502, detail=f"Real Coinbase order did not fill: {stuck_reason}")
+            raise HTTPException(status_code=502, detail=f"Real Coinbase order did not fill after retrying: {stuck_reason}")
         filled_qty, filled_price = fill
 
         existing_position = await tree._load_branch_position(bot_name)
@@ -1936,10 +1976,9 @@ async def reallocate_cash_between_branches(payload: ReallocateCashRequest, db: A
         if price is None or atr_pct is None:
             raise HTTPException(status_code=503, detail=f"Could not fetch a live {dest.product_id} price/volatility right now - try again")
 
-        fill = await engine.place_market_buy(session, payload.amount, dest.product_id)
+        fill, stuck_reason = await _place_buy_with_retry(engine, session, payload.amount, dest.product_id)
         if not fill:
-            stuck_reason = engine._last_order_error.get(dest.product_id, "unknown reason")
-            raise HTTPException(status_code=502, detail=f"Real Coinbase order did not fill: {stuck_reason}")
+            raise HTTPException(status_code=502, detail=f"Real Coinbase order did not fill after retrying: {stuck_reason}")
         filled_qty, filled_price = fill
 
         existing_position = await tree._load_branch_position(payload.to_bot_name)
