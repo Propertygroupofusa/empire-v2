@@ -9130,6 +9130,68 @@ older coins like POL that predate this change.
 
 ---
 
+## Real, confirmed live bug: "Run Backtest With Real Allocations" threw a raw HTTP 500 whenever a coin's only real branch sat at exactly $0.00
+
+The account owner shared a screenshot of a real, unhandled `Error: HTTP
+500` on the "Run Backtest With Real Allocations" button. Root cause found
+purely by reading the code (no live network access needed - the crash is
+deterministic given the inputs, not a real API hiccup):
+`_get_real_branch_allocations()` (`crypto_selection_backtest.py`) sums
+`allocated_usd` per coin across every real `CryptoTreeBranch` row,
+including a branch sitting at a genuine real $0.00 (POL-USD, SOL-USD in
+actual production, confirmed via earlier screenshots this same session -
+POL never funded, SOL lost its entire real $1,010.93 peak). That produces
+a real, PRESENT dict entry like `{"POL-USD": 0.0}` - not absent.
+`run_full_backtest_with_real_allocations()` then passed
+`spend=allocations.get(pid)`, i.e. a literal `spend=0.0` (never `None`),
+into `backtest_one_coin()`/`_replay_with_exit_mode()` - whose spend
+resolution (`spend if spend is not None else SPEND`) only falls back to
+the real $150 default on a literal `None`; `0.0` sailed straight through
+untouched. The instant the real 30-day replay produced even one trade for
+that coin, `total_pnl / spend` (both functions' own `roi_pct_of_spend`/
+`avg_trade_pct` calculations) divided real `0.0` by real `0.0` - a genuine
+`ZeroDivisionError`, uncaught by the endpoint (no try/except there),
+surfacing as the raw 500 the account owner actually saw.
+
+Fixed in three places, defense in depth:
+1. `_get_real_branch_allocations()` now PRUNES a coin whose real summed
+   allocation is `<= $0.005` out of the returned dict entirely, instead
+   of returning it as `0.0` - so `.get(pid)` correctly returns `None` for
+   it, falling through to the same $150 default every other unallocated
+   coin already gets, matching this function's own documented contract
+   ("a coin with no real branch/allocation right now still gets tested").
+2. `backtest_one_coin()`'s and `_replay_with_exit_mode()`'s own spend
+   resolution both now treat any `spend <= 0` (not just `None`) as "use
+   the default" - a second, independent guard so a future caller passing
+   a real non-positive spend through some other path can't reintroduce
+   this exact crash.
+
+Verified offline (`test_zero_allocation_backtest_crash.py`, 14 checks):
+confirmed `0.0 / 0.0` really does raise `ZeroDivisionError` in Python (the
+exact real mechanism, not a guess); `backtest_one_coin(spend=0.0)` and
+`_replay_with_exit_mode(spend=0.0)` both now complete without crashing on
+a real trending synthetic price series that genuinely produces trades
+(the previous crash trigger), each falling back to the $150 default and
+producing byte-identical results to `spend=None`; a real negative spend
+is caught by the same guard; and, seeding a real throwaway SQLite DB with
+the EXACT real production shape (POL-USD and SOL-USD both at real
+$0.00, BTC-USD at a real healthy $1,051.19),
+`_get_real_branch_allocations()` correctly prunes both zero-balance coins
+while still returning BTC-USD's real allocation, and the full
+`run_full_backtest_with_real_allocations()` endpoint function completes
+end-to-end without raising - POL-USD correctly falls back to the $150
+default (`has_real_allocation=False`) instead of crashing the whole
+request. Full pre-existing `test_real_allocations_backtest.py` suite (13
+checks) re-run clean alongside it, confirming this was purely a bug fix
+with zero behavior change for any coin that already had a real, healthy
+allocation.
+
+**Not yet confirmed live** - the account owner needs to redeploy and tap
+"Run Backtest With Real Allocations" again to confirm it now returns a
+real table instead of the HTTP 500.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

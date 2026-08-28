@@ -115,7 +115,14 @@ def backtest_one_coin(closes, highs, lows, entry_gate=None, spend=None):
     replay loop. None (the default) means always enter the moment flat -
     the original, unchanged behavior every existing caller (including the
     live auto-exclusion system's daily backtest run) already depends on."""
-    spend = spend if spend is not None else SPEND
+    # `spend <= 0` (not just None) falls back to the default too - real,
+    # confirmed live bug: a coin whose only real branch is sitting at a
+    # genuine $0.00 balance (POL-USD, SOL-USD in production) passed
+    # spend=0.0 straight through, which isn't None so the check below
+    # never caught it, and total_pnl / spend crashed with a real
+    # ZeroDivisionError the instant the replay produced even one trade -
+    # surfaced as a raw HTTP 500 on "Run Backtest With Real Allocations".
+    spend = spend if spend is not None and spend > 0 else SPEND
     trades = []
     entries_skipped_by_gate = 0
     i = ATR_WINDOW
@@ -233,7 +240,9 @@ def _replay_with_exit_mode(closes, highs, lows, mode, entry_gate=None, spend=Non
     backtest_one_coin() already documents and accepts; good enough for
     comparing the two exit philosophies against each other, not a precise
     P&L forecast."""
-    spend = spend if spend is not None else SPEND
+    # Same real spend<=0 guard as backtest_one_coin() above - see its own
+    # comment for the exact live ZeroDivisionError this prevents.
+    spend = spend if spend is not None and spend > 0 else SPEND
     trades = []
     i = ATR_WINDOW
     n = len(closes)
@@ -585,13 +594,25 @@ async def _get_real_branch_allocations() -> dict:
     share one coin (see "Multiple branches can now share the same coin"
     in CLAUDE.md) and Coinbase's real balance for it is pooled the same
     way. Same aggregation-by-product_id pattern the per-coin trade
-    history already uses. Root (BTC-USD) included like any other coin."""
+    history already uses. Root (BTC-USD) included like any other coin.
+
+    A coin whose only real branch(es) are sitting at a genuine $0.00
+    balance (real production examples: POL-USD, SOL-USD - a never-funded
+    branch, or one that's lost its entire real balance) is pruned out
+    here entirely rather than returned as 0.0 - real, confirmed live bug:
+    passing spend=0.0 through to backtest_one_coin() crashed it with a
+    real ZeroDivisionError (0.0 total_pnl / 0.0 spend) the instant the
+    replay produced even one trade, surfacing as a raw HTTP 500 on "Run
+    Backtest With Real Allocations". Pruning it here means the caller's
+    `allocations.get(pid)` correctly returns None for that coin, falling
+    through to the same $150 default every other unallocated coin
+    already gets - matching this function's own documented contract."""
     allocations = {}
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoTreeBranch.product_id, CryptoTreeBranch.allocated_usd))
         for product_id, allocated_usd in result.all():
             allocations[product_id] = allocations.get(product_id, 0.0) + allocated_usd
-    return allocations
+    return {pid: usd for pid, usd in allocations.items() if usd > 0.005}
 
 
 async def run_full_backtest(coins=None, days=BACKTEST_DAYS, max_concurrent=6):
