@@ -9992,6 +9992,68 @@ updated footer note should be visible immediately.
 
 ---
 
+## "Could not load combined progress" made genuinely more resilient, after being asked to fix it rather than just explain it
+
+Right after being told this looked like a real but unreproducible
+transient network blip, the account owner pushed back directly: "fix
+it." Fair - not finding a server-side bug in `get_combined_equity_progress()`
+doesn't mean there's nothing worth fixing on the CLIENT side that makes a
+real, inevitable network hiccup (a dropped mobile connection, the page
+backgrounded and resumed mid-request - both genuinely common on a phone)
+hurt far more than it needs to. Two real, concrete client-side gaps found
+by re-reading `loadCombinedProgress()`/`apiGet()` with that specific
+question in mind:
+
+1. **No timeout on the fetch at all.** A stalled real connection (signal
+   drops mid-request) could sit for however long the OS/browser's own
+   default socket timeout is before failing - `apiGet()` (both
+   `alpaca_dashboard.html` and `family_tree_dashboard.html` - this panel
+   is duplicated verbatim across both files) now wraps every fetch in a
+   real `AbortController` with a 20s default timeout, so a stalled
+   connection fails fast and predictably instead of possibly hanging far
+   longer than the page's own 60s refresh cycle would ever notice.
+2. **A single real failure destroyed the chart, then wasn't retried for a
+   full 60 seconds.** `renderCombinedProgress()` only ever touches the
+   chart SVG (`combined-chart-wrap`) - the gauge, momentum line, and
+   Alpaca/Coinbase legend are separate DOM writes, confirmed by reading
+   the function directly, which is exactly why those kept showing correct
+   (if stale) numbers in the account owner's own screenshot while only
+   the chart area showed the error. But the OLD catch handler still threw
+   away a real chart that may represent HOURS of accumulated real
+   history, on a single blip, and then wasn't retried until the next
+   scheduled 60s poll.
+
+`loadCombinedProgress()` (both files) now retries automatically once,
+3 seconds after a real failure, before giving up - and even after BOTH
+attempts fail, it only overwrites `combined-chart-wrap` with an error
+message if there's no real chart (`<svg>`) already rendered there;
+otherwise the existing real chart is left completely alone; a genuinely
+new failure just waits for its own next scheduled poll, same as before.
+
+Verified with a real Python `HTMLParser` tag-balance check and
+`node --check` on the extracted inline `<script>` block for both touched
+files - this is a pure client-side JS robustness fix (timeout + retry +
+non-destructive failure handling), no backend endpoint changed, so no
+dedicated Python test was needed; `get_combined_equity_progress()` itself
+is untouched.
+
+**Real, honest limitation stated plainly**: this can't be verified
+against the actual real intermittent failure from this sandbox (no live
+network access to reproduce a genuine mobile connection drop) - it's a
+real, sound fix for the two concrete gaps found (no timeout, destructive
+single-failure handling), not a guaranteed cure for whatever specific
+network condition produced that one screenshot. If "Could not load..."
+still shows up repeatedly after this ships, that's real evidence the
+underlying cause is something else (e.g. the endpoint itself, or the
+admin key), and worth a second, deeper look at that point.
+
+**Not yet confirmed live** - the account owner needs to redeploy; the
+real test of this fix is whether "Could not load combined progress" stops
+appearing on ordinary network blips, or - if it does still appear - now
+appears without wiping out a chart that was already loaded.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

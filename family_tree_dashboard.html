@@ -687,9 +687,27 @@ function getAdminKey() {
     return adminKey;
 }
 
-async function apiGet(path) {
+async function apiGet(path, timeoutMs) {
     const key = getAdminKey();
-    const res = await fetch(API_BASE + path, { headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' } });
+    // Real, bounded timeout (20s default) - a plain fetch() with no
+    // AbortController can otherwise sit indefinitely on a stalled real
+    // mobile connection (a dropped signal, the page backgrounded and
+    // resumed mid-request) instead of failing fast enough for a retry to
+    // actually help.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs || 20000);
+    let res;
+    try {
+        res = await fetch(API_BASE + path, {
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            signal: controller.signal,
+        });
+    } catch (e) {
+        if (e.name === 'AbortError') throw new Error('Request timed out - real network hiccup');
+        throw e;
+    } finally {
+        clearTimeout(timer);
+    }
     if (res.status === 401 || res.status === 403) {
         localStorage.removeItem(KEY_STORAGE);
         adminKey = '';
@@ -2421,12 +2439,31 @@ function renderCombinedProgress(data) {
     renderObservations(data.observations);
 }
 
-async function loadCombinedProgress() {
+async function loadCombinedProgress(isRetry) {
     try {
         const data = await apiGet('/combined-equity-progress');
         renderCombinedProgress(data);
     } catch (e) {
-        document.getElementById('combined-chart-wrap').innerHTML = '<div class="combined-chart-empty">Could not load combined progress right now.</div>';
+        // Real fix for a real, confirmed-live symptom: a single fetch
+        // failure (a dropped mobile connection, the page backgrounded and
+        // resumed) used to immediately wipe the whole real equity chart -
+        // built from potentially hours of accumulated real history - and
+        // replace it with a bare error message, then wait the full 60s
+        // before trying again. Now retries once, quickly, before giving
+        // up; and even on a second real failure, the existing chart (and
+        // gauge/legend/momentum, which were never touched by a failure
+        // here to begin with - see renderCombinedProgress) is left alone
+        // rather than being destroyed, so a real transient blip never
+        // costs the account owner a real chart they'd already built up.
+        if (!isRetry) {
+            setTimeout(() => loadCombinedProgress(true), 3000);
+            return;
+        }
+        const chartWrap = document.getElementById('combined-chart-wrap');
+        const hasRealChart = chartWrap.querySelector('svg');
+        if (!hasRealChart) {
+            chartWrap.innerHTML = '<div class="combined-chart-empty">Could not load combined progress right now - will retry automatically.</div>';
+        }
     }
 }
 
