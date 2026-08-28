@@ -9192,6 +9192,76 @@ real table instead of the HTTP 500.
 
 ---
 
+## QUICK_PROFIT removed outright as a live exit mode - not just defaulted away from
+
+Right after seeing the real `run_quick_profit_vs_trailing_stop_comparison`
+numbers confirming trailing stop had won decisively (QUICK_PROFIT lost on
+0 of 15 real coins tested, -$614.69 total; trailing stop won on all 15,
+-$35.34 total), the account owner asked directly: "get rid of quick
+profit I don't even want to see it no more... out with the old, in with
+the new, and then looking for something newer than that." A real,
+explicit request to remove it, not just leave it as an unused-but-present
+option - so this goes further than the earlier default flip (which kept
+both modes selectable and just changed which one an unset flag resolved
+to).
+
+**`EXIT_MODE_LEVELS`** (`crypto_family_tree_bot.py`) is now
+`["trailing_stop"]` - `"quick_profit"` removed entirely. `set_live_exit_mode()`
+now genuinely REJECTS `"quick_profit"` with the same `ValueError` any
+other unknown mode gets - it can never be promoted live again, not just
+"not currently promoted." `run_branch_cycle()`'s exit-mode section had its
+whole `if exit_mode == "trailing_stop": ... else: # quick_profit ...`
+branch removed - the trailing-stop logic now runs unconditionally, with
+the dead QUICK_PROFIT code block (the giveback-net-of-fees check, the
+`quick_profit_available` fast-profit-take, the `QUICK_PROFIT_MIN_NET_USD`
+constant) deleted outright rather than left unreachable. `exit_mode`
+itself is still fetched and logged each cycle - the mechanism stays in
+place as exactly where a future, newly-validated exit rule gets appended
+once it's backtested and proven, per the account owner's own "looking for
+something newer than that."
+
+Deliberately NOT touched: `crypto_selection_backtest.py`'s
+`run_quick_profit_vs_trailing_stop_comparison()` and `_replay_with_exit_mode(mode="quick_profit")`
+- that's the real evidence that justified this decision in the first
+place, and stays available to re-run and re-check trailing stop (or
+whatever comes next) against it going forward. Only the LIVE-selectable
+path was removed, not the historical comparison tool.
+
+**Dashboard UI** (`crypto_selection_backtest.html`, `family_tree_dashboard.html`):
+`EXIT_MODE_LABELS`/`EXIT_MODE_BADGE_LABELS` both dropped their
+`quick_profit` entry - since both are plain JS objects the UI loops over
+to render promote buttons/badges, this structurally removes the "Promote
+QUICK_PROFIT" button and any quick_profit badge text without any special-
+casing. The comparison table's own note text (which used to say
+"QUICK_PROFIT... matches what the live bot does right now," now false)
+was corrected to describe what actually happened - trailing stop won and
+QUICK_PROFIT was removed - and the "only these 2 tested modes" copy was
+updated to describe the current single-mode-until-something-new-is-proven
+state honestly.
+
+Verified offline: `test_live_exit_mode_trailing_stop.py` (18 checks) updated
+in place - `get_live_exit_mode()`'s real default is now `"trailing_stop"`,
+`set_live_exit_mode("quick_profit")` now genuinely raises rather than
+succeeding, and the real live mode is confirmed unchanged after a rejected
+attempt; every trailing-stop-mechanics assertion (the actual point of this
+test file) is completely unchanged and still passes. `test_set_crypto_exit_mode_endpoint.py`
+(7 checks) and `test_exit_mode_default_flip.py` (5 checks) both updated the
+same way. `test_quick_profit_vs_trailing_stop.py` (the backtest comparison
+tool's own test, 16 checks) re-run clean, confirming the untouched shadow-
+mode tool is completely unaffected. `test_quick_profit_take.py` (the old
+dedicated test for the now-removed live QUICK_PROFIT branch) is obsolete
+by design - it tested a code path that no longer exists, which is the
+intended outcome of this change, not a regression. HTML tag-balance and
+extracted-script `node --check` both clean on both touched dashboard files.
+
+**Not yet confirmed live** - the account owner needs to redeploy; the
+"Promote QUICK_PROFIT" button will be gone from the backtest page, the
+badge will only ever say "Trailing Stop," and any future new exit rule
+(once built and backtested) will be the next thing to show up in that
+same promote row.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

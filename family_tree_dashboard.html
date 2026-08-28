@@ -1719,7 +1719,10 @@ function renderReconciliation(data) {
     </table></div>`;
 }
 
-const EXIT_MODE_BADGE_LABELS = { quick_profit: 'QUICK_PROFIT (take any real profit fast)', trailing_stop: 'Trailing Stop (let winners run, trail off peak)' };
+// QUICK_PROFIT removed entirely - it lost decisively in real testing and
+// can no longer be live. Only trailing_stop exists until something new
+// gets backtested and promoted.
+const EXIT_MODE_BADGE_LABELS = { trailing_stop: 'Trailing Stop (let winners run, trail off peak)' };
 
 function renderExitModeBadge(mode) {
     const el = document.getElementById('exit-mode-badge');

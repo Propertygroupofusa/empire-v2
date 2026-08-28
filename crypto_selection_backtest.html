@@ -638,20 +638,26 @@ function renderQuickProfitVsTrailingStopResults(data) {
             </tr></thead>
             <tbody>${rows}</tbody>
         </table>
-        <p class="trade-note">QUICK_PROFIT (fewer dollars per trade, more trades) matches what the live bot does right now. Trailing stop (fewer, bigger trades) only exits once price genuinely reverses after reaching the real target. A positive "Difference" means letting it run would have made more real money on that coin; negative means taking it fast was the better real call.</p>
-        <p style="margin-top:20px;font-weight:700;">Push an exit mode to the live bot:</p>
+        <p class="trade-note">This comparison is what proved trailing stop out in the first place - QUICK_PROFIT (fewer dollars per trade, more trades) lost on every coin tested (0 of 15), while trailing stop (fewer, bigger trades, only exits once price genuinely reverses after reaching the real target) won on all 15. QUICK_PROFIT has since been removed as a live option entirely - this table stays purely as the historical evidence for why. A positive "Difference" means letting it run made more real money on that coin.</p>
+        <p style="margin-top:20px;font-weight:700;">Live exit mode:</p>
         <div id="exitModeBadgeWrap"></div>
         <div class="promote-row" id="exitModePromoteRow"></div>
         <p style="margin-top:8px;font-size:0.78em;color:var(--text-dim);">
-            A real, immediate change to how every branch's own exits work - takes effect on the live bot's very next cycle,
-            no restart needed. Only these 2 tested modes can ever be promoted - there's no way to push an untested exit rule.
+            Trailing stop is the only real exit rule that's ever been promoted to live, and QUICK_PROFIT can no longer be
+            selected - it was tested, lost decisively, and was removed outright. As new exit rules get backtested and
+            proven, they'll show up here to promote - only a tested mode can ever go live.
         </p>
     `;
     renderExitModePromoteRow();
 }
 
-let currentLiveExitMode = 'quick_profit';
-const EXIT_MODE_LABELS = { quick_profit: 'QUICK_PROFIT (take any real profit fast)', trailing_stop: 'Trailing Stop (let winners run, trail 2.5% off peak)' };
+// QUICK_PROFIT removed from here entirely per the account owner's explicit
+// request ("get rid of quick profit I don't even want to see it no
+// more") - it lost decisively in the real comparison above (0 of 15 real
+// coins) and can no longer be promoted. This object is exactly where a
+// future, newly-validated exit rule gets added once it's backtested.
+let currentLiveExitMode = 'trailing_stop';
+const EXIT_MODE_LABELS = { trailing_stop: 'Trailing Stop (let winners run, trail 2.5% off peak)' };
 
 async function loadLiveExitMode() {
     try {
