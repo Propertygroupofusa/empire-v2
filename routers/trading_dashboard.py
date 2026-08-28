@@ -2083,6 +2083,26 @@ async def consolidate_family_tree_branches(dry_run: bool = True):
     return await crypto_family_tree_bot_module.consolidate_branches_by_coin(dry_run=dry_run)
 
 
+@router.post("/family-tree-status/reconcile-asset/{currency}", dependencies=[Depends(require_admin_key)])
+async def reconcile_asset(currency: str, dry_run: bool = True):
+    """Corrects a real SHORTFALL the Reconciliation panel flags - every
+    real branch's tracked qty for this currency, summed, exceeds what
+    Coinbase's own real account currently shows. See
+    crypto_family_tree_bot.reconcile_asset_to_real_balance() for the real
+    math (Coinbase's real balance is ground truth; the deficit is
+    distributed proportionally across every branch tracking this currency,
+    correcting only BotPosition.qty - allocated_usd, entry_price, target,
+    and stop are all left untouched, and no Coinbase order is ever placed).
+
+    dry_run=true (the default - always call this way first) computes and
+    returns the real plan without touching the database. Only call with
+    dry_run=false once you've reviewed it and want to actually apply the
+    correction."""
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+    return await crypto_family_tree_bot_module.reconcile_asset_to_real_balance(currency.upper(), dry_run=dry_run)
+
+
 @router.post("/family-tree-status/liquidate-and-buy-btc", dependencies=[Depends(require_admin_key)])
 async def liquidate_family_tree_and_buy_btc():
     """Per the account owner's explicit, real decision - the crypto-side

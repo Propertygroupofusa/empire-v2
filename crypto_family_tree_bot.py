@@ -2983,6 +2983,97 @@ async def consolidate_branches_by_coin(dry_run: bool = True) -> dict:
     return {"dry_run": False, "groups_merged": len(executed), "plan": executed}
 
 
+async def reconcile_asset_to_real_balance(currency: str, dry_run: bool = True) -> dict:
+    """Fixes a real SHORTFALL the reconciliation panel flags: every real
+    branch's tracked BotPosition.qty for this currency, summed, exceeds
+    what Coinbase's own real account currently shows. Coinbase's real
+    balance is the ground truth - a tracked qty above it can only be real
+    drift (fee dust compounding over many trades, a stale row from before
+    a fix like the phantom-position self-heal existed) or a genuine
+    phantom that hasn't tried to sell yet. Left uncorrected, a branch
+    would eventually try to sell more than genuinely exists - place_market_
+    sell() already clamps that to what's real, so it's not a crash, but
+    the branch's own tracked qty (and therefore its next target/stop math
+    and its eventual recorded trade P&L) would stay wrong until it does.
+
+    Deliberately NEVER touches allocated_usd, entry_price, target_price, or
+    stop_price - purely corrects "how many tokens do we actually think we
+    hold" to match reality, the same narrow scope the phantom-position
+    self-heal already uses for the full-zero case. No Coinbase order is
+    ever placed here.
+
+    When 2+ branches share this currency (real, since branches can share a
+    coin - see get_reconciliation_report's own docstring), the real
+    deficit is distributed proportionally to each branch's own share of
+    the tracked total, so no single branch absorbs a shortfall another
+    branch's trades actually caused.
+
+    dry_run=True (the default) computes and returns the real plan without
+    touching the database. dry_run=False executes it - each affected
+    branch's BotPosition.qty is corrected in place (keeping its own real
+    entry_price/target_price/stop_price untouched) and a real RECONCILE
+    activity event is logged naming the exact real correction."""
+    async with AsyncSessionLocal() as db:
+        branch_result = await db.execute(select(CryptoTreeBranch.bot_name))
+        tree_bot_names = {row[0] for row in branch_result.all()}
+        result = await db.execute(select(BotPosition).where(BotPosition.bot.in_(tree_bot_names)))
+        positions = [p for p in result.scalars().all() if p.symbol.split("-")[0] == currency]
+
+    if not positions:
+        return {"status": "ok", "currency": currency, "detail": "no real branch currently tracks this currency"}
+
+    tracked_qty = sum(p.qty for p in positions)
+
+    async with engine.aiohttp.ClientSession() as session:
+        real_balance, err = await engine.get_asset_balance(session, currency)
+
+    if real_balance is None:
+        return {"status": "unchecked", "currency": currency, "detail": err}
+
+    tolerance = max(tracked_qty * 0.01, 1e-6)
+    deficit = tracked_qty - real_balance
+    if deficit <= tolerance:
+        return {
+            "status": "ok", "currency": currency,
+            "tracked_qty": round(tracked_qty, 8), "real_balance": round(real_balance, 8),
+        }
+
+    plan = []
+    for p in positions:
+        share = p.qty / tracked_qty if tracked_qty > 0 else 0.0
+        new_qty = max(0.0, p.qty - deficit * share)
+        plan.append({
+            "bot_name": p.bot, "old_qty": p.qty, "new_qty": round(new_qty, 8),
+            "entry_price": p.entry_price, "target_price": p.target_price, "stop_price": p.stop_price,
+        })
+
+    if dry_run:
+        return {
+            "status": "SHORTFALL", "dry_run": True, "currency": currency,
+            "tracked_qty": round(tracked_qty, 8), "real_balance": round(real_balance, 8),
+            "deficit": round(deficit, 8), "plan": plan,
+        }
+
+    for item in plan:
+        await _save_branch_position(
+            item["bot_name"], f"{currency}-USD", item["entry_price"],
+            item["new_qty"], item["target_price"], item["stop_price"],
+        )
+        reconcile_msg = (
+            f"🔧 Reconciled {item['bot_name']}'s tracked {currency} from {item['old_qty']:.8f} "
+            f"down to {item['new_qty']:.8f} - real Coinbase balance ({real_balance:.8f}) was short of "
+            f"what the tree's tracked positions said it held ({tracked_qty:.8f})"
+        )
+        log.info(f"[TREE] {reconcile_msg}")
+        await _log_activity(item["bot_name"], f"{currency}-USD", "RECONCILE", reconcile_msg)
+
+    return {
+        "status": "SHORTFALL", "dry_run": False, "currency": currency,
+        "tracked_qty": round(tracked_qty, 8), "real_balance": round(real_balance, 8),
+        "deficit": round(deficit, 8), "plan": plan,
+    }
+
+
 async def liquidate_family_tree_and_buy_btc() -> dict:
     """Per the account owner's explicit, real decision (mirrors
     prop_bot.py's liquidate-and-buy-SPY on the Alpaca side): retire the

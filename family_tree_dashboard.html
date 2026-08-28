@@ -540,6 +540,8 @@
         <div id="cash-recon-banner" style="margin-bottom:10px;">Loading…</div>
         <div id="recon-banner">Loading…</div>
         <div id="recon-table-wrap"></div>
+        <div id="reconcile-status" style="margin-top:8px; font-size:0.85em; color: var(--text-dim);"></div>
+        <div id="reconcile-plan-wrap"></div>
         <button id="consolidate-btn" class="unlock-btn" style="margin-top:12px;" onclick="previewConsolidate()">🔗 Combine branches sharing a coin</button>
         <div id="consolidate-status" style="margin-top:8px; font-size:0.85em; color: var(--text-dim);"></div>
         <div id="consolidate-plan-wrap"></div>
@@ -1743,19 +1745,92 @@ function renderReconciliation(data) {
         const statusLabel = a.status === 'SHORTFALL' ? '⚠️ SHORTFALL' : a.status === 'unchecked' ? '— unchecked' : '✅ ok';
         const statusClass = a.status === 'SHORTFALL' ? 'status-shortfall' : a.status === 'unchecked' ? 'status-unchecked' : 'status-ok';
         const realBalanceText = a.real_balance === null ? '—' : a.real_balance.toLocaleString(undefined, { maximumFractionDigits: 8 });
+        // Real fix action, per the account owner's own screenshot of a
+        // live SHORTFALL - only ever shown for a genuinely shortfalled
+        // asset (reconcile_asset_to_real_balance in
+        // crypto_family_tree_bot.py never touches a healthy one, but
+        // there's nothing to fix if it's asked to anyway).
+        const fixLink = a.status === 'SHORTFALL'
+            ? `<a href="#" onclick="previewReconcile('${a.currency}'); return false;" style="color:var(--navy);">🔧 Reconcile</a>`
+            : '';
         return `<tr>
             <td>${a.currency}</td>
             <td>${a.branch_count}</td>
             <td>${a.tracked_qty.toLocaleString(undefined, { maximumFractionDigits: 8 })}</td>
             <td>${realBalanceText}</td>
             <td class="${statusClass}">${statusLabel}</td>
+            <td>${fixLink}</td>
         </tr>`;
     }).join('');
 
     wrap.innerHTML = `<div style="overflow-x:auto;"><table id="recon-table">
-        <thead><tr><th>Asset</th><th>Branches</th><th>Tracked qty (DB)</th><th>Real balance (Coinbase)</th><th>Status</th></tr></thead>
+        <thead><tr><th>Asset</th><th>Branches</th><th>Tracked qty (DB)</th><th>Real balance (Coinbase)</th><th>Status</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
     </table></div>`;
+}
+
+async function previewReconcile(currency) {
+    // Real fix for a SHORTFALL row - corrects only the tracked qty for
+    // this currency (never allocated_usd, entry/target/stop, and never
+    // places a Coinbase order) - see reconcile_asset_to_real_balance() in
+    // crypto_family_tree_bot.py. Always shows the real plan (dry_run=true)
+    // first; nothing is touched until explicitly confirmed below.
+    const statusEl = document.getElementById('reconcile-status');
+    const planWrap = document.getElementById('reconcile-plan-wrap');
+    statusEl.textContent = `Computing the real reconcile plan for ${currency}…`;
+    planWrap.innerHTML = '';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + `/family-tree-status/reconcile-asset/${encodeURIComponent(currency)}?dry_run=true`, {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        if (data.status === 'ok') {
+            statusEl.textContent = `✅ ${currency} is no longer short - real Coinbase balance already covers what's tracked. Nothing to fix.`;
+            return;
+        }
+        if (data.status === 'unchecked') {
+            statusEl.textContent = `Could not check ${currency}'s real balance right now: ${data.detail}`;
+            return;
+        }
+        statusEl.textContent = `Real plan: Coinbase's ${currency} balance (${data.real_balance}) is short of the tree's tracked ${data.tracked_qty} by ${data.deficit} - review the correction below, then confirm.`;
+        const rows = data.plan.map(p => `<tr>
+            <td>${p.bot_name}</td>
+            <td>${p.old_qty}</td>
+            <td>${p.new_qty}</td>
+        </tr>`).join('');
+        planWrap.innerHTML = `<div style="overflow-x:auto;"><table id="reconcile-table">
+            <thead><tr><th>Branch</th><th>Tracked qty now</th><th>Corrected to</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table></div>
+        <div style="font-size:0.78em; color:var(--text-dim); margin-top:6px;">Only the tracked quantity changes - entry price, target, stop, and allocated balance are all left exactly as they are. No Coinbase order is placed.</div>
+        <button class="unlock-btn" style="margin-top:10px;" onclick="executeReconcile('${currency}')">✅ Confirm and correct for real</button>`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+    }
+}
+
+async function executeReconcile(currency) {
+    if (!confirm(`Correct ${currency}'s tracked quantity to match Coinbase's real balance? This only fixes bookkeeping (what the tree THINKS it holds) - no order is placed and no money moves. This cannot be undone by calling this again.`)) return;
+    const statusEl = document.getElementById('reconcile-status');
+    const planWrap = document.getElementById('reconcile-plan-wrap');
+    statusEl.textContent = 'Correcting…';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + `/family-tree-status/reconcile-asset/${encodeURIComponent(currency)}?dry_run=false`, {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        statusEl.textContent = `✅ Corrected ${currency}'s tracked quantity for real.`;
+        planWrap.innerHTML = '';
+        await refresh();
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+    }
 }
 
 // QUICK_PROFIT removed entirely - it lost decisively in real testing and
