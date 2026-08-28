@@ -9807,6 +9807,74 @@ its own.
 
 ---
 
+## Real Alpaca-branch cash deficit made proactively visible, plus a checked-but-unconfirmed intermittent dashboard error
+
+The account owner shared five real screenshots asking generally what
+needed tightening up. Two things worth separating:
+
+**1. A real, confirmed finding: the two existing Alpaca branches'
+allocated capital exceeds real free buying power right now.** Opening
+"New branch" showed `$-122.22 real free buying power right now ($690.78
+total − $813.00 already in other active branches)` - a genuine deficit,
+correctly computed and correctly refusing the new allocation attempt
+(the existing safeguard working exactly as designed). Root cause: two
+individually-held real positions (SLV, SPY) sitting OUTSIDE the
+AlpacaBranch system are using part of the same real Alpaca cash the two
+branches (`alpaca_branch_1`/MES, `alpaca_branch_2`/MCL) count as their
+own $813 combined allocation - the same real shared-cash-pool risk
+already found and made visible on the crypto side's Reconciliation
+panel, just on Alpaca instead. `run_alpaca_branch_cycle()`'s own real
+buy path was confirmed (by reading the code directly) to already clamp
+`spend = min(branch.allocated_usd, buying_power)` before ever placing an
+order, so this deficit can't cause a branch to overspend - it just means
+a branch may fund for less than its own bookkept allocation if it tries
+to enter while the deficit holds.
+
+The real gap was PURELY visibility: this deficit was only ever
+calculated and shown inside the "New branch" creation modal
+(`loadBranchSpendableHint()`) - nothing surfaced it on the main Real
+Branches table where the two EXISTING branches actually live, so it was
+invisible unless the account owner happened to try creating a new one.
+`renderBranches()` (`alpaca_dashboard.html`) now shows a real red banner
+above the branches table whenever `real_spendable_usd < 0` (reusing the
+exact same `buying_power`/`already_allocated_usd`/`real_spendable_usd`
+fields the create-branch modal already computes via
+`GET /alpaca-overview/branches` - no backend change needed, this was a
+pure frontend visibility gap), naming the real dollar amounts and
+explaining honestly what it means and doesn't mean (never a silent
+overspend, since the buy path already clamps). Verified via a real
+Python `HTMLParser` tag-balance check and `node --check` on the
+extracted inline `<script>` block - no dedicated backend test needed
+since the underlying calculation itself was already correct and already
+covered by this feature's own earlier test coverage; this change only
+adds a second render site for numbers already being computed correctly.
+
+**2. Checked but NOT confirmed as a real code bug**: one screenshot
+showed "Could not load combined progress right now" on the Combined
+Progress panel, while the gauge/percentage next to it still showed
+values (likely stale, from the previous successful poll). Read through
+`get_combined_equity_progress()` (`routers/trading_dashboard.py`) and
+`_project_years_to_goal()` directly - both already fail open per-side
+with no obvious crash path, and `loadCombinedProgress()`'s own client-side
+fetch has no unusual error handling that would explain an intermittent
+failure either. A separate screenshot from ~4 minutes earlier showed the
+identical panel loading correctly. Given no reproducible code-level cause
+was found on inspection, this reads as a real but likely transient
+client-side network hiccup (a dropped mobile connection, the page
+backgrounded and resumed) rather than a diagnosable bug - stated honestly
+rather than guessing at a fix for something that couldn't be reproduced
+or traced to a specific line. The panel re-polls every 60s on its own, so
+a one-off failure like this should self-clear; if it recurs
+persistently (not just once), that would be real evidence worth a second
+look.
+
+**Not yet confirmed live** - the account owner needs to redeploy and open
+the Alpaca dashboard to see the new red deficit banner (it should show
+immediately, since the real deficit already exists) directly above the
+Real Branches table.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

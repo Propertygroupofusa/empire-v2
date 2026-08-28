@@ -899,7 +899,27 @@ function renderBranches(data, tradeHistoryByBot) {
         return;
     }
     tradeHistoryByBot = tradeHistoryByBot || {};
+    // Real, proactive cash-deficit warning - the same real
+    // buying_power/already_allocated_usd/real_spendable_usd figures the
+    // "New branch" modal already checks before allowing a new allocation
+    // (see loadBranchSpendableHint), surfaced here too so a REAL deficit
+    // among branches that already exist is visible without having to
+    // open that modal to discover it. Can happen when real cash the
+    // branches count as their own gets spent by something outside the
+    // branch system (a manual "Trade this" buy, an automatic scan entry)
+    // - the same real shared-cash-pool risk already found and made
+    // visible on the crypto side's own Reconciliation panel.
+    const deficitHtml = (data.real_spendable_usd != null && data.real_spendable_usd < 0) ? `
+        <div style="background:var(--red-bg); border:1px solid var(--red); border-radius:8px; padding:10px 14px; margin-bottom:10px; font-size:0.85em;">
+            ⚠️ These branches' allocated capital (${fmtUsd(data.already_allocated_usd)}) exceeds real free buying power
+            (${fmtUsd(data.buying_power)}) by ${fmtUsd(Math.abs(data.real_spendable_usd))} - some other real holding
+            outside the branch system (a manual buy, an automatic scan entry) is using cash a branch counts as its
+            own. A branch's own real order still clamps to whatever's actually available at the moment it buys, so
+            this won't overspend - it just means a branch may end up funded for less than its own allocated amount
+            if it tries to enter while this deficit holds.
+        </div>` : '';
     content.innerHTML = `
+        ${deficitHtml}
         <div style="margin-bottom:10px; color:var(--text-dim); font-size:0.85em;">
             ${fmtUsd(data.total_allocated_usd)} total real capital allocated across ${branches.length} branch(es).
         </div>
