@@ -566,7 +566,29 @@ function fmtOpenedAt(iso) {
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-function renderPositions(positions) {
+// Real "when does this auto-close" answer, per the account owner's direct
+// ask - the table only ever showed "long"/"short" with no sense of the
+// real deadline. Reuses the exact same auto_close_profit_pct/
+// auto_close_max_hold_days figures the page's own explanatory note above
+// the table already gets from get_alpaca_overview() (see
+// check_and_auto_close_positions() in routers/trading_dashboard.py) -
+// never a separately-guessed number, so this can't disagree with what the
+// real background check is actually about to do.
+function fmtAutoCloses(p, profitPct, maxHoldDays) {
+    if (profitPct == null || maxHoldDays == null) return '<span class="no-date">unknown</span>';
+    const plpc = Number(p.unrealized_plpc || 0);
+    if (plpc >= profitPct) {
+        return `<span class="pill pos">Eligible now (hit +${(profitPct * 100).toFixed(0)}% target)</span>`;
+    }
+    if (!p.opened_at) return '<span class="no-date">unknown</span>';
+    const opened = new Date(p.opened_at);
+    if (isNaN(opened.getTime())) return '<span class="no-date">unknown</span>';
+    const deadline = new Date(opened.getTime() + maxHoldDays * 86400000);
+    const dateStr = deadline.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    return `by ${dateStr}<div style="font-size:0.8em; color:var(--text-dim);">or sooner at +${(profitPct * 100).toFixed(0)}%</div>`;
+}
+
+function renderPositions(positions, autoCloseProfitPct, autoCloseMaxHoldDays) {
     if (!positions.length) return '<div class="empty">No open positions right now</div>';
     const rows = positions.map(p => {
         const pl = Number(p.unrealized_pl || 0);
@@ -579,11 +601,12 @@ function renderPositions(positions) {
             <td>${fmtUsd(p.current_price)}</td>
             <td><span class="pill ${pl >= 0 ? 'pos' : 'neg'}">${fmtUsd(pl)} (${fmtPct(plpc)})</span></td>
             <td>${fmtOpenedAt(p.opened_at)}</td>
+            <td>${fmtAutoCloses(p, autoCloseProfitPct, autoCloseMaxHoldDays)}</td>
             <td><button class="close-btn" onclick="closePosition('${p.symbol}', this)">Close</button></td>
         </tr>`;
     }).join('');
     return `<table>
-        <thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>Unrealized P&amp;L</th><th>Opened</th><th></th></tr></thead>
+        <thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>Unrealized P&amp;L</th><th>Opened</th><th>Auto-closes</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
     </table>`;
 }
@@ -860,7 +883,7 @@ async function refresh() {
         const bots = data.bots || [];
         renderBarList('bots-bar', bots.map(b => ({ label: b.name, value: b.profit })));
         document.getElementById('bots').innerHTML = renderBots(bots);
-        document.getElementById('positions').innerHTML = renderPositions(data.positions);
+        document.getElementById('positions').innerHTML = renderPositions(data.positions, data.auto_close_profit_pct, data.auto_close_max_hold_days);
         renderNarrative(data);
 
         statusEl.textContent = 'Last updated ' + new Date().toLocaleTimeString();
