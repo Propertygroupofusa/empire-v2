@@ -128,11 +128,18 @@
     <div id="tfResults"></div>
 
     <div class="note" style="margin-top: 28px;">
-        <strong>QUICK_PROFIT vs. trailing stop:</strong> the live bot right now takes ANY real profit the instant it clears fees (QUICK_PROFIT). This tests the alternative - hold past the real target and trail a 2.5% stop behind the peak instead, only exiting on a genuine reversal. Same real entry, hard stop-loss, and breakeven ratchet either way - only what happens once a position is profitable differs. Shadow mode only - does not change what the live bot does.
+        <strong>QUICK_PROFIT vs. trailing stop (historical evidence):</strong> this is the real comparison that already settled the question - QUICK_PROFIT (take any real profit the instant it clears fees) lost on every coin tested, trailing stop (hold past the real target and trail a stop behind the peak, only exiting on a genuine reversal) won on all of them. QUICK_PROFIT has since been removed as a live option entirely; this table is kept as the historical evidence for why. Shadow mode only - re-running it does not change what the live bot does.
     </div>
     <button class="run-btn" id="qpBtn" onclick="runQuickProfitVsTrailingStop()">▶ Run QUICK_PROFIT vs. Trailing Stop Comparison (~30-90 seconds)</button>
     <div id="qpStatus"></div>
     <div id="qpResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>Refine the trailing-stop width itself:</strong> the live 2.5% trail was never actually tested against any alternative width - it was only sized to match the OLD QUICK_PROFIT dollar-giveback cap, a coincidence of the comparison it won. This replays the real trailing-stop exit rule under several candidate trail widths (1.5% to 5%) against the same real historical candles for every coin, so a genuinely better width can be found with real evidence. Same real entry, target, hard stop-loss, and breakeven ratchet across every candidate - only the trail width itself varies. Shadow mode only - does not change what the live bot does until a candidate is promoted below.
+    </div>
+    <button class="run-btn" id="tsBtn" onclick="runTrailingStopPctSweep()">▶ Run Trailing Stop Width Sweep (~30-90 seconds)</button>
+    <div id="tsStatus"></div>
+    <div id="tsResults"></div>
 </div>
 
 <script>
@@ -649,6 +656,136 @@ function renderQuickProfitVsTrailingStopResults(data) {
         </p>
     `;
     renderExitModePromoteRow();
+}
+
+async function runTrailingStopPctSweep() {
+    const btn = document.getElementById('tsBtn');
+    const statusEl = document.getElementById('tsStatus');
+    const resultsEl = document.getElementById('tsResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real data, one replay per candidate per coin)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/crypto-selection-backtest/trailing-stop-pct-sweep', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - try again');
+        }
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+
+        renderTrailingStopPctSweepResults(data);
+        const bestLabel = data.best_overall_pct ? `${(parseFloat(data.best_overall_pct) * 100).toFixed(1)}%` : 'none';
+        statusEl.textContent = `Compared ${data.coins_with_results} coins over ${data.backtest_days} days across ${data.candidates.length} candidate trail widths. Best overall: ${bestLabel}.`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Trailing Stop Width Sweep (~30-90 seconds)';
+    }
+}
+
+let lastTrailPctCandidates = [];
+
+function renderTrailingStopPctSweepResults(data) {
+    const resultsEl = document.getElementById('tsResults');
+    if (!data.comparison || data.comparison.length === 0) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No coins produced usable comparison results.</p>';
+        return;
+    }
+    const candidates = data.candidates;
+    const totalCells = candidates.map(pct => {
+        const key = String(pct);
+        const total = data.totals_by_pct[key];
+        const won = data.coins_won_by_pct[key];
+        const isBest = key === data.best_overall_pct;
+        return `<td class="${total >= 0 ? 'pos' : 'neg'}"${isBest ? ' style="font-weight:700;"' : ''}>${total >= 0 ? '+' : ''}$${total.toFixed(2)} (won ${won})${isBest ? ' 🏆' : ''}</td>`;
+    }).join('');
+
+    const coinRows = data.comparison.map(r => {
+        const cells = candidates.map(pct => {
+            const key = String(pct);
+            const res = r.results[key];
+            const pnl = res ? res.total_pnl : 0;
+            return `<td class="${pnl >= 0 ? 'pos' : 'neg'}">${res ? (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) : '—'}</td>`;
+        }).join('');
+        return `<tr><td>${r.product_id}</td>${cells}</tr>`;
+    }).join('');
+
+    resultsEl.innerHTML = `
+        <table>
+            <thead><tr><th>Totals across all coins</th>${candidates.map(pct => `<th>${(pct * 100).toFixed(1)}% trail</th>`).join('')}</tr></thead>
+            <tbody><tr><td>Total P&amp;L (coins won)</td>${totalCells}</tr></tbody>
+        </table>
+        <table style="margin-top:14px;">
+            <thead><tr><th>Coin</th>${candidates.map(pct => `<th>${(pct * 100).toFixed(1)}%</th>`).join('')}</tr></thead>
+            <tbody>${coinRows}</tbody>
+        </table>
+        <p class="trade-note">Current live trail width: ${(data.current_live_trail_pct * 100).toFixed(1)}%. Each column replays the exact same real entry/target/stop/breakeven rules - only the trail width itself differs.</p>
+        <p style="margin-top:20px;font-weight:700;">Push a trailing-stop width to the live bot:</p>
+        <div id="trailPctBadgeWrap"></div>
+        <div class="promote-row" id="trailPctPromoteRow"></div>
+        <p style="margin-top:8px;font-size:0.78em;color:var(--text-dim);">
+            A real, immediate change to how every branch's own trailing stop works - takes effect on the live bot's very
+            next cycle, no restart needed. Only these tested widths can ever be promoted - there's no way to push an
+            untested trail percentage.
+        </p>
+    `;
+    lastTrailPctCandidates = candidates;
+    renderTrailPctPromoteRow();
+}
+
+let currentLiveTrailPct = 0.025;
+
+function renderTrailPctPromoteRow() {
+    const badgeWrap = document.getElementById('trailPctBadgeWrap');
+    const row = document.getElementById('trailPctPromoteRow');
+    if (!row) return;
+    if (badgeWrap) {
+        badgeWrap.innerHTML = `<span class="live-exit-mode-badge">🎯 Live now: ${(currentLiveTrailPct * 100).toFixed(1)}% trail</span>`;
+    }
+    const candidates = lastTrailPctCandidates.length ? lastTrailPctCandidates : [0.015, 0.02, 0.025, 0.03, 0.04, 0.05];
+    row.innerHTML = candidates.map(pct => {
+        const isLive = Math.abs(pct - currentLiveTrailPct) < 1e-9;
+        return `<button class="promote-btn${isLive ? ' is-live' : ''}" data-pct="${pct}" ${isLive ? 'disabled' : ''}
+            onclick="promoteTrailPct(${pct}, this)">${isLive ? '✓ Live now' : `Promote ${(pct * 100).toFixed(1)}%`}</button>`;
+    }).join('');
+}
+
+async function promoteTrailPct(pct, btn) {
+    if (!confirm(
+        `Promote a ${(pct * 100).toFixed(1)}% trailing-stop width to the LIVE crypto bot? From its very next cycle onward, ` +
+        `every branch's real trailing stop will use this width instead of whatever's live now. This is a real, immediate ` +
+        `change to how real money gets traded - not a backtest.`
+    )) return;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Promoting...';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/family-tree-status/set-trailing-stop-pct', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pct }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        currentLiveTrailPct = data.trailing_stop_pct;
+        renderTrailPctPromoteRow();
+    } catch (e) {
+        alert('Could not promote trailing-stop width: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = original;
+    }
 }
 
 // QUICK_PROFIT removed from here entirely per the account owner's explicit

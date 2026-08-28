@@ -847,6 +847,7 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     crypto_passive_mode = await crypto_family_tree_bot_module.is_crypto_passive_mode() if crypto_family_tree_bot_module else False
     rolling_expectancy = await crypto_family_tree_bot_module.get_rolling_expectancy() if crypto_family_tree_bot_module else None
     exit_mode = await crypto_family_tree_bot_module.get_live_exit_mode() if crypto_family_tree_bot_module else "trailing_stop"
+    trailing_stop_pct = await crypto_family_tree_bot_module.get_live_trailing_stop_pct() if crypto_family_tree_bot_module else None
 
     return {
         "branches": out,
@@ -869,6 +870,7 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         "crypto_passive_mode": crypto_passive_mode,
         "rolling_expectancy": rolling_expectancy,
         "exit_mode": exit_mode,
+        "trailing_stop_pct": trailing_stop_pct,
         "real_usd_balance": round(real_balance, 2) if real_balance is not None else None,
         "real_usdc_balance": round(real_usdc_balance, 2) if real_usdc_balance is not None else None,
     }
@@ -2616,6 +2618,58 @@ async def set_crypto_exit_mode(payload: SetExitModeRequest):
     await crypto_family_tree_bot_module.set_live_exit_mode(mode)
     log.info(f"[dashboard] 🎯 Live crypto exit mode promoted to '{mode}'")
     return {"status": "promoted", "exit_mode": mode}
+
+
+@router.post("/crypto-selection-backtest/trailing-stop-pct-sweep", dependencies=[Depends(require_admin_key)])
+async def run_trailing_stop_pct_sweep_backtest():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    Per the account owner's explicit follow-up request right after
+    QUICK_PROFIT was removed outright ("is there any way that we can
+    refine and update the trailing stop what we have"): the live 2.5%
+    trail width was never itself tested against any alternative - it was
+    only sized to match the OLD QUICK_PROFIT dollar-giveback cap, a
+    coincidence of the comparison it won, not evidence it's the best
+    trailing-stop width on its own merits. Replays the real trailing-stop
+    exit rule under several candidate trail percentages
+    (crypto_selection_backtest.py's TRAILING_STOP_PCT_CANDIDATES) against
+    the exact same real historical candles for every coin, so a
+    genuinely better width can be found with real evidence instead of
+    guessed at.
+
+    Pulls real historical data from Coinbase's public candles endpoint -
+    can take 30-90 seconds depending on that endpoint's response time."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_trailing_stop_pct_sweep_comparison()
+
+
+class SetTrailingStopPctRequest(BaseModel):
+    pct: float
+
+
+@router.post("/family-tree-status/set-trailing-stop-pct", dependencies=[Depends(require_admin_key)])
+async def set_crypto_trailing_stop_pct(payload: SetTrailingStopPctRequest):
+    """Promotes one of the real, backtested trailing-stop widths (see
+    crypto_selection_backtest.py's run_trailing_stop_pct_sweep_comparison,
+    and crypto_family_tree_bot.py's run_branch_cycle which actually
+    enforces whichever one is live) to production - the direct trailing-
+    stop-refinement counterpart to set_crypto_exit_mode above, per the
+    account owner's explicit request to "refine and update" trailing
+    stop rather than replace it outright.
+
+    Deliberately restricted to exactly the candidate widths the sweep
+    tool itself tested (TRAILING_STOP_PCT_CANDIDATES) - there is no way
+    to request an untested trail width. Takes effect on the live bot's
+    very next cycle for every branch - no restart needed, same as every
+    other real-time flag in this codebase."""
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+    try:
+        await crypto_family_tree_bot_module.set_live_trailing_stop_pct(payload.pct)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    log.info(f"[dashboard] 🎯 Live crypto trailing-stop width promoted to {payload.pct * 100:.1f}%")
+    return {"status": "promoted", "trailing_stop_pct": payload.pct}
 
 
 @router.post("/alpaca-selection-backtest", dependencies=[Depends(require_admin_key)])

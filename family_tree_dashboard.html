@@ -1627,7 +1627,7 @@ async function refresh() {
         renderCryptoPassiveModeBanner(data);
         renderRollingExpectancyBanner(data);
         renderUsdcBlindSpotBanner(data);
-        renderExitModeBadge(data.exit_mode);
+        renderExitModeBadge(data.exit_mode, data.trailing_stop_pct);
 
         const branches = data.branches || [];
         lastUnrealizedProfit = branches.reduce((sum, b) => {
@@ -1724,11 +1724,15 @@ function renderReconciliation(data) {
 // gets backtested and promoted.
 const EXIT_MODE_BADGE_LABELS = { trailing_stop: 'Trailing Stop (let winners run, trail off peak)' };
 
-function renderExitModeBadge(mode) {
+function renderExitModeBadge(mode, trailingStopPct) {
     const el = document.getElementById('exit-mode-badge');
     if (!mode) { el.style.display = 'none'; return; }
     el.style.display = '';
-    el.innerHTML = `🎯 Live exit rule: <strong style="color:var(--navy);">${EXIT_MODE_BADGE_LABELS[mode] || mode}</strong> — ` +
+    let label = EXIT_MODE_BADGE_LABELS[mode] || mode;
+    if (mode === 'trailing_stop' && trailingStopPct != null) {
+        label = `Trailing Stop (${(trailingStopPct * 100).toFixed(1)}% off peak)`;
+    }
+    el.innerHTML = `🎯 Live exit rule: <strong style="color:var(--navy);">${label}</strong> — ` +
         `<a href="/crypto-selection-backtest-view" style="color: var(--navy);">run the backtest to compare or promote a different one →</a>`;
 }
 

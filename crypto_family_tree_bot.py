@@ -319,6 +319,68 @@ async def set_live_exit_mode(mode: str):
         await db.commit()
 
 
+# Per the account owner's explicit follow-up ("is there any way that we
+# can refine and update the trailing stop what we have") right after
+# QUICK_PROFIT was removed outright in favor of trailing stop: the live
+# 2.5% trail width (TRAILING_STOP_PCT above) was never itself tested
+# against any alternative - it was only sized to match the OLD
+# QUICK_PROFIT dollar-giveback cap, a coincidence of the comparison it
+# won, not evidence it's the best trailing-stop width on its own merits.
+# Mirrors crypto_selection_backtest.py's own TRAILING_STOP_PCT_CANDIDATES
+# exactly, so a width can never be promoted here that wasn't actually
+# backtested there - same "never run an untested value" discipline
+# EXIT_MODE_LEVELS above already follows.
+TRAILING_STOP_PCT_CANDIDATES = [0.015, 0.02, 0.025, 0.03, 0.04, 0.05]
+LIVE_TRAILING_STOP_PCT_KEY = "crypto_live_trailing_stop_pct"
+
+
+def _matched_trailing_stop_candidate(pct):
+    """Tolerant match against TRAILING_STOP_PCT_CANDIDATES - a value
+    round-tripped through a real DB float column can drift by a
+    floating-point epsilon, so a bare `in` check would wrongly reject a
+    genuinely-valid stored candidate. Returns the real candidate value
+    (not the possibly-drifted input) on a match, else None."""
+    for candidate in TRAILING_STOP_PCT_CANDIDATES:
+        if pct is not None and abs(pct - candidate) < 1e-9:
+            return candidate
+    return None
+
+
+async def get_live_trailing_stop_pct() -> float:
+    """The real trail width (a fraction, e.g. 0.025 = 2.5%) the live
+    trailing-stop exit rule currently uses. DB-persisted the same generic
+    way every other real-time flag in this file already is. Defaults to
+    the original TRAILING_STOP_PCT if never explicitly promoted, and
+    falls back to it on any stored value that no longer matches a real
+    tested candidate too (e.g. TRAILING_STOP_PCT_CANDIDATES gets revised
+    later) - there's currently nothing else it could correctly mean."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == LIVE_TRAILING_STOP_PCT_KEY))
+        row = result.scalar_one_or_none()
+        if row is None or row.base_capital is None:
+            return TRAILING_STOP_PCT
+        matched = _matched_trailing_stop_candidate(row.base_capital)
+        return matched if matched is not None else TRAILING_STOP_PCT
+
+
+async def set_live_trailing_stop_pct(pct: float):
+    matched = _matched_trailing_stop_candidate(pct)
+    if matched is None:
+        raise ValueError(
+            f"unknown trailing-stop percentage {pct!r} - must be one of "
+            f"{TRAILING_STOP_PCT_CANDIDATES} (only a real, backtested width can go live)"
+        )
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == LIVE_TRAILING_STOP_PCT_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = TradingBotState(bot_name=LIVE_TRAILING_STOP_PCT_KEY, base_capital=matched)
+            db.add(row)
+        else:
+            row.base_capital = matched
+        await db.commit()
+
+
 # Per the account owner (a king/throne model, corrected after an earlier
 # "permanent once earned" version): BTC (the root) is King - always stays
 # on BTC-USD, never contested, never changes - see the ROOT_BOT_NAME check
@@ -3869,16 +3931,23 @@ async def run_branch_cycle(bot_name: str) -> bool:
         # _replay_with_exit_mode(mode="trailing_stop") already tested: the
         # real hard stop-loss/breakeven ratchet applies exactly as before
         # UNTIL price first reaches the real ATR-based target; from that
-        # moment on, the stop trails TRAILING_STOP_PCT behind the highest
-        # real price seen since entry (never loosening below the original
-        # stop/breakeven level - only ever tightening), and the position
-        # exits on a genuine reversal from its own peak rather than the
-        # instant it clears fees. TARGET itself is never an immediate-exit
-        # condition here - reaching it only ARMS the trail.
+        # moment on, the stop trails the live trail width behind the
+        # highest real price seen since entry (never loosening below the
+        # original stop/breakeven level - only ever tightening), and the
+        # position exits on a genuine reversal from its own peak rather
+        # than the instant it clears fees. TARGET itself is never an
+        # immediate-exit condition here - reaching it only ARMS the trail.
+        # The width itself is a real, live-switchable, backtested
+        # parameter (get_live_trailing_stop_pct/set_live_trailing_stop_pct
+        # above) rather than the hardcoded TRAILING_STOP_PCT module
+        # default - per the account owner's own explicit follow-up request
+        # to "refine and update" trailing stop with real evidence, the
+        # same promote-from-a-tested-set discipline exit_mode itself uses.
+        live_trail_pct = await get_live_trailing_stop_pct()
         peak_price = position.entry_price + (stored_peak / position.qty) if position.qty else position.entry_price
         profit_activated = peak_price >= position.target_price
         if profit_activated:
-            trailing_stop_price = peak_price * (1 - TRAILING_STOP_PCT)
+            trailing_stop_price = peak_price * (1 - live_trail_pct)
             effective_stop = max(position.stop_price, trailing_stop_price)
         else:
             effective_stop = position.stop_price
@@ -3888,7 +3957,7 @@ async def run_branch_cycle(bot_name: str) -> bool:
             if profit_activated:
                 log.info(
                     f"[TREE] 📉 {bot_name} reversed ${peak_price - price:,.2f} from its ${peak_price:,.2f} peak "
-                    f"(trailing {TRAILING_STOP_PCT*100:.1f}%) - selling to lock in the real move"
+                    f"(trailing {live_trail_pct*100:.1f}%) - selling to lock in the real move"
                 )
 
         if exit_now:

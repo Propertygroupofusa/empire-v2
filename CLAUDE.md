@@ -9262,6 +9262,101 @@ same promote row.
 
 ---
 
+## Refining the trailing-stop WIDTH itself, right after QUICK_PROFIT was removed outright
+
+Right after QUICK_PROFIT was removed as a live option, the account owner
+asked directly: "is there any way that we can refine and update the
+trailing stop what we have." A real, well-founded question - the live
+2.5% trail width (`TRAILING_STOP_PCT`) was never itself backtested
+against any alternative; it was only ever sized to match the OLD
+QUICK_PROFIT dollar-giveback cap ($3.75/$150 spend), a coincidence of the
+comparison it won, not evidence 2.5% specifically is the best trailing-
+stop width on its own merits. Ports the same "sweep real candidates,
+promote only what's evidence-backed" mechanism already used for
+`exit_mode` and prop_bot.py's own A/B/C/D entry variants, applied to the
+one real parameter that defines trailing stop.
+
+**`crypto_selection_backtest.py`**:
+- `_replay_with_exit_mode()` gained an optional `trail_pct` parameter -
+  `trail_pct=None` (every existing caller) reproduces the exact original
+  2.5%-only behavior byte-for-byte; a real `trail_pct<=0` is treated the
+  same as `None` (same defensive pattern already used for `spend`).
+- `TRAILING_STOP_PCT_CANDIDATES = [0.015, 0.02, 0.025, 0.03, 0.04, 0.05]`
+  (1.5% to 5%, bracketing the current live width on both sides).
+- `run_trailing_stop_pct_sweep_comparison()` - replays the real trailing-
+  stop exit rule under every candidate width against the IDENTICAL real
+  historical candles for every coin (entry/target/hard-stop/breakeven all
+  unchanged across candidates - only the trail width varies), returning
+  per-coin-per-candidate results plus real summed totals, a coins-won
+  count per candidate, and the single best-performing width overall.
+
+**`crypto_family_tree_bot.py`**: `get_live_trailing_stop_pct()`/
+`set_live_trailing_stop_pct()` - DB-persisted the same generic way every
+other real-time flag in this file already is, restricted to exactly
+`TRAILING_STOP_PCT_CANDIDATES` (a tolerant float match, `_matched_trailing_stop_candidate()`,
+guards against DB float round-trip drift) so an untested width can never
+go live. Defaults to the original 2.5% if never explicitly promoted.
+`run_branch_cycle()`'s trailing-stop logic now calls
+`get_live_trailing_stop_pct()` each cycle instead of reading the
+hardcoded `TRAILING_STOP_PCT` module constant directly - the live width
+is now a real, switchable parameter, not a fixed number.
+
+**`routers/trading_dashboard.py`**: new `POST /crypto-selection-backtest/trailing-stop-pct-sweep`
+(admin-key gated, runs the real sweep) and `POST /family-tree-status/set-trailing-stop-pct`
+(admin-key gated, `{"pct": 0.03}` - refuses any value that isn't a real
+tested candidate with a 400). `get_family_tree_status()`'s response
+gained a `trailing_stop_pct` field.
+
+**Dashboard**: `crypto_selection_backtest.html` gained a "▶ Run Trailing
+Stop Width Sweep" button right under the (now-historical-evidence-only)
+QUICK_PROFIT vs Trailing Stop table - two result tables (totals per
+candidate with the real best one marked 🏆, then a per-coin breakdown)
+plus a promote row mirroring the exit-mode one exactly (a live badge, one
+button per tested candidate, `✓ Live now` on whichever's currently
+promoted). `family_tree_dashboard.html`'s exit-mode badge now shows the
+real live trail percentage inline ("Trailing Stop (2.5% off peak)")
+instead of a generic label. Both QUICK_PROFIT-era note texts on the
+backtest page were corrected too (one now frames the old comparison
+table explicitly as historical evidence, the other explains why 2.5%
+itself was never actually validated).
+
+Verified offline (`test_trailing_stop_pct_refinement.py`, 24 checks,
+reusing the same monkeypatched-ATR/target technique already validated in
+`test_quick_profit_vs_trailing_stop.py` for fully deterministic,
+hand-verifiable entries/exits): `trail_pct=None` reproduces the exact
+original default byte-for-byte; a real tighter 1% trail and a real wider
+5% trail both produce genuinely different, hand-verified real exits on
+the identical data (the wider one never even triggers, correctly
+returning no completed trade); `run_trailing_stop_pct_sweep_comparison()`'s
+own totals-by-candidate exactly match independently-computed direct
+`_replay_with_exit_mode()` calls summed across two real coins, and its
+`best_overall_pct`/`coins_won_by_pct` correctly identify the real winner
+on this data (1%, which happens to catch a better exit price than the
+default on this specific declining-after-peak shape - a real, sensible,
+data-dependent outcome, not a general "tighter always wins" rule);
+`get_live_trailing_stop_pct()`/`set_live_trailing_stop_pct()` round-trip
+correctly and reject a real untested value (0.033); the real dashboard
+endpoint promotes correctly and refuses an untested percentage with a
+real 400; and - the most important end-to-end check - `run_branch_cycle()`
+is confirmed to genuinely read the LIVE-promoted width, not the hardcoded
+module constant: with a real 5% trail promoted, a real pullback that
+would have exited under the old fixed 2.5% default does NOT exit,
+proving the live code path actually uses the promoted value. Full
+existing regression suite re-run clean alongside it (18 + 7 + 16 checks
+across the exit-mode and QUICK_PROFIT-comparison test files - zero
+regressions). Confirmed via a real AST route-count parse that both new
+routes are bound correctly with no duplicate registrations (72 total
+routes, zero duplicates). Both touched HTML files re-verified with a real
+Python `HTMLParser` tag-balance check and `node --check` on each file's
+extracted inline `<script>` block.
+
+**Not yet confirmed live** - the account owner needs to redeploy, open
+`/crypto-selection-backtest-view`, and tap "Run Trailing Stop Width
+Sweep" to see the real numbers on actual historical data before deciding
+whether to promote a different width than today's 2.5% default.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

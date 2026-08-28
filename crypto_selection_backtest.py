@@ -203,7 +203,7 @@ def backtest_one_coin(closes, highs, lows, entry_gate=None, spend=None):
     return result
 
 
-def _replay_with_exit_mode(closes, highs, lows, mode, entry_gate=None, spend=None):
+def _replay_with_exit_mode(closes, highs, lows, mode, entry_gate=None, spend=None, trail_pct=None):
     """Real, shared replay for the QUICK_PROFIT-vs-trailing-stop
     comparison (run_quick_profit_vs_trailing_stop_comparison below) -
     built after a pasted proposal argued for letting winners run with a
@@ -239,10 +239,19 @@ def _replay_with_exit_mode(closes, highs, lows, mode, entry_gate=None, spend=Non
     dropped without being marked-to-market - the same simplification
     backtest_one_coin() already documents and accepts; good enough for
     comparing the two exit philosophies against each other, not a precise
-    P&L forecast."""
+    P&L forecast.
+
+    `trail_pct` (optional) overrides the module's own TRAILING_STOP_PCT
+    for this one replay - used by run_trailing_stop_pct_sweep_comparison()
+    below to test several candidate trail widths against the identical
+    real data, per the account owner's own explicit follow-up request to
+    "refine and update" trailing stop with what's already built rather
+    than replace it outright. `trail_pct=None` (every existing caller)
+    reproduces the exact original behavior, byte-for-byte."""
     # Same real spend<=0 guard as backtest_one_coin() above - see its own
     # comment for the exact live ZeroDivisionError this prevents.
     spend = spend if spend is not None and spend > 0 else SPEND
+    trail_pct = trail_pct if trail_pct is not None and trail_pct > 0 else TRAILING_STOP_PCT
     trades = []
     i = ATR_WINDOW
     n = len(closes)
@@ -291,7 +300,7 @@ def _replay_with_exit_mode(closes, highs, lows, mode, entry_gate=None, spend=Non
             if not position["profit_activated"] and price >= position["target"]:
                 position["profit_activated"] = True
             if position["profit_activated"]:
-                trailing_stop = position["peak_price"] * (1 - TRAILING_STOP_PCT)
+                trailing_stop = position["peak_price"] * (1 - trail_pct)
                 effective_stop = max(position["stop"], trailing_stop)
             else:
                 effective_stop = position["stop"]
@@ -379,6 +388,94 @@ async def run_quick_profit_vs_trailing_stop_comparison(coins=None, days=BACKTEST
             "quick_profit_coins_won": quick_profit_wins,
             "trailing_stop_coins_won": trailing_stop_wins,
         },
+        "comparison": comparison,
+    }
+
+
+# Per the account owner's explicit follow-up ("is there any way that we
+# can refine and update the trailing stop what we have") right after
+# QUICK_PROFIT was removed outright in favor of trailing stop: the live
+# 2.5% trail (TRAILING_STOP_PCT) was never itself tested against any
+# alternative width - it was sized to match the OLD QUICK_PROFIT
+# dollar-giveback cap ($3.75/$150), a coincidence of the comparison it
+# won, not evidence it's the best trailing-stop width on its own merits.
+# These candidates bracket it on both sides (tighter and looser) so the
+# sweep below can actually find a genuinely better real width, not just a
+# different one.
+TRAILING_STOP_PCT_CANDIDATES = [0.015, 0.02, 0.025, 0.03, 0.04, 0.05]
+
+
+async def run_trailing_stop_pct_sweep_comparison(coins=None, days=BACKTEST_DAYS, max_concurrent=6, candidates=None):
+    """SHADOW-MODE, additive comparison - never touches live trading,
+    places no real order. Replays the real trailing-stop exit rule under
+    several candidate trail percentages (TRAILING_STOP_PCT_CANDIDATES by
+    default) against the IDENTICAL real historical candles for every
+    coin, so a genuinely better trail width can be found with real
+    evidence - the same discipline (replay the bot's own real rules,
+    never guess) every other comparison tool in this file already
+    follows. Entry, target, stop, and breakeven are all identical across
+    every candidate - only the trail width itself varies, isolating the
+    one real question being asked."""
+    coins = coins or COIN_FAMILY_TREE
+    candidates = candidates or TRAILING_STOP_PCT_CANDIDATES
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def _one(product_id):
+        async with semaphore:
+            candles = await fetch_historical_candles(session, product_id, days=days)
+        if candles is None:
+            return product_id, None, "not enough historical data"
+        closes, highs, lows, _times = candles
+        by_pct = {
+            pct: _replay_with_exit_mode(closes, highs, lows, mode="trailing_stop", trail_pct=pct)
+            for pct in candidates
+        }
+        return product_id, by_pct, None
+
+    async with aiohttp.ClientSession() as session:
+        outcomes = await asyncio.gather(*(_one(pid) for pid in coins))
+
+    comparison = []
+    skipped = []
+    for product_id, by_pct, skip_reason in outcomes:
+        if by_pct is None:
+            skipped.append({"product_id": product_id, "reason": skip_reason})
+            continue
+        comparison.append({"product_id": product_id, "results": {str(pct): by_pct[pct] for pct in candidates}})
+
+    totals_by_pct = {}
+    coins_won_by_pct = {}
+    for pct in candidates:
+        key = str(pct)
+        totals_by_pct[key] = sum(
+            (row["results"][key]["total_pnl"] if row["results"][key] else 0.0) for row in comparison
+        )
+        coins_won_by_pct[key] = 0
+
+    for row in comparison:
+        best_pnl, best_key = None, None
+        for pct in candidates:
+            key = str(pct)
+            r = row["results"][key]
+            pnl = r["total_pnl"] if r else 0.0
+            if best_pnl is None or pnl > best_pnl:
+                best_pnl, best_key = pnl, key
+        if best_key is not None:
+            coins_won_by_pct[best_key] += 1
+
+    best_overall_pct = max(totals_by_pct, key=lambda k: totals_by_pct[k]) if totals_by_pct else None
+
+    return {
+        "backtest_days": days,
+        "spend_per_trade": SPEND,
+        "candidates": candidates,
+        "current_live_trail_pct": TRAILING_STOP_PCT,
+        "coins_tested": len(coins),
+        "coins_with_results": len(comparison),
+        "skipped": skipped,
+        "totals_by_pct": totals_by_pct,
+        "coins_won_by_pct": coins_won_by_pct,
+        "best_overall_pct": best_overall_pct,
         "comparison": comparison,
     }
 
