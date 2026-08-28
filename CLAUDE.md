@@ -9616,6 +9616,78 @@ evidence needed before any further change to the stop/trail parameters.
 
 ---
 
+## Trailing-stop candidate set revised again from a direct read of the real sweep results, plus a stale-badge bug fixed
+
+The account owner looked at the real per-coin Trailing Stop Width Sweep
+table (1.5%/2.0%/2.5%/3.0%/4.0%/5.0% trail widths, replayed against real
+history) and read the pattern themselves: the narrow candidates were
+consistently the most red, the wider ones consistently the most green.
+Asked directly to drop the three worst-performing narrow candidates and
+add a new 7.5% one to keep testing wider, in the direction the real data
+was already pointing.
+
+`TRAILING_STOP_PCT_CANDIDATES` (`crypto_selection_backtest.py` and its
+mirror in `crypto_family_tree_bot.py`, kept identical on purpose so a
+width can never be promoted live that wasn't actually backtested) changed
+from `[0.015, 0.02, 0.025, 0.03, 0.04, 0.05]` to `[0.03, 0.04, 0.05,
+0.075]` - dropping 1.5%/2.0%/2.5%, adding 7.5%. **0.05 (5.0%) was kept in
+the set deliberately** since it's the account owner's own already-
+promoted LIVE width - removing it would have silently fallen back
+`get_live_trailing_stop_pct()` to the module's original 2.5% default the
+next time it's read, changing live behavior as a side effect of trimming
+a test list, which was never the ask. Real, honest caveat carried into
+both files' own comments: the real per-coin data isn't perfectly
+monotonic (a few coins - LDO, SUI, ETC - stayed negative at every width
+tested), so wider trails aren't a universal fix, just the real, visible
+trend across most of the table.
+
+**A second, real bug found and fixed along the way**: the sweep page's
+"Current live trail width: X%" note text (`crypto_selection_backtest.html`)
+was rendered once from the sweep response's own `current_live_trail_pct`
+at the moment the sweep ran, and never updated again - so promoting a
+different width afterward correctly updated the "🎯 Live now" badge and
+buttons (`renderTrailPctPromoteRow()` already handled that) but left this
+separate static paragraph showing the OLD width, exactly the stale "2.5%"
+text visible in the account owner's own screenshot after they'd already
+promoted 5.0%. Fixed by giving that note an id and updating it inside
+`renderTrailPctPromoteRow()` alongside the badge, so the two can never
+disagree again. Also fixed the underlying cause: `currentLiveTrailPct`
+(the client-side variable driving both the badge and the note) previously
+only ever got set by a client-side promotion action THIS SAME PAGE LOAD -
+a fresh page load or a re-run of the sweep without promoting anything
+never synced it from the real backend value at all, defaulting to a
+hardcoded `0.025` until something changed it. `renderTrailingStopPctSweepResults()`
+now syncs `currentLiveTrailPct = data.current_live_trail_pct` on every
+real sweep response, so a fresh load correctly reflects whatever's
+genuinely live without needing a promotion in that session first.
+
+Verified offline (a focused standalone script, 9 checks, run directly
+against the real `crypto_family_tree_bot`/`routers/trading_dashboard`
+functions - the full pre-existing `test_trailing_stop_pct_refinement.py`
+has an unrelated, pre-existing failure in its Part 1/2 confirmed via a
+direct `git stash` comparison to fail identically on the prior commit,
+so it was bypassed rather than fixed here, out of scope for this
+change): the real currently-live 0.05 stays valid after the candidate-set
+change; a removed candidate (0.02) is now correctly rejected with a clear
+message, and the live value stays unchanged after the rejection; the new
+0.075 candidate can be promoted; the real dashboard endpoint promotes a
+remaining candidate (0.03) correctly and refuses a removed one (0.025,
+the old default) with a real 400; and `get_family_tree_status()`'s
+response correctly reflects the real current promoted value. Full
+existing `test_quick_profit_vs_trailing_stop.py` (16 checks) and
+`test_live_exit_mode_trailing_stop.py` (18 checks) suites re-run clean
+alongside it. `crypto_selection_backtest.html` re-verified with a real
+Python `HTMLParser` tag-balance check and `node --check` on the extracted
+inline `<script>` block.
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+re-run the Trailing Stop Width Sweep to see the real, narrower 4-candidate
+table (3.0%/4.0%/5.0%/7.5%) and confirm the "Current live trail width"
+note now stays in sync with the "Live now" badge after a promotion,
+instead of going stale.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

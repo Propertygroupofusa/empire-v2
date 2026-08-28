@@ -399,10 +399,24 @@ async def run_quick_profit_vs_trailing_stop_comparison(coins=None, days=BACKTEST
 # alternative width - it was sized to match the OLD QUICK_PROFIT
 # dollar-giveback cap ($3.75/$150), a coincidence of the comparison it
 # won, not evidence it's the best trailing-stop width on its own merits.
-# These candidates bracket it on both sides (tighter and looser) so the
-# sweep below can actually find a genuinely better real width, not just a
-# different one.
-TRAILING_STOP_PCT_CANDIDATES = [0.015, 0.02, 0.025, 0.03, 0.04, 0.05]
+# These candidates originally bracketed it on both sides (tighter and
+# looser) so the sweep could find a genuinely better real width, not just
+# a different one.
+#
+# Revised again per the account owner's own direct read of the real
+# per-coin sweep results: the narrower candidates (1.5%/2.0%/2.5%) were
+# consistently the worst real performers across almost every coin in the
+# table (the most red), while the wider ones (3.0%/4.0%/5.0%) were
+# consistently the best (the most green) - a real, visible pattern of
+# wider trails outperforming tighter ones on this data (though NOT
+# perfectly monotonic per-coin - a few coins like LDO/SUI/ETC stayed
+# negative at every width tested, meaning trail width alone can't fix a
+# fundamentally bad setup on those). Dropped the three worst-performing
+# narrow candidates and added 0.075 (7.5%) to keep testing further in the
+# direction the real data was already pointing - 0.05 (5.0%, the
+# account owner's own currently-promoted live width) stays in the set so
+# it's never silently dropped out from under the live bot.
+TRAILING_STOP_PCT_CANDIDATES = [0.03, 0.04, 0.05, 0.075]
 
 
 async def run_trailing_stop_pct_sweep_comparison(coins=None, days=BACKTEST_DAYS, max_concurrent=6, candidates=None):

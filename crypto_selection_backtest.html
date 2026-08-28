@@ -730,7 +730,7 @@ function renderTrailingStopPctSweepResults(data) {
             <thead><tr><th>Coin</th>${candidates.map(pct => `<th>${(pct * 100).toFixed(1)}%</th>`).join('')}</tr></thead>
             <tbody>${coinRows}</tbody>
         </table>
-        <p class="trade-note">Current live trail width: ${(data.current_live_trail_pct * 100).toFixed(1)}%. Each column replays the exact same real entry/target/stop/breakeven rules - only the trail width itself differs.</p>
+        <p class="trade-note" id="trailPctCurrentLiveNote">Current live trail width: ${(data.current_live_trail_pct * 100).toFixed(1)}%. Each column replays the exact same real entry/target/stop/breakeven rules - only the trail width itself differs.</p>
         <p style="margin-top:20px;font-weight:700;">Push a trailing-stop width to the live bot:</p>
         <div id="trailPctBadgeWrap"></div>
         <div class="promote-row" id="trailPctPromoteRow"></div>
@@ -741,10 +741,18 @@ function renderTrailingStopPctSweepResults(data) {
         </p>
     `;
     lastTrailPctCandidates = candidates;
+    // Real bug fixed here: this function used to leave currentLiveTrailPct
+    // at whatever it already was (a hardcoded 0.025 default until a
+    // promotion happened client-side this same page load) instead of
+    // syncing it from the sweep's own real current_live_trail_pct - so a
+    // fresh page load, or re-running the sweep without promoting anything
+    // new, could show a stale "Live now" badge/buttons that disagreed with
+    // what's actually live. Now synced on every real sweep response.
+    currentLiveTrailPct = data.current_live_trail_pct;
     renderTrailPctPromoteRow();
 }
 
-let currentLiveTrailPct = 0.025;
+let currentLiveTrailPct = 0.05;
 
 function renderTrailPctPromoteRow() {
     const badgeWrap = document.getElementById('trailPctBadgeWrap');
@@ -753,7 +761,16 @@ function renderTrailPctPromoteRow() {
     if (badgeWrap) {
         badgeWrap.innerHTML = `<span class="live-exit-mode-badge">🎯 Live now: ${(currentLiveTrailPct * 100).toFixed(1)}% trail</span>`;
     }
-    const candidates = lastTrailPctCandidates.length ? lastTrailPctCandidates : [0.015, 0.02, 0.025, 0.03, 0.04, 0.05];
+    // The static "Current live trail width" note above the promote row is
+    // rendered once from the sweep response's own real value - keep it in
+    // sync here too (the same real bug: it used to only reflect whatever
+    // was live at the moment the sweep ran, never updating after a
+    // promotion in this same session).
+    const note = document.getElementById('trailPctCurrentLiveNote');
+    if (note) {
+        note.textContent = `Current live trail width: ${(currentLiveTrailPct * 100).toFixed(1)}%. Each column replays the exact same real entry/target/stop/breakeven rules - only the trail width itself differs.`;
+    }
+    const candidates = lastTrailPctCandidates.length ? lastTrailPctCandidates : [0.03, 0.04, 0.05, 0.075];
     row.innerHTML = candidates.map(pct => {
         const isLive = Math.abs(pct - currentLiveTrailPct) < 1e-9;
         return `<button class="promote-btn${isLive ? ' is-live' : ''}" data-pct="${pct}" ${isLive ? 'disabled' : ''}

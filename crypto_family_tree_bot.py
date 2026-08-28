@@ -329,8 +329,15 @@ async def set_live_exit_mode(mode: str):
 # Mirrors crypto_selection_backtest.py's own TRAILING_STOP_PCT_CANDIDATES
 # exactly, so a width can never be promoted here that wasn't actually
 # backtested there - same "never run an untested value" discipline
-# EXIT_MODE_LEVELS above already follows.
-TRAILING_STOP_PCT_CANDIDATES = [0.015, 0.02, 0.025, 0.03, 0.04, 0.05]
+# EXIT_MODE_LEVELS above already follows. Revised again per the account
+# owner's own direct read of the real sweep results (the narrow 1.5/2.0/
+# 2.5% candidates were consistently the worst real performers, the wider
+# 3.0/4.0/5.0% ones consistently the best) - dropped the three worst and
+# added 0.075 to keep testing wider. 0.05 stays in the set since it's the
+# account owner's own currently-promoted live width - see
+# crypto_selection_backtest.py's TRAILING_STOP_PCT_CANDIDATES for the
+# full real reasoning.
+TRAILING_STOP_PCT_CANDIDATES = [0.03, 0.04, 0.05, 0.075]
 LIVE_TRAILING_STOP_PCT_KEY = "crypto_live_trailing_stop_pct"
 
 
