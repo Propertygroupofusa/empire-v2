@@ -9357,6 +9357,103 @@ whether to promote a different width than today's 2.5% default.
 
 ---
 
+## Real CASH reconciliation, chasing down a persistent "Move Cash Between Branches" INSUFFICIENT_FUND that survived retrying
+
+Per the account owner's explicit "yes I do do it" to the offer to chase
+down a real, recurring "Move Cash Between Branches" failure - the earlier
+this-session fix (`_place_buy_with_retry()`, 3 real attempts with jitter)
+already targets a BRIEF cross-branch timing race, but the account owner's
+most recent screenshot showed the failure now reading "did not fill
+**after retrying**" - meaning several real attempts, seconds apart, each
+independently re-fetching the real balance right before submitting (per
+`place_market_buy()`'s own existing clamp), all still hit a genuine
+Coinbase `INSUFFICIENT_FUND`. A failure that survives multiple spaced-out
+retries isn't a brief race any more - it points at something more
+durable: the tree's own bookkeeping believing more real free cash exists
+than Coinbase's real USD account actually holds.
+
+The existing DB-vs-Coinbase reconciliation panel (`get_reconciliation_report()`)
+already checks this exact shape of drift for real ASSET quantities (crypto
+held) - it never checked real CASH the same way.
+`spendable_for_spawn`/every manual Add Cash/Move Cash/Start New Branch
+action is gated on `real_balance - locked_usd - (every FLAT branch's own
+allocated_usd)` - if the sum of what flat branches claim as idle real
+cash, plus the real already-skimmed `locked_usd`, has drifted above what
+Coinbase's real USD account actually shows (the same class of drift
+already found and self-healed once for `equity_floor` going negative and
+once for `allocated_usd` itself drifting negative on individual
+branches - just never checked in aggregate against the real account
+before), then every one of those actions is standing on a number that's
+already wrong, and no amount of retrying a single order can fix a
+genuine shortfall in the real cash itself.
+
+`get_reconciliation_report()` (`crypto_family_tree_bot.py`) now also
+returns a `cash` section: real `tracked_flat_cash` (SUM of every branch's
+`allocated_usd` that is currently FLAT - a branch holding a position has
+already deployed its allocation into crypto, so it's correctly excluded,
+the same distinction `spendable_for_spawn` itself already makes),
+`locked_usd`, `expected_real_cash` (their sum - what the tree's
+bookkeeping claims is real, idle-or-earmarked cash), the real
+`real_usd_balance` from Coinbase's own `/accounts` (reusing the exact
+same `get_usd_balance()` every buy/spend path already calls - not a
+second, separately-derived number), and `shortfall`/`status`
+(`ok`/`SHORTFALL`/`unchecked`, with a proportional tolerance floored at
+$2 for real fee/rounding dust, same reasoning as the existing per-asset
+tolerance). A real USD-balance fetch failure marks it `unchecked` with
+the real error, never silently `ok` or a false `SHORTFALL`.
+
+`GET /family-tree-status/reconciliation` needed no changes (already a
+thin pass-through). `family_tree_dashboard.html`'s existing Reconciliation
+panel gained a new banner above the per-asset table: green "✅ Real cash
+checks out" when it does, or a direct red explanation naming the exact
+real dollar gap and pointing straight at the actual live symptom -
+"...this is why Add Cash / Move Cash Between Branches can keep failing
+with INSUFFICIENT_FUND even after retrying" - so the NEXT occurrence is
+diagnosable straight from the dashboard already open on the account
+owner's phone, instead of requiring another round of guessing.
+
+Verified offline (`test_cash_reconciliation.py`, new, 5 checks) against a
+real throwaway SQLite DB: the exact real shape (bookkeeping claims $850 of
+idle cash across two flat branches + locked profit, Coinbase's real
+balance is only $700) is correctly flagged SHORTFALL with the exact real
+$150 gap; a healthy tree where the real balance comfortably covers
+bookkept claims reports `ok`; a branch currently HOLDING a position is
+correctly excluded from `tracked_flat_cash` (its allocation is deployed
+into crypto, not idle - proven by seeding a $500-allocated holding branch
+alongside a $90 flat one and confirming only the $90 counts); a real
+USD-balance fetch failure marks the cash section `unchecked` with the
+real error, never `ok` or a false `SHORTFALL`; and a tiny real 10-cent
+rounding gap stays within tolerance. Full existing reconciliation
+regression suite (`test_reconciliation_report.py`,
+`test_reconciliation_excludes_other_bots.py` - both already exercise
+`get_reconciliation_report()` without mocking `get_usd_balance`, so they
+now exercise the real fail-open path where the fetch naturally errors
+against the test's fake session object) re-run clean alongside it, with
+no changes needed to either. `family_tree_dashboard.html` re-verified
+with a real Python `HTMLParser` tag-balance check and `node --check` on
+the extracted inline `<script>` block.
+
+**This is a diagnostic, not a fix for the drift itself** - if the next
+real occurrence shows `status: SHORTFALL` on the dashboard, that
+confirms bookkeeping has genuinely drifted from the real account and
+narrows the investigation to WHERE (fee rounding compounding over many
+real trades, a real order that filled for a different amount than its
+bookkept seed, a stray branch never getting its `allocated_usd` corrected
+after a partial fill) - a separate, follow-up fix once that's confirmed.
+If it instead shows `status: ok` on the next failure, that rules out
+aggregate drift entirely and points back at a genuinely thin real cash
+cushion relative to how many branches are concurrently trying to spend
+it at once (worth revisiting `_place_buy_with_retry()`'s attempt
+count/delay in that case, not the bookkeeping).
+
+**Not yet confirmed live** - the account owner needs to redeploy and open
+the family tree dashboard's Reconciliation panel; if a real cash
+shortfall exists right now, the new banner will show the exact real
+dollar gap immediately, which is the direct answer to why Move Cash
+Between Branches/Add Cash keep failing even after retrying.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

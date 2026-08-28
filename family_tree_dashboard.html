@@ -537,6 +537,7 @@
     <div class="panel">
         <div class="panel-title">🔍 Reconciliation — DB vs. real Coinbase balance</div>
         <div class="panel-sub">Per real asset (not per-branch, since branches can share a coin and Coinbase's balance for it is pooled): what every branch's tracked position says it holds, summed, vs. what Coinbase actually reports right now.</div>
+        <div id="cash-recon-banner" style="margin-bottom:10px;">Loading…</div>
         <div id="recon-banner">Loading…</div>
         <div id="recon-table-wrap"></div>
         <button id="consolidate-btn" class="unlock-btn" style="margin-top:12px;" onclick="previewConsolidate()">🔗 Combine branches sharing a coin</button>
@@ -1672,6 +1673,8 @@ async function refresh() {
         const reconData = await apiGet('/family-tree-status/reconciliation');
         renderReconciliation(reconData);
     } catch (e) {
+        document.getElementById('cash-recon-banner').className = 'shortfall';
+        document.getElementById('cash-recon-banner').textContent = 'Could not load reconciliation: ' + e.message;
         document.getElementById('recon-banner').className = 'shortfall';
         document.getElementById('recon-banner').textContent = 'Could not load reconciliation: ' + e.message;
         document.getElementById('recon-table-wrap').innerHTML = '';
@@ -1680,7 +1683,25 @@ async function refresh() {
     loadHeaderTotals();
 }
 
+function renderCashReconciliation(cash) {
+    const banner = document.getElementById('cash-recon-banner');
+    if (!cash) { banner.style.display = 'none'; return; }
+    banner.style.display = '';
+    const fmt = (v) => v === null || v === undefined ? '—' : `$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    if (cash.status === 'unchecked') {
+        banner.className = 'shortfall';
+        banner.textContent = `⚠️ Could not check real cash right now: ${cash.detail || 'unknown error'}`;
+    } else if (cash.status === 'SHORTFALL') {
+        banner.className = 'shortfall';
+        banner.textContent = `⚠️ Cash shortfall: the tree's flat branches + locked profit claim ${fmt(cash.expected_real_cash)} of real free cash, but Coinbase's real USD balance is only ${fmt(cash.real_usd_balance)} (short by ${fmt(cash.shortfall)}). This is why Add Cash / Move Cash Between Branches can keep failing with INSUFFICIENT_FUND even after retrying — the bookkeeping believes more real cash is idle than actually exists.`;
+    } else {
+        banner.className = 'ok';
+        banner.textContent = `✅ Real cash checks out: Coinbase's real USD balance (${fmt(cash.real_usd_balance)}) covers what flat branches + locked profit claim as idle (${fmt(cash.expected_real_cash)}).`;
+    }
+}
+
 function renderReconciliation(data) {
+    renderCashReconciliation(data.cash);
     const banner = document.getElementById('recon-banner');
     const wrap = document.getElementById('recon-table-wrap');
     const assets = data.assets || [];

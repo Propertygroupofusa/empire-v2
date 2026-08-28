@@ -2172,10 +2172,32 @@ async def get_reconciliation_report():
     producing a false SHORTFALL on a real Alpaca position that was never
     a Coinbase asset to begin with. Scoped to only real family-tree branch
     bot_names below, so this panel only ever reports on what it's actually
-    meant to: Coinbase coins the tree itself tracks."""
+    meant to: Coinbase coins the tree itself tracks.
+
+    Also reports a real CASH reconciliation (the "cash" key), added after
+    a real, sustained INSUFFICIENT_FUND pattern on "Move Cash Between
+    Branches"/"Add Cash" (retrying with jitter still failed on every
+    attempt) suggested this wasn't a brief cross-branch timing race -
+    place_market_buy() already retries and clamps to the real balance
+    right before submitting, so a race that resolves within a couple of
+    seconds should clear on retry. A failure that survives retrying points
+    at something more durable: the tree's own bookkeeping (every FLAT
+    branch's allocated_usd, plus locked_usd) claiming more real free cash
+    exists than Coinbase's own USD account actually holds right now - the
+    exact same shape of drift already found and self-healed for
+    equity_floor (went negative) and allocated_usd itself (drifted
+    negative on individual branches), just never checked in aggregate
+    against the real account before. Every FLAT branch's allocated_usd is
+    the tree's own claim on "this much of the real USD balance is mine and
+    currently idle" - if the sum of those claims (plus the real,
+    already-skimmed locked_usd) exceeds what Coinbase actually shows,
+    spendable_for_spawn's whole calculation is standing on a number that's
+    already wrong, and no amount of retrying a single order can fix a
+    genuine shortfall in the underlying real cash."""
     async with AsyncSessionLocal() as db:
-        branch_result = await db.execute(select(CryptoTreeBranch.bot_name))
-        tree_bot_names = {row[0] for row in branch_result.all()}
+        branch_result = await db.execute(select(CryptoTreeBranch.bot_name, CryptoTreeBranch.allocated_usd))
+        branch_rows = branch_result.all()
+        tree_bot_names = {row[0] for row in branch_rows}
         result = await db.execute(select(BotPosition).where(BotPosition.bot.in_(tree_bot_names)))
         positions = result.scalars().all()
 
@@ -2186,8 +2208,13 @@ async def get_reconciliation_report():
         tracked_by_currency[currency] = tracked_by_currency.get(currency, 0.0) + pos.qty
         branch_count_by_currency[currency] = branch_count_by_currency.get(currency, 0) + 1
 
+    holding_bot_names = {pos.bot for pos in positions}
+    flat_allocated_sum = sum(allocated for bot_name, allocated in branch_rows if bot_name not in holding_bot_names)
+    locked_usd = await get_locked_usd()
+
     async with engine.aiohttp.ClientSession() as session:
         all_balances, fetch_err = await engine.get_all_asset_balances(session)
+        real_usd, usd_err = await engine.get_usd_balance(session)
 
     report = []
     for currency, tracked_qty in tracked_by_currency.items():
@@ -2212,7 +2239,32 @@ async def get_reconciliation_report():
         })
 
     report.sort(key=lambda r: (r["status"] != "SHORTFALL", r["currency"]))
-    return {"assets": report, "shortfall_count": sum(1 for r in report if r["status"] == "SHORTFALL")}
+
+    if real_usd is None:
+        cash_report = {
+            "tracked_flat_cash": round(flat_allocated_sum, 2), "locked_usd": round(locked_usd, 2),
+            "expected_real_cash": round(flat_allocated_sum + locked_usd, 2), "real_usd_balance": None,
+            "shortfall": None, "status": "unchecked", "detail": usd_err,
+        }
+    else:
+        expected_real_cash = flat_allocated_sum + locked_usd
+        cash_shortfall = expected_real_cash - real_usd
+        # Real, proportional tolerance - the same reasoning as the
+        # per-asset tolerance above (fee rounding is normal), floored at
+        # $2 so a healthy tree with near-zero flat cash doesn't false-
+        # positive on a few cents of dust.
+        cash_tolerance = max(expected_real_cash * 0.01, 2.0)
+        cash_status = "SHORTFALL" if cash_shortfall > cash_tolerance else "ok"
+        cash_report = {
+            "tracked_flat_cash": round(flat_allocated_sum, 2), "locked_usd": round(locked_usd, 2),
+            "expected_real_cash": round(expected_real_cash, 2), "real_usd_balance": round(real_usd, 2),
+            "shortfall": round(cash_shortfall, 2), "status": cash_status, "detail": None,
+        }
+
+    return {
+        "assets": report, "shortfall_count": sum(1 for r in report if r["status"] == "SHORTFALL"),
+        "cash": cash_report,
+    }
 
 
 async def _load_branch_position(bot_name: str):
