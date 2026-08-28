@@ -274,25 +274,34 @@ LIVE_EXIT_MODE_KEY = "crypto_live_exit_mode"
 
 async def get_live_exit_mode() -> str:
     """Which of the two real, backtested exit philosophies the live bot
-    currently runs - "quick_profit" (today's original rule: take any real
+    currently runs - "quick_profit" (the original rule: take any real
     net gain fast) or "trailing_stop" (let a winner run, protected by a
     real percentage trail off its own peak once it reaches target).
     DB-persisted (same generic TradingBotState bucket every other
     real-time flag in this file already uses) rather than a Railway env
     var - avoids the exact stray-quote-character class of bug that
     silently disabled the crypto coordinator earlier this session.
-    Defaults to "quick_profit" (today's live rule, unchanged) if never
-    explicitly promoted - a fresh deployment never silently runs an
-    unvalidated exit mode."""
+
+    Defaults to "trailing_stop" if never explicitly set. Per the account
+    owner's own explicit real decision (confirmed after seeing the real
+    run_quick_profit_vs_trailing_stop_comparison numbers again and asking
+    directly why root's BTC position was sitting at a fee-eaten +$3.85
+    for so long): QUICK_PROFIT was the untested-but-safe original
+    default; trailing_stop is now the evidence-backed default instead,
+    since the account owner has no live network access to this
+    deployment to press the dashboard's own promote button themselves -
+    this default flip is the equivalent action, taking effect on the
+    next redeploy. `set_live_exit_mode()` still works exactly as before
+    for switching back (or to a future third mode) from the dashboard."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == LIVE_EXIT_MODE_KEY))
         row = result.scalar_one_or_none()
         if row is None or row.base_capital is None:
-            return "quick_profit"
+            return "trailing_stop"
         level = int(row.base_capital)
         if 0 <= level < len(EXIT_MODE_LEVELS):
             return EXIT_MODE_LEVELS[level]
-        return "quick_profit"
+        return "trailing_stop"
 
 
 async def set_live_exit_mode(mode: str):

@@ -8856,6 +8856,62 @@ correctly with genuine data.
 
 ---
 
+## Live crypto exit rule defaulted to Trailing Stop, via a code-default flip instead of the dashboard's own promote button
+
+The account owner shared a real screenshot of root's BTC position sitting
+at +$3.85 unrealized against a $4.16 entry-side fee, and asked directly
+to "help it make more money... figure something out." The honest read:
+that +$3.85 wasn't real spendable profit yet - the shown "fee to enter"
+is only the entry-side half of the real round-trip fee, so closing right
+then would have landed close to break-even or a hair negative. That's
+exactly why QUICK_PROFIT (the live default since it shipped) hadn't taken
+it yet - it's built to refuse a sale until the real, fee-adjusted net is
+genuinely positive, not just cosmetically green on the dashboard. But the
+real, already-gathered evidence from `run_quick_profit_vs_trailing_stop_comparison`
+(see above) showed trailing stop beating QUICK_PROFIT on almost every
+coin in a real 30-day backtest (STX +$127.90, AAVE +$87.46, ADA +$61.44,
+and more) - QUICK_PROFIT's habit of snapping the instant a trade clears
+fees is exactly the pattern visible on this real BTC position. Asked the
+account owner directly via `AskUserQuestion` whether to switch now; they
+confirmed yes.
+
+The one-click promote mechanism for this (`POST
+.../family-tree-status/set-exit-mode`, `crypto_selection_backtest.html`'s
+own "Promote Trailing Stop" button) already existed from earlier this
+session - but this session has no live network access to the deployed
+Railway app (confirmed repeatedly throughout this file), so the dashboard
+button can't be pressed from here. The real, honest equivalent given that
+constraint: `get_live_exit_mode()`'s own unset-default in
+`crypto_family_tree_bot.py` flipped from `"quick_profit"` to
+`"trailing_stop"` - since no dashboard promote click has ever been made on
+this deployment yet (confirmed: `TradingBotState` has no
+`crypto_live_exit_mode` row on record), the live bot has only ever been
+running off this same default the whole time, so changing it here has the
+identical real effect the dashboard button would have had, once
+redeployed. `set_live_exit_mode()` itself, and the dashboard's own promote
+buttons for switching between the two validated modes in either direction
+later, are completely unchanged - this only flips which mode a
+never-explicitly-set flag resolves to. The same fallback string in
+`routers/trading_dashboard.py`'s `/family-tree-status` handler (used only
+if the crypto module fails to import entirely) was updated to match, for
+consistency.
+
+Verified offline (`test_exit_mode_default_flip.py`, 4 checks, real
+throwaway SQLite DB): a never-set exit mode now reads back
+`"trailing_stop"`, not the old `"quick_profit"`; explicitly setting either
+mode via `set_live_exit_mode()` still round-trips correctly in both
+directions (the switch-back path stays fully intact); and an unrelated
+row in the same shared `TradingBotState` table is completely untouched by
+any of this.
+
+**Not yet confirmed live** - the account owner needs to redeploy; every
+open position (including the real BTC one from the screenshot) will then
+run under the real trailing-stop rule (2.5% trail off its own peak, only
+after first reaching target) instead of snapping the instant it clears
+fees, going forward.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md
