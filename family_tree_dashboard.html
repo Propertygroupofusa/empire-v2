@@ -959,6 +959,17 @@ function branchCardHtml(b) {
         // position, independent of profit state (unlike selling, adding
         // cash never risks locking in a loss).
         sellBtnHtml += `<button class="sell-btn" style="background:var(--navy);margin-top:6px;" onclick="addCashToBranch('${b.bot_name}', this)">💰 Add cash to ${coin}</button>`;
+        if (isRoot) {
+            // Root-only, real, deliberate reopening of a specific slice of
+            // its "never manually sold" lock - per the account owner's own
+            // explicit, informed choice to fund new Grid Bot branches from
+            // part of the consolidated BTC holding rather than new cash.
+            // Unlike "Take profit now" above, this is NOT gated on being in
+            // profit - the account owner weighed that tradeoff directly and
+            // chose it anyway. Sells a real, specific dollar amount and
+            // leaves the rest of the position untouched.
+            sellBtnHtml += `<button class="sell-btn" style="background:#7a3b12;margin-top:6px;" onclick="rootPartialSell(this)">💸 Withdraw cash from BTC</button>`;
+        }
         // Real-time "is now actually a good time to sell this" advisory -
         // reuses the bot's own TARGET/STOP/GIVEBACK exit math server-side
         // (see compute_sell_advice in crypto_family_tree_bot.py) so this can
@@ -1124,6 +1135,40 @@ async function addCashToBranch(botName, btn) {
         refresh();
     } catch (e) {
         alert('Add cash failed: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+    }
+}
+
+// Root-only, real, deliberate partial withdrawal - per the account
+// owner's own explicit, informed choice to fund new Grid Bot branches
+// from part of the consolidated BTC holding. Sells a specific real
+// dollar amount out of root's position and leaves the rest untouched -
+// NOT gated on being in profit (unlike "Take profit now" above), since
+// the account owner weighed and accepted that tradeoff directly.
+async function rootPartialSell(btn) {
+    const amountStr = prompt('How much real cash to withdraw from BTC right now? (sells that much at market, leaves the rest of the position untouched)');
+    if (!amountStr) return;
+    const amount = parseFloat(amountStr);
+    if (!amount || amount <= 0) { alert('Enter a positive dollar amount.'); return; }
+    if (!confirm(`Sell $${amount.toFixed(2)} of real BTC right now at market price, leaving the rest of root's position untouched? Real order, can't be undone.`)) return;
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Selling…';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/family-tree-status/root-partial-sell', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ amount_usd: amount }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        alert(`Sold ${data.filled_qty.toFixed(8)} BTC @ ${fmtUsd(data.filled_price)} - ${fmtUsd(data.proceeds)} real cash freed (P&L ${data.realized_pnl >= 0 ? '+' : ''}${fmtUsd(data.realized_pnl)}). ${data.status === 'fully_sold' ? 'Root is now flat.' : `Remaining position worth ~${fmtUsd(data.remaining_position_value)}.`} Root balance now ${fmtUsd(data.root_new_balance)}.`);
+        refresh();
+    } catch (e) {
+        alert('Withdraw failed: ' + e.message);
     } finally {
         btn.disabled = false;
         btn.textContent = originalText;

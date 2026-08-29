@@ -1772,6 +1772,30 @@ async def take_root_profit():
     }
 
 
+class RootPartialSellRequest(BaseModel):
+    amount_usd: float
+
+
+@router.post("/family-tree-status/root-partial-sell", dependencies=[Depends(require_admin_key)])
+async def root_partial_sell_endpoint(payload: RootPartialSellRequest):
+    """Sells a specific real dollar amount out of root's BTC-USD position,
+    leaving the rest untouched - per the account owner's own explicit,
+    informed choice (weighed directly against the alternative of a new
+    deposit or waiting for real profit) to fund new Grid Bot branches from
+    part of the consolidated BTC position rather than new cash. This is a
+    real, deliberate reopening of root's manual-sell path specifically for
+    a PARTIAL amount - the existing close endpoint only ever sold root's
+    ENTIRE position. See crypto_family_tree_bot.root_partial_sell() for
+    the full real mechanics (real fee-adjusted proceeds, real trade-history
+    record, never strands unsellable dust)."""
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+    try:
+        return await crypto_family_tree_bot_module.root_partial_sell(payload.amount_usd)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 async def _place_buy_with_retry(engine, session, amount: float, product_id: str, attempts: int = 3):
     """Retries a manual real market buy through a transient real-balance
     race, before surfacing a raw rejection to a human waiting on a click.

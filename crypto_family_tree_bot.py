@@ -3280,6 +3280,129 @@ async def liquidate_family_tree_and_buy_btc() -> dict:
     }
 
 
+async def root_partial_sell(amount_usd: float) -> dict:
+    """Sells a SPECIFIC real dollar amount out of root's BTC-USD position,
+    leaving the rest of the position untouched - the deliberate, explicit
+    real feature the account owner asked for after weighing the tradeoff
+    directly: root's own "never manually sold" lock (built earlier this
+    same session specifically to stop root's capital from bleeding out)
+    is already lifted once the tree is retired (is_crypto_passive_mode()
+    True - see close_family_tree_branch's own root check), but the only
+    existing manual-sell path was a FULL close - there was no way to pull
+    out just part of it to fund something else (here: seeding new Grid
+    Bot branches) without selling the whole real position.
+
+    Real, deliberate design choices:
+    - Refuses (ValueError) if amount_usd isn't positive, root has no open
+      position, or amount_usd exceeds the real current position's value
+      (with a tiny float-tolerance) - never silently clamps a manual
+      dollar request down to whatever's available, so the account owner
+      always knows exactly what they're getting before it happens.
+    - If what would be LEFT after the sell is too small to ever
+      realistically trade again (real value < MIN_TRADE_USD), sells the
+      ENTIRE position instead of stranding unsellable real dust behind -
+      same "never leave stranded dust" philosophy the rest of this file
+      already uses elsewhere (_check_and_sweep_stranded_dust).
+    - Real proceeds (fee-adjusted) are what leaves root's own tracked
+      allocated_usd - never the requested amount, which can differ
+      slightly once a real fill lands. entry_price/target_price/
+      stop_price on the REMAINING position are left completely
+      untouched - a partial sell never changes the cost basis or the
+      exit levels of the shares that are still held.
+    - The real, closed portion is recorded as its own
+      CryptoCoinTradeHistory row (exit_reason "PARTIAL_SELL - manual root
+      reduction") so this real trade shows up in the coin history exactly
+      like any other real sell, never silently dropped."""
+    if amount_usd <= 0:
+        raise ValueError("amount_usd must be positive")
+
+    branch = await load_branch(ROOT_BOT_NAME)
+    if branch is None:
+        raise ValueError("Root branch not found")
+
+    position = await _load_branch_position(ROOT_BOT_NAME)
+    if position is None:
+        raise ValueError("Root has no open BTC position to sell from right now")
+
+    async with engine.aiohttp.ClientSession() as session:
+        current_price, _atr_pct = await engine.get_price_and_volatility(session, ROOT_PRODUCT_ID)
+        if current_price is None:
+            raise ValueError("Could not fetch a live BTC price right now - try again")
+
+        position_value = position.qty * current_price
+        if amount_usd > position_value + 0.01:
+            raise ValueError(
+                f"Only ${position_value:.2f} of real BTC is currently held - can't sell ${amount_usd:.2f}"
+            )
+
+        qty_to_sell = amount_usd / current_price
+        remaining_qty = position.qty - qty_to_sell
+        selling_everything = (remaining_qty * current_price) < MIN_TRADE_USD
+        if selling_everything:
+            qty_to_sell = position.qty
+
+        fill = await engine.place_market_sell(session, qty_to_sell, ROOT_PRODUCT_ID)
+        if not fill:
+            reason = engine._last_order_error.get(ROOT_PRODUCT_ID, "unknown reason")
+            raise ValueError(f"Real BTC sell did not fill: {reason}")
+        filled_qty, filled_price = fill
+
+        gross = filled_price * filled_qty
+        fee = gross * (ROUND_TRIP_FEE_RATE / 2)
+        proceeds = round(gross - fee, 2)
+        pnl = round(proceeds - (position.entry_price * filled_qty), 2)
+
+        async with AsyncSessionLocal() as db:
+            db.add(CryptoCoinTradeHistory(
+                product_id=ROOT_PRODUCT_ID, bot_name=ROOT_BOT_NAME,
+                entry_price=position.entry_price, exit_price=filled_price,
+                qty=filled_qty, pnl=pnl, exit_reason="PARTIAL_SELL - manual root reduction",
+                opened_at=position.opened_at,
+            ))
+            await db.commit()
+
+        fully_sold = filled_qty >= position.qty - 1e-9
+        if fully_sold:
+            await _clear_branch_position(ROOT_BOT_NAME)
+            new_remaining_qty = 0.0
+        else:
+            new_remaining_qty = position.qty - filled_qty
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(BotPosition).where(BotPosition.bot == ROOT_BOT_NAME).order_by(BotPosition.id.desc()))
+                pos_row = result.scalars().first()
+                if pos_row:
+                    pos_row.qty = new_remaining_qty
+                    await db.commit()
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == ROOT_BOT_NAME))
+            row = result.scalar_one_or_none()
+            new_balance = None
+            if row:
+                row.allocated_usd = round(max(0.0, (row.allocated_usd or 0.0) - proceeds), 2)
+                new_balance = row.allocated_usd
+                await db.commit()
+
+    msg = (
+        f"💰➡️ Manually sold {filled_qty:.8f} BTC-USD @ ${filled_price:,.2f} (${proceeds:,.2f} real proceeds, "
+        f"P&L ${pnl:+.2f}) out of root - {'fully closed' if fully_sold else f'{new_remaining_qty:.8f} BTC remains'} | "
+        f"root now ${new_balance if new_balance is not None else 0.0:,.2f}"
+    )
+    log.info(f"[TREE] {msg}")
+    await _log_activity(ROOT_BOT_NAME, ROOT_PRODUCT_ID, "SELL", msg)
+
+    return {
+        "status": "partial_sold" if not fully_sold else "fully_sold",
+        "filled_qty": filled_qty,
+        "filled_price": round(filled_price, 2),
+        "proceeds": proceeds,
+        "realized_pnl": pnl,
+        "remaining_qty": new_remaining_qty,
+        "remaining_position_value": round(new_remaining_qty * filled_price, 2),
+        "root_new_balance": new_balance,
+    }
+
+
 async def _maybe_spawn_child(branch, chain_visited: frozenset = frozenset(), chain_hops_remaining: int = None):
     """Called right after a branch's allocated_usd is updated (always right
     after a real sell, when the number is freshly accurate). If it just
