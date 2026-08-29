@@ -981,12 +981,12 @@ function branchCardHtml(b) {
             sellBtnHtml += `<button class="sell-btn" style="background:#7a3b12;margin-top:6px;" onclick="rootPartialSell(this)">💸 Withdraw cash from BTC</button>`;
         }
         // Real-time "is now actually a good time to sell this" advisory -
-        // reuses the bot's own TARGET/STOP/GIVEBACK exit math server-side
-        // (see compute_sell_advice in crypto_family_tree_bot.py) so this can
-        // never disagree with what the bot itself is about to do. Per the
-        // account owner's explicit request, after being talked out of a
-        // thin, fee-losing take-profit by hand - this puts that same
-        // reasoning one tap away instead.
+        // reuses the bot's own real STOP/TRAILING-STOP exit math
+        // server-side (see compute_sell_advice in crypto_family_tree_bot.py)
+        // so this can never disagree with what the bot itself is about to
+        // do. Per the account owner's explicit request, after being talked
+        // out of a thin, fee-losing take-profit by hand - this puts that
+        // same reasoning one tap away instead.
         if (p.sell_advice) {
             const adv = p.sell_advice;
             const advClass = adv.verdict === 'sell' ? 'advice-sell' : (adv.verdict === 'watch' ? 'advice-watch' : 'advice-hold');

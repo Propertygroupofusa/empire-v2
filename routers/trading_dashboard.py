@@ -751,6 +751,16 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
             # made with the real number in front of them.
             real_usdc_balance, _usdc_err = await engine.get_usdc_balance(session)
 
+    # Fetched ONCE per request (a real DB read), not per-branch inside the
+    # loop below - the same real, live, dashboard-switchable trailing-stop
+    # width run_branch_cycle() itself reads every cycle, so compute_sell_advice()
+    # can never show a different trail than what the bot is actually
+    # protecting a position with right now.
+    live_trail_pct = (
+        await crypto_family_tree_bot_module.get_live_trailing_stop_pct()
+        if crypto_family_tree_bot_module is not None else None
+    )
+
     out = []
     total_equity_now = 0.0
     for b in branches:
@@ -816,12 +826,12 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
                     pos.entry_price * pos.qty * (crypto_family_tree_bot_module.ROUND_TRIP_FEE_RATE / 2), 2
                 ) if crypto_family_tree_bot_module is not None else None,
                 # Backs the dashboard's 💡 Sell advice button - reuses the
-                # bot's own real TARGET/STOP/GIVEBACK exit checks (see
+                # bot's own real STOP/TRAILING-STOP exit check (see
                 # compute_sell_advice) so the advice can never disagree with
                 # what the bot is actually about to do on its own.
                 "sell_advice": crypto_family_tree_bot_module.compute_sell_advice(
                     pos.entry_price, pos.qty, pos.target_price, pos.stop_price,
-                    current_price, pos.peak_pct,
+                    current_price, pos.peak_pct, live_trail_pct,
                 ) if crypto_family_tree_bot_module is not None and current_price is not None else None,
                 # Real historical context alongside the live verdict above -
                 # the same CryptoBacktestRun data crypto_selection_backtest.html's
