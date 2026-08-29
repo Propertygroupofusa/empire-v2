@@ -2178,6 +2178,25 @@ ALPACA_REINFORCEMENT_SEED_USD = _safe_float_env("ALPACA_REINFORCEMENT_SEED_USD",
 ALPACA_UNLOCK_TIER_USD = _safe_float_env("ALPACA_UNLOCK_TIER_USD", "100")
 ALPACA_MAX_CHAIN_HOPS = _safe_int_env("ALPACA_MAX_CHAIN_HOPS", "5")
 
+# ============================================================================
+# IDLE-CASH SWEEP - real buying power not yet claimed by any active branch,
+# put to work automatically instead of sitting uninvested. Per the account
+# owner's explicit request ("don't allow the market to close with money
+# sitting uninvested... auto-start new branches too"), and their explicit
+# choice, when asked directly, to also auto-open brand-new branches (not
+# just top up existing ones) once idle cash builds up - real, independent
+# exposure, not just deposits into what already exists.
+#
+# Runs every real cycle alongside the reinforcement chain (see
+# run_alpaca_branches_cycle), but does at most ONE real deployment per
+# cycle - same "don't rush several real orders off one pass" discipline
+# the reinforcement chain already follows. Never runs while a real
+# account-wide kill condition is active (kill_halted) - new capital is
+# never deployed while the account itself is in trouble, matching every
+# other capital-deployment path in this file.
+ALPACA_IDLE_SWEEP_SEED_USD = _safe_float_env("ALPACA_IDLE_SWEEP_SEED_USD", "50")
+ALPACA_IDLE_SWEEP_MIN_SPENDABLE_USD = _safe_float_env("ALPACA_IDLE_SWEEP_MIN_SPENDABLE_USD", "75")
+
 ALPACA_BRANCH_MODE_KEY = "alpaca_branch_mode"
 
 
@@ -2727,6 +2746,104 @@ async def _alpaca_maybe_spawn_or_reinforce(branch, chain_visited: frozenset = fr
         )
 
 
+async def get_next_eligible_alpaca_contract_for_new_branch():
+    """Real, live pick of the best real FUTURES contract for a brand-new
+    Alpaca branch to auto-spawn on - genuinely unclaimed
+    (get_alpaca_branch_claimed_contracts) and not currently excluded
+    (get_effective_excluded_symbols - the exact same real auto-exclusion +
+    top-N-by-ROI ranking every other entry path already respects, so this
+    can never pick a contract the live bot itself wouldn't otherwise be
+    willing to enter). Among what's left, prefers the real highest latest
+    backtested ROI (AlpacaBacktestRun) when any exists - a candidate with
+    NO real backtest run yet ranks LAST, not first, since "no data" isn't
+    "good data". Returns a real contract code (e.g. "MCL"), or None if
+    nothing eligible remains."""
+    claimed = await get_alpaca_branch_claimed_contracts()
+    excluded_symbols = await get_effective_excluded_symbols()
+    candidates = [
+        contract for contract, config in FUTURES.items()
+        if contract not in claimed and config["symbol"] not in excluded_symbols
+    ]
+    if not candidates:
+        return None
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(AlpacaBacktestRun.product_id, AlpacaBacktestRun.roi_pct_of_spend)
+            .order_by(AlpacaBacktestRun.product_id, desc(AlpacaBacktestRun.run_at))
+        )
+        rows = result.all()
+    latest_roi = {}
+    for product_id, roi in rows:
+        if product_id not in latest_roi:
+            latest_roi[product_id] = roi
+
+    def _rank_key(contract):
+        roi = latest_roi.get(FUTURES[contract]["symbol"])
+        return (roi is None, -(roi if roi is not None else 0.0))
+
+    candidates.sort(key=_rank_key)
+    return candidates[0]
+
+
+async def _alpaca_idle_cash_sweep(session, buying_power: float, active_branches: list, strategy_family: str, live_entry_variant: str, kill_halted: bool):
+    """Real, per-cycle sweep of genuinely idle Alpaca buying power - real
+    money not already allocated to any active branch - into real trading,
+    instead of it sitting uninvested while an active branch mode is on.
+    Per the account owner's explicit request, and their explicit choice
+    when asked directly: top up an existing branch first, but also
+    auto-open a brand-new branch on a real, currently-eligible contract
+    once idle cash builds up beyond what existing branches need.
+
+    At most ONE real deployment per cycle - same "don't rush several real
+    orders off one pass" discipline the reinforcement chain already uses.
+    Never runs while kill_halted (a real account-wide kill condition) -
+    new capital is never deployed while the account itself is in trouble."""
+    if kill_halted:
+        return
+    already_allocated = sum(b.allocated_usd for b in active_branches)
+    idle = buying_power - already_allocated
+    if idle < ALPACA_IDLE_SWEEP_MIN_SPENDABLE_USD:
+        return
+    seed = ALPACA_IDLE_SWEEP_SEED_USD
+
+    # Step 1: top up the real current weakest active branch, if any exists
+    # and its own contract currently qualifies on its own merits (reuses
+    # the exact same real entry-quality gate reinforcement already uses -
+    # "idle cash isn't an automatic trade" either).
+    weakest = await _pick_weakest_alpaca_branch_for_reinforcement(exclude_bot_name="")
+    if weakest is not None:
+        deployed = await _deploy_seed_into_weakest_alpaca_branch(session, weakest, seed, strategy_family, live_entry_variant)
+        if deployed:
+            log.info(
+                f"[ALPACA-BRANCH] 💰 Idle-cash sweep: deposited ${seed:.2f} of real idle buying power "
+                f"(${idle:.2f} was idle) into {weakest.bot_name} ({weakest.contract})"
+            )
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(AlpacaBranch).where(AlpacaBranch.bot_name == weakest.bot_name))
+                fresh_recipient = result.scalar_one_or_none()
+            if fresh_recipient is not None:
+                await _alpaca_maybe_spawn_or_reinforce(fresh_recipient)
+            return
+
+    # Step 2: no existing branch could take it right now (none flat and
+    # qualifying, or no branches at all) - open a real brand-new branch on
+    # the best currently-eligible unclaimed contract, if any.
+    contract = await get_next_eligible_alpaca_contract_for_new_branch()
+    if contract is None:
+        log.info(f"[ALPACA-BRANCH] Idle-cash sweep: ${idle:.2f} idle but no real eligible branch or contract to deploy it into right now")
+        return
+    try:
+        branch = await create_alpaca_branch(contract, seed)
+    except ValueError as e:
+        log.warning(f"[ALPACA-BRANCH] Idle-cash sweep: could not open a new branch on {contract}: {e}")
+        return
+    log.info(
+        f"[ALPACA-BRANCH] 💰🌱 Idle-cash sweep: opened a real new branch {branch.bot_name} on {contract} "
+        f"with ${seed:.2f} of real idle buying power (${idle:.2f} was idle)"
+    )
+
+
 async def run_alpaca_branches_cycle():
     """Real per-cycle driver for every active Alpaca branch - a true
     no-op unless is_alpaca_branch_mode_active() is on. Runs sequentially
@@ -2741,9 +2858,11 @@ async def run_alpaca_branches_cycle():
         return
     if await is_alpaca_passive_mode():
         return
+    # Deliberately NOT early-returning when there are zero active branches
+    # (unlike before the idle-cash sweep existed) - the sweep below needs
+    # to be able to open a real FIRST branch too, not just top up ones
+    # that already exist.
     branches = [b for b in await get_alpaca_branches() if b.active]
-    if not branches:
-        return
 
     connector = aiohttp.TCPConnector(use_dns_cache=True, limit=10, limit_per_host=5, ttl_dns_cache=300)
     timeout = aiohttp.ClientTimeout(total=60, connect=20, sock_read=30, sock_connect=10)
@@ -2767,6 +2886,12 @@ async def run_alpaca_branches_cycle():
             except Exception as e:
                 log.error(f"[ALPACA-BRANCH] {branch.bot_name} cycle error: {e}")
             await asyncio.sleep(0.5)
+
+        if buying_power is not None:
+            try:
+                await _alpaca_idle_cash_sweep(session, buying_power, branches, strategy_family, live_entry_variant, kill_halted=should_halt)
+            except Exception as e:
+                log.error(f"[ALPACA-BRANCH] Idle-cash sweep error: {e}")
 
 
 def check_credentials():

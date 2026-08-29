@@ -383,7 +383,10 @@
         A real, smaller first slice toward something like the crypto family tree's compounding branches —
         each branch is a real, independent capital slice trading its own dedicated symbol, sized only
         against its own allocation (clamped to real buying power). Off by default: existing branches can be
-        created below, but nothing trades until "Enable branch trading" is switched on.
+        created below, but nothing trades until "Enable branch trading" is switched on. While it's on, real
+        idle buying power (not yet allocated to any branch) gets swept automatically every cycle — first to
+        top up your weakest current branch, and if none can take it right now, into a real brand-new branch
+        on the best currently-eligible contract — so cash doesn't just sit uninvested.
     </p>
     <div class="panel" id="branches-panel">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px; flex-wrap:wrap; gap:8px;">
