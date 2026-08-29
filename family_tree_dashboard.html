@@ -893,7 +893,9 @@ function branchCardHtml(b) {
     const pct = b.next_unlock_tier > 0 ? Math.min(100, (b.allocated_usd / b.next_unlock_tier) * 100) : 0;
     const coin = b.product_id.replace('-USD', '');
 
-    let posHtml = '<div class="node-position none">Flat — waiting to buy</div>';
+    let posHtml = cryptoPassiveModeActive
+        ? '<div class="node-position none">🔒 Flat — retired, will not buy again</div>'
+        : '<div class="node-position none">Flat — waiting to buy</div>';
     let sellBtnHtml = '';
     let adviceHtml = '';
     // Real-time unrealized $ on the CURRENT open position, refreshed every
@@ -1456,6 +1458,13 @@ async function confirmReallocateCash() {
 // sell the OLDEST real slice (FIFO) on a bounce. See crypto_grid_bot.py's
 // own module docstring for the full real Strategy Lab evidence behind this.
 let gridModeActive = false;
+// Real, live passive-mode state - set on every refresh() from data.crypto_passive_mode.
+// branchCardHtml() reads this so a flat branch's status line can say the
+// real, honest thing (retired, never buys again) instead of the generic
+// "waiting to buy" text that was true before the tree was retired but
+// misleading afterward. Cosmetic only - passive mode itself was already
+// correctly enforced server-side; this just fixes what the label says.
+let cryptoPassiveModeActive = false;
 
 function renderGridStatus(data, tradeHistoryByBot) {
     gridModeActive = !!data.mode_active;
@@ -2096,6 +2105,7 @@ async function refresh() {
         document.getElementById('stat-refreshed').textContent = new Date().toLocaleTimeString();
         updateSpawnButtonState(data);
         updateUnlockButtonState(data);
+        cryptoPassiveModeActive = !!data.crypto_passive_mode;
         renderCryptoPassiveModeBanner(data);
         renderRollingExpectancyBanner(data);
         renderUsdcBlindSpotBanner(data);
