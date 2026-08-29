@@ -92,13 +92,53 @@ async def fetch_recent_1min_candles_with_times(session, product_id: str = PRODUC
         return None
 
 
-async def _fetch_1min_candles_paginated(session, product_id: str, days: float):
+async def _fetch_1min_page_with_retry(session, url, last_error_out=None):
+    """Real, bounded retry-with-backoff for a single real Coinbase candles
+    page - the same fix already validated in
+    crypto_selection_backtest.py's own fetch_candles_window(), ported here
+    after the account owner's own real Strategy Lab rate-limit fix asked
+    whether other real backtest tools sharing this same class of bug
+    should get it too. Before this, ANY non-200 page here (a real 429
+    included) was silently swallowed with zero retry and zero reason
+    surfaced - a real, sustained rate limit and a genuine data gap were
+    indistinguishable from the caller's side. Returns the real page's
+    candle list (possibly empty) on success, or None after exhausting
+    retries - the real last reason is written into last_error_out (a
+    plain single string, not a per-product dict, since every caller here
+    fetches one real product_id at a time)."""
+    for attempt in range(3):
+        try:
+            async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
+                if r.status == 429:
+                    if last_error_out is not None:
+                        last_error_out["reason"] = "HTTP 429 rate limited"
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    continue
+                if r.status != 200:
+                    if last_error_out is not None:
+                        last_error_out["reason"] = f"HTTP {r.status}"
+                    return None
+                data = await r.json()
+                if last_error_out is not None:
+                    last_error_out["reason"] = None
+                return data or []
+        except Exception as e:
+            if last_error_out is not None:
+                last_error_out["reason"] = f"{type(e).__name__}: {str(e)[:100]}"
+            await asyncio.sleep(0.5 * (attempt + 1))
+    return None
+
+
+async def _fetch_1min_candles_paginated(session, product_id: str, days: float, last_error_out: dict = None):
     """Paginated pull of real historical 1-minute candles - same real
     public Coinbase endpoint as the live fetch above, just walking a
     start/end window since one call caps at 300 candles (5 real hours at
     this granularity). Mirrors crypto_selection_backtest.py's own
-    fetch_historical_candles pagination pattern. Returns closes
-    (oldest-first) or None."""
+    fetch_historical_candles pagination pattern, including its real
+    retry-on-429 fix (see _fetch_1min_page_with_retry above). Returns
+    closes (oldest-first) or None. `last_error_out`, when passed a dict,
+    gets the real reason the LAST failed page failed under "reason" -
+    optional, fully backward-compatible with every pre-existing caller."""
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
     all_candles = []
@@ -109,14 +149,9 @@ async def _fetch_1min_candles_paginated(session, product_id: str, days: float):
             f"https://api.exchange.coinbase.com/products/{product_id}/candles"
             f"?granularity={GRANULARITY_SECONDS}&start={cursor.isoformat()}&end={page_end.isoformat()}"
         )
-        try:
-            async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    if data:
-                        all_candles.extend(data)
-        except Exception as e:
-            log.warning(f"[BTC-PROJECTION] backtest page fetch failed for {cursor.isoformat()}: {e}")
+        page = await _fetch_1min_page_with_retry(session, url, last_error_out)
+        if page:
+            all_candles.extend(page)
         cursor = page_end
         await asyncio.sleep(0.15)  # be polite to the public endpoint
 
@@ -126,16 +161,17 @@ async def _fetch_1min_candles_paginated(session, product_id: str, days: float):
     return [float(c[4]) for c in all_candles]
 
 
-async def _fetch_1min_candles_and_volumes_paginated(session, product_id: str, days: float):
+async def _fetch_1min_candles_and_volumes_paginated(session, product_id: str, days: float, last_error_out: dict = None):
     """Same real, paginated historical fetch as
-    _fetch_1min_candles_paginated above, but also keeps each candle's real
-    volume (Coinbase candle array: [time, low, high, open, close, volume])
-    - needed for the volume_weighted_momentum directional signal below.
-    Kept as a separate function rather than changing the existing one's
-    return shape, since _fetch_1min_candles_paginated already has one
-    real caller (the price-LEVEL backtest) that never needed volume and
-    shouldn't have its return type silently changed. Returns
-    (closes, volumes) - both oldest-first, same length - or (None, None)."""
+    _fetch_1min_candles_paginated above (including the same retry-on-429
+    fix), but also keeps each candle's real volume (Coinbase candle
+    array: [time, low, high, open, close, volume]) - needed for the
+    volume_weighted_momentum directional signal below. Kept as a separate
+    function rather than changing the existing one's return shape, since
+    _fetch_1min_candles_paginated already has one real caller (the
+    price-LEVEL backtest) that never needed volume and shouldn't have its
+    return type silently changed. Returns (closes, volumes) - both
+    oldest-first, same length - or (None, None)."""
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
     all_candles = []
@@ -146,14 +182,9 @@ async def _fetch_1min_candles_and_volumes_paginated(session, product_id: str, da
             f"https://api.exchange.coinbase.com/products/{product_id}/candles"
             f"?granularity={GRANULARITY_SECONDS}&start={cursor.isoformat()}&end={page_end.isoformat()}"
         )
-        try:
-            async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    if data:
-                        all_candles.extend(data)
-        except Exception as e:
-            log.warning(f"[BTC-PROJECTION] backtest page fetch failed for {cursor.isoformat()}: {e}")
+        page = await _fetch_1min_page_with_retry(session, url, last_error_out)
+        if page:
+            all_candles.extend(page)
         cursor = page_end
         await asyncio.sleep(0.15)  # be polite to the public endpoint
 
@@ -312,10 +343,13 @@ async def run_price_projection_backtest(product_id: str = PRODUCT_ID, days: floa
     sub-sampled), so the real sample count stays large even over a
     short, cheap-to-fetch window. Returns {"error": ...} on a real fetch
     or data-sufficiency failure, never a fabricated result."""
+    last_error = {}
     async with aiohttp.ClientSession() as session:
-        closes = await _fetch_1min_candles_paginated(session, product_id, days)
+        closes = await _fetch_1min_candles_paginated(session, product_id, days, last_error_out=last_error)
     if closes is None:
-        return {"error": f"could not fetch enough real 1-minute history for {product_id} over the last {days} day(s)"}
+        reason = last_error.get("reason")
+        base = f"could not fetch enough real 1-minute history for {product_id} over the last {days} day(s)"
+        return {"error": f"{base} - real reason: {reason}" if reason else base}
     stats = _backtest_replay(closes)
     if stats is None:
         return {"error": "not enough real candles in the fetched window to produce any samples"}
@@ -522,10 +556,13 @@ async def run_directional_signal_backtest(product_id: str = PRODUCT_ID, days: fl
     Fetches real volume alongside closes (see
     _fetch_1min_candles_and_volumes_paginated) so volume_weighted_momentum
     gets real data to work with, not just the price-only signals."""
+    last_error = {}
     async with aiohttp.ClientSession() as session:
-        closes, volumes = await _fetch_1min_candles_and_volumes_paginated(session, product_id, days)
+        closes, volumes = await _fetch_1min_candles_and_volumes_paginated(session, product_id, days, last_error_out=last_error)
     if closes is None:
-        return {"error": f"could not fetch enough real 1-minute history for {product_id} over the last {days} day(s)"}
+        reason = last_error.get("reason")
+        base = f"could not fetch enough real 1-minute history for {product_id} over the last {days} day(s)"
+        return {"error": f"{base} - real reason: {reason}" if reason else base}
     result = _directional_backtest_replay(closes, volumes=volumes)
     if result is None:
         return {"error": "not enough real candles in the fetched window to produce any samples"}
