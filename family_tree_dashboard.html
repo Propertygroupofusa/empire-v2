@@ -1528,7 +1528,13 @@ async function toggleGridBranchActive(botName, newActive) {
 }
 
 function openCreateGridModal() {
-    document.getElementById('create-grid-coin').value = '';
+    // Pre-filled with a real default value, not just placeholder text -
+    // per the account owner's direct report that the field LOOKED filled
+    // in ("BTC-USD" shown) but Create still refused it, because a
+    // placeholder is never a real submitted value. Now it's a genuine
+    // value you can tap Create on directly, or overwrite to pick a
+    // different real coin.
+    document.getElementById('create-grid-coin').value = 'BTC-USD';
     document.getElementById('create-grid-amount').value = '';
     document.getElementById('create-grid-error').style.display = 'none';
     // Real coin suggestions, drawn from the family tree's own branches
