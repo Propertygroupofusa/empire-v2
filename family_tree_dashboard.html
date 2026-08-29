@@ -550,6 +550,26 @@
         <div style="margin-top:6px; font-size:0.78em; color:var(--text-dim);">Pulls real reserved cash from a FLAT branch (holding nothing right now) and deploys it into another branch's coin - for when a branch's own allocated_usd is sitting idle instead of working.</div>
     </div>
 
+    <div class="section-title" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+        <span>🔲 Grid Bot <span id="grid-mode-badge" style="font-size:0.7em; font-weight:600; margin-left:8px;"></span></span>
+        <button class="unlock-btn" onclick="openCreateGridModal()">🌱 New grid branch</button>
+    </div>
+    <p class="panel-sub" style="margin-bottom:10px;">
+        Real, genuinely separate grid-trading branches - buys a real slice when a coin's price closes 1% below its own
+        reference price (up to 10 concurrent slices), sells the OLDEST slice (FIFO) once it closes 1% above it, real fees
+        included both ways. Built after Strategy Lab's real 30-day A/B/C/D comparison showed Grid Bot as the clear best
+        performer (+$69.50 total P&amp;L, 59.2% win rate, 637 trades - vs. the live baseline's real -$1,457.43 over the
+        same coins/window). Its own real capital, its own real position tracking - never touches or shares state with the
+        family tree branches above. Master switch defaults ON; nothing trades until a real branch actually exists below.
+    </p>
+    <div class="panel" id="grid-panel">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:8px;">
+            <button id="grid-mode-toggle-btn" class="unlock-btn" onclick="toggleGridMode()" disabled>Loading…</button>
+            <div id="grid-total-allocated" style="font-size:0.85em; color:var(--text-dim);"></div>
+        </div>
+        <div id="grid-content" class="empty">Loading…</div>
+    </div>
+
     <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
         <div class="panel">
             <div class="panel-title">Branch Ranking by Next-Spawn Progress</div>
@@ -673,6 +693,27 @@
         <div class="modal-actions">
             <button type="button" class="modal-btn-secondary" onclick="closeReallocateModal()">Cancel</button>
             <button type="button" class="modal-btn-primary" id="realloc-confirm-btn" onclick="confirmReallocateCash()">Move cash</button>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="create-grid-modal-overlay">
+    <div class="modal-card">
+        <div class="modal-title">🌱 New Grid Branch</div>
+        <div class="modal-sub">Claims one real coin and allocates real capital to it, split across up to 10 concurrent grid slices - a bookkeeping split of the account's own real cash, not a trade by itself (its first real buy happens once price actually dips 1% below its starting reference price).</div>
+
+        <label class="modal-label">Coin (real Coinbase product id)</label>
+        <input type="text" id="create-grid-coin" class="modal-input" list="grid-coin-suggestions" placeholder="BTC-USD" autocomplete="off" style="text-transform:uppercase;">
+        <datalist id="grid-coin-suggestions"></datalist>
+        <div id="grid-coin-claimed-note" style="font-size:0.78em; color:var(--text-dim); margin-top:4px;"></div>
+
+        <label class="modal-label" style="margin-top:16px;">Allocated capital ($)</label>
+        <input type="number" id="create-grid-amount" class="modal-input" step="1" min="1">
+
+        <div id="create-grid-error" style="color:var(--red); font-size:0.85em; margin-top:6px; display:none;"></div>
+        <div class="modal-actions">
+            <button type="button" class="modal-btn-secondary" onclick="closeCreateGridModal()">Cancel</button>
+            <button type="button" class="modal-btn-primary" id="create-grid-confirm-btn" onclick="confirmCreateGridBranch()">Create</button>
         </div>
     </div>
 </div>
@@ -1359,6 +1400,197 @@ async function confirmReallocateCash() {
     }
 }
 
+// Real, genuinely separate Grid Bot branches - buy a real slice on a dip,
+// sell the OLDEST real slice (FIFO) on a bounce. See crypto_grid_bot.py's
+// own module docstring for the full real Strategy Lab evidence behind this.
+let gridModeActive = false;
+
+function renderGridStatus(data, tradeHistoryByBot) {
+    gridModeActive = !!data.mode_active;
+    const badge = document.getElementById('grid-mode-badge');
+    badge.textContent = gridModeActive ? '🟢 grid trading ON' : '⚪ grid trading off';
+    badge.style.color = gridModeActive ? 'var(--green)' : 'var(--text-dim)';
+
+    const toggleBtn = document.getElementById('grid-mode-toggle-btn');
+    toggleBtn.disabled = false;
+    toggleBtn.textContent = gridModeActive ? '⏸️ Disable grid trading' : '▶️ Enable grid trading';
+
+    document.getElementById('grid-total-allocated').textContent =
+        `${fmtUsd(data.total_allocated_usd)} total real capital across ${data.branch_count} grid branch${data.branch_count === 1 ? '' : 'es'}`;
+
+    const content = document.getElementById('grid-content');
+    const branches = data.branches || [];
+    if (branches.length === 0) {
+        content.innerHTML = '<div class="empty">No real grid branches yet - tap "New grid branch" above to start one.</div>';
+        return;
+    }
+    tradeHistoryByBot = tradeHistoryByBot || {};
+    content.innerHTML = `
+        <table style="width:100%; border-collapse:collapse; font-size:0.9em;">
+            <thead><tr style="text-align:left; border-bottom:1px solid var(--border);">
+                <th style="padding:6px 8px;">Branch</th><th style="padding:6px 8px;">Coin</th>
+                <th style="padding:6px 8px;">Allocated</th><th style="padding:6px 8px;">Open slices</th>
+                <th style="padding:6px 8px;">Real results</th>
+                <th style="padding:6px 8px;">Status</th><th style="padding:6px 8px;"></th>
+            </tr></thead>
+            <tbody>
+                ${branches.map(b => {
+                    const slicesStr = b.open_slices > 0
+                        ? `${b.open_slices} / ${b.num_levels} <span style="color:var(--text-dim);">(ref ${fmtUsd(b.reference_price)})</span>`
+                        : `<span style="color:var(--text-dim);">flat (ref ${fmtUsd(b.reference_price)})</span>`;
+                    const hist = tradeHistoryByBot[b.bot_name];
+                    let resultsStr;
+                    if (!hist || hist.trade_count === 0) {
+                        resultsStr = '<span style="color:var(--text-dim);">No closed trades yet</span>';
+                    } else {
+                        const pnlColor = hist.total_pnl >= 0 ? 'var(--green)' : 'var(--red)';
+                        const returnPct = b.allocated_usd ? (hist.total_pnl / b.allocated_usd) * 100 : 0;
+                        resultsStr = `<span style="color:${pnlColor}; font-weight:600;">${hist.total_pnl >= 0 ? '+' : ''}${fmtUsd(hist.total_pnl)} (${returnPct >= 0 ? '+' : ''}${returnPct.toFixed(1)}%)</span>`
+                            + `<div style="font-size:0.8em; color:var(--text-dim); margin-top:2px;">${hist.trade_count} trade${hist.trade_count === 1 ? '' : 's'} · ${hist.win_rate.toFixed(0)}% win</div>`;
+                    }
+                    return `<tr style="border-bottom:1px solid var(--border);">
+                        <td style="padding:6px 8px;">${b.bot_name}</td>
+                        <td style="padding:6px 8px;">${b.product_id}</td>
+                        <td style="padding:6px 8px;">${fmtUsd(b.allocated_usd)}</td>
+                        <td style="padding:6px 8px;">${slicesStr}</td>
+                        <td style="padding:6px 8px;">${resultsStr}</td>
+                        <td style="padding:6px 8px;">${b.active ? '🟢 active' : '⏸️ paused'}</td>
+                        <td style="padding:6px 8px;">
+                            <a href="#" onclick="toggleGridBranchActive('${b.bot_name}', ${!b.active}); return false;" style="color:var(--navy);">
+                                ${b.active ? 'Pause' : 'Resume'}
+                            </a>
+                        </td>
+                    </tr>`;
+                }).join('')}
+            </tbody>
+        </table>
+        <p style="margin-top:10px; font-size:0.76em; color:var(--text-dim); line-height:1.5;">
+            "Open slices" is how many of this branch's up-to-10 concurrent real positions are currently open (each buys on
+            its own 1% dip, sells FIFO on a 1% bounce) - "ref" is the real reference price the next buy/sell is measured
+            against. Pausing a branch releases its coin so a new branch can claim it, but never force-closes a real open
+            slice - it just sits until price naturally reaches it, or you pause/resume again later.
+        </p>`;
+}
+
+async function loadGridStatus() {
+    try {
+        const [data, history] = await Promise.all([
+            apiGet('/grid-status'),
+            apiGet('/grid-status/trade-history').catch(function () { return { branches: [] }; }),
+        ]);
+        const tradeHistoryByBot = {};
+        (history.branches || []).forEach(function (h) { tradeHistoryByBot[h.bot_name] = h; });
+        renderGridStatus(data, tradeHistoryByBot);
+    } catch (e) {
+        document.getElementById('grid-content').innerHTML = `<div class="empty">Could not load: ${e.message}</div>`;
+    }
+}
+
+async function toggleGridMode() {
+    const enabling = !gridModeActive;
+    const msg = enabling
+        ? 'Enable real grid trading? Every active grid branch will start buying/selling real slices on its own dedicated coin on the next cycle.'
+        : 'Disable real grid trading? No grid branch will open a new slice until re-enabled - any currently open slice keeps sitting exactly where it is either way (never force-closed).';
+    if (!confirm(msg)) return;
+    const btn = document.getElementById('grid-mode-toggle-btn');
+    btn.disabled = true;
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/grid-status/mode', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: enabling }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    } catch (e) {
+        alert('Could not update: ' + e.message);
+    } finally {
+        await loadGridStatus();
+    }
+}
+
+async function toggleGridBranchActive(botName, newActive) {
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + `/grid-status/${botName}/active`, {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ active: newActive }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    } catch (e) {
+        alert('Could not update: ' + e.message);
+    } finally {
+        await loadGridStatus();
+    }
+}
+
+function openCreateGridModal() {
+    document.getElementById('create-grid-coin').value = '';
+    document.getElementById('create-grid-amount').value = '';
+    document.getElementById('create-grid-error').style.display = 'none';
+    // Real coin suggestions, drawn from the family tree's own branches
+    // (already-known-valid Coinbase pairs) plus every coin already claimed
+    // by an existing grid branch (shown but noted as claimed - a second
+    // branch on the same coin is refused server-side, same "one active
+    // grid branch per coin" rule create_grid_branch itself enforces).
+    const treeCoins = new Set((lastKnownBranches || []).map(b => b.product_id));
+    const list = document.getElementById('grid-coin-suggestions');
+    list.innerHTML = Array.from(treeCoins).sort().map(c => `<option value="${c}">`).join('');
+    document.getElementById('create-grid-modal-overlay').classList.add('open');
+    loadGridStatus().then(() => {
+        apiGet('/grid-status').then(d => {
+            const claimed = (d.branches || []).filter(b => b.active).map(b => b.product_id);
+            document.getElementById('grid-coin-claimed-note').textContent = claimed.length
+                ? `Already claimed by an active grid branch: ${claimed.join(', ')}`
+                : '';
+        }).catch(() => {});
+    });
+}
+
+function closeCreateGridModal() {
+    document.getElementById('create-grid-modal-overlay').classList.remove('open');
+}
+
+async function confirmCreateGridBranch() {
+    const productId = document.getElementById('create-grid-coin').value.trim().toUpperCase();
+    const amount = parseFloat(document.getElementById('create-grid-amount').value);
+    const errorEl = document.getElementById('create-grid-error');
+    errorEl.style.display = 'none';
+    if (!productId) {
+        errorEl.textContent = 'Enter a real Coinbase coin, e.g. BTC-USD.';
+        errorEl.style.display = 'block';
+        return;
+    }
+    if (!amount || amount <= 0) {
+        errorEl.textContent = 'Enter a real positive dollar amount.';
+        errorEl.style.display = 'block';
+        return;
+    }
+    if (!confirm(`Start a real grid branch on ${productId} with ${fmtUsd(amount)}? This is real capital, split across up to 10 concurrent grid slices - it starts buying/selling once grid trading is enabled and price actually moves.`)) return;
+    const confirmBtn = document.getElementById('create-grid-confirm-btn');
+    confirmBtn.disabled = true;
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/grid-status/create-branch', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ product_id: productId, allocated_usd: amount }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        closeCreateGridModal();
+    } catch (e) {
+        errorEl.textContent = e.message;
+        errorEl.style.display = 'block';
+    } finally {
+        confirmBtn.disabled = false;
+        await loadGridStatus();
+    }
+}
+
 // Real node-link tree layout (classic "place leaves left-to-right, put a
 // parent above the midpoint of its children" recursion) - genuinely
 // branches root-to-child with connecting lines, not just indentation.
@@ -1590,6 +1822,7 @@ function toggleCoinTrades(i) {
 let lastUnrealizedProfit = null;
 let lastRealizedProfit = null;
 let lastLockedProfit = null;
+let lastKnownBranches = [];
 
 function renderTotalProfit() {
     const card = document.getElementById('stat-profit-card');
@@ -1653,6 +1886,7 @@ async function refresh() {
         renderReversalTradeBadge(data.reversal_trade_active);
 
         const branches = data.branches || [];
+        lastKnownBranches = branches;
         lastUnrealizedProfit = branches.reduce((sum, b) => {
             const p = b.position;
             if (!p || p.current_price == null) return sum;
@@ -1702,6 +1936,7 @@ async function refresh() {
         document.getElementById('recon-table-wrap').innerHTML = '';
     }
 
+    loadGridStatus();
     loadHeaderTotals();
 }
 
