@@ -352,9 +352,23 @@ async def run_grid_branches_cycle():
 
 async def get_grid_status() -> dict:
     """Real, live status for the dashboard - every branch's own real
-    allocation, grid parameters, and currently-open slices. Read-only."""
+    allocation, grid parameters, and currently-open slices, PLUS each
+    branch's real current live price (fetched once per distinct
+    product_id, not once per branch, so several branches sharing a coin
+    never cost extra real API calls) - backs the dashboard's real grid
+    visual (where price sits right now against the buy/sell trigger
+    levels and every open slice's own entry). Read-only."""
     mode_active = await is_grid_bot_active()
     branches = await get_grid_branches()
+
+    distinct_products = {b.product_id for b in branches}
+    live_prices = {}
+    if distinct_products:
+        async with engine.aiohttp.ClientSession() as session:
+            for product_id in distinct_products:
+                price, _atr = await engine.get_price_and_volatility(session, product_id)
+                live_prices[product_id] = price
+
     out = []
     total_allocated = 0.0
     for b in branches:
@@ -364,6 +378,7 @@ async def get_grid_status() -> dict:
             "bot_name": b.bot_name, "product_id": b.product_id, "allocated_usd": round(b.allocated_usd, 2),
             "active": b.active, "grid_pct": b.grid_pct, "num_levels": b.num_levels,
             "reference_price": b.reference_price, "open_slices": len(slices),
+            "current_price": live_prices.get(b.product_id),
             "slices": [
                 {"entry_price": s.entry_price, "qty": s.qty, "opened_at": (s.opened_at.isoformat() + "Z") if s.opened_at else None}
                 for s in slices

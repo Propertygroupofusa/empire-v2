@@ -1508,6 +1508,9 @@ function renderGridStatus(data, tradeHistoryByBot) {
                                 ${b.active ? 'Pause' : 'Resume'}
                             </a>
                         </td>
+                    </tr>
+                    <tr style="border-bottom:1px solid var(--border);">
+                        <td colspan="7" style="padding:4px 8px 14px;">${renderGridBranchChart(b)}</td>
                     </tr>`;
                 }).join('')}
             </tbody>
@@ -1516,8 +1519,91 @@ function renderGridStatus(data, tradeHistoryByBot) {
             "Open slices" is how many of this branch's up-to-10 concurrent real positions are currently open (each buys on
             its own 1% dip, sells FIFO on a 1% bounce) - "ref" is the real reference price the next buy/sell is measured
             against. Pausing a branch releases its coin so a new branch can claim it, but never force-closes a real open
-            slice - it just sits until price naturally reaches it, or you pause/resume again later.
+            slice - it just sits until price naturally reaches it, or you pause/resume again later. The chart below each
+            branch shows real slice entries against the live price - a slice colored red is currently sitting at a real
+            unrealized loss right now; grid selling is FIFO by trigger price, not by which slice is winning, so a red
+            slice can still be the one sold next.
         </p>`;
+}
+
+// Real, live visual per grid branch - a horizontal real price axis showing
+// where the current live price sits against this branch's own reference
+// price and its real 1% buy/sell trigger levels, plus every real open
+// slice as a marker at its own entry price. Per the account owner's
+// direct request ("I really would like a visual of them") right after
+// asking whether Grid Bot protects against selling at a loss - it
+// doesn't (only root_partial_sell does), so every slice marker is
+// colored AND labeled with its real signed unrealized $ (color alone
+// would fail real colorblind accessibility for a red/green pair this
+// close in hue - the real dollar label is what actually carries the
+// information, color is just a quick visual cue on top of it). The
+// OLDEST open slice (next in line to sell, FIFO) gets a real "next"
+// ring so it's obvious which one the branch will act on first.
+function renderGridBranchChart(b) {
+    const slices = b.slices || [];
+    if (b.current_price == null) {
+        return `<div style="font-size:0.78em; color:var(--text-dim);">Real live price unavailable right now - chart will populate on the next refresh.</div>`;
+    }
+    const price = b.current_price;
+    const ref = b.reference_price;
+    const buyTrigger = ref * (1 - b.grid_pct);
+    const sellTrigger = ref * (1 + b.grid_pct);
+
+    const fmtPrice = p => p >= 1
+        ? '$' + p.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+        : '$' + p.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 6 });
+
+    const allPrices = [price, ref, buyTrigger, sellTrigger, ...slices.map(s => s.entry_price)];
+    let domainMin = Math.min(...allPrices);
+    let domainMax = Math.max(...allPrices);
+    const span = (domainMax - domainMin) || (price * 0.02);
+    domainMin -= span * 0.15;
+    domainMax += span * 0.15;
+
+    const W = 640, H = 124, marginX = 14, axisY = 55;
+    const x = p => marginX + ((p - domainMin) / (domainMax - domainMin)) * (W - 2 * marginX);
+
+    // "Now"/"Reference" are shown as a plain HTML caption ABOVE the chart
+    // (below), never as SVG text tied to a line's x-position - two prices
+    // that happen to sit close together (a common real case) would
+    // otherwise stack their floating labels right on top of each other,
+    // confirmed via a real rendered screenshot before this shipped (see
+    // this function's own real Playwright-verified layout history).
+    const triggerLine = (val, label) => `
+        <line x1="${x(val)}" y1="8" x2="${x(val)}" y2="${axisY}" stroke="var(--border)" stroke-width="1.5" stroke-dasharray="3,3"/>
+        <text x="${x(val)}" y="98" text-anchor="middle" font-size="10" fill="var(--text-dim)">${label}</text>
+        <text x="${x(val)}" y="110" text-anchor="middle" font-size="10" fill="var(--text-dim)">${fmtPrice(val)}</text>`;
+
+    const sliceMarkers = slices.map((s, i) => {
+        const unrealized = s.qty * (price - s.entry_price);
+        const isLoss = unrealized < 0;
+        const color = isLoss ? 'var(--red)' : 'var(--green)';
+        const isOldest = i === 0;
+        const cx = x(s.entry_price);
+        const ring = isOldest ? `<circle cx="${cx}" cy="${axisY}" r="10" fill="none" stroke="var(--gold)" stroke-width="2"/>` : '';
+        const sign = unrealized >= 0 ? '+' : '-';
+        return `
+            ${ring}
+            <circle cx="${cx}" cy="${axisY}" r="6" fill="${color}"/>
+            <text x="${cx}" y="${axisY - 14}" text-anchor="middle" font-size="10" font-weight="700" fill="${color}">${sign}$${Math.abs(unrealized).toFixed(2)}</text>
+            ${isOldest ? `<text x="${cx}" y="${axisY + 22}" text-anchor="middle" font-size="9" fill="var(--gold)" font-weight="700">next to sell</text>` : ''}`;
+    }).join('');
+
+    return `
+        <div style="font-size:0.82em; margin-bottom:2px;">
+            <strong style="color:var(--navy);">Now ${fmtPrice(price)}</strong>
+            <span style="color:var(--text-dim); margin-left:10px;">Reference ${fmtPrice(ref)}</span>
+        </div>
+        <svg viewBox="0 0 ${W} ${H}" style="width:100%; max-width:${W}px; height:auto; display:block;">
+            <line x1="${marginX}" y1="${axisY}" x2="${W - marginX}" y2="${axisY}" stroke="var(--border)" stroke-width="1.5"/>
+            ${triggerLine(buyTrigger, '↓ buy dip')}
+            ${triggerLine(sellTrigger, '↑ sell rise')}
+            <line x1="${x(ref)}" y1="8" x2="${x(ref)}" y2="${axisY}" stroke="var(--navy)" stroke-width="1.5" stroke-dasharray="5,2" opacity="0.5"/>
+            <line x1="${x(price)}" y1="8" x2="${x(price)}" y2="${axisY}" stroke="var(--navy)" stroke-width="2.5"/>
+            <polygon points="${x(price) - 5},2 ${x(price) + 5},2 ${x(price)},9" fill="var(--navy)"/>
+            ${sliceMarkers}
+        </svg>
+        ${slices.length === 0 ? '<div style="font-size:0.78em; color:var(--text-dim); margin-top:4px;">No open slices yet - waiting for a real 1% dip below the reference price.</div>' : ''}`;
 }
 
 async function loadGridStatus() {
