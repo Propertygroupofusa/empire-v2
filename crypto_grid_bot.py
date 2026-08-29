@@ -259,6 +259,22 @@ async def get_real_free_cash_usd():
     return round(real_balance - locked_usd - tree_flat_allocated - grid_allocated_total, 2)
 
 
+def _safe_num_levels_for_allocation(allocated_usd: float) -> int:
+    """A small real branch (e.g. a $20 quick-buy) would silently never
+    trade under the fixed DEFAULT_GRID_LEVELS - splitting $20 across 10
+    levels gives a real $2.00 slice, below the real MIN_TRADE_USD floor
+    every buy attempt checks, so run_grid_branch_cycle would just log
+    "waiting" forever with no real order ever placed. Found while
+    building the real $20 Quick Buy button - fixed generally here rather
+    than just for that one path, since ANY branch created below
+    DEFAULT_GRID_LEVELS * MIN_TRADE_USD ($50) had this same real bug.
+    Caps levels down so each real slice stays at or above the real
+    minimum, floored at 1 level (a single-slice "grid" is still a real,
+    working position, just with no room to average down)."""
+    max_levels_by_min_trade = int(allocated_usd // MIN_TRADE_USD)
+    return max(1, min(DEFAULT_GRID_LEVELS, max_levels_by_min_trade))
+
+
 async def create_grid_branch(product_id: str, allocated_usd: float) -> CryptoGridBranch:
     """Creates a real new grid branch - a pure bookkeeping operation plus
     one real live price fetch to anchor its starting reference_price,
@@ -270,7 +286,12 @@ async def create_grid_branch(product_id: str, allocated_usd: float) -> CryptoGri
     exceeding real free spendable cash (see get_real_free_cash_usd) -
     per the account owner's own direct complaint that they were creating
     branches "blindly" with no idea what was actually available; this
-    can never silently accept a request for money that doesn't exist."""
+    can never silently accept a request for money that doesn't exist.
+
+    num_levels is chosen per-branch (see _safe_num_levels_for_allocation)
+    rather than always the fixed DEFAULT_GRID_LEVELS, so a small real
+    branch still genuinely trades instead of every slice rounding below
+    the real minimum order size."""
     if allocated_usd <= 0:
         raise ValueError("allocated_usd must be positive")
     claimed = await get_grid_branch_claimed_coins()
@@ -288,6 +309,8 @@ async def create_grid_branch(product_id: str, allocated_usd: float) -> CryptoGri
     if price is None:
         raise ValueError(f"could not fetch a real live price for {product_id} right now - try again shortly")
 
+    num_levels = _safe_num_levels_for_allocation(allocated_usd)
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoGridBranch))
         existing = list(result.scalars().all())
@@ -301,13 +324,89 @@ async def create_grid_branch(product_id: str, allocated_usd: float) -> CryptoGri
         bot_name = f"crypto_grid_{next_num}"
         branch = CryptoGridBranch(
             bot_name=bot_name, product_id=product_id, allocated_usd=allocated_usd, active=True,
-            grid_pct=DEFAULT_GRID_PCT, num_levels=DEFAULT_GRID_LEVELS, reference_price=price,
+            grid_pct=DEFAULT_GRID_PCT, num_levels=num_levels, reference_price=price,
         )
         db.add(branch)
         await db.commit()
         await db.refresh(branch)
-    log.info(f"[GRID] 🌱 Created {bot_name} on {product_id} with ${allocated_usd:.2f} (real reference price ${price:.2f})")
+    log.info(f"[GRID] 🌱 Created {bot_name} on {product_id} with ${allocated_usd:.2f} ({num_levels} real levels, reference price ${price:.2f})")
     return branch
+
+
+async def pick_best_ranked_coin_for_grid() -> str:
+    """Real coin auto-pick for the $20 Quick Buy button - the single best
+    real backtested-ROI coin (from CryptoBacktestRun, the same real
+    per-coin backtest data crypto_family_tree_bot.py's own top-15
+    rotation and exclusion layers already read - not a second, separately
+    computed ranking) that isn't already claimed by an active grid branch
+    and isn't currently excluded by the family tree's own real exclusion
+    layers (manual + auto-backtest + live-performance). Reusing that
+    real, already-validated "known bad coin" protection rather than
+    risking a quick-buy landing on a coin already proven to lose real
+    money live - Grid Bot has no exclusion layer of its own, so this
+    borrows the sibling system's rather than shipping a quick-buy with
+    none at all. Raises ValueError if nothing real qualifies (no coin has
+    a real backtest run yet, or every ranked coin is excluded/claimed)."""
+    import crypto_family_tree_bot as tree  # lazy - avoids a circular import at module load, same pattern as get_real_free_cash_usd above
+    from models import CryptoBacktestRun
+
+    excluded = await tree.get_effective_excluded_coins()
+    claimed = await get_grid_branch_claimed_coins()
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(CryptoBacktestRun).order_by(CryptoBacktestRun.product_id, desc(CryptoBacktestRun.run_at))
+        )
+        rows = result.scalars().all()
+
+    latest_by_coin = {}
+    for row in rows:
+        if row.product_id not in latest_by_coin:
+            latest_by_coin[row.product_id] = row
+
+    candidates = [
+        row for pid, row in latest_by_coin.items()
+        if pid not in excluded and pid not in claimed
+    ]
+    if not candidates:
+        raise ValueError(
+            "no eligible coin has a real backtest run yet, or every ranked coin is currently excluded/claimed - "
+            "run a coin-selection backtest first, or pick a specific coin instead"
+        )
+    candidates.sort(key=lambda r: r.roi_pct_of_spend, reverse=True)
+    return candidates[0].product_id
+
+
+async def quick_buy_best_coin(amount_usd: float) -> dict:
+    """The real $20 Quick Buy button's backend - per the account owner's
+    explicit request for "a button that I can put $20 in... it'll place
+    the [trade] for me," after being told the honest reason the BTC
+    price-prediction panel can't back a real bet (no proven directional
+    edge, no real instrument to bet on) and offered the two REAL,
+    validated strategies instead. This is the Grid Bot half of that -
+    56.2% real backtested win rate, not a coin-flip.
+
+    Real, honest behavior worth being explicit about: this does NOT fire
+    an instant market buy. It creates a real new grid branch (via
+    create_grid_branch, same real spendable-cash check, same real
+    dynamic num_levels fix) on whichever coin currently ranks best (via
+    pick_best_ranked_coin_for_grid) - the actual first real buy happens
+    on that branch's own next cycle, whenever price genuinely closes a
+    real 1% dip below its starting reference price, exactly like every
+    other grid branch. Refuses while STOP_TRADING is set, matching every
+    other path that deploys new real capital in this codebase."""
+    if amount_usd <= 0:
+        raise ValueError("amount_usd must be positive")
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        raise ValueError("STOP_TRADING is set - no new real capital can be deployed right now")
+
+    product_id = await pick_best_ranked_coin_for_grid()
+    branch = await create_grid_branch(product_id, amount_usd)
+    return {
+        "status": "created", "bot_name": branch.bot_name, "product_id": branch.product_id,
+        "allocated_usd": round(branch.allocated_usd, 2), "num_levels": branch.num_levels,
+        "reference_price": branch.reference_price,
+    }
 
 
 async def get_grid_slices(bot_name: str) -> list:

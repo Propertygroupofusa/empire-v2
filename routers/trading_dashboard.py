@@ -4822,6 +4822,32 @@ async def create_grid_branch_endpoint(payload: CreateGridBranchRequest):
     }
 
 
+class GridQuickBuyRequest(BaseModel):
+    amount_usd: float = 20.0
+
+
+@router.post("/grid-status/quick-buy", dependencies=[Depends(require_admin_key)])
+async def grid_quick_buy_endpoint(payload: GridQuickBuyRequest):
+    """The real $20 Quick Buy button - per the account owner's explicit
+    request for a real 'put money in, it trades for me' button, after
+    being shown why the BTC price-prediction panel couldn't back one (no
+    proven directional edge, no real instrument to bet on) and offered
+    Grid Bot instead (56.2% real backtested win rate).
+
+    Creates a real new grid branch with the given amount on whichever
+    coin currently ranks best by real backtested ROI (see
+    crypto_grid_bot.pick_best_ranked_coin_for_grid) - never an instant
+    market buy; the branch's own first real fill happens on its own next
+    cycle, on a genuine 1% dip, same as every other grid branch."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    try:
+        result = await crypto_grid_bot_module.quick_buy_best_coin(payload.amount_usd)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return result
+
+
 class SetGridBranchActiveRequest(BaseModel):
     active: bool
 

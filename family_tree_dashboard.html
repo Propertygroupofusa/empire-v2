@@ -552,7 +552,10 @@
 
     <div class="section-title" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
         <span>🔲 Grid Bot <span id="grid-mode-badge" style="font-size:0.7em; font-weight:600; margin-left:8px;"></span></span>
-        <button class="unlock-btn" onclick="openCreateGridModal()">🌱 New grid branch</button>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="sell-btn" style="width:auto; margin-top:0;" onclick="gridQuickBuy(this)">💰 $20 Quick Buy</button>
+            <button class="unlock-btn" onclick="openCreateGridModal()">🌱 New grid branch</button>
+        </div>
     </div>
     <p class="panel-sub" style="margin-bottom:10px;">
         Real, genuinely separate grid-trading branches - buys a real slice when a coin's price closes 1% below its own
@@ -1716,6 +1719,46 @@ async function toggleGridBranchActive(botName, newActive) {
         alert('Could not update: ' + e.message);
     } finally {
         await loadGridStatus();
+    }
+}
+
+// Real $20 Quick Buy - per the account owner's explicit request for a
+// real "put money in, it trades for me" button, after being shown why
+// the BTC price-prediction panel couldn't back one (no proven
+// directional edge, no real instrument to bet on) and offered Grid Bot
+// instead (56.2% real backtested win rate, not a coin-flip). This does
+// NOT fire an instant market buy - it creates a real new grid branch on
+// whichever coin currently ranks best by real backtested ROI, and that
+// branch's own first real fill happens on its own next cycle, on a
+// genuine 1% dip, same as every other grid branch - the confirm dialog
+// says so explicitly so nothing here is a surprise.
+async function gridQuickBuy(btn) {
+    if (!confirm(
+        'Deploy $20 real cash into a new Grid Bot branch?\n\n' +
+        'This picks whichever coin currently ranks best by real backtested ROI (excluding any coin already claimed ' +
+        'or currently excluded), and creates a real branch there. It does NOT buy instantly - the branch places its ' +
+        'first real trade on its own next cycle, once price genuinely dips 1% below the starting reference price, ' +
+        'same as every other grid branch.'
+    )) return;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Picking best coin…';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/grid-status/quick-buy', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ amount_usd: 20 }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        alert(`Created ${data.bot_name} on ${data.product_id} with $${data.allocated_usd.toFixed(2)} (${data.num_levels} real levels). It'll place its first real trade on a genuine dip - watch the Grid Bot table below.`);
+        await loadGridStatus();
+    } catch (e) {
+        alert('Could not quick-buy: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = original;
     }
 }
 
