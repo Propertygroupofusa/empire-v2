@@ -708,6 +708,7 @@
         <div id="grid-coin-claimed-note" style="font-size:0.78em; color:var(--text-dim); margin-top:4px;"></div>
 
         <label class="modal-label" style="margin-top:16px;">Allocated capital ($)</label>
+        <div id="grid-spendable-hint" style="font-size:0.85em; color:var(--text-dim); margin-bottom:6px;">Checking real available capital…</div>
         <input type="number" id="create-grid-amount" class="modal-input" step="1" min="1">
 
         <div id="create-grid-error" style="color:var(--red); font-size:0.85em; margin-top:6px; display:none;"></div>
@@ -1591,14 +1592,42 @@ function openCreateGridModal() {
     const list = document.getElementById('grid-coin-suggestions');
     list.innerHTML = Array.from(treeCoins).sort().map(c => `<option value="${c}">`).join('');
     document.getElementById('create-grid-modal-overlay').classList.add('open');
+    document.getElementById('grid-spendable-hint').textContent = 'Checking real available capital…';
+    lastKnownGridSpendableUsd = null;
     loadGridStatus().then(() => {
         apiGet('/grid-status').then(d => {
             const claimed = (d.branches || []).filter(b => b.active).map(b => b.product_id);
             document.getElementById('grid-coin-claimed-note').textContent = claimed.length
                 ? `Already claimed by an active grid branch: ${claimed.join(', ')}`
                 : '';
-        }).catch(() => {});
+            // Real, live "$X available right now" hint - per the account
+            // owner's direct complaint about creating branches "blindly"
+            // with no idea what was actually available. Same real number
+            // create_grid_branch() itself enforces server-side (see
+            // crypto_grid_bot.get_real_free_cash_usd) - this hint can
+            // never disagree with what actually gets accepted or refused.
+            const hintEl = document.getElementById('grid-spendable-hint');
+            if (d.real_free_cash_usd == null) {
+                hintEl.textContent = 'Could not fetch real free cash right now - the amount will still be checked when you hit Create.';
+            } else {
+                lastKnownGridSpendableUsd = d.real_free_cash_usd;
+                const spendable = fmtUsd(d.real_free_cash_usd);
+                hintEl.innerHTML = d.real_free_cash_usd > 0
+                    ? `💰 <strong>${spendable}</strong> real free cash right now `
+                        + `<a href="javascript:void(0)" onclick="useMaxGridSpendable()" style="color:var(--accent, var(--navy));">Use max</a>`
+                    : `⚠️ <strong>$0.00</strong> real free cash right now - every real dollar is already committed elsewhere.`;
+            }
+        }).catch(() => {
+            document.getElementById('grid-spendable-hint').textContent = 'Could not fetch real free cash right now - the amount will still be checked when you hit Create.';
+        });
     });
+}
+
+let lastKnownGridSpendableUsd = null;
+
+function useMaxGridSpendable() {
+    if (lastKnownGridSpendableUsd == null || lastKnownGridSpendableUsd <= 0) return;
+    document.getElementById('create-grid-amount').value = Math.floor(lastKnownGridSpendableUsd);
 }
 
 function closeCreateGridModal() {

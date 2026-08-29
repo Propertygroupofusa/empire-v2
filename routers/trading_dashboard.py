@@ -851,7 +851,15 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     seed_usd = round(crypto_family_tree_bot_module.SEED_USD, 2) if crypto_family_tree_bot_module is not None else None
     if real_balance is not None:
         flat_allocated_sum = sum(b.allocated_usd for b in branches if b.bot_name not in positions_by_bot)
-        spendable_for_spawn = round(real_balance - locked_usd - flat_allocated_sum, 2)
+        # Grid Bot draws from this exact same shared real Coinbase wallet -
+        # its own committed capital has to come off this figure too, or
+        # this endpoint's own "real free cash" number would silently
+        # disagree with Grid Bot's (see crypto_grid_bot.get_real_free_cash_usd,
+        # the same real subtraction, kept in sync with this one).
+        grid_allocated_sum = (
+            await crypto_grid_bot_module.get_grid_allocated_total()
+        ) if crypto_grid_bot_module is not None else 0.0
+        spendable_for_spawn = round(real_balance - locked_usd - flat_allocated_sum - grid_allocated_sum, 2)
         can_spawn = seed_usd is not None and spendable_for_spawn >= seed_usd
 
     crypto_passive_mode = await crypto_family_tree_bot_module.is_crypto_passive_mode() if crypto_family_tree_bot_module else False

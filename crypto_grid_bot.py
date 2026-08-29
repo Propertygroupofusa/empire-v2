@@ -45,7 +45,7 @@ from sqlalchemy import select, func, case, desc
 
 import crypto_btc_compound_bot as engine
 from database import AsyncSessionLocal
-from models import CryptoGridBranch, CryptoGridSlice, CryptoGridTradeHistory, TradingBotState
+from models import CryptoGridBranch, CryptoGridSlice, CryptoGridTradeHistory, TradingBotState, CryptoTreeBranch, BotPosition
 
 log = logging.getLogger("crypto_grid_bot")
 
@@ -104,19 +104,80 @@ async def get_grid_branch_claimed_coins() -> set:
         return {row[0] for row in result.all()}
 
 
+async def get_grid_allocated_total() -> float:
+    """Real total capital already committed across EVERY grid branch
+    (active or paused - a paused branch releases its coin claim but its
+    real allocated_usd stays committed, same as any other branch type in
+    this codebase)."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoGridBranch))
+        return sum(b.allocated_usd for b in result.scalars().all())
+
+
+async def get_real_free_cash_usd():
+    """Real, honest 'how much can I actually deploy into a NEW grid
+    branch right now' figure - per the account owner's own direct
+    complaint about creating branches "blindly" with no idea what's
+    really available. Real Coinbase USD balance minus real locked
+    profit minus every FLAT family-tree branch's own allocated_usd (a
+    branch holding a position has already deployed that money into
+    crypto, not cash - same real distinction
+    routers/trading_dashboard.py's own spendable_for_spawn already
+    makes) minus every Grid Bot branch's own allocated_usd (its FULL
+    amount, active or paused - a deliberately conservative
+    simplification: some of a grid branch's own allocation may already
+    be sitting in open slices as real crypto rather than literal cash,
+    but treating the whole thing as reserved is the safe direction,
+    never overstating what's genuinely free).
+
+    Grid Bot and the family tree draw from the exact same shared real
+    Coinbase wallet, so this is the one real number both systems should
+    agree on - never a separately, independently computed figure that
+    could quietly disagree with the other. Returns None on a real
+    balance-fetch failure, never a fabricated number."""
+    async with engine.aiohttp.ClientSession() as session:
+        real_balance, _err = await engine.get_usd_balance(session)
+    if real_balance is None:
+        return None
+
+    import crypto_family_tree_bot as tree  # lazy - avoids a circular import at module load, same pattern as _log_activity_safe below
+    locked_usd = await tree.get_locked_usd()
+
+    async with AsyncSessionLocal() as db:
+        tree_result = await db.execute(select(CryptoTreeBranch))
+        tree_branches = tree_result.scalars().all()
+        open_bots_result = await db.execute(select(BotPosition.bot))
+        open_bots = {row[0] for row in open_bots_result.all()}
+        tree_flat_allocated = sum(b.allocated_usd for b in tree_branches if b.bot_name not in open_bots)
+
+    grid_allocated_total = await get_grid_allocated_total()
+
+    return round(real_balance - locked_usd - tree_flat_allocated - grid_allocated_total, 2)
+
+
 async def create_grid_branch(product_id: str, allocated_usd: float) -> CryptoGridBranch:
     """Creates a real new grid branch - a pure bookkeeping operation plus
     one real live price fetch to anchor its starting reference_price,
     never a trade by itself (mirrors CryptoTreeBranch/AlpacaBranch's own
     "spawning is a bookkeeping transfer" reasoning - the real dollars
     this represents are already sitting in the one real Coinbase wallet,
-    just not earmarked to any branch yet). Refuses a non-positive amount
-    or a coin already claimed by another active grid branch."""
+    just not earmarked to any branch yet). Refuses a non-positive amount,
+    a coin already claimed by another active grid branch, or an amount
+    exceeding real free spendable cash (see get_real_free_cash_usd) -
+    per the account owner's own direct complaint that they were creating
+    branches "blindly" with no idea what was actually available; this
+    can never silently accept a request for money that doesn't exist."""
     if allocated_usd <= 0:
         raise ValueError("allocated_usd must be positive")
     claimed = await get_grid_branch_claimed_coins()
     if product_id in claimed:
         raise ValueError(f"{product_id} is already claimed by an active grid branch")
+
+    real_spendable = await get_real_free_cash_usd()
+    if real_spendable is not None and allocated_usd > real_spendable + 0.01:
+        raise ValueError(
+            f"Only ${real_spendable:.2f} in real free spendable cash right now - can't deploy ${allocated_usd:.2f}"
+        )
 
     async with engine.aiohttp.ClientSession() as session:
         price, _atr = await engine.get_price_and_volatility(session, product_id)
@@ -312,6 +373,7 @@ async def get_grid_status() -> dict:
         "mode_active": mode_active,
         "branch_count": len(branches),
         "total_allocated_usd": round(total_allocated, 2),
+        "real_free_cash_usd": await get_real_free_cash_usd(),
         "branches": out,
     }
 
