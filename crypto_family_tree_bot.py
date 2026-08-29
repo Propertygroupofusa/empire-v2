@@ -3358,8 +3358,31 @@ async def _maybe_spawn_child(branch, chain_visited: frozenset = frozenset(), cha
     # branch only ever gets created once there's no OTHER branch left to
     # reinforce at all (see the None case below - the very first spawn in
     # a fresh tree, or a tree of exactly one branch).
+    # Real bug the account owner hit live: root's own balance repeatedly
+    # bled out to $0.00 over time - traced to this exact reinforcement
+    # path. Root gets a cheaper tier to cross (ROOT_UNLOCK_TIER_USD, $50
+    # vs the regular $100), but nothing here previously stopped it from
+    # being the SOURCE of a real reinforcement give-away once it crossed
+    # that tier, same as any other branch - so every time root re-crossed
+    # its own cheap threshold, $50 of its real balance left for whichever
+    # branch was weakest, over and over, until root's real peak of
+    # $1,061.44 drained to $0.00. Root being "the head branch" never
+    # actually protected its own CAPITAL from this - it only ever meant
+    # root can't be manually sold and can't switch off BTC-USD.
+    #
+    # Fixed by making root NEVER a valid reinforcement SOURCE: `weakest`
+    # is forced to None for root specifically, so root always falls
+    # through to the ordinary new-branch-spawn path below instead of
+    # giving an existing weaker branch its crossed-tier seed. Root can
+    # still RECEIVE reinforcement from every other branch completely
+    # unaffected (that logic lives in each OTHER branch's own call to
+    # _pick_weakest_branch_for_reinforcement, which can still return
+    # root) - and root can still spawn brand-new children exactly as
+    # before (ROOT_UNLOCK_TIER_USD/_force_root_spawn_ready are both
+    # untouched) - only the "give money to an EXISTING weaker branch"
+    # path is now permanently closed off for root.
     effective_hops_remaining = chain_hops_remaining if chain_hops_remaining is not None else MAX_CHAIN_HOPS
-    can_reinforce = effective_hops_remaining > 0
+    can_reinforce = effective_hops_remaining > 0 and branch.bot_name != ROOT_BOT_NAME
     weakest = await _pick_weakest_branch_for_reinforcement(
         exclude_bot_name=branch.bot_name, also_exclude_bot_names=chain_visited
     ) if can_reinforce else None
