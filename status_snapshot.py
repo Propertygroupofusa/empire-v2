@@ -163,9 +163,62 @@ async def _build_alpaca_section() -> str:
     return "\n".join(lines) + "\n"
 
 
+async def _build_grid_section() -> str:
+    """Real Grid Bot status - added after the account owner asked to
+    "check the dashboard" for the Grid Bot features (the drawdown
+    breaker, dynamic spacing, the $20 Quick Buy button) three separate
+    times, and this session had no way to actually answer that: this
+    file existed before Grid Bot did and was never extended to cover it,
+    so the one real channel available with no live network access
+    (this git snapshot) was blind to the one thing being asked about
+    most. Calls crypto_grid_bot.get_grid_status() directly - the exact
+    same real function the dashboard's own /grid-status endpoint calls,
+    so this can never show a different reality than the live page
+    does."""
+    try:
+        import crypto_grid_bot as grid
+    except Exception as e:
+        return f"## 🔲 Grid Bot\n\n_Could not load: {e}_\n"
+
+    try:
+        status = await grid.get_grid_status()
+    except Exception as e:
+        return f"## 🔲 Grid Bot\n\n_Could not fetch: {e}_\n"
+
+    branches = status.get("branches", [])
+    lines = [
+        "## 🔲 Grid Bot",
+        "",
+        f"- **Mode:** {'ON' if status.get('mode_active') else 'OFF'}",
+        f"- **Dynamic spacing:** {'ON' if status.get('dynamic_spacing_active') else 'OFF (fixed 1%)'}",
+        f"- **Drawdown breaker:** {status.get('drawdown_breaker_pct', 0) * 100:.0f}% off peak",
+        f"- **Total Allocated:** {_fmt_usd(status.get('total_allocated_usd'))}",
+        f"- **Real Free Cash:** {_fmt_usd(status.get('real_free_cash_usd'))}",
+        f"- **Branches:** {len(branches)}",
+        "",
+        "| Branch | Coin | Allocated | Spacing | Levels | Open Slices | Current Price | Peak/Drawdown |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for b in branches:
+        dd = b.get("drawdown_pct")
+        dd_desc = f"{_fmt_usd(b.get('peak_equity'))} ({dd * 100:.0f}% down)" if dd is not None else "—"
+        if b.get("drawdown_breached"):
+            dd_desc = f"🛑 {dd_desc}"
+        lines.append(
+            f"| {b['bot_name']} | {b['product_id']} | {_fmt_usd(b.get('allocated_usd'))} "
+            f"| {b.get('grid_pct', 0) * 100:.2f}% | {b.get('num_levels')} | {b.get('open_slices')} "
+            f"| {_fmt_usd(b.get('current_price'))} | {dd_desc} |"
+        )
+    if not branches:
+        lines.append("| _(no grid branches yet)_ | | | | | | | |")
+
+    return "\n".join(lines) + "\n"
+
+
 async def build_snapshot_markdown() -> str:
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     crypto_section = await _build_crypto_section()
+    grid_section = await _build_grid_section()
     alpaca_section = await _build_alpaca_section()
     return (
         f"# Empire v2 — Real Status Snapshot\n\n"
@@ -173,7 +226,7 @@ async def build_snapshot_markdown() -> str:
         f"this file is written by the running app on a timer and pushed to the "
         f"`{SNAPSHOT_BRANCH}` branch (never `main`). Numbers reflect the live database "
         f"and, where noted, live Coinbase/Alpaca prices at generation time._\n\n"
-        f"{crypto_section}\n{alpaca_section}"
+        f"{crypto_section}\n{grid_section}\n{alpaca_section}"
     )
 
 
