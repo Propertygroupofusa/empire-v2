@@ -699,6 +699,327 @@ async def run_btc_relative_strength_comparison(coins=None, days=BACKTEST_DAYS, l
     }
 
 
+STRATEGY_LAB_MOMENTUM_TARGET_PCT = 0.025  # midpoint of the pasted proposal's "1.5% to 3%"
+STRATEGY_LAB_MOMENTUM_STOP_PCT = 0.015
+STRATEGY_LAB_MOMENTUM_MAX_HOLD_HOURS = 48
+STRATEGY_LAB_GRID_PCT = 0.01
+STRATEGY_LAB_GRID_LEVELS = 10
+STRATEGY_LAB_SWING_LOOKBACK_HOURS = 120  # ~5 days of hourly candles, a real proxy for "recent support"
+STRATEGY_LAB_SWING_TARGET_PCT = 0.07  # midpoint of the pasted proposal's "5% to 10%"
+STRATEGY_LAB_SWING_STOP_PCT = 0.03
+STRATEGY_LAB_SWING_MAX_HOLD_HOURS = 168  # 7 days, the proposal's own outer hold window
+
+
+def _replay_hourly_momentum(closes, highs, lows, spend=None,
+                             target_pct=STRATEGY_LAB_MOMENTUM_TARGET_PCT,
+                             stop_pct=STRATEGY_LAB_MOMENTUM_STOP_PCT,
+                             max_hold_hours=STRATEGY_LAB_MOMENTUM_MAX_HOLD_HOURS):
+    """Real replay of the pasted proposal's "Hourly Momentum Trading" idea:
+    enter on confirmed intraday strength (RSI above 55 AND the hourly
+    SMA20 > SMA50 uptrend - reusing engine._rsi_from_closes and the same
+    SMA pairing _make_higher_tf_trend_gate already validates elsewhere in
+    this file), exit at a real fixed target/stop instead of the baseline's
+    ATR-derived one, since the proposal itself specifies fixed percentage
+    moves. A max_hold_hours backstop marks-to-market if neither fires -
+    same "don't leave a position open forever" pattern already used by
+    the stop-hit-reversal backtest above.
+
+    This is the one proposal idea genuinely close to logic already live
+    (RSI + higher-timeframe trend confirmation) - the other two below
+    (grid, swing) have no real analog in this codebase today."""
+    spend = spend if spend is not None and spend > 0 else SPEND
+    trades = []
+    i = max(ATR_WINDOW, 50)
+    n = len(closes)
+    position = None
+
+    while i < n:
+        price = closes[i]
+        if position is None:
+            rsi = engine._rsi_from_closes(closes[:i + 1])
+            sma20 = sum(closes[i - 19:i + 1]) / 20
+            sma50 = sum(closes[i - 49:i + 1]) / 50
+            if rsi is not None and rsi > 55 and sma20 > sma50:
+                position = {
+                    "entry": price, "qty": spend / price,
+                    "target": price * (1 + target_pct), "stop": price * (1 - stop_pct),
+                    "entry_i": i,
+                }
+            i += 1
+            continue
+
+        held_hours = i - position["entry_i"]
+        exit_reason = None
+        if price >= position["target"]:
+            exit_reason = "TARGET"
+        elif price <= position["stop"]:
+            exit_reason = "STOP"
+        elif held_hours >= max_hold_hours:
+            exit_reason = "TIME"
+
+        if exit_reason:
+            gross = position["qty"] * (price - position["entry"])
+            fee = position["qty"] * (position["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            trades.append((exit_reason, gross - fee))
+            position = None
+        i += 1
+
+    return _summarize_strategy_trades(trades, spend)
+
+
+def _replay_grid_bot(closes, highs, lows, spend=None,
+                      grid_pct=STRATEGY_LAB_GRID_PCT, num_levels=STRATEGY_LAB_GRID_LEVELS):
+    """Real replay of the pasted proposal's "Automated Grid Bot" idea -
+    a genuinely different mechanism from every other strategy in this
+    file: instead of one directional position at a time, capital is split
+    into `num_levels` real slices, buying a slice every time price closes
+    grid_pct below the last reference level and selling the oldest open
+    slice every time price closes grid_pct above it - matching the
+    proposal's own description ("every time Bitcoin ticks down 1%, buy a
+    tiny piece; every time it ticks up 1%, sell that piece").
+
+    Real, stated simplifications (this is a simulation of the CORE
+    mechanic, not Coinbase's actual grid-bot product):
+    - Decided on each hourly candle's CLOSE only, same limitation as
+      backtest_one_coin's own docstring already states for the baseline -
+      a real grid bot watches price continuously, so this likely UNDER-
+      counts how many real grid fills would actually occur.
+    - The proposal claims a real grid bot pays only the lower 0.40% maker
+      fee (limit orders resting in the book) rather than the 0.60% taker
+      rate a market order pays - this simulation does NOT assume that
+      more favorable rate. It reuses the exact same engine.ROUND_TRIP_FEE_RATE
+      every other strategy in this file uses, for one honest reason: this
+      codebase's own live trading engine places MARKET orders everywhere
+      (place_market_buy/place_market_sell), and there's no already-
+      validated real maker-fee assumption anywhere in this codebase to
+      safely reuse instead. Giving the grid strategy a cheaper, unverified
+      fee rate than every other strategy tested here would make this
+      comparison structurally unfair in the grid strategy's own favor.
+      If Coinbase's real current fee schedule is confirmed to differ
+      (see the account owner's own pasted sourcing), this constant should
+      be revisited codebase-wide, not just here.
+    - num_levels caps how many concurrent real slices can be open at
+      once, matching a real fixed capital split - a sustained one-
+      directional move will fill every level and then simply stop buying
+      (or selling) until price reverses, the same real constraint an
+      actual grid bot has."""
+    spend = spend if spend is not None and spend > 0 else SPEND
+    slice_usd = spend / num_levels
+    trades = []
+    n = len(closes)
+    if n < 2:
+        return None
+    # No ATR dependency here (unlike every other replay in this file) -
+    # a grid only needs a single real prior close to anchor its first
+    # reference level, so it doesn't skip a warm-up window the way the
+    # ATR-based strategies have to.
+    i = 1
+    open_slices = []  # FIFO: [{entry, qty}]
+    reference = closes[0]
+
+    while i < n:
+        price = closes[i]
+        if price <= reference * (1 - grid_pct) and len(open_slices) < num_levels:
+            open_slices.append({"entry": price, "qty": slice_usd / price})
+            reference = price
+        elif price >= reference * (1 + grid_pct) and open_slices:
+            slot = open_slices.pop(0)
+            gross = slot["qty"] * (price - slot["entry"])
+            fee = slot["qty"] * (slot["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            trades.append(("GRID_CYCLE", gross - fee))
+            reference = price
+        i += 1
+
+    # Real, honest mark-to-market for whatever slices are still open at
+    # the end of the window - same "don't just discard an open position"
+    # principle every other replay tool in this file already follows,
+    # tagged distinctly so the caller can see how much of the total was
+    # actually realized vs. still sitting open.
+    final_price = closes[-1]
+    for slot in open_slices:
+        gross = slot["qty"] * (final_price - slot["entry"])
+        trades.append(("OPEN_AT_WINDOW_END", gross))
+
+    result = _summarize_strategy_trades(trades, spend)
+    if result is not None:
+        result["open_slices_at_end"] = len(open_slices)
+    return result
+
+
+def _replay_swing_trading(closes, highs, lows, spend=None,
+                           lookback_hours=STRATEGY_LAB_SWING_LOOKBACK_HOURS,
+                           target_pct=STRATEGY_LAB_SWING_TARGET_PCT,
+                           stop_pct=STRATEGY_LAB_SWING_STOP_PCT,
+                           max_hold_hours=STRATEGY_LAB_SWING_MAX_HOLD_HOURS):
+    """Real replay of the pasted proposal's "Spot Swing Trading" idea -
+    buy on a real pullback toward recent support, hold for days for a
+    larger real move. "Support" is operationalized as the real rolling
+    lookback_hours low (a concrete, defensible proxy for a technical
+    support zone, not a claim this matches any specific chart pattern a
+    human trader might draw) - entry requires price within 2% of that
+    rolling low AND RSI confirming a genuine oversold pullback (reusing
+    engine._rsi_from_closes, threshold 40, the same oversold convention
+    prop_bot.py's own mean-reversion entry already uses), not just any
+    dip. Exit at the proposal's own fixed target/stop, or a
+    max_hold_hours backstop (the proposal's own outer "2 to 7 days"
+    window) if neither fires."""
+    spend = spend if spend is not None and spend > 0 else SPEND
+    trades = []
+    i = max(ATR_WINDOW, lookback_hours)
+    n = len(closes)
+    position = None
+
+    while i < n:
+        price = closes[i]
+        if position is None:
+            rolling_low = min(closes[i - lookback_hours:i + 1])
+            near_support = price <= rolling_low * 1.02
+            rsi = engine._rsi_from_closes(closes[:i + 1])
+            if near_support and rsi is not None and rsi < 40:
+                position = {
+                    "entry": price, "qty": spend / price,
+                    "target": price * (1 + target_pct), "stop": price * (1 - stop_pct),
+                    "entry_i": i,
+                }
+            i += 1
+            continue
+
+        held_hours = i - position["entry_i"]
+        exit_reason = None
+        if price >= position["target"]:
+            exit_reason = "TARGET"
+        elif price <= position["stop"]:
+            exit_reason = "STOP"
+        elif held_hours >= max_hold_hours:
+            exit_reason = "TIME"
+
+        if exit_reason:
+            gross = position["qty"] * (price - position["entry"])
+            fee = position["qty"] * (position["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            trades.append((exit_reason, gross - fee))
+            position = None
+        i += 1
+
+    return _summarize_strategy_trades(trades, spend)
+
+
+def _summarize_strategy_trades(trades, spend):
+    """Shared real summary math for the three strategy-lab replays above -
+    identical shape to backtest_one_coin()'s own return dict so the
+    dashboard can render all four (baseline included) through one table."""
+    if not trades:
+        return None
+    total_pnl = sum(net for _, net in trades)
+    wins = [net for _, net in trades if net > 0]
+    return {
+        "num_trades": len(trades),
+        "win_rate": len(wins) / len(trades) * 100,
+        "total_pnl": total_pnl,
+        "roi_pct_of_spend": total_pnl / spend * 100,
+        "avg_trade_pct": (total_pnl / len(trades)) / spend * 100,
+        "spend_used": spend,
+    }
+
+
+STRATEGY_LAB_STRATEGIES = {
+    "baseline": lambda closes, highs, lows, spend: backtest_one_coin(closes, highs, lows, spend=spend),
+    "hourly_momentum": lambda closes, highs, lows, spend: _replay_hourly_momentum(closes, highs, lows, spend=spend),
+    "grid_bot": lambda closes, highs, lows, spend: _replay_grid_bot(closes, highs, lows, spend=spend),
+    "swing_trading": lambda closes, highs, lows, spend: _replay_swing_trading(closes, highs, lows, spend=spend),
+}
+
+
+async def run_strategy_lab_comparison(coins=None, days=BACKTEST_DAYS, max_concurrent=6):
+    """SHADOW-MODE, additive comparison - never touches live trading, never
+    places an order. Direct answer to the account owner's own request
+    ("I would like to try all of the options just to see what my options
+    are... a b c d to see which one I like") after a pasted third-party
+    proposal (Spot Swing Trading / Automated Grid Bot / Hourly Momentum
+    Trading) that itself contained no real backtest, only illustrative
+    arithmetic. Replays the EXISTING live baseline (backtest_one_coin,
+    unchanged) alongside all three new strategies above, on the identical
+    real historical Coinbase candles per coin, so all four are directly,
+    fairly comparable on the same data.
+
+    Real, honest limits stated plainly, not hidden:
+    - grid_bot's own fee assumption may be too pessimistic relative to
+      Coinbase's real grid-bot product specifically (see _replay_grid_bot's
+      own docstring) - or this codebase's existing fee constant may be too
+      OPTIMISTIC for every strategy here, since every real order this
+      codebase places is a market/taker order, not the maker rate the
+      pasted proposal assumed. Worth confirming Coinbase's actual current
+      fee schedule directly rather than trusting either source blind.
+    - None of these three are wired into live trading. Promoting any of
+      them - even hourly_momentum, the closest to what's already live -
+      would be a real, separate, deliberate decision once real evidence
+      from this comparison exists, the same "evidence before any live
+      change" rule every other strategy decision in this file already
+      follows. grid_bot and swing_trading also don't fit the live branch
+      engine's current single-position-per-branch design at all (a grid
+      needs several real concurrent open slices; a multi-day swing hold
+      would conflict with the tree's existing ~30s per-cycle exit checks)
+      - going live with either would need real architecture work first,
+      not just a promote button."""
+    coins = coins or COIN_FAMILY_TREE
+    semaphore = asyncio.Semaphore(max_concurrent)
+    async with aiohttp.ClientSession() as session:
+        async def _one(product_id):
+            async with semaphore:
+                candles = await fetch_historical_candles(session, product_id, days=days)
+            if candles is None:
+                return product_id, None, "not enough historical data"
+            closes, highs, lows, _times = candles
+            per_strategy = {
+                name: fn(closes, highs, lows, None) for name, fn in STRATEGY_LAB_STRATEGIES.items()
+            }
+            return product_id, per_strategy, None
+
+        outcomes = await asyncio.gather(*(_one(pid) for pid in coins))
+
+    comparison = []
+    skipped = []
+    totals = {name: 0.0 for name in STRATEGY_LAB_STRATEGIES}
+    trade_counts = {name: 0 for name in STRATEGY_LAB_STRATEGIES}
+    win_counts = {name: 0 for name in STRATEGY_LAB_STRATEGIES}
+    for product_id, per_strategy, skip_reason in outcomes:
+        if per_strategy is None:
+            skipped.append({"product_id": product_id, "reason": skip_reason})
+            continue
+        comparison.append({"product_id": product_id, **per_strategy})
+        for name, result in per_strategy.items():
+            if result is None:
+                continue
+            totals[name] += result["total_pnl"]
+            trade_counts[name] += result["num_trades"]
+            win_counts[name] += round(result["win_rate"] / 100 * result["num_trades"])
+
+    summary = {
+        name: {
+            "total_pnl": round(totals[name], 2),
+            "num_trades": trade_counts[name],
+            "win_rate": round(win_counts[name] / trade_counts[name] * 100, 1) if trade_counts[name] else None,
+        }
+        for name in STRATEGY_LAB_STRATEGIES
+    }
+    best = max(summary.items(), key=lambda kv: kv[1]["total_pnl"])[0]
+
+    def _sort_key(row):
+        best_result = row.get(best)
+        return best_result["roi_pct_of_spend"] if best_result else -999.0
+    comparison.sort(key=_sort_key, reverse=True)
+
+    return {
+        "backtest_days": days,
+        "spend_per_trade": SPEND,
+        "coins_tested": len(coins),
+        "coins_with_results": len(comparison),
+        "skipped": skipped,
+        "summary": summary,
+        "best_strategy": best,
+        "comparison": comparison,
+    }
+
+
 async def _backtest_one_coin_with_semaphore(session, product_id, semaphore, spend=None):
     async with semaphore:
         candles = await fetch_historical_candles(session, product_id)

@@ -2625,6 +2625,32 @@ async def run_quick_profit_vs_trailing_stop_backtest():
     return await crypto_selection_backtest_module.run_quick_profit_vs_trailing_stop_comparison()
 
 
+@router.post("/crypto-selection-backtest/strategy-lab", dependencies=[Depends(require_admin_key)])
+async def run_strategy_lab_backtest():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    Built after the account owner pasted a third-party proposal (Spot
+    Swing Trading / Automated Grid Bot / Hourly Momentum Trading) that
+    contained no real backtest of its own, only illustrative arithmetic,
+    and asked directly to see all three tested for real against real
+    historical data, A/B/C/D style. See
+    crypto_selection_backtest.run_strategy_lab_comparison() for the real
+    replay logic - the existing live baseline plus all three new
+    strategies, replayed on the identical real historical candles per
+    coin so all four are directly, fairly comparable.
+
+    Real, honest limit: none of the three new strategies are wired into
+    live trading by this backtest, and grid_bot/swing_trading don't fit
+    the live branch engine's current single-position-per-branch design
+    at all - promoting any of them would be a real, separate decision
+    once the account owner has seen these real numbers.
+
+    Pulls real historical data from Coinbase's public candles endpoint -
+    can take 30-90 seconds depending on that endpoint's response time."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_strategy_lab_comparison()
+
+
 class SetExitModeRequest(BaseModel):
     mode: str
 
