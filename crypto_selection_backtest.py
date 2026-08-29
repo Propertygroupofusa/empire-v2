@@ -44,6 +44,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 import crypto_btc_compound_bot as engine
+import crypto_grid_bot as grid_engine  # only for its own real constants (TARGET_NET_MARGIN_PCT etc.) - no circular import, crypto_grid_bot never imports this module
 from crypto_family_tree_bot import COIN_FAMILY_TREE, BREAKEVEN_TRIGGER_PCT, MAX_PROFIT_GIVEBACK_USD
 from database import AsyncSessionLocal
 from models import CryptoTreeBranch, CryptoCoinTradeHistory
@@ -914,6 +915,265 @@ async def run_strategy_lab_comparison(coins=None, days=BACKTEST_DAYS, max_concur
         "skipped": skipped,
         "summary": summary,
         "best_strategy": best,
+        "comparison": comparison,
+    }
+
+
+def _replay_grid_bot_with_drawdown_breaker(closes, highs, lows, spend=None,
+                                            grid_pct=STRATEGY_LAB_GRID_PCT, num_levels=STRATEGY_LAB_GRID_LEVELS,
+                                            drawdown_pct=None):
+    """Real replay of the live crypto_grid_bot.py's own drawdown-breaker
+    mechanism - a genuinely different function from _replay_grid_bot
+    above (not a parameterized variant of it), since testing a breaker
+    means tracking real equity/peak/drawdown through the whole replay,
+    which the baseline grid replay has no reason to do on its own.
+
+    `drawdown_pct=None` replays with NO breaker at all (the real
+    baseline - identical trading behavior to _replay_grid_bot, just
+    computed through this function's own equity-tracking loop so the
+    "no breaker" candidate is directly, fairly comparable to every real
+    threshold candidate on identical code paths). A real float
+    (e.g. 0.25) pauses new slice-opening once real equity - allocated
+    cash-equivalent basis plus real unrealized P&L across every
+    currently-open slice, the EXACT SAME formula
+    crypto_grid_bot._grid_branch_real_equity() itself uses - drops that
+    fraction below its own real running peak. An existing open slice is
+    NEVER blocked from selling by this - matches the live bot's own
+    "pause new entries only, never force-sell a healthy position"
+    philosophy exactly."""
+    spend = spend if spend is not None and spend > 0 else SPEND
+    slice_usd = spend / num_levels
+    trades = []
+    n = len(closes)
+    if n < 2:
+        return None
+    i = 1
+    open_slices = []  # FIFO: [{entry, qty}]
+    reference = closes[0]
+    allocated = spend  # the real cost-basis figure crypto_grid_bot.py's own allocated_usd tracks
+    peak_equity = spend
+    breaches = 0
+    was_breached = False
+
+    while i < n:
+        price = closes[i]
+        unrealized = sum(s["qty"] * (price - s["entry"]) for s in open_slices)
+        equity = allocated + unrealized
+        if equity > peak_equity:
+            peak_equity = equity
+        breached = drawdown_pct is not None and peak_equity > 0 and (peak_equity - equity) / peak_equity >= drawdown_pct
+        if breached and not was_breached:
+            breaches += 1
+        was_breached = breached
+
+        if not breached and price <= reference * (1 - grid_pct) and len(open_slices) < num_levels:
+            open_slices.append({"entry": price, "qty": slice_usd / price})
+            reference = price
+        elif price >= reference * (1 + grid_pct) and open_slices:
+            slot = open_slices.pop(0)
+            gross = slot["qty"] * (price - slot["entry"])
+            fee = slot["qty"] * (slot["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            pnl = gross - fee
+            trades.append(("GRID_CYCLE", pnl))
+            allocated += pnl  # matches the live bot's own allocated_usd += pnl on every real sell
+            reference = price
+        i += 1
+
+    final_price = closes[-1]
+    for slot in open_slices:
+        gross = slot["qty"] * (final_price - slot["entry"])
+        trades.append(("OPEN_AT_WINDOW_END", gross))
+
+    result = _summarize_strategy_trades(trades, spend)
+    if result is not None:
+        result["open_slices_at_end"] = len(open_slices)
+        result["real_breach_count"] = breaches
+        result["was_breached_at_window_end"] = was_breached
+    return result
+
+
+GRID_DRAWDOWN_BREAKER_CANDIDATES = [None, 0.15, grid_engine.GRID_DRAWDOWN_BREAKER_PCT, 0.40]
+
+
+async def run_grid_drawdown_breaker_comparison(coins=None, days=BACKTEST_DAYS, max_concurrent=6, candidates=None):
+    """SHADOW-MODE, additive comparison - never touches live trading,
+    never places an order. Direct answer to "does Grid Bot's new real
+    drawdown breaker actually help, or does it just cut off branches
+    that would have recovered on their own": replays every candidate
+    threshold (plus a real no-breaker baseline) against the identical
+    real historical Coinbase candles per coin, via
+    _replay_grid_bot_with_drawdown_breaker above - never the live-bot
+    code path itself, but the exact same real equity/peak/drawdown
+    math it uses.
+
+    grid_engine.GRID_DRAWDOWN_BREAKER_PCT (today's real live default,
+    25%) is always included in `candidates` even if the caller only
+    passes their own custom list, so the live default is always directly
+    comparable against whatever else is being tested."""
+    coins = coins or COIN_FAMILY_TREE
+    candidates = list(candidates) if candidates else list(GRID_DRAWDOWN_BREAKER_CANDIDATES)
+    if grid_engine.GRID_DRAWDOWN_BREAKER_PCT not in candidates:
+        candidates.append(grid_engine.GRID_DRAWDOWN_BREAKER_PCT)
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async with aiohttp.ClientSession() as session:
+        async def _one(product_id):
+            async with semaphore:
+                candles = await fetch_historical_candles(session, product_id, days=days)
+            if candles is None:
+                return product_id, None, "not enough historical data"
+            closes, highs, lows, _times = candles
+            per_candidate = {
+                _candidate_label(c): _replay_grid_bot_with_drawdown_breaker(closes, highs, lows, drawdown_pct=c)
+                for c in candidates
+            }
+            return product_id, per_candidate, None
+
+        outcomes = await asyncio.gather(*(_one(pid) for pid in coins))
+
+    comparison = []
+    skipped = []
+    labels = [_candidate_label(c) for c in candidates]
+    totals = {label: 0.0 for label in labels}
+    trade_counts = {label: 0 for label in labels}
+    breach_counts = {label: 0 for label in labels}
+    for product_id, per_candidate, skip_reason in outcomes:
+        if per_candidate is None:
+            skipped.append({"product_id": product_id, "reason": skip_reason})
+            continue
+        comparison.append({"product_id": product_id, **per_candidate})
+        for label, result in per_candidate.items():
+            if result is None:
+                continue
+            totals[label] += result["total_pnl"]
+            trade_counts[label] += result["num_trades"]
+            breach_counts[label] += result.get("real_breach_count", 0)
+
+    summary = {
+        label: {
+            "total_pnl": round(totals[label], 2),
+            "num_trades": trade_counts[label],
+            "real_breach_count": breach_counts[label],
+        }
+        for label in labels
+    }
+    best = max(summary.items(), key=lambda kv: kv[1]["total_pnl"])[0]
+
+    return {
+        "backtest_days": days,
+        "spend_per_trade": SPEND,
+        "coins_tested": len(coins),
+        "coins_with_results": len(comparison),
+        "candidates_tested": labels,
+        "live_default_label": _candidate_label(grid_engine.GRID_DRAWDOWN_BREAKER_PCT),
+        "skipped": skipped,
+        "summary": summary,
+        "best_candidate": best,
+        "comparison": comparison,
+    }
+
+
+def _candidate_label(drawdown_pct):
+    return "no_breaker" if drawdown_pct is None else f"{drawdown_pct*100:.0f}pct"
+
+
+# Real, publicly-documented Coinbase Advanced Trade taker-fee tiers by
+# 30-day trailing volume (base -> $10K -> $50K), expressed as a RATIO
+# against the base tier - deliberately not hardcoded absolute fee
+# percentages, so this backtest stays anchored to this codebase's own
+# existing engine.ROUND_TRIP_FEE_RATE assumption (0.8% round trip / 0.4%
+# each way) rather than silently introducing a second, different fee
+# number nothing else in this codebase uses. See
+# crypto_grid_bot.compute_dynamic_grid_pct's own docstring for why the
+# LIVE version of this feature doesn't need this table at all - it reads
+# the account's real current fee tier directly from Coinbase's own
+# /transaction_summary endpoint. This table exists ONLY because this
+# sandbox has no live network access to fetch real historical fee-tier
+# data for a real backtest replay - an honest approximation, not a
+# fetched real number, stated plainly per this file's own established
+# norm for every other estimated constant.
+GRID_FEE_TIER_RATIOS = {
+    "base (<$10K vol)": 1.0,
+    "tier2 ($10K-$50K vol)": 0.40 / 0.60,
+    "tier3 ($50K-$100K vol)": 0.25 / 0.60,
+}
+
+
+async def run_grid_fee_tier_spacing_comparison(coins=None, days=BACKTEST_DAYS, max_concurrent=6):
+    """SHADOW-MODE, additive comparison - never touches live trading,
+    never places an order. Direct answer to "would fee-tier-aware
+    dynamic grid spacing (crypto_grid_bot.compute_dynamic_grid_pct) have
+    actually helped": replays the EXISTING, already-validated
+    _replay_grid_bot at the real grid_pct each fee tier in
+    GRID_FEE_TIER_RATIOS would produce (via the identical real formula
+    compute_dynamic_grid_pct itself uses -
+    grid_engine.TARGET_NET_MARGIN_PCT + round_trip_fee_rate, floored at
+    grid_engine.MIN_DYNAMIC_GRID_PCT), against the identical real
+    historical candles per coin - so all three tiers are directly, fairly
+    comparable. The base tier's own grid_pct is asserted to exactly
+    reproduce today's live grid_pct (0.01) - if this feature is ever
+    turned on for an account still at the base fee tier, nothing about
+    its real trading changes."""
+    coins = coins or COIN_FAMILY_TREE
+    tier_grid_pcts = {}
+    for tier_name, ratio in GRID_FEE_TIER_RATIOS.items():
+        round_trip = engine.ROUND_TRIP_FEE_RATE * ratio
+        tier_grid_pcts[tier_name] = max(grid_engine.MIN_DYNAMIC_GRID_PCT, grid_engine.TARGET_NET_MARGIN_PCT + round_trip)
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async with aiohttp.ClientSession() as session:
+        async def _one(product_id):
+            async with semaphore:
+                candles = await fetch_historical_candles(session, product_id, days=days)
+            if candles is None:
+                return product_id, None, "not enough historical data"
+            closes, highs, lows, _times = candles
+            per_tier = {
+                tier_name: _replay_grid_bot(closes, highs, lows, grid_pct=pct)
+                for tier_name, pct in tier_grid_pcts.items()
+            }
+            return product_id, per_tier, None
+
+        outcomes = await asyncio.gather(*(_one(pid) for pid in coins))
+
+    comparison = []
+    skipped = []
+    tier_names = list(tier_grid_pcts.keys())
+    totals = {name: 0.0 for name in tier_names}
+    trade_counts = {name: 0 for name in tier_names}
+    win_counts = {name: 0 for name in tier_names}
+    for product_id, per_tier, skip_reason in outcomes:
+        if per_tier is None:
+            skipped.append({"product_id": product_id, "reason": skip_reason})
+            continue
+        comparison.append({"product_id": product_id, **per_tier})
+        for name, result in per_tier.items():
+            if result is None:
+                continue
+            totals[name] += result["total_pnl"]
+            trade_counts[name] += result["num_trades"]
+            win_counts[name] += round(result["win_rate"] / 100 * result["num_trades"])
+
+    summary = {
+        name: {
+            "grid_pct": round(tier_grid_pcts[name] * 100, 3),
+            "total_pnl": round(totals[name], 2),
+            "num_trades": trade_counts[name],
+            "win_rate": round(win_counts[name] / trade_counts[name] * 100, 1) if trade_counts[name] else None,
+        }
+        for name in tier_names
+    }
+    best = max(summary.items(), key=lambda kv: kv[1]["total_pnl"])[0]
+
+    return {
+        "backtest_days": days,
+        "spend_per_trade": SPEND,
+        "coins_tested": len(coins),
+        "coins_with_results": len(comparison),
+        "tier_grid_pcts": {k: round(v * 100, 3) for k, v in tier_grid_pcts.items()},
+        "skipped": skipped,
+        "summary": summary,
+        "best_tier": best,
         "comparison": comparison,
     }
 

@@ -158,6 +158,20 @@
     <button class="run-btn" id="labBtn" onclick="runStrategyLab()">▶ Run Strategy Lab: A vs B vs C vs D (~30-90 seconds)</button>
     <div id="labStatus"></div>
     <div id="labResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>🛡️ Grid Bot drawdown breaker - does it actually help?</strong> Grid Bot went live with no account-level protection at all - a losing branch could keep buying new slices into a real, sustained decline forever. A real per-branch drawdown circuit breaker now ships live (pauses NEW buys once real equity drops a % below its own peak - existing open slices keep selling normally, never force-sold). This replays several real candidate thresholds, plus a real no-breaker baseline, against the identical real historical candles per coin, using the exact same real equity/peak/drawdown math the live breaker itself uses. Shadow mode only - never places an order.
+    </div>
+    <button class="run-btn" id="gdbBtn" onclick="runGridDrawdownBreakerBacktest()">▶ Run Grid Drawdown Breaker Comparison (~30-90 seconds)</button>
+    <div id="gdbStatus"></div>
+    <div id="gdbResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>🎯 Grid Bot fee-tier-aware dynamic spacing - would it have helped?</strong> Grid Bot always trades a fixed 1% spacing regardless of the account's real Coinbase fee tier. This real, opt-in feature (off by default) narrows the real spacing as the account's real fee tier improves, holding a fixed net-margin target instead of a fixed percentage - at the base fee tier it behaves byte-identically to today. Replays the existing, already-validated grid strategy at the real grid_pct each Coinbase Advanced Trade volume tier would produce, against the identical real historical candles per coin. One honest limitation, stated plainly: this sandbox has no live access to real historical fee-tier data, so the tier spacing here is modeled from Coinbase's publicly documented tier ratios against this codebase's own existing fee assumption - the LIVE feature itself reads the account's real current fee tier directly, no approximation needed there. Shadow mode only.
+    </div>
+    <button class="run-btn" id="gfsBtn" onclick="runGridFeeTierSpacingBacktest()">▶ Run Grid Fee-Tier Spacing Comparison (~30-90 seconds)</button>
+    <div id="gfsStatus"></div>
+    <div id="gfsResults"></div>
 </div>
 
 <script>
@@ -876,6 +890,166 @@ function renderStrategyLabResults(data) {
             <tbody>${coinRows}</tbody>
         </table>
         <p class="trade-note">Real evidence, not a recommendation on its own - see the honest limits noted above the run button, especially for Grid Bot and Swing Trading, before deciding whether to pursue building either for real.</p>
+    `;
+}
+
+async function runGridDrawdownBreakerBacktest() {
+    const btn = document.getElementById('gdbBtn');
+    const statusEl = document.getElementById('gdbStatus');
+    const resultsEl = document.getElementById('gdbResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real data, several candidates replayed per coin)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/crypto-selection-backtest/grid-drawdown-breaker', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderGridDrawdownBreakerResults(data);
+        const best = data.summary[data.best_candidate];
+        statusEl.textContent = `Compared ${data.coins_with_results} coins over ${data.backtest_days} days across ${data.candidates_tested.length} candidates. Best on this real sample: ${data.best_candidate} ($${best.total_pnl.toFixed(2)} total).`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Grid Drawdown Breaker Comparison (~30-90 seconds)';
+    }
+}
+
+function renderGridDrawdownBreakerResults(data) {
+    const resultsEl = document.getElementById('gdbResults');
+    if (!data.comparison || data.comparison.length === 0) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No coins produced usable comparison results.</p>';
+        return;
+    }
+    const labels = data.candidates_tested;
+    const summaryRows = labels.map(label => {
+        const s = data.summary[label];
+        const isBest = label === data.best_candidate;
+        const isLive = label === data.live_default_label;
+        const cls = s.total_pnl >= 0 ? 'pos' : 'neg';
+        return `<tr${isBest ? ' style="font-weight:700;"' : ''}>
+            <td>${label === 'no_breaker' ? 'No breaker (baseline)' : label.replace('pct', '%') + ' drawdown breaker'}${isBest ? ' 🏆' : ''}${isLive ? ' <span style="color:var(--text-dim);">(today\'s live default)</span>' : ''}</td>
+            <td>${s.num_trades}</td>
+            <td>${s.real_breach_count}</td>
+            <td class="${cls}">${s.total_pnl >= 0 ? '+' : ''}$${s.total_pnl.toFixed(2)}</td>
+        </tr>`;
+    }).join('');
+
+    const coinRows = data.comparison.map(row => {
+        const cells = labels.map(label => {
+            const r = row[label];
+            if (!r) return `<td style="color:var(--text-dim);">no trades</td>`;
+            const cls = r.total_pnl >= 0 ? 'pos' : 'neg';
+            return `<td class="${cls}">${r.total_pnl >= 0 ? '+' : ''}$${r.total_pnl.toFixed(2)} <span style="color:var(--text-dim);">(${r.real_breach_count} breach${r.real_breach_count === 1 ? '' : 'es'})</span></td>`;
+        }).join('');
+        return `<tr><td>${row.product_id}</td>${cells}</tr>`;
+    }).join('');
+
+    resultsEl.innerHTML = `
+        <table style="margin-top:14px;">
+            <thead><tr><th>Candidate</th><th>Trades</th><th>Real breach count</th><th>Real total P&amp;L</th></tr></thead>
+            <tbody>${summaryRows}</tbody>
+        </table>
+        <table style="margin-top:14px;">
+            <thead><tr><th>Coin</th>${labels.map(l => `<th>${l === 'no_breaker' ? 'No breaker' : l}</th>`).join('')}</tr></thead>
+            <tbody>${coinRows}</tbody>
+        </table>
+        <p class="trade-note">"Real breach count" is how many separate times that candidate's real drawdown threshold actually engaged and paused new buys on that coin over the window - a threshold that engages often but doesn't improve total P&amp;L is pausing on ordinary grid noise, not protecting against a real bad trend. This tests whether the live breaker helps or just gets in the way - it doesn't change the live default on its own.</p>
+    `;
+}
+
+const GRID_TIER_LABELS_ORDER = ['base (<$10K vol)', 'tier2 ($10K-$50K vol)', 'tier3 ($50K-$100K vol)'];
+
+async function runGridFeeTierSpacingBacktest() {
+    const btn = document.getElementById('gfsBtn');
+    const statusEl = document.getElementById('gfsStatus');
+    const resultsEl = document.getElementById('gfsResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real data, three fee tiers replayed per coin)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/crypto-selection-backtest/grid-fee-tier-spacing', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderGridFeeTierSpacingResults(data);
+        const best = data.summary[data.best_tier];
+        statusEl.textContent = `Compared ${data.coins_with_results} coins over ${data.backtest_days} days across 3 real fee tiers. Best on this real sample: ${data.best_tier} ($${best.total_pnl.toFixed(2)} total at ${best.grid_pct}% spacing).`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Grid Fee-Tier Spacing Comparison (~30-90 seconds)';
+    }
+}
+
+function renderGridFeeTierSpacingResults(data) {
+    const resultsEl = document.getElementById('gfsResults');
+    if (!data.comparison || data.comparison.length === 0) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No coins produced usable comparison results.</p>';
+        return;
+    }
+    const tierNames = GRID_TIER_LABELS_ORDER.filter(t => t in data.summary);
+    const summaryRows = tierNames.map(name => {
+        const s = data.summary[name];
+        const isBest = name === data.best_tier;
+        const cls = s.total_pnl >= 0 ? 'pos' : 'neg';
+        return `<tr${isBest ? ' style="font-weight:700;"' : ''}>
+            <td>${name}${isBest ? ' 🏆' : ''}</td>
+            <td>${s.grid_pct}%</td>
+            <td>${s.num_trades}</td>
+            <td>${s.win_rate == null ? '—' : s.win_rate.toFixed(1) + '%'}</td>
+            <td class="${cls}">${s.total_pnl >= 0 ? '+' : ''}$${s.total_pnl.toFixed(2)}</td>
+        </tr>`;
+    }).join('');
+
+    const coinRows = data.comparison.map(row => {
+        const cells = tierNames.map(name => {
+            const r = row[name];
+            if (!r) return `<td style="color:var(--text-dim);">no trades</td>`;
+            const cls = r.total_pnl >= 0 ? 'pos' : 'neg';
+            return `<td class="${cls}">${r.total_pnl >= 0 ? '+' : ''}$${r.total_pnl.toFixed(2)} <span style="color:var(--text-dim);">(${r.num_trades}tr, ${r.win_rate.toFixed(0)}%)</span></td>`;
+        }).join('');
+        return `<tr><td>${row.product_id}</td>${cells}</tr>`;
+    }).join('');
+
+    resultsEl.innerHTML = `
+        <table style="margin-top:14px;">
+            <thead><tr><th>Real fee tier</th><th>Real grid spacing</th><th>Trades</th><th>Win rate</th><th>Real total P&amp;L</th></tr></thead>
+            <tbody>${summaryRows}</tbody>
+        </table>
+        <table style="margin-top:14px;">
+            <thead><tr><th>Coin</th>${tierNames.map(t => `<th>${t}</th>`).join('')}</tr></thead>
+            <tbody>${coinRows}</tbody>
+        </table>
+        <p class="trade-note">"base (&lt;$10K vol)" always reproduces today's live 1% spacing exactly - this feature only ever changes anything once the real account genuinely qualifies for a lower fee tier. Real evidence here, not a recommendation on its own - the toggle to turn this on lives on the family tree dashboard, next to the Grid Bot panel.</p>
     `;
 }
 

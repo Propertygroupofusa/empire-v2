@@ -561,7 +561,11 @@
         performer (+$69.50 total P&amp;L, 59.2% win rate, 637 trades - vs. the live baseline's real -$1,457.43 over the
         same coins/window). Its own real capital, its own real position tracking - never touches or shares state with the
         family tree branches above. Master switch defaults ON; nothing trades until a real branch actually exists below.
+        Every branch also carries a real drawdown circuit breaker (pauses NEW buys only, once real equity drops 25% below
+        its own peak - existing slices keep selling normally) - it's the account-level protection Grid Bot never had
+        before.
     </p>
+    <div id="grid-dynamic-spacing-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div class="panel" id="grid-panel">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:8px;">
             <button id="grid-mode-toggle-btn" class="unlock-btn" onclick="toggleGridMode()" disabled>Loading…</button>
@@ -1463,6 +1467,8 @@ function renderGridStatus(data, tradeHistoryByBot) {
     toggleBtn.disabled = false;
     toggleBtn.textContent = gridModeActive ? '⏸️ Disable grid trading' : '▶️ Enable grid trading';
 
+    renderGridDynamicSpacingBadge(!!data.dynamic_spacing_active);
+
     document.getElementById('grid-total-allocated').textContent =
         `${fmtUsd(data.total_allocated_usd)} total real capital across ${data.branch_count} grid branch${data.branch_count === 1 ? '' : 'es'}`;
 
@@ -1496,13 +1502,16 @@ function renderGridStatus(data, tradeHistoryByBot) {
                         resultsStr = `<span style="color:${pnlColor}; font-weight:600;">${hist.total_pnl >= 0 ? '+' : ''}${fmtUsd(hist.total_pnl)} (${returnPct >= 0 ? '+' : ''}${returnPct.toFixed(1)}%)</span>`
                             + `<div style="font-size:0.8em; color:var(--text-dim); margin-top:2px;">${hist.trade_count} trade${hist.trade_count === 1 ? '' : 's'} · ${hist.win_rate.toFixed(0)}% win</div>`;
                     }
+                    const statusStr = b.drawdown_breached
+                        ? `🛑 <span style="color:var(--red);" title="Real equity is down ${((b.drawdown_pct || 0) * 100).toFixed(0)}% from its own $${(b.peak_equity || 0).toFixed(2)} peak - new buys paused, existing slices still sell normally">breach (${((b.drawdown_pct || 0) * 100).toFixed(0)}% down)</span>`
+                        : (b.active ? '🟢 active' : '⏸️ paused');
                     return `<tr style="border-bottom:1px solid var(--border);">
                         <td style="padding:6px 8px;">${b.bot_name}</td>
                         <td style="padding:6px 8px;">${b.product_id}</td>
                         <td style="padding:6px 8px;">${fmtUsd(b.allocated_usd)}</td>
                         <td style="padding:6px 8px;">${slicesStr}</td>
                         <td style="padding:6px 8px;">${resultsStr}</td>
-                        <td style="padding:6px 8px;">${b.active ? '🟢 active' : '⏸️ paused'}</td>
+                        <td style="padding:6px 8px;">${statusStr}</td>
                         <td style="padding:6px 8px;">
                             <a href="#" onclick="toggleGridBranchActive('${b.bot_name}', ${!b.active}); return false;" style="color:var(--navy);">
                                 ${b.active ? 'Pause' : 'Resume'}
@@ -1604,6 +1613,46 @@ function renderGridBranchChart(b) {
             ${sliceMarkers}
         </svg>
         ${slices.length === 0 ? '<div style="font-size:0.78em; color:var(--text-dim); margin-top:4px;">No open slices yet - waiting for a real 1% dip below the reference price.</div>' : ''}`;
+}
+
+// Real, opt-in fee-tier-aware dynamic grid spacing toggle - per the
+// account owner's explicit "build both, backtest before going live."
+// Off by default; narrows the real grid spacing as the account's real
+// Coinbase fee tier improves, holding a fixed net-margin target instead
+// of a fixed percentage. See crypto_selection_backtest.py's
+// run_grid_fee_tier_spacing_comparison for the real backtest evidence
+// that should inform whether to turn this on - same "evidence before
+// any live change" discipline as every other real strategy toggle in
+// this codebase.
+function renderGridDynamicSpacingBadge(active) {
+    const el = document.getElementById('grid-dynamic-spacing-badge');
+    if (!el) return;
+    const label = active
+        ? '<strong style="color:var(--green);">ON</strong> - real spacing narrows as the account\'s real Coinbase fee tier improves'
+        : '<strong style="color:var(--text-dim);">OFF</strong> - fixed 1% spacing regardless of real fee tier';
+    el.innerHTML = `🎯 Fee-tier-aware dynamic spacing: ${label} — ` +
+        `<a href="javascript:void(0)" onclick="toggleGridDynamicSpacing(${!active})" style="color: var(--navy);">${active ? 'turn off' : 'turn on'}</a> ` +
+        `<span style="color:var(--text-dim);">(real evidence: <a href="/crypto-selection-backtest-view" style="color: var(--navy);">Grid Fee-Tier Spacing Backtest</a>)</span>`;
+}
+
+async function toggleGridDynamicSpacing(enable) {
+    const msg = enable
+        ? 'Turn ON fee-tier-aware dynamic spacing? Every real grid branch will start recomputing its own grid_pct from the account\'s real live Coinbase fee tier each cycle instead of a fixed 1% - narrower spacing (more, smaller real trades) once the account genuinely qualifies for a lower fee tier. Falls back to the fixed 1% default if the real fee-tier lookup ever fails.'
+        : 'Turn OFF dynamic spacing? Every real grid branch goes back to the fixed 1% spacing.';
+    if (!confirm(msg)) return;
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/grid-status/dynamic-spacing', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: enable }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        renderGridDynamicSpacingBadge(data.dynamic_spacing_active);
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
 }
 
 async function loadGridStatus() {

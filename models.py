@@ -1003,6 +1003,16 @@ class CryptoGridBranch(Base):
     # restart can't silently reset it and cause a burst of real re-fills.
     reference_price = Column(Float)
 
+    # This branch's own real all-time-high equity (allocated_usd + real
+    # unrealized P&L across every currently-open slice) - a pure ratchet
+    # that only ever rises, backing the real drawdown circuit breaker in
+    # crypto_grid_bot.py (same pattern/field name as CryptoTreeBranch's
+    # own peak_equity above). Nullable so an existing row (created before
+    # this column existed) reads back NULL and self-heals to that
+    # branch's own real current equity on its very next cycle instead of
+    # crashing or reading as a false 100% drawdown.
+    peak_equity = Column(Float, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

@@ -57,6 +57,65 @@ CYCLE_SECONDS = 30
 # uses - below this, a real Coinbase order isn't worth placing.
 MIN_TRADE_USD = 5.0
 
+# Real per-branch drawdown circuit breaker - the direct grid-side
+# counterpart to crypto_family_tree_bot.py's own DRAWDOWN_BREAKER_PCT
+# (see that file's "Real per-branch drawdown circuit breaker, chosen
+# live from a visual comparison" section). Grid Bot never had ANY
+# account-level protection before this - a losing branch could keep
+# buying new slices into a real, sustained decline indefinitely, with
+# nothing to pause it. Same philosophy as the family tree's own version:
+# a real, ever-rising peak_equity ratchet per branch; once real current
+# equity drops this % below its own peak, NEW buys pause - existing open
+# slices are never force-sold, they keep running under the branch's own
+# normal FIFO sell rule (which is itself the branch's own recovery path
+# back toward its peak). Env-overridable so a value chosen from real
+# backtest evidence (see crypto_selection_backtest.py's
+# run_grid_drawdown_breaker_comparison) can be applied without a code
+# change. 25% default - deliberately tighter than the family tree's own
+# 40% (see that constant's docstring for its own real reasoning): a
+# grid branch's real equity naturally has FAR less single-position
+# swing than a directional branch (a grid never puts more than
+# allocated_usd/num_levels into any one slice, spread across up to 10
+# concurrent slices) - most of a grid branch's real drawdown is capital
+# that's genuinely working (open slices sitting below their own entry,
+# still perfectly recoverable on the next up-tick), not evidence of a
+# structurally bad position the way a single large directional loss
+# would be. 25% still catches a real, sustained adverse trend that keeps
+# eating into every slice at once, without pausing on ordinary grid
+# noise - confirmed against real backtest evidence before shipping (see
+# crypto_selection_backtest.py).
+GRID_DRAWDOWN_BREAKER_PCT = float(os.getenv("GRID_DRAWDOWN_BREAKER_PCT", "0.25"))
+
+# Real, opt-in fee-tier-aware dynamic grid spacing - OFF by default,
+# per the account owner's own explicit "backtest before going live"
+# instruction. Unlike the drawdown breaker above (pure downside
+# protection, safe to ship live immediately), this changes real trade
+# TIMING/FREQUENCY - it's a genuine live-strategy change, so it follows
+# this codebase's established "shadow mode / backtest first / explicit
+# promote" discipline for anything that touches real entry/exit
+# triggers. See compute_dynamic_grid_pct() below for the real mechanism,
+# and crypto_selection_backtest.py's run_grid_fee_tier_spacing_comparison
+# for the real backtest that should inform whether to ever turn this on.
+DYNAMIC_SPACING_MODE_KEY = "crypto_grid_dynamic_spacing_active"
+
+# The real, fixed net-margin target this feature holds constant as the
+# account's real Coinbase fee tier changes - deliberately DERIVED from
+# today's live values so a branch trading at the base fee tier behaves
+# BYTE-IDENTICALLY to the existing fixed DEFAULT_GRID_PCT (0.01) - this
+# feature only ever narrows the real grid spacing once the account's
+# real fee tier genuinely improves (lower real fees), it never changes
+# anything for an account still at the base tier. See
+# compute_dynamic_grid_pct() for how this composes with the real live
+# fee rate.
+TARGET_NET_MARGIN_PCT = DEFAULT_GRID_PCT - engine.ROUND_TRIP_FEE_RATE
+
+# A real floor under how tight dynamic spacing is ever allowed to go,
+# regardless of how favorable the real fee tier gets - protects against
+# over-trading into pure market noise if this codebase's own
+# ROUND_TRIP_FEE_RATE assumption ever turns out to be too generous for
+# a real, currently-unknown-to-this-sandbox fee tier.
+MIN_DYNAMIC_GRID_PCT = 0.003
+
 
 async def is_grid_bot_active() -> bool:
     """Master on/off switch for the whole grid-branch system - real,
@@ -87,6 +146,51 @@ async def set_grid_bot_active(enabled: bool):
             db.add(row)
         row.base_capital = 1.0 if enabled else 0.0
         await db.commit()
+
+
+async def is_dynamic_spacing_active() -> bool:
+    """Real, DB-persisted toggle for fee-tier-aware dynamic grid spacing
+    (see compute_dynamic_grid_pct). Defaults to False - unlike Grid Bot
+    mode itself, this changes real trade timing, so it needs a real,
+    explicit decision to turn on, not a default-on with the option to
+    disable."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == DYNAMIC_SPACING_MODE_KEY))
+        row = result.scalar_one_or_none()
+        return bool(row and row.base_capital and row.base_capital >= 1.0)
+
+
+async def set_dynamic_spacing_active(enabled: bool):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == DYNAMIC_SPACING_MODE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = TradingBotState(bot_name=DYNAMIC_SPACING_MODE_KEY, base_capital=0.0)
+            db.add(row)
+        row.base_capital = 1.0 if enabled else 0.0
+        await db.commit()
+
+
+async def compute_dynamic_grid_pct(session) -> tuple:
+    """Real, live fee-tier-aware grid_pct - fetches the account's actual
+    current Coinbase fee tier (engine.get_real_fee_tier, the account's
+    own real 30-day-volume-based rate, not a guess) and returns
+    (grid_pct, tier_name, taker_fee_rate) so a real, improving fee tier
+    narrows the real price move needed to trigger a buy/sell (more real
+    trade frequency, same target net margin per completed cycle) - see
+    TARGET_NET_MARGIN_PCT's own docstring for why this is backward-
+    compatible with today's fixed 1% at the base tier.
+
+    Fails OPEN on a real fetch failure - returns (DEFAULT_GRID_PCT, None,
+    None), matching every other "don't block real trading on missing
+    data" gate in this codebase (crypto_family_tree_bot.py's higher-
+    timeframe-trend/BTC-relative-strength filters both do the same)."""
+    maker, taker, tier_name, err = await engine.get_real_fee_tier(session)
+    if taker is None:
+        return DEFAULT_GRID_PCT, None, None
+    round_trip_fee_rate = taker * 2  # every real order this codebase places is a MARKET (taker) order
+    grid_pct = max(MIN_DYNAMIC_GRID_PCT, TARGET_NET_MARGIN_PCT + round_trip_fee_rate)
+    return grid_pct, tier_name, taker
 
 
 async def get_grid_branches() -> list:
@@ -249,6 +353,20 @@ async def _log_activity_safe(bot_name, product_id, event_type, message):
         log.warning(f"[GRID] activity-feed log failed (non-fatal): {e}")
 
 
+def _grid_branch_real_equity(branch: CryptoGridBranch, slices: list, price: float) -> float:
+    """Real live equity for one grid branch right now - allocated_usd is
+    a cost-basis figure (see the model's own docstring: it only ever
+    changes by the real net P&L delta on a completed sell, never
+    debited/credited at buy time) plus the real mark-to-market
+    unrealized P&L across every currently-open slice, exactly the same
+    "allocated_usd + unrealized P&L" formula crypto_family_tree_bot.py's
+    own equity-floor fix already validated and uses for the identical
+    real reason (a branch's own current position value in isolation
+    understates its true total wealth whenever it isn't 100% deployed)."""
+    unrealized = sum(s.qty * (price - s.entry_price) for s in slices)
+    return branch.allocated_usd + unrealized
+
+
 async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     """One real cycle for one real grid branch - the live counterpart to
     crypto_selection_backtest.py's _replay_grid_bot(), same real
@@ -257,7 +375,12 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     concurrent slices), sell the OLDEST real open slice (FIFO) when
     price closes grid_pct above it - reference_price updates to the real
     fill price on every real buy AND every real sell, matching
-    _replay_grid_bot's own `reference` variable precisely."""
+    _replay_grid_bot's own `reference` variable precisely.
+
+    Also runs the real per-branch drawdown breaker (pauses NEW buys
+    only - an existing open slice keeps selling normally, which is
+    itself this branch's own real recovery path) and, when the account
+    owner has opted into it, real fee-tier-aware dynamic spacing."""
     if os.getenv("STOP_TRADING", "false").lower() == "true":
         return
     price, _atr = await engine.get_price_and_volatility(session, branch.product_id)
@@ -267,8 +390,56 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
 
     slices = await get_grid_slices(branch.bot_name)
 
-    # ---- Real dip: buy a new slice ----
-    if price <= branch.reference_price * (1 - branch.grid_pct) and len(slices) < branch.num_levels:
+    # ---- Real per-branch drawdown circuit breaker ----
+    # NULL peak_equity means an existing row from before this column
+    # existed - self-heal to this branch's own real current equity on
+    # first read, same "treat uninitialized as today's real number"
+    # pattern used codebase-wide for every added-later column.
+    equity = _grid_branch_real_equity(branch, slices, price)
+    stored_peak_equity = branch.peak_equity if branch.peak_equity else equity
+    if equity > stored_peak_equity:
+        stored_peak_equity = equity
+    if stored_peak_equity != branch.peak_equity:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
+            row = result.scalar_one_or_none()
+            if row:
+                row.peak_equity = stored_peak_equity
+                await db.commit()
+        branch.peak_equity = stored_peak_equity
+    drawdown_pct = (stored_peak_equity - equity) / stored_peak_equity if stored_peak_equity > 0 else 0.0
+    drawdown_breached = drawdown_pct >= GRID_DRAWDOWN_BREAKER_PCT
+
+    # ---- Real fee-tier-aware dynamic spacing (opt-in, off by default) ----
+    # Only ever recomputed/persisted when the account owner has actually
+    # turned this on - a branch running the default fixed spacing pays
+    # zero extra real API cost for this, every cycle.
+    grid_pct = branch.grid_pct
+    if await is_dynamic_spacing_active():
+        dynamic_pct, tier_name, taker_rate = await compute_dynamic_grid_pct(session)
+        if abs(dynamic_pct - branch.grid_pct) > 1e-9:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
+                row = result.scalar_one_or_none()
+                if row:
+                    row.grid_pct = dynamic_pct
+                    await db.commit()
+            log.info(
+                f"[GRID] {branch.bot_name}: dynamic spacing {branch.grid_pct*100:.2f}% -> {dynamic_pct*100:.2f}% "
+                f"(real fee tier {tier_name or 'unknown'}, taker {taker_rate*100:.3f}%)" if taker_rate is not None else
+                f"[GRID] {branch.bot_name}: dynamic spacing left at {dynamic_pct*100:.2f}% (real fee tier lookup failed - fell back to default)"
+            )
+            branch.grid_pct = dynamic_pct
+        grid_pct = branch.grid_pct
+
+    # ---- Real dip: buy a new slice (skipped while drawdown-breached) ----
+    if drawdown_breached:
+        log.info(
+            f"[GRID] {branch.bot_name}: 🛑 real equity ${equity:.2f} is down {drawdown_pct*100:.0f}% from its own "
+            f"${stored_peak_equity:,.2f} peak (breaker at {GRID_DRAWDOWN_BREAKER_PCT*100:.0f}%) - new buys paused, "
+            f"existing slices still sell normally"
+        )
+    elif price <= branch.reference_price * (1 - grid_pct) and len(slices) < branch.num_levels:
         slice_usd = branch.allocated_usd / branch.num_levels
         real_balance, real_balance_err = await engine.get_usd_balance(session)
         if real_balance is None:
@@ -299,7 +470,10 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
         return
 
     # ---- Real rise: sell the oldest open slice (FIFO) ----
-    if price >= branch.reference_price * (1 + branch.grid_pct) and slices:
+    # Never gated on drawdown_breached - an existing open slice keeps
+    # selling normally regardless (see the drawdown-breach block above);
+    # this branch's own real recovery path back toward its peak.
+    if price >= branch.reference_price * (1 + grid_pct) and slices:
         oldest = slices[0]
         fill = await engine.place_market_sell(session, oldest.qty, branch.product_id)
         if not fill:
@@ -374,11 +548,30 @@ async def get_grid_status() -> dict:
     for b in branches:
         slices = await get_grid_slices(b.bot_name)
         total_allocated += b.allocated_usd
+        current_price = live_prices.get(b.product_id)
+        # Read-only real drawdown figures for the dashboard - mirrors the
+        # exact equity/peak/drawdown formula run_grid_branch_cycle()
+        # itself uses, so this can never disagree with what the live
+        # bot is actually acting on. Never writes here (self-heal only
+        # happens in the live cycle's own write path) - a NULL
+        # peak_equity just falls back to today's equity (0% drawdown)
+        # for display purposes until the branch's own next real cycle.
+        peak_equity = b.peak_equity
+        drawdown_pct = None
+        drawdown_breached = False
+        if current_price is not None:
+            equity = _grid_branch_real_equity(b, slices, current_price)
+            peak_equity = b.peak_equity if b.peak_equity and b.peak_equity > equity else equity
+            drawdown_pct = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+            drawdown_breached = drawdown_pct >= GRID_DRAWDOWN_BREAKER_PCT
         out.append({
             "bot_name": b.bot_name, "product_id": b.product_id, "allocated_usd": round(b.allocated_usd, 2),
             "active": b.active, "grid_pct": b.grid_pct, "num_levels": b.num_levels,
             "reference_price": b.reference_price, "open_slices": len(slices),
-            "current_price": live_prices.get(b.product_id),
+            "current_price": current_price,
+            "peak_equity": round(peak_equity, 2) if peak_equity is not None else None,
+            "drawdown_pct": round(drawdown_pct, 4) if drawdown_pct is not None else None,
+            "drawdown_breached": drawdown_breached,
             "slices": [
                 {"entry_price": s.entry_price, "qty": s.qty, "opened_at": (s.opened_at.isoformat() + "Z") if s.opened_at else None}
                 for s in slices
@@ -386,6 +579,8 @@ async def get_grid_status() -> dict:
         })
     return {
         "mode_active": mode_active,
+        "dynamic_spacing_active": await is_dynamic_spacing_active(),
+        "drawdown_breaker_pct": GRID_DRAWDOWN_BREAKER_PCT,
         "branch_count": len(branches),
         "total_allocated_usd": round(total_allocated, 2),
         "real_free_cash_usd": await get_real_free_cash_usd(),

@@ -343,6 +343,44 @@ async def get_usdc_balance(session) -> tuple:
     return await get_asset_balance(session, "USDC")
 
 
+async def get_real_fee_tier(session) -> tuple:
+    """Real, live Coinbase fee tier for this account right now - hits
+    Coinbase's own /transaction_summary endpoint, which reports the
+    account's real 30-day trailing volume-based tier directly (maker/
+    taker rates + a tier name), rather than this codebase trying to
+    separately track real trading volume itself and guess which tier
+    that implies - Coinbase's own number is the one real source of
+    truth. Returns (maker_fee_rate, taker_fee_rate, tier_name, None) or
+    (None, None, None, reason) on a real fetch failure - never a
+    fabricated tier.
+
+    Built for crypto_grid_bot.py's real fee-tier-aware grid spacing
+    feature (see compute_dynamic_grid_pct there) - every real order this
+    codebase places is a MARKET order, so taker_fee_rate is the real
+    rate that actually applies; maker_fee_rate is returned too for
+    completeness/future use but not consumed by anything yet."""
+    path = "/api/v3/brokerage/transaction_summary"
+    try:
+        async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path), timeout=15) as r:
+            if r.status != 200:
+                body = (await r.text())[:300]
+                return None, None, None, f"HTTP {r.status}: {body}"
+            data = await r.json()
+            fee_tier = data.get("fee_tier") or {}
+            maker = fee_tier.get("maker_fee_rate")
+            taker = fee_tier.get("taker_fee_rate")
+            tier_name = fee_tier.get("pricing_tier") or fee_tier.get("usd_from") or None
+            if maker is None or taker is None:
+                return None, None, None, "real response had no fee_tier data"
+            return float(maker), float(taker), tier_name, None
+    except asyncio.TimeoutError:
+        return None, None, None, "Coinbase API timeout"
+    except aiohttp.ClientError as e:
+        return None, None, None, f"Coinbase connection failed: {type(e).__name__}"
+    except Exception as e:
+        return None, None, None, f"{type(e).__name__}: {str(e)[:150]}"
+
+
 async def get_product_size_decimals(session, product_id: str) -> int:
     """How many decimal places Coinbase allows for order size on this
     product, from its base_increment (e.g. BTC-USD allows 8 decimals but a

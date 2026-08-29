@@ -2709,6 +2709,52 @@ async def run_strategy_lab_backtest():
     return await crypto_selection_backtest_module.run_strategy_lab_comparison()
 
 
+@router.post("/crypto-selection-backtest/grid-drawdown-breaker", dependencies=[Depends(require_admin_key)])
+async def run_grid_drawdown_breaker_backtest():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    Grid Bot went live with no account-level protection at all - a
+    losing branch could keep buying new slices into a real, sustained
+    decline indefinitely. Per the account owner's explicit "build both,
+    backtest before going live," this replays several real candidate
+    drawdown-breaker thresholds (plus a real no-breaker baseline) against
+    the identical real historical Coinbase candles per coin, via
+    crypto_selection_backtest.py's run_grid_drawdown_breaker_comparison -
+    the exact same real equity/peak/drawdown math the live bot's own
+    breaker uses, just replayed offline. Always includes today's real
+    live default (crypto_grid_bot.GRID_DRAWDOWN_BREAKER_PCT, 25%) so it's
+    directly comparable against every other candidate tested.
+
+    Pulls real historical data from Coinbase's public candles endpoint -
+    can take 30-90 seconds depending on that endpoint's response time."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_grid_drawdown_breaker_comparison()
+
+
+@router.post("/crypto-selection-backtest/grid-fee-tier-spacing", dependencies=[Depends(require_admin_key)])
+async def run_grid_fee_tier_spacing_backtest():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    Real backtest for Grid Bot's opt-in fee-tier-aware dynamic spacing
+    (crypto_grid_bot.compute_dynamic_grid_pct) - per the account owner's
+    explicit "build both, backtest before going live." Replays the
+    existing, already-validated grid-strategy replay at the real
+    grid_pct each Coinbase Advanced Trade volume tier would produce,
+    against the identical real historical candles per coin. See
+    crypto_selection_backtest.py's run_grid_fee_tier_spacing_comparison
+    for the full real methodology and its one honest, stated
+    approximation (this sandbox has no live access to real historical
+    fee-tier data, so tier spacing is modeled from Coinbase's publicly
+    documented tier ratios against this codebase's own existing fee
+    assumption - the LIVE feature itself reads the account's real
+    current fee tier directly, no approximation needed there).
+
+    Pulls real historical data from Coinbase's public candles endpoint -
+    can take 30-90 seconds depending on that endpoint's response time."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_grid_fee_tier_spacing_comparison()
+
+
 class SetExitModeRequest(BaseModel):
     mode: str
 
@@ -4730,6 +4776,26 @@ async def set_grid_bot_mode_endpoint(payload: SetGridBotModeRequest):
     await crypto_grid_bot_module.set_grid_bot_active(payload.enabled)
     log.info(f"[dashboard] 🔲 Crypto grid bot mode {'ENABLED - real grid branches are now live' if payload.enabled else 'disabled'}")
     return {"status": "updated", "mode_active": payload.enabled}
+
+
+class SetGridDynamicSpacingRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/grid-status/dynamic-spacing", dependencies=[Depends(require_admin_key)])
+async def set_grid_dynamic_spacing_endpoint(payload: SetGridDynamicSpacingRequest):
+    """Turns real fee-tier-aware dynamic grid spacing on or off - the
+    live wiring for crypto_grid_bot.compute_dynamic_grid_pct, per the
+    account owner's explicit "build both, backtest before going live."
+    Off by default - see crypto_selection_backtest.py's
+    run_grid_fee_tier_spacing_comparison for the real backtest evidence
+    that should inform whether to turn this on. Takes effect on the live
+    bot's very next cycle for every branch, no restart needed."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    await crypto_grid_bot_module.set_dynamic_spacing_active(payload.enabled)
+    log.info(f"[dashboard] 🎯 Grid Bot fee-tier-aware dynamic spacing {'ENABLED' if payload.enabled else 'disabled'}")
+    return {"status": "updated", "dynamic_spacing_active": payload.enabled}
 
 
 class CreateGridBranchRequest(BaseModel):
