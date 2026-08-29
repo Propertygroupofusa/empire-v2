@@ -737,16 +737,23 @@ function renderReversalBacktestResults(resultsId, eventLabel, data) {
         return;
     }
     const s = data.summary;
-    const rows = data.per_event.map(e => {
+    const rows = data.per_event.map((e, idx) => {
         const pnlCls = e.reversal_trade_pnl_pct >= 0 ? 'pos' : 'neg';
         const fwdCls = e.forward_return_pct >= 0 ? 'pos' : 'neg';
-        return `<tr>
+        // A coin can appear more than once in this table (several real
+        // forced-exit events on the same coin) - a per-EVENT row id, not
+        // a per-coin one, so tradeCoin()'s own "✓ Started" note always
+        // lands on the exact row that was clicked, not just the first
+        // real row for that coin.
+        const rowId = `row-${resultsId}-${idx}`;
+        return `<tr id="${rowId}">
             <td>${e.product_id}</td>
             <td>${new Date(e.original_stop_closed_at).toLocaleDateString()}</td>
             <td class="neg">$${e.original_stop_pnl.toFixed(2)}</td>
             <td class="${fwdCls}">${e.forward_return_pct >= 0 ? '+' : ''}${e.forward_return_pct}%</td>
             <td>${e.recovered_to_breakeven ? '✅ yes' : '—'}</td>
             <td class="${pnlCls}">${e.reversal_trade_pnl_pct >= 0 ? '+' : ''}${e.reversal_trade_pnl_pct}% (${e.reversal_trade_exit_reason})</td>
+            <td><button class="trade-btn" onclick="tradeCoin('${e.product_id}', this, '${rowId}')">Trade this</button></td>
         </tr>`;
     }).join('');
 
@@ -762,10 +769,11 @@ function renderReversalBacktestResults(resultsId, eventLabel, data) {
             </tbody>
         </table>
         <table style="margin-top:14px;">
-            <thead><tr><th>Coin</th><th>Exit date</th><th>Real exit P&amp;L</th><th>Fwd return</th><th>Recovered?</th><th>Hypothetical reversal trade</th></tr></thead>
+            <thead><tr><th>Coin</th><th>Exit date</th><th>Real exit P&amp;L</th><th>Fwd return</th><th>Recovered?</th><th>Hypothetical reversal trade</th><th></th></tr></thead>
             <tbody>${rows}</tbody>
         </table>
         <p class="trade-note">No fees modeled on the hypothetical reversal trades, and real cash availability at the time isn't checked - this is a real, honest first look at whether the idea has merit, not a final answer or something wired into live trading.</p>
+        <p class="trade-note">"Trade this" places a REAL trade, not a simulation - it starts a real new $50 branch on that coin right now using your actual unallocated Coinbase cash (same real mechanism as the watchlist's own "Trade this" button below). Refused if the coin is already held, currently excluded, or there isn't enough real free cash.</p>
     `;
 }
 
@@ -1145,7 +1153,11 @@ async function promoteExitMode(mode, btn) {
     }
 }
 
-async function tradeCoin(productId, btn) {
+async function tradeCoin(productId, btn, rowId) {
+    if (!confirm(
+        `Start a REAL $50 branch on ${productId} right now, using your actual unallocated Coinbase cash? ` +
+        `This is a real trade, not a simulation.`
+    )) return;
     const originalText = btn.textContent;
     btn.disabled = true;
     btn.textContent = 'Starting...';
@@ -1161,7 +1173,13 @@ async function tradeCoin(productId, btn) {
         }
         btn.textContent = '✓ Started';
         btn.style.background = 'var(--navy)';
-        const row = document.getElementById('row-' + productId.replace(/[^A-Z0-9]/gi, '-'));
+        // rowId lets a caller pin the "started" note to the exact row
+        // clicked, not just the first real row matching this coin - needed
+        // on tables (like the reversal-backtest one) where the same coin
+        // can appear more than once. Falls back to the original
+        // per-coin lookup when omitted, so the watchlist's own call site
+        // (one row per coin) is completely unaffected.
+        const row = document.getElementById(rowId || ('row-' + productId.replace(/[^A-Z0-9]/gi, '-')));
         if (row) {
             const note = document.createElement('div');
             note.style.cssText = 'font-size:0.78em;color:var(--text-dim);margin-top:2px;';
