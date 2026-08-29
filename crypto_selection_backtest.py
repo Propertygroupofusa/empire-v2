@@ -1078,12 +1078,12 @@ def _candidate_label(drawdown_pct):
 
 
 # Real, publicly-documented Coinbase Advanced Trade taker-fee tiers by
-# 30-day trailing volume (base -> $10K -> $50K), expressed as a RATIO
-# against the base tier - deliberately not hardcoded absolute fee
-# percentages, so this backtest stays anchored to this codebase's own
-# existing engine.ROUND_TRIP_FEE_RATE assumption (0.8% round trip / 0.4%
-# each way) rather than silently introducing a second, different fee
-# number nothing else in this codebase uses. See
+# 30-day trailing volume (base -> $10K -> $50K -> $100K -> $1M),
+# expressed as a RATIO against the base tier - deliberately not
+# hardcoded absolute fee percentages, so this backtest stays anchored to
+# this codebase's own existing engine.ROUND_TRIP_FEE_RATE assumption
+# (0.8% round trip / 0.4% each way) rather than silently introducing a
+# second, different fee number nothing else in this codebase uses. See
 # crypto_grid_bot.compute_dynamic_grid_pct's own docstring for why the
 # LIVE version of this feature doesn't need this table at all - it reads
 # the account's real current fee tier directly from Coinbase's own
@@ -1091,11 +1091,15 @@ def _candidate_label(drawdown_pct):
 # sandbox has no live network access to fetch real historical fee-tier
 # data for a real backtest replay - an honest approximation, not a
 # fetched real number, stated plainly per this file's own established
-# norm for every other estimated constant.
+# norm for every other estimated constant. Deliberately taker (not
+# maker) ratios throughout - every real order this codebase places is a
+# MARKET order, so the maker rate a pasted proposal might assume was
+# never the real basis this bot trades under.
 GRID_FEE_TIER_RATIOS = {
     "base (<$10K vol)": 1.0,
     "tier2 ($10K-$50K vol)": 0.40 / 0.60,
     "tier3 ($50K-$100K vol)": 0.25 / 0.60,
+    "tier4 ($100K-$1M vol)": 0.20 / 0.60,
 }
 
 
