@@ -112,9 +112,9 @@
     <div id="momentumResults"></div>
 
     <div class="note" style="margin-top: 28px;">
-        <strong>Was that result a fluke, or does it hold up?</strong> A single 30-day window can flip either way by chance - the same "require several consecutive results, not one" rule the crypto side's auto-exclusion already uses. This re-runs the exact same real momentum-vs-mean-reversion replay across 3 separate, back-to-back real 30-day windows (the real last ~90 days) and reports how many of the 3 each strategy actually won, not just one sample's total.
+        <strong>Was that result a fluke, or does it hold up?</strong> A single 30-day window can flip either way by chance - the same "require several consecutive results, not one" rule the crypto side's auto-exclusion already uses. This re-runs the exact same real replay across 3 separate, back-to-back real 30-day windows (the real last ~90 days) and reports how many of the 3 each strategy actually won, not just one sample's total. Also includes <strong>Reverse Momentum</strong> - the mirror image of Momentum's entry rule (buys the crossover moment a reversal begins instead of an already-confirmed trend) - as a real third contender, same exit rule as Momentum so only entry timing differs.
     </div>
-    <button class="run-btn" id="multiWindowBtn" onclick="runMultiWindowComparison()">▶ Run 3-Window Momentum vs. Mean-Reversion Check (real data, ~60-120 seconds)</button>
+    <button class="run-btn" id="multiWindowBtn" onclick="runMultiWindowComparison()">▶ Run 3-Window Strategy Check: Mean-Reversion vs. Momentum vs. Reverse Momentum (real data, ~60-120 seconds)</button>
     <div id="multiWindowStatus"></div>
     <div id="multiWindowResults"></div>
     <div id="liveStrategyFamilyBadge" style="margin-top:14px;font-size:0.85em;color:var(--text-dim);"></div>
@@ -416,7 +416,7 @@ async function runMultiWindowComparison() {
     const statusEl = document.getElementById('multiWindowStatus');
     const resultsEl = document.getElementById('multiWindowResults');
     btn.disabled = true;
-    btn.textContent = 'Running... (pulling 3 real historical windows for 11 symbols each)';
+    btn.textContent = 'Running... (pulling 3 real historical windows for 11 symbols each, 3 strategies)';
     statusEl.textContent = '';
     statusEl.className = '';
     resultsEl.innerHTML = '';
@@ -442,7 +442,7 @@ async function runMultiWindowComparison() {
         statusEl.className = 'error';
     } finally {
         btn.disabled = false;
-        btn.textContent = '▶ Run 3-Window Momentum vs. Mean-Reversion Check (real data, ~60-120 seconds)';
+        btn.textContent = '▶ Run 3-Window Strategy Check: Mean-Reversion vs. Momentum vs. Reverse Momentum (real data, ~60-120 seconds)';
     }
 }
 
@@ -454,31 +454,42 @@ function renderMultiWindowComparison(data) {
         return;
     }
 
-    const verdict = s.momentum_windows_won > s.mean_reversion_windows_won
-        ? `Momentum won ${s.momentum_windows_won} of ${data.num_windows} windows - the more consistent real performer.`
-        : s.mean_reversion_windows_won > s.momentum_windows_won
-        ? `Mean-reversion won ${s.mean_reversion_windows_won} of ${data.num_windows} windows - the more consistent real performer.`
-        : `Tied at ${s.momentum_windows_won}-${s.mean_reversion_windows_won} across ${data.num_windows} windows - no consistent real edge either way.`;
+    const revWon = s.reverse_momentum_windows_won || 0;
+    const standings = [
+        { name: 'Mean-reversion', won: s.mean_reversion_windows_won },
+        { name: 'Momentum', won: s.momentum_windows_won },
+        { name: 'Reverse Momentum', won: revWon },
+    ].sort((a, b) => b.won - a.won);
+    const verdict = standings[0].won > standings[1].won
+        ? `${standings[0].name} won ${standings[0].won} of ${data.num_windows} windows - the more consistent real performer.`
+        : `Tied at the top across ${data.num_windows} windows (${standings.map(x => `${x.name} ${x.won}`).join(', ')}) - no single consistent real edge.`;
 
     const windowRows = (data.windows || []).map(w => {
         const mrC = w.mean_reversion.total_pnl >= 0 ? 'pos' : 'neg';
         const momC = w.momentum.total_pnl >= 0 ? 'pos' : 'neg';
-        const winnerLabel = w.mean_reversion.total_pnl > w.momentum.total_pnl ? 'Mean-reversion' : w.momentum.total_pnl > w.mean_reversion.total_pnl ? 'Momentum' : 'Tie';
+        const rev = w.reverse_momentum || { total_pnl: 0, num_trades: 0, win_rate: 0 };
+        const revC = rev.total_pnl >= 0 ? 'pos' : 'neg';
+        const contenders = { 'Mean-reversion': w.mean_reversion.total_pnl, 'Momentum': w.momentum.total_pnl, 'Reverse Momentum': rev.total_pnl };
+        const best = Math.max(...Object.values(contenders));
+        const leaders = Object.keys(contenders).filter(k => contenders[k] === best);
+        const winnerLabel = leaders.length > 1 ? 'Tie' : leaders[0];
         return `<tr>
             <td>${w.window_start} → ${w.window_end}</td>
             <td class="${mrC}">${fmtUsd(w.mean_reversion.total_pnl)} <span style="color:var(--text-dim);font-weight:400;">(${w.mean_reversion.num_trades}tr, ${w.mean_reversion.win_rate.toFixed(0)}%)</span></td>
             <td class="${momC}">${fmtUsd(w.momentum.total_pnl)} <span style="color:var(--text-dim);font-weight:400;">(${w.momentum.num_trades}tr, ${w.momentum.win_rate.toFixed(0)}%)</span></td>
+            <td class="${revC}">${fmtUsd(rev.total_pnl)} <span style="color:var(--text-dim);font-weight:400;">(${rev.num_trades}tr, ${rev.win_rate.toFixed(0)}%)</span></td>
             <td>${winnerLabel}</td>
         </tr>`;
     }).join('');
 
     resultsEl.innerHTML = `
         <p style="margin-top:16px;font-weight:700;">${verdict}</p>
+        <p style="margin-top:4px;color:var(--text-dim);font-size:0.85em;">Reverse Momentum = the mirror image of Momentum's entry: instead of buying an already-confirmed uptrend (RSI already &gt;55, price already above its SMA20), it buys the exact crossover moment a reversal begins (RSI crossing up through 45, price crossing up through its SMA20) - same exit rule as Momentum, so only entry timing differs. Long-only, same as everything else here.</p>
         <table>
-            <thead><tr><th>Window (real dates)</th><th>Mean-reversion</th><th>Momentum</th><th>Won this window</th></tr></thead>
+            <thead><tr><th>Window (real dates)</th><th>Mean-reversion</th><th>Momentum</th><th>Reverse Momentum</th><th>Won this window</th></tr></thead>
             <tbody>${windowRows}</tbody>
         </table>
-        <p style="margin-top:12px;color:var(--text-dim);font-size:0.85em;">Real totals across all ${data.num_windows} windows: mean-reversion ${fmtUsd(s.mean_reversion_total_pnl)}, momentum ${fmtUsd(s.momentum_total_pnl)}.</p>
+        <p style="margin-top:12px;color:var(--text-dim);font-size:0.85em;">Real totals across all ${data.num_windows} windows: mean-reversion ${fmtUsd(s.mean_reversion_total_pnl)}, momentum ${fmtUsd(s.momentum_total_pnl)}, reverse momentum ${fmtUsd(s.reverse_momentum_total_pnl || 0)}.</p>
     `;
 }
 

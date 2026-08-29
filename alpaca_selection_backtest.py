@@ -360,6 +360,85 @@ def _replay_symbol_momentum(closes: list, spend_per_trade: float = SPEND_PER_TRA
     return trades
 
 
+# ============================================================================
+# REVERSE MOMENTUM - the honest mirror-image of _replay_symbol_momentum(),
+# built at the account owner's explicit request after seeing a real losing
+# window (2026-05-31 -> 2026-06-30, momentum -$64.93) and asking to test the
+# "reverse" of momentum on real data rather than fabricate/swap the already-
+# real numbers on the dashboard (which was declined - that would mean
+# showing a result that never actually happened).
+#
+# Momentum enters once a trend is ALREADY confirmed (RSI already above 55
+# AND price already above its own 20-bar average) - it buys strength that's
+# established and rides it. Since this real account can't short (see the
+# module docstring - every real short attempt fails live with "account is
+# not allowed to short"), the honest "reverse" isn't "bet the trend
+# continues down" (unexecutable on this account) - it's "buy the moment a
+# reversal is just STARTING instead of waiting for it to be confirmed":
+# enter the instant RSI crosses UP through REVERSE_MOMENTUM_RSI_ENTRY from
+# below (was weak, is turning right now) while price is trading above its
+# own SMA20 (real, if early, confirmation the reversal has genuine legs,
+# not just one noisy tick) - the mirror of Momentum's own two conditions,
+# caught at the RSI crossover moment instead of only after both signals
+# have been true for a while.
+#
+# The EXIT is left byte-for-byte identical to Momentum's own (same trailing
+# stop off peak, same max-hold backstop) - same discipline the existing
+# entry-signal A/B/C/D test already established: isolate entry-signal
+# quality alone, don't let a different exit muddy the real comparison.
+REVERSE_MOMENTUM_RSI_ENTRY = 45.0  # crossing UP through this from below = weakness fading, not strength already confirmed (Momentum's own 55 mirrored around neutral)
+REVERSE_MOMENTUM_SMA_PERIOD = 20   # same period as Momentum's own SMA, for a fair, directly comparable real signal
+
+
+def _replay_symbol_reverse_momentum(closes: list, spend_per_trade: float = SPEND_PER_TRADE) -> list:
+    """Reverse-Momentum entry/trailing-exit replay: the mirror image of
+    _replay_symbol_momentum()'s entry gate - instead of confirming an
+    already-established real uptrend (RSI already high, price already above
+    its SMA for a while), this catches the real moment RSI crosses UP
+    through REVERSE_MOMENTUM_RSI_ENTRY (was weak, is turning right now)
+    while price is trading above its own REVERSE_MOMENTUM_SMA_PERIOD-bar
+    average - real, executable, long-only. Exit is intentionally identical
+    to Momentum's own trailing-stop/backstop logic, so this isolates entry
+    timing alone."""
+    trades = []
+    position = None  # {"entry": float, "peak": float, "entry_idx": int}
+    prev_rsi = None
+
+    for i in range(50, len(closes)):
+        window = closes[max(0, i - 50):i + 1]
+        rsi = _compute_rsi(window)
+        sma = _compute_sma(closes[:i + 1], REVERSE_MOMENTUM_SMA_PERIOD)
+        price = closes[i]
+        if rsi is None or sma is None:
+            prev_rsi = rsi
+            continue
+
+        if position is None:
+            if (prev_rsi is not None and prev_rsi < REVERSE_MOMENTUM_RSI_ENTRY
+                    and rsi >= REVERSE_MOMENTUM_RSI_ENTRY and price > sma):
+                position = {"entry": price, "peak": price, "entry_idx": i}
+            prev_rsi = rsi
+            continue
+
+        position["peak"] = max(position["peak"], price)
+        trailing_stop = position["peak"] * (1 - MOMENTUM_TRAIL_PCT)
+        age_bars = i - position["entry_idx"]
+
+        if price <= trailing_stop or age_bars >= MOMENTUM_MAX_HOLD_BARS:
+            pnl_pct = (price - position["entry"]) / position["entry"]
+            trades.append({"pnl_usd": spend_per_trade * pnl_pct, "pnl_pct": pnl_pct})
+            position = None
+
+        prev_rsi = rsi
+
+    if position is not None:
+        price = closes[-1]
+        pnl_pct = (price - position["entry"]) / position["entry"]
+        trades.append({"pnl_usd": spend_per_trade * pnl_pct, "pnl_pct": pnl_pct})
+
+    return trades
+
+
 async def run_momentum_vs_mean_reversion_comparison(contract_codes=None, days: int = BACKTEST_DAYS, max_concurrent: int = 6) -> dict:
     """Fetches real Alpaca history ONCE per symbol, then replays BOTH the
     existing real mean-reversion strategy (_replay_symbol(), completely
@@ -505,18 +584,22 @@ async def run_momentum_vs_mean_reversion_multi_window(
 
             await asyncio.gather(*[_one(t) for t in unique_tickers])
 
-            mr_total, mom_total = 0.0, 0.0
-            mr_trades_total, mom_trades_total = 0, 0
-            mr_wins_total, mom_wins_total = 0, 0
+            mr_total, mom_total, rev_total = 0.0, 0.0, 0.0
+            mr_trades_total, mom_trades_total, rev_trades_total = 0, 0, 0
+            mr_wins_total, mom_wins_total, rev_wins_total = 0, 0, 0
             for ticker, closes in per_symbol.items():
                 mr_trades = _replay_symbol(closes, symbol=ticker)
                 mom_trades = _replay_symbol_momentum(closes)
+                rev_trades = _replay_symbol_reverse_momentum(closes)
                 mr_total += sum(t["pnl_usd"] for t in mr_trades)
                 mom_total += sum(t["pnl_usd"] for t in mom_trades)
+                rev_total += sum(t["pnl_usd"] for t in rev_trades)
                 mr_trades_total += len(mr_trades)
                 mom_trades_total += len(mom_trades)
+                rev_trades_total += len(rev_trades)
                 mr_wins_total += len([t for t in mr_trades if t["pnl_usd"] > 0])
                 mom_wins_total += len([t for t in mom_trades if t["pnl_usd"] > 0])
+                rev_wins_total += len([t for t in rev_trades if t["pnl_usd"] > 0])
 
             windows.append({
                 "window_index": w,
@@ -534,12 +617,37 @@ async def run_momentum_vs_mean_reversion_multi_window(
                     "win_rate": round(mom_wins_total / mom_trades_total * 100, 1) if mom_trades_total else 0.0,
                     "total_pnl": round(mom_total, 2),
                 },
+                "reverse_momentum": {
+                    "num_trades": rev_trades_total,
+                    "win_rate": round(rev_wins_total / rev_trades_total * 100, 1) if rev_trades_total else 0.0,
+                    "total_pnl": round(rev_total, 2),
+                },
             })
 
-    mr_wins_windows = sum(1 for wnd in windows if wnd["mean_reversion"]["total_pnl"] > wnd["momentum"]["total_pnl"])
-    mom_wins_windows = sum(1 for wnd in windows if wnd["momentum"]["total_pnl"] > wnd["mean_reversion"]["total_pnl"])
+    # Three-way "which real strategy actually won this window" - a genuine
+    # tie for best (identical total_pnl, e.g. all three at $0 with zero
+    # trades) counts toward none of them rather than crediting an arbitrary
+    # one.
+    mr_wins_windows = mom_wins_windows = rev_wins_windows = 0
+    for wnd in windows:
+        pnls = {
+            "mean_reversion": wnd["mean_reversion"]["total_pnl"],
+            "momentum": wnd["momentum"]["total_pnl"],
+            "reverse_momentum": wnd["reverse_momentum"]["total_pnl"],
+        }
+        best_pnl = max(pnls.values())
+        leaders = [name for name, pnl in pnls.items() if pnl == best_pnl]
+        if len(leaders) > 1:
+            continue
+        if leaders[0] == "mean_reversion":
+            mr_wins_windows += 1
+        elif leaders[0] == "momentum":
+            mom_wins_windows += 1
+        else:
+            rev_wins_windows += 1
     mr_total_all = round(sum(wnd["mean_reversion"]["total_pnl"] for wnd in windows), 2)
     mom_total_all = round(sum(wnd["momentum"]["total_pnl"] for wnd in windows), 2)
+    rev_total_all = round(sum(wnd["reverse_momentum"]["total_pnl"] for wnd in windows), 2)
 
     return {
         "window_days": window_days,
@@ -549,8 +657,10 @@ async def run_momentum_vs_mean_reversion_multi_window(
         "summary": {
             "mean_reversion_windows_won": mr_wins_windows,
             "momentum_windows_won": mom_wins_windows,
+            "reverse_momentum_windows_won": rev_wins_windows,
             "mean_reversion_total_pnl": mr_total_all,
             "momentum_total_pnl": mom_total_all,
+            "reverse_momentum_total_pnl": rev_total_all,
         },
     }
 
