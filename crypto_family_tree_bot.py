@@ -1057,12 +1057,25 @@ STOP_HIT_REVERSAL_STOP_PCT = 0.02
 
 
 async def get_reversal_trade_active() -> bool:
-    """Off by default - see _attempt_stop_hit_reversal_buy's own docstring
-    for the real evidence and scoping behind this feature."""
+    """Defaults to ON now - per the account owner's explicit "ok turn it
+    on" right after being shown the real evidence and safety scoping
+    behind this feature. This session has no live network access to the
+    deployed app to click the dashboard toggle directly (documented
+    throughout this file), so - same precedent already used elsewhere in
+    this codebase for a "turn it on" request under that exact constraint
+    (e.g. the live exit-mode default flip) - the unset default itself was
+    flipped: since no dashboard toggle click has ever been made on this
+    deployment yet (no row exists), this has the identical real effect
+    the toggle would have had, once redeployed. The dashboard toggle
+    (set_reversal_trade_active) still works normally in both directions
+    afterward - explicitly setting it False always wins over this
+    default, so the account owner can still turn it back off anytime."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == REVERSAL_TRADE_STATE_KEY))
         row = result.scalar_one_or_none()
-        return bool(row and row.base_capital and row.base_capital >= 1.0)
+        if row is None:
+            return True
+        return bool(row.base_capital and row.base_capital >= 1.0)
 
 
 async def set_reversal_trade_active(enabled: bool):
@@ -3736,8 +3749,11 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
     # per the account owner's own explicit "yes" after being shown that
     # real evidence.
     #
-    # Off by default (get_reversal_trade_active) - a true no-op until
-    # explicitly turned on. Deliberately scoped to a genuine "STOP HIT"
+    # Live (get_reversal_trade_active) per the account owner's own
+    # explicit "ok turn it on" - see that function's own docstring for
+    # why the default itself was flipped rather than a dashboard click.
+    # Still a real, reversible toggle either way. Deliberately scoped to
+    # a genuine "STOP HIT"
     # only - never "BRANCH BREACH - forced exit" or "EQUITY FLOOR
     # BREACH - forced exit". Those two are exactly what
     # FLOOR_BREACH_COOLDOWN_SECONDS exists to protect against (the real
