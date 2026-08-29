@@ -831,6 +831,7 @@ function renderStrategyLabBarChart(summary) {
     const width = 640, rowH = 46, chartH = rowH * STRATEGY_LAB_ORDER.length + 10;
     const midX = width / 2;
     const scale = (width / 2 - 20) / maxAbs;
+    const EST_CHAR_PX = 7.2; // rough real px-per-character at this font size/weight - only used to decide inside-vs-outside label placement, not for exact layout
     const bars = STRATEGY_LAB_ORDER.map((key, idx) => {
         const s = summary[key];
         const pnl = s.total_pnl;
@@ -839,10 +840,24 @@ function renderStrategyLabBarChart(summary) {
         const color = pnl >= 0 ? '#1a7f4f' : '#c0392b';
         const y = idx * rowH + 8;
         const labelY = y + 18;
+        const labelText = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
+        // A real, large loss/gain can make its own bar wide enough that
+        // the OUTSIDE label (drawn further away from center than the bar
+        // itself) runs past the SVG's own edge and gets clipped - confirmed
+        // live: a real -$71.07 bar clipped its own label down to a bare
+        // "07". If there isn't real room to draw the label outside the bar
+        // before hitting the canvas edge, draw it INSIDE the bar instead
+        // (light text, anchored to the bar's own far edge) - that can never
+        // clip, since it's bounded by the bar's own real width.
+        const outsideRoom = pnl >= 0 ? (width - (x + barW)) : x;
+        const fitsOutside = outsideRoom >= labelText.length * EST_CHAR_PX + 8;
+        const textX = fitsOutside ? (pnl >= 0 ? x + barW + 6 : x - 6) : (pnl >= 0 ? x + barW - 6 : x + 6);
+        const anchor = fitsOutside ? (pnl >= 0 ? 'start' : 'end') : (pnl >= 0 ? 'end' : 'start');
+        const textColor = fitsOutside ? color : '#ffffff';
         return `
             <text x="8" y="${labelY - 12}" font-size="12" fill="var(--muted)">${STRATEGY_LAB_LABELS[key]}</text>
             <rect x="${x}" y="${labelY - 10}" width="${Math.max(barW, 1)}" height="18" fill="${color}" rx="3"></rect>
-            <text x="${pnl >= 0 ? x + barW + 6 : x - 6}" y="${labelY + 4}" font-size="12" fill="${color}" text-anchor="${pnl >= 0 ? 'start' : 'end'}" font-weight="700">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</text>
+            <text x="${textX}" y="${labelY + 4}" font-size="12" fill="${textColor}" text-anchor="${anchor}" font-weight="700">${labelText}</text>
         `;
     }).join('');
     return `<svg viewBox="0 0 ${width} ${chartH}" style="width:100%; max-width:640px; height:auto; margin-top:10px;">
