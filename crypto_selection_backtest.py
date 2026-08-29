@@ -8,11 +8,17 @@ actually buying at bad moments? That function's only timing check is
 `closes[-1] > closes[0]` over a ~25-hour window - a coarse "is it up
 overall" check with no sense of whether the move already happened and
 the coin is now extended. This script tests that suspicion the honest
-way: replay the bot's OWN real target/stop/breakeven/giveback rules
+way: replay the bot's OWN real target/stop/breakeven/trailing-stop rules
 (imported directly from crypto_btc_compound_bot.py and
 crypto_family_tree_bot.py - not reimplemented) against each coin's real
 historical price data, and rank coins by what that strategy would
 actually have returned on each one.
+
+`backtest_one_coin()`'s exit mechanics were updated to match the live
+bot's real exit_mode="trailing_stop" rule (STOP with a breakeven ratchet,
+then a real trailing stop once target is first reached) after it was
+found to still be replaying a retired TARGET/STOP/GIVEBACK rule - see
+`backtest_one_coin()`'s own docstring for the full real history.
 
 Simplifications, stated plainly rather than hidden:
 - Entries/exits are decided on each hourly candle's CLOSE only, not
@@ -45,7 +51,7 @@ from sqlalchemy import select
 
 import crypto_btc_compound_bot as engine
 import crypto_grid_bot as grid_engine  # only for its own real constants (TARGET_NET_MARGIN_PCT etc.) - no circular import, crypto_grid_bot never imports this module
-from crypto_family_tree_bot import COIN_FAMILY_TREE, BREAKEVEN_TRIGGER_PCT, MAX_PROFIT_GIVEBACK_USD
+from crypto_family_tree_bot import COIN_FAMILY_TREE, BREAKEVEN_TRIGGER_PCT
 from database import AsyncSessionLocal
 from models import CryptoTreeBranch, CryptoCoinTradeHistory
 
@@ -156,24 +162,55 @@ async def fetch_historical_candles(session, product_id, days=BACKTEST_DAYS, last
     return await fetch_candles_window(session, product_id, start, end, last_error_out=last_error_out)
 
 
-def backtest_one_coin(closes, highs, lows, entry_gate=None, spend=None):
-    """Replays the REAL live rules candle-by-candle. Returns a dict of
-    results, or None if there wasn't enough data to trade at all.
+def backtest_one_coin(closes, highs, lows, entry_gate=None, spend=None, trail_pct=None):
+    """Replays the REAL live rules candle-by-candle: a real ATR-based
+    entry, a hard STOP-LOSS with a breakeven ratchet, and - once price
+    first reaches the real ATR-based target - a real percentage TRAILING
+    STOP behind the highest price seen since entry. This is the same exit
+    mechanics as crypto_family_tree_bot.py's own live run_branch_cycle()
+    under exit_mode="trailing_stop", the ONLY live exit mode today
+    (QUICK_PROFIT and the old GIVEBACK-cap exit were both removed
+    outright earlier this session - see CLAUDE.md). Reaching TARGET is
+    never an immediate exit here, only arms the trail - exactly matching
+    the live bot.
+
+    THIS WAS PREVIOUSLY STALE, fixed after the account owner asked
+    directly why a real 1,674-trade "Baseline (A)" sample on Strategy Lab
+    showed -$1,301.59: until this fix, this function replayed a retired
+    TARGET/STOP/GIVEBACK rule (and its own GIVEBACK check never even had
+    the fee-net-positive guard the live giveback exit was given before
+    being removed entirely) - meaning "Baseline (A)", and every
+    CryptoBacktestRun row this function's real caller (run_full_backtest)
+    persists (the same table the automatic coin-exclusion layer and the
+    top-15 ROI rotation both read to decide what the live tree can even
+    trade), were being computed against an exit rule the live bot hasn't
+    run in a while. Some real, unknown share of that real loss was an
+    artifact of testing dead code, not a reflection of the bot as it
+    actually trades today - fixed by request, not guessed at.
+
+    Returns a dict of results, or None if there wasn't enough data to
+    trade at all.
 
     `spend` (optional) overrides the fixed SPEND module constant for this
     one coin - used by run_full_backtest_with_real_allocations() below to
     simulate each coin's REAL current branch dollars instead of the flat
     $150 every coin gets by default. `spend=None` (the default, every
-    existing caller) reproduces the exact original behavior - falls back
-    to the module-level SPEND constant, byte-for-byte unchanged.
+    existing caller) falls back to the module-level SPEND constant.
 
     entry_gate, if given, is called as entry_gate(i) at each flat decision
     point (i = index into closes/highs/lows) and must return True to allow
     a new entry there - used by run_btc_relative_strength_comparison()
-    below to add a real entry-timing filter without duplicating this whole
-    replay loop. None (the default) means always enter the moment flat -
-    the original, unchanged behavior every existing caller (including the
-    live auto-exclusion system's daily backtest run) already depends on."""
+    and run_higher_tf_trend_comparison() below to add a real entry-timing
+    filter without duplicating this whole replay loop. None (the default)
+    means always enter the moment flat.
+
+    `trail_pct` (optional) overrides the module's own TRAILING_STOP_PCT
+    default (2.5%) - the same real, live-tunable width
+    run_trailing_stop_pct_sweep_comparison() already tests candidates
+    for. This module has no live access to read whatever width is
+    currently promoted on the real deployed dashboard, so the module
+    constant is a reasonable default, not a guaranteed match to the exact
+    live value at any given moment."""
     # `spend <= 0` (not just None) falls back to the default too - real,
     # confirmed live bug: a coin whose only real branch is sitting at a
     # genuine $0.00 balance (POL-USD, SOL-USD in production) passed
@@ -182,12 +219,13 @@ def backtest_one_coin(closes, highs, lows, entry_gate=None, spend=None):
     # ZeroDivisionError the instant the replay produced even one trade -
     # surfaced as a raw HTTP 500 on "Run Backtest With Real Allocations".
     spend = spend if spend is not None and spend > 0 else SPEND
+    trail_pct = trail_pct if trail_pct is not None and trail_pct > 0 else TRAILING_STOP_PCT
     trades = []
     entries_skipped_by_gate = 0
     i = ATR_WINDOW
     n = len(closes)
 
-    position = None  # dict: entry, qty, target, stop, peak_usd
+    position = None  # dict: entry, qty, target, stop, peak_price, profit_activated
 
     while i < n:
         price = closes[i]
@@ -207,29 +245,32 @@ def backtest_one_coin(closes, highs, lows, entry_gate=None, spend=None):
                 "entry": price, "qty": qty,
                 "target": price * (1 + target_pct),
                 "stop": price * (1 - engine.STOP_LOSS_PCT),
-                "peak_usd": 0.0,
+                "peak_price": price,
+                "profit_activated": False,
             }
             i += 1
             continue
 
-        unrealized_usd = position["qty"] * (price - position["entry"])
-        if unrealized_usd > position["peak_usd"]:
-            position["peak_usd"] = unrealized_usd
+        if price > position["peak_price"]:
+            position["peak_price"] = price
 
         # Real breakeven ratchet (same trigger the live bot uses).
         if position["stop"] < position["entry"] and price >= position["entry"] * (1 + BREAKEVEN_TRIGGER_PCT):
             position["stop"] = position["entry"]
 
-        giveback = position["peak_usd"] - unrealized_usd
-        giveback_exceeded = position["peak_usd"] > 0 and giveback >= MAX_PROFIT_GIVEBACK_USD
+        # Real trailing-stop mechanics, identical to the live bot: reaching
+        # target only ARMS the trail, it never exits by itself.
+        if not position["profit_activated"] and price >= position["target"]:
+            position["profit_activated"] = True
+        if position["profit_activated"]:
+            trailing_stop_price = position["peak_price"] * (1 - trail_pct)
+            effective_stop = max(position["stop"], trailing_stop_price)
+        else:
+            effective_stop = position["stop"]
 
         exit_reason = None
-        if price >= position["target"]:
-            exit_reason = "TARGET"
-        elif price <= position["stop"]:
-            exit_reason = "STOP"
-        elif giveback_exceeded:
-            exit_reason = "GIVEBACK"
+        if price <= effective_stop:
+            exit_reason = "TRAILING STOP" if position["profit_activated"] else "STOP"
 
         if exit_reason:
             gross = position["qty"] * (price - position["entry"])
@@ -881,12 +922,19 @@ async def run_strategy_lab_comparison(coins=None, days=BACKTEST_DAYS, max_concur
     are... a b c d to see which one I like") after a pasted third-party
     proposal (Spot Swing Trading / Automated Grid Bot / Hourly Momentum
     Trading) that itself contained no real backtest, only illustrative
-    arithmetic. Replays the EXISTING live baseline (backtest_one_coin,
-    unchanged) alongside all three new strategies above, on the identical
-    real historical Coinbase candles per coin, so all four are directly,
-    fairly comparable on the same data.
+    arithmetic. Replays the EXISTING live baseline (backtest_one_coin)
+    alongside all three new strategies above, on the identical real
+    historical Coinbase candles per coin, so all four are directly, fairly
+    comparable on the same data.
 
     Real, honest limits stated plainly, not hidden:
+    - "Baseline (A)" previously replayed a RETIRED exit rule
+      (TARGET/STOP/GIVEBACK) instead of the live bot's real
+      exit_mode="trailing_stop" - found and fixed after a real
+      1,674-trade sample showed -$1,301.59 and the account owner asked
+      why. backtest_one_coin() now matches the live rule; see its own
+      docstring for the full real history. Not yet confirmed against a
+      fresh real run on the deployed dashboard.
     - Real 31-of-36 coins skipped in a real live run, all reporting a
       blanket "not enough historical data" - traced to fetch_candles_window's
       own old behavior of silently giving up on ANY non-200 response
