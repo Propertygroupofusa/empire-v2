@@ -10054,6 +10054,44 @@ appears without wiping out a chart that was already loaded.
 
 ---
 
+## Grid Bot's drawdown-breach response confirmed as pause-only, after a pasted proposal argued for full liquidation + permanent freeze
+
+A pasted third-party proposal for Grid Bot's real drawdown breaker (see
+"Add Grid Bot drawdown breaker + opt-in fee-tier-aware dynamic spacing"
+above) argued for a materially different breach response than what
+shipped: force-sell every real open slice at market the instant the
+breach line is crossed, then permanently freeze the branch with no path
+back. Checked against the real pasted code first, not just the idea -
+found real, disqualifying problems (a literal Python syntax error in the
+liquidation function, a phantom `GridAccountState`/`account_id` schema
+that doesn't exist in this single-account codebase, a limit-order-cancel
+step for a bot that only ever places market orders, and maker-fee
+assumptions where every real order this bot places pays the taker rate)
+- none of that code was usable as-is. One real, small, genuinely useful
+piece WAS kept: a 4th real Coinbase volume tier ($100K-$1M) added to
+`GRID_FEE_TIER_RATIOS`, purely additive.
+
+The real, separate question underneath the broken code - pause-only vs.
+full-liquidation-and-freeze on a real drawdown breach - was put to the
+account owner directly rather than assumed either way, with the real
+tradeoff spelled out concretely (pause-only lets a slice recover on its
+own if price bounces, at the cost of capital staying tied up longer in a
+genuinely bad decline; full liquidation guarantees a hard loss ceiling,
+at the cost of guaranteeing every slice - including ones about to
+recover - gets sold at what's very often close to the real bottom, plus
+no real un-freeze mechanism was ever proposed). The account owner's
+explicit, informed choice: **keep pause-only** - no code change needed,
+since that's exactly the real behavior already shipped and live (see the
+section above). This is now the confirmed, deliberate real-money
+decision for this codebase, not a default nobody actively chose -
+consistent with every other real breach/floor mechanism in this file
+(the family tree's own `DRAWDOWN_BREAKER_PCT`, the equity-floor
+self-heal, the "never force-sell a healthy position for an unrelated
+milestone" rule already applied repeatedly elsewhere), never one-way,
+never force-selling a position that might have recovered on its own.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md
