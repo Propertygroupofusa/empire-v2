@@ -2196,6 +2196,19 @@ ALPACA_MAX_CHAIN_HOPS = _safe_int_env("ALPACA_MAX_CHAIN_HOPS", "5")
 # other capital-deployment path in this file.
 ALPACA_IDLE_SWEEP_SEED_USD = _safe_float_env("ALPACA_IDLE_SWEEP_SEED_USD", "50")
 ALPACA_IDLE_SWEEP_MIN_SPENDABLE_USD = _safe_float_env("ALPACA_IDLE_SWEEP_MIN_SPENDABLE_USD", "75")
+# Real floor-cushion guard, per the account owner's explicit follow-up
+# ("make sure that we don't hit it... just make sure it don't happen"),
+# raised after being told the account's real equity ($1,001.50) sits
+# almost exactly on its own real ratcheting floor ($1,000.00 - the same
+# `equity_floor` global the EQUITY FLOOR BREACH close-everything logic
+# already uses elsewhere in this file). Depositing cash into a branch
+# doesn't itself move real equity (it converts cash into a position of
+# equal notional) - the real risk is adding MORE leveraged exposure while
+# there's little to no real room left before a normal adverse swing
+# breaches the floor. The sweep now refuses outright unless real equity
+# is at least this many dollars ABOVE the real floor - real protection
+# checked fresh every cycle, not a one-time setting.
+ALPACA_IDLE_SWEEP_MIN_EQUITY_CUSHION_USD = _safe_float_env("ALPACA_IDLE_SWEEP_MIN_EQUITY_CUSHION_USD", "100")
 
 ALPACA_BRANCH_MODE_KEY = "alpaca_branch_mode"
 
@@ -2786,7 +2799,7 @@ async def get_next_eligible_alpaca_contract_for_new_branch():
     return candidates[0]
 
 
-async def _alpaca_idle_cash_sweep(session, buying_power: float, active_branches: list, strategy_family: str, live_entry_variant: str, kill_halted: bool):
+async def _alpaca_idle_cash_sweep(session, buying_power: float, equity, active_branches: list, strategy_family: str, live_entry_variant: str, kill_halted: bool):
     """Real, per-cycle sweep of genuinely idle Alpaca buying power - real
     money not already allocated to any active branch - into real trading,
     instead of it sitting uninvested while an active branch mode is on.
@@ -2798,7 +2811,21 @@ async def _alpaca_idle_cash_sweep(session, buying_power: float, active_branches:
     At most ONE real deployment per cycle - same "don't rush several real
     orders off one pass" discipline the reinforcement chain already uses.
     Never runs while kill_halted (a real account-wide kill condition) -
-    new capital is never deployed while the account itself is in trouble."""
+    new capital is never deployed while the account itself is in trouble.
+
+    Never runs unless real equity is at least ALPACA_IDLE_SWEEP_MIN_EQUITY_
+    CUSHION_USD above the real, ratcheting equity_floor (the same global
+    the account-wide EQUITY FLOOR BREACH close-everything logic already
+    uses) - per the account owner's explicit follow-up request to make
+    sure new capital deployment can never itself contribute to pushing
+    the account into or through its own real floor."""
+    if equity is None or (equity - equity_floor) < ALPACA_IDLE_SWEEP_MIN_EQUITY_CUSHION_USD:
+        log.info(
+            f"[ALPACA-BRANCH] Idle-cash sweep skipped - real equity "
+            f"{'unavailable' if equity is None else f'${equity:.2f}'} isn't at least "
+            f"${ALPACA_IDLE_SWEEP_MIN_EQUITY_CUSHION_USD:.2f} above the real floor ${equity_floor:,.2f}"
+        )
+        return
     if kill_halted:
         return
     already_allocated = sum(b.allocated_usd for b in active_branches)
@@ -2889,7 +2916,7 @@ async def run_alpaca_branches_cycle():
 
         if buying_power is not None:
             try:
-                await _alpaca_idle_cash_sweep(session, buying_power, branches, strategy_family, live_entry_variant, kill_halted=should_halt)
+                await _alpaca_idle_cash_sweep(session, buying_power, equity, branches, strategy_family, live_entry_variant, kill_halted=should_halt)
             except Exception as e:
                 log.error(f"[ALPACA-BRANCH] Idle-cash sweep error: {e}")
 

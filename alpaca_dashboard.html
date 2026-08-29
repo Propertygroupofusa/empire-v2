@@ -386,7 +386,9 @@
         created below, but nothing trades until "Enable branch trading" is switched on. While it's on, real
         idle buying power (not yet allocated to any branch) gets swept automatically every cycle — first to
         top up your weakest current branch, and if none can take it right now, into a real brand-new branch
-        on the best currently-eligible contract — so cash doesn't just sit uninvested.
+        on the best currently-eligible contract — so cash doesn't just sit uninvested. Guarded against the
+        account's own real floor: the sweep refuses outright unless real equity is comfortably above it, so
+        it can never itself contribute to pushing the account toward or through that floor.
     </p>
     <div class="panel" id="branches-panel">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px; flex-wrap:wrap; gap:8px;">
