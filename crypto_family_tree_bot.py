@@ -1048,6 +1048,34 @@ async def set_crypto_passive_mode(enabled: bool):
         await db.commit()
 
 
+REVERSAL_TRADE_STATE_KEY = "crypto_family_tree_reversal_trade_active"
+# Matches crypto_selection_backtest.py's STOP_HIT_REVERSAL_TARGET_PCT/
+# STOP_HIT_REVERSAL_STOP_PCT exactly - the same real, validated numbers
+# the shadow backtest tested, not a guess at different ones.
+STOP_HIT_REVERSAL_TARGET_PCT = 0.02
+STOP_HIT_REVERSAL_STOP_PCT = 0.02
+
+
+async def get_reversal_trade_active() -> bool:
+    """Off by default - see _attempt_stop_hit_reversal_buy's own docstring
+    for the real evidence and scoping behind this feature."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == REVERSAL_TRADE_STATE_KEY))
+        row = result.scalar_one_or_none()
+        return bool(row and row.base_capital and row.base_capital >= 1.0)
+
+
+async def set_reversal_trade_active(enabled: bool):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == REVERSAL_TRADE_STATE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = TradingBotState(bot_name=REVERSAL_TRADE_STATE_KEY, base_capital=0.0)
+            db.add(row)
+        row.base_capital = 1.0 if enabled else 0.0
+        await db.commit()
+
+
 async def get_locked_usd() -> float:
     """The running total of skimmed profit walled off from ever being
     redeployed by any branch - see PROFIT_SKIM_PCT. Reusing TradingBotState
@@ -3549,6 +3577,60 @@ async def _maybe_spawn_child(branch, chain_visited: frozenset = frozenset(), cha
     await _log_activity(child_name, next_product, "SPAWN", spawn_msg)
 
 
+async def _attempt_stop_hit_reversal_buy(session, bot_name: str, product_id: str, spend_cap: float) -> bool:
+    """Real market buy back into the SAME coin that just hit its own real
+    STOP HIT, right away - the live counterpart to what
+    crypto_selection_backtest.py's run_stop_hit_reversal_backtest() tests
+    in shadow mode. Gated by the exact same new-entry checks a normal
+    flat-branch buy already respects (STOP_TRADING, floor-breach
+    cooldown, tree-wide rolling expectancy) - a reversal buy IS a new
+    entry with real capital, so it earns no exemption from any of them.
+
+    Returns True on a genuine real fill (the branch's position row is
+    already saved, with a fixed +/-2% target/stop, before this returns).
+    Returns False on any refusal or a real order that simply didn't fill
+    - the caller (_branch_sell_and_settle) falls through to the normal
+    post-STOP-HIT coin-switch flow in that case, completely unchanged."""
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        log.info(f"[TREE] {bot_name}: STOP_TRADING=true - skipping the reversal buy on {product_id}")
+        return False
+    if await _floor_breach_cooldown_active(bot_name):
+        log.info(f"[TREE] {bot_name}: cooling down after a recent floor breach - skipping the reversal buy on {product_id}")
+        return False
+    expectancy_state = await get_rolling_expectancy()
+    if expectancy_state["negative"]:
+        log.info(f"[TREE] {bot_name}: rolling expectancy is negative - skipping the reversal buy on {product_id}")
+        return False
+
+    real_balance, real_balance_err = await engine.get_usd_balance(session)
+    if real_balance is None:
+        log.warning(f"[TREE] {bot_name}: real balance unavailable ({real_balance_err}) - skipping the reversal buy on {product_id}")
+        return False
+    locked_usd = await get_locked_usd()
+    spendable = max(0.0, real_balance - locked_usd)
+    spend = min(spend_cap, spendable)
+    if spend < MIN_TRADE_USD:
+        log.info(f"[TREE] {bot_name}: only ${spend:.2f} real spendable - below the ${MIN_TRADE_USD:.2f} minimum, skipping the reversal buy on {product_id}")
+        return False
+
+    fill = await engine.place_market_buy(session, spend, product_id)
+    if not fill:
+        log.warning(f"[TREE] {bot_name}: real reversal buy into {product_id} did not fill")
+        return False
+    filled_qty, filled_price = fill
+    target_price = filled_price * (1 + STOP_HIT_REVERSAL_TARGET_PCT)
+    stop_price = filled_price * (1 - STOP_HIT_REVERSAL_STOP_PCT)
+    await _save_branch_position(bot_name, product_id, filled_price, filled_qty, target_price, stop_price)
+    reversal_msg = (
+        f"🔁 {bot_name} REVERSAL BUY: bought back {filled_qty:.8f} {product_id} @ ${filled_price:,.2f} right after its own "
+        f"STOP HIT (${spend:.2f} deployed) | target +{STOP_HIT_REVERSAL_TARGET_PCT*100:.0f}% (${target_price:,.2f}) | "
+        f"stop -{STOP_HIT_REVERSAL_STOP_PCT*100:.0f}% (${stop_price:,.2f})"
+    )
+    log.info(f"[TREE] {reversal_msg}")
+    await _log_activity(bot_name, product_id, "BUY", reversal_msg)
+    return True
+
+
 async def _branch_sell_and_settle(session, bot_name, product_id, position, reason) -> bool:
     """Returns True if the branch's real state actually changed (a genuine
     fill, or the phantom-position self-heal clearing a stale tracked
@@ -3645,10 +3727,47 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
 
     await _clear_branch_position(bot_name)
 
+    # Real, opt-in reversal buy - the live version of what
+    # crypto_selection_backtest.py's run_stop_hit_reversal_backtest()
+    # already validated in shadow mode (94 real STOP HIT events, 88.3%
+    # recovered to breakeven within 24h, 68.1% hypothetical win rate,
+    # +1.94% avg hypothetical P&L on a plain "buy back at the stop price,
+    # ride it with a modest target or a second hard stop" trade). Wired in
+    # per the account owner's own explicit "yes" after being shown that
+    # real evidence.
+    #
+    # Off by default (get_reversal_trade_active) - a true no-op until
+    # explicitly turned on. Deliberately scoped to a genuine "STOP HIT"
+    # only - never "BRANCH BREACH - forced exit" or "EQUITY FLOOR
+    # BREACH - forced exit". Those two are exactly what
+    # FLOOR_BREACH_COOLDOWN_SECONDS exists to protect against (the real
+    # incident this file already documents: AAVE -> STOP HIT -> instant
+    # rebuy XRP -> breach again -> instant rebuy BONK, three real losses
+    # in a row) - an instant rebuy right after one of those would
+    # directly reintroduce the exact bug that cooldown was built to fix.
+    # A genuine STOP HIT is one position's own price-based stop failing,
+    # not a signal the whole branch is unhealthy, so it carries no such
+    # risk. Applies to root the same as any other branch - buying back
+    # into the SAME coin (BTC-USD for root) is already exactly what
+    # root's own "always stays on BTC-USD" design already does.
+    #
+    # Once bought, the reversal position is a completely NORMAL branch
+    # position from that point on - the exact same generic TARGET/STOP/
+    # TRAILING-STOP/breakeven-ratchet logic further down in
+    # run_branch_cycle already manages any position purely off its own
+    # target_price/stop_price, regardless of how those were originally
+    # computed. No separate exit logic needed - only the ENTRY differs
+    # from a normal buy.
+    reversal_bought = False
+    if reason == "STOP HIT" and await get_reversal_trade_active():
+        reversal_bought = await _attempt_stop_hit_reversal_buy(session, bot_name, product_id, new_allocated)
+
     # Every exit - a profitable TARGET HIT, a STOP HIT, or a floor-breach
     # forced exit - now looks for a new coin to move to rather than
-    # automatically re-buying the same one just traded. It can't
-    # immediately switch back to the coin it just sold either - the
+    # automatically re-buying the same one just traded (unless the real
+    # reversal buy right above already re-bought this exact coin - in
+    # that case there's nothing to switch, it's already handled). It
+    # can't immediately switch back to the coin it just sold either - the
     # one-cycle cooldown set at the top of this function (_coin_last_sold_at)
     # covers that, same protection for every branch, not a "claimed" check.
     #
@@ -3674,7 +3793,7 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
         and product_id not in await get_effective_excluded_coins()
         and await _is_coin_locked(bot_name)
     )
-    if bot_name != ROOT_BOT_NAME and not branch_is_locked:
+    if not reversal_bought and bot_name != ROOT_BOT_NAME and not branch_is_locked:
         new_product_id, new_product_atr = await find_most_volatile_unclaimed_coin(session)
 
     async with AsyncSessionLocal() as db:
@@ -3701,8 +3820,14 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
 
     # The coin switch commits separately, in its own transaction, so a
     # conflict here (see below) can never roll back the balance/floor
-    # update above - that part is correct and final either way.
-    if row is not None and new_product_id:
+    # update above - that part is correct and final either way. Skipped
+    # entirely when the real reversal buy above already re-bought this
+    # exact coin - _attempt_stop_hit_reversal_buy already logged its own
+    # clear real REVERSAL BUY line, so nothing here would add anything
+    # but a confusing, redundant message.
+    if reversal_bought:
+        pass
+    elif row is not None and new_product_id:
         old_product_id = row.product_id
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == bot_name))

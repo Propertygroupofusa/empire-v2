@@ -496,6 +496,7 @@
     </div>
 
     <div id="exit-mode-badge" style="display:none; font-size:0.8em; color: var(--text-dim); margin-bottom: 8px;"></div>
+    <div id="reversal-trade-badge" style="display:none; font-size:0.8em; color: var(--text-dim); margin-bottom: 8px;"></div>
     <div id="crypto-passive-mode-banner" style="display:none;"></div>
     <div id="rolling-expectancy-banner" style="display:none;"></div>
     <div id="usdc-blindspot-banner" style="display:none;"></div>
@@ -1649,6 +1650,7 @@ async function refresh() {
         renderRollingExpectancyBanner(data);
         renderUsdcBlindSpotBanner(data);
         renderExitModeBadge(data.exit_mode, data.trailing_stop_pct);
+        renderReversalTradeBadge(data.reversal_trade_active);
 
         const branches = data.branches || [];
         lastUnrealizedProfit = branches.reduce((sum, b) => {
@@ -1848,6 +1850,44 @@ function renderExitModeBadge(mode, trailingStopPct) {
     }
     el.innerHTML = `🎯 Live exit rule: <strong style="color:var(--navy);">${label}</strong> — ` +
         `<a href="/crypto-selection-backtest-view" style="color: var(--navy);">run the backtest to compare or promote a different one →</a>`;
+}
+
+// Real, opt-in STOP-HIT reversal buy - the live wiring of the "buy back
+// at the stop price" idea run_stop_hit_reversal_backtest() already
+// validated in shadow mode (94 real STOP HIT events, 88.3% recovered to
+// breakeven within 24h, 68.1% hypothetical win rate, +1.94% avg
+// hypothetical P&L). Off by default; this badge/toggle is how it's
+// turned on. Deliberately never fires on a BRANCH BREACH/EQUITY FLOOR
+// BREACH forced exit - see the backend's own docstring for why.
+function renderReversalTradeBadge(active) {
+    const el = document.getElementById('reversal-trade-badge');
+    el.style.display = '';
+    const label = active
+        ? '<strong style="color:var(--green);">ON</strong> - a genuine STOP HIT immediately re-buys the same coin with a fixed +/-2% target/stop'
+        : '<strong style="color:var(--text-dim);">OFF</strong>';
+    el.innerHTML = `🔁 STOP-HIT reversal buy: ${label} — ` +
+        `<a href="javascript:void(0)" onclick="toggleReversalTrade(${!active})" style="color: var(--navy);">${active ? 'turn off' : 'turn on'}</a> ` +
+        `<span style="color:var(--text-dim);">(real evidence: <a href="/crypto-selection-backtest-view" style="color: var(--navy);">Stop-Hit Reversal Backtest</a>)</span>`;
+}
+
+async function toggleReversalTrade(enable) {
+    const msg = enable
+        ? 'Turn ON the real STOP-HIT reversal buy? After a genuine real STOP HIT, the branch will immediately buy back into the same coin with a real fixed +/-2% target/stop, using real money. Never fires on a BRANCH BREACH or EQUITY FLOOR BREACH exit.'
+        : 'Turn OFF the real STOP-HIT reversal buy? Branches will go back to the normal coin-switch behavior after a STOP HIT.';
+    if (!confirm(msg)) return;
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/family-tree-status/set-reversal-trade', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: enable }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        renderReversalTradeBadge(data.reversal_trade_active);
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
 }
 
 function renderCryptoPassiveModeBanner(data) {

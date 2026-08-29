@@ -852,6 +852,7 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     rolling_expectancy = await crypto_family_tree_bot_module.get_rolling_expectancy() if crypto_family_tree_bot_module else None
     exit_mode = await crypto_family_tree_bot_module.get_live_exit_mode() if crypto_family_tree_bot_module else "trailing_stop"
     trailing_stop_pct = await crypto_family_tree_bot_module.get_live_trailing_stop_pct() if crypto_family_tree_bot_module else None
+    reversal_trade_active = await crypto_family_tree_bot_module.get_reversal_trade_active() if crypto_family_tree_bot_module else False
 
     return {
         "branches": out,
@@ -875,6 +876,7 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         "rolling_expectancy": rolling_expectancy,
         "exit_mode": exit_mode,
         "trailing_stop_pct": trailing_stop_pct,
+        "reversal_trade_active": reversal_trade_active,
         "real_usd_balance": round(real_balance, 2) if real_balance is not None else None,
         "real_usdc_balance": round(real_usdc_balance, 2) if real_usdc_balance is not None else None,
     }
@@ -2683,6 +2685,33 @@ async def set_crypto_exit_mode(payload: SetExitModeRequest):
     await crypto_family_tree_bot_module.set_live_exit_mode(mode)
     log.info(f"[dashboard] 🎯 Live crypto exit mode promoted to '{mode}'")
     return {"status": "promoted", "exit_mode": mode}
+
+
+class SetReversalTradeRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/family-tree-status/set-reversal-trade", dependencies=[Depends(require_admin_key)])
+async def set_crypto_reversal_trade(payload: SetReversalTradeRequest):
+    """Turns the real, opt-in STOP-HIT reversal buy on or off - the live
+    wiring of what crypto_selection_backtest.py's
+    run_stop_hit_reversal_backtest() already validated in shadow mode (94
+    real STOP HIT events, 88.3% recovered to breakeven within 24h, 68.1%
+    hypothetical win rate, +1.94% avg hypothetical P&L on a plain "buy
+    back at the stop price" trade). Per the account owner's explicit
+    "yes" after being shown that real evidence.
+
+    Off by default - a true no-op until explicitly turned on here. Takes
+    effect on the live bot's very next real STOP HIT for any branch, no
+    restart needed, same as every other real-time flag in this codebase.
+    See crypto_family_tree_bot._attempt_stop_hit_reversal_buy's own
+    docstring for why this is deliberately scoped to a genuine STOP HIT
+    only, never a BRANCH BREACH/EQUITY FLOOR BREACH forced exit."""
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+    await crypto_family_tree_bot_module.set_reversal_trade_active(payload.enabled)
+    log.info(f"[dashboard] 🔁 Live crypto STOP-HIT reversal buy {'ENABLED' if payload.enabled else 'disabled'}")
+    return {"status": "updated", "reversal_trade_active": payload.enabled}
 
 
 @router.post("/crypto-selection-backtest/trailing-stop-pct-sweep", dependencies=[Depends(require_admin_key)])
