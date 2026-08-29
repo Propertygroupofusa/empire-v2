@@ -1793,8 +1793,11 @@ async def root_partial_sell_endpoint(payload: RootPartialSellRequest):
     part of the consolidated BTC position rather than new cash. This is a
     real, deliberate reopening of root's manual-sell path specifically for
     a PARTIAL amount - the existing close endpoint only ever sold root's
-    ENTIRE position. See crypto_family_tree_bot.root_partial_sell() for
-    the full real mechanics (real fee-adjusted proceeds, real trade-history
+    ENTIRE position. Per the account owner's own direct follow-up ("don't
+    let me sale at a loss ever"), this is refused server-side (a real,
+    fee-aware check, not just a UI warning) whenever it would realize a
+    real loss. See crypto_family_tree_bot.root_partial_sell() for the
+    full real mechanics (real fee-adjusted proceeds, real trade-history
     record, never strands unsellable dust)."""
     if crypto_family_tree_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")

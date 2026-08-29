@@ -1146,10 +1146,12 @@ async function addCashToBranch(botName, btn) {
 // owner's own explicit, informed choice to fund new Grid Bot branches
 // from part of the consolidated BTC holding. Sells a specific real
 // dollar amount out of root's position and leaves the rest untouched -
-// NOT gated on being in profit (unlike "Take profit now" above), since
-// the account owner weighed and accepted that tradeoff directly.
+// per the account owner's direct follow-up ("don't let me sale at a
+// loss ever"), this is now refused server-side (real, fee-aware check,
+// not just a UI warning) whenever it would realize a real loss - see
+// crypto_family_tree_bot.root_partial_sell()'s own docstring.
 async function rootPartialSell(btn) {
-    const amountStr = prompt('How much real cash to withdraw from BTC right now? (sells that much at market, leaves the rest of the position untouched)');
+    const amountStr = prompt('How much real cash to withdraw from BTC right now? (sells that much at market, leaves the rest of the position untouched - refused if it would be a real loss)');
     if (!amountStr) return;
     const amount = parseFloat(amountStr);
     if (!amount || amount <= 0) { alert('Enter a positive dollar amount.'); return; }

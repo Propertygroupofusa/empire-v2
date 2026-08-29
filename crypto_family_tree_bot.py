@@ -3298,6 +3298,20 @@ async def root_partial_sell(amount_usd: float) -> dict:
       (with a tiny float-tolerance) - never silently clamps a manual
       dollar request down to whatever's available, so the account owner
       always knows exactly what they're getting before it happens.
+    - NEVER sells at a real loss - per the account owner's own explicit,
+      direct follow-up ("don't let me sale at a loss ever, take that
+      option away") after initially accepting that tradeoff. Refuses
+      (ValueError) unless the REAL, fee-adjusted net proceeds on the
+      portion being sold would exceed its own real cost basis - not just
+      a raw price-above-entry check, which could still let a real net
+      loss through on a thin margin once the real round-trip fee is
+      subtracted (the exact class of bug already found and fixed once in
+      this file for the peak-profit-giveback exit - see
+      MAX_PROFIT_GIVEBACK_USD's own real net-of-fees fix above). Checked
+      against the real live price BEFORE ever placing the order, using
+      the same real ROUND_TRIP_FEE_RATE every other real exit in this
+      file already uses - so this can never fire a real sell that ends
+      up realizing a loss once fees are counted.
     - If what would be LEFT after the sell is too small to ever
       realistically trade again (real value < MIN_TRADE_USD), sells the
       ENTIRE position instead of stranding unsellable real dust behind -
@@ -3336,6 +3350,22 @@ async def root_partial_sell(amount_usd: float) -> dict:
             )
 
         qty_to_sell = amount_usd / current_price
+
+        # Real, fee-aware "never sell at a loss" guard - per the account
+        # owner's explicit request. Estimated against the real live price
+        # right now, using the exact same real fee rate the actual sell
+        # will be charged - a raw price check alone (current_price >
+        # entry_price) isn't enough, since a thin real margin can still
+        # net out to a real loss once the real round-trip fee is
+        # subtracted.
+        projected_net_proceeds = qty_to_sell * current_price * (1 - ROUND_TRIP_FEE_RATE / 2)
+        projected_cost_basis = qty_to_sell * position.entry_price
+        if projected_net_proceeds <= projected_cost_basis:
+            raise ValueError(
+                f"Refused - this would be a real loss after fees (entry ${position.entry_price:,.2f}, "
+                f"now ${current_price:,.2f}). Manual withdrawals are never allowed to sell at a loss."
+            )
+
         remaining_qty = position.qty - qty_to_sell
         selling_everything = (remaining_qty * current_price) < MIN_TRADE_USD
         if selling_everything:
