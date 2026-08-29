@@ -189,6 +189,13 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import status_snapshot: {e}")
 
+crypto_grid_bot_module = None
+try:
+    import crypto_grid_bot
+    crypto_grid_bot_module = crypto_grid_bot
+except Exception as e:
+    logging.warning(f"Failed to import crypto_grid_bot: {e}")
+
 # Which Coinbase strategy actually runs - "family_tree" (multiple branches,
 # each the same single-position adaptive-target engine, growing one new
 # coin at a time as branches cross $1,000), "btc_compound" (that same
@@ -1144,6 +1151,14 @@ async def lifespan(app: FastAPI):
             log.info("📄 Status snapshot thread started (periodic real-status report to a git branch)")
     except Exception as e:
         log.warning(f"Status snapshot thread failed to start: {e}")
+
+    try:
+        if crypto_grid_bot_module is not None:
+            import threading
+            threading.Thread(target=crypto_grid_bot_module.run, daemon=True).start()
+            log.info("🔲 Crypto grid bot thread started (real, opt-in grid-trading branches - see is_grid_bot_active)")
+    except Exception as e:
+        log.warning(f"Crypto grid bot thread failed to start: {e}")
 
     print(f"[LIFESPAN] About to check alpaca_swing_bot_module: {alpaca_swing_bot_module is not None}", flush=True)
     try:

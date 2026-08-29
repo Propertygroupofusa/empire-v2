@@ -75,6 +75,12 @@ except Exception as e:
     log.warning(f"btc_price_projection not importable, /family-tree-status/btc-projection will report unavailable: {e}")
     btc_price_projection_module = None
 
+try:
+    import crypto_grid_bot as crypto_grid_bot_module
+except Exception as e:
+    log.warning(f"crypto_grid_bot not importable, /grid-status will report unavailable: {e}")
+    crypto_grid_bot_module = None
+
 ALPACA_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
@@ -2714,29 +2720,6 @@ async def set_crypto_reversal_trade(payload: SetReversalTradeRequest):
     return {"status": "updated", "reversal_trade_active": payload.enabled}
 
 
-@router.post("/crypto-selection-backtest/trailing-stop-pct-sweep", dependencies=[Depends(require_admin_key)])
-async def run_trailing_stop_pct_sweep_backtest():
-    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
-    Per the account owner's explicit follow-up request right after
-    QUICK_PROFIT was removed outright ("is there any way that we can
-    refine and update the trailing stop what we have"): the live 2.5%
-    trail width was never itself tested against any alternative - it was
-    only sized to match the OLD QUICK_PROFIT dollar-giveback cap, a
-    coincidence of the comparison it won, not evidence it's the best
-    trailing-stop width on its own merits. Replays the real trailing-stop
-    exit rule under several candidate trail percentages
-    (crypto_selection_backtest.py's TRAILING_STOP_PCT_CANDIDATES) against
-    the exact same real historical candles for every coin, so a
-    genuinely better width can be found with real evidence instead of
-    guessed at.
-
-    Pulls real historical data from Coinbase's public candles endpoint -
-    can take 30-90 seconds depending on that endpoint's response time."""
-    if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
-    return await crypto_selection_backtest_module.run_trailing_stop_pct_sweep_comparison()
-
-
 class SetTrailingStopPctRequest(BaseModel):
     pct: float
 
@@ -4662,3 +4645,94 @@ async def get_profit_locks():
             "locks_week": 0,
             "recent_locks": []
         }
+
+
+# ============================================================================
+# CRYPTO GRID BOT - real, live grid-trading branches (see crypto_grid_bot.py's
+# own module docstring for the full real evidence/scoping). Per the account
+# owner's direct "you have to do it C" after Strategy Lab's real A/B/C/D
+# comparison showed Grid Bot as the clear best real performer.
+# ============================================================================
+
+@router.get("/grid-status", dependencies=[Depends(require_admin_key)])
+async def get_grid_status_endpoint():
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    return await crypto_grid_bot_module.get_grid_status()
+
+
+@router.get("/grid-status/trade-history", dependencies=[Depends(require_admin_key)])
+async def get_grid_trade_history_endpoint():
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    return await crypto_grid_bot_module.get_grid_trade_history()
+
+
+class SetGridBotModeRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/grid-status/mode", dependencies=[Depends(require_admin_key)])
+async def set_grid_bot_mode_endpoint(payload: SetGridBotModeRequest):
+    """The real master switch for the whole grid-branch system. Real
+    branches can be created while the mode is off (so they're ready
+    before flipping it on), but nothing trades until this is explicitly
+    enabled - see crypto_grid_bot.is_grid_bot_active's own docstring for
+    why it currently defaults to True."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    await crypto_grid_bot_module.set_grid_bot_active(payload.enabled)
+    log.info(f"[dashboard] 🔲 Crypto grid bot mode {'ENABLED - real grid branches are now live' if payload.enabled else 'disabled'}")
+    return {"status": "updated", "mode_active": payload.enabled}
+
+
+class CreateGridBranchRequest(BaseModel):
+    product_id: str
+    allocated_usd: float
+
+
+@router.post("/grid-status/create-branch", dependencies=[Depends(require_admin_key)])
+async def create_grid_branch_endpoint(payload: CreateGridBranchRequest):
+    """Creates a real new grid branch on the given real Coinbase product
+    id with the given real dollar allocation - a pure bookkeeping
+    operation plus one real live price fetch (to anchor its starting
+    reference_price), never a trade by itself. Refuses a non-positive
+    amount or a coin already claimed by another active grid branch."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    try:
+        branch = await crypto_grid_bot_module.create_grid_branch(payload.product_id, payload.allocated_usd)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "status": "created", "bot_name": branch.bot_name, "product_id": branch.product_id,
+        "allocated_usd": round(branch.allocated_usd, 2), "reference_price": branch.reference_price,
+    }
+
+
+class SetGridBranchActiveRequest(BaseModel):
+    active: bool
+
+
+@router.post("/grid-status/{bot_name}/active", dependencies=[Depends(require_admin_key)])
+async def set_grid_branch_active_endpoint(bot_name: str, payload: SetGridBranchActiveRequest):
+    """Pauses or resumes ONE specific real grid branch without touching
+    the master switch or any other branch. A paused branch's own coin is
+    also released back to real availability for a new branch (see
+    get_grid_branch_claimed_coins, active-only) - it does NOT force-close
+    any real open slices, matching the "never force a real position
+    closed by a settings change" principle used everywhere else in this
+    codebase; existing slices just sit until price naturally reaches
+    them, or a real manual close is added later."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    from models import CryptoGridBranch
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == bot_name))
+        branch = result.scalar_one_or_none()
+        if branch is None:
+            raise HTTPException(status_code=404, detail=f"no grid branch named {bot_name!r}")
+        branch.active = payload.active
+        await db.commit()
+    log.info(f"[dashboard] {'▶️ Resumed' if payload.active else '⏸️ Paused'} grid branch {bot_name}")
+    return {"status": "updated", "bot_name": bot_name, "active": payload.active}

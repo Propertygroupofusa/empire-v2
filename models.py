@@ -956,6 +956,107 @@ class AlpacaBranch(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class CryptoGridBranch(Base):
+    """A real, live grid-trading branch - per the account owner's direct
+    "you have to do it C" after Strategy Lab's real A/B/C/D comparison
+    showed Grid Bot (C) as the clear best real performer (+$69.50 total,
+    59.2% win rate, 637 trades, vs. the live baseline's real -$1,457.43
+    over the same 35 coins/30 days). crypto_selection_backtest.py's own
+    Strategy Lab copy said this plainly: "going live with [Grid Bot]
+    would need real engineering work first, not just a promote click" -
+    the existing family-tree engine (CryptoTreeBranch/BotPosition) is
+    fundamentally single-position-per-branch, but a real grid needs
+    several concurrent open slices at once. This is that real
+    engineering: a genuinely separate, additive branch type - never
+    touches or shares state with CryptoTreeBranch - trading its own real
+    dedicated coin with its own capital, split into up to num_levels real
+    concurrent slices (see CryptoGridSlice).
+
+    Same real-money shape as every other branch system in this codebase:
+    one real shared Coinbase USD wallet, no per-branch sub-account -
+    allocated_usd is this branch's own virtual slice of it, clamped
+    against the real account balance at order time the same way
+    place_market_buy() already clamps for the family tree."""
+    __tablename__ = "crypto_grid_branches"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot_name = Column(String, unique=True, index=True)  # e.g. "crypto_grid_btc_usd"
+    product_id = Column(String)  # Coinbase product id, e.g. "BTC-USD" - fixed for this branch's whole life
+
+    allocated_usd = Column(Float)  # this branch's current virtual slice, cash-equivalent (idle cash + the real value of every open slice)
+    active = Column(Boolean, default=True)  # a disabled branch is skipped by the cycle driver but keeps its own history/row and open slices
+
+    # The real, live grid parameters this branch trades under - matches
+    # crypto_selection_backtest.py's STRATEGY_LAB_GRID_PCT/STRATEGY_LAB_GRID_LEVELS
+    # exactly (the same real numbers the validated backtest used), stored
+    # per-row rather than as a fixed constant so a future branch could be
+    # created with different, separately-tested parameters without
+    # touching every existing one.
+    grid_pct = Column(Float, default=0.01)
+    num_levels = Column(Integer, default=10)
+
+    # The real price level this branch's next buy/sell decision is
+    # measured against - starts at the real price when the branch was
+    # created, and updates to the real fill price on every real buy AND
+    # every real sell (exactly matching _replay_grid_bot's own
+    # `reference` variable). Persisted (not just in-memory) so a Railway
+    # restart can't silently reset it and cause a burst of real re-fills.
+    reference_price = Column(Float)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CryptoGridSlice(Base):
+    """One currently-open real slice of a CryptoGridBranch's position -
+    the real reason Grid Bot needed its own branch/model pair rather than
+    reusing CryptoTreeBranch/BotPosition, which assume exactly one open
+    position per branch. Multiple rows can exist for the same bot_name at
+    once (up to that branch's own num_levels) - sold strictly FIFO
+    (oldest opened_at first), matching _replay_grid_bot's own real
+    mechanics exactly."""
+    __tablename__ = "crypto_grid_slices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot_name = Column(String, index=True)
+    product_id = Column(String)
+    entry_price = Column(Float)
+    qty = Column(Float)
+    opened_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CryptoGridTradeHistory(Base):
+    """One completed real grid-slice round trip (a real buy, later
+    matched with a real FIFO sell) - the direct grid-branch counterpart
+    to CryptoCoinTradeHistory/AlpacaBranchTradeHistory, so a grid
+    branch's own real win rate/P&L history is visible the same way every
+    other branch type's already is, not just its current allocated_usd."""
+    __tablename__ = "crypto_grid_trade_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot_name = Column(String, index=True)
+    product_id = Column(String, index=True)
+    entry_price = Column(Float)
+    exit_price = Column(Float)
+    qty = Column(Float)
+    pnl = Column(Float)
+    opened_at = Column(DateTime, nullable=True)
+    closed_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "bot_name": self.bot_name,
+            "product_id": self.product_id,
+            "entry_price": self.entry_price,
+            "exit_price": self.exit_price,
+            "qty": self.qty,
+            "pnl": self.pnl,
+            "opened_at": (self.opened_at.isoformat() + "Z") if self.opened_at else None,
+            "closed_at": (self.closed_at.isoformat() + "Z") if self.closed_at else None,
+        }
+
+
 class ClosedTrade(Base):
     """One completed round trip, with the conditions that caused it.
 
