@@ -816,7 +816,7 @@ async function runStrategyLab() {
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
 
         renderStrategyLabResults(data);
-        statusEl.textContent = `Tested ${data.coins_with_results} of ${data.coins_tested} real coins over ${data.backtest_days} days (${data.skipped.length} skipped for missing real data). Best real performer: ${STRATEGY_LAB_LABELS[data.best_strategy]}.`;
+        statusEl.textContent = `Tested ${data.coins_with_results} of ${data.coins_tested} real coins over ${data.backtest_days} days (${data.skipped.length} skipped - see the real reason for each below). Best real performer: ${STRATEGY_LAB_LABELS[data.best_strategy]}.`;
     } catch (e) {
         statusEl.textContent = 'Error: ' + e.message;
         statusEl.className = 'error';
@@ -894,6 +894,21 @@ function renderStrategyLabResults(data) {
         return `<tr><td>${row.product_id}</td>${cells}</tr>`;
     }).join('');
 
+    const skipped = data.skipped || [];
+    const skippedRows = skipped.map(s => `<tr><td>${s.product_id}</td><td>${s.reason}</td></tr>`).join('');
+    // Real, per-coin skip reasons - per the account owner's own direct
+    // question about why so many coins were being skipped, which the
+    // old code could only ever answer with a blanket "not enough
+    // historical data" even when the real cause was a Coinbase rate
+    // limit. Shown even when the list is short, so a real rate-limit
+    // pattern (several coins all reporting "HTTP 429") is visible at a
+    // glance instead of buried in a raw count.
+    const skippedHtml = skipped.length ? `
+        <table style="margin-top:14px;">
+            <thead><tr><th>Skipped coin</th><th>Real reason</th></tr></thead>
+            <tbody>${skippedRows}</tbody>
+        </table>` : '';
+
     resultsEl.innerHTML = `
         ${renderStrategyLabBarChart(data.summary)}
         <table style="margin-top:14px;">
@@ -904,6 +919,7 @@ function renderStrategyLabResults(data) {
             <thead><tr><th>Coin</th>${STRATEGY_LAB_ORDER.map(k => `<th>${STRATEGY_LAB_LABELS[k]}</th>`).join('')}</tr></thead>
             <tbody>${coinRows}</tbody>
         </table>
+        ${skippedHtml}
         <p class="trade-note">Real evidence, not a recommendation on its own - see the honest limits noted above the run button, especially for Grid Bot and Swing Trading, before deciding whether to pursue building either for real.</p>
     `;
 }

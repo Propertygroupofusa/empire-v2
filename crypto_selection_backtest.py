@@ -61,7 +61,7 @@ GRANULARITY_SECONDS = 3600  # 1-hour candles
 ATR_WINDOW = 15  # matches _atr_pct_from_candles' 14-period + 1
 
 
-async def fetch_candles_window(session, product_id, start, end, min_candles=ATR_WINDOW + 5):
+async def fetch_candles_window(session, product_id, start, end, min_candles=ATR_WINDOW + 5, last_error_out=None):
     """Paginated pull of real Coinbase historical candles (public,
     unauthenticated endpoint - same one the live bot's own _fetch_candles
     uses) between two explicit real UTC datetimes. Factored out of
@@ -69,28 +69,72 @@ async def fetch_candles_window(session, product_id, start, end, min_candles=ATR_
     EVENT (not "the last N days from right now") can reuse the identical
     real pagination logic - see run_stop_hit_reversal_backtest(), which
     needs a real forward window starting at each real stop-loss's own
-    closed_at, not the module's usual now-minus-days window."""
+    closed_at, not the module's usual now-minus-days window.
+
+    Real bug found from the account owner's own observation - Strategy
+    Lab was skipping 31 of 36 real coins with a blanket "not enough
+    historical data" message. Reading this function's own original code
+    turned up the real, likely cause: with several coins fetched
+    CONCURRENTLY (see max_concurrent on every real caller) and this
+    function's own real 3-page pagination for a 30-day window, a burst
+    of simultaneous requests to Coinbase's real public, unauthenticated
+    candles endpoint is a real, plausible way to trip its rate limit -
+    and the old code treated ANY non-200 response (silently, including a
+    real 429) as "give up on this page, return whatever came back so
+    far," which for a well-established coin like ETH-USD or LTC-USD is
+    almost certainly a rate-limit artifact, not genuinely missing real
+    history. Not yet confirmed live (this sandbox has no live network
+    access to Coinbase to reproduce it directly) - real evidence needs
+    the account owner re-running Strategy Lab after this ships.
+
+    Fixed two ways: a real 429 now gets a bounded number of retries with
+    a short real backoff (a genuine rate limit typically clears in well
+    under a second) before giving up on that page - a non-429 failure
+    (e.g. a real 404 for an invalid product) is NOT retried, since
+    retrying an identical request could never fix it. And the real
+    reason a coin's fetch ultimately failed is now captured into
+    last_error_out[product_id] when a dict is passed in (optional,
+    defaults to None - every existing caller that doesn't pass this is
+    completely unaffected), so a future skip can say WHY instead of a
+    blanket "not enough historical data" hiding a real rate-limit
+    problem."""
     all_candles = []
     cursor = start
+    last_error = None
     while cursor < end:
         page_end = min(cursor + timedelta(seconds=GRANULARITY_SECONDS * 299), end)
         url = (
             f"https://api.exchange.coinbase.com/products/{product_id}/candles"
             f"?granularity={GRANULARITY_SECONDS}&start={cursor.isoformat()}&end={page_end.isoformat()}"
         )
-        try:
-            async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
-                if r.status != 200:
+        page_data = None
+        for attempt in range(3):
+            try:
+                async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
+                    if r.status == 429:
+                        last_error = f"HTTP 429 rate limited"
+                        await asyncio.sleep(0.5 * (attempt + 1))
+                        continue
+                    if r.status != 200:
+                        last_error = f"HTTP {r.status}"
+                        break
+                    page_data = await r.json()
+                    last_error = None
                     break
-                data = await r.json()
-                if data:
-                    all_candles.extend(data)
-        except Exception as e:
-            print(f"  [{product_id}] fetch error for page starting {cursor.date()}: {e}")
+            except Exception as e:
+                last_error = f"{type(e).__name__}: {str(e)[:100]}"
+                print(f"  [{product_id}] fetch error for page starting {cursor.date()}: {e}")
+                await asyncio.sleep(0.5 * (attempt + 1))
+        if page_data:
+            all_candles.extend(page_data)
+        elif last_error:
+            break  # this page never came through even after retries - stop rather than silently pretend the window is complete
         cursor = page_end
         await asyncio.sleep(0.15)  # be polite to the public endpoint
 
     if len(all_candles) < min_candles:
+        if last_error_out is not None:
+            last_error_out[product_id] = last_error or f"only {len(all_candles)} of {min_candles} required real candles came back"
         return None
     all_candles.sort(key=lambda c: c[0])  # oldest first
     closes = [float(c[4]) for c in all_candles]
@@ -100,14 +144,16 @@ async def fetch_candles_window(session, product_id, start, end, min_candles=ATR_
     return closes, highs, lows, times
 
 
-async def fetch_historical_candles(session, product_id, days=BACKTEST_DAYS):
+async def fetch_historical_candles(session, product_id, days=BACKTEST_DAYS, last_error_out=None):
     """Real, unauthenticated Coinbase candles for the last `days` days
     from right now - the module's original, most common shape. Now a thin
     wrapper around fetch_candles_window() (see above), unchanged in
-    return shape/behavior for every existing caller."""
+    return shape/behavior for every existing caller. last_error_out is
+    optional and passed straight through - see fetch_candles_window's own
+    docstring."""
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
-    return await fetch_candles_window(session, product_id, start, end)
+    return await fetch_candles_window(session, product_id, start, end, last_error_out=last_error_out)
 
 
 def backtest_one_coin(closes, highs, lows, entry_gate=None, spend=None):
@@ -828,7 +874,7 @@ STRATEGY_LAB_STRATEGIES = {
 }
 
 
-async def run_strategy_lab_comparison(coins=None, days=BACKTEST_DAYS, max_concurrent=6):
+async def run_strategy_lab_comparison(coins=None, days=BACKTEST_DAYS, max_concurrent=3):
     """SHADOW-MODE, additive comparison - never touches live trading, never
     places an order. Direct answer to the account owner's own request
     ("I would like to try all of the options just to see what my options
@@ -841,6 +887,20 @@ async def run_strategy_lab_comparison(coins=None, days=BACKTEST_DAYS, max_concur
     fairly comparable on the same data.
 
     Real, honest limits stated plainly, not hidden:
+    - Real 31-of-36 coins skipped in a real live run, all reporting a
+      blanket "not enough historical data" - traced to fetch_candles_window's
+      own old behavior of silently giving up on ANY non-200 response
+      (very plausibly a real 429 rate-limit from several coins' candle
+      fetches firing at once against Coinbase's public endpoint, not
+      genuinely missing history for well-established coins). Fixed there
+      with a real bounded retry on 429 specifically, and max_concurrent
+      here lowered from 6 to 3 to reduce how many real simultaneous
+      requests this tool fires at once. skipped[].reason now reports the
+      real captured cause (e.g. "HTTP 429 rate limited") instead of the
+      old generic message, so if coins are still being skipped after
+      this, the real reason is visible instead of guessed at again. Not
+      yet confirmed live - needs a real re-run to see if the skip count
+      actually drops.
     - grid_bot's own fee assumption may be too pessimistic relative to
       Coinbase's real grid-bot product specifically (see _replay_grid_bot's
       own docstring) - or this codebase's existing fee constant may be too
@@ -861,12 +921,14 @@ async def run_strategy_lab_comparison(coins=None, days=BACKTEST_DAYS, max_concur
       not just a promote button."""
     coins = coins or COIN_FAMILY_TREE
     semaphore = asyncio.Semaphore(max_concurrent)
+    last_errors = {}
     async with aiohttp.ClientSession() as session:
         async def _one(product_id):
             async with semaphore:
-                candles = await fetch_historical_candles(session, product_id, days=days)
+                candles = await fetch_historical_candles(session, product_id, days=days, last_error_out=last_errors)
             if candles is None:
-                return product_id, None, "not enough historical data"
+                reason = last_errors.get(product_id, "not enough historical data")
+                return product_id, None, reason
             closes, highs, lows, _times = candles
             per_strategy = {
                 name: fn(closes, highs, lows, None) for name, fn in STRATEGY_LAB_STRATEGIES.items()
