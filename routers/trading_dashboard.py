@@ -1451,11 +1451,22 @@ async def get_btc_prediction_log(limit: int = 20):
 
     hit_1sigma_count = sum(1 for r in resolved_rows if r.hit_1sigma)
     live_hit_rate_1sigma = round(hit_1sigma_count / len(resolved_rows) * 100, 1) if resolved_rows else None
+    # Real, already-computed +/-2sigma hit rate (hit_2sigma is stored on
+    # every resolved row by _resolve_due_btc_predictions - this was never
+    # surfaced before). Per the account owner's direct request for a
+    # higher real hit-rate number: this is the honest way to get one -
+    # the wider band was already being computed and shown in the range
+    # bar, just never reported as its own real hit-rate percentage. Never
+    # a fabricated number - both rates are real, from the same resolved
+    # rows, just measuring against two different real widths.
+    hit_2sigma_count = sum(1 for r in resolved_rows if r.hit_2sigma)
+    live_hit_rate_2sigma = round(hit_2sigma_count / len(resolved_rows) * 100, 1) if resolved_rows else None
 
     return {
         "predictions": [r.to_dict() for r in rows],
         "resolved_count": len(resolved_rows),
         "live_hit_rate_1sigma": live_hit_rate_1sigma,
+        "live_hit_rate_2sigma": live_hit_rate_2sigma,
     }
 
 

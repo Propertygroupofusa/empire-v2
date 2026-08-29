@@ -2415,9 +2415,19 @@ function renderBtcPredictionLog(data) {
     const wrap = document.getElementById('btc-pred-log-wrap');
     const hitRateEl = document.getElementById('btc-pred-hitrate');
     const preds = data.predictions || [];
-    hitRateEl.textContent = data.live_hit_rate_1sigma != null
-        ? `Live hit rate: ${data.live_hit_rate_1sigma}% (${data.resolved_count} resolved)`
-        : 'No resolved predictions yet';
+    // Two real, honest widths side by side - not two different claims
+    // about the same thing. +/-1sigma is the tight, precise band (what
+    // "HIT/MISS" below grades against); +/-2sigma is the wider band
+    // already shown in the range bar above, real evidence that a bigger
+    // real window is genuinely hit far more often - never a relabeled or
+    // inflated number, both come from the same resolved real rows.
+    if (data.live_hit_rate_1sigma != null) {
+        hitRateEl.innerHTML = `&plusmn;1&sigma; hit rate: <strong>${data.live_hit_rate_1sigma}%</strong>`
+            + (data.live_hit_rate_2sigma != null ? ` &middot; &plusmn;2&sigma; hit rate: <strong>${data.live_hit_rate_2sigma}%</strong>` : '')
+            + ` <span style="color:var(--text-dim);">(${data.resolved_count} resolved)</span>`;
+    } else {
+        hitRateEl.textContent = 'No resolved predictions yet';
+    }
     if (preds.length === 0) {
         wrap.innerHTML = '<div class="coin-history-empty">No predictions logged yet - a real one gets recorded every 15 minutes while this dashboard stays open.</div>';
         return;
@@ -2431,9 +2441,11 @@ function renderBtcPredictionLog(data) {
             const resolveAt = new Date(p.resolve_at).toLocaleTimeString([], timeFmt);
             statusHtml = `<strong>${madeAt}</strong> <span style="color:var(--text-dim);">&#8987; Pending (resolves ${resolveAt})</span>`;
         } else if (p.hit_1sigma) {
-            statusHtml = `<strong>${madeAt}</strong> <span style="color:var(--green); font-weight:700;">&#9989; HIT</span> - <span style="color:#c99a00; font-weight:700;">actual ${fmtBtc(p.actual_price)}</span> (${p.abs_error_pct}% off)`;
+            statusHtml = `<strong>${madeAt}</strong> <span style="color:var(--green); font-weight:700;">&#9989; HIT (&plusmn;1&sigma;)</span> - <span style="color:#c99a00; font-weight:700;">actual ${fmtBtc(p.actual_price)}</span> (${p.abs_error_pct}% off)`;
+        } else if (p.hit_2sigma) {
+            statusHtml = `<strong>${madeAt}</strong> <span style="color:var(--gold); font-weight:700;">&#9888; MISS &plusmn;1&sigma; / HIT &plusmn;2&sigma;</span> - <span style="color:#c99a00; font-weight:700;">actual ${fmtBtc(p.actual_price)}</span> (${p.abs_error_pct}% off)`;
         } else {
-            statusHtml = `<strong>${madeAt}</strong> <span style="color:var(--red); font-weight:700;">&#10060; MISS</span> - <span style="color:#c99a00; font-weight:700;">actual ${fmtBtc(p.actual_price)}</span> (${p.abs_error_pct}% off)`;
+            statusHtml = `<strong>${madeAt}</strong> <span style="color:var(--red); font-weight:700;">&#10060; MISS (both bands)</span> - <span style="color:#c99a00; font-weight:700;">actual ${fmtBtc(p.actual_price)}</span> (${p.abs_error_pct}% off)`;
         }
         return `<div style="display:flex; flex-direction:column; gap:2px; padding:7px 0; border-bottom:1px solid var(--border); font-size:0.82em;">
             <div>${statusHtml}</div>
