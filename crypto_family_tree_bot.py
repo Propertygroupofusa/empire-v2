@@ -415,7 +415,18 @@ COIN_LOCK_KEY_PREFIX = "crypto_family_tree_coin_locked_"
 # limitation prop_bot.py/trading_dashboard.py already document for
 # Alpaca) - an actual bank withdrawal would be a manual step, or a
 # separate, bigger integration if ever wanted.
-PROFIT_SKIM_PCT = engine._safe_float_env("TREE_PROFIT_SKIM_PCT", "0.10")
+# Defaulted to 0.0 (no skim at all) per the account owner's explicit
+# request: "take away the lock profit, I don't want that anymore for any
+# of my stuff, I want all my money to be making money." Still real,
+# env-overridable (TREE_PROFIT_SKIM_PCT) if a skim is ever wanted again -
+# nothing about the skim MECHANISM itself was removed, only its default
+# rate, so a real future sell simply keeps 100% of its own profit inside
+# the branch's own allocated_usd (compounding) instead of 10% being
+# walled off into locked_usd. Existing locked_usd (real money already
+# skimmed before this change) is completely untouched by this - it's
+# still real, still sitting in the ledger, still reachable via the
+# existing 🔓 Unlock button on the dashboard.
+PROFIT_SKIM_PCT = engine._safe_float_env("TREE_PROFIT_SKIM_PCT", "0.0")
 LOCKED_PROFIT_STATE_KEY = "crypto_family_tree_locked_usd"
 
 # Per the account owner's explicit request: every real spawn reinforces

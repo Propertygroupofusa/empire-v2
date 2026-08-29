@@ -94,10 +94,14 @@ ALPACA_HEADERS = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_S
 ALPACA_AUTO_CLOSE_PROFIT_PCT = float(os.getenv("ALPACA_AUTO_CLOSE_PROFIT_PCT", "0.08"))
 ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS = float(os.getenv("ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS", "10"))
 ALPACA_AUTO_CLOSE_CHECK_INTERVAL_SECONDS = int(os.getenv("ALPACA_AUTO_CLOSE_CHECK_INTERVAL_SECONDS", "900"))
-# Same 10%-of-realized-profit pattern crypto_family_tree_bot.py uses (never
-# on a loss) - the other 90% + principal just returns to the account's
-# real buying power on close, no reinvestment decision made here.
-ALPACA_PROFIT_SKIM_PCT = float(os.getenv("ALPACA_PROFIT_SKIM_PCT", "0.10"))
+# Defaulted to 0.0 (no skim at all), matching crypto_family_tree_bot.py's
+# own PROFIT_SKIM_PCT change, per the account owner's explicit request:
+# "take away the lock profit, I don't want that anymore for any of my
+# stuff, I want all my money to be making money." A real closed position's
+# full profit now returns to the account's real buying power on close -
+# nothing is walled off into the locked ledger. Still env-overridable
+# (ALPACA_PROFIT_SKIM_PCT) if a skim is ever wanted again.
+ALPACA_PROFIT_SKIM_PCT = float(os.getenv("ALPACA_PROFIT_SKIM_PCT", "0.0"))
 ALPACA_LOCKED_PROFIT_KEY = "alpaca_locked_usd"
 
 # Pre-8-bot names, kept only to migrate whatever they were already
@@ -2978,6 +2982,7 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
         "locked_usd": locked_usd,
         "auto_close_profit_pct": ALPACA_AUTO_CLOSE_PROFIT_PCT,
         "auto_close_max_hold_days": ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS,
+        "profit_skim_pct": ALPACA_PROFIT_SKIM_PCT,
         "bots": [{"name": b.bot_name, "capital": round(b.base_capital, 2), "profit": round(_bot_profit(b), 2), "pl": round(_bot_pl(b), 2)} for b in bots],
         "positions": [
             {

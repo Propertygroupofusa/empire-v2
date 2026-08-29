@@ -869,11 +869,13 @@ async function refresh() {
         updateUnlockButtonState();
 
         if (data.auto_close_profit_pct != null && data.auto_close_max_hold_days != null) {
+            const skimPct = data.profit_skim_pct != null ? data.profit_skim_pct * 100 : 0;
+            const skimNote = skimPct > 0 ? `${skimPct.toFixed(0)}% of realized profit locks away, same as the crypto bot.` : `Full realized profit returns to buying power - no skim right now.`;
             document.getElementById('positions-note').textContent =
                 `Opened = real fill time of the order that opened the position. A background check auto-closes ` +
                 `any position once it hits +${(data.auto_close_profit_pct * 100).toFixed(0)}% profit or has been ` +
-                `open ${data.auto_close_max_hold_days.toFixed(0)} days, whichever comes first (10% of realized ` +
-                `profit locks away, same as the crypto bot). You can still Close one manually before that happens.`;
+                `open ${data.auto_close_max_hold_days.toFixed(0)} days, whichever comes first (${skimNote}) ` +
+                `You can still Close one manually before that happens.`;
         }
 
         isAlpacaPassive = !!data.alpaca_passive_mode;
