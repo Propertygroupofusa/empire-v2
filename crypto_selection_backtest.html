@@ -142,7 +142,7 @@
     <div id="shrResults"></div>
 
     <div class="note" style="margin-top: 28px;">
-        <strong>What about the OTHER real losses - the forced exits?</strong> The exit-reason breakdown showed most of a real losing window's damage actually came from BRANCH BREACH / EQUITY FLOOR BREACH - a branch's own real floor/drawdown-breach safety net force-selling it, not a genuine price-based stop. Unlike the OLD exit types from before QUICK_PROFIT was removed (which can never happen again), these two are real and still live today - so the same reversal question applies: does price tend to recover after one of these forced exits, and would buying back in right at that exit price have made money? Same real methodology as the Stop-Hit test above, same honest limitations (no fees modeled, real cash availability not checked) - only the source exit type differs. Shadow mode only.
+        <strong>What about the OTHER real losses - the forced exits?</strong> The exit-reason breakdown showed most of a real losing window's damage actually came from BRANCH BREACH / EQUITY FLOOR BREACH - a branch's own real floor/drawdown-breach safety net force-selling it, not a genuine price-based stop. Unlike the OLD exit types from before QUICK_PROFIT was removed (which can never happen again), these two are real and still live today - so the same reversal question applies: does price tend to recover after one of these forced exits, and would buying back in right at that exit price have made money? Same real methodology as the Stop-Hit test above (real, fee-adjusted P&amp;L on the hypothetical reversal trade), same one remaining honest limitation (real cash availability not checked) - only the source exit type differs. Shadow mode only.
     </div>
     <button class="run-btn" id="ferBtn" onclick="runForcedExitReversalBacktest()">▶ Run Forced-Exit Reversal Backtest (~10-60 seconds)</button>
     <div id="ferStatus"></div>
@@ -772,7 +772,7 @@ function renderReversalBacktestResults(resultsId, eventLabel, data) {
             <thead><tr><th>Coin</th><th>Exit date</th><th>Real exit P&amp;L</th><th>Fwd return</th><th>Recovered?</th><th>Hypothetical reversal trade</th><th></th></tr></thead>
             <tbody>${rows}</tbody>
         </table>
-        <p class="trade-note">No fees modeled on the hypothetical reversal trades, and real cash availability at the time isn't checked - this is a real, honest first look at whether the idea has merit, not a final answer or something wired into live trading.</p>
+        <p class="trade-note">The hypothetical reversal trade's P&amp;L is now net of the real round-trip fee (matching every other backtest on this page) - but real cash availability at the time still isn't checked. This is a real, honest look at whether the idea has merit, not a final answer or something wired into live trading.</p>
         <p class="trade-note">"Trade this" places a REAL trade, not a simulation - it starts a real new $50 branch on that coin right now using your actual unallocated Coinbase cash (same real mechanism as the watchlist's own "Trade this" button below). Refused if the coin is already held, currently excluded, or there isn't enough real free cash.</p>
     `;
 }

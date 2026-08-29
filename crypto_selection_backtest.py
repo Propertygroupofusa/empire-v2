@@ -1450,6 +1450,23 @@ async def _load_real_exit_events(exit_reasons, limit=STOP_HIT_REVERSAL_EVENT_LIM
         return result.scalars().all()
 
 
+def _net_pnl_pct(entry_price, exit_price):
+    """Real, fee-adjusted round-trip return - the exact same math every
+    other real replay in this file already uses (backtest_one_coin,
+    _replay_with_exit_mode, etc: fee = qty*(entry+exit)*(ROUND_TRIP_FEE_RATE/2),
+    net = gross - fee), expressed in percentage terms so this function
+    doesn't need a real qty/spend to compute it - net_pct = net/spend is
+    algebraically identical to this formula regardless of position size.
+    Added after the account owner pointed out the reversal backtest
+    should model real fees "so we would know how everything going to
+    look" - previously this walked away with a raw, fee-free price
+    return, overstating every hypothetical reversal trade's real result
+    by the full real round-trip cost."""
+    gross_pct = (exit_price - entry_price) / entry_price
+    fee_pct = (entry_price + exit_price) / entry_price * (engine.ROUND_TRIP_FEE_RATE / 2)
+    return gross_pct - fee_pct
+
+
 def _simulate_reversal_trade(closes, times, start_idx, entry_price, target_pct, stop_pct):
     """Real, simple hypothesis test: what if the tree had immediately
     bought back in at the real stop-loss's own exit price, right after
@@ -1459,8 +1476,15 @@ def _simulate_reversal_trade(closes, times, start_idx, entry_price, target_pct, 
     protecting the reversal trade itself, whichever comes first; if
     neither fires before the window (the candles passed in) runs out,
     marks-to-market against the real last close instead of leaving the
-    hypothetical trade open forever. No fees modeled - stated plainly,
-    same as the module's other single-position replay simplifications.
+    hypothetical trade open forever.
+
+    `pnl_pct` is now the REAL, fee-adjusted round-trip return (see
+    _net_pnl_pct above) - a real buy-back has to clear the real
+    round-trip fee on top of target_pct to count as a genuine win, same
+    as every other trade this codebase actually places. target_price/
+    stop_price themselves are still set on the raw price move (a real
+    order's trigger doesn't care about fees, only its settled P&L does) -
+    only the reported pnl_pct changed.
 
     Real bug fixed here: recovered_to_breakeven originally checked
     EVERY candle including the very first one in the window (the candle
@@ -1479,13 +1503,13 @@ def _simulate_reversal_trade(closes, times, start_idx, entry_price, target_pct, 
         if offset > 0 and price >= entry_price:
             recovered_to_breakeven = True
         if price >= target_price:
-            return {"exit_reason": "TARGET", "exit_price": price, "pnl_pct": (price - entry_price) / entry_price, "recovered_to_breakeven": True}
+            return {"exit_reason": "TARGET", "exit_price": price, "pnl_pct": _net_pnl_pct(entry_price, price), "recovered_to_breakeven": True}
         if price <= stop_price:
-            return {"exit_reason": "STOP", "exit_price": price, "pnl_pct": (price - entry_price) / entry_price, "recovered_to_breakeven": recovered_to_breakeven}
+            return {"exit_reason": "STOP", "exit_price": price, "pnl_pct": _net_pnl_pct(entry_price, price), "recovered_to_breakeven": recovered_to_breakeven}
     # Window ran out with neither hit - mark to the real last close.
     last_price = closes[-1]
     return {
-        "exit_reason": "TIME", "exit_price": last_price, "pnl_pct": (last_price - entry_price) / entry_price,
+        "exit_reason": "TIME", "exit_price": last_price, "pnl_pct": _net_pnl_pct(entry_price, last_price),
         "recovered_to_breakeven": recovered_to_breakeven,
     }
 
@@ -1520,14 +1544,16 @@ async def run_stop_hit_reversal_backtest(
         exit at a modest target or a second hard stop" trade
         (_simulate_reversal_trade above)
 
-    Real, honest limitations stated plainly: no fees are modeled on the
-    hypothetical reversal trades (a real one would need to clear the
-    real round-trip fee on top of target_pct to be a genuine profit);
-    this never accounts for whether real free cash would actually have
-    been available to take the hypothetical trade; and coins with very
-    few real STOP HIT events don't carry the same statistical weight as
-    POL-USD's real 80+ trade history. This is diagnostic only - it never
-    reads into any live trading decision on its own."""
+    Real, honest limitations stated plainly: the real round-trip fee IS
+    now modeled on the hypothetical reversal trades (_net_pnl_pct, added
+    after the account owner asked for it directly - "back testing with
+    the fees and everything... so we would know how everything going to
+    look"), but this still never accounts for whether real free cash
+    would actually have been available to take the hypothetical trade at
+    that moment; and coins with very few real STOP HIT events don't carry
+    the same statistical weight as POL-USD's real 80+ trade history. This
+    is diagnostic only - it never reads into any live trading decision on
+    its own."""
     events = await _load_real_exit_events(["STOP HIT"], limit=event_limit, hours_forward=hours_forward)
     return await _run_reversal_backtest_for_events(events, hours_forward, target_pct, stop_pct, max_concurrent)
 
@@ -1554,11 +1580,11 @@ async def run_forced_exit_reversal_backtest(
     is a genuinely actionable real test.
 
     Identical real methodology to run_stop_hit_reversal_backtest() -
-    same _simulate_reversal_trade hypothesis, same real historical
-    candle fetch, same honest limitations (no fees modeled, real cash
-    availability not checked) - only the source exit_reason filter
-    differs. See run_stop_hit_reversal_backtest()'s own docstring for
-    the full real methodology."""
+    same _simulate_reversal_trade hypothesis (now real, fee-adjusted P&L
+    via _net_pnl_pct), same real historical candle fetch, same honest
+    remaining limitation (real cash availability not checked) - only the
+    source exit_reason filter differs. See run_stop_hit_reversal_backtest()'s
+    own docstring for the full real methodology."""
     events = await _load_real_exit_events(FORCED_EXIT_REASONS, limit=event_limit, hours_forward=hours_forward)
     return await _run_reversal_backtest_for_events(events, hours_forward, target_pct, stop_pct, max_concurrent)
 
