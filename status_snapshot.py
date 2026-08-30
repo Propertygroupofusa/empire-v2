@@ -196,8 +196,8 @@ async def _build_grid_section() -> str:
         f"- **Real Free Cash:** {_fmt_usd(status.get('real_free_cash_usd'))}",
         f"- **Branches:** {len(branches)}",
         "",
-        "| Branch | Coin | Allocated | Spacing | Levels | Open Slices | Current Price | Peak/Drawdown |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Branch | Coin | Allocated | Spacing | Levels | Open Slices | Current Price | Peak/Drawdown | Locked |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for b in branches:
         dd = b.get("drawdown_pct")
@@ -207,10 +207,43 @@ async def _build_grid_section() -> str:
         lines.append(
             f"| {b['bot_name']} | {b['product_id']} | {_fmt_usd(b.get('allocated_usd'))} "
             f"| {b.get('grid_pct', 0) * 100:.2f}% | {b.get('num_levels')} | {b.get('open_slices')} "
-            f"| {_fmt_usd(b.get('current_price'))} | {dd_desc} |"
+            f"| {_fmt_usd(b.get('current_price'))} | {dd_desc} | {'🔒' if b.get('locked') else ''} |"
         )
     if not branches:
-        lines.append("| _(no grid branches yet)_ | | | | | | | |")
+        lines.append("| _(no grid branches yet)_ | | | | | | | | |")
+
+    return "\n".join(lines) + "\n"
+
+
+async def _build_activity_section() -> str:
+    """Real, recent Live Activity feed excerpt - added so a session with
+    no live network access can see WHAT actually happened recently (a
+    move-cash, a reallocation, a spawn, a real sell) instead of only the
+    resulting balances, which alone can't explain a real change like a
+    branch suddenly draining to $0. Reads the exact same real
+    CryptoActivityEvent table the dashboard's own Live Activity panel
+    does - shared between the family tree AND Grid Bot (see
+    crypto_grid_bot._log_activity_safe), so this one section covers both."""
+    try:
+        import crypto_family_tree_bot as tree
+    except Exception as e:
+        return f"## 📡 Recent Activity\n\n_Could not load: {e}_\n"
+
+    try:
+        events = await tree.get_activity_feed(limit=15)
+    except Exception as e:
+        return f"## 📡 Recent Activity\n\n_Could not fetch: {e}_\n"
+
+    lines = ["## 📡 Recent Activity (most recent first)", ""]
+    if not events:
+        lines.append("_(no activity recorded yet)_")
+    else:
+        lines.append("| When (UTC) | Branch | Type | What happened |")
+        lines.append("|---|---|---|---|")
+        for e in events:
+            when = (e.get("created_at") or "—").replace("T", " ")[:19]
+            msg = (e.get("message") or "").replace("|", "/")
+            lines.append(f"| {when} | {e.get('bot_name') or '—'} | {e.get('event_type') or '—'} | {msg} |")
 
     return "\n".join(lines) + "\n"
 
@@ -220,13 +253,14 @@ async def build_snapshot_markdown() -> str:
     crypto_section = await _build_crypto_section()
     grid_section = await _build_grid_section()
     alpaca_section = await _build_alpaca_section()
+    activity_section = await _build_activity_section()
     return (
         f"# Empire v2 — Real Status Snapshot\n\n"
         f"_Generated automatically at {generated_at}. Read-only real account data - "
         f"this file is written by the running app on a timer and pushed to the "
         f"`{SNAPSHOT_BRANCH}` branch (never `main`). Numbers reflect the live database "
         f"and, where noted, live Coinbase/Alpaca prices at generation time._\n\n"
-        f"{crypto_section}\n{grid_section}\n{alpaca_section}"
+        f"{crypto_section}\n{grid_section}\n{alpaca_section}\n{activity_section}"
     )
 
 
