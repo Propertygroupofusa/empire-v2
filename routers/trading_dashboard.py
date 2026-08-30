@@ -2964,6 +2964,28 @@ async def run_grid_atr_spacing_backtest():
     return await crypto_selection_backtest_module.run_grid_atr_spacing_comparison()
 
 
+@router.post("/crypto-selection-backtest/grid-higher-tf-trend", dependencies=[Depends(require_admin_key)])
+async def run_grid_higher_tf_trend_backtest():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    Direct follow-up to the account owner's own question after seeing
+    narrow grid spacing lose money: does the same real higher-timeframe
+    trend filter already validated for the family tree's own entries
+    (SMA20 > SMA50 on hourly candles) reduce Grid Bot's real losses from
+    buying into a decline and later FIFO-selling an older, higher-priced
+    slice at a loss? Replays the existing, already-validated grid
+    strategy at today's real live 1%/10-level default, with new buys
+    gated on the real trend filter vs. an ungated real baseline, on
+    identical real historical candles - see
+    crypto_selection_backtest.py's run_grid_higher_tf_trend_comparison
+    for the full real methodology.
+
+    Pulls real historical data from Coinbase's public candles endpoint -
+    can take 30-90 seconds depending on that endpoint's response time."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_grid_higher_tf_trend_comparison()
+
+
 class SetExitModeRequest(BaseModel):
     mode: str
 

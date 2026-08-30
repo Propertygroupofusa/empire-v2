@@ -201,6 +201,19 @@
     <div id="gasResults"></div>
 
     <div class="note" style="margin-top: 28px;">
+        <strong>📉 A higher-timeframe trend filter for Grid Bot - does it stop the narrow-spacing losses?</strong>
+        Direct follow-up after narrower grid spacing showed real losses: those losses come from buying into a real
+        decline (several dips stack up open slices at descending prices), then FIFO-selling the OLDEST, higher-priced
+        slice at a real loss on a partial bounce. This gates NEW buys only on the exact same real SMA20 &gt; SMA50
+        (hourly) trend filter already validated for the family tree's own entries - real sells are NEVER gated - at
+        today's real live 1%/10-level default, against an ungated real baseline, on identical real candles. Shadow mode
+        only - never places an order.
+    </div>
+    <button class="run-btn" id="ghtBtn" onclick="runGridHigherTfTrendBacktest()">▶ Run Grid Higher-Timeframe Trend Comparison (~30-90 seconds)</button>
+    <div id="ghtStatus"></div>
+    <div id="ghtResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
         <strong>🎯 Narrow-range breakout continuation - does it really hold?</strong> A real trading concept the account owner described directly: "the best opportunity come from a narrow state... if you open above a narrow state... 87% chance there are more upside to come... if you open below a narrow state... 87% chance to follow through to the downside." That 87% is their own stated number, not yet checked against this system's real data. This replays every real coin's history looking for genuinely NARROW price ranges (tight relative to that SAME coin's own recent range history, not one fixed threshold - a coin's normal volatility varies too much for a flat number to mean the same thing everywhere), then checks the real FIRST candle that breaks outside each narrow range and whether price genuinely continued in that direction 24 real hours later. Reports the real hit rate, split by up vs. down breakouts, against an honest 50% coin-flip baseline. Shadow mode only - diagnostic, never wired to any real trade or entry filter.
     </div>
     <button class="run-btn" id="nrbBtn" onclick="runNarrowRangeBreakoutBacktest()">▶ Run Narrow-Range Breakout Backtest (~30-90 seconds)</button>
@@ -1383,6 +1396,85 @@ function renderGridAtrSpacingResults(data) {
             <tbody>${coinRows}</tbody>
         </table>
         <p class="trade-note">Every coin gets a DIFFERENT real grid_pct under each swing-based candidate (that's the whole point) - shown per cell, since there's no single "the spacing" the way the fee-tier table has one. Real evidence here, not a recommendation on its own - this is diagnostic only, nothing here changes what the live bot does.</p>
+    `;
+}
+
+async function runGridHigherTfTrendBacktest() {
+    const btn = document.getElementById('ghtBtn');
+    const statusEl = document.getElementById('ghtStatus');
+    const resultsEl = document.getElementById('ghtResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real data, baseline vs. trend-gated replayed per coin)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/crypto-selection-backtest/grid-higher-tf-trend', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderGridHigherTfTrendResults(data);
+        const best = data.summary[data.best_candidate];
+        statusEl.textContent = `Compared ${data.coins_with_results} coins over ${data.backtest_days} days, SMA${data.sma_short}/SMA${data.sma_long} trend filter. Best on this real sample: ${data.best_candidate === 'with_trend_filter' ? 'trend-gated' : 'ungated baseline'} ($${best.total_pnl.toFixed(2)} total).`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Grid Higher-Timeframe Trend Comparison (~30-90 seconds)';
+    }
+}
+
+function renderGridHigherTfTrendResults(data) {
+    const resultsEl = document.getElementById('ghtResults');
+    if (!data.comparison || data.comparison.length === 0) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No coins produced usable comparison results.</p>';
+        return;
+    }
+    const names = ['baseline', 'with_trend_filter'];
+    const labels = { baseline: 'Ungated baseline (today\'s live default)', with_trend_filter: 'Trend-gated (SMA20 &gt; SMA50)' };
+    const summaryRows = names.map(name => {
+        const s = data.summary[name];
+        const isBest = name === data.best_candidate;
+        const cls = s.total_pnl >= 0 ? 'pos' : 'neg';
+        return `<tr${isBest ? ' style="font-weight:700;"' : ''}>
+            <td>${labels[name]}${isBest ? ' 🏆' : ''}</td>
+            <td>${s.num_trades}</td>
+            <td>${s.win_rate == null ? '—' : s.win_rate.toFixed(1) + '%'}</td>
+            <td class="${cls}">${s.total_pnl >= 0 ? '+' : ''}$${s.total_pnl.toFixed(2)}</td>
+        </tr>`;
+    }).join('');
+
+    const coinRows = data.comparison.map(row => {
+        const cells = names.map(name => {
+            const r = row[name];
+            if (!r) return `<td style="color:var(--text-dim);">no trades</td>`;
+            const cls = r.total_pnl >= 0 ? 'pos' : 'neg';
+            return `<td class="${cls}">${r.total_pnl >= 0 ? '+' : ''}$${r.total_pnl.toFixed(2)} <span style="color:var(--text-dim);">(${r.num_trades}tr, ${r.win_rate.toFixed(0)}%)</span></td>`;
+        }).join('');
+        return `<tr><td>${row.product_id}</td>${cells}</tr>`;
+    }).join('');
+
+    resultsEl.innerHTML = `
+        <table style="margin-top:14px;">
+            <thead><tr><th>Real candidate</th><th>Trades</th><th>Win rate</th><th>Real total P&amp;L</th></tr></thead>
+            <tbody>${summaryRows}</tbody>
+        </table>
+        <table style="margin-top:14px;">
+            <thead><tr><th>Coin</th><th>Ungated baseline</th><th>Trend-gated</th></tr></thead>
+            <tbody>${coinRows}</tbody>
+        </table>
+        <p class="trade-note">Real sells are NEVER gated in either run - only new buys - so this isolates whether avoiding new entries during a confirmed real downtrend actually reduces the FIFO-oldest-slice-sold-at-a-loss pattern. Real evidence here, not a recommendation on its own - this is diagnostic only, nothing here changes what the live bot does.</p>
     `;
 }
 

@@ -1040,7 +1040,8 @@ def _replay_hourly_momentum(closes, highs, lows, spend=None,
 
 
 def _replay_grid_bot(closes, highs, lows, spend=None,
-                      grid_pct=STRATEGY_LAB_GRID_PCT, num_levels=STRATEGY_LAB_GRID_LEVELS):
+                      grid_pct=STRATEGY_LAB_GRID_PCT, num_levels=STRATEGY_LAB_GRID_LEVELS,
+                      entry_gate=None):
     """Real replay of the pasted proposal's "Automated Grid Bot" idea -
     a genuinely different mechanism from every other strategy in this
     file: instead of one directional position at a time, capital is split
@@ -1074,7 +1075,16 @@ def _replay_grid_bot(closes, highs, lows, spend=None,
       once, matching a real fixed capital split - a sustained one-
       directional move will fill every level and then simply stop buying
       (or selling) until price reverses, the same real constraint an
-      actual grid bot has."""
+      actual grid bot has.
+
+    `entry_gate(i)` (optional) - same real per-index callback interface
+    backtest_one_coin() already uses (see _make_higher_tf_trend_gate) -
+    when given, gates NEW BUYS only; a real sell is NEVER gated, matching
+    every other "existing protection never pauses on a filter" rule in
+    this codebase. A gated-out dip leaves `reference` completely
+    unchanged (mirrors crypto_grid_bot.py's own live behavior - reference
+    only ever updates on a REAL fill), so the identical dip is simply
+    re-evaluated next candle rather than being silently skipped forever."""
     spend = spend if spend is not None and spend > 0 else SPEND
     slice_usd = spend / num_levels
     trades = []
@@ -1092,8 +1102,9 @@ def _replay_grid_bot(closes, highs, lows, spend=None,
     while i < n:
         price = closes[i]
         if price <= reference * (1 - grid_pct) and len(open_slices) < num_levels:
-            open_slices.append({"entry": price, "qty": slice_usd / price})
-            reference = price
+            if entry_gate is None or entry_gate(i):
+                open_slices.append({"entry": price, "qty": slice_usd / price})
+                reference = price
         elif price >= reference * (1 + grid_pct) and open_slices:
             slot = open_slices.pop(0)
             gross = slot["qty"] * (price - slot["entry"])
@@ -1709,6 +1720,95 @@ async def run_grid_atr_spacing_comparison(coins=None, days=BACKTEST_DAYS, max_co
         "coins_with_results": len(comparison),
         "candidate_names": candidate_names,
         "average_real_swing_across_all_coins_pct": round(sum(avg_swings) / len(avg_swings), 3) if avg_swings else None,
+        "skipped": skipped,
+        "summary": summary,
+        "best_candidate": best,
+        "comparison": comparison,
+    }
+
+
+async def run_grid_higher_tf_trend_comparison(coins=None, days=BACKTEST_DAYS, sma_short=20, sma_long=50, max_concurrent=6):
+    """SHADOW-MODE, additive comparison - never touches live trading,
+    never places an order. Direct answer to the account owner's own
+    follow-up question, after seeing narrower grid spacing lose money by
+    repeatedly buying into real declines: would gating Grid Bot's own
+    NEW-SLICE buys on the same real higher-timeframe trend filter already
+    validated for the family tree's own entries (SMA20 > SMA50 on hourly
+    candles - see _make_higher_tf_trend_gate, the exact same real gate
+    function run_higher_tf_trend_comparison() already uses for that
+    strategy) reduce the real losses this specific failure mode causes?
+
+    Real mechanism this targets: a grid buys every qualifying dip with no
+    regard for the broader trend, so a sustained real decline piles up
+    several open slices at descending prices; when a partial bounce
+    finally triggers a sell, the OLDEST (FIFO) slice - bought before the
+    decline, at a real higher price - can still be sold at a real loss
+    even though the grid's own local rule was satisfied. Blocking new
+    buys while the higher timeframe is confirmed-declining should mean
+    fewer slices get stacked up during exactly the moves that produce
+    this pattern.
+
+    Replays the existing, already-validated _replay_grid_bot TWICE per
+    coin on the identical real historical candles - once as today's live
+    baseline (no gate), once with new buys gated on the real trend filter
+    - real sells are NEVER gated in either run, matching every other
+    "existing protection never pauses" rule in this file. Always at
+    today's real live grid_pct (1%) and num_levels (10) - this isolates
+    the trend-gate question specifically, not spacing (already tested
+    separately in run_grid_atr_spacing_comparison)."""
+    coins = coins or COIN_FAMILY_TREE
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async with aiohttp.ClientSession() as session:
+        async def _one(product_id):
+            async with semaphore:
+                candles = await fetch_historical_candles(session, product_id, days=days)
+            if candles is None:
+                return product_id, None, "not enough historical data"
+            closes, highs, lows, _times = candles
+            baseline = _replay_grid_bot(closes, highs, lows)
+            gate = _make_higher_tf_trend_gate(closes, sma_short=sma_short, sma_long=sma_long)
+            filtered = _replay_grid_bot(closes, highs, lows, entry_gate=gate)
+            return product_id, {"baseline": baseline, "with_trend_filter": filtered}, None
+
+        outcomes = await asyncio.gather(*(_one(pid) for pid in coins))
+
+    comparison = []
+    skipped = []
+    names = ["baseline", "with_trend_filter"]
+    totals = {name: 0.0 for name in names}
+    trade_counts = {name: 0 for name in names}
+    win_counts = {name: 0 for name in names}
+    for product_id, result, skip_reason in outcomes:
+        if result is None:
+            skipped.append({"product_id": product_id, "reason": skip_reason})
+            continue
+        comparison.append({"product_id": product_id, **result})
+        for name in names:
+            r = result[name]
+            if r is None:
+                continue
+            totals[name] += r["total_pnl"]
+            trade_counts[name] += r["num_trades"]
+            win_counts[name] += round(r["win_rate"] / 100 * r["num_trades"])
+
+    summary = {
+        name: {
+            "total_pnl": round(totals[name], 2),
+            "num_trades": trade_counts[name],
+            "win_rate": round(win_counts[name] / trade_counts[name] * 100, 1) if trade_counts[name] else None,
+        }
+        for name in names
+    }
+    best = max(summary.items(), key=lambda kv: kv[1]["total_pnl"])[0]
+
+    return {
+        "backtest_days": days,
+        "sma_short": sma_short,
+        "sma_long": sma_long,
+        "spend_per_trade": SPEND,
+        "coins_tested": len(coins),
+        "coins_with_results": len(comparison),
         "skipped": skipped,
         "summary": summary,
         "best_candidate": best,
