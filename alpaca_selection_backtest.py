@@ -1535,3 +1535,355 @@ async def run_opening_bar_breakout_backtest(symbols=None, days: int = BACKTEST_D
             "days": days,
         },
     }
+
+
+def _rolling_range_pct(highs: list, lows: list, end_idx: int, lookback: int):
+    """Real channel width - the real high/low range over the `lookback`
+    real bars ending just before end_idx, as a fraction of that window's
+    own real midpoint price. Ported from crypto_selection_backtest.py's
+    identical function (this file never cross-imports from that one, per
+    this codebase's own established convention) - returns (range_pct,
+    window_high, window_low), or None if end_idx doesn't have `lookback`
+    real bars of history behind it yet (or the window's own midpoint is
+    zero)."""
+    if end_idx < lookback:
+        return None
+    window_high = max(highs[end_idx - lookback:end_idx])
+    window_low = min(lows[end_idx - lookback:end_idx])
+    mid = (window_high + window_low) / 2
+    if not mid:
+        return None
+    return (window_high - window_low) / mid, window_high, window_low
+
+
+def _is_narrow_range_at(i: int, highs: list, lows: list, lookback: int, history: int, percentile: float):
+    """Real, percentile-relative "narrow state" detection - the direct
+    index-based counterpart to crypto_selection_backtest.py's identical
+    function, ported here (not imported) for real 2-minute bar arrays.
+    "Narrow" = the real range over the last `lookback` real bars is in
+    the bottom `percentile` of that same rolling-range measure's own
+    real distribution over the preceding `history` bars. Returns
+    (is_narrow, window_high, window_low). Returns (False, None, None)
+    when there isn't yet enough real history to judge - never guesses
+    without at least 10 real historical range samples behind it."""
+    current = _rolling_range_pct(highs, lows, i, lookback)
+    if current is None or i < lookback + history:
+        return False, None, None
+    current_range_pct, window_high, window_low = current
+
+    step = max(1, lookback // 2)
+    samples = []
+    j = i - lookback
+    stop = i - lookback - history
+    while j > stop:
+        r = _rolling_range_pct(highs, lows, j, lookback)
+        if r is not None:
+            samples.append(r[0])
+        j -= step
+    if len(samples) < 10:
+        return False, None, None
+    samples.sort()
+    idx = min(int(len(samples) * percentile), len(samples) - 1)
+    threshold = samples[idx]
+    return current_range_pct <= threshold, window_high, window_low
+
+
+SMA_STATE_SHORT_PERIOD = 20
+SMA_STATE_LONG_PERIOD = 200
+SMA_STATE_NARROW_PCT = 0.005
+OPENING_BAR_PCTL_LOOKBACK_BARS = 200
+OPENING_BAR_PCTL_HISTORY_BARS = 2000
+WIDE_STATE_SPEND_USD = OPENING_BAR_SPEND_USD
+WIDE_STATE_STOP_PCT = 0.02
+WIDE_STATE_MAX_HOLD_BARS = 200
+
+
+def _sma_at(closes: list, i: int, period: int):
+    """Real simple moving average of `period` closes ending AT index i
+    (inclusive) - None if index i doesn't have `period` real closes of
+    history behind it yet."""
+    if i - period + 1 < 0 or i >= len(closes):
+        return None
+    return sum(closes[i - period + 1:i + 1]) / period
+
+
+def _sma_state_at(closes: list, i: int, short_period: int = SMA_STATE_SHORT_PERIOD,
+                   long_period: int = SMA_STATE_LONG_PERIOD, narrow_pct: float = SMA_STATE_NARROW_PCT):
+    """Real 20/200 SMA-convergence "state" detection - the direct Alpaca-
+    side counterpart to crypto_selection_backtest.py's identical
+    function. Per the account owner's own real trading concept,
+    transcribed directly: "moving averages far apart is a wide state...
+    a tight narrow state [is] the 20 a little below the 200... know the
+    stock's state first and you've got 85% of the game figured out." A
+    GENUINELY DIFFERENT real definition of "narrow" than this file's
+    existing percentile-range method above - that one looks at how
+    tight the PRICE RANGE itself has been; this one looks at how close
+    two moving averages of different real speeds currently sit to each
+    other. Both are tested side by side in
+    run_opening_bar_narrow_state_comparison below.
+
+    `narrow_pct` (0.5% default) is an INVENTED threshold - the account
+    owner described "close together" vs. "separated" but gave no real
+    number, so this session picked one and is saying so plainly.
+
+    Returns "narrow", "wide_up" (the real 20 SMA has separated ABOVE the
+    real 200 SMA by more than narrow_pct), "wide_down" (separated
+    BELOW), or None when there isn't yet enough real closes for both
+    real SMAs."""
+    sma_short = _sma_at(closes, i, short_period)
+    sma_long = _sma_at(closes, i, long_period)
+    if sma_short is None or sma_long is None or sma_long == 0:
+        return None
+    gap_pct = (sma_short - sma_long) / sma_long
+    if abs(gap_pct) <= narrow_pct:
+        return "narrow"
+    return "wide_up" if gap_pct > 0 else "wide_down"
+
+
+async def run_opening_bar_narrow_state_comparison(symbols=None, days: int = BACKTEST_DAYS,
+                                                    max_concurrent: int = 6) -> dict:
+    """SHADOW-MODE. The direct Alpaca-side counterpart to
+    crypto_selection_backtest.py's identical function - compares three
+    real narrow-state definitions against the IDENTICAL real Elephant/
+    Tail opening-bar trades (_replay_opening_bar_breakout):
+      - "baseline": no narrow-state gate - every real qualifying setup,
+        exactly run_opening_bar_breakout_backtest's own shipped default.
+      - "percentile": gated on _is_narrow_range_at (real range in the
+        bottom 25th percentile of its own recent history).
+      - "sma": gated on the account owner's own real 20/200 SMA-
+        convergence method (_sma_state_at).
+    A day where a given method doesn't yet have enough real history to
+    have an opinion is excluded from THAT method's bucket only. Never
+    places a real order."""
+    symbol_list = symbols if symbols is not None else list(FUTURES.keys())
+    semaphore = asyncio.Semaphore(max_concurrent)
+    last_error = {}
+
+    async def _one(session, symbol):
+        async with semaphore:
+            bars, err = await _fetch_bars_2min_with_ohlc_and_times(session, symbol, days)
+        if bars is None:
+            last_error[symbol] = err
+            return symbol, None
+        days_grouped = _group_bars_by_day(bars)
+        highs = [b["h"] for b in bars]
+        lows = [b["l"] for b in bars]
+        closes = [b["c"] for b in bars]
+
+        cum = 0
+        day_start_idx = []
+        for _date, dbars in days_grouped:
+            day_start_idx.append(cum)
+            cum += len(dbars)
+
+        buckets = {"baseline": [], "percentile": [], "sma": []}
+        for i in range(1, len(days_grouped)):
+            _date, session_bars = days_grouped[i]
+            preceding_bars = days_grouped[i - 1][1][-ELEPHANT_BAR_LOOKBACK * 2:]
+            trade = _replay_opening_bar_breakout(session_bars, preceding_bars)
+            if trade is None:
+                continue
+            buckets["baseline"].append(trade)
+
+            idx_before = day_start_idx[i] - 1
+            if idx_before < 0:
+                continue
+            is_narrow_pctl, _, _ = _is_narrow_range_at(
+                idx_before, highs, lows,
+                lookback=OPENING_BAR_PCTL_LOOKBACK_BARS, history=OPENING_BAR_PCTL_HISTORY_BARS,
+                percentile=NARROW_DAY_PERCENTILE,
+            )
+            if is_narrow_pctl:
+                buckets["percentile"].append(trade)
+
+            sma_state = _sma_state_at(closes, idx_before)
+            if sma_state == "narrow":
+                buckets["sma"].append(trade)
+
+        return symbol, buckets
+
+    async with aiohttp.ClientSession() as session:
+        results = await asyncio.gather(*(_one(session, s) for s in symbol_list))
+
+    def _summarize(trades):
+        if not trades:
+            return None
+        wins = sum(1 for t in trades if t["pnl_usd"] > 0)
+        return {
+            "num_trades": len(trades),
+            "win_rate": round(wins / len(trades), 4),
+            "total_pnl": round(sum(t["pnl_usd"] for t in trades), 2),
+        }
+
+    per_symbol = []
+    skipped = []
+    overall_buckets = {"baseline": [], "percentile": [], "sma": []}
+    for symbol, buckets in results:
+        if buckets is None:
+            skipped.append({"product_id": symbol, "reason": last_error.get(symbol, "not enough real historical data")})
+            continue
+        if buckets["baseline"]:
+            per_symbol.append({
+                "product_id": symbol,
+                "baseline": _summarize(buckets["baseline"]),
+                "percentile": _summarize(buckets["percentile"]),
+                "sma": _summarize(buckets["sma"]),
+            })
+        for k in overall_buckets:
+            overall_buckets[k].extend(buckets[k])
+
+    return {
+        "symbols_tested": len(symbol_list), "symbols_with_results": len(per_symbol),
+        "skipped": skipped, "per_symbol": per_symbol,
+        "overall": {k: _summarize(v) for k, v in overall_buckets.items()},
+        "params": {
+            "spend_usd": OPENING_BAR_SPEND_USD, "days": days,
+            "sma_short_period": SMA_STATE_SHORT_PERIOD, "sma_long_period": SMA_STATE_LONG_PERIOD,
+            "sma_narrow_pct": SMA_STATE_NARROW_PCT,
+            "percentile_lookback_bars": OPENING_BAR_PCTL_LOOKBACK_BARS,
+            "percentile_history_bars": OPENING_BAR_PCTL_HISTORY_BARS,
+        },
+    }
+
+
+def _replay_wide_state_contrarian(closes: list, highs: list, lows: list, entry_idx: int, direction: str,
+                                   spend: float = WIDE_STATE_SPEND_USD, max_hold_bars: int = WIDE_STATE_MAX_HOLD_BARS,
+                                   stop_pct: float = WIDE_STATE_STOP_PCT,
+                                   short_period: int = SMA_STATE_SHORT_PERIOD, long_period: int = SMA_STATE_LONG_PERIOD,
+                                   narrow_pct: float = SMA_STATE_NARROW_PCT):
+    """Real contrarian mean-reversion trade - the direct Alpaca-side
+    counterpart to crypto_selection_backtest.py's identical function.
+    `direction="long"` (a real wide_down state, betting on reversion UP)
+    is executable by prop_bot.py today - it's long-only, but a long
+    entry here is exactly what it can already place. `direction="short"`
+    (a real wide_up state, betting on reversion DOWN) is diagnostic
+    only - prop_bot.py's real shorting is a documented, confirmed
+    account-level restriction ("account is not allowed to short"), not a
+    bug in this backtest.
+
+    Real exit conditions, checked bar by bar from entry_idx+1: STOP
+    (price moves `stop_pct` - 2% default, an INVENTED risk bound -
+    further against the bet), REVERSION (the real 20/200 state returns
+    to "narrow" - the real win condition), or MAX_HOLD (a real 200-bar
+    time backstop, ~6.7 real trading hours on 2-minute bars).
+
+    Returns a real trade dict, or None if entry_idx has no real close to
+    enter at."""
+    if entry_idx >= len(closes):
+        return None
+    entry_price = closes[entry_idx]
+    stop_price = entry_price * (1 - stop_pct) if direction == "long" else entry_price * (1 + stop_pct)
+    qty = spend / entry_price
+
+    def _result(exit_price, exit_reason, exit_idx):
+        pnl_usd = qty * (exit_price - entry_price) if direction == "long" else qty * (entry_price - exit_price)
+        return {
+            "direction": direction, "entry_price": entry_price, "entry_idx": entry_idx,
+            "stop_price": round(stop_price, 8), "exit_price": exit_price,
+            "exit_reason": exit_reason, "exit_idx": exit_idx,
+            "pnl_usd": round(pnl_usd, 2), "pnl_pct": round(pnl_usd / spend, 4),
+        }
+
+    last_idx = min(entry_idx + max_hold_bars, len(closes) - 1)
+    for i in range(entry_idx + 1, last_idx + 1):
+        if direction == "long":
+            if lows[i] <= stop_price:
+                return _result(stop_price, "STOP", i)
+        else:
+            if highs[i] >= stop_price:
+                return _result(stop_price, "STOP", i)
+        state = _sma_state_at(closes, i, short_period, long_period, narrow_pct)
+        if state == "narrow":
+            return _result(closes[i], "REVERSION", i)
+
+    return _result(closes[last_idx], "MAX_HOLD", last_idx)
+
+
+async def run_wide_state_contrarian_backtest(symbols=None, days: int = BACKTEST_DAYS, max_concurrent: int = 6) -> dict:
+    """SHADOW-MODE, real historical 2-minute Alpaca bars - the direct
+    Alpaca-side counterpart to crypto_selection_backtest.py's identical
+    function. The account owner's own separate "wide state -> contrarian
+    reversion" idea (see _replay_wide_state_contrarian's own docstring
+    for the real, honest long-vs-short scope note). Never places a real
+    order. symbols=None (default) tests every real symbol prop_bot.py
+    trades."""
+    symbol_list = symbols if symbols is not None else list(FUTURES.keys())
+    semaphore = asyncio.Semaphore(max_concurrent)
+    last_error = {}
+
+    async def _one(session, symbol):
+        async with semaphore:
+            bars, err = await _fetch_bars_2min_with_ohlc_and_times(session, symbol, days)
+        if bars is None:
+            last_error[symbol] = err
+            return symbol, None
+        closes = [b["c"] for b in bars]
+        highs = [b["h"] for b in bars]
+        lows = [b["l"] for b in bars]
+
+        trades = []
+        i = SMA_STATE_LONG_PERIOD
+        prev_state = None
+        while i < len(closes):
+            state = _sma_state_at(closes, i)
+            if state in ("wide_up", "wide_down") and prev_state != state:
+                direction = "long" if state == "wide_down" else "short"
+                trade = _replay_wide_state_contrarian(closes, highs, lows, i, direction)
+                if trade is not None:
+                    trades.append(trade)
+                    i = trade["exit_idx"] + 1
+                    prev_state = None
+                    continue
+            prev_state = state
+            i += 1
+        return symbol, trades
+
+    async with aiohttp.ClientSession() as session:
+        results = await asyncio.gather(*(_one(session, s) for s in symbol_list))
+
+    def _summarize(trades):
+        if not trades:
+            return None
+        wins = sum(1 for t in trades if t["pnl_usd"] > 0)
+        return {
+            "num_trades": len(trades),
+            "win_rate": round(wins / len(trades), 4),
+            "total_pnl": round(sum(t["pnl_usd"] for t in trades), 2),
+            "reversion_count": sum(1 for t in trades if t["exit_reason"] == "REVERSION"),
+            "stop_count": sum(1 for t in trades if t["exit_reason"] == "STOP"),
+        }
+
+    per_symbol = []
+    skipped = []
+    all_trades = []
+    for symbol, trades in results:
+        if trades is None:
+            skipped.append({"product_id": symbol, "reason": last_error.get(symbol, "not enough real historical data")})
+            continue
+        if trades:
+            long_trades = [t for t in trades if t["direction"] == "long"]
+            short_trades = [t for t in trades if t["direction"] == "short"]
+            per_symbol.append({
+                "product_id": symbol,
+                "long_wide_down": _summarize(long_trades),
+                "short_wide_up_diagnostic_only": _summarize(short_trades),
+            })
+        all_trades.extend(trades)
+
+    all_long = [t for t in all_trades if t["direction"] == "long"]
+    all_short = [t for t in all_trades if t["direction"] == "short"]
+
+    return {
+        "symbols_tested": len(symbol_list), "symbols_with_results": len(per_symbol),
+        "skipped": skipped, "per_symbol": per_symbol,
+        "overall": {
+            "long_wide_down": _summarize(all_long),
+            "short_wide_up_diagnostic_only": _summarize(all_short),
+        },
+        "params": {
+            "spend_usd": WIDE_STATE_SPEND_USD, "stop_pct": WIDE_STATE_STOP_PCT,
+            "max_hold_bars": WIDE_STATE_MAX_HOLD_BARS,
+            "sma_short_period": SMA_STATE_SHORT_PERIOD, "sma_long_period": SMA_STATE_LONG_PERIOD,
+            "sma_narrow_pct": SMA_STATE_NARROW_PCT, "days": days,
+        },
+    }

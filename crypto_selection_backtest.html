@@ -200,6 +200,20 @@
     <button class="run-btn" id="obbBtn" onclick="runOpeningBarBreakoutBacktest()">▶ Run Elephant/Tail Opening-Bar Backtest (~60-180 seconds)</button>
     <div id="obbStatus"></div>
     <div id="obbResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>📏 Which "narrow state" actually calls it right?</strong> The account owner described a real, DIFFERENT definition than the percentile-range one already used above: a 20-period and a 200-period simple moving average on the 2-minute chart - narrow when the two sit close together, wide when they've separated. Transcribed directly: "moving averages far apart is a wide state... a tight narrow state [is] the 20 a little below the 200... know the stock's state first and you've got 85% of the game figured out." This replays the IDENTICAL real Elephant/Tail trades against three real gates side by side - no gate at all (the button above's own default), the existing percentile-range method, and this new 20/200 SMA-convergence method - so you can see which real definition (if either) actually improves the setup, not just guess. The 0.5% "how close is close" threshold is an invented number (the account owner gave no real figure) - stated plainly, not hidden.
+    </div>
+    <button class="run-btn" id="narrowStateCmpBtn" onclick="runOpeningBarNarrowStateComparison()">▶ Run Narrow-State Definition Comparison (~60-180 seconds)</button>
+    <div id="narrowStateCmpStatus"></div>
+    <div id="narrowStateCmpResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>🔄 The account owner's SEPARATE idea: trade the wide state too, as a contrarian</strong> transcribed directly: "you become a contrarian trader in the wide state... the drop brings you back to narrow... if you have the wide state to the downside... you're looking for that wide state... back up to go back to narrow." A genuinely different real trade than the breakout-continuation system above - this one bets on REVERSION, entered the instant the real 20/200 SMA state flips wide, exiting once the state genuinely returns to narrow (or a real, invented 2% stop / ~6.7-hour time backstop if it doesn't). <strong>Real, honest scope note:</strong> only the wide_down → LONG leg (betting on a bounce back up) is executable by the live bot today - both real bots are long-only in production. The wide_up → SHORT leg (betting on a pullback down) is reported here as pure diagnostic information only; neither live bot can actually place a real short today. Shadow mode only.
+    </div>
+    <button class="run-btn" id="wideStateBtn" onclick="runWideStateContrarianBacktest()">▶ Run Wide-State Contrarian Backtest (~60-180 seconds)</button>
+    <div id="wideStateStatus"></div>
+    <div id="wideStateResults"></div>
 </div>
 
 <script>
@@ -1522,6 +1536,155 @@ function renderOpeningBarBreakoutResults(data) {
         html += `<p class="trade-note">Skipped: ${data.skipped.map(s => `${s.product_id} (${s.reason})`).join(', ')}</p>`;
     }
     html += `<p class="trade-note">A win rate meaningfully above 50% with a genuinely positive total P&amp;L on a real, decent-sized sample is real evidence the setup works for these coins; a low win rate or negative total means the account owner's own 80%+ claim isn't showing up here. This is diagnostic only - nothing here changes what any live bot buys or sells.</p>`;
+    resultsEl.innerHTML = html;
+}
+
+// Real 20/200-SMA vs. percentile-range narrow-state comparison - the
+// account owner's own newly-described real definition tested directly
+// against the IDENTICAL real Elephant/Tail trades the button above
+// already produces, plus the unfiltered baseline.
+function fmtBucket(s) {
+    if (!s) return '<span style="color:var(--text-dim)">no real trades</span>';
+    const cls = s.total_pnl >= 0 ? 'pos' : 'neg';
+    return `${s.num_trades} trades, <span class="${cls}">${(s.win_rate * 100).toFixed(1)}% win rate, ${s.total_pnl >= 0 ? '+' : ''}$${s.total_pnl.toFixed(2)}</span>`;
+}
+
+async function runOpeningBarNarrowStateComparison() {
+    const btn = document.getElementById('narrowStateCmpBtn');
+    const statusEl = document.getElementById('narrowStateCmpStatus');
+    const resultsEl = document.getElementById('narrowStateCmpResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real 1-min data, computing both narrow-state definitions per coin)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/crypto-selection-backtest/opening-bar-narrow-state-comparison', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderOpeningBarNarrowStateComparison(data);
+        statusEl.textContent = `Scanned ${data.coins_with_results} coins over ${data.params.days} real days each - real SMA20/SMA200 gap threshold: ${(data.params.sma_narrow_pct * 100).toFixed(1)}%.`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Narrow-State Definition Comparison (~60-180 seconds)';
+    }
+}
+
+function renderOpeningBarNarrowStateComparison(data) {
+    const resultsEl = document.getElementById('narrowStateCmpResults');
+    const o = data.overall;
+    let html = `
+        <table>
+            <thead><tr><th></th><th>No gate (baseline)</th><th>Percentile-range gate</th><th>20/200 SMA gate</th></tr></thead>
+            <tbody>
+                <tr><td><strong>Combined (all coins)</strong></td><td>${fmtBucket(o.baseline)}</td><td>${fmtBucket(o.percentile)}</td><td>${fmtBucket(o.sma)}</td></tr>
+            </tbody>
+        </table>`;
+    if (data.per_coin && data.per_coin.length > 0) {
+        const rows = data.per_coin.map(c => `<tr>
+            <td>${c.product_id}</td>
+            <td>${fmtBucket(c.baseline)}</td>
+            <td>${fmtBucket(c.percentile)}</td>
+            <td>${fmtBucket(c.sma)}</td>
+        </tr>`).join('');
+        html += `
+        <table style="margin-top:16px;">
+            <thead><tr><th>Coin</th><th>Baseline</th><th>Percentile gate</th><th>SMA gate</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+    }
+    if (data.skipped && data.skipped.length > 0) {
+        html += `<p class="trade-note">Skipped: ${data.skipped.map(s => `${s.product_id} (${s.reason})`).join(', ')}</p>`;
+    }
+    html += `<p class="trade-note">If a gated column shows a meaningfully better win rate/P&amp;L than the baseline on a real, decent-sized sample, that's real evidence THAT narrow-state definition is worth requiring. If a gate leaves too few real trades to judge, that's real evidence too - just of a stricter filter, not a better one. Diagnostic only - this never changes what the live bot buys or sells on its own.</p>`;
+    resultsEl.innerHTML = html;
+}
+
+// Real "wide state -> contrarian reversion" backtest - the account
+// owner's own separate real trading idea. See this section's own note
+// text for the real long-vs-short scope distinction.
+function fmtWideBucket(s) {
+    if (!s) return '<span style="color:var(--text-dim)">no real trades</span>';
+    const cls = s.total_pnl >= 0 ? 'pos' : 'neg';
+    return `${s.num_trades} trades (${s.reversion_count} reverted, ${s.stop_count} stopped out), <span class="${cls}">${(s.win_rate * 100).toFixed(1)}% win rate, ${s.total_pnl >= 0 ? '+' : ''}$${s.total_pnl.toFixed(2)}</span>`;
+}
+
+async function runWideStateContrarianBacktest() {
+    const btn = document.getElementById('wideStateBtn');
+    const statusEl = document.getElementById('wideStateStatus');
+    const resultsEl = document.getElementById('wideStateResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real 1-min data, scanning for real 20/200 SMA wide-state flips)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/crypto-selection-backtest/wide-state-contrarian', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderWideStateContrarianResults(data);
+        statusEl.textContent = `Scanned ${data.coins_with_results} coins over ${data.params.days} real days each.`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Wide-State Contrarian Backtest (~60-180 seconds)';
+    }
+}
+
+function renderWideStateContrarianResults(data) {
+    const resultsEl = document.getElementById('wideStateResults');
+    const o = data.overall;
+    let html = `
+        <table>
+            <thead><tr><th></th><th>Real hit rate</th></tr></thead>
+            <tbody>
+                <tr><td>⬆️ LONG - real wide_down state, betting on reversion UP (live-executable today)</td><td>${fmtWideBucket(o.long_wide_down)}</td></tr>
+                <tr><td>⬇️ SHORT - real wide_up state, betting on reversion DOWN (diagnostic only - not live-executable)</td><td>${fmtWideBucket(o.short_wide_up_diagnostic_only)}</td></tr>
+            </tbody>
+        </table>`;
+    if (data.per_coin && data.per_coin.length > 0) {
+        const rows = data.per_coin.map(c => `<tr>
+            <td>${c.product_id}</td>
+            <td>${fmtWideBucket(c.long_wide_down)}</td>
+            <td>${fmtWideBucket(c.short_wide_up_diagnostic_only)}</td>
+        </tr>`).join('');
+        html += `
+        <table style="margin-top:16px;">
+            <thead><tr><th>Coin</th><th>LONG (wide_down)</th><th>SHORT (wide_up, diagnostic)</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+    }
+    if (data.skipped && data.skipped.length > 0) {
+        html += `<p class="trade-note">Skipped: ${data.skipped.map(s => `${s.product_id} (${s.reason})`).join(', ')}</p>`;
+    }
+    html += `<p class="trade-note">Only the LONG (wide_down) row reflects a real trade either live bot can actually place today - a positive real total there is real, actionable evidence. The SHORT row is included purely so the idea can be judged in full; it can't be acted on until real short-selling capability exists on either account. Diagnostic only - nothing here changes what any live bot buys or sells.</p>`;
     resultsEl.innerHTML = html;
 }
 </script>

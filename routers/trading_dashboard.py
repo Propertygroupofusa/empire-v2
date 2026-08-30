@@ -2783,6 +2783,36 @@ async def run_opening_bar_breakout_backtest_endpoint():
     return await crypto_selection_backtest_module.run_opening_bar_breakout_backtest()
 
 
+@router.post("/crypto-selection-backtest/opening-bar-narrow-state-comparison", dependencies=[Depends(require_admin_key)])
+async def run_opening_bar_narrow_state_comparison_endpoint():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    Compares three real narrow-state definitions against the IDENTICAL
+    real Elephant/Tail opening-bar trades above: no gate (baseline), the
+    existing percentile-range method, and the account owner's own
+    newly-described real 20/200 SMA-convergence method - transcribed
+    directly: "moving averages far apart is a wide state... a tight
+    narrow state [is] the 20 a little below the 200." Never places a
+    real order."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_opening_bar_narrow_state_comparison()
+
+
+@router.post("/crypto-selection-backtest/wide-state-contrarian", dependencies=[Depends(require_admin_key)])
+async def run_wide_state_contrarian_backtest_endpoint():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    The account owner's own SEPARATE real trading idea from the
+    Elephant/Tail breakout-continuation system above: "you become a
+    contrarian trader in the wide state... the drop brings you back to
+    narrow." Real, honest scope note: only the wide_down -> LONG leg is
+    executable by the live bot today (long-only in production); the
+    wide_up -> SHORT leg is reported as pure diagnostic information,
+    clearly labeled - neither live bot can actually short today."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_wide_state_contrarian_backtest()
+
+
 @router.post("/crypto-selection-backtest/strategy-lab", dependencies=[Depends(require_admin_key)])
 async def run_strategy_lab_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
@@ -3133,6 +3163,35 @@ async def run_alpaca_opening_bar_breakout_backtest():
     if alpaca_selection_backtest_module is None:
         raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
     return await alpaca_selection_backtest_module.run_opening_bar_breakout_backtest()
+
+
+@router.post("/alpaca-selection-backtest/opening-bar-narrow-state-comparison", dependencies=[Depends(require_admin_key)])
+async def run_alpaca_opening_bar_narrow_state_comparison():
+    """SHADOW-MODE ONLY - never touches live trading, places no order.
+    The Alpaca-side counterpart to the crypto comparison above - compares
+    three real narrow-state definitions against the IDENTICAL real
+    Elephant/Tail opening-bar trades: no gate (baseline), the existing
+    percentile-range method, and the account owner's own newly-described
+    real 20/200 SMA-convergence method."""
+    if alpaca_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+    return await alpaca_selection_backtest_module.run_opening_bar_narrow_state_comparison()
+
+
+@router.post("/alpaca-selection-backtest/wide-state-contrarian", dependencies=[Depends(require_admin_key)])
+async def run_alpaca_wide_state_contrarian_backtest():
+    """SHADOW-MODE ONLY - never touches live trading, places no order.
+    The Alpaca-side counterpart to the crypto wide-state contrarian
+    backtest above: "you become a contrarian trader in the wide state...
+    the drop brings you back to narrow." Both directions here are
+    genuinely long-only executable in spirit (a wide_down real reversion
+    LONG matches what prop_bot.py can already place) - the wide_up
+    SHORT leg is still reported as pure diagnostic information, since
+    prop_bot.py's real shorting is a documented, confirmed account-level
+    restriction, not a bug in this backtest."""
+    if alpaca_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+    return await alpaca_selection_backtest_module.run_wide_state_contrarian_backtest()
 
 
 def _safe_float(v):
