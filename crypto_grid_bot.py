@@ -275,18 +275,28 @@ def _safe_num_levels_for_allocation(allocated_usd: float) -> int:
     return max(1, min(DEFAULT_GRID_LEVELS, max_levels_by_min_trade))
 
 
-async def create_grid_branch(product_id: str, allocated_usd: float) -> CryptoGridBranch:
+async def create_grid_branch(product_id: str, allocated_usd: float, skip_free_cash_check: bool = False) -> CryptoGridBranch:
     """Creates a real new grid branch - a pure bookkeeping operation plus
     one real live price fetch to anchor its starting reference_price,
     never a trade by itself (mirrors CryptoTreeBranch/AlpacaBranch's own
     "spawning is a bookkeeping transfer" reasoning - the real dollars
     this represents are already sitting in the one real Coinbase wallet,
     just not earmarked to any branch yet). Refuses a non-positive amount,
-    a coin already claimed by another active grid branch, or an amount
-    exceeding real free spendable cash (see get_real_free_cash_usd) -
-    per the account owner's own direct complaint that they were creating
-    branches "blindly" with no idea what was actually available; this
-    can never silently accept a request for money that doesn't exist.
+    a coin already claimed by another active grid branch, or (unless
+    skip_free_cash_check) an amount exceeding real free spendable cash
+    (see get_real_free_cash_usd) - per the account owner's own direct
+    complaint that they were creating branches "blindly" with no idea
+    what was actually available; this can never silently accept a
+    request for money that doesn't exist.
+
+    `skip_free_cash_check` exists for fund_grid_from_tree_branch() below:
+    that real cash is already reserved (it's a family-tree branch's own
+    allocated_usd, not unreserved free cash) - get_real_free_cash_usd()
+    would incorrectly refuse a real, legitimate cross-system TRANSFER,
+    since it doesn't know the source branch's allocation is about to
+    shrink by the identical amount in the same real operation. Every
+    other caller (the dashboard's "New grid branch" button, the $20 Quick
+    Buy) keeps the real check exactly as before.
 
     num_levels is chosen per-branch (see _safe_num_levels_for_allocation)
     rather than always the fixed DEFAULT_GRID_LEVELS, so a small real
@@ -298,11 +308,12 @@ async def create_grid_branch(product_id: str, allocated_usd: float) -> CryptoGri
     if product_id in claimed:
         raise ValueError(f"{product_id} is already claimed by an active grid branch")
 
-    real_spendable = await get_real_free_cash_usd()
-    if real_spendable is not None and allocated_usd > real_spendable + 0.01:
-        raise ValueError(
-            f"Only ${real_spendable:.2f} in real free spendable cash right now - can't deploy ${allocated_usd:.2f}"
-        )
+    if not skip_free_cash_check:
+        real_spendable = await get_real_free_cash_usd()
+        if real_spendable is not None and allocated_usd > real_spendable + 0.01:
+            raise ValueError(
+                f"Only ${real_spendable:.2f} in real free spendable cash right now - can't deploy ${allocated_usd:.2f}"
+            )
 
     async with engine.aiohttp.ClientSession() as session:
         price, _atr = await engine.get_price_and_volatility(session, product_id)
@@ -331,6 +342,118 @@ async def create_grid_branch(product_id: str, allocated_usd: float) -> CryptoGri
         await db.refresh(branch)
     log.info(f"[GRID] 🌱 Created {bot_name} on {product_id} with ${allocated_usd:.2f} ({num_levels} real levels, reference price ${price:.2f})")
     return branch
+
+
+async def add_cash_to_grid_branch(bot_name: str, amount: float) -> CryptoGridBranch:
+    """Adds real cash to an EXISTING grid branch's own allocation - the
+    one real capability this module never had before
+    fund_grid_from_tree_branch() below needed it (every prior path only
+    ever CREATED a new branch). Pure bookkeeping: increases allocated_usd
+    and recomputes num_levels via _safe_num_levels_for_allocation (which
+    is monotonic in allocated_usd, so this can only ever hold steady or
+    grow the real level count - never shrinks it out from under any
+    already-open real slice). Does NOT touch reference_price or any
+    already-open CryptoGridSlice row - existing real slices keep their
+    own real entry/qty exactly as bought; only the branch's own future
+    slice sizing (slice_usd = allocated_usd / num_levels) changes going
+    forward. Refuses a non-positive amount or an unknown bot_name."""
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == bot_name))
+        branch = result.scalar_one_or_none()
+        if branch is None:
+            raise ValueError(f"no grid branch named {bot_name}")
+        branch.allocated_usd += amount
+        branch.num_levels = _safe_num_levels_for_allocation(branch.allocated_usd)
+        await db.commit()
+        await db.refresh(branch)
+    log.info(f"[GRID] 💰 Added ${amount:.2f} to {bot_name} - now ${branch.allocated_usd:.2f} ({branch.num_levels} real levels)")
+    return branch
+
+
+async def fund_grid_from_tree_branch(from_bot_name: str, amount: float, product_id: str = None, to_grid_bot_name: str = None) -> dict:
+    """Real, cross-system cash transfer - moves already-reserved real
+    dollars OUT of a flat family-tree branch's own allocated_usd and INTO
+    Grid Bot, either adding to an existing grid branch (to_grid_bot_name)
+    or creating a new one (product_id, or auto-picked via
+    pick_best_ranked_coin_for_grid() if neither is given). Built after
+    the account owner's own real, direct request to move more real
+    capital into Grid Bot - the one strategy actually winning on a real,
+    fresh Strategy Lab sample - right after get_real_free_cash_usd()
+    showed genuinely negative real free cash, because the family tree's
+    own flat, idle allocation was itself the thing blocking it.
+
+    Same real safety discipline as reallocate_cash_between_branches()
+    (the existing family-tree-to-family-tree cash mover this mirrors):
+    the source branch MUST be flat (no open BotPosition) - pulling
+    allocated_usd out from under a branch actively holding a real
+    position would desync its own bookkeeping from what's genuinely
+    deployed. Refused if the amount isn't positive, exceeds the source's
+    own real allocated_usd, the source bot_name doesn't exist, or
+    STOP_TRADING is set (this deploys new capital into Grid Bot, same
+    kill-switch every other capital-deployment action already respects).
+
+    The destination is created/funded FIRST (via create_grid_branch with
+    skip_free_cash_check=True - see its own docstring for why the normal
+    real-free-cash check would incorrectly block this specific transfer),
+    and the source's allocated_usd is only debited AFTER that succeeds -
+    a failed destination (e.g. a real live-price fetch failure) leaves
+    the source completely untouched, no real dollars debited with
+    nothing to show for it."""
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        raise ValueError("STOP_TRADING is set - new capital deployment is paused")
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == from_bot_name))
+        source = result.scalar_one_or_none()
+        if source is None:
+            raise ValueError(f"no family-tree branch named {from_bot_name}")
+        pos_result = await db.execute(select(BotPosition).where(BotPosition.bot == from_bot_name))
+        if pos_result.scalars().first() is not None:
+            raise ValueError(f"{from_bot_name} is currently holding a real position - can only move cash from a FLAT branch")
+        if amount > source.allocated_usd + 0.01:
+            raise ValueError(f"{from_bot_name} only has ${source.allocated_usd:.2f} real allocated - can't move ${amount:.2f}")
+
+    if to_grid_bot_name:
+        destination = await add_cash_to_grid_branch(to_grid_bot_name, amount)
+        action = "added_to_existing"
+    else:
+        target_coin = product_id or await pick_best_ranked_coin_for_grid()
+        destination = await create_grid_branch(target_coin, amount, skip_free_cash_check=True)
+        action = "new_branch"
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == from_bot_name))
+        fresh_source = result.scalar_one_or_none()
+        if fresh_source is None:
+            raise ValueError(f"{from_bot_name} no longer exists - the destination was funded but the source could not be debited")
+        fresh_source.allocated_usd -= amount
+        await db.commit()
+
+    log.info(f"[GRID] 🔀 Moved ${amount:.2f} from real family-tree branch {from_bot_name} into grid branch {destination.bot_name} ({destination.product_id})")
+    # Both real legs logged via the same defensive helper every other
+    # grid-side activity event already uses - a logging failure here can
+    # never unwind or block the real transfer that already completed.
+    await _log_activity_safe(
+        destination.bot_name, destination.product_id, "BUY",
+        f"Received ${amount:.2f} moved from the family tree's {from_bot_name} - grid branch total now ${destination.allocated_usd:.2f}",
+    )
+    await _log_activity_safe(
+        from_bot_name, source.product_id, "REALLOCATE",
+        f"Moved ${amount:.2f} of its own idle real cash into Grid Bot's {destination.bot_name} ({destination.product_id})",
+    )
+
+    return {
+        "from_bot_name": from_bot_name,
+        "to_bot_name": destination.bot_name,
+        "product_id": destination.product_id,
+        "amount": amount,
+        "action": action,
+        "destination_allocated_usd": destination.allocated_usd,
+    }
 
 
 async def pick_best_ranked_coin_for_grid() -> str:

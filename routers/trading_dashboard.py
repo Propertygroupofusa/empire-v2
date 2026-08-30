@@ -4903,6 +4903,44 @@ async def grid_quick_buy_endpoint(payload: GridQuickBuyRequest):
     return result
 
 
+class FundGridFromTreeRequest(BaseModel):
+    from_bot_name: str
+    amount: float
+    product_id: str | None = None
+    to_grid_bot_name: str | None = None
+
+
+@router.post("/grid-status/fund-from-tree", dependencies=[Depends(require_admin_key)])
+async def fund_grid_from_tree_endpoint(payload: FundGridFromTreeRequest):
+    """Moves real, already-reserved cash from a FLAT family-tree branch
+    directly into Grid Bot - built after the account owner's own direct
+    request to put more real capital into Grid Bot right after a fresh
+    Strategy Lab run confirmed it's the one strategy actually winning
+    (+$81.23, 58.8% win rate on a real 34-coin sample), while the real
+    family tree (Baseline "A") lost -$363.63 on the identical data.
+    get_real_free_cash_usd() had genuinely gone negative - the family
+    tree's own flat, idle allocation was itself the thing blocking Grid
+    Bot from getting more real money, since nothing previously let that
+    reserved-but-doing-nothing cash move across systems.
+
+    `to_grid_bot_name`, if given, adds to that existing real grid branch;
+    otherwise `product_id` (or an auto-pick by real backtested ROI if
+    neither is given) creates a new one. Refuses if the source branch is
+    currently holding a real position (must be flat), if the amount
+    exceeds its real allocated_usd, or if STOP_TRADING is set. The
+    destination is funded first; the source is only debited after that
+    real fill/bookkeeping succeeds."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    try:
+        result = await crypto_grid_bot_module.fund_grid_from_tree_branch(
+            payload.from_bot_name, payload.amount, product_id=payload.product_id, to_grid_bot_name=payload.to_grid_bot_name,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return result
+
+
 class SetGridBranchActiveRequest(BaseModel):
     active: bool
 
