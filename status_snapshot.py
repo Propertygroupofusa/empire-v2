@@ -186,6 +186,27 @@ async def _build_grid_section() -> str:
         return f"## 🔲 Grid Bot\n\n_Could not fetch: {e}_\n"
 
     branches = status.get("branches", [])
+
+    # Real, closed-trade P&L - per the account owner's own direct
+    # question ("is Grid Bot in the negative") which this section
+    # couldn't answer at all before: every other section here (the
+    # family tree, Alpaca) already surfaces a real total-profit figure,
+    # but Grid Bot's own realized P&L across every real completed
+    # buy-low/sell-high slice was never summed anywhere in this
+    # snapshot. Reuses get_grid_trade_history() - the exact same real
+    # function the dashboard's own trade-history panel calls - rather
+    # than a second, separately-computed number. Real, honest caveat:
+    # summed by CURRENT bot_name, and a branch's bot_name is reassigned
+    # on every real coin rotation (see the rotation-cooldown fix above),
+    # so this is a real total across every closed slice ever, not a
+    # stable per-branch history.
+    total_realized_pnl = None
+    try:
+        trade_history = await grid.get_grid_trade_history()
+        total_realized_pnl = round(sum(b["total_pnl"] for b in trade_history.get("branches", [])), 2)
+    except Exception:
+        pass
+
     lines = [
         "## 🔲 Grid Bot",
         "",
@@ -194,6 +215,7 @@ async def _build_grid_section() -> str:
         f"- **Drawdown breaker:** {status.get('drawdown_breaker_pct', 0) * 100:.0f}% off peak",
         f"- **Total Allocated:** {_fmt_usd(status.get('total_allocated_usd'))}",
         f"- **Real Free Cash:** {_fmt_usd(status.get('real_free_cash_usd'))}",
+        f"- **Real Realized P&L (all closed slices ever):** {_fmt_usd(total_realized_pnl)}",
         f"- **Branches:** {len(branches)}",
         "",
         "| Branch | Coin | Allocated | Spacing | Levels | Open Slices | Current Price | Peak/Drawdown | Locked |",
