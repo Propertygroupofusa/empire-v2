@@ -2846,6 +2846,22 @@ async def run_scaled_entry_comparison_backtest_endpoint():
     return await crypto_selection_backtest_module.run_scaled_entry_comparison_backtest()
 
 
+@router.post("/crypto-selection-backtest/red-bar-takeout", dependencies=[Depends(require_admin_key)])
+async def run_red_bar_takeout_backtest_endpoint():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    The account owner's own real THIRD, lower-conviction setup,
+    transcribed directly: "even if you don't have an elephant or a
+    tail... little red bar take outs [work too]." Bar 1 is a real,
+    ordinary red bar (not elephant-sized, not a qualifying tail) whose
+    high still gets taken out by a later real bar - same real entry/
+    stop/exit mechanics as the higher-conviction Elephant/Tail system,
+    just without requiring bar 1 to be anything special. Never places a
+    real order."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_red_bar_takeout_backtest()
+
+
 @router.post("/crypto-selection-backtest/strategy-lab", dependencies=[Depends(require_admin_key)])
 async def run_strategy_lab_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
@@ -3250,6 +3266,18 @@ async def run_alpaca_scaled_entry_comparison_backtest():
     if alpaca_selection_backtest_module is None:
         raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
     return await alpaca_selection_backtest_module.run_scaled_entry_comparison_backtest()
+
+
+@router.post("/alpaca-selection-backtest/red-bar-takeout", dependencies=[Depends(require_admin_key)])
+async def run_alpaca_red_bar_takeout_backtest():
+    """SHADOW-MODE ONLY - never touches live trading, places no order.
+    The Alpaca-side counterpart to the crypto red-bar-takeout backtest
+    above - the account owner's own real third, lower-conviction setup:
+    an ordinary red bar 1 (not a qualifying Elephant or Tail) whose high
+    still gets taken out by a later real bar."""
+    if alpaca_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+    return await alpaca_selection_backtest_module.run_red_bar_takeout_backtest()
 
 
 def _safe_float(v):

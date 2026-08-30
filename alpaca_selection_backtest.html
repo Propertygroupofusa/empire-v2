@@ -145,7 +145,7 @@
     <div id="narrowRangeResults"></div>
 
     <div class="note" style="margin-top: 28px;">
-        <strong>🐘 Elephant/Tail opening-bar breakout - the full real system</strong> the account owner described directly: pick a symbol sitting in a narrow state, wait for its real first 2-minute bar of the trading day; if that bar is a real "Elephant Bar" (an oversized green candle - "sizable... larger and taller than the vast majority of the green bars before it") or a real "bottoming Tail" bar (a long lower-wick rejection candle), mark its high plus one penny; the instant the SECOND bar's real price crosses that level - never waiting for bar 2 to close - a real $500 goes in; the stop sits at bar 1's own low, for the life of the trade; once a real second "push" (a genuine new high after a real pullback) confirms, exit. Their own claimed real number: 80%+ follow-through. Stocks get a more literal version of this than crypto - real Alpaca 2-minute bars are fetched directly (no aggregation needed), grouped into real trading days by the same helper the Narrow-Range Breakout test above already uses, with the real session open as the actual anchor - no invented stand-in needed here. Shadow mode only - diagnostic, never wired to any real trade.
+        <strong>🐘 Elephant/Tail opening-bar breakout - the full real system</strong> the account owner described directly: pick a symbol sitting in a narrow state, wait for its real first 2-minute bar of the trading day; if that bar is a real "Elephant Bar" (an oversized green candle - "sizable... larger and taller than the vast majority of the green bars before it") or a real "bottoming Tail" bar (a long lower-wick rejection candle), mark its high plus one penny; the instant the SECOND bar's real price crosses that level - never waiting for bar 2 to close - a real $25,000 goes in; the stop sits at bar 1's own low, for the life of the trade; once a real second "push" (a genuine new high after a real pullback) confirms, exit. Their own claimed real number: 80%+ follow-through. Stocks get a more literal version of this than crypto - real Alpaca 2-minute bars are fetched directly (no aggregation needed), grouped into real trading days by the same helper the Narrow-Range Breakout test above already uses, with the real session open as the actual anchor - no invented stand-in needed here. Shadow mode only - diagnostic, never wired to any real trade.
     </div>
     <button class="run-btn" id="obbBtn" onclick="runOpeningBarBreakoutBacktest()">▶ Run Elephant/Tail Opening-Bar Backtest (real data, ~60-180 seconds)</button>
     <div id="obbStatus"></div>
@@ -173,11 +173,18 @@
     <div id="shortSideResults"></div>
 
     <div class="note" style="margin-top: 28px;">
-        <strong>📈 Scaling in: half now, then up to two real adds</strong> transcribed directly: "you want to go in and then in and then in... usually two adds... let me put half in... that add arrow is one penny above the high of a single red bar." This session's own concrete reading of that real, informally-described mechanic: half the real $500 at the original trigger, then up to two real 25% adds - each fired the instant a later bar trades one penny past the high of the most recent single real red pullback bar. The real stop and exit are completely unchanged from the single-shot version above; only the entry sizing differs. Replays the IDENTICAL real qualifying setups both ways so you can see whether scaling in actually beats going all-in at once, on the same real data.
+        <strong>📈 Scaling in: half now, then up to two real adds</strong> transcribed directly: "you want to go in and then in and then in... usually two adds... let me put half in... that add arrow is one penny above the high of a single red bar." This session's own concrete reading of that real, informally-described mechanic: half the real $25,000 at the original trigger, then up to two real 25% adds - each fired the instant a later bar trades one penny past the high of the most recent single real red pullback bar. The real stop and exit are completely unchanged from the single-shot version above; only the entry sizing differs. Replays the IDENTICAL real qualifying setups both ways so you can see whether scaling in actually beats going all-in at once, on the same real data.
     </div>
     <button class="run-btn" id="scaledEntryBtn" onclick="runScaledEntryComparisonBacktest()">▶ Run Scaled-Entry vs. Single-Shot Comparison (real data, ~60-180 seconds)</button>
     <div id="scaledEntryStatus"></div>
     <div id="scaledEntryResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>🎯 The third setup: an ordinary red bar's high, taken out</strong> transcribed directly: "even if you don't have an elephant or a tail... little red bar take outs [work too]." A real, LOWER-conviction version of the same long-side system above - bar 1 doesn't need to be an oversized Elephant or a long-wick Tail, just an ordinary real red bar (excluded if it happens to already qualify as one of those two, so this never double-counts a setup already tested separately). Same real entry/stop/exit mechanics: mark bar 1's high, enter the instant a later bar crosses it + $0.01, stop at bar 1's own low, exit on a second push or session end. A real hit rate meaningfully below the higher-conviction setups' own numbers would confirm "lower conviction" is the right read; a comparable one would be a real, useful surprise.
+    </div>
+    <button class="run-btn" id="redBarTakeoutBtn" onclick="runRedBarTakeoutBacktest()">▶ Run Red-Bar-Takeout Backtest (real data, ~60-180 seconds)</button>
+    <div id="redBarTakeoutStatus"></div>
+    <div id="redBarTakeoutResults"></div>
 </div>
 
 <script>
@@ -1045,7 +1052,7 @@ function renderOpeningBarBreakoutResults(data) {
 
     let html = `
         <table>
-            <thead><tr><th>Symbol</th><th>Real trades</th><th>Win rate</th><th>Total P&amp;L ($500/trade)</th></tr></thead>
+            <thead><tr><th>Symbol</th><th>Real trades</th><th>Win rate</th><th>Total P&amp;L ($25,000/trade)</th></tr></thead>
             <tbody>${rows}</tbody>
         </table>`;
     if (data.skipped && data.skipped.length > 0) {
@@ -1263,7 +1270,7 @@ function renderOpeningBarShortSideResults(data) {
         </tr>`).join('');
     let html = `
         <table>
-            <thead><tr><th>Symbol</th><th>Real diagnostic SHORT trades</th><th>Win rate</th><th>Total P&amp;L ($500/trade)</th></tr></thead>
+            <thead><tr><th>Symbol</th><th>Real diagnostic SHORT trades</th><th>Win rate</th><th>Total P&amp;L ($25,000/trade)</th></tr></thead>
             <tbody>${rows}</tbody>
         </table>`;
     if (data.skipped && data.skipped.length > 0) {
@@ -1343,6 +1350,74 @@ function renderScaledEntryComparisonResults(data) {
         html += `<p class="trade-note">Skipped: ${data.skipped.map(s => `${s.product_id} (${s.reason})`).join(', ')}</p>`;
     }
     html += `<p class="trade-note">Both columns replay the exact same real qualifying setups - only the entry sizing differs, so any real difference in total P&amp;L reflects the scaling mechanic itself, not different trades. Diagnostic only - nothing here changes what the live bot does on its own.</p>`;
+    resultsEl.innerHTML = html;
+}
+
+// Real "little red bar takeout" third, lower-conviction setup - the
+// Alpaca-side counterpart to the crypto page's own version.
+async function runRedBarTakeoutBacktest() {
+    const btn = document.getElementById('redBarTakeoutBtn');
+    const statusEl = document.getElementById('redBarTakeoutStatus');
+    const resultsEl = document.getElementById('redBarTakeoutResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real 2-min Alpaca data, scanning for real ordinary red bar 1 setups)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-selection-backtest/red-bar-takeout', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderRedBarTakeoutResults(data);
+        const o = data.overall;
+        if (o) {
+            statusEl.textContent = `Scanned ${data.symbols_with_results} symbols over ${data.params.days} real trading days. ${o.num_trades} real trades, ${(o.win_rate * 100).toFixed(1)}% win rate, real total P&L $${o.total_pnl.toFixed(2)}.`;
+        } else {
+            statusEl.textContent = `Scanned ${data.symbols_with_results} symbols - no real qualifying ordinary red bar 1 setups found in this window.`;
+        }
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Red-Bar-Takeout Backtest (real data, ~60-180 seconds)';
+    }
+}
+
+function renderRedBarTakeoutResults(data) {
+    const resultsEl = document.getElementById('redBarTakeoutResults');
+    if (!data.per_symbol || data.per_symbol.length === 0) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No symbol produced a real qualifying red-bar-takeout setup on this sample.</p>';
+        return;
+    }
+    const rows = data.per_symbol
+        .sort((a, b) => b.total_pnl - a.total_pnl)
+        .map(s => `<tr>
+            <td>${s.product_id}</td>
+            <td>${s.num_trades}</td>
+            <td>${(s.win_rate * 100).toFixed(1)}%</td>
+            <td class="${s.total_pnl >= 0 ? 'pos' : 'neg'}">${s.total_pnl >= 0 ? '+' : ''}$${s.total_pnl.toFixed(2)}</td>
+        </tr>`).join('');
+    let html = `
+        <table>
+            <thead><tr><th>Symbol</th><th>Real trades</th><th>Win rate</th><th>Total P&amp;L ($25,000/trade)</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+    if (data.skipped && data.skipped.length > 0) {
+        html += `<p class="trade-note">Skipped: ${data.skipped.map(s => `${s.product_id} (${s.reason})`).join(', ')}</p>`;
+    }
+    html += `<p class="trade-note">This is the lower-conviction fallback - compare its real win rate/P&amp;L directly against the higher-conviction Elephant/Tail backtest above on the same symbols. Diagnostic only - nothing here changes what any live bot buys or sells.</p>`;
     resultsEl.innerHTML = html;
 }
 </script>
