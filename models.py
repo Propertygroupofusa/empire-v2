@@ -1013,6 +1013,18 @@ class CryptoGridBranch(Base):
     # crashing or reading as a false 100% drawdown.
     peak_equity = Column(Float, nullable=True)
 
+    # Per the account owner's explicit request, after recalling losing
+    # money moving cash off a branch that was "about to make profit" a
+    # few times in the past: a real, manual lock that blocks this
+    # branch's cash from ever being pulled out - by the manual "Move
+    # cash between grid branches" action (as a source), the manual
+    # "Withdraw" action, and the automatic idle-cash auto-rotate sweep.
+    # Never blocks the branch's own normal grid trading (buying dips /
+    # selling rises) - only cash-removal paths check this. Nullable so
+    # an existing row (created before this column existed) reads back
+    # NULL, treated as unlocked (False) everywhere it's checked.
+    locked = Column(Boolean, default=False, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

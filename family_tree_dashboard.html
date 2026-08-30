@@ -1674,21 +1674,23 @@ let moveGridCashModal = null;
 async function openMoveGridCashModal() {
     const data = await apiGet('/grid-status');
     const branches = data.branches || [];
-    moveGridCashModal = { branches, selectedSource: null, selectedDest: null };
+    moveGridCashModal = { branches, selectedSource: null, selectedDest: null, moveCandidates: null };
 
     const MIN_SOURCE_USD = 0.01;
-    const flatBranches = branches.filter(b => b.open_slices === 0 && b.allocated_usd >= MIN_SOURCE_USD);
+    const flatBranches = branches.filter(b => b.open_slices === 0 && b.allocated_usd >= MIN_SOURCE_USD && !b.locked);
     const emptyFlatCount = branches.filter(b => b.open_slices === 0 && b.allocated_usd < MIN_SOURCE_USD).length;
+    const lockedCount = branches.filter(b => b.open_slices === 0 && b.allocated_usd >= MIN_SOURCE_USD && b.locked).length;
     const sourceListEl = document.getElementById('move-grid-source-list');
     if (flatBranches.length === 0) {
-        sourceListEl.innerHTML = `<div class="coin-history-empty">No grid branches have real idle cash worth moving right now${emptyFlatCount > 0 ? ` (${emptyFlatCount} flat branch(es) have essentially $0.00)` : ''}.</div>`;
+        sourceListEl.innerHTML = `<div class="coin-history-empty">No grid branches have real idle, unlocked cash worth moving right now${emptyFlatCount > 0 ? ` (${emptyFlatCount} flat branch(es) have essentially $0.00)` : ''}${lockedCount > 0 ? ` (${lockedCount} flat branch(es) are 🔒 locked)` : ''}.</div>`;
     } else {
         sourceListEl.innerHTML = flatBranches.map(b => `
             <button type="button" class="branch-pick-btn" data-bot="${b.bot_name}" onclick="selectMoveGridSource('${b.bot_name}', this)">
                 <span class="coin-name">${b.product_id.replace('-USD', '')}</span>
                 <span class="bot-id">${b.bot_name} · ${fmtUsd(b.allocated_usd)} idle</span>
             </button>
-        `).join('') + (emptyFlatCount > 0 ? `<div class="coin-history-empty" style="padding:8px 4px 0; font-size:0.78em;">${emptyFlatCount} other flat branch(es) hidden - they have essentially $0.00 real idle cash, nothing to move.</div>` : '');
+        `).join('') + (lockedCount > 0 ? `<div class="coin-history-empty" style="padding:8px 4px 0; font-size:0.78em;">${lockedCount} 🔒 locked branch(es) hidden - unlock a branch first if you want to move its cash.</div>` : '')
+          + (emptyFlatCount > 0 ? `<div class="coin-history-empty" style="padding:8px 4px 0; font-size:0.78em;">${emptyFlatCount} other flat branch(es) hidden - they have essentially $0.00 real idle cash, nothing to move.</div>` : '');
     }
 
     renderMoveGridDestList();
@@ -1698,22 +1700,58 @@ async function openMoveGridCashModal() {
     document.getElementById('move-grid-cash-modal-overlay').classList.add('open');
 }
 
+// Real "would this actually help" badge text for one destination candidate,
+// from the /grid-status/{bot_name}/move-candidates real ROI preview - per
+// the account owner's direct request to see whether moving cash to a
+// branch will "help it out and potentially push it to make money faster"
+// before confirming. Honest about missing data: a candidate with no real
+// backtest run on record shows a plain "no real backtest data yet" note,
+// never a guessed verdict.
+function moveGridCandidateBadge(candidate) {
+    if (!candidate) return '';
+    if (candidate.roi_pct === null || candidate.roi_pct === undefined) {
+        return `<span style="color:var(--text-dim);">no real backtest data yet</span>`;
+    }
+    const roiStr = `${candidate.roi_pct >= 0 ? '+' : ''}${candidate.roi_pct.toFixed(1)}% real backtested ROI`;
+    if (candidate.would_help === true) {
+        return `<span style="color:var(--green); font-weight:600;">✅ ${roiStr} - better than the source's own coin</span>`;
+    }
+    if (candidate.would_help === false) {
+        return `<span style="color:var(--red);">⚠️ ${roiStr} - not better than the source's own coin</span>`;
+    }
+    return `<span style="color:var(--text-dim);">${roiStr}</span>`;
+}
+
 function renderMoveGridDestList() {
     const destListEl = document.getElementById('move-grid-dest-list');
     const branches = moveGridCashModal.branches;
-    const existingHtml = branches.map(b => `
+    const candidates = moveGridCashModal.moveCandidates;
+    const candByBot = {};
+    let newBranchCand = null;
+    if (candidates) {
+        for (const c of candidates.candidates) {
+            if (c.is_new_branch) newBranchCand = c;
+            else candByBot[c.bot_name] = c;
+        }
+    }
+    const sourceHint = candidates
+        ? `<div style="font-size:0.76em; color:var(--text-dim); padding:2px 4px 8px;">Source (${candidates.source_product_id}) real backtested ROI: ${candidates.source_roi_pct === null ? 'no real data yet' : `${candidates.source_roi_pct >= 0 ? '+' : ''}${candidates.source_roi_pct.toFixed(1)}%`}</div>`
+        : '';
+    const existingHtml = branches.filter(b => b.bot_name !== moveGridCashModal.selectedSource).map(b => `
         <button type="button" class="branch-pick-btn" data-bot="${b.bot_name}" onclick="selectMoveGridDest('${b.bot_name}', this)">
-            <span class="coin-name">${b.product_id.replace('-USD', '')}</span>
+            <span class="coin-name">${b.product_id.replace('-USD', '')}${b.locked ? ' 🔒' : ''}</span>
             <span class="bot-id">${b.bot_name} · ${fmtUsd(b.allocated_usd)} existing grid</span>
+            ${candByBot[b.bot_name] ? `<span class="bot-id" style="display:block; margin-top:2px;">${moveGridCandidateBadge(candByBot[b.bot_name])}</span>` : ''}
         </button>
     `).join('');
     const autoPickHtml = `
         <button type="button" class="branch-pick-btn" data-bot="__auto__" onclick="selectMoveGridDest('__auto__', this)">
             <span class="coin-name">🌱 New branch</span>
-            <span class="bot-id">Auto-pick the best-ranked real coin</span>
+            <span class="bot-id">Auto-pick the best-ranked real coin${newBranchCand ? ` (${newBranchCand.product_id})` : ''}</span>
+            ${newBranchCand ? `<span class="bot-id" style="display:block; margin-top:2px;">${moveGridCandidateBadge(newBranchCand)}</span>` : ''}
         </button>
     `;
-    destListEl.innerHTML = existingHtml + autoPickHtml;
+    destListEl.innerHTML = sourceHint + existingHtml + autoPickHtml;
     // Re-apply the selected state after a re-render (e.g. after the source changes).
     if (moveGridCashModal.selectedDest) {
         const btn = destListEl.querySelector(`.branch-pick-btn[data-bot="${moveGridCashModal.selectedDest}"]`);
@@ -1721,7 +1759,7 @@ function renderMoveGridDestList() {
     }
 }
 
-function selectMoveGridSource(botName, btnEl) {
+async function selectMoveGridSource(botName, btnEl) {
     moveGridCashModal.selectedSource = botName;
     document.getElementById('move-grid-source-list').querySelectorAll('.branch-pick-btn').forEach(el => el.classList.remove('selected'));
     btnEl.classList.add('selected');
@@ -1735,7 +1773,17 @@ function selectMoveGridSource(botName, btnEl) {
     if (moveGridCashModal.selectedDest === botName) {
         moveGridCashModal.selectedDest = null;
     }
+    moveGridCashModal.moveCandidates = null;
     renderMoveGridDestList();
+    // Real "would this help" preview - fetched fresh per source pick, since
+    // the source's own real backtested ROI is what every candidate gets
+    // compared against.
+    try {
+        moveGridCashModal.moveCandidates = await apiGet(`/grid-status/${botName}/move-candidates`);
+    } catch (e) {
+        moveGridCashModal.moveCandidates = null;
+    }
+    if (moveGridCashModal.selectedSource === botName) renderMoveGridDestList();
 }
 
 function selectMoveGridDest(botName, btnEl) {
@@ -1845,9 +1893,10 @@ function renderGridStatus(data, tradeHistoryByBot) {
                         resultsStr = `<span style="color:${pnlColor}; font-weight:600;">${hist.total_pnl >= 0 ? '+' : ''}${fmtUsd(hist.total_pnl)} (${returnPct >= 0 ? '+' : ''}${returnPct.toFixed(1)}%)</span>`
                             + `<div style="font-size:0.8em; color:var(--text-dim); margin-top:2px;">${hist.trade_count} trade${hist.trade_count === 1 ? '' : 's'} · ${hist.win_rate.toFixed(0)}% win</div>`;
                     }
-                    const statusStr = b.drawdown_breached
+                    const statusStr = (b.drawdown_breached
                         ? `🛑 <span style="color:var(--red);" title="Real equity is down ${((b.drawdown_pct || 0) * 100).toFixed(0)}% from its own $${(b.peak_equity || 0).toFixed(2)} peak - new buys paused, existing slices still sell normally">breach (${((b.drawdown_pct || 0) * 100).toFixed(0)}% down)</span>`
-                        : (b.active ? '🟢 active' : '⏸️ paused');
+                        : (b.active ? '🟢 active' : '⏸️ paused'))
+                        + (b.locked ? `<br><span style="color:var(--navy);" title="This branch's cash can't be withdrawn or moved out - by hand or by auto-rotate - until unlocked">🔒 locked</span>` : '');
                     return `<tr style="border-bottom:1px solid var(--border);">
                         <td style="padding:6px 8px;">${b.bot_name}</td>
                         <td style="padding:6px 8px;">${b.product_id}</td>
@@ -1859,7 +1908,10 @@ function renderGridStatus(data, tradeHistoryByBot) {
                             <a href="#" onclick="toggleGridBranchActive('${b.bot_name}', ${!b.active}); return false;" style="color:var(--navy);">
                                 ${b.active ? 'Pause' : 'Resume'}
                             </a>
-                            ${b.open_slices === 0 ? `
+                            <br><a href="#" onclick="toggleGridBranchLocked('${b.bot_name}', ${!b.locked}); return false;" style="color:var(--navy); font-size:0.9em;" title="${b.locked ? 'Allow this branch cash to be withdrawn/moved again' : 'Protect this branch cash from ever being withdrawn or moved out - its normal trading is unaffected'}">
+                                ${b.locked ? '🔓 Unlock' : '🔒 Lock'}
+                            </a>
+                            ${(b.open_slices === 0 && !b.locked) ? `
                             <br><a href="#" onclick="openWithdrawGridModal('${b.bot_name}', '${b.product_id}', ${b.allocated_usd}); return false;" style="color:var(--navy); font-size:0.9em;">
                                 💵 Withdraw
                             </a>` : ''}
@@ -2109,6 +2161,29 @@ async function toggleGridBranchActive(botName, newActive) {
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
     } catch (e) {
         alert('Could not update: ' + e.message);
+    } finally {
+        await loadGridStatus();
+    }
+}
+
+// Real, manual per-branch lock - per the account owner's direct request
+// after recalling losing real money moving cash off a branch that was
+// "about to make profit" a few times in the past. Only ever blocks
+// cash-REMOVAL (Withdraw, Move Cash as a source, auto-rotate) - this
+// branch's own normal grid trading is completely unaffected either way.
+async function toggleGridBranchLocked(botName, newLocked) {
+    if (newLocked && !confirm(`Lock ${botName}? Its real cash won't be withdrawable or movable (by hand or by auto-rotate) until you unlock it again. Its own normal grid trading is unaffected.`)) return;
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + `/grid-status/${botName}/lock`, {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ locked: newLocked }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    } catch (e) {
+        alert('Could not update lock: ' + e.message);
     } finally {
         await loadGridStatus();
     }

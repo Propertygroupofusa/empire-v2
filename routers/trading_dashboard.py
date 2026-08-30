@@ -5328,6 +5328,47 @@ async def move_cash_between_grid_branches_endpoint(payload: MoveCashBetweenGridB
     return result
 
 
+class SetGridBranchLockedRequest(BaseModel):
+    locked: bool
+
+
+@router.post("/grid-status/{bot_name}/lock", dependencies=[Depends(require_admin_key)])
+async def set_grid_branch_locked_endpoint(bot_name: str, payload: SetGridBranchLockedRequest):
+    """Real, manual per-branch lock - per the account owner's direct
+    request after recalling losing real money moving cash off a branch
+    that was "about to make profit" a few times in the past. A locked
+    branch's real cash can never be pulled out by Withdraw, Move Cash (as
+    a source), or the automatic auto-rotate sweep - its own normal grid
+    trading (buying real dips, selling real rises) is completely
+    unaffected either way."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    try:
+        result = await crypto_grid_bot_module.set_grid_branch_locked(bot_name, payload.locked)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return result
+
+
+@router.get("/grid-status/{bot_name}/move-candidates", dependencies=[Depends(require_admin_key)])
+async def get_grid_cash_move_candidates_endpoint(bot_name: str):
+    """Real, read-only "would moving cash here actually help" preview for
+    the Move Cash Between Grid Branches modal - per the account owner's
+    direct request: "show me if I do move something to another Branch...
+    will help it out and potentially push it to make money faster."
+    Reports every other real active branch's own real backtested ROI
+    (plus a real auto-picked new-branch option) so the account owner can
+    compare against the source branch's own current coin before
+    confirming a move. Never moves anything itself."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    try:
+        result = await crypto_grid_bot_module.get_grid_cash_move_candidates(bot_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return result
+
+
 class SetGridBranchActiveRequest(BaseModel):
     active: bool
 

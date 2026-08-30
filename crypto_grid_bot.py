@@ -495,6 +495,8 @@ async def withdraw_from_grid_branch(bot_name: str, amount: float) -> dict:
         branch = result.scalar_one_or_none()
         if branch is None:
             raise ValueError(f"no grid branch named {bot_name}")
+        if branch.locked:
+            raise ValueError(f"{bot_name} is locked - unlock it first before withdrawing real cash from it")
         slices_result = await db.execute(select(CryptoGridSlice).where(CryptoGridSlice.bot_name == bot_name))
         if slices_result.scalars().first() is not None:
             raise ValueError(f"{bot_name} has real open slices - can only withdraw from a FLAT branch (pause it and wait for slices to close first)")
@@ -518,6 +520,35 @@ async def withdraw_from_grid_branch(bot_name: str, amount: float) -> dict:
         "bot_name": bot_name, "product_id": branch.product_id, "amount": amount,
         "remaining_allocated_usd": round(branch.allocated_usd, 2), "branch_deleted": False,
     }
+
+
+async def set_grid_branch_locked(bot_name: str, locked: bool) -> dict:
+    """Real, manual per-branch lock - per the account owner's direct
+    request after recalling losing real money moving cash off a branch
+    that was "about to make profit" a few times in the past: "I don't
+    want to switch anything that's on his way to being profit so lock it
+    so it won't be able to be moved around by me."
+
+    A locked branch's real cash can never be pulled out by any of the
+    three cash-removal paths in this file - withdraw_from_grid_branch()
+    (direct withdraw), move_cash_between_grid_branches() (as a source,
+    checked BEFORE the destination is ever funded, so a locked source can
+    never leave a destination double-funded), and the automatic
+    auto-rotate sweep (_maybe_rotate_one_grid_branch(), which silently
+    skips a locked branch rather than raising every cycle). A locked
+    branch's own NORMAL grid trading - buying real dips, selling real
+    rises on its existing/future slices - is completely unaffected; this
+    only ever blocks cash-REMOVAL, never the branch's real trading."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == bot_name))
+        branch = result.scalar_one_or_none()
+        if branch is None:
+            raise ValueError(f"no grid branch named {bot_name}")
+        branch.locked = bool(locked)
+        await db.commit()
+        await db.refresh(branch)
+    log.info(f"[GRID] {'🔒 Locked' if locked else '🔓 Unlocked'} grid branch {bot_name} - its real cash {'can no longer' if locked else 'can now again'} be moved out")
+    return {"bot_name": bot_name, "locked": bool(branch.locked)}
 
 
 async def move_cash_between_grid_branches(from_bot_name: str, amount: float, to_bot_name: str = None, product_id: str = None) -> dict:
@@ -572,6 +603,8 @@ async def move_cash_between_grid_branches(from_bot_name: str, amount: float, to_
         source = result.scalar_one_or_none()
         if source is None:
             raise ValueError(f"no grid branch named {from_bot_name}")
+        if source.locked:
+            raise ValueError(f"{from_bot_name} is locked - unlock it first before moving real cash out of it")
         slices_result = await db.execute(select(CryptoGridSlice).where(CryptoGridSlice.bot_name == from_bot_name))
         if slices_result.scalars().first() is not None:
             raise ValueError(f"{from_bot_name} has real open slices - can only move cash from a FLAT branch")
@@ -867,6 +900,85 @@ async def _best_available_coin_and_roi(exclude_bot_name: str = None) -> tuple:
     return best_pid, latest_by_coin[best_pid].roi_pct_of_spend
 
 
+async def get_grid_cash_move_candidates(from_bot_name: str) -> dict:
+    """Real "would moving cash here actually help" preview for the Move
+    Cash Between Grid Branches modal - per the account owner's direct
+    follow-up request: "show me if I do move something to another
+    Branch... will help it out and potentially push it to make money
+    faster." Read-only, never moves anything itself.
+
+    Reuses the exact same real signal every other coin-pick in this file
+    already reads (CryptoBacktestRun's latest real backtested ROI per
+    coin) - not a new or separately-computed number, so this can never
+    disagree with what pick_best_ranked_coin_for_grid()/auto-rotate would
+    actually pick. Every OTHER real active branch is reported as a
+    possible destination (a locked branch can still legitimately RECEIVE
+    cash - locking only ever protects a branch's cash from being pulled
+    OUT, never from being added to), plus a "new branch" option using the
+    same real auto-pick logic _best_available_coin_and_roi() already
+    validates. `would_help` is real and honest: True only when that
+    candidate's own real backtested ROI is both known AND genuinely
+    higher than the source's own current coin's real ROI - a candidate
+    with no real backtest data on record reports `roi_pct=None` and
+    `would_help=None` (never guessed), matching the "no data = no
+    verdict" default every other exclusion/ranking layer in this
+    codebase already uses."""
+    import crypto_family_tree_bot as tree  # lazy - avoids a circular import at module load, same pattern as get_real_free_cash_usd above
+    from models import CryptoBacktestRun
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == from_bot_name))
+        source = result.scalar_one_or_none()
+        if source is None:
+            raise ValueError(f"no grid branch named {from_bot_name}")
+        other_branches = (await db.execute(
+            select(CryptoGridBranch).where(CryptoGridBranch.bot_name != from_bot_name, CryptoGridBranch.active == True)
+        )).scalars().all()
+
+        result = await db.execute(
+            select(CryptoBacktestRun).order_by(CryptoBacktestRun.product_id, desc(CryptoBacktestRun.run_at))
+        )
+        rows = result.scalars().all()
+
+    latest_by_coin = {}
+    for row in rows:
+        if row.product_id not in latest_by_coin:
+            latest_by_coin[row.product_id] = row
+
+    source_roi = latest_by_coin[source.product_id].roi_pct_of_spend if source.product_id in latest_by_coin else None
+
+    def _would_help(roi_pct):
+        if roi_pct is None:
+            return None
+        if source_roi is None:
+            return roi_pct > 0
+        return roi_pct > source_roi
+
+    candidates = []
+    for b in other_branches:
+        roi_pct = latest_by_coin[b.product_id].roi_pct_of_spend if b.product_id in latest_by_coin else None
+        candidates.append({
+            "bot_name": b.bot_name, "product_id": b.product_id, "allocated_usd": round(b.allocated_usd, 2),
+            "locked": bool(b.locked), "roi_pct": roi_pct, "would_help": _would_help(roi_pct),
+            "is_new_branch": False,
+        })
+
+    new_branch_pid, new_branch_roi = await _best_available_coin_and_roi(exclude_bot_name=from_bot_name)
+    if new_branch_pid is not None:
+        candidates.append({
+            "bot_name": None, "product_id": new_branch_pid, "allocated_usd": None,
+            "locked": False, "roi_pct": new_branch_roi, "would_help": _would_help(new_branch_roi),
+            "is_new_branch": True,
+        })
+
+    candidates.sort(key=lambda c: (c["roi_pct"] is None, -(c["roi_pct"] or 0)))
+
+    return {
+        "source_bot_name": from_bot_name, "source_product_id": source.product_id, "source_roi_pct": source_roi,
+        "candidates": candidates,
+    }
+
+
 async def _maybe_rotate_one_grid_branch(branch: CryptoGridBranch):
     """Real, one-branch check for run_grid_auto_rotate_sweep() below -
     also called immediately right after a real sell empties a branch out
@@ -876,6 +988,8 @@ async def _maybe_rotate_one_grid_branch(branch: CryptoGridBranch):
     those are actively working, not idle, and move_cash_between_grid_
     branches() itself refuses a non-flat source as a second, independent
     guard even if this check were ever somehow bypassed."""
+    if branch.locked:
+        return
     slices = await get_grid_slices(branch.bot_name)
     if slices:
         return
@@ -1390,7 +1504,7 @@ async def get_grid_status() -> dict:
 
         out.append({
             "bot_name": b.bot_name, "product_id": b.product_id, "allocated_usd": round(b.allocated_usd, 2),
-            "active": b.active, "grid_pct": b.grid_pct, "num_levels": b.num_levels,
+            "active": b.active, "locked": bool(b.locked), "grid_pct": b.grid_pct, "num_levels": b.num_levels,
             "reference_price": b.reference_price, "open_slices": len(slices),
             "current_price": current_price,
             "peak_equity": round(peak_equity, 2) if peak_equity is not None else None,
