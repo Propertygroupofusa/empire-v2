@@ -929,6 +929,54 @@ async def quick_buy_best_coin(amount_usd: float) -> dict:
     }
 
 
+async def create_multiple_grid_branches(count: int, amount_per_branch: float) -> dict:
+    """Real, one-click convenience for the "New grid branch" flow - per
+    the account owner's direct follow-up after being told the real lever
+    for more trade frequency is running MORE coins, not narrower spacing
+    (already shown, by real backtest evidence, to lose money): "yes build
+    the one-click add 3 branches shortcut" instead of clicking the New
+    Grid Branch modal 3 separate times by hand.
+
+    Creates up to `count` real branches, each on a DIFFERENT real coin -
+    picked the exact same way the $20 Quick Buy button already picks one
+    (pick_best_ranked_coin_for_grid). Since every created branch
+    immediately claims its own coin, the next pass through the loop
+    naturally lands on the next-best real coin with zero extra
+    duplicate-avoidance logic needed - the same claim mechanism
+    create_grid_branch already enforces for a single branch.
+
+    Real, honest partial-success behavior, deliberately NOT all-or-
+    nothing: stops early and returns whatever it genuinely managed the
+    moment one real attempt fails (real free cash runs out partway
+    through, no more real eligible coins exist, a live price fetch
+    hiccups) - every branch already created stays created, this never
+    rolls back a real allocation that already succeeded. Refuses only up
+    front, before touching anything real, if count/amount_per_branch
+    aren't sane or STOP_TRADING is set - matching every other real
+    capital-deployment path in this file."""
+    if count <= 0:
+        raise ValueError("count must be positive")
+    if amount_per_branch <= 0:
+        raise ValueError("amount_per_branch must be positive")
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        raise ValueError("STOP_TRADING is set - no new real capital can be deployed right now")
+
+    created = []
+    error = None
+    for _ in range(count):
+        try:
+            product_id = await pick_best_ranked_coin_for_grid()
+            branch = await create_grid_branch(product_id, amount_per_branch)
+            created.append({
+                "bot_name": branch.bot_name, "product_id": branch.product_id,
+                "allocated_usd": round(branch.allocated_usd, 2),
+            })
+        except Exception as e:
+            error = str(e)
+            break  # real, genuine failure (cash exhausted, nothing left eligible) - stop rather than keep trying
+    return {"created": created, "requested_count": count, "error": error}
+
+
 async def get_grid_slices(bot_name: str) -> list:
     """Every real currently-open slice for one branch, oldest first -
     the exact FIFO order a real sell always consumes from."""

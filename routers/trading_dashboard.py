@@ -5155,6 +5155,33 @@ async def grid_quick_buy_endpoint(payload: GridQuickBuyRequest):
     return result
 
 
+class CreateMultipleGridBranchesRequest(BaseModel):
+    count: int = 3
+    amount_per_branch: float
+
+
+@router.post("/grid-status/create-multiple-branches", dependencies=[Depends(require_admin_key)])
+async def create_multiple_grid_branches_endpoint(payload: CreateMultipleGridBranchesRequest):
+    """The real one-click "add several branches at once" shortcut - per
+    the account owner's explicit "yes build the one-click add 3 branches
+    shortcut," after real backtest evidence showed narrower grid spacing
+    loses money and running more coins is the real lever for more trade
+    frequency instead. Creates up to `count` real branches, each on a
+    different real coin (same auto-pick the $20 Quick Buy button already
+    uses) - see crypto_grid_bot.create_multiple_grid_branches for its own
+    real partial-success behavior (stops and returns whatever it
+    genuinely managed the moment one real attempt fails, never rolls
+    back what already succeeded)."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    try:
+        result = await crypto_grid_bot_module.create_multiple_grid_branches(payload.count, payload.amount_per_branch)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    log.info(f"[dashboard] 🌱 Created {len(result['created'])}/{payload.count} real grid branches via the one-click shortcut")
+    return result
+
+
 class FundGridFromTreeRequest(BaseModel):
     from_bot_name: str
     amount: float

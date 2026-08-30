@@ -555,6 +555,7 @@
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
             <button class="sell-btn" style="width:auto; margin-top:0;" onclick="gridQuickBuy(this)">💰 $20 Quick Buy</button>
             <button class="unlock-btn" onclick="openCreateGridModal()">🌱 New grid branch</button>
+            <button class="unlock-btn" onclick="openCreateMultipleGridModal()">🌱 Add 3 branches</button>
             <button class="unlock-btn" onclick="openFundGridModal()">💸 Fund from family tree</button>
             <button class="unlock-btn" onclick="openMoveGridCashModal()">🔀 Move cash between grid branches</button>
         </div>
@@ -770,6 +771,33 @@
         <div class="modal-actions">
             <button type="button" class="modal-btn-secondary" onclick="closeCreateGridModal()">Cancel</button>
             <button type="button" class="modal-btn-primary" id="create-grid-confirm-btn" onclick="confirmCreateGridBranch()">Create</button>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="create-multiple-grid-modal-overlay">
+    <div class="modal-card">
+        <div class="modal-title">🌱 Add Several Grid Branches</div>
+        <div class="modal-sub">
+            One click instead of repeating "New grid branch" by hand - creates several real branches at once, each on a
+            DIFFERENT real coin (the current best-ranked one each time, same real pick the $20 Quick Buy button already
+            uses). More coins running is the real lever for more trade frequency - real evidence already showed narrower
+            grid spacing loses money, so that's left off.
+        </div>
+
+        <label class="modal-label">How many branches</label>
+        <input type="number" id="create-multi-grid-count" class="modal-input" step="1" min="1" max="10" value="3">
+
+        <label class="modal-label" style="margin-top:16px;">Allocated capital PER branch ($)</label>
+        <div id="multi-grid-spendable-hint" style="font-size:0.85em; color:var(--text-dim); margin-bottom:6px;">Checking real available capital…</div>
+        <input type="number" id="create-multi-grid-amount" class="modal-input" step="1" min="1" value="50">
+        <div id="multi-grid-total-note" style="font-size:0.8em; color:var(--text-dim); margin-top:4px;"></div>
+
+        <div id="create-multi-grid-error" style="color:var(--red); font-size:0.85em; margin-top:6px; display:none;"></div>
+        <div id="create-multi-grid-result" style="font-size:0.85em; margin-top:6px; display:none;"></div>
+        <div class="modal-actions">
+            <button type="button" class="modal-btn-secondary" onclick="closeCreateMultipleGridModal()">Cancel</button>
+            <button type="button" class="modal-btn-primary" id="create-multi-grid-confirm-btn" onclick="confirmCreateMultipleGridBranches()">Create</button>
         </div>
     </div>
 </div>
@@ -2283,6 +2311,105 @@ async function confirmCreateGridBranch() {
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
         closeCreateGridModal();
+    } catch (e) {
+        errorEl.textContent = e.message;
+        errorEl.style.display = 'block';
+    } finally {
+        confirmBtn.disabled = false;
+        await loadGridStatus();
+    }
+}
+
+// Real one-click "add several branches at once" shortcut - per the
+// account owner's explicit "yes build the one-click add 3 branches
+// shortcut," after real backtest evidence showed narrower grid spacing
+// loses money and running more coins is the real lever for more trade
+// frequency instead. Each branch picks a different real currently-best
+// coin server-side (see crypto_grid_bot.create_multiple_grid_branches) -
+// this modal doesn't pick coins itself, only how many and how much each.
+let lastKnownMultiGridSpendableUsd = null;
+
+function updateMultiGridTotalNote() {
+    const count = parseInt(document.getElementById('create-multi-grid-count').value, 10) || 0;
+    const amount = parseFloat(document.getElementById('create-multi-grid-amount').value) || 0;
+    const total = count * amount;
+    const noteEl = document.getElementById('multi-grid-total-note');
+    noteEl.textContent = total > 0
+        ? `Real total capital deployed: ${fmtUsd(total)} (${count} × ${fmtUsd(amount)})`
+        : '';
+}
+
+function openCreateMultipleGridModal() {
+    document.getElementById('create-multi-grid-count').value = '3';
+    document.getElementById('create-multi-grid-amount').value = '50';
+    document.getElementById('create-multi-grid-error').style.display = 'none';
+    document.getElementById('create-multi-grid-result').style.display = 'none';
+    document.getElementById('multi-grid-spendable-hint').textContent = 'Checking real available capital…';
+    lastKnownMultiGridSpendableUsd = null;
+    updateMultiGridTotalNote();
+    document.getElementById('create-multi-grid-modal-overlay').classList.add('open');
+    ['create-multi-grid-count', 'create-multi-grid-amount'].forEach(id => {
+        document.getElementById(id).oninput = updateMultiGridTotalNote;
+    });
+    apiGet('/grid-status').then(d => {
+        const hintEl = document.getElementById('multi-grid-spendable-hint');
+        if (d.real_free_cash_usd == null) {
+            hintEl.textContent = 'Could not fetch real free cash right now - each branch will still be checked as it\'s created.';
+        } else {
+            lastKnownMultiGridSpendableUsd = d.real_free_cash_usd;
+            hintEl.innerHTML = d.real_free_cash_usd > 0
+                ? `💰 <strong>${fmtUsd(d.real_free_cash_usd)}</strong> real free cash right now`
+                : `⚠️ <strong>$0.00</strong> real free cash right now - every real dollar is already committed elsewhere.`;
+        }
+    }).catch(() => {
+        document.getElementById('multi-grid-spendable-hint').textContent = 'Could not fetch real free cash right now - each branch will still be checked as it\'s created.';
+    });
+}
+
+function closeCreateMultipleGridModal() {
+    document.getElementById('create-multi-grid-modal-overlay').classList.remove('open');
+}
+
+async function confirmCreateMultipleGridBranches() {
+    const count = parseInt(document.getElementById('create-multi-grid-count').value, 10);
+    const amount = parseFloat(document.getElementById('create-multi-grid-amount').value);
+    const errorEl = document.getElementById('create-multi-grid-error');
+    const resultEl = document.getElementById('create-multi-grid-result');
+    errorEl.style.display = 'none';
+    resultEl.style.display = 'none';
+    if (!count || count <= 0) {
+        errorEl.textContent = 'Enter a real positive number of branches.';
+        errorEl.style.display = 'block';
+        return;
+    }
+    if (!amount || amount <= 0) {
+        errorEl.textContent = 'Enter a real positive dollar amount per branch.';
+        errorEl.style.display = 'block';
+        return;
+    }
+    const total = count * amount;
+    if (!confirm(`Create up to ${count} real grid branches, ${fmtUsd(amount)} each (${fmtUsd(total)} real total), each on a different currently-best-ranked real coin? Each branch's first real buy happens once price actually dips 1% below its own starting reference price.`)) return;
+    const confirmBtn = document.getElementById('create-multi-grid-confirm-btn');
+    confirmBtn.disabled = true;
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/grid-status/create-multiple-branches', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ count: count, amount_per_branch: amount }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        const created = data.created || [];
+        resultEl.innerHTML = created.length
+            ? `✅ Created ${created.length}/${count}: ${created.map(b => b.product_id).join(', ')}` +
+              (data.error ? `<br>Stopped early - ${data.error}` : '')
+            : `⚠️ Created 0 real branches - ${data.error || 'no real eligible coin was available'}`;
+        resultEl.style.color = created.length ? 'var(--green)' : 'var(--red)';
+        resultEl.style.display = 'block';
+        if (created.length) {
+            setTimeout(closeCreateMultipleGridModal, 2500);
+        }
     } catch (e) {
         errorEl.textContent = e.message;
         errorEl.style.display = 'block';
