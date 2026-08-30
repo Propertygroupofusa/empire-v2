@@ -79,6 +79,11 @@ APEX_MANDATE = {
         # SDOW, SRTY) - those add leveraged-decay risk the account owner
         # didn't ask for.
         "inverse_etfs": ["SH", "PSQ", "DOG", "RWM"],  # inverse of SPY, QQQ, DIA, IWM
+        # Individual mega-cap tech equities - per the account owner's
+        # explicit request to trade real names, not just index/commodity
+        # ETFs. Same contract-code-equals-symbol identifier space as
+        # inverse_etfs above (no futures-proxy exists for a real equity).
+        "equities": ["MSFT", "META", "AAPL", "GOOGL", "AMZN", "NVDA"],
         "restriction": "No other symbols allowed"
     },
 
@@ -425,6 +430,7 @@ def validate_entry(bot_name: str, symbol: str, rsi: float, volume_ratio: float,
                    mandate["universe"].get("crypto", []) +
                    mandate["universe"].get("commodities", []) +
                    mandate["universe"].get("inverse_etfs", []) +
+                   mandate["universe"].get("equities", []) +
                    mandate["universe"].get("approved", []) +
                    mandate["universe"].get("approved_pairs", []))
         if approved and symbol not in approved:

@@ -162,6 +162,25 @@ FUTURES = {
     "PSQ": {"name": "Short Nasdaq (inverse of QQQ)",    "qty": 1, "symbol": "PSQ"},
     "DOG": {"name": "Short Dow 30 (inverse of DIA)",    "qty": 1, "symbol": "DOG"},
     "RWM": {"name": "Short Russell 2000 (inverse of IWM)", "qty": 1, "symbol": "RWM"},
+    # Individual mega-cap tech equities - per the account owner's explicit
+    # request ("I want the Twitter one I want the Facebook one I want it
+    # all") while describing a real opening-bar breakout setup. Twitter/X
+    # is not addable - it delisted from public markets in 2022 and can't
+    # be traded through Alpaca or any other broker; told to the account
+    # owner directly rather than silently dropped. Facebook is Meta
+    # Platforms today (META). No futures-proxy contract code exists for
+    # a real equity, so - same pattern already used for the inverse
+    # ETFs above - the ticker is its own key and its own traded symbol.
+    # Real Alpaca equity orders (size_position()'s dollar-based
+    # fractional-share sizing already handles any real symbol
+    # identically - the "qty" field here is informational only, never
+    # used for real order sizing).
+    "MSFT":  {"name": "Microsoft",       "qty": 1, "symbol": "MSFT"},
+    "META":  {"name": "Meta Platforms (Facebook)", "qty": 1, "symbol": "META"},
+    "AAPL":  {"name": "Apple",           "qty": 1, "symbol": "AAPL"},
+    "GOOGL": {"name": "Alphabet (Google)", "qty": 1, "symbol": "GOOGL"},
+    "AMZN":  {"name": "Amazon",          "qty": 1, "symbol": "AMZN"},
+    "NVDA":  {"name": "Nvidia",          "qty": 1, "symbol": "NVDA"},
 }
 
 # Max concurrent open positions. Explicit request: don't cap this below
@@ -1654,7 +1673,8 @@ async def run_prop_cycle():
             APEX_MANDATE["universe"]["futures"] +
             APEX_MANDATE["universe"]["crypto"] +
             APEX_MANDATE["universe"]["commodities"] +
-            APEX_MANDATE["universe"]["inverse_etfs"]
+            APEX_MANDATE["universe"]["inverse_etfs"] +
+            APEX_MANDATE["universe"]["equities"]
         )
         if contract not in approved_universe:
             log.warning(f"[MANDATE] {contract} NOT in approved universe - SKIPPING")

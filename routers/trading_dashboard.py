@@ -4389,7 +4389,7 @@ async def run_auto_close_periodically():
 # symbol is ever interpolated into an outbound URL, so this endpoint can
 # never be turned into an open SSRF proxy via an arbitrary path param.
 # Same tickers prop_bot.py/crypto_coinbase_bot.py already trade.
-CHART_STOCK_SYMBOLS = {"SPY", "QQQ", "DIA", "IWM", "GLD", "USO", "SLV", "SH", "PSQ", "DOG", "RWM"}
+CHART_STOCK_SYMBOLS = {"SPY", "QQQ", "DIA", "IWM", "GLD", "USO", "SLV", "SH", "PSQ", "DOG", "RWM", "MSFT", "META", "AAPL", "GOOGL", "AMZN", "NVDA"}
 CHART_CRYPTO_SYMBOLS = {"BTC-USD", "ETH-USD"}
 
 
