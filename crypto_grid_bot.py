@@ -809,6 +809,31 @@ async def _log_activity_safe(bot_name, product_id, event_type, message):
         log.warning(f"[GRID] activity-feed log failed (non-fatal): {e}")
 
 
+def _grid_slice_net_pnl(qty: float, entry_price: float, exit_price: float) -> float:
+    """THE single real fee/profit formula for one grid slice's round
+    trip - shared by BOTH run_grid_branch_cycle()'s real sell (the
+    actual dollars booked into a branch's allocated_usd when a real
+    order fills) AND get_grid_status()'s dashboard display (the
+    hypothetical "if sold right now" figure). Extracted into one
+    function per the account owner's own explicit, correct concern:
+    "don't let the dashboard calculation and the actual execution
+    calculation use two different fee formulas. They should share one
+    fee/profit calculation function. Otherwise you can end up with the
+    dashboard saying +$4.21 while the actual sale produces something
+    different." Before this, the identical formula was hand-written in
+    two separate places - never actually inconsistent (both used the
+    same ROUND_TRIP_FEE_RATE constant), but with no structural guarantee
+    they'd stay that way if either one were ever edited alone.
+
+    gross = qty * (exit_price - entry_price); fee = qty * (entry_price +
+    exit_price) * (ROUND_TRIP_FEE_RATE / 2) - the real round-trip taker
+    fee on both legs' notional, matching this module's whole real
+    Strategy Lab evidence (see the module docstring)."""
+    gross = qty * (exit_price - entry_price)
+    fee = qty * (entry_price + exit_price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+    return gross - fee
+
+
 def _grid_branch_real_equity(branch: CryptoGridBranch, slices: list, price: float) -> float:
     """Real live equity for one grid branch right now - allocated_usd is
     a cost-basis figure (see the model's own docstring: it only ever
@@ -936,9 +961,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
             log.warning(f"[GRID] {branch.bot_name}: real grid sell of {branch.product_id} did not fill - will retry next cycle")
             return
         filled_qty, filled_price = fill
-        gross = filled_qty * (filled_price - oldest.entry_price)
-        fee = filled_qty * (oldest.entry_price + filled_price) * (engine.ROUND_TRIP_FEE_RATE / 2)
-        pnl = gross - fee
+        pnl = _grid_slice_net_pnl(filled_qty, oldest.entry_price, filled_price)
         new_balance = branch.allocated_usd + pnl
         async with AsyncSessionLocal() as db:
             slice_result = await db.execute(select(CryptoGridSlice).where(CryptoGridSlice.id == oldest.id))
@@ -1023,16 +1046,14 @@ async def get_grid_status() -> dict:
 
         # Real, fee-adjusted unrealized P&L per slice - per the account
         # owner's direct request ("let me know if it's at a profit after
-        # the fees price percentage wise"): the raw unrealized $ shown on
-        # the chart (qty * (price - entry)) doesn't yet reflect the real
-        # round-trip fee this slice will actually pay when it sells - the
-        # EXACT SAME real formula run_grid_branch_cycle()'s own sell path
-        # already uses to compute the real fee at that moment
-        # (`filled_qty * (oldest.entry_price + filled_price) *
-        # ROUND_TRIP_FEE_RATE/2`), just applied here to the LIVE price
-        # instead of a real fill price - so this can never disagree with
-        # what a real sell would actually net. None (not a fabricated
-        # number) when there's no real live price to compute it from.
+        # the fees price percentage wise"). Uses _grid_slice_net_pnl(),
+        # THE ONE shared function run_grid_branch_cycle()'s own real sell
+        # also calls - not a second, hand-written copy of the fee math
+        # that could quietly drift out of sync - applied here to the LIVE
+        # price instead of a real fill price, so this hypothetical
+        # "if sold now" figure can never disagree with what a real sell
+        # would actually net. None (not a fabricated number) when there's
+        # no real live price to compute it from.
         slices_out = []
         total_net_usd = 0.0
         total_cost_basis = 0.0
@@ -1040,9 +1061,11 @@ async def get_grid_status() -> dict:
             net_usd = None
             net_pct = None
             if current_price is not None:
-                gross = s.qty * (current_price - s.entry_price)
-                fee = s.qty * (s.entry_price + current_price) * (engine.ROUND_TRIP_FEE_RATE / 2)
-                net_usd = gross - fee
+                # THE single shared formula - _grid_slice_net_pnl() is the
+                # exact same function run_grid_branch_cycle()'s real sell
+                # calls, so this hypothetical "if sold now" figure can
+                # never drift from what a real sale would actually book.
+                net_usd = _grid_slice_net_pnl(s.qty, s.entry_price, current_price)
                 cost_basis = s.qty * s.entry_price
                 net_pct = (net_usd / cost_basis) if cost_basis else None
                 total_net_usd += net_usd
