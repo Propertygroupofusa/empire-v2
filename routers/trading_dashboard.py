@@ -2760,6 +2760,29 @@ async def run_narrow_range_breakout_backtest_endpoint():
     return await crypto_selection_backtest_module.run_narrow_range_breakout_backtest()
 
 
+@router.post("/crypto-selection-backtest/opening-bar-breakout", dependencies=[Depends(require_admin_key)])
+async def run_opening_bar_breakout_backtest_endpoint():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    Tests the account owner's own fully-specified real trading system,
+    described directly: narrow-state coins, a real "Elephant Bar"
+    (oversized green candle) or "bottoming Tail" (long lower-wick
+    rejection) as the real first bar of the session, entry the instant
+    the second bar's real price crosses bar 1's high + $0.01 (never
+    waiting for bar 2 to close), a real stop at bar 1's own low, and a
+    real exit once a second "push" (a new high after a genuine pullback)
+    confirms. Crypto has no real discrete session open the way stocks
+    do - uses 13:30 UTC (the real US stock market's own open) as an
+    explicitly invented stand-in, per the account owner's own "do it for
+    crypto too."
+
+    Pulls real, paginated 1-minute Coinbase candles (aggregated into
+    synthetic real 2-minute bars) over a deliberately short 5-day window
+    - can take 60-180 seconds given the real 1-minute data volume."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_opening_bar_breakout_backtest()
+
+
 @router.post("/crypto-selection-backtest/strategy-lab", dependencies=[Depends(require_admin_key)])
 async def run_strategy_lab_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
@@ -3095,6 +3118,21 @@ async def run_alpaca_narrow_range_breakout_backtest():
     if alpaca_selection_backtest_module is None:
         raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
     return await alpaca_selection_backtest_module.run_narrow_range_breakout_backtest()
+
+
+@router.post("/alpaca-selection-backtest/opening-bar-breakout", dependencies=[Depends(require_admin_key)])
+async def run_alpaca_opening_bar_breakout_backtest():
+    """SHADOW-MODE ONLY - never touches live trading, places no order.
+    Tests the account owner's own fully-specified real trading system,
+    running on the real thing (stocks have a genuine 2-minute bar and a
+    real discrete session open, unlike crypto's invented UTC stand-in):
+    real first 2-min bar of the day must be a real "Elephant Bar" or
+    "bottoming Tail" bar; entry the instant bar 2's real price crosses
+    bar 1's high + $0.01 (never waiting for bar 2 to close); real stop
+    at bar 1's own low; real exit once a second "push" confirms."""
+    if alpaca_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+    return await alpaca_selection_backtest_module.run_opening_bar_breakout_backtest()
 
 
 def _safe_float(v):

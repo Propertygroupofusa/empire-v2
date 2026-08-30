@@ -143,6 +143,13 @@
     <button class="run-btn" id="narrowRangeBtn" onclick="runNarrowRangeBreakoutBacktest()">▶ Run Narrow-Range Breakout Backtest (real data, ~30-60 seconds)</button>
     <div id="narrowRangeStatus"></div>
     <div id="narrowRangeResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>🐘 Elephant/Tail opening-bar breakout - the full real system</strong> the account owner described directly: pick a symbol sitting in a narrow state, wait for its real first 2-minute bar of the trading day; if that bar is a real "Elephant Bar" (an oversized green candle - "sizable... larger and taller than the vast majority of the green bars before it") or a real "bottoming Tail" bar (a long lower-wick rejection candle), mark its high plus one penny; the instant the SECOND bar's real price crosses that level - never waiting for bar 2 to close - a real $500 goes in; the stop sits at bar 1's own low, for the life of the trade; once a real second "push" (a genuine new high after a real pullback) confirms, exit. Their own claimed real number: 80%+ follow-through. Stocks get a more literal version of this than crypto - real Alpaca 2-minute bars are fetched directly (no aggregation needed), grouped into real trading days by the same helper the Narrow-Range Breakout test above already uses, with the real session open as the actual anchor - no invented stand-in needed here. Shadow mode only - diagnostic, never wired to any real trade.
+    </div>
+    <button class="run-btn" id="obbBtn" onclick="runOpeningBarBreakoutBacktest()">▶ Run Elephant/Tail Opening-Bar Backtest (real data, ~60-180 seconds)</button>
+    <div id="obbStatus"></div>
+    <div id="obbResults"></div>
 </div>
 
 <script>
@@ -943,6 +950,80 @@ function renderNarrowRangeBreakoutResults(data) {
     }
     html += `<p class="trade-note">A hit rate meaningfully above 50% on a real, decent-sized sample is real evidence the pattern holds for these symbols; a hit rate near 50% means the 87% figure isn't showing up here. This is diagnostic only - nothing here changes what any live bot buys or sells.</p>`;
 
+    resultsEl.innerHTML = html;
+}
+
+// Real Elephant/Tail opening-bar breakout backtest - the Alpaca-side
+// counterpart to the crypto page's own version, per the account owner's
+// own fully-specified real trading system. Real Alpaca 2-minute bars are
+// fetched directly (no aggregation needed, unlike crypto's synthetic
+// stand-in) and grouped into real trading days via the same helper the
+// Narrow-Range Breakout test above already uses.
+async function runOpeningBarBreakoutBacktest() {
+    const btn = document.getElementById('obbBtn');
+    const statusEl = document.getElementById('obbStatus');
+    const resultsEl = document.getElementById('obbResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real 2-min Alpaca data per symbol)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-selection-backtest/opening-bar-breakout', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderOpeningBarBreakoutResults(data);
+        const o = data.overall;
+        if (o) {
+            statusEl.textContent = `Scanned ${data.symbols_with_results} symbols over ${data.params.days} real trading days each. `
+                + `${o.num_trades} real trades, ${(o.win_rate * 100).toFixed(1)}% win rate, real total P&L $${o.total_pnl.toFixed(2)}.`;
+        } else {
+            statusEl.textContent = `Scanned ${data.symbols_with_results} symbols - no real qualifying Elephant/Tail opening-bar setups found in this window.`;
+        }
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Elephant/Tail Opening-Bar Backtest (real data, ~60-180 seconds)';
+    }
+}
+
+function renderOpeningBarBreakoutResults(data) {
+    const resultsEl = document.getElementById('obbResults');
+    if (!data.per_symbol || data.per_symbol.length === 0) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No symbol produced a real qualifying Elephant/Tail opening-bar setup on this sample.</p>';
+        return;
+    }
+    const rows = data.per_symbol
+        .sort((a, b) => b.total_pnl - a.total_pnl)
+        .map(s => `<tr>
+            <td>${s.product_id}</td>
+            <td>${s.num_trades}</td>
+            <td>${(s.win_rate * 100).toFixed(1)}%</td>
+            <td class="${s.total_pnl >= 0 ? 'pos' : 'neg'}">${s.total_pnl >= 0 ? '+' : ''}$${s.total_pnl.toFixed(2)}</td>
+        </tr>`).join('');
+
+    let html = `
+        <table>
+            <thead><tr><th>Symbol</th><th>Real trades</th><th>Win rate</th><th>Total P&amp;L ($500/trade)</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+    if (data.skipped && data.skipped.length > 0) {
+        html += `<p class="trade-note">Skipped: ${data.skipped.map(s => `${s.product_id} (${s.reason})`).join(', ')}</p>`;
+    }
+    html += `<p class="trade-note">A win rate meaningfully above 50% with a genuinely positive total P&amp;L on a real, decent-sized sample is real evidence the setup works for these symbols; a low win rate or negative total means the account owner's own 80%+ claim isn't showing up here. This is diagnostic only - nothing here changes what any live bot buys or sells.</p>`;
     resultsEl.innerHTML = html;
 }
 </script>

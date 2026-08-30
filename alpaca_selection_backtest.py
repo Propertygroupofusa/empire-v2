@@ -1325,3 +1325,213 @@ async def run_narrow_range_breakout_backtest(symbols=None, days: int = BACKTEST_
             "follow_through_bars": NARROW_BREAKOUT_FOLLOW_BARS,
         },
     }
+
+
+# ============================================================================
+# OPENING-BAR ELEPHANT/TAIL BREAKOUT - the Alpaca-side counterpart to
+# crypto_selection_backtest.py's run_opening_bar_breakout_backtest(). Per
+# the account owner's own fully-specified real trading system: wait for
+# the real first 2-minute bar of the trading day; if it's a real
+# "Elephant Bar" (oversized green candle) or a real "bottoming Tail" bar
+# (long lower-wick rejection - their own answer to what a "Tails" bar
+# means), mark its high + one penny; the instant the SECOND bar's real
+# price reaches that level (never waiting for bar 2 to close), enter
+# $500; the stop sits at bar 1's own low; once a real second "push"
+# confirms, exit.
+#
+# Stocks get a MORE LITERAL version than crypto's invented UTC anchor:
+# Alpaca's real bars API directly supports a native 2-minute timeframe
+# and real, genuine trading-day sessions (9:30am ET), so no synthetic
+# aggregation or invented session boundary is needed here - this is the
+# account owner's own setup, running on the real thing.
+#
+# SHADOW-MODE, real historical data, never places a real order. Same
+# "evidence before trusting a claimed number" discipline as every other
+# backtest tool in this file - the account owner's own claimed 80%+
+# follow-through rate is tested here, not assumed.
+# ============================================================================
+
+ELEPHANT_BAR_MIN_SIZE_MULTIPLE = 1.5
+ELEPHANT_BAR_LOOKBACK = 10
+TAIL_BAR_MIN_WICK_FRACTION = 0.6
+OPENING_BAR_ENTRY_BUFFER_USD = 0.01
+OPENING_BAR_SPEND_USD = 500.0
+PUSH_MIN_PULLBACK_PCT = 0.003
+
+
+def _is_elephant_bar(bar: dict, preceding_bars: list) -> bool:
+    """A real 'Elephant Bar' - a green (bullish) candle whose own real
+    range is meaningfully larger (ELEPHANT_BAR_MIN_SIZE_MULTIPLE, 1.5x
+    default) than the AVERAGE real range of the preceding real green
+    bars (up to ELEPHANT_BAR_LOOKBACK, 10 default) - "sizable... larger
+    and taller than the vast majority of the green bars before it," per
+    the account owner's own real description. Requires at least 3 real
+    preceding green bars to compare against - never guesses with too
+    little real evidence."""
+    if bar["c"] <= bar["o"]:
+        return False
+    green_preceding = [b for b in preceding_bars[-ELEPHANT_BAR_LOOKBACK:] if b["c"] > b["o"]]
+    if len(green_preceding) < 3:
+        return False
+    avg_range = sum(b["h"] - b["l"] for b in green_preceding) / len(green_preceding)
+    if avg_range <= 0:
+        return False
+    return (bar["h"] - bar["l"]) >= ELEPHANT_BAR_MIN_SIZE_MULTIPLE * avg_range
+
+
+def _is_bottoming_tail_bar(bar: dict) -> bool:
+    """A real 'bottoming tail' bar - a candle with a long real lower
+    wick (rejection of the downside), the account owner's own real
+    answer to what a "Tails" bar means: at least TAIL_BAR_MIN_WICK_FRACTION
+    (60% default) of the bar's own total real range sits BELOW its own
+    real body."""
+    total_range = bar["h"] - bar["l"]
+    if total_range <= 0:
+        return False
+    body_low = min(bar["o"], bar["c"])
+    lower_wick = body_low - bar["l"]
+    return (lower_wick / total_range) >= TAIL_BAR_MIN_WICK_FRACTION
+
+
+def _replay_opening_bar_breakout(session_bars: list, preceding_bars: list, spend: float = OPENING_BAR_SPEND_USD):
+    """Real replay of ONE real trading day's opening-bar breakout setup -
+    see crypto_selection_backtest.py's own version of this same function
+    for the full real mechanics docstring (entry trigger = bar 1's high
+    + $0.01, filled the instant bar 2's real high reaches it; stop = bar
+    1's own low; exit on that STOP or a real confirmed second "push").
+    Returns a real trade dict, or None if no real trade fired today."""
+    if len(session_bars) < 3:
+        return None
+    bar1 = session_bars[0]
+    is_elephant = _is_elephant_bar(bar1, preceding_bars)
+    is_tail = _is_bottoming_tail_bar(bar1)
+    if not (is_elephant or is_tail):
+        return None
+
+    trigger_price = bar1["h"] + OPENING_BAR_ENTRY_BUFFER_USD
+    stop_price = bar1["l"]
+    bar2 = session_bars[1]
+    if bar2["h"] < trigger_price:
+        return None
+
+    entry_price = trigger_price
+    qty = spend / entry_price
+    qualifies_as = "elephant" if is_elephant else "tail"
+
+    def _result(exit_price, exit_reason, exit_index):
+        pnl_usd = qty * (exit_price - entry_price)
+        return {
+            "qualifies_as": qualifies_as, "entry_price": entry_price, "stop_price": stop_price,
+            "exit_price": exit_price, "exit_reason": exit_reason, "exit_index": exit_index,
+            "pnl_usd": round(pnl_usd, 2), "pnl_pct": round((exit_price - entry_price) / entry_price, 4),
+        }
+
+    peak = entry_price
+    pushes = 1
+    in_pullback = False
+    for i in range(2, len(session_bars)):
+        b = session_bars[i]
+        if b["l"] <= stop_price:
+            return _result(stop_price, "STOP", i)
+        if b["h"] > peak:
+            if in_pullback:
+                pushes += 1
+                in_pullback = False
+                if pushes >= 2:
+                    return _result(b["h"], f"PUSH_{pushes}", i)
+            peak = b["h"]
+        elif not in_pullback and peak > 0 and (peak - b["l"]) / peak >= PUSH_MIN_PULLBACK_PCT:
+            in_pullback = True
+
+    last = session_bars[-1]
+    return _result(last["c"], "SESSION_END", len(session_bars) - 1)
+
+
+async def _fetch_bars_2min_with_ohlc_and_times(session, symbol: str, days: int):
+    """Real historical 2-minute OHLC bars + real UTC timestamps -
+    Alpaca's real bars API accepts an arbitrary N-minute timeframe
+    directly (unlike Coinbase's fixed-granularity public candles), so
+    this needs no synthetic aggregation the way the crypto-side version
+    does. Returns (bars: list[{"t","o","h","l","c"}], None) or
+    (None, reason)."""
+    start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=2Min&start={start}&limit=10000&feed=iex"
+    try:
+        async with session.get(url, headers=get_headers(), timeout=aiohttp.ClientTimeout(total=20)) as r:
+            if r.status != 200:
+                body = (await r.text())[:200]
+                return None, f"HTTP {r.status}: {body}"
+            data = await r.json()
+            bars = data.get("bars", [])
+            if len(bars) < 60:
+                return None, f"only {len(bars)} bars (need 60+)"
+            return [{"t": b["t"], "o": b["o"], "h": b["h"], "l": b["l"], "c": b["c"]} for b in bars], None
+    except asyncio.TimeoutError:
+        return None, "Alpaca API timeout"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {str(e)[:150]}"
+
+
+async def run_opening_bar_breakout_backtest(symbols=None, days: int = BACKTEST_DAYS, max_concurrent: int = 6) -> dict:
+    """SHADOW-MODE, real historical Alpaca 2-minute bars, per-symbol AND
+    aggregate. Never places a real order. symbols=None (default) tests
+    every real symbol prop_bot.py trades."""
+    symbol_list = symbols if symbols is not None else list(FUTURES.keys())
+    semaphore = asyncio.Semaphore(max_concurrent)
+    last_error = {}
+
+    async def _one(session, symbol):
+        async with semaphore:
+            bars, err = await _fetch_bars_2min_with_ohlc_and_times(session, symbol, days)
+        if bars is None:
+            last_error[symbol] = err
+            return symbol, None
+        days_grouped = _group_bars_by_day(bars)
+        trades = []
+        for i in range(1, len(days_grouped)):
+            _date, session_bars = days_grouped[i]
+            preceding_bars = days_grouped[i - 1][1][-ELEPHANT_BAR_LOOKBACK * 2:]
+            trade = _replay_opening_bar_breakout(session_bars, preceding_bars)
+            if trade is not None:
+                trades.append(trade)
+        return symbol, trades
+
+    async with aiohttp.ClientSession() as session:
+        results = await asyncio.gather(*(_one(session, s) for s in symbol_list))
+
+    per_symbol = []
+    skipped = []
+    all_trades = []
+    for symbol, trades in results:
+        if trades is None:
+            skipped.append({"product_id": symbol, "reason": last_error.get(symbol, "not enough real historical data")})
+            continue
+        if trades:
+            wins = sum(1 for t in trades if t["pnl_usd"] > 0)
+            per_symbol.append({
+                "product_id": symbol, "num_trades": len(trades),
+                "win_rate": round(wins / len(trades), 4),
+                "total_pnl": round(sum(t["pnl_usd"] for t in trades), 2),
+            })
+        all_trades.extend(trades)
+
+    overall = None
+    if all_trades:
+        wins = sum(1 for t in all_trades if t["pnl_usd"] > 0)
+        overall = {
+            "num_trades": len(all_trades),
+            "win_rate": round(wins / len(all_trades), 4),
+            "total_pnl": round(sum(t["pnl_usd"] for t in all_trades), 2),
+            "stop_count": sum(1 for t in all_trades if t["exit_reason"] == "STOP"),
+            "push_exit_count": sum(1 for t in all_trades if t["exit_reason"].startswith("PUSH")),
+        }
+
+    return {
+        "symbols_tested": len(symbol_list), "symbols_with_results": len(per_symbol),
+        "skipped": skipped, "per_symbol": per_symbol, "overall": overall,
+        "params": {
+            "spend_usd": OPENING_BAR_SPEND_USD,
+            "entry_buffer_usd": OPENING_BAR_ENTRY_BUFFER_USD,
+            "days": days,
+        },
+    }

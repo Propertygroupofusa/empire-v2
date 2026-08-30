@@ -2190,6 +2190,340 @@ async def run_narrow_range_breakout_backtest(coins=None, days=BACKTEST_DAYS, max
     }
 
 
+# ============================================================================
+# OPENING-BAR ELEPHANT/TAIL BREAKOUT - per the account owner's own real,
+# fully-specified trading system, described directly across several real
+# voice messages: pick a coin sitting in a narrow state; wait for its real
+# first bar of the session; if that bar is a real "Elephant Bar" (an
+# oversized green candle) or a real "bottoming tail" bar (a long lower
+# wick - their own answer to what a "Tails" bar means), mark its high +
+# one penny; the instant the SECOND bar's price reaches that level (never
+# waiting for bar 2 to close), enter $500; the stop sits at bar 1's own
+# low, for the life of the trade; once a real second "push" (a new higher
+# high following a genuine pullback) confirms, start selling.
+#
+# SHADOW-MODE, real historical data, never places a real order. Same
+# "evidence before trusting a claimed number" discipline as the
+# narrow-range breakout backtest above - the account owner's own claimed
+# 80%+ follow-through rate for this setup is tested here, not assumed.
+#
+# Crypto has no real discrete session open the way stocks do (see the
+# Alpaca-side counterpart in alpaca_selection_backtest.py, which uses the
+# real literal trading day) - per the account owner's own explicit "do
+# both," this uses an INVENTED stand-in: 13:30 UTC, the real US stock
+# market's own regular-session open time, chosen because it's a real,
+# meaningful anchor (many crypto traders watch for a real volume/
+# volatility pickup around the US open) rather than an arbitrary hour.
+# Stated plainly: this is this session's own interpretation of "the
+# morning" for a market that has no morning, not a literal transcription
+# of the account owner's own words.
+#
+# Coinbase's public candles endpoint has no native 2-minute granularity
+# (only 60/300/900/3600/21600/86400s) - real 1-minute candles are fetched
+# and paired into synthetic real 2-minute bars (open of the first minute,
+# close of the second, high/low across both) to match the account
+# owner's own literal "2-minute bar" spec.
+# ============================================================================
+
+ELEPHANT_BAR_MIN_SIZE_MULTIPLE = 1.5
+ELEPHANT_BAR_LOOKBACK = 10
+TAIL_BAR_MIN_WICK_FRACTION = 0.6
+OPENING_BAR_ENTRY_BUFFER_USD = 0.01
+OPENING_BAR_SPEND_USD = 500.0
+PUSH_MIN_PULLBACK_PCT = 0.003
+OPENING_BAR_SESSION_UTC_HOUR = 13
+OPENING_BAR_SESSION_UTC_MINUTE = 30
+OPENING_BAR_DAYS = 5  # deliberately much smaller than BACKTEST_DAYS (30) - see _fetch_1min_candles_window's own docstring for the real API-load reason
+OPENING_BAR_GRANULARITY_SECONDS = 60
+
+
+def _is_elephant_bar(bar: dict, preceding_bars: list) -> bool:
+    """A real 'Elephant Bar' - a green (bullish) candle whose own real
+    range is meaningfully larger (ELEPHANT_BAR_MIN_SIZE_MULTIPLE, 1.5x
+    default) than the AVERAGE real range of the preceding real green
+    bars (up to ELEPHANT_BAR_LOOKBACK, 10 default) - "sizable... larger
+    and taller than the vast majority of the green bars before it," per
+    the account owner's own real description. Requires at least 3 real
+    preceding green bars to compare against - never guesses with too
+    little real evidence. `bar`/`preceding_bars` are dicts with
+    o/h/l/c keys."""
+    if bar["c"] <= bar["o"]:
+        return False
+    green_preceding = [b for b in preceding_bars[-ELEPHANT_BAR_LOOKBACK:] if b["c"] > b["o"]]
+    if len(green_preceding) < 3:
+        return False
+    avg_range = sum(b["h"] - b["l"] for b in green_preceding) / len(green_preceding)
+    if avg_range <= 0:
+        return False
+    return (bar["h"] - bar["l"]) >= ELEPHANT_BAR_MIN_SIZE_MULTIPLE * avg_range
+
+
+def _is_bottoming_tail_bar(bar: dict) -> bool:
+    """A real 'bottoming tail' bar - a candle with a long real lower
+    wick (rejection of the downside), the account owner's own real
+    answer to what a "Tails" bar means: at least TAIL_BAR_MIN_WICK_FRACTION
+    (60% default) of the bar's own total real range sits BELOW its own
+    real body, signaling price was pushed down hard within the bar and
+    then rejected back up before it closed."""
+    total_range = bar["h"] - bar["l"]
+    if total_range <= 0:
+        return False
+    body_low = min(bar["o"], bar["c"])
+    lower_wick = body_low - bar["l"]
+    return (lower_wick / total_range) >= TAIL_BAR_MIN_WICK_FRACTION
+
+
+def _replay_opening_bar_breakout(session_bars: list, preceding_bars: list, spend: float = OPENING_BAR_SPEND_USD):
+    """Real replay of ONE real session's opening-bar breakout setup,
+    exactly per the account owner's own described mechanics:
+
+    - Bar 1 (session_bars[0]) must qualify as a real Elephant Bar
+      (compared against `preceding_bars`, real history from BEFORE this
+      session) or a real bottoming Tail bar - if neither, no real setup
+      today, returns None.
+    - The real entry trigger is bar 1's own high + $0.01 (a real
+      buy-stop). Filled the instant bar 2's own real HIGH reaches that
+      price - never waiting for bar 2 to close ("you do not let the
+      second bar finish trading... the moment the second bar crosses
+      the high of the first bar the money is in"). If bar 2 never
+      reaches it, no real trade fires today - returns None.
+    - The real stop-loss sits at bar 1's own low, unconditionally, for
+      the life of the trade ("protect yourself below bar one... limiting
+      your loss... to one bar").
+    - Real exit: the hard STOP being hit, OR once a real second "push"
+      confirms (a new real higher high following a genuine pullback from
+      the running peak - PUSH_MIN_PULLBACK_PCT, 0.3% default - from the
+      running peak) - "I'm looking for the stock to meet three pushes...
+      after push two I start throwing sell orders." "Push" has no single
+      unambiguous definition in raw price data - this operationalizes it
+      as a genuine swing high after a real minimum pullback, stated
+      plainly as this session's own interpretation, not a literal
+      transcription. Real session end with neither firing marks to the
+      real last close.
+
+    Returns a real trade dict {qualifies_as, entry_price, stop_price,
+    exit_price, exit_reason, exit_index, pnl_usd, pnl_pct}, or None if
+    no real trade fired today."""
+    if len(session_bars) < 3:
+        return None
+    bar1 = session_bars[0]
+    is_elephant = _is_elephant_bar(bar1, preceding_bars)
+    is_tail = _is_bottoming_tail_bar(bar1)
+    if not (is_elephant or is_tail):
+        return None
+
+    trigger_price = bar1["h"] + OPENING_BAR_ENTRY_BUFFER_USD
+    stop_price = bar1["l"]
+    bar2 = session_bars[1]
+    if bar2["h"] < trigger_price:
+        return None
+
+    entry_price = trigger_price
+    qty = spend / entry_price
+    qualifies_as = "elephant" if is_elephant else "tail"
+
+    def _result(exit_price, exit_reason, exit_index):
+        pnl_usd = qty * (exit_price - entry_price)
+        return {
+            "qualifies_as": qualifies_as, "entry_price": entry_price, "stop_price": stop_price,
+            "exit_price": exit_price, "exit_reason": exit_reason, "exit_index": exit_index,
+            "pnl_usd": round(pnl_usd, 2), "pnl_pct": round((exit_price - entry_price) / entry_price, 4),
+        }
+
+    peak = entry_price
+    pushes = 1
+    in_pullback = False
+    for i in range(2, len(session_bars)):
+        b = session_bars[i]
+        if b["l"] <= stop_price:
+            return _result(stop_price, "STOP", i)
+        if b["h"] > peak:
+            if in_pullback:
+                pushes += 1
+                in_pullback = False
+                if pushes >= 2:
+                    return _result(b["h"], f"PUSH_{pushes}", i)
+            peak = b["h"]
+        elif not in_pullback and peak > 0 and (peak - b["l"]) / peak >= PUSH_MIN_PULLBACK_PCT:
+            in_pullback = True
+
+    last = session_bars[-1]
+    return _result(last["c"], "SESSION_END", len(session_bars) - 1)
+
+
+def _aggregate_to_2min_bars(one_min_candles: list) -> list:
+    """Pairs consecutive real 1-minute candles into synthetic real
+    2-minute OHLC bars - open of the first minute, close of the second,
+    high/low across both. Assumes real, consecutive (gap-free) 1-minute
+    data, matching every real Coinbase candle response this fetches from.
+    An odd real trailing candle (no pair) is dropped, not padded with a
+    fabricated one. `one_min_candles` are dicts with t/o/h/l/c keys,
+    oldest-first."""
+    bars = []
+    for i in range(0, len(one_min_candles) - 1, 2):
+        a, b = one_min_candles[i], one_min_candles[i + 1]
+        bars.append({
+            "t": a["t"], "o": a["o"], "c": b["c"],
+            "h": max(a["h"], b["h"]), "l": min(a["l"], b["l"]),
+        })
+    return bars
+
+
+async def _fetch_1min_candles_window(session, product_id: str, days: int = OPENING_BAR_DAYS, last_error_out: dict = None):
+    """Real, paginated 1-minute Coinbase candles for the last `days`
+    days - deliberately a SMALLER default window (5 days, not this
+    module's usual 30) than every other backtest tool here: 1-minute
+    granularity over 30 real days is ~43,200 real candles per coin
+    (roughly 144 real paginated requests each, at Coinbase's real
+    300-candle-per-page limit) - impractical real API load across dozens
+    of coins. 5 real days (~7,200 candles, ~24 real requests per coin)
+    keeps this practical while still giving several real opening-bar
+    setups to evaluate. Returns a real list of {t,o,h,l,c} dicts
+    (oldest-first), or None if too little real data came back."""
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=days)
+    all_candles = []
+    cursor = start
+    last_error = None
+    while cursor < end:
+        page_end = min(cursor + timedelta(seconds=OPENING_BAR_GRANULARITY_SECONDS * 299), end)
+        url = (
+            f"https://api.exchange.coinbase.com/products/{product_id}/candles"
+            f"?granularity={OPENING_BAR_GRANULARITY_SECONDS}&start={cursor.isoformat()}&end={page_end.isoformat()}"
+        )
+        page_data = None
+        for attempt in range(3):
+            try:
+                async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
+                    if r.status == 429:
+                        last_error = "HTTP 429 rate limited"
+                        await asyncio.sleep(0.5 * (attempt + 1))
+                        continue
+                    if r.status != 200:
+                        last_error = f"HTTP {r.status}"
+                        break
+                    page_data = await r.json()
+                    last_error = None
+                    break
+            except Exception as e:
+                last_error = f"{type(e).__name__}: {str(e)[:100]}"
+                await asyncio.sleep(0.5 * (attempt + 1))
+        if page_data:
+            all_candles.extend(page_data)
+        elif last_error:
+            break
+        cursor = page_end
+        await asyncio.sleep(0.15)
+
+    if len(all_candles) < 120:
+        if last_error_out is not None:
+            last_error_out[product_id] = last_error or f"only {len(all_candles)} of 120 required real 1-min candles came back"
+        return None
+    all_candles.sort(key=lambda c: c[0])
+    return [{"t": int(c[0]), "l": float(c[1]), "h": float(c[2]), "o": float(c[3]), "c": float(c[4])} for c in all_candles]
+
+
+def _group_2min_bars_into_sessions(bars: list, session_utc_hour: int = OPENING_BAR_SESSION_UTC_HOUR,
+                                    session_utc_minute: int = OPENING_BAR_SESSION_UTC_MINUTE) -> list:
+    """Groups real 2-minute bars into real "sessions" anchored at the
+    invented stand-in session-open time (13:30 UTC default - the real US
+    stock market's own regular-session open) rather than raw UTC
+    midnight - crypto has no genuine session boundary, so this defines
+    one explicitly rather than pretending midnight UTC means anything
+    special. Returns an ordered list of (session_start_iso, session_bars)
+    tuples, oldest first - each session runs from one real anchor time to
+    the next."""
+    if not bars:
+        return []
+    from datetime import datetime as _dt
+    groups = []
+    current_bucket = []
+    current_key = None
+    for bar in bars:
+        ts = _dt.fromtimestamp(bar["t"], tz=timezone.utc)
+        # Shift the clock back by the anchor offset so grouping by real
+        # UTC calendar date naturally buckets each real anchor-to-anchor
+        # window together.
+        shifted = ts - timedelta(hours=session_utc_hour, minutes=session_utc_minute)
+        key = shifted.strftime("%Y-%m-%d")
+        if key != current_key:
+            if current_bucket:
+                groups.append((current_key, current_bucket))
+            current_bucket = []
+            current_key = key
+        current_bucket.append(bar)
+    if current_bucket:
+        groups.append((current_key, current_bucket))
+    return groups
+
+
+async def run_opening_bar_breakout_backtest(coins=None, days: int = OPENING_BAR_DAYS, max_concurrent: int = 4) -> dict:
+    """SHADOW-MODE, real historical data (synthetic real 2-min bars
+    aggregated from real 1-min Coinbase candles), per-coin AND
+    aggregate. Never places a real order. coins=None (default) tests
+    every real coin in COIN_FAMILY_TREE."""
+    coin_list = coins if coins is not None else list(COIN_FAMILY_TREE)
+    semaphore = asyncio.Semaphore(max_concurrent)
+    last_error = {}
+
+    async def _one(session, product_id):
+        async with semaphore:
+            one_min = await _fetch_1min_candles_window(session, product_id, days=days, last_error_out=last_error)
+        if one_min is None:
+            return product_id, None
+        two_min = _aggregate_to_2min_bars(one_min)
+        sessions = _group_2min_bars_into_sessions(two_min)
+        trades = []
+        for i in range(1, len(sessions)):
+            _key, session_bars = sessions[i]
+            preceding_bars = sessions[i - 1][1][-ELEPHANT_BAR_LOOKBACK * 2:]
+            trade = _replay_opening_bar_breakout(session_bars, preceding_bars)
+            if trade is not None:
+                trades.append(trade)
+        return product_id, trades
+
+    async with aiohttp.ClientSession() as session:
+        results = await asyncio.gather(*(_one(session, pid) for pid in coin_list))
+
+    per_coin = []
+    skipped = []
+    all_trades = []
+    for product_id, trades in results:
+        if trades is None:
+            skipped.append({"product_id": product_id, "reason": last_error.get(product_id, "not enough real historical data")})
+            continue
+        if trades:
+            wins = sum(1 for t in trades if t["pnl_usd"] > 0)
+            per_coin.append({
+                "product_id": product_id, "num_trades": len(trades),
+                "win_rate": round(wins / len(trades), 4),
+                "total_pnl": round(sum(t["pnl_usd"] for t in trades), 2),
+            })
+        all_trades.extend(trades)
+
+    overall = None
+    if all_trades:
+        wins = sum(1 for t in all_trades if t["pnl_usd"] > 0)
+        overall = {
+            "num_trades": len(all_trades),
+            "win_rate": round(wins / len(all_trades), 4),
+            "total_pnl": round(sum(t["pnl_usd"] for t in all_trades), 2),
+            "stop_count": sum(1 for t in all_trades if t["exit_reason"] == "STOP"),
+            "push_exit_count": sum(1 for t in all_trades if t["exit_reason"].startswith("PUSH")),
+        }
+
+    return {
+        "coins_tested": len(coin_list), "coins_with_results": len(per_coin),
+        "skipped": skipped, "per_coin": per_coin, "overall": overall,
+        "params": {
+            "spend_usd": OPENING_BAR_SPEND_USD,
+            "entry_buffer_usd": OPENING_BAR_ENTRY_BUFFER_USD,
+            "session_utc_anchor": f"{OPENING_BAR_SESSION_UTC_HOUR:02d}:{OPENING_BAR_SESSION_UTC_MINUTE:02d}",
+            "days": days,
+        },
+    }
+
+
 async def main():
     print(f"Backtesting {len(COIN_FAMILY_TREE)} coins over the last {BACKTEST_DAYS} days of REAL Coinbase hourly candles.")
     print(f"Replaying the live bot's real target/stop/breakeven/giveback rules, ${SPEND:.0f} redeployed per trade.\n")
