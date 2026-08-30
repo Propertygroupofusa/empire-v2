@@ -1899,20 +1899,40 @@ function renderGridBranchChart(b) {
         <text x="${x(val)}" y="98" text-anchor="middle" font-size="10" fill="var(--text-dim)">${label}</text>
         <text x="${x(val)}" y="110" text-anchor="middle" font-size="10" fill="var(--text-dim)">${fmtPrice(val)}</text>`;
 
+    // Real, fee-adjusted P&L per slice - per the account owner's direct
+    // request ("let me know if it's at a profit after the fees price
+    // percentage wise"). Uses unrealized_net_usd/unrealized_net_pct from
+    // the backend (get_grid_status()) - the exact same real round-trip
+    // fee formula the live sell path itself uses, computed against the
+    // live price - never a separate, possibly-drifting frontend copy of
+    // that math. A slice can show green raw but red net-of-fees (still
+    // hasn't cleared the real cost of actually selling) - that's the
+    // whole point of showing both.
     const sliceMarkers = slices.map((s, i) => {
-        const unrealized = s.qty * (price - s.entry_price);
-        const isLoss = unrealized < 0;
-        const color = isLoss ? 'var(--red)' : 'var(--green)';
+        const netUsd = s.unrealized_net_usd;
+        const isLoss = netUsd == null ? false : netUsd < 0;
+        const color = netUsd == null ? 'var(--text-dim)' : (isLoss ? 'var(--red)' : 'var(--green)');
         const isOldest = i === 0;
         const cx = x(s.entry_price);
         const ring = isOldest ? `<circle cx="${cx}" cy="${axisY}" r="10" fill="none" stroke="var(--gold)" stroke-width="2"/>` : '';
-        const sign = unrealized >= 0 ? '+' : '-';
+        const sign = netUsd == null ? '' : (netUsd >= 0 ? '+' : '-');
+        const pctStr = s.unrealized_net_pct != null ? ` (${s.unrealized_net_pct >= 0 ? '+' : ''}${(s.unrealized_net_pct * 100).toFixed(2)}%)` : '';
+        const label = netUsd == null ? '—' : `${sign}$${Math.abs(netUsd).toFixed(2)}${pctStr}`;
         return `
             ${ring}
             <circle cx="${cx}" cy="${axisY}" r="6" fill="${color}"/>
-            <text x="${cx}" y="${axisY - 14}" text-anchor="middle" font-size="10" font-weight="700" fill="${color}">${sign}$${Math.abs(unrealized).toFixed(2)}</text>
+            <text x="${cx}" y="${axisY - 14}" text-anchor="middle" font-size="10" font-weight="700" fill="${color}">${label}</text>
             ${isOldest ? `<text x="${cx}" y="${axisY + 22}" text-anchor="middle" font-size="9" fill="var(--gold)" font-weight="700">next to sell</text>` : ''}`;
     }).join('');
+
+    const netSummary = (slices.length > 0 && b.total_unrealized_net_usd != null) ? (() => {
+        const netColor = b.total_unrealized_net_usd >= 0 ? 'var(--green)' : 'var(--red)';
+        const sign = b.total_unrealized_net_usd >= 0 ? '+' : '';
+        const pctStr = b.total_unrealized_net_pct != null ? ` (${sign}${(b.total_unrealized_net_pct * 100).toFixed(2)}%)` : '';
+        return `<div style="font-size:0.82em; margin-top:6px; color:${netColor}; font-weight:600;">
+            💰 If sold right now, net of real fees: ${sign}${fmtUsd(b.total_unrealized_net_usd)}${pctStr} across ${slices.length} open slice${slices.length === 1 ? '' : 's'}
+        </div>`;
+    })() : '';
 
     return `
         <div style="font-size:0.82em; margin-bottom:2px;">
@@ -1928,7 +1948,7 @@ function renderGridBranchChart(b) {
             <polygon points="${x(price) - 5},2 ${x(price) + 5},2 ${x(price)},9" fill="var(--navy)"/>
             ${sliceMarkers}
         </svg>
-        ${slices.length === 0 ? '<div style="font-size:0.78em; color:var(--text-dim); margin-top:4px;">No open slices yet - waiting for a real 1% dip below the reference price.</div>' : ''}`;
+        ${slices.length === 0 ? '<div style="font-size:0.78em; color:var(--text-dim); margin-top:4px;">No open slices yet - waiting for a real 1% dip below the reference price.</div>' : netSummary}`;
 }
 
 // Real, opt-in fee-tier-aware dynamic grid spacing toggle - per the

@@ -1020,6 +1020,41 @@ async def get_grid_status() -> dict:
             peak_equity = b.peak_equity if b.peak_equity and b.peak_equity > equity else equity
             drawdown_pct = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
             drawdown_breached = drawdown_pct >= GRID_DRAWDOWN_BREAKER_PCT
+
+        # Real, fee-adjusted unrealized P&L per slice - per the account
+        # owner's direct request ("let me know if it's at a profit after
+        # the fees price percentage wise"): the raw unrealized $ shown on
+        # the chart (qty * (price - entry)) doesn't yet reflect the real
+        # round-trip fee this slice will actually pay when it sells - the
+        # EXACT SAME real formula run_grid_branch_cycle()'s own sell path
+        # already uses to compute the real fee at that moment
+        # (`filled_qty * (oldest.entry_price + filled_price) *
+        # ROUND_TRIP_FEE_RATE/2`), just applied here to the LIVE price
+        # instead of a real fill price - so this can never disagree with
+        # what a real sell would actually net. None (not a fabricated
+        # number) when there's no real live price to compute it from.
+        slices_out = []
+        total_net_usd = 0.0
+        total_cost_basis = 0.0
+        for s in slices:
+            net_usd = None
+            net_pct = None
+            if current_price is not None:
+                gross = s.qty * (current_price - s.entry_price)
+                fee = s.qty * (s.entry_price + current_price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+                net_usd = gross - fee
+                cost_basis = s.qty * s.entry_price
+                net_pct = (net_usd / cost_basis) if cost_basis else None
+                total_net_usd += net_usd
+                total_cost_basis += cost_basis
+            slices_out.append({
+                "entry_price": s.entry_price, "qty": s.qty,
+                "opened_at": (s.opened_at.isoformat() + "Z") if s.opened_at else None,
+                "unrealized_net_usd": round(net_usd, 2) if net_usd is not None else None,
+                "unrealized_net_pct": round(net_pct, 4) if net_pct is not None else None,
+            })
+        total_net_pct = (total_net_usd / total_cost_basis) if (current_price is not None and total_cost_basis) else None
+
         out.append({
             "bot_name": b.bot_name, "product_id": b.product_id, "allocated_usd": round(b.allocated_usd, 2),
             "active": b.active, "grid_pct": b.grid_pct, "num_levels": b.num_levels,
@@ -1028,10 +1063,9 @@ async def get_grid_status() -> dict:
             "peak_equity": round(peak_equity, 2) if peak_equity is not None else None,
             "drawdown_pct": round(drawdown_pct, 4) if drawdown_pct is not None else None,
             "drawdown_breached": drawdown_breached,
-            "slices": [
-                {"entry_price": s.entry_price, "qty": s.qty, "opened_at": (s.opened_at.isoformat() + "Z") if s.opened_at else None}
-                for s in slices
-            ],
+            "total_unrealized_net_usd": round(total_net_usd, 2) if current_price is not None and slices else None,
+            "total_unrealized_net_pct": round(total_net_pct, 4) if total_net_pct is not None else None,
+            "slices": slices_out,
         })
     return {
         "mode_active": mode_active,
