@@ -22,7 +22,10 @@ import tempfile
 import time
 from datetime import datetime, timezone
 
+from sqlalchemy import select
+
 from database import AsyncSessionLocal
+from models import TradingBotState
 
 log = logging.getLogger("status_snapshot")
 
@@ -90,6 +93,7 @@ async def _build_crypto_section() -> str:
         "## 🌳 Crypto Family Tree",
         "",
         f"- **Total Profit (realized + unrealized):** {_fmt_usd(total_profit)}",
+        "- **Real starting capital:** not tracked anywhere in this app - unlike Alpaca's bot buckets (see below), no `starting_capital` snapshot was ever recorded for the crypto side (family tree or Grid Bot). The real original deposit amount can only be found in Coinbase's own account/deposit history directly.",
         f"- **Total Allocated:** {_fmt_usd(status.get('total_allocated_usd'))}",
         f"- **Locked Profit:** {_fmt_usd(status.get('locked_usd'))}",
         f"- **Retired (buy-and-hold BTC passive mode):** {'YES - no new entries, existing positions unmanaged' if passive_mode else 'No - actively trading'}",
@@ -147,10 +151,33 @@ async def _build_alpaca_section() -> str:
     bots = data.get("bots", [])
     total_profit = sum(b.get("pl", 0.0) for b in bots)
 
+    # Real starting capital - per the account owner's direct question
+    # ("how much did I actually start off with"). A pure DB value (never
+    # needs the real live Alpaca fetch get_alpaca_overview() above already
+    # made), so queried directly here rather than added to that dict.
+    # Real, honest caveat baked into the label itself: TradingBotState.
+    # starting_capital is documented as "a never-updated snapshot of what
+    # the bucket started at" - but a bucket created BEFORE this field
+    # existed had it silently backfilled to whatever its real base_capital
+    # happened to be at that later moment (see _get_or_init_bots's own
+    # backfill), not necessarily the true original day-one deposit. This
+    # is the most accurate real number this app has ever recorded, not a
+    # guaranteed exact original deposit.
+    alpaca_starting_capital = None
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name.like(f"{td.BOT_PREFIX}%")))
+            bot_rows = list(result.scalars().all())
+        if bot_rows:
+            alpaca_starting_capital = round(sum(b.starting_capital if b.starting_capital is not None else b.base_capital for b in bot_rows), 2)
+    except Exception:
+        pass
+
     lines = [
         "## 📈 Alpaca (Stocks/Futures)",
         "",
         f"- **Total Profit:** {_fmt_usd(total_profit)}",
+        f"- **Real starting capital (earliest recorded, may not be the true original deposit - see note below):** {_fmt_usd(alpaca_starting_capital)}",
         f"- **Equity:** {_fmt_usd(data.get('equity'))}",
         f"- **Cash:** {_fmt_usd(data.get('cash'))}",
         f"- **Session P&L:** {_fmt_usd(data.get('session_pl'))}",
