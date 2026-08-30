@@ -569,8 +569,8 @@
         family tree branches above. Master switch defaults ON; nothing trades until a real branch actually exists below.
         Every branch also carries a real drawdown circuit breaker (pauses NEW buys only, once real equity drops 25% below
         its own peak - existing slices keep selling normally) - it's the account-level protection Grid Bot never had
-        before. Real idle cash sitting in a flat branch also auto-rotates to whichever coin currently ranks best (see the
-        toggle below) - it never has to just sit there.
+        before. Real idle cash - whether it's sitting in a flat branch or was never allocated to one at all - also
+        auto-deploys toward whichever coin currently ranks best (see the toggle below), no manual click ever required.
     </p>
     <div id="grid-dynamic-spacing-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-auto-rotate-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
@@ -2033,7 +2033,7 @@ function renderGridAutoRotateBadge(active, intervalMinutes) {
     if (!el) return;
     const mins = intervalMinutes || 30;
     const label = active
-        ? `<strong style="color:var(--green);">ON</strong> - real idle cash in a flat branch auto-moves to the current best coin every ~${mins} min (and right after a slice sells)`
+        ? `<strong style="color:var(--green);">ON</strong> - real idle cash (in a flat branch, or never allocated at all) auto-moves/auto-deploys to the current best coin every ~${mins} min (and right after a slice sells) - no click needed`
         : '<strong style="color:var(--text-dim);">OFF</strong> - real idle cash only moves when you move it yourself';
     el.innerHTML = `🔁 Auto-rotate idle cash: ${label} — ` +
         `<a href="javascript:void(0)" onclick="toggleGridAutoRotate(${!active})" style="color: var(--navy);">${active ? 'turn off' : 'turn on'}</a>`;
@@ -2041,8 +2041,8 @@ function renderGridAutoRotateBadge(active, intervalMinutes) {
 
 async function toggleGridAutoRotate(enable) {
     const msg = enable
-        ? 'Turn ON automatic idle-cash rotation? Any FLAT grid branch with real idle cash will automatically move that cash into whichever real coin currently ranks best, roughly every 30 minutes (and immediately after a slice sells for profit). This places real Coinbase orders on its own - a branch actively holding open slices is never touched.'
-        : 'Turn OFF automatic idle-cash rotation? Real idle cash will only move when you move it yourself.';
+        ? 'Turn ON automatic idle-cash rotation? Any FLAT grid branch with real idle cash will automatically move that cash into whichever real coin currently ranks best, and real unallocated free cash will automatically start brand-new branches the same way - roughly every 30 minutes (and immediately after a slice sells for profit), no manual click ever needed. This places real Coinbase orders on its own - a branch actively holding open slices is never touched, and new-branch creation stops on its own once real free cash runs low.'
+        : 'Turn OFF automatic idle-cash rotation? Real idle cash will only move (or deploy into a new branch) when you do it yourself.';
     if (!confirm(msg)) return;
     try {
         const key = getAdminKey();

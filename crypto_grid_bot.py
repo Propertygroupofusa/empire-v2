@@ -128,6 +128,27 @@ GRID_AUTO_ROTATE_MIN_USD = float(os.getenv("GRID_AUTO_ROTATE_MIN_USD", "10.0"))
 # within one process's lifetime.
 _last_grid_auto_rotate_at = 0.0
 
+# Real, automatic deployment of real UNALLOCATED free cash - the direct
+# follow-up after the account owner pointed out that a manual "Add 3
+# branches" button still meant going back into the dashboard and tapping
+# it themselves: "I don't have to go back in there and do it." The
+# per-branch rotation above only ever moves cash that's already sitting
+# INSIDE a flat branch; this closes the other real gap - genuine free
+# cash that was never allocated to any branch at all (a deposit, a
+# withdrawal from elsewhere, real profit that already got swept out via
+# rotation) now also gets put to work automatically, on the same real
+# 30-min sweep, with zero manual click ever required. Reuses the exact
+# same real coin-picker (pick_best_ranked_coin_for_grid) and branch-
+# creation path (create_grid_branch) the manual "New branch"/"Add 3
+# branches" buttons already use - this is that same real action, just
+# fired on its own instead of waiting for a tap.
+GRID_AUTO_DEPLOY_AMOUNT_USD = float(os.getenv("GRID_AUTO_DEPLOY_AMOUNT_USD", "50.0"))
+# Caps how many NEW branches one single sweep can create - real,
+# deliberate friction against a large, sudden cash windfall (or a bug)
+# spinning up dozens of tiny branches in one shot. A real surplus above
+# this cap just gets picked up on the next sweep instead.
+GRID_AUTO_DEPLOY_MAX_NEW_BRANCHES_PER_SWEEP = int(os.getenv("GRID_AUTO_DEPLOY_MAX_NEW_BRANCHES_PER_SWEEP", "3"))
+
 # The real, fixed net-margin target this feature holds constant as the
 # account's real Coinbase fee tier changes - deliberately DERIVED from
 # today's live values so a branch trading at the base fee tier behaves
@@ -871,19 +892,61 @@ async def _maybe_rotate_one_grid_branch(branch: CryptoGridBranch):
     )
 
 
+async def _auto_deploy_idle_free_cash():
+    """Real, automatic new-branch creation from genuinely UNALLOCATED
+    real free cash - the other half of run_grid_auto_rotate_sweep()
+    below. While real free cash (get_real_free_cash_usd) clears
+    GRID_AUTO_DEPLOY_AMOUNT_USD, creates a real new branch on whichever
+    coin currently ranks best (same real pick every other auto-pick path
+    in this file already uses) - each created branch immediately claims
+    its own coin, so the next pass through the loop naturally lands on
+    the next-best DIFFERENT coin, same as create_multiple_grid_branches.
+    Stops the moment real free cash runs out, no more real eligible
+    coins exist, or the per-sweep cap is hit - never raises, a real
+    shortfall just means fewer (or zero) branches created this sweep,
+    picked up again next time."""
+    created = 0
+    while created < GRID_AUTO_DEPLOY_MAX_NEW_BRANCHES_PER_SWEEP:
+        real_free_cash = await get_real_free_cash_usd()
+        if real_free_cash is None or real_free_cash < GRID_AUTO_DEPLOY_AMOUNT_USD:
+            return
+        try:
+            product_id = await pick_best_ranked_coin_for_grid()
+            branch = await create_grid_branch(product_id, GRID_AUTO_DEPLOY_AMOUNT_USD)
+        except Exception as e:
+            log.info(f"[GRID] auto-deploy stopped for this sweep - {e}")
+            return
+        created += 1
+        await _log_activity_safe(
+            branch.bot_name, branch.product_id, "SPAWN",
+            f"🌱🔁 Auto-deployed ${GRID_AUTO_DEPLOY_AMOUNT_USD:.2f} of real unallocated free cash into a brand-new "
+            f"grid branch on {branch.product_id} - real best-ranked coin available right now",
+        )
+        log.info(f"[GRID] 🌱🔁 auto-deployed ${GRID_AUTO_DEPLOY_AMOUNT_USD:.2f} of real free cash into {branch.bot_name} ({branch.product_id})")
+
+
 async def run_grid_auto_rotate_sweep():
-    """Real, periodic automatic capital rotation across every FLAT grid
-    branch - per the account owner's explicit request: real idle cash
-    should never just sit there, it should keep moving toward whichever
-    real coin is currently doing well. Runs every GRID_AUTO_ROTATE_
-    INTERVAL_SECONDS (throttled in run_grid_branches_cycle(), not here),
-    checking every active branch in turn via _maybe_rotate_one_grid_
-    branch() - a branch with real open slices, too little idle cash, or
-    already sitting on the real best-available coin is left completely
-    alone. A per-branch failure (a real live-price fetch hiccup, a rare
-    claim race against a concurrent create) is logged and skipped rather
-    than aborting the whole sweep - every other branch still gets its own
-    real chance this cycle."""
+    """Real, periodic automatic capital rotation - per the account
+    owner's explicit request: real idle cash should never just sit
+    there, it should keep moving toward whichever real coin is currently
+    doing well, with zero manual click ever required ("I don't have to
+    go back in there and do it"). Runs every GRID_AUTO_ROTATE_INTERVAL_
+    SECONDS (throttled in run_grid_branches_cycle(), not here), and does
+    two real things every time it fires:
+
+    1. Rotates real idle cash already sitting INSIDE a flat branch (via
+       _maybe_rotate_one_grid_branch, for every active branch in turn) -
+       a branch with real open slices, too little idle cash, or already
+       on the real best-available coin is left completely alone.
+    2. Deploys real UNALLOCATED free cash (never allocated to any branch
+       at all) into brand-new branches (see _auto_deploy_idle_free_cash)
+       - the real gap a manual "New branch"/"Add 3 branches" click used
+       to be the only way to close.
+
+    A per-branch rotation failure (a real live-price fetch hiccup, a
+    rare claim race) is logged and skipped rather than aborting the
+    whole sweep - every other branch still gets its own real chance this
+    cycle."""
     if not await is_grid_auto_rotate_active():
         return
     if os.getenv("STOP_TRADING", "false").lower() == "true":
@@ -895,6 +958,10 @@ async def run_grid_auto_rotate_sweep():
             await _maybe_rotate_one_grid_branch(branch)
         except Exception as e:
             log.warning(f"[GRID] auto-rotate check failed for {branch.bot_name} (non-fatal, will retry next sweep): {e}")
+    try:
+        await _auto_deploy_idle_free_cash()
+    except Exception as e:
+        log.warning(f"[GRID] auto-deploy of real free cash failed this sweep (non-fatal, will retry next sweep): {e}")
 
 
 async def quick_buy_best_coin(amount_usd: float) -> dict:
