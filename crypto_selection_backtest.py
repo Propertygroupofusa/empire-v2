@@ -1578,6 +1578,144 @@ async def run_grid_fee_tier_spacing_comparison(coins=None, days=BACKTEST_DAYS, m
     }
 
 
+def _average_hourly_swing_pct(closes, highs, lows) -> float:
+    """Real "average swing" for one coin - the mean real True Range (as a
+    % of price) across EVERY hourly candle in the given window, not just
+    a snapshot at the most recent one. Deliberately a different figure
+    from engine._atr_pct_from_candles (which reports the real ATR at only
+    the LAST 14 candles, the live "right now" volatility reading every
+    other real entry filter in this codebase already uses) - this
+    backtest's own question is "what does this coin typically do across
+    the whole real test window," which needs the real mean, not a single
+    live snapshot. Reuses the identical real True-Range formula (max of
+    high-low, |high-prev_close|, |low-prev_close|) so the two stay
+    consistent, just averaged over a different real span."""
+    n = len(closes)
+    if n < 2:
+        return 0.0
+    true_ranges_pct = []
+    for i in range(1, n):
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+        if closes[i]:
+            true_ranges_pct.append(tr / closes[i])
+    if not true_ranges_pct:
+        return 0.0
+    return sum(true_ranges_pct) / len(true_ranges_pct)
+
+
+# Real candidate grid spacings, each a multiple of a coin's OWN real
+# average swing over the test window - per the account owner's direct
+# question: "what is the average swing of coins... do you think it
+# should stay at 1% or we should change it and see what the average of
+# coins moving is and set it around that rate." Unlike
+# GRID_FEE_TIER_RATIOS above (one spacing shared by every coin, tied to
+# the account's own fee tier), every candidate here computes a
+# DIFFERENT real grid_pct per coin, sized off that coin's own real
+# behavior - a calm coin gets a tighter grid, a choppy one gets a wider
+# one. 1.0x is the literal "match the average swing exactly" version of
+# the account owner's own question; 0.5x/1.5x/2.0x bracket it so the
+# real answer isn't just one untested guess.
+GRID_ATR_SPACING_MULTIPLIERS = {
+    "0.5x avg swing": 0.5,
+    "1.0x avg swing": 1.0,
+    "1.5x avg swing": 1.5,
+    "2.0x avg swing": 2.0,
+}
+# Real baseline label for today's live, fixed default - always included
+# so every multiplier is directly, fairly compared against what's
+# actually live right now, same "always include today's real default"
+# discipline as every other Grid Bot comparison in this file.
+GRID_ATR_BASELINE_LABEL = "fixed 1% (today's live default)"
+
+
+async def run_grid_atr_spacing_comparison(coins=None, days=BACKTEST_DAYS, max_concurrent=6):
+    """SHADOW-MODE, additive comparison - never touches live trading,
+    never places an order. Direct answer to the account owner's own
+    question: would setting Grid Bot's spacing to match each coin's own
+    real average price swing (instead of today's one-size-fits-all fixed
+    1%) actually help? Computes each coin's real average hourly swing %
+    (_average_hourly_swing_pct) from the SAME real historical candles the
+    replay itself uses - no separate live fetch needed - then replays the
+    existing, already-validated _replay_grid_bot at grid_pct = that
+    coin's own real average swing × each of GRID_ATR_SPACING_MULTIPLIERS
+    (floored at grid_engine.MIN_DYNAMIC_GRID_PCT, the same real floor the
+    fee-tier dynamic-spacing feature already uses, so a near-zero real
+    swing can never produce a degenerate, effectively-always-triggering
+    grid), alongside today's real fixed 1% baseline on the identical real
+    candles - so every candidate is directly, fairly comparable per coin
+    AND in aggregate.
+
+    Real, honest note worth being explicit about, unlike the fee-tier
+    comparison above: every coin gets a DIFFERENT real grid_pct under
+    each swing-based candidate (that's the whole point), so there's no
+    single "the grid_pct for this candidate" figure the way the fee-tier
+    table has one - each per-coin row reports its own real average swing
+    and the real grid_pct that was actually used for it."""
+    coins = coins or COIN_FAMILY_TREE
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async with aiohttp.ClientSession() as session:
+        async def _one(product_id):
+            async with semaphore:
+                candles = await fetch_historical_candles(session, product_id, days=days)
+            if candles is None:
+                return product_id, None, None, "not enough historical data"
+            closes, highs, lows, _times = candles
+            avg_swing_pct = _average_hourly_swing_pct(closes, highs, lows)
+            per_candidate = {GRID_ATR_BASELINE_LABEL: {"grid_pct_used": STRATEGY_LAB_GRID_PCT, "result": _replay_grid_bot(closes, highs, lows, grid_pct=STRATEGY_LAB_GRID_PCT)}}
+            for name, multiplier in GRID_ATR_SPACING_MULTIPLIERS.items():
+                grid_pct = max(grid_engine.MIN_DYNAMIC_GRID_PCT, avg_swing_pct * multiplier)
+                per_candidate[name] = {"grid_pct_used": grid_pct, "result": _replay_grid_bot(closes, highs, lows, grid_pct=grid_pct)}
+            return product_id, avg_swing_pct, per_candidate, None
+
+        outcomes = await asyncio.gather(*(_one(pid) for pid in coins))
+
+    comparison = []
+    skipped = []
+    candidate_names = [GRID_ATR_BASELINE_LABEL] + list(GRID_ATR_SPACING_MULTIPLIERS.keys())
+    totals = {name: 0.0 for name in candidate_names}
+    trade_counts = {name: 0 for name in candidate_names}
+    win_counts = {name: 0 for name in candidate_names}
+    for product_id, avg_swing_pct, per_candidate, skip_reason in outcomes:
+        if per_candidate is None:
+            skipped.append({"product_id": product_id, "reason": skip_reason})
+            continue
+        row = {"product_id": product_id, "avg_swing_pct": round(avg_swing_pct * 100, 3)}
+        for name in candidate_names:
+            entry = per_candidate[name]
+            result = entry["result"]
+            row[name] = {"grid_pct_used": round(entry["grid_pct_used"] * 100, 3), **(result or {})} if result else {"grid_pct_used": round(entry["grid_pct_used"] * 100, 3), "no_trades": True}
+            if result is not None:
+                totals[name] += result["total_pnl"]
+                trade_counts[name] += result["num_trades"]
+                win_counts[name] += round(result["win_rate"] / 100 * result["num_trades"])
+        comparison.append(row)
+
+    summary = {
+        name: {
+            "total_pnl": round(totals[name], 2),
+            "num_trades": trade_counts[name],
+            "win_rate": round(win_counts[name] / trade_counts[name] * 100, 1) if trade_counts[name] else None,
+        }
+        for name in candidate_names
+    }
+    best = max(summary.items(), key=lambda kv: kv[1]["total_pnl"])[0]
+    avg_swings = [row["avg_swing_pct"] for row in comparison]
+
+    return {
+        "backtest_days": days,
+        "spend_per_trade": SPEND,
+        "coins_tested": len(coins),
+        "coins_with_results": len(comparison),
+        "candidate_names": candidate_names,
+        "average_real_swing_across_all_coins_pct": round(sum(avg_swings) / len(avg_swings), 3) if avg_swings else None,
+        "skipped": skipped,
+        "summary": summary,
+        "best_candidate": best,
+        "comparison": comparison,
+    }
+
+
 async def _backtest_one_coin_with_semaphore(session, product_id, semaphore, spend=None):
     async with semaphore:
         candles = await fetch_historical_candles(session, product_id)

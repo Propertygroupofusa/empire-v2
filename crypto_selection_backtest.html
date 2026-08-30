@@ -188,6 +188,19 @@
     <div id="gfsResults"></div>
 
     <div class="note" style="margin-top: 28px;">
+        <strong>📏 Grid spacing matched to each coin's own real average swing - does that beat a flat 1%?</strong>
+        Direct answer to the account owner's own question: "what is the average swing of coins... should it stay at 1% or
+        should we set it around that rate." Computes each real coin's own real average hourly price swing over the test
+        window (a real True-Range % average, not a live snapshot), then replays the existing grid strategy at spacing set
+        to 0.5x/1.0x/1.5x/2.0x THAT coin's own real average - a calm coin gets a tighter grid, a choppy one gets a wider
+        one - against today's real fixed 1% baseline, on the identical real candles. Shadow mode only - never places an
+        order.
+    </div>
+    <button class="run-btn" id="gasBtn" onclick="runGridAtrSpacingBacktest()">▶ Run Grid Average-Swing Spacing Comparison (~30-90 seconds)</button>
+    <div id="gasStatus"></div>
+    <div id="gasResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
         <strong>🎯 Narrow-range breakout continuation - does it really hold?</strong> A real trading concept the account owner described directly: "the best opportunity come from a narrow state... if you open above a narrow state... 87% chance there are more upside to come... if you open below a narrow state... 87% chance to follow through to the downside." That 87% is their own stated number, not yet checked against this system's real data. This replays every real coin's history looking for genuinely NARROW price ranges (tight relative to that SAME coin's own recent range history, not one fixed threshold - a coin's normal volatility varies too much for a flat number to mean the same thing everywhere), then checks the real FIRST candle that breaks outside each narrow range and whether price genuinely continued in that direction 24 real hours later. Reports the real hit rate, split by up vs. down breakouts, against an honest 50% coin-flip baseline. Shadow mode only - diagnostic, never wired to any real trade or entry filter.
     </div>
     <button class="run-btn" id="nrbBtn" onclick="runNarrowRangeBreakoutBacktest()">▶ Run Narrow-Range Breakout Backtest (~30-90 seconds)</button>
@@ -1292,6 +1305,84 @@ function renderGridFeeTierSpacingResults(data) {
             <tbody>${coinRows}</tbody>
         </table>
         <p class="trade-note">"base (&lt;$10K vol)" always reproduces today's live 1% spacing exactly - this feature only ever changes anything once the real account genuinely qualifies for a lower fee tier. Real evidence here, not a recommendation on its own - the toggle to turn this on lives on the family tree dashboard, next to the Grid Bot panel.</p>
+    `;
+}
+
+async function runGridAtrSpacingBacktest() {
+    const btn = document.getElementById('gasBtn');
+    const statusEl = document.getElementById('gasStatus');
+    const resultsEl = document.getElementById('gasResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real data, 5 spacing candidates replayed per coin)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/crypto-selection-backtest/grid-atr-spacing', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderGridAtrSpacingResults(data);
+        const best = data.summary[data.best_candidate];
+        statusEl.textContent = `Compared ${data.coins_with_results} coins over ${data.backtest_days} days. Real average swing across all of them: ${data.average_real_swing_across_all_coins_pct}%. Best on this real sample: ${data.best_candidate} ($${best.total_pnl.toFixed(2)} total).`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Grid Average-Swing Spacing Comparison (~30-90 seconds)';
+    }
+}
+
+function renderGridAtrSpacingResults(data) {
+    const resultsEl = document.getElementById('gasResults');
+    if (!data.comparison || data.comparison.length === 0) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No coins produced usable comparison results.</p>';
+        return;
+    }
+    const names = data.candidate_names || [];
+    const summaryRows = names.map(name => {
+        const s = data.summary[name];
+        const isBest = name === data.best_candidate;
+        const cls = s.total_pnl >= 0 ? 'pos' : 'neg';
+        return `<tr${isBest ? ' style="font-weight:700;"' : ''}>
+            <td>${name}${isBest ? ' 🏆' : ''}</td>
+            <td>${s.num_trades}</td>
+            <td>${s.win_rate == null ? '—' : s.win_rate.toFixed(1) + '%'}</td>
+            <td class="${cls}">${s.total_pnl >= 0 ? '+' : ''}$${s.total_pnl.toFixed(2)}</td>
+        </tr>`;
+    }).join('');
+
+    const coinRows = data.comparison.map(row => {
+        const cells = names.map(name => {
+            const r = row[name];
+            if (!r || r.no_trades) return `<td style="color:var(--text-dim);">${r ? r.grid_pct_used + '% spacing, ' : ''}no trades</td>`;
+            const cls = r.total_pnl >= 0 ? 'pos' : 'neg';
+            return `<td class="${cls}">${r.grid_pct_used}% spacing<br>${r.total_pnl >= 0 ? '+' : ''}$${r.total_pnl.toFixed(2)} <span style="color:var(--text-dim);">(${r.num_trades}tr, ${r.win_rate.toFixed(0)}%)</span></td>`;
+        }).join('');
+        return `<tr><td>${row.product_id}<br><span style="color:var(--text-dim);font-size:0.85em;">real avg swing ${row.avg_swing_pct}%</span></td>${cells}</tr>`;
+    }).join('');
+
+    resultsEl.innerHTML = `
+        <table style="margin-top:14px;">
+            <thead><tr><th>Real candidate</th><th>Trades</th><th>Win rate</th><th>Real total P&amp;L</th></tr></thead>
+            <tbody>${summaryRows}</tbody>
+        </table>
+        <table style="margin-top:14px;">
+            <thead><tr><th>Coin (real avg swing)</th>${names.map(n => `<th>${n}</th>`).join('')}</tr></thead>
+            <tbody>${coinRows}</tbody>
+        </table>
+        <p class="trade-note">Every coin gets a DIFFERENT real grid_pct under each swing-based candidate (that's the whole point) - shown per cell, since there's no single "the spacing" the way the fee-tier table has one. Real evidence here, not a recommendation on its own - this is diagnostic only, nothing here changes what the live bot does.</p>
     `;
 }
 

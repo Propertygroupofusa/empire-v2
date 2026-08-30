@@ -2942,6 +2942,28 @@ async def run_grid_fee_tier_spacing_backtest():
     return await crypto_selection_backtest_module.run_grid_fee_tier_spacing_comparison()
 
 
+@router.post("/crypto-selection-backtest/grid-atr-spacing", dependencies=[Depends(require_admin_key)])
+async def run_grid_atr_spacing_backtest():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    Direct answer to the account owner's own question: "what is the
+    average swing of coins... do you think it should stay at 1% or we
+    should change it and see what the average of coins moving is and set
+    it around that rate." Computes each real coin's own real average
+    hourly price swing over the test window (from the same real
+    historical candles the replay itself uses), then replays the
+    existing, already-validated grid strategy at grid_pct set to several
+    real multiples of that PER-COIN average (0.5x/1.0x/1.5x/2.0x),
+    alongside today's real fixed 1% baseline - see
+    crypto_selection_backtest.py's run_grid_atr_spacing_comparison for
+    the full real methodology.
+
+    Pulls real historical data from Coinbase's public candles endpoint -
+    can take 30-90 seconds depending on that endpoint's response time."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_grid_atr_spacing_comparison()
+
+
 class SetExitModeRequest(BaseModel):
     mode: str
 
