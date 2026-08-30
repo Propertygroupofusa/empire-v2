@@ -2716,6 +2716,28 @@ async def run_quick_profit_vs_trailing_stop_backtest():
     return await crypto_selection_backtest_module.run_quick_profit_vs_trailing_stop_comparison()
 
 
+@router.post("/crypto-selection-backtest/partial-exit-vs-full-trail", dependencies=[Depends(require_admin_key)])
+async def run_partial_exit_vs_full_trail_backtest():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    Tests the account owner's own real proposal directly: "take most of
+    your profits... take partials... and trailing the stop" - does
+    selling a real partial of the position at the first ATR-based target
+    (and only trailing the real remainder) actually make more money than
+    the live rule, which trails the WHOLE position and exits it in one
+    piece? Runs BOTH real exit philosophies against the exact same real
+    historical candles for every coin - same real entry, hard stop,
+    breakeven ratchet, and fee on every leg - so the comparison is fair.
+    Does not change what the live bot does unless/until the account owner
+    sees these real numbers and explicitly decides to wire a change into
+    the live path - this is a read-only comparison report.
+
+    Pulls real historical data from Coinbase's public candles endpoint -
+    can take 30-90 seconds depending on that endpoint's response time."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_partial_exit_vs_full_trail_comparison()
+
+
 @router.post("/crypto-selection-backtest/strategy-lab", dependencies=[Depends(require_admin_key)])
 async def run_strategy_lab_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.

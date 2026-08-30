@@ -492,6 +492,185 @@ async def run_quick_profit_vs_trailing_stop_comparison(coins=None, days=BACKTEST
     }
 
 
+PARTIAL_EXIT_FRACTION = 0.5  # sell half at the first real target, per the account owner's own explicit request ("take most of your profits... take partials... and trailing the stop") - a common real professional convention (scale out, let the rest run), not a number this codebase already had
+
+
+def _replay_partial_then_trail(closes, highs, lows, spend=None, trail_pct=None, partial_fraction=PARTIAL_EXIT_FRACTION):
+    """Real replay of the account owner's own proposal: instead of
+    trailing the WHOLE position once it reaches the real ATR-based target
+    (what mode="trailing_stop" in _replay_with_exit_mode already does),
+    sell `partial_fraction` of it right at target - a real, separate
+    order that pays its own real round-trip fee - and only trail the real
+    REMAINDER behind the peak from there. The hard stop-loss (with the
+    same real breakeven ratchet every other replay in this file uses)
+    still protects the full remaining qty at every point, whether or not
+    a partial has fired yet - a partial exit only ever adds a second,
+    tighter protection on top once armed, never removes the first.
+
+    Deliberately a separate function rather than a third mode inside
+    _replay_with_exit_mode() - that function's trade-tracking assumes
+    exactly one closing leg per position, and forcing a two-leg
+    (partial + remainder) position through that shape would have meant
+    restructuring already-tested code. Mirrors _replay_grid_bot() and
+    friends instead: its own separate replay, same real entry/breakeven/
+    fee mechanics, own trade list.
+
+    Each real leg (a partial sale, a remainder sale, or a real mark-to-
+    market at the window's end) is its own row in the returned trade
+    list - num_trades can be higher than a pure single-exit strategy's
+    on the identical data purely because a winning position now closes
+    in two real pieces instead of one, not because more positions were
+    opened. Same real simplifications as _replay_with_exit_mode: decided
+    on each hourly candle's close only, and a position (or a still-
+    trailing remainder) still open when the window ends is marked to the
+    real last close rather than silently dropped, so a partial that fired
+    but never got a chance to finish trailing isn't invisible here."""
+    spend = spend if spend is not None and spend > 0 else SPEND
+    trail_pct = trail_pct if trail_pct is not None and trail_pct > 0 else TRAILING_STOP_PCT
+    trades = []
+    i = ATR_WINDOW
+    n = len(closes)
+    position = None  # entry, qty (remaining), target, stop, peak_price, partial_taken
+
+    def _net_leg(qty, entry, exit_price):
+        gross = qty * (exit_price - entry)
+        fee = qty * (entry + exit_price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+        return gross - fee
+
+    while i < n:
+        price = closes[i]
+        window_closes = closes[max(0, i - ATR_WINDOW):i + 1]
+        window_highs = highs[max(0, i - ATR_WINDOW):i + 1]
+        window_lows = lows[max(0, i - ATR_WINDOW):i + 1]
+        atr_pct = engine._atr_pct_from_candles(window_closes, window_highs, window_lows)
+
+        if position is None:
+            target_pct = max(engine.pick_target_pct(atr_pct), engine.min_profit_target_pct(spend, atr_pct))
+            qty = spend / price
+            position = {
+                "entry": price, "qty": qty,
+                "target": price * (1 + target_pct),
+                "stop": price * (1 - engine.STOP_LOSS_PCT),
+                "peak_price": price,
+                "partial_taken": False,
+            }
+            i += 1
+            continue
+
+        if price > position["peak_price"]:
+            position["peak_price"] = price
+
+        # Real breakeven ratchet - identical to every other replay here.
+        if position["stop"] < position["entry"] and price >= position["entry"] * (1 + BREAKEVEN_TRIGGER_PCT):
+            position["stop"] = position["entry"]
+
+        # The real hard stop always protects the FULL remaining qty,
+        # partial already taken or not - checked before anything else.
+        if price <= position["stop"]:
+            trades.append(("STOP", _net_leg(position["qty"], position["entry"], price)))
+            position = None
+            i += 1
+            continue
+
+        if not position["partial_taken"]:
+            if price >= position["target"]:
+                partial_qty = position["qty"] * partial_fraction
+                trades.append(("PARTIAL_TARGET", _net_leg(partial_qty, position["entry"], price)))
+                position["qty"] -= partial_qty
+                position["partial_taken"] = True
+        else:
+            trailing_stop_price = position["peak_price"] * (1 - trail_pct)
+            effective_stop = max(position["stop"], trailing_stop_price)
+            if price <= effective_stop:
+                trades.append(("TRAIL_REMAINDER", _net_leg(position["qty"], position["entry"], price)))
+                position = None
+        i += 1
+
+    if position is not None:
+        trades.append(("OPEN_AT_WINDOW_END", _net_leg(position["qty"], position["entry"], closes[-1])))
+
+    if not trades:
+        return None
+    total_pnl = sum(net for _, net in trades)
+    wins = [net for _, net in trades if net > 0]
+    win_rate = len(wins) / len(trades) * 100
+    avg_trade_pct = (total_pnl / len(trades)) / spend * 100
+    return {
+        "num_trades": len(trades),
+        "win_rate": win_rate,
+        "total_pnl": total_pnl,
+        "roi_pct_of_spend": total_pnl / spend * 100,
+        "avg_trade_pct": avg_trade_pct,
+    }
+
+
+async def run_partial_exit_vs_full_trail_comparison(coins=None, days=BACKTEST_DAYS, max_concurrent=6):
+    """SHADOW-MODE, additive comparison - never touches live trading,
+    places no real order. Direct answer to the account owner's own real
+    proposal: "take most of your profits... take partials... and
+    trailing the stop" - does selling a real partial at the first ATR-
+    based target and trailing only the real remainder actually make more
+    money than the live rule (trail the WHOLE position, one exit,
+    mode="trailing_stop" in _replay_with_exit_mode)? Runs BOTH real exit
+    philosophies against the identical real historical candles for every
+    coin - same real entry, same real hard stop/breakeven ratchet, same
+    real fee on every leg - so the comparison is fair. Never wired into
+    live trading; this only informs whether it's worth doing so."""
+    coins = coins or COIN_FAMILY_TREE
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def _one(product_id):
+        async with semaphore:
+            candles = await fetch_historical_candles(session, product_id, days=days)
+        if candles is None:
+            return product_id, None, "not enough historical data"
+        closes, highs, lows, _times = candles
+        full_trail = _replay_with_exit_mode(closes, highs, lows, mode="trailing_stop")
+        partial_then_trail = _replay_partial_then_trail(closes, highs, lows)
+        return product_id, {"full_trail": full_trail, "partial_then_trail": partial_then_trail}, None
+
+    async with aiohttp.ClientSession() as session:
+        outcomes = await asyncio.gather(*(_one(pid) for pid in coins))
+
+    comparison = []
+    skipped = []
+    for product_id, result, skip_reason in outcomes:
+        if result is None:
+            skipped.append({"product_id": product_id, "reason": skip_reason})
+            continue
+        comparison.append({"product_id": product_id, **result})
+
+    def _total(key):
+        return sum((row[key]["total_pnl"] if row[key] else 0.0) for row in comparison)
+
+    full_trail_wins = 0
+    partial_wins = 0
+    for row in comparison:
+        ft_pnl = row["full_trail"]["total_pnl"] if row["full_trail"] else 0.0
+        pt_pnl = row["partial_then_trail"]["total_pnl"] if row["partial_then_trail"] else 0.0
+        if ft_pnl > pt_pnl:
+            full_trail_wins += 1
+        elif pt_pnl > ft_pnl:
+            partial_wins += 1
+
+    return {
+        "backtest_days": days,
+        "spend_per_trade": SPEND,
+        "trailing_stop_pct": TRAILING_STOP_PCT,
+        "partial_exit_fraction": PARTIAL_EXIT_FRACTION,
+        "coins_tested": len(coins),
+        "coins_with_results": len(comparison),
+        "skipped": skipped,
+        "totals": {
+            "full_trail_total_pnl": round(_total("full_trail"), 2),
+            "partial_then_trail_total_pnl": round(_total("partial_then_trail"), 2),
+            "full_trail_coins_won": full_trail_wins,
+            "partial_then_trail_coins_won": partial_wins,
+        },
+        "comparison": comparison,
+    }
+
+
 def calculate_relative_strength(coin_closes_window: list, btc_closes_window: list) -> float:
     """Real alpha calc, per the account owner's explicit request to add a
     BTC-relative-strength signal on top of the existing selection checks:

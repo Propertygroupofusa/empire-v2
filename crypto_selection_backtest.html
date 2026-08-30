@@ -142,6 +142,13 @@
     <div id="qpResults"></div>
 
     <div class="note" style="margin-top: 28px;">
+        <strong>Partial exit + trail the remainder:</strong> a real proposal, tested rather than assumed - "take most of your profits, take partials, and trail the stop." The live rule today trails the WHOLE position and exits it in one piece the moment it reverses past the trail. This tests the alternative: sell half the position at the first real ATR-based target (a real, separate order, paying its own real round-trip fee), and only trail the real REMAINDER behind the peak from there. Same real entry, hard stop, and breakeven ratchet either way - only what happens once target is first reached differs. Shadow mode only - this does not change what the live bot does.
+    </div>
+    <button class="run-btn" id="peBtn" onclick="runPartialExitVsFullTrail()">▶ Run Partial Exit vs. Full Trail Comparison (~30-90 seconds)</button>
+    <div id="peStatus"></div>
+    <div id="peResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
         <strong>Can we make money off the stops themselves?</strong> Right after the exit-reason breakdown showed that a real losing window's damage was mostly OLD exit types and structural forced exits rather than genuine price-based stops, the direct question came back: does price tend to recover after a real STOP HIT, and would buying back in right at the stop-exit price have actually made money? This replays that against the FULL real historical STOP HIT ledger (every coin, every real hard-stop exit ever recorded - not just one 20-trade window): the real forward price move in the hours after each stop, whether it ever recovered back to the stop's own exit price, and a simple hypothetical "buy back at the stop price, sell at a modest target or a second hard stop" trade. Shadow mode only - purely diagnostic, never wired to any real trade. No fees are modeled on the hypothetical trades and real cash availability isn't checked, so treat this as a real, honest first look, not a final answer.
     </div>
     <button class="run-btn" id="shrBtn" onclick="runStopHitReversalBacktest()">▶ Run Stop-Hit Reversal Backtest (~10-60 seconds)</button>
@@ -764,6 +771,77 @@ function renderQuickProfitVsTrailingStopResults(data) {
         </p>
     `;
     renderExitModePromoteRow();
+}
+
+async function runPartialExitVsFullTrail() {
+    const btn = document.getElementById('peBtn');
+    const statusEl = document.getElementById('peStatus');
+    const resultsEl = document.getElementById('peResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real data, two replays per coin)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/crypto-selection-backtest/partial-exit-vs-full-trail', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderPartialExitVsFullTrailResults(data);
+        const t = data.totals;
+        const overall = t.full_trail_total_pnl >= t.partial_then_trail_total_pnl ? 'Full trail (live)' : 'Partial exit + trail remainder';
+        statusEl.textContent = `Compared ${data.coins_with_results} coins over ${data.backtest_days} days, ${(data.partial_exit_fraction * 100).toFixed(0)}% partial at target. Full trail total: $${t.full_trail_total_pnl.toFixed(2)} (won on ${t.full_trail_coins_won} coins). Partial+trail total: $${t.partial_then_trail_total_pnl.toFixed(2)} (won on ${t.partial_then_trail_coins_won} coins). Overall: ${overall} made more real money on this sample.`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Partial Exit vs. Full Trail Comparison (~30-90 seconds)';
+    }
+}
+
+function renderPartialExitVsFullTrailResults(data) {
+    const resultsEl = document.getElementById('peResults');
+    if (!data.comparison || data.comparison.length === 0) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No coins produced usable comparison results.</p>';
+        return;
+    }
+    const rows = data.comparison.map(r => {
+        const ft = r.full_trail;
+        const pt = r.partial_then_trail;
+        const ftPnl = ft ? ft.total_pnl : 0;
+        const ptPnl = pt ? pt.total_pnl : 0;
+        const delta = ptPnl - ftPnl;
+        const deltaHtml = `<span class="${delta >= 0 ? 'pos' : 'neg'}">${delta >= 0 ? '+' : ''}$${delta.toFixed(2)}</span>`;
+        return `<tr>
+            <td>${r.product_id}</td>
+            <td>${ft ? ft.num_trades : 0}</td>
+            <td class="${ftPnl >= 0 ? 'pos' : 'neg'}">${ft ? (ftPnl >= 0 ? '+' : '') + '$' + ftPnl.toFixed(2) : '—'}</td>
+            <td>${pt ? pt.num_trades : 0}</td>
+            <td class="${ptPnl >= 0 ? 'pos' : 'neg'}">${pt ? (ptPnl >= 0 ? '+' : '') + '$' + ptPnl.toFixed(2) : '—'}</td>
+            <td>${deltaHtml}</td>
+        </tr>`;
+    }).join('');
+
+    resultsEl.innerHTML = `
+        <table>
+            <thead><tr>
+                <th>Coin</th><th>Full trail trades</th><th>Full trail P&amp;L</th><th>Partial+trail trades</th><th>Partial+trail P&amp;L</th><th>Difference</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+        <p class="trade-note">"Partial+trail trades" is naturally higher than "Full trail trades" on a winning coin - a position that fires its partial now closes in two real legs (each paying its own real fee) instead of one, not because more positions were opened. A positive "Difference" means taking the partial actually made more real money on that coin; negative means letting the whole position ride the trail was better. Neither mode is live - this only informs whether it's worth becoming so.</p>
+    `;
 }
 
 
