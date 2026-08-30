@@ -71,12 +71,32 @@ async def _build_crypto_section() -> str:
 
     total_profit = realized + unrealized
 
+    # Real "is this thing even ABLE to trade right now" diagnostics - per
+    # the account owner's own direct question ("why isn't it trading, I
+    # need to recover that money") this section had no way to answer
+    # before: a $0.00 Total Allocated alone doesn't say WHY - it could be
+    # unfunded, retired (crypto_passive_mode), or tree-wide paused on a
+    # real negative rolling expectancy, three genuinely different real
+    # reasons with three different real fixes. All three real values
+    # already exist on `status` (the same dict the dashboard itself
+    # reads) - no new fetch needed here.
+    passive_mode = status.get("crypto_passive_mode")
+    spendable = status.get("spendable_for_spawn")
+    real_usd = status.get("real_usd_balance")
+    real_usdc = status.get("real_usdc_balance")
+    rolling = status.get("rolling_expectancy") or {}
+
     lines = [
         "## 🌳 Crypto Family Tree",
         "",
         f"- **Total Profit (realized + unrealized):** {_fmt_usd(total_profit)}",
         f"- **Total Allocated:** {_fmt_usd(status.get('total_allocated_usd'))}",
         f"- **Locked Profit:** {_fmt_usd(status.get('locked_usd'))}",
+        f"- **Retired (buy-and-hold BTC passive mode):** {'YES - no new entries, existing positions unmanaged' if passive_mode else 'No - actively trading'}",
+        f"- **Real free cash available to fund a branch:** {_fmt_usd(spendable)}",
+        f"- **Real Coinbase USD / USDC balance:** {_fmt_usd(real_usd)} / {_fmt_usd(real_usdc)}",
+        f"- **Tree-wide entries paused (negative rolling expectancy):** "
+        + (f"YES - last {rolling.get('num_trades')} real trades averaged {_fmt_usd(rolling.get('expectancy'))}/trade (real total {_fmt_usd(rolling.get('total_pnl'))})" if rolling.get("negative") else "No"),
         f"- **Branches:** {len(branches)}",
         "",
         "| Branch | Coin | Balance | Position | Unrealized P&L | Last Order Error |",
