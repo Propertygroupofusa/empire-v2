@@ -2828,7 +2828,14 @@ function renderUsdcBlindSpotBanner(data) {
 function renderRollingExpectancyBanner(data) {
     const el = document.getElementById('rolling-expectancy-banner');
     const exp = data.rolling_expectancy;
-    if (!exp || !exp.negative) {
+    // The tree being retired already means no branch will ever open a
+    // new position, for any reason, permanently - showing this real
+    // "why entries are paused" explanation on top of that is genuinely
+    // confusing (two banners giving different, seemingly-contradicting
+    // reasons for the same real fact), not informative. Real bug found
+    // from the account owner's own screenshot: both banners were
+    // rendering at once.
+    if (!exp || !exp.negative || data.crypto_passive_mode) {
         el.style.display = 'none';
         el.innerHTML = '';
         return;

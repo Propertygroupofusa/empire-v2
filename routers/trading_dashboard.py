@@ -988,13 +988,21 @@ def _build_progress_observations(alpaca_data, crypto_data):
     observations = []
 
     if crypto_data:
-        if crypto_data.get("crypto_passive_mode"):
+        crypto_retired = bool(crypto_data.get("crypto_passive_mode"))
+        if crypto_retired:
             observations.append({
                 "icon": "🔒", "tone": "warn",
                 "text": "Crypto family tree is retired (passive mode) - no new entries or exits are happening on that side at all.",
             })
+        # Once retired, no branch can ever open a new position for ANY
+        # reason - the rolling-expectancy pause and the drawdown-breach
+        # pause both become moot real explanations for something that's
+        # already fully explained by retirement. Showing them anyway is
+        # genuinely confusing, not informative - a real bug the account
+        # owner's own screenshot surfaced (three banners, two of them
+        # giving different reasons for the same already-explained fact).
         rolling = crypto_data.get("rolling_expectancy")
-        if rolling and rolling.get("negative"):
+        if not crypto_retired and rolling and rolling.get("negative"):
             win_rate = rolling.get("win_rate")
             win_count = rolling.get("win_count")
             loss_count = rolling.get("loss_count")
@@ -1020,7 +1028,7 @@ def _build_progress_observations(alpaca_data, crypto_data):
             })
         branches = crypto_data.get("branches") or []
         paused_dd = [b for b in branches if b.get("drawdown_breached")]
-        if paused_dd:
+        if not crypto_retired and paused_dd:
             names = ", ".join(
                 b["bot_name"].replace("crypto_tree_", "").replace("_usd", "").upper() for b in paused_dd[:4]
             )
