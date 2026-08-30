@@ -2738,6 +2738,28 @@ async def run_partial_exit_vs_full_trail_backtest():
     return await crypto_selection_backtest_module.run_partial_exit_vs_full_trail_comparison()
 
 
+@router.post("/crypto-selection-backtest/narrow-range-breakout", dependencies=[Depends(require_admin_key)])
+async def run_narrow_range_breakout_backtest_endpoint():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    Tests the account owner's own real trading claim directly: "the best
+    opportunity come from a narrow state... if you open above a narrow
+    state... 87% chance there are more upside to come... if you open
+    below a narrow state... 87% chance to follow through to the
+    downside." That 87% figure is their own stated number, not something
+    already verified against this system's real data - this replays real
+    historical Coinbase hourly candles looking for genuine narrow-range
+    states (percentile-relative to each coin's own recent range history,
+    not one fixed threshold) and reports the REAL hit rate the actual
+    first breakout candle's follow-through produced, split by direction,
+    against an honest 50% coin-flip baseline.
+
+    Pulls real historical data from Coinbase's public candles endpoint -
+    can take 30-90 seconds depending on that endpoint's response time."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_narrow_range_breakout_backtest()
+
+
 @router.post("/crypto-selection-backtest/strategy-lab", dependencies=[Depends(require_admin_key)])
 async def run_strategy_lab_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
@@ -3054,6 +3076,25 @@ async def run_alpaca_entry_signal_ab_test():
     if alpaca_selection_backtest_module is None:
         raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
     return await alpaca_selection_backtest_module.run_entry_signal_ab_test()
+
+
+@router.post("/alpaca-selection-backtest/narrow-range-breakout", dependencies=[Depends(require_admin_key)])
+async def run_alpaca_narrow_range_breakout_backtest():
+    """SHADOW-MODE ONLY - never touches live trading, places no order.
+    The Alpaca-side counterpart to the crypto narrow-range-breakout
+    backtest - tests the account owner's own real trading claim about
+    narrow-range breakout continuation, but MORE LITERALLY than crypto
+    could (stocks have a real discrete daily open crypto's 24/7 market
+    doesn't): groups real historical 15-min bars into real trading days,
+    finds real days whose own range is genuinely NARROW relative to that
+    symbol's own recent range history, and checks the very next real
+    trading day's actual FIRST bar against that narrow day's own high/low
+    - exactly "when your stock opens in the morning, the first bar opens
+    above/below a narrow state." Reports the real hit rate against an
+    honest 50% coin-flip baseline, split by breakout direction."""
+    if alpaca_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+    return await alpaca_selection_backtest_module.run_narrow_range_breakout_backtest()
 
 
 def _safe_float(v):

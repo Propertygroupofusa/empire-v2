@@ -1974,6 +1974,222 @@ async def _run_reversal_backtest_for_events(events, hours_forward, target_pct, s
     }
 
 
+NARROW_RANGE_LOOKBACK_HOURS = 24
+NARROW_RANGE_HISTORY_LOOKBACK_HOURS = 240
+NARROW_RANGE_PERCENTILE = 0.25
+NARROW_BREAKOUT_FOLLOW_HOURS = 24
+
+
+def _rolling_range_pct(highs, lows, end_idx, lookback):
+    """Real channel width - the real high/low range over the `lookback`
+    real candles ending just before end_idx, as a fraction of that
+    window's own real midpoint price. Returns (range_pct, window_high,
+    window_low), or None if end_idx doesn't have `lookback` real candles
+    of history behind it yet (or the window's own midpoint is zero)."""
+    if end_idx < lookback:
+        return None
+    window_high = max(highs[end_idx - lookback:end_idx])
+    window_low = min(lows[end_idx - lookback:end_idx])
+    mid = (window_high + window_low) / 2
+    if not mid:
+        return None
+    return (window_high - window_low) / mid, window_high, window_low
+
+
+def _is_narrow_range_at(i, highs, lows, lookback=NARROW_RANGE_LOOKBACK_HOURS,
+                         history=NARROW_RANGE_HISTORY_LOOKBACK_HOURS, percentile=NARROW_RANGE_PERCENTILE):
+    """Real, percentile-relative "narrow state" detection - per the
+    account owner's own real trading concept: the best setups come from
+    a genuinely TIGHT/NARROW range, and you go WITH the breakout
+    direction out of one (only flipping contrarian after a coin has
+    already made a WIDE, extended move - a separate, not-yet-built idea;
+    this backtest only tests the narrow-state breakout-continuation
+    half). Deliberately PERCENTILE-relative to each coin's own recent
+    range history, not a fixed absolute % - a coin's own normal
+    volatility varies wildly (BTC vs. a small altcoin), so "narrow" has
+    to mean "tight relative to how this coin itself has been trading
+    lately," not one fixed number for every coin.
+
+    "Narrow" = the real range over the last `lookback` real candles is
+    in the bottom `percentile` (25% default) of that same rolling-range
+    measure's own real distribution over the preceding `history` hours.
+    Returns (is_narrow, window_high, window_low) - the last two are the
+    real narrow range's own boundaries, needed by the replay loop to
+    detect the eventual real breakout. Returns (False, None, None) when
+    there isn't yet enough real history to judge (both for the current
+    window and for building a real percentile distribution to compare
+    it against) - never guesses without a real minimum of history
+    behind it (at least 10 real historical range samples)."""
+    current = _rolling_range_pct(highs, lows, i, lookback)
+    if current is None or i < lookback + history:
+        return False, None, None
+    current_range_pct, window_high, window_low = current
+
+    # Real historical distribution of this same rolling-range measure,
+    # sampled every half-lookback (12h default) rather than every single
+    # hour - overlapping windows one hour apart are heavily
+    # autocorrelated and would just pad the sample count without adding
+    # real independent evidence.
+    step = max(1, lookback // 2)
+    samples = []
+    j = i - lookback
+    stop = i - lookback - history
+    while j > stop:
+        r = _rolling_range_pct(highs, lows, j, lookback)
+        if r is not None:
+            samples.append(r[0])
+        j -= step
+    if len(samples) < 10:
+        return False, None, None
+    samples.sort()
+    idx = min(int(len(samples) * percentile), len(samples) - 1)
+    threshold = samples[idx]
+    return current_range_pct <= threshold, window_high, window_low
+
+
+def _replay_narrow_range_breakout(highs, lows, closes, lookback=NARROW_RANGE_LOOKBACK_HOURS,
+                                   history=NARROW_RANGE_HISTORY_LOOKBACK_HOURS,
+                                   percentile=NARROW_RANGE_PERCENTILE,
+                                   follow_hours=NARROW_BREAKOUT_FOLLOW_HOURS):
+    """Walks a real candle series looking for real narrow-range states
+    (see _is_narrow_range_at), then scores the FIRST real candle whose
+    CLOSE breaks outside that narrow range's own high/low - matching the
+    account owner's own framing ("the first bar... opens above/below") -
+    and checks whether price genuinely continued in that breakout
+    direction `follow_hours` (24 default) later. Only the first real
+    breakout after each narrow state is scored, not every candle while
+    still narrow, so the same narrow state's eventual breakout is never
+    counted more than once.
+
+    Returns a list of real event dicts: {breakout_index, direction
+    ("up"/"down"), breakout_price, forward_price, followed_through
+    (bool), forward_return_pct}.
+
+    _is_narrow_range_at(i, ...) tells us whether the real window of
+    candles STRICTLY BEFORE index i was narrow - it says nothing about
+    candle i itself. So the real breakout candle is found by: the moment
+    a narrow window is detected ending right before some index i, scan
+    FORWARD (i, i+1, i+2, ...) for the first real candle whose CLOSE
+    actually lies outside that fixed narrow zone's own high/low - that
+    is the real breakout. Once found (or if the series runs out first),
+    resume scanning for the NEXT narrow zone starting after it, so the
+    same narrow zone's breakout is never scored twice."""
+    events = []
+    n = len(closes)
+    i = lookback + history
+    while i < n:
+        is_narrow, wh, wl = _is_narrow_range_at(i, highs, lows, lookback, history, percentile)
+        if not is_narrow:
+            i += 1
+            continue
+        j = i
+        while j < n and wl <= closes[j] <= wh:
+            j += 1
+        if j >= n:
+            break  # ran off the end of real history without a genuine breakout
+        direction = "up" if closes[j] > wh else "down"
+        breakout_price = closes[j]
+        target_j = j + follow_hours
+        if target_j < n:
+            forward_price = closes[target_j]
+            followed_through = (forward_price > breakout_price) if direction == "up" else (forward_price < breakout_price)
+            events.append({
+                "breakout_index": j, "direction": direction,
+                "breakout_price": breakout_price, "forward_price": forward_price,
+                "followed_through": followed_through,
+                "forward_return_pct": (forward_price - breakout_price) / breakout_price,
+            })
+        i = j + 1
+    return events
+
+
+def _summarize_breakout_events(events):
+    """Real hit-rate/avg-return summary for a list of breakout events -
+    None (not a fabricated 0%) when there are no real events to
+    summarize."""
+    if not events:
+        return None
+    hits = sum(1 for e in events if e["followed_through"])
+    return {
+        "count": len(events),
+        "hit_rate": round(hits / len(events), 4),
+        "avg_forward_return_pct": round(sum(e["forward_return_pct"] for e in events) / len(events), 4),
+    }
+
+
+async def run_narrow_range_breakout_backtest(coins=None, days=BACKTEST_DAYS, max_concurrent=6) -> dict:
+    """SHADOW-MODE, real historical data, per-coin AND aggregate - tests
+    the account owner's own real trading claim directly: "if you open
+    above a narrow state... 87% chance there are more upside to come...
+    if you open below a narrow state... 87% chance to follow through to
+    the downside." That 87% figure was their own stated number, not
+    something already verified against this system's real data - this
+    replays real narrow-range breakout events on real historical
+    Coinbase candles and reports the REAL hit rate this system's own
+    coins actually produced, split by breakout direction, against an
+    honest 50% coin-flip baseline (same "state the baseline plainly"
+    convention run_directional_signal_backtest() already uses for the
+    BTC price-projection panel).
+
+    Never places a real order, never touches live trading - purely
+    diagnostic, same posture as every other backtest tool in this file.
+    coins=None (default) tests every real coin in COIN_FAMILY_TREE."""
+    coin_list = coins if coins is not None else list(COIN_FAMILY_TREE)
+    semaphore = asyncio.Semaphore(max_concurrent)
+    last_error = {}
+
+    async def _one(session, product_id):
+        async with semaphore:
+            data = await fetch_historical_candles(session, product_id, days=days, last_error_out=last_error)
+        if data is None:
+            return product_id, None
+        closes, highs, lows, _times = data
+        return product_id, _replay_narrow_range_breakout(highs, lows, closes)
+
+    async with aiohttp.ClientSession() as session:
+        results = await asyncio.gather(*(_one(session, pid) for pid in coin_list))
+
+    per_coin = []
+    skipped = []
+    all_events = []
+    for product_id, events in results:
+        if events is None:
+            skipped.append({"product_id": product_id, "reason": last_error.get(product_id, "not enough real historical data")})
+            continue
+        up_events = [e for e in events if e["direction"] == "up"]
+        down_events = [e for e in events if e["direction"] == "down"]
+        per_coin.append({
+            "product_id": product_id, "total_events": len(events),
+            "up_breakouts": _summarize_breakout_events(up_events),
+            "down_breakouts": _summarize_breakout_events(down_events),
+        })
+        all_events.extend(events)
+
+    up_all = [e for e in all_events if e["direction"] == "up"]
+    down_all = [e for e in all_events if e["direction"] == "down"]
+    combined_hit_rate = None
+    if all_events:
+        combined_hit_rate = round(sum(1 for e in all_events if e["followed_through"]) / len(all_events), 4)
+
+    return {
+        "coins_tested": len(coin_list), "coins_with_results": len(per_coin),
+        "skipped": skipped, "per_coin": per_coin,
+        "overall": {
+            "total_events": len(all_events),
+            "up_breakouts": _summarize_breakout_events(up_all),
+            "down_breakouts": _summarize_breakout_events(down_all),
+            "combined_hit_rate": combined_hit_rate,
+            "coin_flip_baseline": 0.5,
+        },
+        "params": {
+            "narrow_range_lookback_hours": NARROW_RANGE_LOOKBACK_HOURS,
+            "narrow_range_history_lookback_hours": NARROW_RANGE_HISTORY_LOOKBACK_HOURS,
+            "narrow_range_percentile": NARROW_RANGE_PERCENTILE,
+            "follow_through_hours": NARROW_BREAKOUT_FOLLOW_HOURS,
+        },
+    }
+
+
 async def main():
     print(f"Backtesting {len(COIN_FAMILY_TREE)} coins over the last {BACKTEST_DAYS} days of REAL Coinbase hourly candles.")
     print(f"Replaying the live bot's real target/stop/breakeven/giveback rules, ${SPEND:.0f} redeployed per trade.\n")

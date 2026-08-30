@@ -1102,3 +1102,226 @@ async def run_entry_signal_ab_test(contract_codes=None, days: int = BACKTEST_DAY
         "variants": variant_summaries,
         "symbol_breakdown": symbol_breakdown,
     }
+
+
+# ============================================================================
+# NARROW-RANGE BREAKOUT CONTINUATION - the Alpaca-side counterpart to
+# crypto_selection_backtest.py's run_narrow_range_breakout_backtest(). Per
+# the account owner's own real trading claim: "the best opportunity come
+# from a narrow state... if you open above a narrow state... 87% chance
+# there are more upside to come... if you open below a narrow state...
+# 87% chance to follow through to the downside." That 87% figure is their
+# own stated number, not something already verified against this
+# account's real data - this replays real historical Alpaca bars to see
+# what the actual hit rate comes out to.
+#
+# Stocks get a MORE LITERAL version of this than crypto could: crypto
+# trades 24/7 with no discrete session open, so the crypto-side backtest
+# uses a rolling hourly window as its stand-in for "narrow state." Stocks
+# genuinely have a real daily open - this groups real bars into real
+# trading days, measures each real day's own range, and checks the very
+# next real day's actual FIRST bar against the prior (narrow) day's own
+# high/low - exactly the account owner's own literal framing.
+# ============================================================================
+
+NARROW_DAY_HISTORY_DAYS = 20
+NARROW_DAY_PERCENTILE = 0.25
+NARROW_BREAKOUT_FOLLOW_BARS = 26  # ~one real trading day of 15-min bars (6.5h * 4/h ≈ 26)
+
+
+async def _fetch_bars_with_ohlc_and_times(session, symbol: str, days: int):
+    """Real historical 15-min OHLC bars + real UTC timestamps - needed
+    for real day-range detection (needs high/low) and identifying each
+    real trading day's own first bar (needs timestamps), neither of
+    which _fetch_bars()/_fetch_bars_with_times() (close-only) carry.
+    Returns (bars: list[{"t","o","h","l","c"}], None) or (None, reason)."""
+    start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=15Min&start={start}&limit=10000&feed=iex"
+    try:
+        async with session.get(url, headers=get_headers(), timeout=aiohttp.ClientTimeout(total=20)) as r:
+            if r.status != 200:
+                body = (await r.text())[:200]
+                return None, f"HTTP {r.status}: {body}"
+            data = await r.json()
+            bars = data.get("bars", [])
+            if len(bars) < 60:
+                return None, f"only {len(bars)} bars (need 60+)"
+            return [{"t": b["t"], "o": b["o"], "h": b["h"], "l": b["l"], "c": b["c"]} for b in bars], None
+    except asyncio.TimeoutError:
+        return None, "Alpaca API timeout"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {str(e)[:150]}"
+
+
+def _group_bars_by_day(bars: list) -> list:
+    """Groups real 15-min bars by their own real UTC calendar date - a
+    regular US market session (9:30am-4pm ET) always falls entirely
+    within one real UTC date regardless of EST/EDT, so this is a safe,
+    simple real trading-day boundary with no timezone-conversion
+    library needed. Returns an ordered list of (date_str, day_bars)
+    tuples, oldest real trading day first."""
+    groups = {}
+    order = []
+    for b in bars:
+        date_str = b["t"][:10]  # "2024-01-02T14:30:00Z" -> "2024-01-02"
+        if date_str not in groups:
+            groups[date_str] = []
+            order.append(date_str)
+        groups[date_str].append(b)
+    return [(d, groups[d]) for d in order]
+
+
+def _day_range_pct(day_bars: list):
+    """Real trading day range (using every real bar's own high/low that
+    day) as a fraction of the day's own real midpoint price. Returns
+    (range_pct, day_high, day_low), or None if the day's own real
+    midpoint is zero (never happens with real data, defensive only)."""
+    day_high = max(b["h"] for b in day_bars)
+    day_low = min(b["l"] for b in day_bars)
+    mid = (day_high + day_low) / 2
+    if not mid:
+        return None
+    return (day_high - day_low) / mid, day_high, day_low
+
+
+def _replay_narrow_day_breakout(bars: list, history_days: int = NARROW_DAY_HISTORY_DAYS,
+                                 percentile: float = NARROW_DAY_PERCENTILE,
+                                 follow_bars: int = NARROW_BREAKOUT_FOLLOW_BARS) -> list:
+    """Groups real bars into real trading days, then for each real day
+    whose own range is NARROW (bottom `percentile` of its own real range
+    history over the preceding `history_days` real trading days, the
+    same percentile-relative "tight relative to its OWN recent history"
+    approach crypto_selection_backtest.py's version uses - a stock's
+    normal daily range varies as much across symbols as a coin's does,
+    so this is never one fixed absolute threshold), checks whether the
+    very next real trading day's real FIRST bar opens above that narrow
+    day's own high (bullish breakout) or below its low (bearish) -
+    matching the account owner's own literal framing exactly ("when your
+    stock opens in the morning, the first bar..."). A day whose real
+    open falls INSIDE the narrow range's own high/low is not a real
+    breakout and is skipped, not scored as a miss.
+
+    Checks real follow-through `follow_bars` (26 default, ~one real
+    trading day of 15-min bars) real bars forward from that real opening
+    bar - flattening every remaining real bar across day boundaries so
+    "26 bars forward" means 26 real bars of real trading time, not
+    artificially truncated at each day's own close.
+
+    Returns a list of real event dicts: {date, direction ("up"/"down"),
+    open_price, forward_price, followed_through (bool),
+    forward_return_pct}."""
+    days = _group_bars_by_day(bars)
+    ranges = [_day_range_pct(day_bars) for _date, day_bars in days]
+    events = []
+    for i in range(history_days, len(days) - 1):
+        current = ranges[i]
+        if current is None:
+            continue
+        current_range_pct, day_high, day_low = current
+
+        hist = [r[0] for r in ranges[i - history_days:i] if r is not None]
+        if len(hist) < 10:
+            continue
+        hist_sorted = sorted(hist)
+        idx = min(int(len(hist_sorted) * percentile), len(hist_sorted) - 1)
+        threshold = hist_sorted[idx]
+        if current_range_pct > threshold:
+            continue  # not a genuinely narrow real day
+
+        next_date, next_day_bars = days[i + 1]
+        if not next_day_bars:
+            continue
+        open_price = next_day_bars[0]["o"]
+        if open_price > day_high:
+            direction = "up"
+        elif open_price < day_low:
+            direction = "down"
+        else:
+            continue  # opened INSIDE the narrow range - not a real breakout, don't score it either way
+
+        remaining = [b for _d, db in days[i + 1:] for b in db]
+        if len(remaining) <= follow_bars:
+            continue  # not enough real forward history to check follow-through
+        forward_price = remaining[follow_bars]["c"]
+        followed_through = (forward_price > open_price) if direction == "up" else (forward_price < open_price)
+        events.append({
+            "date": next_date, "direction": direction, "open_price": open_price,
+            "forward_price": forward_price, "followed_through": followed_through,
+            "forward_return_pct": (forward_price - open_price) / open_price,
+        })
+    return events
+
+
+def _summarize_narrow_breakout_events(events: list):
+    """Real hit-rate/avg-return summary for a list of breakout events -
+    None (not a fabricated 0%) when there are no real events to
+    summarize."""
+    if not events:
+        return None
+    hits = sum(1 for e in events if e["followed_through"])
+    return {
+        "count": len(events),
+        "hit_rate": round(hits / len(events), 4),
+        "avg_forward_return_pct": round(sum(e["forward_return_pct"] for e in events) / len(events), 4),
+    }
+
+
+async def run_narrow_range_breakout_backtest(symbols=None, days: int = BACKTEST_DAYS, max_concurrent: int = 6) -> dict:
+    """SHADOW-MODE, real historical Alpaca data, per-symbol AND
+    aggregate. Never places a real order, never touches live trading -
+    purely diagnostic, same posture as every other backtest tool in this
+    file. symbols=None (default) tests every real symbol prop_bot.py
+    trades (FUTURES.keys())."""
+    symbol_list = symbols if symbols is not None else list(FUTURES.keys())
+    semaphore = asyncio.Semaphore(max_concurrent)
+    last_error = {}
+
+    async def _one(session, symbol):
+        async with semaphore:
+            bars, err = await _fetch_bars_with_ohlc_and_times(session, symbol, days)
+        if bars is None:
+            last_error[symbol] = err
+            return symbol, None
+        return symbol, _replay_narrow_day_breakout(bars)
+
+    async with aiohttp.ClientSession() as session:
+        results = await asyncio.gather(*(_one(session, s) for s in symbol_list))
+
+    per_symbol = []
+    skipped = []
+    all_events = []
+    for symbol, events in results:
+        if events is None:
+            skipped.append({"product_id": symbol, "reason": last_error.get(symbol, "not enough real historical data")})
+            continue
+        up_events = [e for e in events if e["direction"] == "up"]
+        down_events = [e for e in events if e["direction"] == "down"]
+        per_symbol.append({
+            "product_id": symbol, "total_events": len(events),
+            "up_breakouts": _summarize_narrow_breakout_events(up_events),
+            "down_breakouts": _summarize_narrow_breakout_events(down_events),
+        })
+        all_events.extend(events)
+
+    up_all = [e for e in all_events if e["direction"] == "up"]
+    down_all = [e for e in all_events if e["direction"] == "down"]
+    combined_hit_rate = None
+    if all_events:
+        combined_hit_rate = round(sum(1 for e in all_events if e["followed_through"]) / len(all_events), 4)
+
+    return {
+        "symbols_tested": len(symbol_list), "symbols_with_results": len(per_symbol),
+        "skipped": skipped, "per_symbol": per_symbol,
+        "overall": {
+            "total_events": len(all_events),
+            "up_breakouts": _summarize_narrow_breakout_events(up_all),
+            "down_breakouts": _summarize_narrow_breakout_events(down_all),
+            "combined_hit_rate": combined_hit_rate,
+            "coin_flip_baseline": 0.5,
+        },
+        "params": {
+            "narrow_day_history_days": NARROW_DAY_HISTORY_DAYS,
+            "narrow_day_percentile": NARROW_DAY_PERCENTILE,
+            "follow_through_bars": NARROW_BREAKOUT_FOLLOW_BARS,
+        },
+    }

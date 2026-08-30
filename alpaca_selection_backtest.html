@@ -136,6 +136,13 @@
     <div id="entrySignalStatus"></div>
     <div id="liveVariantBadge" style="margin-top:14px;font-size:0.85em;color:var(--text-dim);"></div>
     <div id="entrySignalResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>🎯 Narrow-range breakout continuation - does it really hold?</strong> A real trading concept the account owner described directly: "the best opportunity come from a narrow state... when your stock opens in the morning, the first bar opens above a narrow state... 87% chance there are more upside to come... if you open below a narrow state... 87% chance to follow through to the downside." That 87% is their own stated number, not yet checked against real Alpaca data. Stocks get a more literal version of this test than crypto's 24/7 market can: real trading days are grouped, days whose own range is genuinely NARROW relative to that symbol's own recent range history are found, and the very next real trading day's actual FIRST bar is checked against that narrow day's own high/low - exactly "the first bar opens above/below." Reports the real hit rate, split by breakout direction, against an honest 50% coin-flip baseline. Shadow mode only - diagnostic, never wired to any real trade or entry filter.
+    </div>
+    <button class="run-btn" id="narrowRangeBtn" onclick="runNarrowRangeBreakoutBacktest()">▶ Run Narrow-Range Breakout Backtest (real data, ~30-60 seconds)</button>
+    <div id="narrowRangeStatus"></div>
+    <div id="narrowRangeResults"></div>
 </div>
 
 <script>
@@ -849,6 +856,94 @@ async function tradeThisStock(ticker, btn) {
         btn.textContent = originalText;
         alert('Could not place a trade on ' + ticker + ': ' + e.message);
     }
+}
+
+// Real narrow-range breakout-continuation backtest - the Alpaca-side
+// counterpart to the crypto page's own version. Per the account owner's
+// own real trading claim about narrow-range breakout continuation and
+// the literal "first bar of the morning" framing, tested here against
+// real historical Alpaca bars grouped into real trading days.
+async function runNarrowRangeBreakoutBacktest() {
+    const btn = document.getElementById('narrowRangeBtn');
+    const statusEl = document.getElementById('narrowRangeStatus');
+    const resultsEl = document.getElementById('narrowRangeResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real data, scanning every symbol for narrow days)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-selection-backtest/narrow-range-breakout', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderNarrowRangeBreakoutResults(data);
+        const o = data.overall;
+        const combinedStr = o.combined_hit_rate != null ? `${(o.combined_hit_rate * 100).toFixed(1)}%` : 'n/a (no real events found)';
+        statusEl.textContent = `Scanned ${data.symbols_with_results} symbols over ${data.params.narrow_day_history_days} real trading days of history each. `
+            + `${o.total_events} real breakout events found. Combined real hit rate: ${combinedStr} (coin-flip baseline: 50%).`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Narrow-Range Breakout Backtest (real data, ~30-60 seconds)';
+    }
+}
+
+function renderNarrowRangeBreakoutResults(data) {
+    const resultsEl = document.getElementById('narrowRangeResults');
+    const o = data.overall;
+
+    const fmtSummary = (s) => {
+        if (!s) return '<span style="color:var(--text-dim)">no real events</span>';
+        const color = s.hit_rate >= 0.5 ? 'pos' : 'neg';
+        return `<span class="${color}">${(s.hit_rate * 100).toFixed(1)}%</span> hit rate (${s.count} real events, avg ${(s.avg_forward_return_pct * 100).toFixed(2)}% forward move)`;
+    };
+
+    let html = `
+        <table>
+            <thead><tr><th></th><th>Real hit rate</th></tr></thead>
+            <tbody>
+                <tr><td>⬆️ Up breakouts (opened above a narrow day)</td><td>${fmtSummary(o.up_breakouts)}</td></tr>
+                <tr><td>⬇️ Down breakouts (opened below a narrow day)</td><td>${fmtSummary(o.down_breakouts)}</td></tr>
+                <tr><td><strong>Combined</strong></td><td><strong>${o.combined_hit_rate != null ? (o.combined_hit_rate * 100).toFixed(1) + '%' : 'n/a'}</strong> vs. a real 50% coin-flip baseline</td></tr>
+            </tbody>
+        </table>`;
+
+    if (data.per_symbol && data.per_symbol.length > 0) {
+        const rows = data.per_symbol
+            .filter(s => s.total_events > 0)
+            .sort((a, b) => b.total_events - a.total_events)
+            .map(s => `<tr>
+                <td>${s.product_id}</td>
+                <td>${s.total_events}</td>
+                <td>${fmtSummary(s.up_breakouts)}</td>
+                <td>${fmtSummary(s.down_breakouts)}</td>
+            </tr>`).join('');
+        html += `
+        <table style="margin-top:16px;">
+            <thead><tr><th>Symbol</th><th>Real events</th><th>Up hit rate</th><th>Down hit rate</th></tr></thead>
+            <tbody>${rows || '<tr><td colspan="4" style="color:var(--text-dim)">No symbol produced a real narrow-range breakout event on this sample.</td></tr>'}</tbody>
+        </table>`;
+    }
+
+    if (data.skipped && data.skipped.length > 0) {
+        html += `<p class="trade-note">Skipped: ${data.skipped.map(s => `${s.product_id} (${s.reason})`).join(', ')}</p>`;
+    }
+    html += `<p class="trade-note">A hit rate meaningfully above 50% on a real, decent-sized sample is real evidence the pattern holds for these symbols; a hit rate near 50% means the 87% figure isn't showing up here. This is diagnostic only - nothing here changes what any live bot buys or sells.</p>`;
+
+    resultsEl.innerHTML = html;
 }
 </script>
 </body>
