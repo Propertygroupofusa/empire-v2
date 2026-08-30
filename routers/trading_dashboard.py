@@ -5085,6 +5085,26 @@ async def set_grid_dynamic_spacing_endpoint(payload: SetGridDynamicSpacingReques
     return {"status": "updated", "dynamic_spacing_active": payload.enabled}
 
 
+class SetGridAutoRotateRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/grid-status/auto-rotate", dependencies=[Depends(require_admin_key)])
+async def set_grid_auto_rotate_endpoint(payload: SetGridAutoRotateRequest):
+    """Turns real automatic idle-cash rotation on or off - per the
+    account owner's explicit request that real idle cash should never
+    just sit there, it should keep moving toward whichever real coin is
+    currently doing well (see crypto_grid_bot.run_grid_auto_rotate_sweep).
+    On by default - reuses the exact same real coin-ranking signal
+    already live via the $20 Quick Buy button. Takes effect on the live
+    bot's very next scheduled sweep, no restart needed."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    await crypto_grid_bot_module.set_grid_auto_rotate_active(payload.enabled)
+    log.info(f"[dashboard] 🔁 Grid Bot automatic idle-cash rotation {'ENABLED' if payload.enabled else 'disabled'}")
+    return {"status": "updated", "auto_rotate_active": payload.enabled}
+
+
 class CreateGridBranchRequest(BaseModel):
     product_id: str
     allocated_usd: float

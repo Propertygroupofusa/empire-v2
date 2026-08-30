@@ -98,6 +98,36 @@ GRID_DRAWDOWN_BREAKER_PCT = float(os.getenv("GRID_DRAWDOWN_BREAKER_PCT", "0.25")
 # for the real backtest that should inform whether to ever turn this on.
 DYNAMIC_SPACING_MODE_KEY = "crypto_grid_dynamic_spacing_active"
 
+# Real, automatic idle-cash rotation - per the account owner's explicit
+# request: "why don't my system automatic[ally]... move it until the
+# next coin that is doing good... so the money will never stay idle and
+# keep growing." Unlike dynamic spacing above (a genuine live-strategy
+# change that needed backtest evidence first), this reuses the exact
+# same real coin-ranking signal already live and placing real orders via
+# the $20 Quick Buy button (pick_best_ranked_coin_for_grid - real
+# backtested ROI + live BTC-relative-strength) - so it's ON by default,
+# with a real dashboard toggle to turn it off. Never touches a branch
+# with real open slices (see _maybe_rotate_one_grid_branch) - only real,
+# genuinely idle cash sitting in a FLAT branch ever moves.
+GRID_AUTO_ROTATE_MODE_KEY = "crypto_grid_auto_rotate_active"
+# 30 min, per the account owner's own explicit choice (offered a real
+# fee-cost-vs-idle-time tradeoff directly: more frequent means real cash
+# rotates faster but pays more real trading fees moving small amounts
+# around; less frequent means fewer fees but longer real idle stretches).
+GRID_AUTO_ROTATE_INTERVAL_SECONDS = int(os.getenv("GRID_AUTO_ROTATE_INTERVAL_SECONDS", str(30 * 60)))
+# Below this, a real Coinbase round-trip (sell nothing / just a fresh
+# buy into the new branch) isn't worth the real trading fee it costs to
+# move - matches the same order-of-magnitude reasoning as MIN_TRADE_USD,
+# just a real notch higher since this is a discretionary optimization
+# move, not a required trade.
+GRID_AUTO_ROTATE_MIN_USD = float(os.getenv("GRID_AUTO_ROTATE_MIN_USD", "10.0"))
+# In-process throttle only (mirrors crypto_family_tree_bot.py's own
+# _last_auto_backtest_at pattern) - this is a single, long-running
+# coordinator thread, so a plain module-level timestamp is sufficient;
+# no DB persistence needed for a value that only ever needs to survive
+# within one process's lifetime.
+_last_grid_auto_rotate_at = 0.0
+
 # The real, fixed net-margin target this feature holds constant as the
 # account's real Coinbase fee tier changes - deliberately DERIVED from
 # today's live values so a branch trading at the base fee tier behaves
@@ -166,6 +196,32 @@ async def set_dynamic_spacing_active(enabled: bool):
         row = result.scalar_one_or_none()
         if row is None:
             row = TradingBotState(bot_name=DYNAMIC_SPACING_MODE_KEY, base_capital=0.0)
+            db.add(row)
+        row.base_capital = 1.0 if enabled else 0.0
+        await db.commit()
+
+
+async def is_grid_auto_rotate_active() -> bool:
+    """Real, DB-persisted toggle for automatic idle-cash rotation (see
+    run_grid_auto_rotate_sweep). Defaults to True - per the account
+    owner's own explicit request for this behavior, and because it
+    reuses the exact same real coin-ranking signal already live via the
+    $20 Quick Buy button, not a new, unvalidated strategy needing a
+    shadow-mode period first."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == GRID_AUTO_ROTATE_MODE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            return True
+        return bool(row.base_capital and row.base_capital >= 1.0)
+
+
+async def set_grid_auto_rotate_active(enabled: bool):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == GRID_AUTO_ROTATE_MODE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = TradingBotState(bot_name=GRID_AUTO_ROTATE_MODE_KEY, base_capital=0.0)
             db.add(row)
         row.base_capital = 1.0 if enabled else 0.0
         await db.commit()
@@ -734,6 +790,113 @@ async def pick_best_ranked_coin_for_grid() -> str:
     return await _first_ranked_coin_beating_btc([c.product_id for c in candidates])
 
 
+async def _best_available_coin_and_roi(exclude_bot_name: str = None) -> tuple:
+    """Real best-ranked coin AND its real ROI figure - the same
+    real signal pick_best_ranked_coin_for_grid() already uses (latest
+    CryptoBacktestRun ROI, the family tree's exclusion layers, the live
+    BTC-relative-strength tiebreak), but reports the real ROI back too so
+    a caller can compare it against what a specific branch already holds
+    - pick_best_ranked_coin_for_grid() alone can't answer "is my current
+    coin already the best one" because it always excludes every currently
+    ACTIVE branch's own claimed coin, including the branch asking the
+    question.
+
+    `exclude_bot_name`'s own claimed coin is treated as available (not
+    blocked by its own claim) - it's the branch whose idle cash is being
+    considered for a move, so its current coin is a legitimate candidate
+    for "no move needed, already the best."
+
+    Returns (None, None) if nothing real qualifies (no coin has a real
+    backtest run yet, or every ranked coin is excluded/claimed by some
+    OTHER active branch) - never raises, so an automatic caller can just
+    skip a branch this cycle rather than crash on a real data gap."""
+    import crypto_family_tree_bot as tree  # lazy - avoids a circular import at module load, same pattern as get_real_free_cash_usd above
+    from models import CryptoBacktestRun
+
+    excluded = await tree.get_effective_excluded_coins()
+    claimed = await get_grid_branch_claimed_coins()
+    if exclude_bot_name:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(CryptoGridBranch.product_id).where(CryptoGridBranch.bot_name == exclude_bot_name))
+            own_coin = result.scalar_one_or_none()
+        if own_coin:
+            claimed = claimed - {own_coin}
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(CryptoBacktestRun).order_by(CryptoBacktestRun.product_id, desc(CryptoBacktestRun.run_at))
+        )
+        rows = result.scalars().all()
+
+    latest_by_coin = {}
+    for row in rows:
+        if row.product_id not in latest_by_coin:
+            latest_by_coin[row.product_id] = row
+
+    candidates = [
+        row for pid, row in latest_by_coin.items()
+        if pid not in excluded and pid not in claimed
+    ]
+    if not candidates:
+        return None, None
+    candidates.sort(key=lambda r: r.roi_pct_of_spend, reverse=True)
+    best_pid = await _first_ranked_coin_beating_btc([c.product_id for c in candidates])
+    if best_pid is None:
+        return None, None
+    return best_pid, latest_by_coin[best_pid].roi_pct_of_spend
+
+
+async def _maybe_rotate_one_grid_branch(branch: CryptoGridBranch):
+    """Real, one-branch check for run_grid_auto_rotate_sweep() below -
+    also called immediately right after a real sell empties a branch out
+    to flat (see run_grid_branch_cycle), so a slice's freshly-realized
+    profit doesn't just sit waiting for the next scheduled sweep before
+    it goes back to work. Never touches a branch with real open slices -
+    those are actively working, not idle, and move_cash_between_grid_
+    branches() itself refuses a non-flat source as a second, independent
+    guard even if this check were ever somehow bypassed."""
+    slices = await get_grid_slices(branch.bot_name)
+    if slices:
+        return
+    if branch.allocated_usd < GRID_AUTO_ROTATE_MIN_USD:
+        return
+    best_pid, _best_roi = await _best_available_coin_and_roi(exclude_bot_name=branch.bot_name)
+    if best_pid is None or best_pid == branch.product_id:
+        return  # already the real best available coin, or nothing real to compare against - no pointless real trade
+    amount = branch.allocated_usd
+    result = await move_cash_between_grid_branches(branch.bot_name, amount, product_id=best_pid)
+    log.info(
+        f"[GRID] 🔁 auto-rotated ${amount:.2f} of real idle cash from {branch.bot_name} ({branch.product_id}) "
+        f"into {result['to_bot_name']} ({best_pid}) - real best-ranked coin available right now"
+    )
+
+
+async def run_grid_auto_rotate_sweep():
+    """Real, periodic automatic capital rotation across every FLAT grid
+    branch - per the account owner's explicit request: real idle cash
+    should never just sit there, it should keep moving toward whichever
+    real coin is currently doing well. Runs every GRID_AUTO_ROTATE_
+    INTERVAL_SECONDS (throttled in run_grid_branches_cycle(), not here),
+    checking every active branch in turn via _maybe_rotate_one_grid_
+    branch() - a branch with real open slices, too little idle cash, or
+    already sitting on the real best-available coin is left completely
+    alone. A per-branch failure (a real live-price fetch hiccup, a rare
+    claim race against a concurrent create) is logged and skipped rather
+    than aborting the whole sweep - every other branch still gets its own
+    real chance this cycle."""
+    if not await is_grid_auto_rotate_active():
+        return
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        return
+    for branch in await get_grid_branches():
+        if not branch.active:
+            continue
+        try:
+            await _maybe_rotate_one_grid_branch(branch)
+        except Exception as e:
+            log.warning(f"[GRID] auto-rotate check failed for {branch.bot_name} (non-fatal, will retry next sweep): {e}")
+
+
 async def quick_buy_best_coin(amount_usd: float) -> dict:
     """The real $20 Quick Buy button's backend - per the account owner's
     explicit request for "a button that I can put $20 in... it'll place
@@ -982,6 +1145,21 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
         )
         log.info(f"[GRID] {msg}")
         await _log_activity_safe(branch.bot_name, branch.product_id, "SELL", msg)
+        # Real "settle immediately" check - only when THIS sale emptied
+        # the branch out to flat (its own last open slice), so freshly-
+        # realized profit doesn't just sit waiting for the next scheduled
+        # 30-min sweep before it goes back to work. Best-effort: a
+        # failure here can never unwind or affect the real sale that
+        # already completed above.
+        if len(slices) == 1:
+            try:
+                async with AsyncSessionLocal() as db:
+                    fresh_result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
+                    fresh_branch = fresh_result.scalar_one_or_none()
+                if fresh_branch and fresh_branch.active:
+                    await _maybe_rotate_one_grid_branch(fresh_branch)
+            except Exception as e:
+                log.warning(f"[GRID] {branch.bot_name}: post-sale auto-rotate check failed (non-fatal, will retry next sweep): {e}")
         return
 
 
@@ -1001,6 +1179,23 @@ async def run_grid_branches_cycle():
             except Exception as e:
                 log.error(f"[GRID] {branch.bot_name} cycle error: {e}")
             await asyncio.sleep(0.5)
+
+    # Real, periodic automatic idle-cash rotation - throttled here (not
+    # inside run_grid_auto_rotate_sweep itself) via a plain in-process
+    # timestamp, same pattern crypto_family_tree_bot.py's own scheduled-
+    # backtest throttle already uses. Runs after every branch's own
+    # normal buy/sell check above, so a branch that just went flat this
+    # exact cycle is already picked up by the immediate post-sale check
+    # in run_grid_branch_cycle() - this periodic sweep exists for real
+    # idle cash that's been sitting for a while, not freshly realized.
+    global _last_grid_auto_rotate_at
+    now = time.time()
+    if now - _last_grid_auto_rotate_at >= GRID_AUTO_ROTATE_INTERVAL_SECONDS:
+        _last_grid_auto_rotate_at = now
+        try:
+            await run_grid_auto_rotate_sweep()
+        except Exception as e:
+            log.error(f"[GRID] auto-rotate sweep error: {e}")
 
 
 async def get_grid_status() -> dict:
@@ -1093,6 +1288,8 @@ async def get_grid_status() -> dict:
     return {
         "mode_active": mode_active,
         "dynamic_spacing_active": await is_dynamic_spacing_active(),
+        "auto_rotate_active": await is_grid_auto_rotate_active(),
+        "auto_rotate_interval_minutes": GRID_AUTO_ROTATE_INTERVAL_SECONDS // 60,
         "drawdown_breaker_pct": GRID_DRAWDOWN_BREAKER_PCT,
         "branch_count": len(branches),
         "total_allocated_usd": round(total_allocated, 2),
