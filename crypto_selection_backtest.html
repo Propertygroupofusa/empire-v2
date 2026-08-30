@@ -128,6 +128,13 @@
     <div id="tfResults"></div>
 
     <div class="note" style="margin-top: 28px;">
+        <strong>RSI 30/70 + support/resistance structure:</strong> a real proposal, tested rather than assumed - "RSI 70/30 on the 1hr, structure and levels should help boost the accuracy." Support/resistance is operationalized honestly as the real rolling low/high over the last 72 real hours (a previous low or breakdown level, and a previous high) - the same real proxy this page's own Swing Trading strategy already uses for "support," not a vaguer, unvalidatable notion of chart structure. This runs the same real target/stop/breakeven/trailing-stop replay TWICE per coin on the same real historical hourly candles - once as-is (baseline), and once requiring BOTH real RSI(14) below 30 AND price within 2% of a real recent support zone before entering. Shadow mode only - this does not change what the live bot buys.
+    </div>
+    <button class="run-btn" id="srBtn" onclick="runSupportResistance()">▶ Run RSI + Support/Resistance Comparison (~30-90 seconds)</button>
+    <div id="srStatus"></div>
+    <div id="srResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
         <strong>QUICK_PROFIT vs. trailing stop (historical evidence):</strong> this is the real comparison that already settled the question - QUICK_PROFIT (take any real profit the instant it clears fees) lost on every coin tested, trailing stop (hold past the real target and trail a stop behind the peak, only exiting on a genuine reversal) won on all of them. QUICK_PROFIT has since been removed as a live option entirely; this table is kept as the historical evidence for why. Shadow mode only - re-running it does not change what the live bot does.
     </div>
     <button class="run-btn" id="qpBtn" onclick="runQuickProfitVsTrailingStop()">▶ Run QUICK_PROFIT vs. Trailing Stop Comparison (~30-90 seconds)</button>
@@ -607,6 +614,75 @@ function renderHigherTfTrendResults(data) {
             <tbody>${rows}</tbody>
         </table>
         <p class="trade-note">"Filtered" only enters a position when the coin's own real SMA${data.sma_short} is above its SMA${data.sma_long} (hourly) - same real target/stop/breakeven/giveback exit rules either way. A positive "ROI change" means the trend filter would have genuinely helped that coin; negative means it would have cost real trades that were actually fine.</p>
+    `;
+}
+
+async function runSupportResistance() {
+    const btn = document.getElementById('srBtn');
+    const statusEl = document.getElementById('srStatus');
+    const resultsEl = document.getElementById('srResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real data, two replays per coin)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/crypto-selection-backtest/support-resistance', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderSupportResistanceResults(data);
+        statusEl.textContent = `Compared ${data.coins_with_results} coins over ${data.backtest_days} days - RSI below ${data.rsi_oversold} AND within ${data.proximity_pct}% of a real ${data.lookback_hours}h support zone, $${data.spend_per_trade} redeployed per trade.`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run RSI + Support/Resistance Comparison (~30-90 seconds)';
+    }
+}
+
+function renderSupportResistanceResults(data) {
+    const resultsEl = document.getElementById('srResults');
+    if (!data.comparison || data.comparison.length === 0) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No coins produced usable comparison results.</p>';
+        return;
+    }
+    const rows = data.comparison.map(r => {
+        const b = r.baseline;
+        const f = r.with_sr_filter;
+        const bRoi = b ? b.roi_pct_of_spend : null;
+        const fRoi = f ? f.roi_pct_of_spend : null;
+        const delta = (bRoi != null && fRoi != null) ? fRoi - bRoi : null;
+        const deltaHtml = delta == null ? '—' : `<span class="${delta >= 0 ? 'pos' : 'neg'}">${delta >= 0 ? '+' : ''}${delta.toFixed(1)}pp</span>`;
+        return `<tr>
+            <td>${r.product_id}</td>
+            <td>${b ? b.num_trades : 0}</td>
+            <td class="${bRoi != null && bRoi >= 0 ? 'pos' : 'neg'}">${bRoi != null ? (bRoi >= 0 ? '+' : '') + bRoi.toFixed(1) + '%' : '—'}</td>
+            <td>${f ? f.num_trades : 0}</td>
+            <td class="${fRoi != null && fRoi >= 0 ? 'pos' : 'neg'}">${fRoi != null ? (fRoi >= 0 ? '+' : '') + fRoi.toFixed(1) + '%' : '—'}</td>
+            <td>${deltaHtml}</td>
+        </tr>`;
+    }).join('');
+
+    resultsEl.innerHTML = `
+        <table>
+            <thead><tr>
+                <th>Coin</th><th>Baseline trades</th><th>Baseline ROI</th><th>Filtered trades</th><th>Filtered ROI</th><th>ROI change</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+        <p class="trade-note">"Filtered" only enters when real RSI(14, hourly) is below ${data.rsi_oversold} AND price is within ${data.proximity_pct}% of a real recent support zone (the lowest low over the last ${data.lookback_hours} real hours) - same real target/stop/breakeven/trailing-stop exit rules either way. A positive "ROI change" means the real claimed accuracy boost actually held up on this coin; negative means the filter would have cost real trades that were actually fine, or blocked too much to matter. Fewer filtered trades than baseline is expected - this is a stricter, not looser, entry condition.</p>
     `;
 }
 

@@ -2669,6 +2669,29 @@ async def run_higher_tf_trend_backtest():
     return await crypto_selection_backtest_module.run_higher_tf_trend_comparison()
 
 
+@router.post("/crypto-selection-backtest/support-resistance", dependencies=[Depends(require_admin_key)])
+async def run_support_resistance_backtest():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders,
+    and no bot reads this result yet. Tests the account owner's own real
+    proposal directly: RSI 70/30 on the 1hr chart, plus real support/
+    resistance structure, to see whether it actually "boost[s] the
+    accuracy" as claimed - rather than assuming it. Runs the exact same
+    real target/stop/breakeven/trailing-stop replay as
+    /crypto-selection-backtest, twice per coin, on the exact same real
+    historical hourly candles: once with no entry filter (baseline) and
+    once gated by real RSI(30, oversold) plus proximity to a real recent
+    support zone (a previous low / previous breakdown level), so the two
+    are directly comparable. Does not change what the live bot buys
+    unless/until wired into the live selection path separately, on
+    purpose - this is a read-only comparison report.
+
+    Pulls real historical data from Coinbase's public candles endpoint -
+    can take 30-90 seconds depending on that endpoint's response time."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_support_resistance_comparison()
+
+
 @router.post("/crypto-selection-backtest/quick-profit-vs-trailing-stop", dependencies=[Depends(require_admin_key)])
 async def run_quick_profit_vs_trailing_stop_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.

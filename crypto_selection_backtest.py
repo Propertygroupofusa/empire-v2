@@ -622,6 +622,113 @@ async def run_higher_tf_trend_comparison(coins=None, days=BACKTEST_DAYS, sma_sho
     }
 
 
+SR_LOOKBACK_HOURS = 72  # 3 real days of hourly candles - a real, stated proxy for "recent chart structure" on the 1hr timeframe requested
+SR_RSI_OVERSOLD = 30  # TradingView's own classic RSI threshold, per the account owner's explicit request - deliberately distinct from this codebase's other real RSI conventions (engine.ENTRY_MAX_RSI=65 for overbought, mean-reversion's own RSI<40), tested here as its own real hypothesis rather than silently substituted for either
+SR_SUPPORT_PROXIMITY_PCT = 0.02  # same real 2% tolerance _replay_swing_trading's own "near_support" check already uses (price <= rolling_low * 1.02) - reused for consistency, not a new arbitrary number
+
+
+def _find_support_resistance(closes, i, lookback_hours=SR_LOOKBACK_HOURS):
+    """Real, concrete proxy for the two liquidity zones the account owner
+    asked about directly - "is there any support area, check for
+    previous high or previous breakdown area, any resistance zone" -
+    operationalized the same honest way _replay_swing_trading() already
+    treats "support" elsewhere in this file (a real rolling low), rather
+    than inventing a vaguer, unvalidatable notion of "structure."
+    Support = the real lowest low in the lookback window (a previous
+    low / previous breakdown level); resistance = the real highest high
+    in the same window (a previous high). Returns (support, resistance),
+    or (None, None) if there isn't yet lookback_hours of real history."""
+    if i < lookback_hours:
+        return None, None
+    window = closes[i - lookback_hours:i + 1]
+    return min(window), max(window)
+
+
+def _make_support_resistance_gate(closes, rsi_oversold=SR_RSI_OVERSOLD, lookback_hours=SR_LOOKBACK_HOURS, proximity_pct=SR_SUPPORT_PROXIMITY_PCT):
+    """Returns an entry_gate(i) closure for backtest_one_coin(), testing
+    the account owner's own real proposal directly: RSI 70/30 on the 1hr
+    chart, plus real structure/levels, to see if it "boost[s] the
+    accuracy." Only allows a new entry when BOTH are real: RSI(14,
+    hourly) is oversold (below rsi_oversold) AND price is sitting within
+    proximity_pct of a real recent support zone (see
+    _find_support_resistance above) - buying an oversold dip that's also
+    sitting at a real historical floor, not just any oversold dip
+    wherever price happens to be right now. Free pass (True) until
+    there's enough real history for both the RSI and the lookback window
+    - never blocks on missing data, the same rule every other gate in
+    this file already follows."""
+    def gate(i):
+        if i < lookback_hours:
+            return True
+        rsi = engine._rsi_from_closes(closes[:i + 1])
+        if rsi is None:
+            return True  # not enough real history for RSI yet - don't block on missing data
+        if rsi >= rsi_oversold:
+            return False  # not genuinely oversold - the core RSI signal isn't there
+        support, _resistance = _find_support_resistance(closes, i, lookback_hours)
+        if support is None:
+            return True  # not enough real history for the lookback window yet
+        return closes[i] <= support * (1 + proximity_pct)
+    return gate
+
+
+async def run_support_resistance_comparison(coins=None, days=BACKTEST_DAYS, rsi_oversold=SR_RSI_OVERSOLD,
+                                              lookback_hours=SR_LOOKBACK_HOURS, proximity_pct=SR_SUPPORT_PROXIMITY_PCT,
+                                              max_concurrent=6):
+    """SHADOW-MODE, additive comparison - same pattern as
+    run_higher_tf_trend_comparison/run_btc_relative_strength_comparison
+    above. Direct answer to the account owner's own real proposal (RSI
+    70/30 on the 1hr chart plus real support/resistance structure -
+    "should help boost the accuracy by 20%"): TESTS that claim against
+    real historical data rather than assuming it, the same "evidence
+    before any live change" rule every other strategy question in this
+    file already follows. Runs the exact same real target/stop/breakeven/
+    trailing-stop replay twice per coin on identical real historical
+    hourly candles - baseline (unfiltered) vs the new RSI(30)+support-zone
+    gate - so the two are directly, fairly comparable. Never wired into
+    live trading; this only informs whether it's worth doing so."""
+    coins = coins or COIN_FAMILY_TREE
+    semaphore = asyncio.Semaphore(max_concurrent)
+    async with aiohttp.ClientSession() as session:
+        async def _one(product_id):
+            async with semaphore:
+                candles = await fetch_historical_candles(session, product_id, days=days)
+            if candles is None:
+                return product_id, None, "not enough historical data"
+            closes, highs, lows, _times = candles
+            baseline = backtest_one_coin(closes, highs, lows)
+            gate = _make_support_resistance_gate(closes, rsi_oversold=rsi_oversold, lookback_hours=lookback_hours, proximity_pct=proximity_pct)
+            filtered = backtest_one_coin(closes, highs, lows, entry_gate=gate)
+            return product_id, {"baseline": baseline, "with_sr_filter": filtered}, None
+
+        outcomes = await asyncio.gather(*(_one(pid) for pid in coins))
+
+    comparison = []
+    skipped = []
+    for product_id, result, skip_reason in outcomes:
+        if result is None:
+            skipped.append({"product_id": product_id, "reason": skip_reason})
+            continue
+        comparison.append({"product_id": product_id, **result})
+
+    def _sort_key(row):
+        filtered = row["with_sr_filter"]
+        return filtered["roi_pct_of_spend"] if filtered else -999.0
+    comparison.sort(key=_sort_key, reverse=True)
+
+    return {
+        "backtest_days": days,
+        "rsi_oversold": rsi_oversold,
+        "lookback_hours": lookback_hours,
+        "proximity_pct": round(proximity_pct * 100, 1),
+        "spend_per_trade": SPEND,
+        "coins_tested": len(coins),
+        "coins_with_results": len(comparison),
+        "skipped": skipped,
+        "comparison": comparison,
+    }
+
+
 async def run_btc_relative_strength_comparison(coins=None, days=BACKTEST_DAYS, lookback_hours=25, max_concurrent=6):
     """SHADOW-MODE, additive comparison tool - does NOT touch or replace
     run_full_backtest()/backtest_one_coin()'s existing baseline behavior,
