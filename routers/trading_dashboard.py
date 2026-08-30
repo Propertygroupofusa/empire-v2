@@ -2813,6 +2813,39 @@ async def run_wide_state_contrarian_backtest_endpoint():
     return await crypto_selection_backtest_module.run_wide_state_contrarian_backtest()
 
 
+@router.post("/crypto-selection-backtest/opening-bar-short-side", dependencies=[Depends(require_admin_key)])
+async def run_opening_bar_short_side_backtest_endpoint():
+    """SHADOW-MODE ONLY, DIAGNOSTIC ONLY - does not touch live trading,
+    places no orders. The real bearish mirror of the live Elephant/Tail
+    breakout system above, transcribed directly: "opens below with a
+    red elephant or opens below with one of the topping tail bars...
+    these bars below and these bars above the narrow state." Real RED
+    Elephant Bar or topping Tail bar breaking below a narrow state, a
+    real SHORT entry the instant bar 2's price crosses bar 1's low minus
+    $0.01, a real stop at bar 1's own high, a real exit on a second
+    downside push. Never places a real order - and never could: the
+    crypto side has no real short-selling mechanism at all today."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_opening_bar_short_side_backtest()
+
+
+@router.post("/crypto-selection-backtest/scaled-entry-comparison", dependencies=[Depends(require_admin_key)])
+async def run_scaled_entry_comparison_backtest_endpoint():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    The account owner's own real scaling-in mechanic, transcribed
+    directly: "you want to go in and then in and then in... usually two
+    adds... let me put half in... that add arrow is one penny above the
+    high of a single red bar." Replays the IDENTICAL real qualifying
+    Elephant/Tail setups two ways on the same real data - the existing
+    single-shot entry vs. a real half-in-then-two-adds scaling mechanic
+    - so "does scaling in actually help" gets a real, direct answer.
+    Never places a real order."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_scaled_entry_comparison_backtest()
+
+
 @router.post("/crypto-selection-backtest/strategy-lab", dependencies=[Depends(require_admin_key)])
 async def run_strategy_lab_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
@@ -3192,6 +3225,31 @@ async def run_alpaca_wide_state_contrarian_backtest():
     if alpaca_selection_backtest_module is None:
         raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
     return await alpaca_selection_backtest_module.run_wide_state_contrarian_backtest()
+
+
+@router.post("/alpaca-selection-backtest/opening-bar-short-side", dependencies=[Depends(require_admin_key)])
+async def run_alpaca_opening_bar_short_side_backtest():
+    """SHADOW-MODE ONLY, DIAGNOSTIC ONLY - never touches live trading,
+    places no order. The Alpaca-side counterpart to the crypto bearish-
+    mirror backtest above: a real RED Elephant Bar or topping Tail bar
+    breaking below a real narrow state. Never places a real order -
+    prop_bot.py's real shorting is a documented, confirmed account-level
+    restriction, not a bug in this backtest."""
+    if alpaca_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+    return await alpaca_selection_backtest_module.run_opening_bar_short_side_backtest()
+
+
+@router.post("/alpaca-selection-backtest/scaled-entry-comparison", dependencies=[Depends(require_admin_key)])
+async def run_alpaca_scaled_entry_comparison_backtest():
+    """SHADOW-MODE ONLY - never touches live trading, places no order.
+    The Alpaca-side counterpart to the crypto scaled-entry comparison
+    above - replays the IDENTICAL real qualifying Elephant/Tail setups
+    two ways: the existing single-shot entry vs. the account owner's own
+    real half-in-then-two-adds scaling mechanic."""
+    if alpaca_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+    return await alpaca_selection_backtest_module.run_scaled_entry_comparison_backtest()
 
 
 def _safe_float(v):

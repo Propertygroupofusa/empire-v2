@@ -164,6 +164,20 @@
     <button class="run-btn" id="wideStateBtn" onclick="runWideStateContrarianBacktest()">▶ Run Wide-State Contrarian Backtest (real data, ~60-180 seconds)</button>
     <div id="wideStateStatus"></div>
     <div id="wideStateResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>🐻 The bearish mirror: RED elephant / topping Tail breaking BELOW a narrow state</strong> transcribed directly: "opens below with a red elephant or opens below with one of the topping tail bars... these bars below and these bars above the narrow state." The exact same real mechanics as the Elephant/Tail system above, flipped: a real RED "power bar" or a real topping Tail (long UPPER wick) as bar 1, a real SHORT entry the instant bar 2's price crosses bar 1's low MINUS $0.01, a real stop at bar 1's own HIGH, exit on a second downside push. <strong>DIAGNOSTIC ONLY</strong> - prop_bot.py's real shorting is a documented, confirmed account-level restriction, so this can never place a real order regardless of what the numbers show; it exists purely so the account owner's full real system can be judged, not just its tradeable long half.
+    </div>
+    <button class="run-btn" id="shortSideBtn" onclick="runOpeningBarShortSideBacktest()">▶ Run Bearish-Mirror Short-Side Backtest (diagnostic only, real data, ~60-180 seconds)</button>
+    <div id="shortSideStatus"></div>
+    <div id="shortSideResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>📈 Scaling in: half now, then up to two real adds</strong> transcribed directly: "you want to go in and then in and then in... usually two adds... let me put half in... that add arrow is one penny above the high of a single red bar." This session's own concrete reading of that real, informally-described mechanic: half the real $500 at the original trigger, then up to two real 25% adds - each fired the instant a later bar trades one penny past the high of the most recent single real red pullback bar. The real stop and exit are completely unchanged from the single-shot version above; only the entry sizing differs. Replays the IDENTICAL real qualifying setups both ways so you can see whether scaling in actually beats going all-in at once, on the same real data.
+    </div>
+    <button class="run-btn" id="scaledEntryBtn" onclick="runScaledEntryComparisonBacktest()">▶ Run Scaled-Entry vs. Single-Shot Comparison (real data, ~60-180 seconds)</button>
+    <div id="scaledEntryStatus"></div>
+    <div id="scaledEntryResults"></div>
 </div>
 
 <script>
@@ -1187,6 +1201,148 @@ function renderWideStateContrarianResults(data) {
         html += `<p class="trade-note">Skipped: ${data.skipped.map(s => `${s.product_id} (${s.reason})`).join(', ')}</p>`;
     }
     html += `<p class="trade-note">Only the LONG (wide_down) row reflects a real trade prop_bot.py can actually place today - a positive real total there is real, actionable evidence. The SHORT row is included purely so the idea can be judged in full; it can't be acted on until real short-selling capability exists on this account. Diagnostic only - nothing here changes what any live bot buys or sells.</p>`;
+    resultsEl.innerHTML = html;
+}
+
+// Real bearish-mirror short-side backtest (RED Elephant / topping Tail
+// breaking below a narrow state) - DIAGNOSTIC ONLY, prop_bot.py's real
+// shorting is a documented, confirmed account-level restriction.
+async function runOpeningBarShortSideBacktest() {
+    const btn = document.getElementById('shortSideBtn');
+    const statusEl = document.getElementById('shortSideStatus');
+    const resultsEl = document.getElementById('shortSideResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real 2-min Alpaca data, scanning for real RED elephant/topping tail setups)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-selection-backtest/opening-bar-short-side', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderOpeningBarShortSideResults(data);
+        const o = data.overall;
+        if (o) {
+            statusEl.textContent = `Scanned ${data.symbols_with_results} symbols over ${data.params.days} real days. ${o.num_trades} real diagnostic SHORT trades, ${(o.win_rate * 100).toFixed(1)}% win rate, real total P&L $${o.total_pnl.toFixed(2)}. Diagnostic only - not live-executable.`;
+        } else {
+            statusEl.textContent = `Scanned ${data.symbols_with_results} symbols - no real qualifying RED elephant/topping tail setups found in this window.`;
+        }
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Bearish-Mirror Short-Side Backtest (diagnostic only, real data, ~60-180 seconds)';
+    }
+}
+
+function renderOpeningBarShortSideResults(data) {
+    const resultsEl = document.getElementById('shortSideResults');
+    if (!data.per_symbol || data.per_symbol.length === 0) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No symbol produced a real qualifying RED elephant/topping tail setup on this sample.</p>';
+        return;
+    }
+    const rows = data.per_symbol
+        .sort((a, b) => b.total_pnl - a.total_pnl)
+        .map(s => `<tr>
+            <td>${s.product_id}</td>
+            <td>${s.num_trades}</td>
+            <td>${(s.win_rate * 100).toFixed(1)}%</td>
+            <td class="${s.total_pnl >= 0 ? 'pos' : 'neg'}">${s.total_pnl >= 0 ? '+' : ''}$${s.total_pnl.toFixed(2)}</td>
+        </tr>`).join('');
+    let html = `
+        <table>
+            <thead><tr><th>Symbol</th><th>Real diagnostic SHORT trades</th><th>Win rate</th><th>Total P&amp;L ($500/trade)</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+    if (data.skipped && data.skipped.length > 0) {
+        html += `<p class="trade-note">Skipped: ${data.skipped.map(s => `${s.product_id} (${s.reason})`).join(', ')}</p>`;
+    }
+    html += `<p class="trade-note">DIAGNOSTIC ONLY - this is a real backtest of the account owner's own bearish-mirror idea, but prop_bot.py's real shorting is a documented, confirmed account-level restriction, so nothing here could ever be traded live regardless of the result. Included purely so the full real system can be judged, not just its tradeable long half.</p>`;
+    resultsEl.innerHTML = html;
+}
+
+// Real scaled-entry (half-in, then two real adds) vs. single-shot
+// comparison - the Alpaca-side counterpart to the crypto page's own
+// version.
+function fmtScaledBucket(s) {
+    if (!s) return '<span style="color:var(--text-dim)">no real trades</span>';
+    const cls = s.total_pnl >= 0 ? 'pos' : 'neg';
+    return `${s.num_trades} trades, <span class="${cls}">${(s.win_rate * 100).toFixed(1)}% win rate, ${s.total_pnl >= 0 ? '+' : ''}$${s.total_pnl.toFixed(2)}</span>`;
+}
+
+async function runScaledEntryComparisonBacktest() {
+    const btn = document.getElementById('scaledEntryBtn');
+    const statusEl = document.getElementById('scaledEntryStatus');
+    const resultsEl = document.getElementById('scaledEntryResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real 2-min Alpaca data, replaying every real setup both ways)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-selection-backtest/scaled-entry-comparison', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderScaledEntryComparisonResults(data);
+        statusEl.textContent = `Scanned ${data.symbols_with_results} symbols over ${data.params.days} real days each - half in, then up to ${data.params.max_adds} real ${(data.params.add_fraction * 100).toFixed(0)}% adds.`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Scaled-Entry vs. Single-Shot Comparison (real data, ~60-180 seconds)';
+    }
+}
+
+function renderScaledEntryComparisonResults(data) {
+    const resultsEl = document.getElementById('scaledEntryResults');
+    const o = data.overall;
+    let html = `
+        <table>
+            <thead><tr><th></th><th>Single-shot (all-at-once)</th><th>Scaled (half + up to 2 adds)</th></tr></thead>
+            <tbody>
+                <tr><td><strong>Combined (all symbols)</strong></td><td>${fmtScaledBucket(o.single_shot)}</td><td>${fmtScaledBucket(o.scaled)}</td></tr>
+            </tbody>
+        </table>`;
+    if (data.per_symbol && data.per_symbol.length > 0) {
+        const rows = data.per_symbol.map(s => `<tr>
+            <td>${s.product_id}</td>
+            <td>${fmtScaledBucket(s.single_shot)}</td>
+            <td>${fmtScaledBucket(s.scaled)}</td>
+        </tr>`).join('');
+        html += `
+        <table style="margin-top:16px;">
+            <thead><tr><th>Symbol</th><th>Single-shot</th><th>Scaled</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+    }
+    if (data.skipped && data.skipped.length > 0) {
+        html += `<p class="trade-note">Skipped: ${data.skipped.map(s => `${s.product_id} (${s.reason})`).join(', ')}</p>`;
+    }
+    html += `<p class="trade-note">Both columns replay the exact same real qualifying setups - only the entry sizing differs, so any real difference in total P&amp;L reflects the scaling mechanic itself, not different trades. Diagnostic only - nothing here changes what the live bot does on its own.</p>`;
     resultsEl.innerHTML = html;
 }
 </script>

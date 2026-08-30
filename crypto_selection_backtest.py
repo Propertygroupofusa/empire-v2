@@ -2841,6 +2841,347 @@ async def run_wide_state_contrarian_backtest(coins=None, days: int = OPENING_BAR
     }
 
 
+def _is_red_elephant_bar(bar: dict, preceding_bars: list, min_size_multiple: float = ELEPHANT_BAR_MIN_SIZE_MULTIPLE,
+                          lookback: int = ELEPHANT_BAR_LOOKBACK) -> bool:
+    """The real bearish mirror of _is_elephant_bar - a real RED
+    "power bar" the account owner described directly: "you can get a
+    power bar to the downside... red solid power." A real RED bar
+    (close < open) whose own range is at least `min_size_multiple`
+    (1.5x default) the average range of the last real RED bars among
+    `preceding_bars` (needs at least 3 real red preceding bars to judge
+    against, same real minimum-evidence floor as the green version -
+    never guesses off too little history)."""
+    if bar["c"] >= bar["o"]:
+        return False
+    reds = [b for b in preceding_bars[-lookback:] if b["c"] < b["o"]]
+    if len(reds) < 3:
+        return False
+    avg_range = sum(b["h"] - b["l"] for b in reds) / len(reds)
+    if avg_range <= 0:
+        return False
+    return (bar["h"] - bar["l"]) >= min_size_multiple * avg_range
+
+
+def _is_topping_tail_bar(bar: dict, min_wick_fraction: float = TAIL_BAR_MIN_WICK_FRACTION) -> bool:
+    """The real bearish mirror of _is_bottoming_tail_bar - a real long
+    UPPER wick rejection candle (a real failed push higher, price
+    rejected back down), the real opposite of the bottoming Tail's long
+    lower wick. Returns False on a real zero-range bar (no real
+    division by zero, same guard as the bottoming version)."""
+    total_range = bar["h"] - bar["l"]
+    if total_range <= 0:
+        return False
+    upper_wick = bar["h"] - max(bar["o"], bar["c"])
+    return (upper_wick / total_range) >= min_wick_fraction
+
+
+def _replay_opening_bar_breakout_short(session_bars: list, preceding_bars: list, spend: float = OPENING_BAR_SPEND_USD):
+    """The real bearish mirror of _replay_opening_bar_breakout - per the
+    account owner's own direct description of the same system applied
+    to the downside: a real RED Elephant Bar or a real topping Tail bar
+    as bar 1, a real SHORT entry the instant bar 2's real price crosses
+    bar 1's low MINUS $0.01 (never waiting for bar 2 to close), a real
+    protective stop at bar 1's own HIGH for the life of the trade, and a
+    real exit once a second downside "push" confirms (a new real lower
+    low following a genuine real bounce from the running trough) or the
+    real session ends.
+
+    DIAGNOSTIC ONLY, by explicit design - neither live bot in this
+    codebase can actually place a real short order today (a documented,
+    confirmed account-level restriction on the Alpaca side; the crypto
+    side has no short mechanism at all). This function exists to let the
+    account owner's own full real system be judged in full, not to
+    suggest it's tradeable as-is.
+
+    Returns a real trade dict, or None if no real trade fired today."""
+    if len(session_bars) < 3:
+        return None
+    bar1 = session_bars[0]
+    is_red_elephant = _is_red_elephant_bar(bar1, preceding_bars)
+    is_topping_tail = _is_topping_tail_bar(bar1)
+    if not (is_red_elephant or is_topping_tail):
+        return None
+
+    trigger_price = bar1["l"] - OPENING_BAR_ENTRY_BUFFER_USD
+    stop_price = bar1["h"]
+    bar2 = session_bars[1]
+    if bar2["l"] > trigger_price:
+        return None
+
+    entry_price = trigger_price
+    qty = spend / entry_price
+    qualifies_as = "red_elephant" if is_red_elephant else "topping_tail"
+
+    def _result(exit_price, exit_reason, exit_index):
+        pnl_usd = qty * (entry_price - exit_price)
+        return {
+            "qualifies_as": qualifies_as, "entry_price": entry_price, "stop_price": stop_price,
+            "exit_price": exit_price, "exit_reason": exit_reason, "exit_index": exit_index,
+            "pnl_usd": round(pnl_usd, 2), "pnl_pct": round((entry_price - exit_price) / entry_price, 4),
+        }
+
+    trough = entry_price
+    pushes = 1
+    in_bounce = False
+    for i in range(2, len(session_bars)):
+        b = session_bars[i]
+        if b["h"] >= stop_price:
+            return _result(stop_price, "STOP", i)
+        if b["l"] < trough:
+            if in_bounce:
+                pushes += 1
+                in_bounce = False
+                if pushes >= 2:
+                    return _result(b["l"], f"PUSH_{pushes}", i)
+            trough = b["l"]
+        elif not in_bounce and trough > 0 and (b["h"] - trough) / trough >= PUSH_MIN_PULLBACK_PCT:
+            in_bounce = True
+
+    last = session_bars[-1]
+    return _result(last["c"], "SESSION_END", len(session_bars) - 1)
+
+
+async def run_opening_bar_short_side_backtest(coins=None, days: int = OPENING_BAR_DAYS, max_concurrent: int = 4) -> dict:
+    """SHADOW-MODE, DIAGNOSTIC ONLY - the real bearish mirror of the live
+    Elephant/Tail system: a real RED elephant bar or topping Tail bar
+    breaking below a real narrow state. Never places a real order, and
+    never could - the crypto side has no real short-selling mechanism at
+    all today. coins=None (default) tests every real coin in
+    COIN_FAMILY_TREE."""
+    coin_list = coins if coins is not None else list(COIN_FAMILY_TREE)
+    semaphore = asyncio.Semaphore(max_concurrent)
+    last_error = {}
+
+    async def _one(session, product_id):
+        async with semaphore:
+            one_min = await _fetch_1min_candles_window(session, product_id, days=days, last_error_out=last_error)
+        if one_min is None:
+            return product_id, None
+        two_min = _aggregate_to_2min_bars(one_min)
+        sessions = _group_2min_bars_into_sessions(two_min)
+        trades = []
+        for i in range(1, len(sessions)):
+            _key, session_bars = sessions[i]
+            preceding_bars = sessions[i - 1][1][-ELEPHANT_BAR_LOOKBACK * 2:]
+            trade = _replay_opening_bar_breakout_short(session_bars, preceding_bars)
+            if trade is not None:
+                trades.append(trade)
+        return product_id, trades
+
+    async with aiohttp.ClientSession() as session:
+        results = await asyncio.gather(*(_one(session, pid) for pid in coin_list))
+
+    per_coin = []
+    skipped = []
+    all_trades = []
+    for product_id, trades in results:
+        if trades is None:
+            skipped.append({"product_id": product_id, "reason": last_error.get(product_id, "not enough real historical data")})
+            continue
+        if trades:
+            wins = sum(1 for t in trades if t["pnl_usd"] > 0)
+            per_coin.append({
+                "product_id": product_id, "num_trades": len(trades),
+                "win_rate": round(wins / len(trades), 4),
+                "total_pnl": round(sum(t["pnl_usd"] for t in trades), 2),
+            })
+        all_trades.extend(trades)
+
+    overall = None
+    if all_trades:
+        wins = sum(1 for t in all_trades if t["pnl_usd"] > 0)
+        overall = {
+            "num_trades": len(all_trades),
+            "win_rate": round(wins / len(all_trades), 4),
+            "total_pnl": round(sum(t["pnl_usd"] for t in all_trades), 2),
+            "stop_count": sum(1 for t in all_trades if t["exit_reason"] == "STOP"),
+            "push_exit_count": sum(1 for t in all_trades if t["exit_reason"].startswith("PUSH")),
+        }
+
+    return {
+        "coins_tested": len(coin_list), "coins_with_results": len(per_coin),
+        "skipped": skipped, "per_coin": per_coin, "overall": overall,
+        "params": {
+            "spend_usd": OPENING_BAR_SPEND_USD,
+            "entry_buffer_usd": OPENING_BAR_ENTRY_BUFFER_USD,
+            "session_utc_anchor": f"{OPENING_BAR_SESSION_UTC_HOUR:02d}:{OPENING_BAR_SESSION_UTC_MINUTE:02d}",
+            "days": days, "diagnostic_only": True,
+        },
+    }
+
+
+SCALED_ENTRY_INITIAL_FRACTION = 0.5
+SCALED_ENTRY_ADD_FRACTION = 0.25
+SCALED_ENTRY_MAX_ADDS = 2
+
+
+def _replay_opening_bar_breakout_scaled(session_bars: list, preceding_bars: list, spend: float = OPENING_BAR_SPEND_USD,
+                                         max_adds: int = SCALED_ENTRY_MAX_ADDS):
+    """The account owner's own real scaling-in mechanic layered onto the
+    unchanged long-side entry/stop/exit rules of
+    _replay_opening_bar_breakout - transcribed directly: "you want to go
+    in and then in and then in... usually two adds... let me put half
+    in... that add arrow is one penny above the high of a single red
+    bar." This session's own concrete interpretation of that real,
+    informally-described mechanic: the initial real fill is HALF of
+    `spend` at the same original trigger (bar 1's high + $0.01); every
+    time a single real RED bar forms while the position is open, its
+    high + $0.01 becomes a real pending add-trigger (a NEWER red bar's
+    level replaces an older, still-unfilled one - only ever tracking the
+    most recent single red bar, matching "it can't give you more than
+    one, it gives you a little one"); the instant a LATER bar's real
+    high trades through that level, a real quarter-size add (25% of
+    `spend`) fires, up to `max_adds` (2 default) real adds - reaching
+    100% of spend if both fire. The real stop (bar 1's own low) and the
+    real push-based exit are COMPLETELY UNCHANGED from the single-shot
+    version; only entry sizing and the resulting real blended entry
+    price/P&L differ.
+
+    Returns a real trade dict (same shape as _replay_opening_bar_breakout,
+    plus `initial_entry_price`, `num_adds`, `total_spend`) - `entry_price`
+    is the real quantity-weighted BLENDED entry across every real fill,
+    the same convention this codebase's own "Add cash" blended-entry math
+    already uses elsewhere. Returns None if no real trade fired today."""
+    if len(session_bars) < 3:
+        return None
+    bar1 = session_bars[0]
+    is_elephant = _is_elephant_bar(bar1, preceding_bars)
+    is_tail = _is_bottoming_tail_bar(bar1)
+    if not (is_elephant or is_tail):
+        return None
+
+    trigger_price = bar1["h"] + OPENING_BAR_ENTRY_BUFFER_USD
+    stop_price = bar1["l"]
+    bar2 = session_bars[1]
+    if bar2["h"] < trigger_price:
+        return None
+
+    entry_price = trigger_price
+    initial_spend = spend * SCALED_ENTRY_INITIAL_FRACTION
+    add_spend = spend * SCALED_ENTRY_ADD_FRACTION
+    qty = initial_spend / entry_price
+    total_cost = initial_spend
+    qualifies_as = "elephant" if is_elephant else "tail"
+
+    def _result(exit_price, exit_reason, exit_index, num_adds):
+        avg_entry = total_cost / qty if qty else entry_price
+        pnl_usd = qty * (exit_price - avg_entry)
+        return {
+            "qualifies_as": qualifies_as, "entry_price": round(avg_entry, 8),
+            "initial_entry_price": entry_price, "stop_price": stop_price,
+            "exit_price": exit_price, "exit_reason": exit_reason, "exit_index": exit_index,
+            "num_adds": num_adds, "total_spend": round(total_cost, 2),
+            "pnl_usd": round(pnl_usd, 2), "pnl_pct": round((exit_price - avg_entry) / avg_entry, 4),
+        }
+
+    peak = entry_price
+    pushes = 1
+    in_pullback = False
+    pending_add_trigger = None
+    adds_done = 0
+    for i in range(2, len(session_bars)):
+        b = session_bars[i]
+        if b["l"] <= stop_price:
+            return _result(stop_price, "STOP", i, adds_done)
+
+        if adds_done < max_adds and pending_add_trigger is not None and b["h"] >= pending_add_trigger:
+            qty += add_spend / pending_add_trigger
+            total_cost += add_spend
+            adds_done += 1
+            pending_add_trigger = None
+
+        if b["c"] < b["o"]:
+            pending_add_trigger = b["h"] + OPENING_BAR_ENTRY_BUFFER_USD
+
+        if b["h"] > peak:
+            if in_pullback:
+                pushes += 1
+                in_pullback = False
+                if pushes >= 2:
+                    return _result(b["h"], f"PUSH_{pushes}", i, adds_done)
+            peak = b["h"]
+        elif not in_pullback and peak > 0 and (peak - b["l"]) / peak >= PUSH_MIN_PULLBACK_PCT:
+            in_pullback = True
+
+    last = session_bars[-1]
+    return _result(last["c"], "SESSION_END", len(session_bars) - 1, adds_done)
+
+
+async def run_scaled_entry_comparison_backtest(coins=None, days: int = OPENING_BAR_DAYS, max_concurrent: int = 4) -> dict:
+    """SHADOW-MODE. Replays the IDENTICAL real qualifying Elephant/Tail
+    setups two ways on the same real data: the existing single-shot,
+    all-at-once entry (_replay_opening_bar_breakout, this file's own
+    already-shipped default) vs. the account owner's own real
+    half-in-then-two-adds scaling mechanic
+    (_replay_opening_bar_breakout_scaled) - so "does scaling in actually
+    help" gets a real, direct answer instead of a guess. Never places a
+    real order."""
+    coin_list = coins if coins is not None else list(COIN_FAMILY_TREE)
+    semaphore = asyncio.Semaphore(max_concurrent)
+    last_error = {}
+
+    async def _one(session, product_id):
+        async with semaphore:
+            one_min = await _fetch_1min_candles_window(session, product_id, days=days, last_error_out=last_error)
+        if one_min is None:
+            return product_id, None
+        two_min = _aggregate_to_2min_bars(one_min)
+        sessions = _group_2min_bars_into_sessions(two_min)
+        single_shot_trades = []
+        scaled_trades = []
+        for i in range(1, len(sessions)):
+            _key, session_bars = sessions[i]
+            preceding_bars = sessions[i - 1][1][-ELEPHANT_BAR_LOOKBACK * 2:]
+            t1 = _replay_opening_bar_breakout(session_bars, preceding_bars)
+            if t1 is not None:
+                single_shot_trades.append(t1)
+            t2 = _replay_opening_bar_breakout_scaled(session_bars, preceding_bars)
+            if t2 is not None:
+                scaled_trades.append(t2)
+        return product_id, single_shot_trades, scaled_trades
+
+    async with aiohttp.ClientSession() as session:
+        results = await asyncio.gather(*(_one(session, pid) for pid in coin_list))
+
+    def _summarize(trades):
+        if not trades:
+            return None
+        wins = sum(1 for t in trades if t["pnl_usd"] > 0)
+        return {
+            "num_trades": len(trades),
+            "win_rate": round(wins / len(trades), 4),
+            "total_pnl": round(sum(t["pnl_usd"] for t in trades), 2),
+        }
+
+    per_coin = []
+    skipped = []
+    all_single = []
+    all_scaled = []
+    for product_id, single_trades, scaled_trades in results:
+        if single_trades is None:
+            skipped.append({"product_id": product_id, "reason": last_error.get(product_id, "not enough real historical data")})
+            continue
+        if single_trades:
+            per_coin.append({
+                "product_id": product_id,
+                "single_shot": _summarize(single_trades),
+                "scaled": _summarize(scaled_trades),
+            })
+        all_single.extend(single_trades)
+        all_scaled.extend(scaled_trades)
+
+    return {
+        "coins_tested": len(coin_list), "coins_with_results": len(per_coin),
+        "skipped": skipped, "per_coin": per_coin,
+        "overall": {"single_shot": _summarize(all_single), "scaled": _summarize(all_scaled)},
+        "params": {
+            "spend_usd": OPENING_BAR_SPEND_USD, "days": days,
+            "initial_fraction": SCALED_ENTRY_INITIAL_FRACTION, "add_fraction": SCALED_ENTRY_ADD_FRACTION,
+            "max_adds": SCALED_ENTRY_MAX_ADDS,
+        },
+    }
+
+
 async def main():
     print(f"Backtesting {len(COIN_FAMILY_TREE)} coins over the last {BACKTEST_DAYS} days of REAL Coinbase hourly candles.")
     print(f"Replaying the live bot's real target/stop/breakeven/giveback rules, ${SPEND:.0f} redeployed per trade.\n")
