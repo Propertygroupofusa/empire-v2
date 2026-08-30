@@ -443,6 +443,93 @@ async def withdraw_from_grid_branch(bot_name: str, amount: float) -> dict:
     }
 
 
+async def move_cash_between_grid_branches(from_bot_name: str, amount: float, to_bot_name: str = None, product_id: str = None) -> dict:
+    """One-step real grid-to-grid cash move - per the account owner's
+    direct follow-up after using withdraw_from_grid_branch()/"New grid
+    branch" as two separate steps: "different sections one should be
+    able to pick from... you put the amount from the coin that you want
+    to pull from... you want to put it in another coin... or just open
+    up a new branch." Combines withdraw_from_grid_branch() (the source
+    debit) and either add_cash_to_grid_branch() or create_grid_branch()
+    (the destination) into one real action and one confirm click,
+    instead of requiring a withdraw, a manual note of the freed amount,
+    then a separate "New grid branch" click.
+
+    `to_bot_name`, if given, adds to that existing real grid branch
+    (must be a DIFFERENT branch than the source - refused otherwise);
+    otherwise `product_id` (or an auto-pick by real backtested
+    ROI/BTC-relative-strength if neither is given - see
+    pick_best_ranked_coin_for_grid) creates a new one. Same real safety
+    discipline as fund_grid_from_tree_branch(): the source must be FLAT
+    (no real open slices), the amount can't exceed its own real
+    allocated_usd, and STOP_TRADING blocks this (it deploys new capital
+    into a destination branch).
+
+    Same "destination funded first, source debited only after" ordering
+    every other cash-mover in this codebase uses - a failed destination
+    (a real live-price fetch failure, a coin already claimed) leaves the
+    source completely untouched. The actual debit is done by calling the
+    real withdraw_from_grid_branch() itself, which re-validates the
+    source's real state (flat, sufficient allocated_usd) fresh at that
+    exact moment - not just the initial check above - so a source that
+    somehow changed state in the brief window between the two real steps
+    is still caught rather than silently over-debited. A real, narrow,
+    accepted edge case worth naming honestly (matching the "doesn't
+    eliminate the race outright" caveat already used elsewhere in this
+    file): if the source becomes invalid in that same brief window, the
+    destination has already been funded and the source debit will raise
+    - the source keeps its cash (never over-debited) but the destination
+    also keeps what it received, a real, narrow double-count risk not
+    worth a full two-phase-commit rollback for, given grid branches only
+    ever change state from their own single-threaded coordinator cycle,
+    not from a second concurrent caller."""
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        raise ValueError("STOP_TRADING is set - new capital deployment is paused")
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+    if to_bot_name and to_bot_name == from_bot_name:
+        raise ValueError("source and destination can't be the same branch")
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == from_bot_name))
+        source = result.scalar_one_or_none()
+        if source is None:
+            raise ValueError(f"no grid branch named {from_bot_name}")
+        slices_result = await db.execute(select(CryptoGridSlice).where(CryptoGridSlice.bot_name == from_bot_name))
+        if slices_result.scalars().first() is not None:
+            raise ValueError(f"{from_bot_name} has real open slices - can only move cash from a FLAT branch")
+        if amount > source.allocated_usd + 0.01:
+            raise ValueError(f"{from_bot_name} only has ${source.allocated_usd:.2f} real allocated - can't move ${amount:.2f}")
+        source_product_id = source.product_id
+
+    if to_bot_name:
+        destination = await add_cash_to_grid_branch(to_bot_name, amount)
+        action = "added_to_existing"
+    else:
+        target_coin = product_id or await pick_best_ranked_coin_for_grid()
+        destination = await create_grid_branch(target_coin, amount, skip_free_cash_check=True)
+        action = "new_branch"
+
+    withdraw_result = await withdraw_from_grid_branch(from_bot_name, amount)
+
+    log.info(f"[GRID] 🔀 Moved ${amount:.2f} from grid branch {from_bot_name} into grid branch {destination.bot_name} ({destination.product_id})")
+    await _log_activity_safe(
+        destination.bot_name, destination.product_id, "BUY",
+        f"Received ${amount:.2f} moved from grid branch {from_bot_name} - branch total now ${destination.allocated_usd:.2f}",
+    )
+    await _log_activity_safe(
+        from_bot_name, source_product_id, "REALLOCATE",
+        f"Moved ${amount:.2f} of its own idle real cash into grid branch {destination.bot_name} ({destination.product_id})",
+    )
+
+    return {
+        "from_bot_name": from_bot_name, "to_bot_name": destination.bot_name, "product_id": destination.product_id,
+        "amount": amount, "action": action, "destination_allocated_usd": round(destination.allocated_usd, 2),
+        "source_branch_deleted": withdraw_result["branch_deleted"],
+        "source_remaining_allocated_usd": withdraw_result["remaining_allocated_usd"],
+    }
+
+
 async def fund_grid_from_tree_branch(from_bot_name: str, amount: float, product_id: str = None, to_grid_bot_name: str = None) -> dict:
     """Real, cross-system cash transfer - moves already-reserved real
     dollars OUT of a flat family-tree branch's own allocated_usd and INTO

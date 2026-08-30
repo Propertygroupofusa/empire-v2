@@ -4972,6 +4972,39 @@ async def withdraw_grid_branch_endpoint(bot_name: str, payload: WithdrawGridBran
     return result
 
 
+class MoveCashBetweenGridBranchesRequest(BaseModel):
+    from_bot_name: str
+    amount: float
+    to_bot_name: str | None = None
+    product_id: str | None = None
+
+
+@router.post("/grid-status/move-cash", dependencies=[Depends(require_admin_key)])
+async def move_cash_between_grid_branches_endpoint(payload: MoveCashBetweenGridBranchesRequest):
+    """One-step real grid-to-grid cash move - per the account owner's
+    direct follow-up wanting the withdraw + redeploy flow combined into
+    one modal with two sections: pick the source branch and amount, then
+    pick either a different existing grid branch or a new one.
+
+    `to_bot_name`, if given, adds to that existing real grid branch;
+    otherwise `product_id` (or an auto-pick by real backtested
+    ROI/BTC-relative-strength if neither is given) creates a new one.
+    Refuses if the source is holding a real position (must be flat), if
+    the amount exceeds its own real allocated_usd, if source and
+    destination are the same branch, or if STOP_TRADING is set. The
+    destination is funded first; the source is only debited after that
+    real fill/bookkeeping succeeds."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    try:
+        result = await crypto_grid_bot_module.move_cash_between_grid_branches(
+            payload.from_bot_name, payload.amount, to_bot_name=payload.to_bot_name, product_id=payload.product_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return result
+
+
 class SetGridBranchActiveRequest(BaseModel):
     active: bool
 

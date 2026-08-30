@@ -556,6 +556,7 @@
             <button class="sell-btn" style="width:auto; margin-top:0;" onclick="gridQuickBuy(this)">💰 $20 Quick Buy</button>
             <button class="unlock-btn" onclick="openCreateGridModal()">🌱 New grid branch</button>
             <button class="unlock-btn" onclick="openFundGridModal()">💸 Fund from family tree</button>
+            <button class="unlock-btn" onclick="openMoveGridCashModal()">🔀 Move cash between grid branches</button>
         </div>
     </div>
     <p class="panel-sub" style="margin-bottom:10px;">
@@ -723,6 +724,28 @@
         <div class="modal-actions">
             <button type="button" class="modal-btn-secondary" onclick="closeFundGridModal()">Cancel</button>
             <button type="button" class="modal-btn-primary" id="fund-grid-confirm-btn" onclick="confirmFundGrid()">Move cash into Grid Bot</button>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="move-grid-cash-modal-overlay">
+    <div class="modal-card">
+        <div class="modal-title">🔀 Move Cash Between Grid Branches</div>
+        <div class="modal-sub">Pulls real allocated cash out of a FLAT grid branch and moves it into a DIFFERENT grid branch - either an existing one, or a brand-new one on its own coin. One step: no separate withdraw-then-recreate needed.</div>
+
+        <label class="modal-label">From (must be flat)</label>
+        <div id="move-grid-source-list" class="branch-pick-list"></div>
+
+        <label class="modal-label" style="margin-top:16px;">Amount to move</label>
+        <input type="number" id="move-grid-amount-input" class="modal-input" step="0.01" min="0.01">
+        <div id="move-grid-source-max" style="font-size:0.78em; color:var(--text-dim); margin-top:4px;"></div>
+
+        <label class="modal-label" style="margin-top:16px;">Into (a different grid branch, or a new one)</label>
+        <div id="move-grid-dest-list" class="branch-pick-list"></div>
+
+        <div class="modal-actions">
+            <button type="button" class="modal-btn-secondary" onclick="closeMoveGridCashModal()">Cancel</button>
+            <button type="button" class="modal-btn-primary" id="move-grid-confirm-btn" onclick="confirmMoveGridCash()">Move cash</button>
         </div>
     </div>
 </div>
@@ -1606,6 +1629,131 @@ async function confirmFundGrid() {
         confirmBtn.disabled = false;
         confirmBtn.textContent = 'Move cash into Grid Bot';
         await refresh();
+    }
+}
+
+// Real, one-step grid-to-grid cash move - per the account owner's direct
+// follow-up on the withdraw-then-recreate flow above: "different
+// sections one should be able to pick from... you want to put it in
+// another coin... or just open up a new branch." Combines
+// withdraw_from_grid_branch + add_cash_to_grid_branch/create_grid_branch
+// into one real action, same two-section FROM/INTO pattern the Move
+// Cash Between (family tree) Branches modal already uses.
+let moveGridCashModal = null;
+
+async function openMoveGridCashModal() {
+    const data = await apiGet('/grid-status');
+    const branches = data.branches || [];
+    moveGridCashModal = { branches, selectedSource: null, selectedDest: null };
+
+    const MIN_SOURCE_USD = 0.01;
+    const flatBranches = branches.filter(b => b.open_slices === 0 && b.allocated_usd >= MIN_SOURCE_USD);
+    const emptyFlatCount = branches.filter(b => b.open_slices === 0 && b.allocated_usd < MIN_SOURCE_USD).length;
+    const sourceListEl = document.getElementById('move-grid-source-list');
+    if (flatBranches.length === 0) {
+        sourceListEl.innerHTML = `<div class="coin-history-empty">No grid branches have real idle cash worth moving right now${emptyFlatCount > 0 ? ` (${emptyFlatCount} flat branch(es) have essentially $0.00)` : ''}.</div>`;
+    } else {
+        sourceListEl.innerHTML = flatBranches.map(b => `
+            <button type="button" class="branch-pick-btn" data-bot="${b.bot_name}" onclick="selectMoveGridSource('${b.bot_name}', this)">
+                <span class="coin-name">${b.product_id.replace('-USD', '')}</span>
+                <span class="bot-id">${b.bot_name} · ${fmtUsd(b.allocated_usd)} idle</span>
+            </button>
+        `).join('') + (emptyFlatCount > 0 ? `<div class="coin-history-empty" style="padding:8px 4px 0; font-size:0.78em;">${emptyFlatCount} other flat branch(es) hidden - they have essentially $0.00 real idle cash, nothing to move.</div>` : '');
+    }
+
+    renderMoveGridDestList();
+
+    document.getElementById('move-grid-amount-input').value = '';
+    document.getElementById('move-grid-source-max').textContent = '';
+    document.getElementById('move-grid-cash-modal-overlay').classList.add('open');
+}
+
+function renderMoveGridDestList() {
+    const destListEl = document.getElementById('move-grid-dest-list');
+    const branches = moveGridCashModal.branches;
+    const existingHtml = branches.map(b => `
+        <button type="button" class="branch-pick-btn" data-bot="${b.bot_name}" onclick="selectMoveGridDest('${b.bot_name}', this)">
+            <span class="coin-name">${b.product_id.replace('-USD', '')}</span>
+            <span class="bot-id">${b.bot_name} · ${fmtUsd(b.allocated_usd)} existing grid</span>
+        </button>
+    `).join('');
+    const autoPickHtml = `
+        <button type="button" class="branch-pick-btn" data-bot="__auto__" onclick="selectMoveGridDest('__auto__', this)">
+            <span class="coin-name">🌱 New branch</span>
+            <span class="bot-id">Auto-pick the best-ranked real coin</span>
+        </button>
+    `;
+    destListEl.innerHTML = existingHtml + autoPickHtml;
+    // Re-apply the selected state after a re-render (e.g. after the source changes).
+    if (moveGridCashModal.selectedDest) {
+        const btn = destListEl.querySelector(`.branch-pick-btn[data-bot="${moveGridCashModal.selectedDest}"]`);
+        if (btn) btn.classList.add('selected');
+    }
+}
+
+function selectMoveGridSource(botName, btnEl) {
+    moveGridCashModal.selectedSource = botName;
+    document.getElementById('move-grid-source-list').querySelectorAll('.branch-pick-btn').forEach(el => el.classList.remove('selected'));
+    btnEl.classList.add('selected');
+    const branch = moveGridCashModal.branches.find(b => b.bot_name === botName);
+    if (branch) {
+        document.getElementById('move-grid-source-max').textContent = `${fmtUsd(branch.allocated_usd)} available from this branch`;
+        document.getElementById('move-grid-amount-input').max = branch.allocated_usd.toFixed(2);
+        document.getElementById('move-grid-amount-input').value = branch.allocated_usd.toFixed(2);
+    }
+    // A branch can't be both the source and destination of the same move.
+    if (moveGridCashModal.selectedDest === botName) {
+        moveGridCashModal.selectedDest = null;
+    }
+    renderMoveGridDestList();
+}
+
+function selectMoveGridDest(botName, btnEl) {
+    if (botName === moveGridCashModal.selectedSource) { alert("Pick a different branch (or a new one) as the destination - it can't be the same as the source."); return; }
+    moveGridCashModal.selectedDest = botName;
+    document.getElementById('move-grid-dest-list').querySelectorAll('.branch-pick-btn').forEach(el => el.classList.remove('selected'));
+    btnEl.classList.add('selected');
+}
+
+function closeMoveGridCashModal() {
+    document.getElementById('move-grid-cash-modal-overlay').classList.remove('open');
+}
+
+async function confirmMoveGridCash() {
+    const amount = parseFloat(document.getElementById('move-grid-amount-input').value);
+    if (!amount || amount <= 0) { alert('Enter a positive dollar amount.'); return; }
+    if (!moveGridCashModal.selectedSource) { alert('Tap a FLAT grid branch to move cash FROM first.'); return; }
+    if (!moveGridCashModal.selectedDest) { alert('Tap where to move it into first.'); return; }
+
+    const fromBot = moveGridCashModal.selectedSource;
+    const isAuto = moveGridCashModal.selectedDest === '__auto__';
+    const toBot = isAuto ? null : moveGridCashModal.selectedDest;
+    const destLabel = isAuto ? 'a new grid branch on the best-ranked real coin' : toBot;
+
+    if (!confirm(`Move $${amount.toFixed(2)} real cash from ${fromBot} into ${destLabel}? This is a real bookkeeping move plus a real order on Grid Bot's own next cycle - can't be undone.`)) return;
+
+    const confirmBtn = document.getElementById('move-grid-confirm-btn');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Moving…';
+    try {
+        const key = getAdminKey();
+        const body = { from_bot_name: fromBot, amount };
+        if (toBot) body.to_bot_name = toBot;
+        const res = await fetch(API_BASE + '/grid-status/move-cash', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        closeMoveGridCashModal();
+        alert(`Moved ${fmtUsd(data.amount)} from ${data.from_bot_name} into ${data.to_bot_name} (${data.product_id}) - branch total now ${fmtUsd(data.destination_allocated_usd)}.`);
+    } catch (e) {
+        alert('Could not move cash: ' + e.message);
+    } finally {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Move cash';
+        await loadGridStatus();
     }
 }
 
