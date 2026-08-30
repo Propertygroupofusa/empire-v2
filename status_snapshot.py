@@ -230,7 +230,7 @@ async def _build_activity_section() -> str:
         return f"## 📡 Recent Activity\n\n_Could not load: {e}_\n"
 
     try:
-        events = await tree.get_activity_feed(limit=15)
+        events = await tree.get_activity_feed(limit=40)
     except Exception as e:
         return f"## 📡 Recent Activity\n\n_Could not fetch: {e}_\n"
 
