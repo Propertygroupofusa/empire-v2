@@ -749,6 +749,23 @@
     </div>
 </div>
 
+<div class="modal-overlay" id="withdraw-grid-modal-overlay">
+    <div class="modal-card">
+        <div class="modal-title">💵 Withdraw From Grid Branch</div>
+        <div class="modal-sub" id="withdraw-grid-sub">Pulls real cash out of this branch's own allocation and frees it back to real spendable cash - it doesn't go anywhere specific, it just becomes available again for "New grid branch" (or any other real capital move). Only works on a FLAT branch (no open slices).</div>
+
+        <label class="modal-label">Amount to withdraw ($)</label>
+        <input type="number" id="withdraw-grid-amount" class="modal-input" step="1" min="1">
+        <div id="withdraw-grid-max" style="font-size:0.82em; color:var(--text-dim); margin-top:6px;"></div>
+
+        <div id="withdraw-grid-error" style="color:var(--red); font-size:0.85em; margin-top:6px; display:none;"></div>
+        <div class="modal-actions">
+            <button type="button" class="modal-btn-secondary" onclick="closeWithdrawGridModal()">Cancel</button>
+            <button type="button" class="modal-btn-primary" id="withdraw-grid-confirm-btn" onclick="confirmWithdrawGridBranch()">Withdraw</button>
+        </div>
+    </div>
+</div>
+
 <script>
 const API_BASE = 'https://empire-v2-production.up.railway.app/api/trading-dashboard';
 const KEY_STORAGE = 'bmb_admin_key';
@@ -1659,10 +1676,14 @@ function renderGridStatus(data, tradeHistoryByBot) {
                         <td style="padding:6px 8px;">${slicesStr}</td>
                         <td style="padding:6px 8px;">${resultsStr}</td>
                         <td style="padding:6px 8px;">${statusStr}</td>
-                        <td style="padding:6px 8px;">
+                        <td style="padding:6px 8px; white-space:nowrap;">
                             <a href="#" onclick="toggleGridBranchActive('${b.bot_name}', ${!b.active}); return false;" style="color:var(--navy);">
                                 ${b.active ? 'Pause' : 'Resume'}
                             </a>
+                            ${b.open_slices === 0 ? `
+                            <br><a href="#" onclick="openWithdrawGridModal('${b.bot_name}', '${b.product_id}', ${b.allocated_usd}); return false;" style="color:var(--navy); font-size:0.9em;">
+                                💵 Withdraw
+                            </a>` : ''}
                         </td>
                     </tr>
                     <tr style="border-bottom:1px solid var(--border);">
@@ -1853,6 +1874,74 @@ async function toggleGridBranchActive(botName, newActive) {
     } catch (e) {
         alert('Could not update: ' + e.message);
     } finally {
+        await loadGridStatus();
+    }
+}
+
+// Real withdraw-from-grid-branch modal - per the account owner's direct
+// request looking at a real $994.65 STX-USD branch sitting flat: "can
+// you make it to where I can pull some money out of this Branch... so I
+// can make more." Only ever offered on a FLAT branch (see the "Withdraw"
+// link's own open_slices===0 check above) - the real backend refusal for
+// a holding branch is the same safety rule, this just avoids ever
+// showing the option in the first place for one that would refuse.
+let withdrawGridModal = null;
+
+function openWithdrawGridModal(botName, productId, allocatedUsd) {
+    withdrawGridModal = { botName, productId, allocatedUsd };
+    document.getElementById('withdraw-grid-sub').textContent =
+        `Pulls real cash out of ${botName} (${productId})'s own $${allocatedUsd.toFixed(2)} allocation and frees it back to real spendable cash - it doesn't move anywhere specific, it just becomes available again for "New grid branch" or any other real capital move.`;
+    document.getElementById('withdraw-grid-amount').value = '';
+    document.getElementById('withdraw-grid-amount').max = allocatedUsd.toFixed(2);
+    document.getElementById('withdraw-grid-max').textContent = `${fmtUsd(allocatedUsd)} real allocated in this branch right now`;
+    document.getElementById('withdraw-grid-error').style.display = 'none';
+    document.getElementById('withdraw-grid-modal-overlay').classList.add('open');
+}
+
+function closeWithdrawGridModal() {
+    document.getElementById('withdraw-grid-modal-overlay').classList.remove('open');
+}
+
+async function confirmWithdrawGridBranch() {
+    const amount = parseFloat(document.getElementById('withdraw-grid-amount').value);
+    const errorEl = document.getElementById('withdraw-grid-error');
+    errorEl.style.display = 'none';
+    if (!amount || amount <= 0) {
+        errorEl.textContent = 'Enter a real positive dollar amount.';
+        errorEl.style.display = 'block';
+        return;
+    }
+    const { botName, productId, allocatedUsd } = withdrawGridModal;
+    const willDrain = amount >= allocatedUsd - 0.01;
+    if (!confirm(
+        `Withdraw ${fmtUsd(amount)} real cash from ${botName} (${productId})?\n\n` +
+        (willDrain
+            ? 'This drains the branch completely - it will be removed and release its coin claim.'
+            : `${fmtUsd(allocatedUsd - amount)} will stay allocated in this branch.`) +
+        '\n\nThe cash becomes real free spendable cash again - use "New grid branch" (or another Fund action) to deploy it.'
+    )) return;
+    const confirmBtn = document.getElementById('withdraw-grid-confirm-btn');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Withdrawing…';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + `/grid-status/${botName}/withdraw`, {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ amount }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        closeWithdrawGridModal();
+        alert(data.branch_deleted
+            ? `Withdrew ${fmtUsd(data.amount)} - ${botName} is now fully drained and removed.`
+            : `Withdrew ${fmtUsd(data.amount)} - ${botName} now has ${fmtUsd(data.remaining_allocated_usd)} left.`);
+    } catch (e) {
+        errorEl.textContent = e.message;
+        errorEl.style.display = 'block';
+    } finally {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Withdraw';
         await loadGridStatus();
     }
 }

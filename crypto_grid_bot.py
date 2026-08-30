@@ -372,6 +372,77 @@ async def add_cash_to_grid_branch(bot_name: str, amount: float) -> CryptoGridBra
     return branch
 
 
+async def withdraw_from_grid_branch(bot_name: str, amount: float) -> dict:
+    """Pulls real cash OUT of an existing grid branch's own allocation -
+    the reverse of add_cash_to_grid_branch(). Built per the account
+    owner's own direct request after seeing a real $994.65 STX-USD
+    branch sitting completely flat (no open slices) while they wanted to
+    "pull some money out of this branch... so I can make more" new
+    branches - a real, legitimate need this module never had a way to
+    do, since a grid branch's allocated_usd could previously only ever
+    grow (via add_cash_to_grid_branch/fund_grid_from_tree_branch) or
+    move to another branch's slices via a real sell, never be pulled
+    back out on demand.
+
+    Requires the branch to be FLAT (no open CryptoGridSlice rows) - same
+    real safety discipline as every other cash-moving function in this
+    codebase (reallocate_cash_between_branches, fund_grid_from_tree_
+    branch): an open slice represents real crypto already bought, not
+    idle cash, so pulling allocated_usd out from under one would desync
+    the branch's own bookkeeping from what's genuinely deployed. Refuses
+    a non-positive amount or an amount exceeding the branch's own real
+    allocated_usd.
+
+    Deliberately does NOT move the withdrawn cash anywhere - it doesn't
+    need to. get_real_free_cash_usd() already subtracts every grid
+    branch's own allocated_usd (active or paused) from the real Coinbase
+    balance, so shrinking this branch's allocation is itself what makes
+    that real cash spendable again - the very next "New grid branch" (or
+    fund_grid_from_tree_branch, or another add_cash_to_grid_branch) call
+    can deploy it immediately, no separate transfer step required.
+
+    If the withdrawal drains the branch down to essentially $0.00 (real
+    fee/rounding dust aside), the branch row is deleted outright rather
+    than left as a real, empty stub still claiming its coin - matching
+    the same "an emptied-out branch doesn't linger" reasoning
+    consolidate_branches_by_coin() already established elsewhere in this
+    codebase. A partial withdrawal that leaves real money behind keeps
+    the branch running exactly as before, with num_levels recomputed via
+    the same _safe_num_levels_for_allocation() every other real
+    allocation change already uses (so a shrunk branch's future slices
+    still clear the real minimum trade size, not just its past ones)."""
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == bot_name))
+        branch = result.scalar_one_or_none()
+        if branch is None:
+            raise ValueError(f"no grid branch named {bot_name}")
+        slices_result = await db.execute(select(CryptoGridSlice).where(CryptoGridSlice.bot_name == bot_name))
+        if slices_result.scalars().first() is not None:
+            raise ValueError(f"{bot_name} has real open slices - can only withdraw from a FLAT branch (pause it and wait for slices to close first)")
+        if amount > branch.allocated_usd + 0.01:
+            raise ValueError(f"{bot_name} only has ${branch.allocated_usd:.2f} real allocated - can't withdraw ${amount:.2f}")
+
+        branch.allocated_usd -= amount
+        deleted = branch.allocated_usd < 0.01
+        if deleted:
+            product_id = branch.product_id
+            await db.delete(branch)
+            await db.commit()
+            log.info(f"[GRID] 💵 Withdrew ${amount:.2f} from {bot_name} - fully drained, branch removed and {product_id} released")
+            return {"bot_name": bot_name, "product_id": product_id, "amount": amount, "remaining_allocated_usd": 0.0, "branch_deleted": True}
+
+        branch.num_levels = _safe_num_levels_for_allocation(branch.allocated_usd)
+        await db.commit()
+        await db.refresh(branch)
+    log.info(f"[GRID] 💵 Withdrew ${amount:.2f} from {bot_name} - now ${branch.allocated_usd:.2f} ({branch.num_levels} real levels), freed back to real spendable cash")
+    return {
+        "bot_name": bot_name, "product_id": branch.product_id, "amount": amount,
+        "remaining_allocated_usd": round(branch.allocated_usd, 2), "branch_deleted": False,
+    }
+
+
 async def fund_grid_from_tree_branch(from_bot_name: str, amount: float, product_id: str = None, to_grid_bot_name: str = None) -> dict:
     """Real, cross-system cash transfer - moves already-reserved real
     dollars OUT of a flat family-tree branch's own allocated_usd and INTO

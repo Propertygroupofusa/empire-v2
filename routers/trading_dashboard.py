@@ -4941,6 +4941,37 @@ async def fund_grid_from_tree_endpoint(payload: FundGridFromTreeRequest):
     return result
 
 
+class WithdrawGridBranchRequest(BaseModel):
+    amount: float
+
+
+@router.post("/grid-status/{bot_name}/withdraw", dependencies=[Depends(require_admin_key)])
+async def withdraw_grid_branch_endpoint(bot_name: str, payload: WithdrawGridBranchRequest):
+    """Pulls real cash OUT of an existing grid branch's own allocation -
+    the reverse of add_cash_to_grid_branch, and the direct sibling of
+    fund_grid_from_tree_branch above. Built after the account owner's
+    own direct request, looking at a real $994.65 STX-USD branch sitting
+    completely flat: "can you make it to where I can pull some money out
+    of this Branch... so I can make more."
+
+    Requires the branch to be FLAT (no real open slices) - refuses
+    otherwise, same real safety discipline as every other cash-moving
+    function here. The withdrawn amount isn't sent anywhere - shrinking
+    this branch's allocated_usd is itself what makes that real cash
+    spendable again via get_real_free_cash_usd(), so the very next "New
+    grid branch" click (or another fund-from-tree/add-cash call) can use
+    it immediately. A withdrawal that drains the branch to essentially
+    $0.00 deletes the row outright and releases its coin claim, rather
+    than leaving a real empty stub behind."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    try:
+        result = await crypto_grid_bot_module.withdraw_from_grid_branch(bot_name, payload.amount)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return result
+
+
 class SetGridBranchActiveRequest(BaseModel):
     active: bool
 
