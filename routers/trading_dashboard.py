@@ -3266,6 +3266,20 @@ async def run_alpaca_opening_bar_breakout_backtest():
     return await alpaca_selection_backtest_module.run_opening_bar_breakout_backtest()
 
 
+@router.post("/alpaca-selection-backtest/opening-bar-multi-entry-comparison", dependencies=[Depends(require_admin_key)])
+async def run_alpaca_opening_bar_multi_entry_comparison():
+    """SHADOW-MODE ONLY - never touches live trading, places no order.
+    Per the account owner's own real reference chart (a staircase of
+    several pullback-and-continuation entries through one session, not
+    just the first): compares today's real one-entry-per-day baseline
+    against a new multi-entry version that keeps trading the same
+    established real trend through every subsequent confirmed pullback/
+    breakout leg, on the identical real historical bars."""
+    if alpaca_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+    return await alpaca_selection_backtest_module.run_opening_bar_multi_entry_comparison()
+
+
 @router.post("/alpaca-selection-backtest/opening-bar-narrow-state-comparison", dependencies=[Depends(require_admin_key)])
 async def run_alpaca_opening_bar_narrow_state_comparison():
     """SHADOW-MODE ONLY - never touches live trading, places no order.

@@ -152,6 +152,13 @@
     <div id="obbResults"></div>
 
     <div class="note" style="margin-top: 28px;">
+        <strong>🪜 One trade a day, or ride the whole staircase?</strong> The button above takes exactly ONE real trade per day, exiting the instant the first confirmed "push" happens. The account owner's own annotated reference chart showed something bigger - a real staircase of several pullback-and-continuation entries through the SAME session (big opening bar, pullback to a level, breakout, another pullback, another breakout). This compares that one-entry baseline against a new multi-entry version that keeps trading the same real established trend through every subsequent confirmed leg (still stopping the whole day's chain the instant a real STOP hits, or after 6 legs), on the identical real historical bars - so you can see with real evidence whether riding the staircase actually makes more money, not just assume it does. Shadow mode only - diagnostic, never wired to any real trade.
+    </div>
+    <button class="run-btn" id="obMultiBtn" onclick="runOpeningBarMultiEntryComparison()">▶ Run One-Entry vs. Multi-Entry Comparison (real data, ~60-180 seconds)</button>
+    <div id="obMultiStatus"></div>
+    <div id="obMultiResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
         <strong>📏 Which "narrow state" actually calls it right?</strong> The account owner described a real, DIFFERENT definition than the percentile-range one already used above: a 20-period and a 200-period simple moving average on the 2-minute chart - narrow when the two sit close together, wide when they've separated. Transcribed directly: "moving averages far apart is a wide state... a tight narrow state [is] the 20 a little below the 200... know the stock's state first and you've got 85% of the game figured out." This replays the IDENTICAL real Elephant/Tail trades against three real gates side by side - no gate at all (the button above's own default), the existing percentile-range method, and this new 20/200 SMA-convergence method - so you can see which real definition (if either) actually improves the setup, not just guess. The 0.5% "how close is close" threshold is an invented number (the account owner gave no real figure) - stated plainly, not hidden.
     </div>
     <button class="run-btn" id="narrowStateCmpBtn" onclick="runOpeningBarNarrowStateComparison()">▶ Run Narrow-State Definition Comparison (real data, ~60-180 seconds)</button>
@@ -1084,6 +1091,83 @@ function renderOpeningBarBreakoutResults(data) {
         html += `<p class="trade-note">Skipped: ${data.skipped.map(s => `${s.product_id} (${s.reason})`).join(', ')}</p>`;
     }
     html += `<p class="trade-note">A win rate meaningfully above 50% with a genuinely positive total P&amp;L on a real, decent-sized sample is real evidence the setup works for these symbols; a low win rate or negative total means the account owner's own 80%+ claim isn't showing up here. This is diagnostic only - nothing here changes what any live bot buys or sells.</p>`;
+    resultsEl.innerHTML = html;
+}
+
+// One-entry-per-day baseline vs. a real multi-entry "ride the staircase"
+// version - per the account owner's own annotated reference chart showing
+// several pullback-and-continuation entries in one session, not just the
+// first. Both replayed on the identical real historical bars.
+async function runOpeningBarMultiEntryComparison() {
+    const btn = document.getElementById('obMultiBtn');
+    const statusEl = document.getElementById('obMultiStatus');
+    const resultsEl = document.getElementById('obMultiResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real 2-min Alpaca data per symbol, replayed twice)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-selection-backtest/opening-bar-multi-entry-comparison', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderOpeningBarMultiEntryResults(data);
+        if (data.better) {
+            statusEl.textContent = `Scanned ${data.symbols_with_results} symbols over ${data.params.days} real trading days each. `
+                + `Real winner on total P&L: ${data.better === 'multi_entry' ? 'riding the staircase (multi-entry)' : 'one entry per day (today\'s baseline)'}.`;
+        } else {
+            statusEl.textContent = `Scanned ${data.symbols_with_results} symbols - no real qualifying Elephant/Tail opening-bar setups found in this window.`;
+        }
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run One-Entry vs. Multi-Entry Comparison (real data, ~60-180 seconds)';
+    }
+}
+
+function renderOpeningBarMultiEntryResults(data) {
+    const resultsEl = document.getElementById('obMultiResults');
+    const so = data.single_entry_overall;
+    const mo = data.multi_entry_overall;
+    let html = `
+        <table>
+            <thead><tr><th>Version</th><th>Real trades</th><th>Win rate</th><th>Total P&amp;L ($25,000/trade)</th></tr></thead>
+            <tbody>
+                <tr><td>One entry per day (baseline)</td><td>${so ? so.num_trades : 0}</td><td>${so ? (so.win_rate * 100).toFixed(1) + '%' : '—'}</td>
+                    <td class="${so && so.total_pnl >= 0 ? 'pos' : 'neg'}">${so ? (so.total_pnl >= 0 ? '+' : '') + '$' + so.total_pnl.toFixed(2) : '—'}</td></tr>
+                <tr><td>Multi-entry (ride the staircase, up to ${data.params.max_entries_per_day}/day)</td><td>${mo ? mo.num_trades : 0}</td><td>${mo ? (mo.win_rate * 100).toFixed(1) + '%' : '—'}</td>
+                    <td class="${mo && mo.total_pnl >= 0 ? 'pos' : 'neg'}">${mo ? (mo.total_pnl >= 0 ? '+' : '') + '$' + mo.total_pnl.toFixed(2) : '—'}</td></tr>
+            </tbody>
+        </table>`;
+    if (data.per_symbol && data.per_symbol.length > 0) {
+        const rows = data.per_symbol.map(s => `<tr>
+            <td>${s.product_id}</td>
+            <td>${fmtBucket(s.single_entry)}</td>
+            <td>${fmtBucket(s.multi_entry)}</td>
+        </tr>`).join('');
+        html += `
+        <table style="margin-top:16px;">
+            <thead><tr><th>Symbol</th><th>One entry/day</th><th>Multi-entry</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+    }
+    if (data.skipped && data.skipped.length > 0) {
+        html += `<p class="trade-note">Skipped: ${data.skipped.map(s => `${s.product_id} (${s.reason})`).join(', ')}</p>`;
+    }
+    html += `<p class="trade-note">Real, honest limitation: neither version accounts for real slippage/fees getting worse the more real trades are stacked into one session - a multi-entry win here is still worth double-checking against that before trusting it blindly. This is diagnostic only - nothing here changes what any live bot buys or sells until a real, evidence-backed decision is made to promote it.</p>`;
     resultsEl.innerHTML = html;
 }
 

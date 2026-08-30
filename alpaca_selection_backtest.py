@@ -1549,6 +1549,204 @@ async def run_opening_bar_breakout_backtest(symbols=None, days: int = BACKTEST_D
     }
 
 
+# ============================================================================
+# OPENING-BAR MULTI-ENTRY CONTINUATION - per the account owner's own real
+# reference screenshots (Oliver Velez's "Why I Trade Only the First 20
+# Minutes of the Market" video, plus their own annotated SWKS chart showing
+# a real staircase: big opening bar -> pullback to a level -> breakout
+# (entry) -> another pullback -> another breakout (a second entry)). The
+# original _replay_opening_bar_breakout() above takes exactly ONE real
+# trade per day - it already exits on the FIRST confirmed "push" after
+# entry (a real pullback of at least PUSH_MIN_PULLBACK_PCT off a new peak,
+# followed by a new high above it), then simply stops watching for the
+# rest of the session. The real gap the account owner's own screenshot
+# showed: their actual setup keeps trading that SAME established trend
+# through MULTIPLE such pullback-and-continuation legs in one session,
+# not just the first one.
+#
+# SHADOW-MODE, real historical data, never places a real order - same
+# posture as every other backtest tool in this file. This is additive:
+# _replay_opening_bar_breakout()/run_opening_bar_breakout_backtest() above
+# are completely unchanged, still the real one-entry-per-day baseline
+# every comparison in this file measures against.
+# ============================================================================
+
+OPENING_BAR_MAX_ENTRIES_PER_DAY = 6
+
+
+def _replay_one_opening_bar_leg(session_bars: list, anchor_idx: int, spend: float):
+    """One real leg (entry-to-exit) of the multi-entry continuation
+    replay below. The anchor bar's own high + OPENING_BAR_ENTRY_BUFFER_USD
+    is the real entry trigger, its own low is the real stop - identical
+    real mechanics to _replay_opening_bar_breakout()'s own single trade,
+    just scoped to ONE leg: exits on that STOP, or the FIRST real
+    confirmed push (not the second) - the same "ride to the first
+    confirmed continuation" idea, generalized so the exit bar can become
+    the next leg's own anchor.
+
+    Returns (trade_dict_or_None, next_anchor_idx). next_anchor_idx is the
+    real bar the NEXT leg's own search should start from (this leg's own
+    PUSH exit bar) - or None when this leg never found a real entry (the
+    level failed before triggering), ended in a real STOP (the trend
+    broke down - no further real legs today), or the session ran out."""
+    if anchor_idx >= len(session_bars) - 1:
+        return None, None
+    anchor = session_bars[anchor_idx]
+    trigger_price = anchor["h"] + OPENING_BAR_ENTRY_BUFFER_USD
+    stop_price = anchor["l"]
+
+    entry_idx = None
+    for i in range(anchor_idx + 1, len(session_bars)):
+        b = session_bars[i]
+        if b["l"] <= stop_price:
+            return None, None
+        if b["h"] >= trigger_price:
+            entry_idx = i
+            break
+    if entry_idx is None:
+        return None, None
+
+    entry_price = trigger_price
+    qty = spend / entry_price
+
+    def _leg_result(exit_price, exit_reason, exit_index):
+        pnl_usd = qty * (exit_price - entry_price)
+        return {
+            "entry_price": entry_price, "entry_index": entry_idx, "stop_price": stop_price,
+            "exit_price": exit_price, "exit_reason": exit_reason, "exit_index": exit_index,
+            "pnl_usd": round(pnl_usd, 2), "pnl_pct": round((exit_price - entry_price) / entry_price, 4),
+        }
+
+    peak = entry_price
+    in_pullback = False
+    for i in range(entry_idx + 1, len(session_bars)):
+        b = session_bars[i]
+        if b["l"] <= stop_price:
+            return _leg_result(stop_price, "STOP", i), None
+        if b["h"] > peak:
+            if in_pullback:
+                return _leg_result(b["h"], "PUSH", i), i
+            peak = b["h"]
+        elif not in_pullback and peak > 0 and (peak - b["l"]) / peak >= PUSH_MIN_PULLBACK_PCT:
+            in_pullback = True
+
+    last = session_bars[-1]
+    return _leg_result(last["c"], "SESSION_END", len(session_bars) - 1), None
+
+
+def _replay_opening_bar_breakout_multi_entry(session_bars: list, preceding_bars: list, spend: float = OPENING_BAR_SPEND_USD, max_entries_per_day: int = OPENING_BAR_MAX_ENTRIES_PER_DAY):
+    """Real multi-entry replay of ONE real trading day - the first leg
+    still requires bar 1 to genuinely qualify as a real Elephant or Tail
+    bar (the "institutional footprint" that sets the day's real
+    directional bias, unchanged from the single-entry version); every
+    SUBSEQUENT leg reuses the exact same real trigger mechanic off the
+    bar where the PRIOR leg exited via a real PUSH, so the system keeps
+    trading the same established real trend instead of taking one trade
+    and going quiet. Stops the whole day's chain the moment a leg exits
+    via STOP (the real trend broke down) or max_entries_per_day is
+    reached. Returns a list of real trade dicts (possibly empty) -
+    each carries the shared `qualifies_as` (elephant/tail) and its own
+    `leg_number` (1-indexed) so a later leg's real P&L can be told apart
+    from the first."""
+    trades = []
+    if len(session_bars) < 3:
+        return trades
+    bar1 = session_bars[0]
+    is_elephant = _is_elephant_bar(bar1, preceding_bars)
+    is_tail = _is_bottoming_tail_bar(bar1)
+    if not (is_elephant or is_tail):
+        return trades
+    qualifies_as = "elephant" if is_elephant else "tail"
+
+    anchor_idx = 0
+    while len(trades) < max_entries_per_day:
+        trade, next_anchor_idx = _replay_one_opening_bar_leg(session_bars, anchor_idx, spend)
+        if trade is None:
+            break
+        trade["qualifies_as"] = qualifies_as
+        trade["leg_number"] = len(trades) + 1
+        trades.append(trade)
+        if next_anchor_idx is None:
+            break
+        anchor_idx = next_anchor_idx
+    return trades
+
+
+async def run_opening_bar_multi_entry_comparison(symbols=None, days: int = BACKTEST_DAYS, max_concurrent: int = 6, max_entries_per_day: int = OPENING_BAR_MAX_ENTRIES_PER_DAY) -> dict:
+    """Real, direct comparison - today's real one-entry-per-day baseline
+    (_replay_opening_bar_breakout, completely unchanged) vs. the new
+    multi-entry continuation version, replayed on the IDENTICAL real
+    historical Alpaca 2-minute bars (fetched once per symbol, not twice)
+    so the two are directly, fairly comparable. SHADOW-MODE, never places
+    a real order. symbols=None (default) tests every real symbol
+    prop_bot.py trades."""
+    symbol_list = symbols if symbols is not None else list(FUTURES.keys())
+    semaphore = asyncio.Semaphore(max_concurrent)
+    last_error = {}
+
+    async def _one(session, symbol):
+        async with semaphore:
+            bars, err = await _fetch_bars_2min_with_ohlc_and_times(session, symbol, days)
+        if bars is None:
+            last_error[symbol] = err
+            return symbol, None, None
+        days_grouped = _group_bars_by_day(bars)
+        single_trades, multi_trades = [], []
+        for i in range(1, len(days_grouped)):
+            _date, session_bars = days_grouped[i]
+            preceding_bars = days_grouped[i - 1][1][-ELEPHANT_BAR_LOOKBACK * 2:]
+            single_trade = _replay_opening_bar_breakout(session_bars, preceding_bars)
+            if single_trade is not None:
+                single_trades.append(single_trade)
+            multi_trades.extend(_replay_opening_bar_breakout_multi_entry(session_bars, preceding_bars, max_entries_per_day=max_entries_per_day))
+        return symbol, single_trades, multi_trades
+
+    async with aiohttp.ClientSession() as session:
+        results = await asyncio.gather(*(_one(session, s) for s in symbol_list))
+
+    def _summarize(trades):
+        if not trades:
+            return None
+        wins = sum(1 for t in trades if t["pnl_usd"] > 0)
+        return {
+            "num_trades": len(trades), "win_rate": round(wins / len(trades), 4),
+            "total_pnl": round(sum(t["pnl_usd"] for t in trades), 2),
+            "stop_count": sum(1 for t in trades if t["exit_reason"] == "STOP"),
+        }
+
+    per_symbol = []
+    skipped = []
+    all_single, all_multi = [], []
+    for symbol, single_trades, multi_trades in results:
+        if single_trades is None:
+            skipped.append({"product_id": symbol, "reason": last_error.get(symbol, "not enough real historical data")})
+            continue
+        per_symbol.append({
+            "product_id": symbol,
+            "single_entry": _summarize(single_trades),
+            "multi_entry": _summarize(multi_trades),
+        })
+        all_single.extend(single_trades)
+        all_multi.extend(multi_trades)
+
+    single_overall = _summarize(all_single)
+    multi_overall = _summarize(all_multi)
+    better = None
+    if single_overall and multi_overall:
+        better = "multi_entry" if multi_overall["total_pnl"] > single_overall["total_pnl"] else "single_entry"
+
+    return {
+        "symbols_tested": len(symbol_list), "symbols_with_results": len(per_symbol),
+        "skipped": skipped, "per_symbol": per_symbol,
+        "single_entry_overall": single_overall, "multi_entry_overall": multi_overall,
+        "better": better,
+        "params": {
+            "spend_usd": OPENING_BAR_SPEND_USD, "entry_buffer_usd": OPENING_BAR_ENTRY_BUFFER_USD,
+            "max_entries_per_day": max_entries_per_day, "days": days,
+        },
+    }
+
+
 def _rolling_range_pct(highs: list, lows: list, end_idx: int, lookback: int):
     """Real channel width - the real high/low range over the `lookback`
     real bars ending just before end_idx, as a fraction of that window's
