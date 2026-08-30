@@ -40,6 +40,7 @@ import logging
 import os
 import random
 import time
+from datetime import datetime
 
 from sqlalchemy import select, func, case, desc
 
@@ -127,6 +128,28 @@ GRID_AUTO_ROTATE_MIN_USD = float(os.getenv("GRID_AUTO_ROTATE_MIN_USD", "10.0"))
 # no DB persistence needed for a value that only ever needs to survive
 # within one process's lifetime.
 _last_grid_auto_rotate_at = 0.0
+
+# Real, minimum time a branch's own coin has to have been in place before
+# it's eligible to rotate away again via the periodic sweep - a real,
+# confirmed-live oscillation bug found on the daily health check: the
+# same handful of branches were reallocating cash back and forth between
+# each other (crypto_grid_1 <-> crypto_grid_7/9/10) every ~25-30 minutes,
+# for hours, via move_cash_between_grid_branches() creating a brand-new
+# branch row on every rotation (see create_grid_branch's own bot_name
+# reassignment). Root cause: _first_ranked_coin_beating_btc's real
+# live BTC-relative-strength tiebreak is time-varying by design (it's
+# checked fresh on every call) - re-evaluating it every ~30 min with zero
+# memory of what a branch just rotated into meant a coin that "currently
+# beats BTC" one sweep could stop beating it the next, bouncing real idle
+# cash between the same coins instead of ever settling long enough to
+# actually catch a real dip and trade. No real Coinbase order or fee was
+# ever placed by this (create_grid_branch never trades, it's pure
+# bookkeeping) - the real cost was capital never getting the chance to
+# actually deploy. Same "give a real decision room before revisiting it"
+# reasoning as the family tree's own one-cycle coin-sale cooldown, just
+# a real, meaningfully longer window here since a grid branch needs real
+# time to actually catch a dip, not just one cycle.
+GRID_ROTATION_COOLDOWN_SECONDS = int(os.getenv("GRID_ROTATION_COOLDOWN_SECONDS", str(2 * 60 * 60)))
 
 # Real, automatic deployment of real UNALLOCATED free cash - the direct
 # follow-up after the account owner pointed out that a manual "Add 3
@@ -979,17 +1002,36 @@ async def get_grid_cash_move_candidates(from_bot_name: str) -> dict:
     }
 
 
-async def _maybe_rotate_one_grid_branch(branch: CryptoGridBranch):
+async def _maybe_rotate_one_grid_branch(branch: CryptoGridBranch, after_sale: bool = False):
     """Real, one-branch check for run_grid_auto_rotate_sweep() below -
     also called immediately right after a real sell empties a branch out
-    to flat (see run_grid_branch_cycle), so a slice's freshly-realized
-    profit doesn't just sit waiting for the next scheduled sweep before
-    it goes back to work. Never touches a branch with real open slices -
-    those are actively working, not idle, and move_cash_between_grid_
-    branches() itself refuses a non-flat source as a second, independent
-    guard even if this check were ever somehow bypassed."""
+    to flat (see run_grid_branch_cycle, after_sale=True), so a slice's
+    freshly-realized profit doesn't just sit waiting for the next
+    scheduled sweep before it goes back to work. Never touches a branch
+    with real open slices - those are actively working, not idle, and
+    move_cash_between_grid_branches() itself refuses a non-flat source as
+    a second, independent guard even if this check were ever somehow
+    bypassed.
+
+    `after_sale=False` (the periodic sweep's own default) enforces
+    GRID_ROTATION_COOLDOWN_SECONDS via branch.created_at - since
+    move_cash_between_grid_branches() always creates a brand-new branch
+    row on rotation, created_at IS the real "how long has this branch's
+    coin been in place" signal, no separate column needed. A branch that
+    was itself just (re)assigned its current coin recently is left alone
+    until it's had real time to actually trade, closing the real
+    oscillation this cooldown was built to fix (see the constant's own
+    docstring above). `after_sale=True` skips the cooldown - a branch
+    that just genuinely sold a real slice earned the right to redeploy
+    its freshly-realized profit immediately, the same "the real source of
+    a crossing settles immediately" reasoning the family tree's own
+    reinforcement chain already established."""
     if branch.locked:
         return
+    if not after_sale and branch.created_at is not None:
+        age_seconds = (datetime.utcnow() - branch.created_at).total_seconds()
+        if age_seconds < GRID_ROTATION_COOLDOWN_SECONDS:
+            return
     slices = await get_grid_slices(branch.bot_name)
     if slices:
         return
@@ -1386,7 +1428,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                     fresh_result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
                     fresh_branch = fresh_result.scalar_one_or_none()
                 if fresh_branch and fresh_branch.active:
-                    await _maybe_rotate_one_grid_branch(fresh_branch)
+                    await _maybe_rotate_one_grid_branch(fresh_branch, after_sale=True)
             except Exception as e:
                 log.warning(f"[GRID] {branch.bot_name}: post-sale auto-rotate check failed (non-fatal, will retry next sweep): {e}")
         return

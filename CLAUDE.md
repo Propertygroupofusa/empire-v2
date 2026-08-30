@@ -10092,6 +10092,84 @@ never force-selling a position that might have recovered on its own.
 
 ---
 
+## Real, live-confirmed bug found via a scheduled daily health check: Grid Bot's auto-rotate sweep was oscillating real idle cash between the same branches for hours
+
+A routine "daily health check" trigger fired, reading the app's own
+real `status-snapshots/STATUS.md` (per the pattern documented above).
+The new "Recent Activity" section added to that snapshot earlier the
+same session (see "Status snapshot: surface locked Grid branches and a
+real recent-activity feed") immediately paid off: it showed
+`crypto_grid_1` moving real cash back and forth with `crypto_grid_7`,
+`crypto_grid_9`, and `crypto_grid_10` repeatedly across ~3 hours
+(09:31, 09:56, 12:13, 12:43 UTC), always the same handful of coins,
+always net $0.00 - genuine oscillation, not capital settling on
+better-performing coins over time.
+
+**Root cause**: `_first_ranked_coin_beating_btc()`'s real live
+BTC-relative-strength tiebreak is time-varying by design - it's
+checked fresh on every call, not cached. `run_grid_auto_rotate_sweep()`
+re-evaluates every flat branch's "what's the real best coin right now"
+every `GRID_AUTO_ROTATE_INTERVAL_SECONDS` (30 min default), with zero
+memory of what a branch had just rotated into. A coin that "currently
+beats BTC" one sweep could stop beating it the very next sweep, real
+idle cash bouncing between the same branches indefinitely instead of
+ever settling long enough to actually catch a real dip and trade.
+
+**No real Coinbase order or fee was ever placed by this** -
+`create_grid_branch()` never trades, it's pure bookkeeping plus one
+live price fetch to anchor `reference_price`. The real cost was capital
+never getting a fair chance to actually deploy, not wasted fees.
+
+**Fix**: a new `GRID_ROTATION_COOLDOWN_SECONDS` (2 hours default,
+env-overridable) in `crypto_grid_bot.py`. Since
+`move_cash_between_grid_branches()` always creates a brand-new branch
+row on rotation (`create_grid_branch()`'s own bot_name-reassignment
+behavior, pre-existing), `CryptoGridBranch.created_at` IS the real "how
+long has this branch's coin been in place" signal - no new column
+needed. `_maybe_rotate_one_grid_branch()` gained an `after_sale: bool =
+False` parameter: the periodic sweep's own default (`after_sale=False`)
+now refuses to rotate a branch whose own `created_at` is more recent
+than the real cooldown - giving a freshly-(re)assigned coin real time
+to actually trade before being judged again, closing the oscillation.
+`after_sale=True` (passed only by the real post-sale immediate-settle
+hook inside `run_grid_branch_cycle()`) bypasses the cooldown entirely -
+a branch that just genuinely sold a real slice still redeploys its
+freshly-realized profit immediately, the same "the real source of a
+crossing settles immediately" reasoning the family tree's own bounded
+reinforcement chain already established elsewhere in this file. A
+locked branch is still checked first and skipped regardless (unrelated
+to this fix, already existed).
+
+Verified offline (`test_grid_rotation_cooldown.py`, new, 11 checks,
+real throwaway SQLite DB): a freshly-created branch does NOT rotate via
+the sweep path even with a real better-ranked coin available; the
+identical branch DOES rotate once its own `created_at` clears the real
+cooldown (the fix paces rotation, it doesn't disable it); `after_sale=True`
+bypasses the cooldown entirely, confirming the post-sale hook is
+unaffected; the exact real oscillation shape (two freshly-created
+branches that would naturally want to swap coins) is reproduced and
+confirmed fixed - neither rotates while both are within the cooldown
+window; and `run_grid_auto_rotate_sweep()` end-to-end correctly skips a
+too-young branch while rotating an old-enough one in the same real
+sweep call. Two pre-existing test files
+(`test_grid_auto_rotate.py`, `test_grid_lock_and_move_candidates.py`)
+needed real branches backdated past the cooldown at 6 call sites -
+without it, several of their own checks were only "passing" because
+the new cooldown blocked rotation, not because the logic they actually
+claim to test (best-coin selection, the locked-branch skip, the
+already-open-slice skip, the below-minimum skip) ran at all; fixed by
+backdating each branch's `created_at` before the relevant call so each
+check again exercises its own real, stated logic. Full existing Grid
+Bot regression suite (18 test files) re-run clean alongside it.
+
+**Not yet confirmed live** - this needs a redeploy; the account owner
+should watch the dashboard's Grid Bot section (or the next real status
+snapshot's "Recent Activity" log) to confirm branches now settle for a
+real, meaningful stretch after a rotation instead of bouncing back
+within the hour.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md
