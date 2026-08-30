@@ -527,6 +527,72 @@ async def fund_grid_from_tree_branch(from_bot_name: str, amount: float, product_
     }
 
 
+async def _first_ranked_coin_beating_btc(ranked_product_ids: list) -> str:
+    """Live BTC-relative-strength check, layered on top of
+    pick_best_ranked_coin_for_grid()'s existing backtested-ROI ranking -
+    per the account owner's explicit "yes do it" after a pasted proposal
+    tried to graft this onto Grid Bot with fabricated code (a hardcoded
+    fake RSI, a phantom `GridAccountState` table, an Alembic migration
+    this project doesn't use). This reuses the REAL, already-validated
+    function instead: crypto_btc_compound_bot.get_price_volatility_and_trend(),
+    the exact same one crypto_family_tree_bot.find_most_volatile_unclaimed_coin()
+    already uses live, after its own real 30-day/21-coin backtest
+    comparison showed a net-positive ROI change on 15 of 21 coins when
+    gated on beating BTC-USD's own return over the identical window
+    (alpha = coin_return - btc_return > 0).
+
+    Real, honest caveat this docstring is explicit about, unlike the
+    fabricated version: that 30-day comparison was run against the
+    family tree's own directional target/stop/trailing-stop strategy,
+    not Grid Bot's mean-reversion buy-the-dip/sell-the-bounce mechanic -
+    it has NOT been separately backtested for Grid Bot specifically.
+    Wiring it in here is a reasonable, real signal reuse (a coin
+    currently trending relative to BTC is a coin actually moving, which
+    a grid strategy needs to have anything to buy/sell against at all),
+    not a claim that the same 15-of-21 improvement applies to Grid Bot's
+    own numbers - that would need its own real comparison, the same
+    "evidence before trusting a promoted number" standard every other
+    live filter in this codebase was held to.
+
+    Walks the real ROI-ranked list in order and returns the first coin
+    whose real live return over the same ~25h window beats BTC-USD's own
+    real return over that identical window - not just the single best-ROI
+    coin regardless of current live momentum. Fails OPEN (returns the
+    plain #1 ROI coin, unfiltered) when BTC's own live data can't be
+    fetched, or when every ranked candidate fails the check - a missing
+    benchmark, or a real moment where nothing beats BTC, is never grounds
+    to block Grid Bot from getting a real coin to trade at all."""
+    if not ranked_product_ids:
+        return None
+    async with engine.aiohttp.ClientSession() as session:
+        results = await asyncio.gather(
+            engine.get_price_volatility_and_trend(session, "BTC-USD"),
+            *(engine.get_price_volatility_and_trend(session, pid) for pid in ranked_product_ids),
+            return_exceptions=True,
+        )
+    btc_result, coin_results = results[0], results[1:]
+    btc_return = None
+    if not isinstance(btc_result, Exception) and btc_result is not None:
+        btc_return = btc_result[4]
+    if btc_return is None:
+        log.info("[GRID] BTC-relative-strength check: BTC-USD's own real live data unavailable right now - "
+                  "falling back to the plain #1 ROI-ranked coin unfiltered")
+        return ranked_product_ids[0]
+
+    for pid, result in zip(ranked_product_ids, coin_results):
+        if isinstance(result, Exception) or result is None:
+            continue
+        coin_return = result[4]
+        if coin_return is not None and coin_return > btc_return:
+            log.info(f"[GRID] BTC-relative-strength check: picked {pid} "
+                      f"(real {coin_return*100:+.2f}% vs BTC-USD's real {btc_return*100:+.2f}% over the same window)")
+            return pid
+
+    log.info(f"[GRID] BTC-relative-strength check: no ranked candidate currently beats BTC-USD's real "
+              f"{btc_return*100:+.2f}% - falling back to the plain #1 ROI-ranked coin")
+    return ranked_product_ids[0]
+
+
 async def pick_best_ranked_coin_for_grid() -> str:
     """Real coin auto-pick for the $20 Quick Buy button - the single best
     real backtested-ROI coin (from CryptoBacktestRun, the same real
@@ -539,8 +605,18 @@ async def pick_best_ranked_coin_for_grid() -> str:
     risking a quick-buy landing on a coin already proven to lose real
     money live - Grid Bot has no exclusion layer of its own, so this
     borrows the sibling system's rather than shipping a quick-buy with
-    none at all. Raises ValueError if nothing real qualifies (no coin has
-    a real backtest run yet, or every ranked coin is excluded/claimed)."""
+    none at all.
+
+    Among the real ROI-ranked candidates, the actual pick then goes
+    through a live BTC-relative-strength check (see
+    _first_ranked_coin_beating_btc) - not just the single highest-ROI
+    coin regardless of whether it's currently trending relative to BTC
+    right now. Fails open to the plain top-ROI pick if that check can't
+    run or nothing currently qualifies - this never blocks a pick outright
+    over the live filter alone.
+
+    Raises ValueError if nothing real qualifies (no coin has a real
+    backtest run yet, or every ranked coin is excluded/claimed)."""
     import crypto_family_tree_bot as tree  # lazy - avoids a circular import at module load, same pattern as get_real_free_cash_usd above
     from models import CryptoBacktestRun
 
@@ -568,7 +644,7 @@ async def pick_best_ranked_coin_for_grid() -> str:
             "run a coin-selection backtest first, or pick a specific coin instead"
         )
     candidates.sort(key=lambda r: r.roi_pct_of_spend, reverse=True)
-    return candidates[0].product_id
+    return await _first_ranked_coin_beating_btc([c.product_id for c in candidates])
 
 
 async def quick_buy_best_coin(amount_usd: float) -> dict:
