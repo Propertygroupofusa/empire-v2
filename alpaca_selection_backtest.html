@@ -802,12 +802,32 @@ async function promoteStrategyFamily(family, btn) {
 
 function renderEntrySignalAbTest(data) {
     const resultsEl = document.getElementById('entrySignalResults');
-    const names = data.variant_names || [];
+    const allNames = data.variant_names || [];
     const v = data.variants || {};
-    if (!names.length) {
+    if (!allNames.length) {
         resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No usable results.</p>';
         return;
     }
+
+    // Per the account owner's explicit request ("get rid of the bad data...
+    // keep the two good ones and if I have it keep that one but if I don't
+    // have it and showing up bad get rid of it"): only show the real
+    // top-2 performing variants by total real P&L - the headline "does
+    // this make more money" number - plus whichever variant is CURRENTLY
+    // LIVE on the real account, even if it isn't one of the top 2, so the
+    // live rule is never silently hidden from view. Every variant is still
+    // really tested underneath - this only trims what's DISPLAYED.
+    const letterOf = n => n.trim().charAt(0);
+    const ranked = allNames.slice().sort((a, b) =>
+        (v[b] ? v[b].total_pnl : -Infinity) - (v[a] ? v[a].total_pnl : -Infinity));
+    const keepSet = new Set(ranked.slice(0, Math.min(2, ranked.length)));
+    if (currentLiveVariant) {
+        const liveName = allNames.find(n => letterOf(n) === currentLiveVariant);
+        if (liveName) keepSet.add(liveName);
+    }
+    const hiddenNames = allNames.filter(n => !keepSet.has(n));
+    const names = allNames.filter(n => keepSet.has(n))
+        .sort((a, b) => allNames.indexOf(a) - allNames.indexOf(b));
 
     const metricRow = (label, fmt) => `
         <tr>
@@ -818,6 +838,11 @@ function renderEntrySignalAbTest(data) {
     const numOrDash = (x, suffix = '') => (x === null || x === undefined) ? '—' : (x + suffix);
 
     resultsEl.innerHTML = `
+        ${hiddenNames.length ? `<p style="margin-top:16px;font-size:0.82em;color:var(--text-dim);">
+            Showing only the top real performers${currentLiveVariant ? ' plus whichever variant is currently live' : ''} -
+            hidden underperformer(s): <strong>${hiddenNames.map(letterOf).join(', ')}</strong> (still really tested, just
+            not worth cluttering the dashboard with real losing numbers).
+        </p>` : ''}
         <p style="margin-top:16px;font-weight:700;">Totals across all symbols — the real answer to "does a richer entry gate help":</p>
         <table>
             <thead><tr><th>Metric</th>${names.map(n => `<th>${n}</th>`).join('')}</tr></thead>
