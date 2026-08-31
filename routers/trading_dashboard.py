@@ -70,6 +70,12 @@ except Exception as e:
     alpaca_selection_backtest_module = None
 
 try:
+    import macro_event_backtest as macro_event_backtest_module
+except Exception as e:
+    log.warning(f"macro_event_backtest not importable, /macro-event-backtest will report unavailable: {e}")
+    macro_event_backtest_module = None
+
+try:
     import btc_price_projection as btc_price_projection_module
 except Exception as e:
     log.warning(f"btc_price_projection not importable, /family-tree-status/btc-projection will report unavailable: {e}")
@@ -3344,6 +3350,28 @@ async def run_alpaca_red_bar_takeout_backtest():
     if alpaca_selection_backtest_module is None:
         raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
     return await alpaca_selection_backtest_module.run_red_bar_takeout_backtest()
+
+
+@router.post("/macro-event-backtest", dependencies=[Depends(require_admin_key)])
+async def run_macro_event_backtest_endpoint():
+    """SHADOW-MODE ONLY - never touches live trading, places no order. Per
+    the account owner's own direct request after sharing a real US Balance
+    of Trade release: "if you specifically think broad macro releases...
+    affect how BTC or the stocks move around release dates... Back-test
+    them and let me look and make a decision."
+
+    Real event-study backtest: measures BTC-USD's and SPY/QQQ's own real
+    return and volatility over the real window following each real macro
+    release date in macro_event_backtest.MACRO_EVENTS, against a real
+    random-window baseline drawn from the same real fetched history. The
+    event dates themselves are real, verified release dates the account
+    owner pasted directly - not guessed. See macro_event_backtest.py's own
+    module docstring for the full real methodology and its honest
+    sample-size caveat (currently just 2 real events - far too few to
+    conclude anything from yet)."""
+    if macro_event_backtest_module is None:
+        raise HTTPException(status_code=500, detail="macro_event_backtest module not available")
+    return await macro_event_backtest_module.run_macro_event_backtest()
 
 
 def _safe_float(v):

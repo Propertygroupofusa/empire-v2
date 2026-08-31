@@ -261,6 +261,13 @@
     <button class="run-btn" id="redBarTakeoutBtn" onclick="runRedBarTakeoutBacktest()">▶ Run Red-Bar-Takeout Backtest (~60-180 seconds)</button>
     <div id="redBarTakeoutStatus"></div>
     <div id="redBarTakeoutResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>🌐 Do US macro releases move BTC/SPY around release day?</strong> Per the account owner's own direct request, after sharing a real US Balance of Trade release and asking whether broad macro prints (trade balance, CPI, jobs numbers) affect price around release dates. <strong>Honest limitation, stated up front:</strong> this sandbox has no live access to any economic-calendar API, so the event dates tested here are ONLY real, verified dates the account owner has actually pasted (currently just the 2 real US Balance of Trade releases from tradingeconomics.com - May and June 2026). That's far too small a sample to conclude anything from - paste more real release dates (CPI, jobs reports, more trade-balance prints) to grow it. For each real event, measures BTC-USD's and SPY/QQQ's own real return + volatility over the window right after it, against a real random-window baseline from the same fetched history - so you can see whether the event windows actually look different, or not.
+    </div>
+    <button class="run-btn" id="macroEventBtn" onclick="runMacroEventBacktest()">▶ Run Macro Event Backtest (~15-30 seconds)</button>
+    <div id="macroEventStatus"></div>
+    <div id="macroEventResults"></div>
 </div>
 
 <script>
@@ -2101,6 +2108,83 @@ function renderRedBarTakeoutResults(data) {
         html += `<p class="trade-note">Skipped: ${data.skipped.map(s => `${s.product_id} (${s.reason})`).join(', ')}</p>`;
     }
     html += `<p class="trade-note">This is the lower-conviction fallback - compare its real win rate/P&amp;L directly against the higher-conviction Elephant/Tail backtest above on the same coins. Diagnostic only - nothing here changes what any live bot buys or sells.</p>`;
+    resultsEl.innerHTML = html;
+}
+
+// Real event-study backtest for whether US macro releases move BTC/SPY -
+// per the account owner's own direct request. See macro_event_backtest.py
+// for the full real methodology and its honest small-sample caveat.
+async function runMacroEventBacktest() {
+    const btn = document.getElementById('macroEventBtn');
+    const statusEl = document.getElementById('macroEventStatus');
+    const resultsEl = document.getElementById('macroEventResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (fetching real BTC + SPY/QQQ history around each real event)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/macro-event-backtest', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        renderMacroEventBacktestResults(data);
+        statusEl.textContent = `Tested ${data.events_used.length} real macro release date(s) against BTC-USD and ${Object.keys(data.stocks).join('/')}.`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Macro Event Backtest (~15-30 seconds)';
+    }
+}
+
+function fmtMacroEventTable(label, result) {
+    if (result.error) {
+        return `<h4 style="margin-top:16px;">${label}</h4><p class="trade-note">${result.error}</p>`;
+    }
+    const eventRows = result.events.map(ev => {
+        if (!ev.available) {
+            return `<tr><td>${ev.date}</td><td>${ev.label}</td><td colspan="2" class="trade-note">${ev.reason}</td></tr>`;
+        }
+        return `<tr>
+            <td>${ev.date}</td>
+            <td>${ev.label}</td>
+            <td class="${ev.return_pct >= 0 ? 'pos' : 'neg'}">${ev.return_pct >= 0 ? '+' : ''}${ev.return_pct}%</td>
+            <td>${ev.volatility_pct}%</td>
+        </tr>`;
+    }).join('');
+    const baselineRow = result.baseline_avg_return_pct != null
+        ? `<tr style="font-style:italic;">
+            <td colspan="2">Real baseline (${result.baseline_sample_size} random windows)</td>
+            <td class="${result.baseline_avg_return_pct >= 0 ? 'pos' : 'neg'}">${result.baseline_avg_return_pct >= 0 ? '+' : ''}${result.baseline_avg_return_pct}%</td>
+            <td>${result.baseline_avg_volatility_pct}%</td>
+        </tr>`
+        : '';
+    return `
+        <h4 style="margin-top:16px;">${label}</h4>
+        <table>
+            <thead><tr><th>Date</th><th>Event</th><th>Return over window</th><th>Volatility</th></tr></thead>
+            <tbody>${eventRows}${baselineRow}</tbody>
+        </table>`;
+}
+
+function renderMacroEventBacktestResults(data) {
+    const resultsEl = document.getElementById('macroEventResults');
+    let html = fmtMacroEventTable('BTC-USD (24 real hourly candles after each event)', data.btc);
+    for (const [symbol, result] of Object.entries(data.stocks)) {
+        html += fmtMacroEventTable(`${symbol} (26 real 15-min bars ≈ 1 trading session after each event)`, result);
+    }
+    html += `<p class="trade-note">Compare each event's own real return/volatility against the real baseline row right below it - that's the honest "does this actually look different from a typical window" check. With only 2 real events tested so far, treat any difference as a hint at best, not a real conclusion - paste more real, verified macro release dates into macro_event_backtest.py's MACRO_EVENTS list to grow the sample. Diagnostic only - nothing here changes what any live bot does on its own.</p>`;
     resultsEl.innerHTML = html;
 }
 </script>

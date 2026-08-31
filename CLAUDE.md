@@ -10170,6 +10170,135 @@ within the hour.
 
 ---
 
+## Grid Bot real total + one-button "close everything & take profit"
+
+Per the account owner's direct request while looking at the live Grid Bot
+dashboard: a single real total across every branch, plus one button at
+the bottom that closes every open slice in every branch at once if the
+whole section is genuinely profitable right now.
+
+`get_grid_status()` now returns `total_unrealized_net_usd` (the real sum
+of every branch's own already-shown "if sold right now" figure, summed
+across every branch currently holding a real open slice) and
+`branches_with_open_slices` - honestly `None` if any holding branch's
+live price fetch failed, never a silent undercount. New
+`close_all_grid_slices()` sells every real open slice, across every
+branch (active/paused/locked all included - locking only ever protected
+cash removal, never trading), ONE real market sell per branch (not per
+slice - the same real notional, fewer real orders), reusing the exact
+same fee/pnl formula and bookkeeping `run_grid_branch_cycle()`'s own FIFO
+sell already uses. A failed sell on one branch never blocks or rolls back
+another branch's own real close in the same call. New
+`POST /grid-status/close-all`, server-side re-gated on the real total
+being genuinely positive (never trust the client) - matching the family
+tree's own root-take-profit precedent. Dashboard: a real total banner at
+the bottom of the Grid Bot section with the close-all button, enabled
+only when the real total is up.
+
+Verified offline (21 checks) against the real local dev DB: total
+aggregation matches a hand-summed total across holding branches, a flat
+branch is excluded and never touched, close-all correctly deltas each
+branch's `allocated_usd` by its own real P&L, logs one trade-history row
+per closed slice, and a real sell failure on one branch never blocks
+another's. Existing Grid Bot regression suite re-run clean alongside it.
+
+---
+
+## Real bug found and fixed: overlapping/unreadable Grid Bot slice labels on close entry prices
+
+The account owner sent marked-up real screenshots (ETC-USD, CTC-USD,
+DOGE-USD branches) circling garbled, overlapping text like "+$0.10
+(+$0.05%)(+0.32%)" on the live per-branch chart. Root cause:
+`renderGridBranchChart()`'s slice markers each draw their own $/% label
+as SVG text centered at `x(entry_price)` and a FIXED y-offset for every
+slice - when two real open slices had entry prices close enough together
+to map to nearby pixels, their labels landed on the identical spot and
+printed directly on top of each other.
+
+Fixed by sorting slices by their real x-position and assigning each a
+vertical "lane": any slice whose x-center falls within 60px of an
+already-placed lane's most recent x-center is bumped to the next lane
+instead of overlapping it, capped at 3 lanes (the real headroom available
+above the axis before hitting the top price marker). Slices that aren't
+actually close together are completely unaffected - still lane 0, same
+as before. Verified the lane-assignment logic directly in Node against
+the real observed scenarios (two close slices split onto separate lanes,
+two far-apart slices both stay on lane 0, four tightly-clustered slices
+cap at 3 lanes rather than growing unbounded) - 10 checks, all passing.
+
+---
+
+## Macro-release event-study backtest (shadow mode, additive only) - is there a real, testable link between US macro prints and BTC/SPY moves?
+
+The account owner pasted a real US Balance of Trade release from
+tradingeconomics.com (and separately, a link to a world-debt-clock site)
+and asked whether macro data like this should feed into the dashboard.
+Given the honest answer directly first: a monthly BEA/BLS print can't
+feed a decision that fires every 30 seconds to a few times a day, and
+this codebase has never validated ANY macro signal against real trading
+outcomes - bolting one on without evidence would be exactly the kind of
+unvalidated-guess mistake this whole system has already been burned by.
+Offered two honest paths (pure display, or a real backtest); the account
+owner chose the backtest: "Back-test them and let me look and make a
+decision."
+
+**New `macro_event_backtest.py`** - SHADOW MODE ONLY, never touches live
+trading, never imported by any live bot. A real, standard event-study
+methodology: for each real macro release date, measures BTC-USD's real
+return + volatility over the 24 real hourly candles following it (via
+`crypto_selection_backtest.fetch_candles_window()`, reused not
+duplicated) and SPY/QQQ's real return + volatility over the 26 real
+15-min bars following it (via `alpaca_selection_backtest._fetch_bars_with_times()`,
+also reused) - then compares each event's real numbers against a real
+baseline of 200 random, non-overlapping-with-any-event windows drawn from
+the identical fetched history, the honest "does this actually look
+different from a typical window" check.
+
+**Real, honest constraint stated directly in the module's own docstring**:
+this sandbox has no live access to any economic-calendar API, and this
+codebase has never integrated one - so `MACRO_EVENTS` holds EXACTLY the
+two real, verified release dates the account owner themselves pasted
+(2026-07-07 and 2026-08-04, the May and June 2026 US trade-balance
+releases, both with their own real "12:30 PM GMT" release time straight
+from that page) - nothing invented or guessed from a "typical schedule."
+Two real events is nowhere near enough to draw a real conclusion from;
+the list is meant to grow as the account owner pastes more real, verified
+release dates (CPI, jobs reports, more trade-balance prints, FOMC
+decisions) the same way this first pair was sourced.
+
+New `POST /macro-event-backtest` (admin-key gated) and a new "🌐 Do US
+macro releases move BTC/SPY around release day?" section on
+`crypto_selection_backtest.html`, with the same honest small-sample
+caveat repeated in the UI copy itself, not just the code comments.
+
+Verified offline (21 checks, no live network access from this sandbox -
+same documented gap as every other backtest tool in this codebase):
+`_find_index_at_or_after`'s real bisect against a hand-built timestamp
+list; `_window_return_and_vol`'s real return/volatility math against a
+hand-computed example and a perfectly flat control (0% return, 0
+volatility); a synthetic 500-candle series with a KNOWN, deliberate +10%
+jump exactly at one real event's timestamp and flat everywhere else
+confirms the event study correctly isolates that jump into the event's
+own result (found ~9.6%, matching the known jump) while the real baseline
+average stays near 0% (proving it doesn't leak the event's own effect
+into itself); an event date outside the fetched window is reported
+honestly unavailable rather than crashing; and
+`run_btc_macro_event_backtest`/`run_stock_macro_event_backtest`/
+`run_macro_event_backtest` all verified end-to-end with the real fetch
+functions mocked, including a real fetch-failure path reporting an honest
+error instead of crashing.
+
+**Not yet run against real historical data** - same documented gap as
+every backtest tool in this codebase (no live network access to
+Coinbase/Alpaca from this sandbox). The account owner needs to open
+`/crypto-selection-backtest-view` after the next redeploy and tap "▶ Run
+Macro Event Backtest" to see the real numbers - with only 2 real events
+tested, this is meant to inform whether growing the event list further is
+worth doing, not to answer the underlying question yet. Nothing here
+changes what any live bot does on its own.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md
