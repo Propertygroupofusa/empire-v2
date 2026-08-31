@@ -10299,6 +10299,42 @@ changes what any live bot does on its own.
 
 ---
 
+## Grid Bot slice-label overlap fix, round 2: the lanes weren't far enough apart
+
+Right after the first overlapping-label fix shipped (separate vertical
+"lanes" for slices whose entry prices land close together on the chart),
+the account owner sent a fresh marked-up screenshot of the SAME real
+DOGE-USD branch still showing garbled overlapping text on two close
+slices. The first fix's mechanism was correct - the two slices genuinely
+were being assigned different lanes - but the lanes were only 12 real SVG
+units apart, too tight for bold, font-size-10 text to actually clear each
+other at that spacing; the real overlap just moved slightly rather than
+disappearing. The first fix also hard-capped stacking at 3 lanes, which
+could silently reproduce the exact same bug for a real 4th slice landing
+in the same tight cluster (a branch can hold up to 10 real open slices).
+
+Fixed properly this time instead of guessing another magic constant:
+`LANE_HEIGHT` raised from 12 to 14, the artificial 3-lane cap removed
+entirely, and the chart's own SVG `viewBox` now grows upward on demand -
+the axis line and everything below it never move; only the top boundary
+extends further up (via a negative `viewBoxTop`) when the topmost real
+lane would otherwise crowd the existing "now price" triangle marker.
+A normal 1-2-slice branch (the overwhelming majority) renders byte-for-
+byte the same size as before - the growth only ever engages when a real
+cluster genuinely needs more than the ~3 lanes that already fit for free.
+
+Verified in Node against the exact real DOGE-USD shape (2 tightly-
+clustered slices) plus a deliberately pathological 4-slice cluster (what
+the OLD 3-lane cap would have silently mishandled): the 2-slice case now
+gets a real, wider 14px gap with no unnecessary chart growth; the 4-slice
+case gets 4 genuinely distinct lanes with the canvas growing exactly
+enough to keep the topmost label a real 10px clear of the top edge; far-
+apart slices and the single-slice case are both completely unaffected -
+9 checks, all passing. HTML tag-balance and extracted-script syntax
+checks both clean.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

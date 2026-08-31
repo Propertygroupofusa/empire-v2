@@ -2033,7 +2033,7 @@ function renderGridBranchChart(b) {
     domainMin -= span * 0.15;
     domainMax += span * 0.15;
 
-    const W = 640, H = 124, marginX = 14, axisY = 55;
+    const W = 640, marginX = 14, axisY = 55;
     const x = p => marginX + ((p - domainMin) / (domainMax - domainMin)) * (W - 2 * marginX);
 
     // "Now"/"Reference" are shown as a plain HTML caption ABOVE the chart
@@ -2059,31 +2059,39 @@ function renderGridBranchChart(b) {
     // Real label-collision avoidance: two (or more) real open slices whose
     // entry prices map to nearby real pixel positions on this chart used to
     // stack their own $/% labels directly on top of each other into
-    // unreadable overlapping text - confirmed live via the account owner's
-    // own marked-up screenshots (ETC-USD, DOGE-USD), each showing exactly
-    // this. Slices are sorted by real x-position and assigned a vertical
-    // "lane" - any slice whose x-center falls within LABEL_MIN_GAP_PX of an
-    // already-placed lane's most recent x-center gets bumped up to the next
-    // lane instead of overlapping it. Capped at 3 lanes - there's only
-    // ~35px of real headroom above the axis before hitting the top price
-    // marker, so a 4th real slice landing in the exact same tight cluster
-    // reuses the top lane rather than growing the whole chart, a rare-enough
-    // real case not worth the extra layout complexity.
+    // unreadable overlapping text - confirmed live TWICE via the account
+    // owner's own marked-up screenshots (ETC-USD, then DOGE-USD again after
+    // the first fix shipped). The first fix put colliding labels on
+    // separate vertical lanes but only 12 real SVG units apart - too tight
+    // for bold, font-size-10 text to actually clear each other, so the
+    // real overlap just moved rather than disappeared. Now: LANE_HEIGHT
+    // raised to 14, no artificial lane cap (a branch can hold up to 10
+    // real slices, so a real worst-case pileup can need more than 3 lanes),
+    // and the chart's own SVG viewBox grows upward on demand - the axis and
+    // everything below it never move, only the top boundary extends
+    // further up when the topmost real lane would otherwise crowd the
+    // existing price-marker triangle - so extra lanes always get real,
+    // guaranteed room instead of hoping 3 was ever going to be enough.
     const LABEL_MIN_GAP_PX = 60;
-    const MAX_LANES = 3;
+    const LANE_HEIGHT = 14;
     const laneByIndex = {};
     slices
         .map((s, i) => ({ i, cx: x(s.entry_price) }))
         .sort((a, b) => a.cx - b.cx)
         .reduce((laneLastX, { i, cx }) => {
             let lane = 0;
-            while (lane < MAX_LANES - 1 && laneLastX[lane] !== undefined && cx - laneLastX[lane] < LABEL_MIN_GAP_PX) {
+            while (laneLastX[lane] !== undefined && cx - laneLastX[lane] < LABEL_MIN_GAP_PX) {
                 lane++;
             }
             laneLastX[lane] = cx;
             laneByIndex[i] = lane;
             return laneLastX;
         }, []);
+    const maxLane = Object.keys(laneByIndex).length ? Math.max(...Object.values(laneByIndex)) : 0;
+    const topmostLabelY = axisY - 14 - maxLane * LANE_HEIGHT;
+    const LABEL_TOP_MARGIN = 10; // real minimum distance the topmost stacked label keeps from the diagram's own top edge
+    const viewBoxTop = Math.min(0, topmostLabelY - LABEL_TOP_MARGIN);
+    const H = 124 - viewBoxTop;
 
     const sliceMarkers = slices.map((s, i) => {
         const netUsd = s.unrealized_net_usd;
@@ -2091,7 +2099,7 @@ function renderGridBranchChart(b) {
         const color = netUsd == null ? 'var(--text-dim)' : (isLoss ? 'var(--red)' : 'var(--green)');
         const isOldest = i === 0;
         const cx = x(s.entry_price);
-        const labelY = axisY - 14 - (laneByIndex[i] || 0) * 12;
+        const labelY = axisY - 14 - (laneByIndex[i] || 0) * LANE_HEIGHT;
         const ring = isOldest ? `<circle cx="${cx}" cy="${axisY}" r="10" fill="none" stroke="var(--gold)" stroke-width="2"/>` : '';
         const sign = netUsd == null ? '' : (netUsd >= 0 ? '+' : '-');
         const pctStr = s.unrealized_net_pct != null ? ` (${s.unrealized_net_pct >= 0 ? '+' : ''}${(s.unrealized_net_pct * 100).toFixed(2)}%)` : '';
@@ -2117,7 +2125,7 @@ function renderGridBranchChart(b) {
             <strong style="color:var(--navy);">Now ${fmtPrice(price)}</strong>
             <span style="color:var(--text-dim); margin-left:10px;">Reference ${fmtPrice(ref)}</span>
         </div>
-        <svg viewBox="0 0 ${W} ${H}" style="width:100%; max-width:${W}px; height:auto; display:block;">
+        <svg viewBox="0 ${viewBoxTop} ${W} ${H}" style="width:100%; max-width:${W}px; height:auto; display:block;">
             <line x1="${marginX}" y1="${axisY}" x2="${W - marginX}" y2="${axisY}" stroke="var(--border)" stroke-width="1.5"/>
             ${triggerLine(buyTrigger, '↓ buy dip')}
             ${triggerLine(sellTrigger, '↑ sell rise')}
