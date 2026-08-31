@@ -5409,3 +5409,32 @@ async def set_grid_branch_active_endpoint(bot_name: str, payload: SetGridBranchA
         await db.commit()
     log.info(f"[dashboard] {'▶️ Resumed' if payload.active else '⏸️ Paused'} grid branch {bot_name}")
     return {"status": "updated", "bot_name": bot_name, "active": payload.active}
+
+
+@router.post("/grid-status/close-all", dependencies=[Depends(require_admin_key)])
+async def close_all_grid_slices_endpoint():
+    """Real, one-way "close everything & take profit" - per the account
+    owner's direct request for one button at the bottom of the Grid Bot
+    section that sells every real open slice across every branch right
+    now, instead of closing branches one at a time.
+
+    Real, server-side re-check so this can't be triggered when the total
+    isn't actually profitable just by calling the API directly: refuses
+    (400) unless the real grand total across every branch's own "if sold
+    right now" figure is genuinely positive at this exact moment -
+    matching the same "only enabled when genuinely in profit right now,
+    re-checked server-side too" principle the family tree's own
+    root-take-profit button already established. A real live-price fetch
+    failure for any branch makes the real total honestly unknown rather
+    than a guess, and is refused the same way."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    status = await crypto_grid_bot_module.get_grid_status()
+    total = status.get("total_unrealized_net_usd")
+    if total is None:
+        raise HTTPException(status_code=400, detail="Could not confirm the real total right now (a live price fetch failed) - refusing to close everything blind")
+    if total <= 0:
+        raise HTTPException(status_code=400, detail=f"Total unrealized P&L across all Grid Bot branches is ${total:.2f} right now - not currently profitable, refusing to close everything")
+    result = await crypto_grid_bot_module.close_all_grid_slices()
+    log.info(f"[dashboard] 🔒 Close-all triggered: {result['branches_closed']} branches, {result['slices_closed']} real slices, ${result['total_realized_pnl']:.2f} total realized")
+    return result

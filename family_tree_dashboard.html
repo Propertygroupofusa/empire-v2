@@ -1931,7 +1931,72 @@ function renderGridStatus(data, tradeHistoryByBot) {
             branch shows real slice entries against the live price - a slice colored red is currently sitting at a real
             unrealized loss right now; grid selling is FIFO by trigger price, not by which slice is winning, so a red
             slice can still be the one sold next.
-        </p>`;
+        </p>
+        ${renderGridCloseAllBanner(data)}`;
+}
+
+// Real, one bottom-line total across every Grid Bot branch, plus the real
+// "close everything" button - per the account owner's direct request: "I
+// need the total at the bottom of it all... let me know if I want to
+// press a button it take all the profit if it was up... one press... it
+// close everything out." Sums every branch's own already-shown "if sold
+// right now" figure - this can never disagree with the per-branch cards
+// above it, since it's the same real number the backend already computed
+// for each one. The button itself is only ever enabled when that real
+// total is genuinely positive right now (re-checked server-side too, so
+// it can't be bypassed) - same "profit-gated, re-checked both places"
+// principle the family tree's own root-take-profit button already uses.
+function renderGridCloseAllBanner(data) {
+    const withSlices = data.branches_with_open_slices || 0;
+    if (withSlices === 0) {
+        return `<div style="margin-top:14px; padding:12px 14px; background:var(--bg); border-radius:8px; font-size:0.85em; color:var(--text-dim);">
+            💰 Nothing open across any Grid Bot branch right now - no real total to show yet.
+        </div>`;
+    }
+    const total = data.total_unrealized_net_usd;
+    if (total === null || total === undefined) {
+        return `<div style="margin-top:14px; padding:12px 14px; background:var(--bg); border-radius:8px; font-size:0.85em; color:var(--text-dim);">
+            💰 Could not confirm the real total right now (a live price fetch failed) - refresh in a moment.
+        </div>`;
+    }
+    const isProfit = total > 0;
+    const color = isProfit ? 'var(--green)' : (total < 0 ? 'var(--red)' : 'var(--text-dim)');
+    return `<div style="margin-top:14px; padding:14px; background:var(--bg); border-radius:8px;">
+        <div style="font-size:1.05em; font-weight:700; color:${color};">
+            💰 Total right now across all ${withSlices} branch${withSlices === 1 ? '' : 'es'} holding a real open slice:
+            ${isProfit ? '+' : ''}${fmtUsd(total)}
+        </div>
+        <div style="font-size:0.8em; color:var(--text-dim); margin-top:4px;">
+            ${isProfit
+                ? 'Real, fee-adjusted - this is genuinely up right now. You can close every open slice, in every branch, at once below.'
+                : 'Real, fee-adjusted - not currently profitable as a whole, so the close-everything button stays off. Individual branches can still be handled one at a time above.'}
+        </div>
+        <button id="grid-close-all-btn" onclick="closeAllGridSlices(this)" ${isProfit ? '' : 'disabled'}
+            style="margin-top:10px; padding:10px 16px; border-radius:8px; border:none; font-weight:600; cursor:${isProfit ? 'pointer' : 'not-allowed'};
+                   background:${isProfit ? 'var(--green)' : 'var(--border)'}; color:${isProfit ? '#fff' : 'var(--text-dim)'};">
+            🔒 Close everything & take profit${isProfit ? ` (${fmtUsd(total)})` : ''}
+        </button>
+    </div>`;
+}
+
+async function closeAllGridSlices(btn) {
+    if (!confirm('Sell EVERY real open slice, in EVERY Grid Bot branch, right now at market? This locks in the current total profit across the whole section and can’t be undone - each branch keeps trading normally afterward, buying back in on its own next real dip.')) return;
+    btn.disabled = true;
+    btn.textContent = 'Closing everything…';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/grid-status/close-all', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        alert(`Closed ${data.slices_closed} real slice(s) across ${data.branches_closed} branch(es). Total realized: ${data.total_realized_pnl >= 0 ? '+' : ''}${fmtUsd(data.total_realized_pnl)}.`);
+        await loadGridStatus();
+    } catch (e) {
+        alert('Close-all failed: ' + e.message);
+        await loadGridStatus();
+    }
 }
 
 // Real, live visual per grid branch - a horizontal real price axis showing

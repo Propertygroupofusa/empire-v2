@@ -1556,6 +1556,22 @@ async def get_grid_status() -> dict:
             "total_unrealized_net_pct": round(total_net_pct, 4) if total_net_pct is not None else None,
             "slices": slices_out,
         })
+
+    # Real grand total across EVERY branch's own "if sold right now" figure
+    # - per the account owner's own explicit request for one bottom-line
+    # number covering the whole Grid Bot section, so a single glance (or a
+    # single "close everything" button) doesn't require mentally summing
+    # every branch card by hand. Only ever a real number when every single
+    # branch that currently HOLDS a slice also has a real live price this
+    # call - one missing price makes the real total honestly unknown
+    # (None) rather than silently undercounting it.
+    branches_with_slices = [b for b in out if b["open_slices"] > 0]
+    total_unrealized_known = all(b["total_unrealized_net_usd"] is not None for b in branches_with_slices)
+    total_unrealized_net_usd = (
+        round(sum(b["total_unrealized_net_usd"] for b in branches_with_slices), 2)
+        if total_unrealized_known else None
+    )
+
     return {
         "mode_active": mode_active,
         "dynamic_spacing_active": await is_dynamic_spacing_active(),
@@ -1563,9 +1579,96 @@ async def get_grid_status() -> dict:
         "auto_rotate_interval_minutes": GRID_AUTO_ROTATE_INTERVAL_SECONDS // 60,
         "drawdown_breaker_pct": GRID_DRAWDOWN_BREAKER_PCT,
         "branch_count": len(branches),
+        "branches_with_open_slices": len(branches_with_slices),
         "total_allocated_usd": round(total_allocated, 2),
+        "total_unrealized_net_usd": total_unrealized_net_usd,
         "real_free_cash_usd": await get_real_free_cash_usd(),
         "branches": out,
+    }
+
+
+async def close_all_grid_slices() -> dict:
+    """Real, one-way "close everything" - per the account owner's direct
+    request for one button at the bottom of the Grid Bot section that
+    takes all the real profit if the whole section is up, instead of
+    closing branches one at a time. Sells EVERY real open slice, across
+    EVERY grid branch (active or paused, locked or not - locking only
+    ever blocked real cash REMOVAL, never normal trading, so it doesn't
+    protect a slice from this either), right now, at market.
+
+    Reuses the exact same real fee/pnl formula (_grid_slice_net_pnl) and
+    the exact same real bookkeeping (allocated_usd += pnl, reference_price
+    -> the real fill price, a real CryptoGridTradeHistory row per slice,
+    a real activity-feed entry) run_grid_branch_cycle()'s own FIFO sell
+    already uses - this is not a second, hand-written copy of that math.
+
+    Placed as ONE real market sell per branch (the branch's total real
+    qty across every one of its open slices), not one order per slice -
+    fewer real orders for the identical real fee cost (fee is % of
+    notional, not per-order), then the single real fill price is applied
+    to each slice's own entry for accurate per-slice P&L bookkeeping and
+    trade-history rows. A branch with zero open slices is skipped
+    entirely - nothing to close, nothing logged. A real sell that doesn't
+    fill for one branch never blocks or rolls back any other branch's own
+    real close in the same call - each branch's outcome is independent
+    and reported separately."""
+    branches = await get_grid_branches()
+    results = []
+    total_realized_pnl = 0.0
+    branches_closed = 0
+    slices_closed = 0
+    async with engine.aiohttp.ClientSession() as session:
+        for b in branches:
+            slices = await get_grid_slices(b.bot_name)
+            if not slices:
+                continue
+            total_qty = sum(s.qty for s in slices)
+            fill = await engine.place_market_sell(session, total_qty, b.product_id)
+            if not fill:
+                reason = engine._last_order_error.get(b.product_id, "real sell did not fill")
+                results.append({
+                    "bot_name": b.bot_name, "product_id": b.product_id,
+                    "sold": False, "slices_closed": 0, "reason": reason,
+                })
+                log.warning(f"[GRID] close-all: {b.bot_name} real sell of {b.product_id} did not fill ({reason}) - left open, will still trade normally")
+                continue
+            filled_qty, filled_price = fill
+            branch_pnl = 0.0
+            async with AsyncSessionLocal() as db:
+                for s in slices:
+                    pnl = _grid_slice_net_pnl(s.qty, s.entry_price, filled_price)
+                    branch_pnl += pnl
+                    await _log_grid_trade(b.bot_name, b.product_id, s.entry_price, filled_price, s.qty, pnl, s.opened_at)
+                    slice_result = await db.execute(select(CryptoGridSlice).where(CryptoGridSlice.id == s.id))
+                    slice_row = slice_result.scalar_one_or_none()
+                    if slice_row:
+                        await db.delete(slice_row)
+                branch_result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == b.bot_name))
+                fresh = branch_result.scalar_one_or_none()
+                new_balance = b.allocated_usd + branch_pnl
+                if fresh:
+                    fresh.allocated_usd += branch_pnl
+                    fresh.reference_price = filled_price
+                    new_balance = fresh.allocated_usd
+                await db.commit()
+            total_realized_pnl += branch_pnl
+            branches_closed += 1
+            slices_closed += len(slices)
+            msg = (
+                f"🔒 {b.bot_name} CLOSE ALL: sold all {len(slices)} real open slice(s) of {b.product_id} @ ${filled_price:,.2f} "
+                f"| P&L: {'+' if branch_pnl >= 0 else ''}${branch_pnl:.2f} after est. fees | branch now ${new_balance:.2f}"
+            )
+            log.info(f"[GRID] {msg}")
+            await _log_activity_safe(b.bot_name, b.product_id, "SELL", msg)
+            results.append({
+                "bot_name": b.bot_name, "product_id": b.product_id, "sold": True,
+                "slices_closed": len(slices), "fill_price": filled_price, "pnl": round(branch_pnl, 2),
+            })
+    return {
+        "branches_closed": branches_closed,
+        "slices_closed": slices_closed,
+        "total_realized_pnl": round(total_realized_pnl, 2),
+        "results": results,
     }
 
 
