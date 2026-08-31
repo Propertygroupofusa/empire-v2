@@ -2056,12 +2056,42 @@ function renderGridBranchChart(b) {
     // that math. A slice can show green raw but red net-of-fees (still
     // hasn't cleared the real cost of actually selling) - that's the
     // whole point of showing both.
+    // Real label-collision avoidance: two (or more) real open slices whose
+    // entry prices map to nearby real pixel positions on this chart used to
+    // stack their own $/% labels directly on top of each other into
+    // unreadable overlapping text - confirmed live via the account owner's
+    // own marked-up screenshots (ETC-USD, DOGE-USD), each showing exactly
+    // this. Slices are sorted by real x-position and assigned a vertical
+    // "lane" - any slice whose x-center falls within LABEL_MIN_GAP_PX of an
+    // already-placed lane's most recent x-center gets bumped up to the next
+    // lane instead of overlapping it. Capped at 3 lanes - there's only
+    // ~35px of real headroom above the axis before hitting the top price
+    // marker, so a 4th real slice landing in the exact same tight cluster
+    // reuses the top lane rather than growing the whole chart, a rare-enough
+    // real case not worth the extra layout complexity.
+    const LABEL_MIN_GAP_PX = 60;
+    const MAX_LANES = 3;
+    const laneByIndex = {};
+    slices
+        .map((s, i) => ({ i, cx: x(s.entry_price) }))
+        .sort((a, b) => a.cx - b.cx)
+        .reduce((laneLastX, { i, cx }) => {
+            let lane = 0;
+            while (lane < MAX_LANES - 1 && laneLastX[lane] !== undefined && cx - laneLastX[lane] < LABEL_MIN_GAP_PX) {
+                lane++;
+            }
+            laneLastX[lane] = cx;
+            laneByIndex[i] = lane;
+            return laneLastX;
+        }, []);
+
     const sliceMarkers = slices.map((s, i) => {
         const netUsd = s.unrealized_net_usd;
         const isLoss = netUsd == null ? false : netUsd < 0;
         const color = netUsd == null ? 'var(--text-dim)' : (isLoss ? 'var(--red)' : 'var(--green)');
         const isOldest = i === 0;
         const cx = x(s.entry_price);
+        const labelY = axisY - 14 - (laneByIndex[i] || 0) * 12;
         const ring = isOldest ? `<circle cx="${cx}" cy="${axisY}" r="10" fill="none" stroke="var(--gold)" stroke-width="2"/>` : '';
         const sign = netUsd == null ? '' : (netUsd >= 0 ? '+' : '-');
         const pctStr = s.unrealized_net_pct != null ? ` (${s.unrealized_net_pct >= 0 ? '+' : ''}${(s.unrealized_net_pct * 100).toFixed(2)}%)` : '';
@@ -2069,7 +2099,7 @@ function renderGridBranchChart(b) {
         return `
             ${ring}
             <circle cx="${cx}" cy="${axisY}" r="6" fill="${color}"/>
-            <text x="${cx}" y="${axisY - 14}" text-anchor="middle" font-size="10" font-weight="700" fill="${color}">${label}</text>
+            <text x="${cx}" y="${labelY}" text-anchor="middle" font-size="10" font-weight="700" fill="${color}">${label}</text>
             ${isOldest ? `<text x="${cx}" y="${axisY + 22}" text-anchor="middle" font-size="9" fill="var(--gold)" font-weight="700">next to sell</text>` : ''}`;
     }).join('');
 
