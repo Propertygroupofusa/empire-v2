@@ -446,7 +446,7 @@ async def get_account_equity(session):
 async def get_account_cash(session):
     """Real Alpaca cash balance, used to size new positions in dollars
     rather than a fixed share count (see size_position). Falls back to
-    None on any failure - callers fall back to the fixed 1-share size."""
+    None on any failure - callers fall back to a bounded dollar size."""
     try:
         url = f"{get_base_url()}/v2/account"
         async with session.get(url, headers=get_headers()) as r:
@@ -579,6 +579,7 @@ async def reconcile_positions_with_broker(session):
 # Micro-account ($978): $50 minimum allows actual execution while maintaining profitability
 # $50 trade × 1-2% move = $0.50-$1.00 profit (after $0.05 fees = $0.45-0.95 net)
 MIN_POSITION_NOTIONAL = float(os.getenv("PROP_MIN_POSITION_NOTIONAL", "50"))  # Reduced from $1500 for micro account
+FALLBACK_POSITION_NOTIONAL = float(os.getenv("PROP_FALLBACK_POSITION_NOTIONAL", "75"))
 
 # HARD MARGIN SAFETY LIMITS — prevent over-leverage ever again
 # Minimum buying power buffer required before opening ANY new position
@@ -958,7 +959,13 @@ async def run_prop_cycle():
                 log.info(f"[APEX_589296] Skipping {contract} {side} entry — not enough cash left (${cash_remaining:.2f})")
                 return False
         else:
-            qty = config["qty"]
+            fallback_notional = FALLBACK_POSITION_NOTIONAL
+            if buying_power is not None and buying_power > 0:
+                fallback_notional = min(fallback_notional, buying_power)
+            if fallback_notional < MIN_POSITION_NOTIONAL:
+                log.info(f"[APEX_589296] Skipping {contract} {side} entry — fallback notional ${fallback_notional:.2f} below minimum ${MIN_POSITION_NOTIONAL:.2f}")
+                return False
+            qty = round(fallback_notional / price, 6)
 
         opened = await open_position(session, contract, config, side, price, rsi, trend, qty)
         if opened and cash_remaining is not None:

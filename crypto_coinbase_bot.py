@@ -93,19 +93,13 @@ except (ValueError, TypeError):
     NETWORK_RETRY_DELAY = 1.0
     log.warning("Invalid NETWORK_RETRY_DELAY, using default: 1.0")
 
-CRYPTO_PAIRS = [
-    "BTC/USD", "ETH/USD",  # Tier 1: Core stable cryptos
-    "SOL/USD", "XRP/USD", "AVAX/USD", "LINK/USD",  # Tier 2: Established mid-caps
-    "DOGE/USD", "SHIB/USD",  # Meme coins with strong volume
-    "NEAR/USD", "MATIC/USD",  # Layer 2 / scaling solutions
-    "ARB/USD", "OP/USD",  # Arbitrum & Optimism
-    "AAVE/USD", "UNI/USD",  # DeFi protocols
-    "STX/USD", "ATOM/USD",  # Bitcoin L2 & Cosmos
-    "LTC/USD", "ADA/USD", "DOT/USD",  # Established alts with high volume
-    "APT/USD", "SUI/USD", "JUP/USD",  # High-velocity newer pairs
-    "LDO/USD", "RNDR/USD", "ICP/USD",  # Staking & compute protocols
-    "BLUR/USD", "FLOKI/USD", "BONK/USD",  # Additional meme/community coins
-]  # 28 pairs total - aggressive expansion for 4x entry frequency
+_default_pairs = ["BTC/USD", "ETH/USD", "SOL/USD"]
+_pairs_env = os.getenv("CRYPTO_PAIRS", "").strip()
+if _pairs_env:
+    parsed_pairs = [p.strip().upper() for p in _pairs_env.split(",") if p.strip()]
+    CRYPTO_PAIRS = [p for p in parsed_pairs if "/" in p] or _default_pairs
+else:
+    CRYPTO_PAIRS = _default_pairs
 
 
 def _to_product_id(symbol: str) -> str:
@@ -188,10 +182,10 @@ except (ValueError, TypeError):
     RSI_BUY_BELOW = 30.0
 
 try:
-    MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "50"))
+    MAX_POSITIONS = int(os.getenv("CRYPTO_MAX_POSITIONS", "3"))
 except (ValueError, TypeError):
-    log.warning("Invalid CRYPTO_MAX_POSITIONS value, using default: 50")
-    MAX_POSITIONS = 50
+    log.warning("Invalid CRYPTO_MAX_POSITIONS value, using default: 3")
+    MAX_POSITIONS = 3
 
 # Unset by default - no ceiling, so the full account balance (principal +
 # compounded profit) is always in play. Set CRYPTO_MAX_ALLOCATION to cap
@@ -1017,15 +1011,17 @@ def find_recent_swing_high(candles: list, lookback_bars: int = 10) -> dict:
 
 
 def size_position(cash_pool_remaining, slots_remaining, price):
-    """Fixed $250 per trade for maximum capital deployment.
-    Aggressive sizing: maximizes gains while maintaining 3-position minimum buffer."""
-    FIXED_POSITION_SIZE = 250.0  # $250 per entry — with $700 pool, allows 2-3 concurrent positions
+    """Fixed-dollar position sizing, configurable by environment variable."""
+    try:
+        fixed_position_size = float(os.getenv("CRYPTO_FIXED_POSITION_SIZE", "100"))
+    except (ValueError, TypeError):
+        fixed_position_size = 100.0
 
-    if cash_pool_remaining < FIXED_POSITION_SIZE * 1.05:  # Need 5% buffer for fees
+    if cash_pool_remaining < fixed_position_size * 1.05:  # Need 5% buffer for fees
         return None
 
     # Calculate qty based on fixed dollar amount (Coinbase taker fee is deducted from the fill, not pre-calculated)
-    qty = round(FIXED_POSITION_SIZE / price, 8)
+    qty = round(fixed_position_size / price, 8)
     return qty if qty > 0 else None
 
 
