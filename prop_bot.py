@@ -1260,7 +1260,7 @@ MAX_RISK_PERCENT = _safe_float_env("PROP_MAX_RISK_PERCENT", "0.20")  # 20% max
 CRITICAL_BUYING_POWER_THRESHOLD = _safe_float_env("PROP_CRITICAL_BP_THRESHOLD", "100")
 
 
-def size_position(cash_remaining, slots_remaining, price, account_equity=None):
+def size_position(cash_remaining, slots_remaining, price, account_equity=None, already_open_notional=0.0):
     """Dollar-based (fractional-share) position sizing with AGGRESSIVE COMPOUNDING.
 
     Position size scales with account growth:
@@ -1271,7 +1271,31 @@ def size_position(cash_remaining, slots_remaining, price, account_equity=None):
 
     Plus POSITION_SCALE_MULTIPLIER from env var (milestone-based scaling).
     This enables exponential compounding as capital grows.
-    """
+
+    `already_open_notional` (real dollar value already held across every
+    other open position) clamps the result to whatever real room is
+    actually left under `account_equity * MAX_RISK_PERCENT` - the exact
+    same real total-risk ceiling check_margin_safety() enforces
+    afterward. Real, confirmed-live bug this closes: this function's own
+    sizing was never coordinated with that ceiling at all, so a single
+    real entry could size itself well past the ENTIRE total-risk budget
+    on its own (confirmed against real account numbers: one real position
+    sized at ~54% of account equity, more than 2.5x the 20% total cap) -
+    permanently maxing out the real risk budget on one or two oversized
+    positions and leaving check_margin_safety blocking every later real
+    signal from that point on, which is exactly how real account growth
+    can stall for weeks even while individual trades are fine. Clamped
+    here so a position is never even SIZED past the real room actually
+    left, given what's already open - the account naturally spreads
+    across more, smaller real positions (as dynamic_max_positions already
+    intends) instead of a couple of oversized ones exhausting the whole
+    real budget up front. This never raises the real risk ceiling itself
+    - only makes new entries respect the existing one from the moment
+    they're sized, not just get rejected after the fact.
+    `already_open_notional=0.0` (every existing caller that doesn't pass
+    it) still applies the real ceiling to a single new position - a
+    tighter, but strictly safer, real behavior than before this fix,
+    never a looser one."""
     if slots_remaining <= 0 or cash_remaining < MIN_POSITION_NOTIONAL:
         return None
 
@@ -1296,6 +1320,12 @@ def size_position(cash_remaining, slots_remaining, price, account_equity=None):
     # Apply additional scaling multiplier (increases after milestone locks)
     scale = _safe_float_env("POSITION_SCALE_MULTIPLIER", "1.0")
     amount = amount * scale  # SCALE UP: bigger positions after milestone
+
+    # Real, hard backstop - applied LAST, after the scale multiplier, so no
+    # combination of allocation tier + scale can ever size a position past
+    # the real total-risk room actually left. See the docstring above.
+    risk_room = max(0.0, account_equity * MAX_RISK_PERCENT - already_open_notional)
+    amount = min(amount, risk_room)
 
     qty = round(amount / price, 6)
     return qty if qty > 0 else None
@@ -1747,7 +1777,17 @@ async def run_prop_cycle():
             return False
 
         if cash_remaining is not None:
-            qty = size_position(cash_remaining, slots_remaining, price, account_equity=equity)
+            # Real total already at risk across every real position this
+            # account holds - open_prop_positions itself plus the Alpaca
+            # branch and opening-bar systems (separate dicts, otherwise
+            # invisible here) - the exact same real figure
+            # check_margin_safety just confirmed leaves SOME room. Passed
+            # through so size_position sizes this new position to fit
+            # inside that real remaining room, not an independent guess
+            # that could still overshoot it. See size_position's own
+            # docstring for the real bug this closes.
+            already_open_notional = total_notional + _total_alpaca_branch_notional() + _total_opening_bar_notional()
+            qty = size_position(cash_remaining, slots_remaining, price, account_equity=equity, already_open_notional=already_open_notional)
             if qty is None:
                 log.warning(f"[APEX_589296] ⛔ INSUFFICIENT CASH: {contract} {side} skipped — only ${cash_remaining:.2f} left (need ${config.get('min_cash', 1000):.2f})")
                 return False

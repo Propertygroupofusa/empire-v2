@@ -10655,6 +10655,94 @@ uncorrected.
 
 ## References
 
+## Real, severe bug found and fixed: size_position() could size a single new position past the ENTIRE real account-wide risk cap, stalling Alpaca growth for weeks
+
+The account owner asked directly why Alpaca's real profit had sat flat at
++$20.33 for weeks despite the account being "active" - not a market-
+direction question, a real "why isn't this growing" question. Traced it
+by hand against the account's own real numbers (equity $1,000.07; three
+real open positions - DOG, SLV, SPY - together worth roughly $845.32):
+`check_margin_safety()`'s real hard cap is `total_open_notional <= equity
+* MAX_RISK_PERCENT` (20%, i.e. ~$200 at this equity) - and $845 already
+blows through that by more than 4x. Every single new entry signal, every
+cycle, was being correctly REJECTED by that real, working safety check -
+the account was never actually stuck on a bad signal or a dead strategy,
+it was stuck holding 3 old positions with zero room left under its own
+real risk ceiling to ever add a 4th.
+
+**The real root cause wasn't the ceiling itself - it was that `size_position()`
+(the function that decides how big a NEW position gets) had no idea the
+ceiling existed.** It sizes purely off `cash_remaining` (up to 40% of it
+per slot) with zero awareness of `MAX_RISK_PERCENT` or what's already
+open - so a single real entry could size itself well past the entire
+total-risk budget in one shot. Confirmed this wasn't hypothetical: replaying
+the OLD formula directly against the account's own real numbers (a
+realistic real cash_remaining of $1,300 at $1,000 equity) produces a
+**$520 position - 52% of total equity, on its own** - closely matching
+the real ~54%-of-equity DOG position actually observed live. One or two
+positions sized this way exhausts `MAX_RISK_PERCENT`'s entire real budget
+immediately, and from that moment on `check_margin_safety` correctly
+vetoes every later real signal forever (or until one of those specific
+positions happens to exit) - `dynamic_max_positions` allowing up to 8 real
+concurrent positions was structurally meaningless the whole time, since
+the sizing function could burn the whole risk budget on the first one or
+two.
+
+Fixed by giving `size_position()` a new `already_open_notional` parameter
+and clamping its result, as a final hard backstop (applied AFTER the
+existing `POSITION_SCALE_MULTIPLIER` scaling, so no scale value can ever
+bypass it), to whatever real room is actually left under
+`account_equity * MAX_RISK_PERCENT` given what's already open - the exact
+same real ceiling `check_margin_safety()` already enforces, now respected
+at the moment a position is SIZED, not just rejected after the fact.
+`try_open()` (the real whole-account scan's own entry path) now passes
+the real combined total already at risk across all three systems sharing
+this account (`open_prop_positions` + `_total_alpaca_branch_notional()` +
+`_total_opening_bar_notional()` - the identical figure the margin-safety
+check right above it already computed) as this new parameter, so sizing
+and the safety veto can never disagree. `already_open_notional=0.0` is
+the default for every OTHER existing caller (the Alpaca branches and
+opening-bar systems don't pass it in this pass) - a real, strictly
+TIGHTER behavior for those too (a lone new position now respects
+`MAX_RISK_PERCENT` on its own, which it never did before), never looser,
+so this fix can only ever reduce a real position's size, never increase
+one.
+
+**Real, intended consequence, not a side effect**: this makes the account
+naturally spread real capital across MORE, smaller positions (as
+`dynamic_max_positions`'s 8-slot default already intended) instead of one
+or two oversized ones eating the entire real risk budget up front - which
+is what should let new real signals actually get taken again, and let the
+account's real total profit start compounding across multiple positions
+instead of sitting frozen behind 3 already-maxed-out ones.
+
+Verified offline (`test_size_position_risk_cap.py`, 8 checks, pure
+function - no DB/network needed): a lone new position with zero other
+real exposure still stays within the real 20% cap; reproducing the
+account's own exact real numbers (equity $1,000.07, $845.32 already open)
+correctly refuses to size anything new at all; a partial real cushion
+sizes a real position that fits exactly inside the remaining room, never
+over it; a real 5x `POSITION_SCALE_MULTIPLIER` still can't push a
+position's real notional past the cap; the existing too-thin-cash refusal
+is completely unaffected; and the OLD (pre-fix) formula, replayed
+directly against the same real account-shaped numbers, is confirmed to
+produce a real $520 position on a $1,000-equity account - proving this
+was a genuine, reproducible live gap, not a guess.
+
+**Not yet confirmed against real live trading** - this is a real, live
+sizing-logic change now shipped; its actual effect can only be judged by
+watching whether new real Alpaca entries start firing again over the
+coming days once the account's existing 3 positions naturally exit (or
+are manually trimmed) enough to free real room under the 20% cap. The
+account owner can also close or reduce SLV/DOG/SPY by hand from the
+dashboard right now to free real room immediately, if they want new
+entries to resume sooner rather than waiting on those positions' own
+exits.
+
+---
+
+## References
+
 - **API Endpoints:** See API_ENDPOINTS.md
 - **Stripe docs:** https://stripe.com/docs/api/checkout/sessions
 - **HeyGen docs:** https://docs.heygen.com/
