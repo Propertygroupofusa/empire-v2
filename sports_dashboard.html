@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🏆 Sports Hub — Scores · Bets · Content · Trading</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+    --bg: #f3f5f9;
+    --panel: #ffffff;
+    --border: #e3e7ef;
+    --text: #16233f;
+    --text-dim: #6b7488;
+    --green: #009845;
+    --green-bg: #e8f6ee;
+    --red: #d6455a;
+    --red-bg: #fbe9ec;
+    --orange: #e8752c;
+    --gold: #c9860a;
+    --gold-bg: #fbf1de;
+    --navy: #1f3864;
+    --purple: #7c3aed;
+    --purple-bg: #f0eeff;
+    --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 2px 8px rgba(16,24,40,0.06);
+}
+body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh; padding: 24px;
+}
+.container { max-width: 1320px; margin: 0 auto; }
+.header { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 22px; flex-wrap: wrap; gap: 10px; }
+.header h1 { font-size: 1.6em; font-weight: 800; color: var(--navy); }
+.header p  { color: var(--text-dim); font-size: 0.85em; margin-top: 2px; }
+#status-bar { color: var(--text-dim); font-size: 0.8em; }
+
+/* Tabs */
+.tab-bar { display: flex; gap: 6px; margin-bottom: 22px; flex-wrap: wrap; }
+.tab-btn {
+    padding: 8px 18px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--text-dim); font-size: 0.85em; font-weight: 600;
+    cursor: pointer; transition: all .15s;
+}
+.tab-btn.active { background: var(--navy); color: #fff; border-color: var(--navy); }
+.tab-btn:hover:not(.active) { border-color: var(--navy); color: var(--navy); }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* KPI row */
+.kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin-bottom: 22px; }
+.kpi { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; box-shadow: var(--shadow); }
+.kpi .label { font-size: 0.72em; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+.kpi .value { font-size: 1.6em; font-weight: 800; color: var(--navy); margin-top: 4px; }
+.kpi .value.pos { color: var(--green); }
+.kpi .value.neg { color: var(--red); }
+
+/* Section panels */
+.section { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; box-shadow: var(--shadow); margin-bottom: 18px; }
+.section h2 { font-size: 1em; font-weight: 700; color: var(--navy); margin-bottom: 14px; }
+
+/* Tables */
+table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+th { text-align: left; padding: 8px 10px; font-weight: 600; color: var(--text-dim); font-size: 0.8em; text-transform: uppercase; border-bottom: 2px solid var(--border); }
+td { padding: 10px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: #f8f9fb; }
+
+/* Badges */
+.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.75em; font-weight: 700; }
+.badge.win  { background: var(--green-bg); color: var(--green); }
+.badge.loss { background: var(--red-bg);   color: var(--red); }
+.badge.push { background: var(--gold-bg);  color: var(--gold); }
+.badge.pending { background: #f0f4ff; color: #3b5bdb; }
+.badge.live { background: #ffe8e8; color: var(--red); }
+.badge.pre  { background: #e9f5ff; color: #1971c2; }
+.badge.post { background: #e8f6ee; color: var(--green); }
+.badge.draft   { background: #f3f4f6; color: #6b7280; }
+.badge.posted  { background: var(--green-bg); color: var(--green); }
+.badge.buy  { background: var(--green-bg); color: var(--green); }
+.badge.sell { background: var(--red-bg);   color: var(--red); }
+.badge.confirmed { background: var(--gold-bg); color: var(--gold); }
+
+/* Score cards */
+.score-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.score-card {
+    border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+    background: var(--panel); box-shadow: var(--shadow);
+}
+.score-card .matchup { font-weight: 700; font-size: 0.95em; margin-bottom: 6px; }
+.score-card .detail  { font-size: 0.8em; color: var(--text-dim); }
+.score-card .scores  { display: flex; justify-content: space-between; margin-top: 10px; }
+.score-card .team    { text-align: center; }
+.score-card .team-name  { font-size: 0.78em; font-weight: 600; }
+.score-card .team-score { font-size: 1.5em; font-weight: 800; color: var(--navy); }
+.score-card.live { border-color: #ffb3b3; }
+
+/* Buttons */
+.btn { padding: 7px 14px; border-radius: 7px; font-family: inherit; font-size: 0.82em; font-weight: 700; cursor: pointer; border: none; transition: opacity .15s; }
+.btn:hover { opacity: .85; }
+.btn-primary   { background: var(--navy); color: #fff; }
+.btn-green     { background: var(--green); color: #fff; }
+.btn-gold      { background: var(--gold);  color: #fff; }
+.btn-red       { background: var(--red);   color: #fff; }
+.btn-sm        { padding: 4px 10px; font-size: 0.78em; }
+
+/* Forms */
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 14px; }
+input, select, textarea {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--border);
+    border-radius: 7px; font-family: inherit; font-size: 0.85em;
+    background: #fafbfc; color: var(--text); outline: none;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--navy); }
+label { font-size: 0.78em; font-weight: 600; color: var(--text-dim); display: block; margin-bottom: 3px; }
+textarea { resize: vertical; min-height: 70px; }
+
+/* Misc */
+.empty { color: var(--text-dim); font-size: 0.85em; text-align: center; padding: 30px; }
+.refresh-btn { background: none; border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; font-size: 0.78em; font-weight: 600; cursor: pointer; color: var(--text-dim); }
+.refresh-btn:hover { border-color: var(--navy); color: var(--navy); }
+.alert { padding: 10px 14px; border-radius: 8px; font-size: 0.83em; margin-bottom: 14px; }
+.alert.success { background: var(--green-bg); color: var(--green); border: 1px solid #b7e4c7; }
+.alert.error   { background: var(--red-bg);   color: var(--red);   border: 1px solid #f3c6cd; }
+.league-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+.league-tab { padding: 5px 12px; border-radius: 6px; font-size: 0.8em; font-weight: 600; cursor: pointer; border: 1px solid var(--border); color: var(--text-dim); background: var(--panel); }
+.league-tab.active { background: var(--purple); color: #fff; border-color: var(--purple); }
+.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 999; align-items: center; justify-content: center; }
+.modal-overlay.open { display: flex; }
+.modal { background: var(--panel); border-radius: 14px; padding: 24px; width: 420px; max-width: 95vw; box-shadow: 0 20px 60px rgba(0,0,0,0.2); }
+.modal h3 { margin-bottom: 16px; font-size: 1em; font-weight: 700; }
+.modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div>
+      <h1>🏆 Sports Hub</h1>
+      <p>Live Scores · Bet Tracker · Content Bot · Trading Signals</p>
+    </div>
+    <div id="status-bar">Loading…</div>
+  </div>
+
+  <div class="tab-bar">
+    <button class="tab-btn active" onclick="showTab('scores')">📡 Live Scores</button>
+    <button class="tab-btn" onclick="showTab('bets')">💰 Bet Tracker</button>
+    <button class="tab-btn" onclick="showTab('content')">📝 Content Bot</button>
+    <button class="tab-btn" onclick="showTab('trading')">📈 Trading Signals</button>
+  </div>
+
+  <!-- ─── SCORES TAB ─────────────────────────────────────────── -->
+  <div id="tab-scores" class="tab-panel active">
+    <div class="kpi-row" id="scores-kpi"></div>
+    <div class="league-tabs" id="league-tabs"></div>
+    <div class="section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h2 id="scores-section-title">Scores</h2>
+        <div style="display:flex;gap:8px">
+          <button class="refresh-btn" onclick="loadScores()">↻ Refresh</button>
+          <button class="btn btn-primary btn-sm" id="admin-refresh-btn" onclick="adminRefresh()" style="display:none">⚡ Force Pull</button>
+        </div>
+      </div>
+      <div id="scores-body" class="score-grid"><div class="empty">Loading scores…</div></div>
+    </div>
+    <div class="section">
+      <h2 id="upcoming-section-title">Upcoming Games</h2>
+      <div id="upcoming-body"><div class="empty">Loading…</div></div>
+    </div>
+  </div>
+
+  <!-- ─── BETS TAB ──────────────────────────────────────────── -->
+  <div id="tab-bets" class="tab-panel">
+    <div class="kpi-row" id="bets-kpi"></div>
+    <div class="section">
+      <h2>➕ Add a Bet</h2>
+      <div id="bet-alert"></div>
+      <div class="form-grid">
+        <div><label>Sport</label>
+          <select id="b-sport">
+            <option>NFL</option><option>NBA</option><option>MLB</option><option>NHL</option>
+            <option>Premier League</option><option>MLS</option><option>College Football</option>
+            <option>College Basketball</option><option>Boxing</option><option>MMA / UFC</option><option>Other</option>
+          </select></div>
+        <div><label>Event (e.g. Chiefs vs Bills)</label><input id="b-event" placeholder="Team A vs Team B"></div>
+        <div><label>Bet Type</label>
+          <select id="b-type">
+            <option value="moneyline">Moneyline</option>
+            <option value="spread">Spread</option>
+            <option value="over_under">Over/Under</option>
+            <option value="prop">Player Prop</option>
+            <option value="parlay">Parlay</option>
+            <option value="futures">Futures</option>
+          </select></div>
+        <div><label>Your Pick</label><input id="b-pick" placeholder="Chiefs -3.5"></div>
+        <div><label>Odds (American)</label><input id="b-odds" placeholder="-110"></div>
+        <div><label>Stake ($)</label><input id="b-stake" type="number" min="0.01" step="0.01" placeholder="50.00"></div>
+        <div><label>Sportsbook</label>
+          <select id="b-book">
+            <option value="">— optional —</option>
+            <option>DraftKings</option><option>FanDuel</option><option>BetMGM</option>
+            <option>Caesars</option><option>PointsBet</option><option>Hard Rock</option><option>Other</option>
+          </select></div>
+        <div><label>Event Date</label><input id="b-date" type="datetime-local"></div>
+      </div>
+      <div style="margin-bottom:12px"><label>Notes (optional)</label><textarea id="b-notes" rows="2" placeholder="Injury news, reasons for the pick…"></textarea></div>
+      <button class="btn btn-primary" onclick="addBet()">Add Bet</button>
+    </div>
+    <div class="section">
+      <h2>📋 Recent Bets</h2>
+      <div id="bets-table"><div class="empty">Loading…</div></div>
+    </div>
+  </div>
+
+  <!-- ─── CONTENT TAB ───────────────────────────────────────── -->
+  <div id="tab-content" class="tab-panel">
+    <div class="section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h2>📝 Sports Content Posts</h2>
+        <div style="display:flex;gap:8px;align-items:center">
+          <select id="content-platform" style="width:130px">
+            <option>YouTube</option><option>Twitter/X</option><option>Instagram</option><option>TikTok</option>
+          </select>
+          <button class="btn btn-gold btn-sm" id="gen-btn" onclick="generateContent()">⚡ Generate from Live Data</button>
+        </div>
+      </div>
+      <div id="content-alert"></div>
+      <div id="content-table"><div class="empty">Loading content…</div></div>
+    </div>
+  </div>
+
+  <!-- ─── TRADING TAB ───────────────────────────────────────── -->
+  <div id="tab-trading" class="tab-panel">
+    <div class="section" style="background:var(--gold-bg);border-color:#f0dcae">
+      <p style="font-size:0.83em;color:var(--gold)">⚠️ <strong>Confirmation Required</strong> — This bot never places trades automatically. Every signal requires your explicit tap to confirm and execute.</p>
+    </div>
+    <div class="kpi-row" id="trading-kpi"></div>
+    <div class="section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h2>📈 Sports Stock Signals</h2>
+        <button class="btn btn-primary btn-sm" id="scan-btn" onclick="manualScan()">🔍 Scan Now</button>
+      </div>
+      <div id="trading-alert"></div>
+      <div id="trading-table"><div class="empty">Loading signals…</div></div>
+    </div>
+    <div class="section">
+      <h2>🏢 Sports Economy Stocks Watched</h2>
+      <div id="universe-table"><div class="empty">Loading…</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- Settle Bet Modal -->
+<div class="modal-overlay" id="settle-modal">
+  <div class="modal">
+    <h3>✅ Settle Bet</h3>
+    <input type="hidden" id="settle-bet-id">
+    <div style="margin-bottom:12px">
+      <label>Result</label>
+      <select id="settle-result"><option value="WIN">WIN</option><option value="LOSS">LOSS</option><option value="PUSH">PUSH</option></select>
+    </div>
+    <div style="margin-bottom:12px">
+      <label>Payout Received ($) — enter 0 for a loss</label>
+      <input type="number" id="settle-payout" min="0" step="0.01" placeholder="0.00">
+    </div>
+    <div class="modal-footer">
+      <button class="btn" style="background:var(--border);color:var(--text-dim)" onclick="closeModal('settle-modal')">Cancel</button>
+      <button class="btn btn-green" onclick="submitSettle()">Save Result</button>
+    </div>
+  </div>
+</div>
+
+<!-- Content Preview Modal -->
+<div class="modal-overlay" id="content-modal">
+  <div class="modal" style="width:600px">
+    <h3 id="cmodal-title"></h3>
+    <div style="background:#f8f9fb;border-radius:8px;padding:14px;font-size:0.85em;white-space:pre-wrap;max-height:300px;overflow-y:auto;margin-bottom:14px" id="cmodal-body"></div>
+    <div class="modal-footer">
+      <button class="btn" style="background:var(--border);color:var(--text-dim)" onclick="closeModal('content-modal')">Close</button>
+      <button class="btn btn-green" id="cmodal-post-btn">✓ Mark Posted</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const ADMIN_KEY = localStorage.getItem('sportsAdminKey') || '';
+let scoresData = null;
+let activeLeague = null;
+
+// ── Admin key prompt ──────────────────────────────────────────────────────────
+(function() {
+  if (!ADMIN_KEY) {
+    const k = prompt('Enter admin key (leave blank to view without admin features):');
+    if (k) localStorage.setItem('sportsAdminKey', k);
+  }
+  if (ADMIN_KEY) {
+    const ab = document.getElementById('admin-refresh-btn');
+    if (ab) ab.style.display = '';
+    const sb = document.getElementById('scan-btn');
+    if (sb) sb.style.display = '';
+    const gb = document.getElementById('gen-btn');
+    if (gb) gb.style.display = '';
+  }
+})();
+
+function adminHeaders() {
+  return { 'Content-Type': 'application/json', 'X-Admin-Key': ADMIN_KEY };
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+function showTab(name) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  event.target.classList.add('active');
+  if (name === 'scores' && !scoresData) loadScores();
+  if (name === 'bets')    loadBets();
+  if (name === 'content') loadContent();
+  if (name === 'trading') loadTrading();
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+function showAlert(elId, msg, type) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  el.innerHTML = `<div class="alert ${type}">${msg}</div>`;
+  setTimeout(() => { if (el) el.innerHTML = ''; }, 5000);
+}
+function fmt$(v) { if (v == null) return '—'; return (v >= 0 ? '+' : '') + '$' + Math.abs(v).toFixed(2); }
+function fmtPct(v) { if (v == null) return '—'; return (v >= 0 ? '+' : '') + v.toFixed(1) + '%'; }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+
+// ── SCORES ────────────────────────────────────────────────────────────────────
+async function loadScores() {
+  document.getElementById('status-bar').textContent = 'Fetching scores…';
+  try {
+    const r = await fetch('/sports/data');
+    const d = await r.json();
+    scoresData = d.data || {};
+    document.getElementById('status-bar').textContent = 'Last refresh: ' + (d.last_refresh ? new Date(d.last_refresh).toLocaleString() : 'never');
+
+    const leagues = Object.keys(scoresData.leagues || {});
+    if (!activeLeague && leagues.length) activeLeague = leagues[0];
+
+    // League tabs
+    const lt = document.getElementById('league-tabs');
+    lt.innerHTML = leagues.map(l =>
+      `<button class="league-tab ${l===activeLeague?'active':''}" onclick="selectLeague('${l}',this)">${l}</button>`
+    ).join('');
+
+    // KPI
+    const kpiEl = document.getElementById('scores-kpi');
+    const totalGames = leagues.reduce((s,l) => s + (scoresData.leagues[l].scores||[]).length, 0);
+    const liveGames  = leagues.reduce((s,l) => s + (scoresData.leagues[l].scores||[]).filter(e=>e.status_state==='in').length, 0);
+    const upcoming   = leagues.reduce((s,l) => s + (scoresData.leagues[l].upcoming||[]).length, 0);
+    kpiEl.innerHTML = `
+      <div class="kpi"><div class="label">Leagues Tracked</div><div class="value">${leagues.length}</div></div>
+      <div class="kpi"><div class="label">Games Today</div><div class="value">${totalGames}</div></div>
+      <div class="kpi"><div class="label" style="color:var(--red)">🔴 Live Now</div><div class="value" style="color:var(--red)">${liveGames}</div></div>
+      <div class="kpi"><div class="label">Upcoming</div><div class="value">${upcoming}</div></div>
+    `;
+    renderLeague(activeLeague);
+  } catch(e) {
+    document.getElementById('status-bar').textContent = 'Error loading scores';
+    document.getElementById('scores-body').innerHTML = `<div class="empty">Failed to load: ${e.message}</div>`;
+  }
+}
+
+function selectLeague(name, btn) {
+  activeLeague = name;
+  document.querySelectorAll('.league-tab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderLeague(name);
+}
+
+function renderLeague(league) {
+  const data = scoresData?.leagues?.[league] || {};
+  document.getElementById('scores-section-title').textContent = `${league} — Scores`;
+  document.getElementById('upcoming-section-title').textContent = `${league} — Upcoming`;
+
+  // Scores
+  const scores = data.scores || [];
+  const sg = document.getElementById('scores-body');
+  if (!scores.length) { sg.innerHTML = '<div class="empty">No scores available right now</div>'; }
+  else {
+    sg.innerHTML = scores.map(ev => {
+      const teams = ev.teams || [];
+      const isLive = ev.status_state === 'in';
+      let teamsHtml = '';
+      if (teams.length >= 2) {
+        teamsHtml = `<div class="scores">
+          ${teams.map(t => `<div class="team"><div class="team-name">${t.name}</div><div class="team-score">${t.score || '—'}</div></div>`).join('<div style="align-self:center;font-weight:700;color:var(--text-dim)">vs</div>')}
+        </div>`;
+      }
+      return `<div class="score-card ${isLive?'live':''}">
+        <div style="display:flex;justify-content:space-between;align-items:start">
+          <div class="matchup">${ev.short_name || ev.name || '—'}</div>
+          <span class="badge ${ev.status_state||'post'}">${ev.status_detail || ev.status_state || 'Final'}</span>
+        </div>
+        <div class="detail">${ev.date ? new Date(ev.date).toLocaleDateString() : ''}</div>
+        ${teamsHtml}
+      </div>`;
+    }).join('');
+  }
+
+  // Upcoming
+  const upcoming = data.upcoming || [];
+  const ub = document.getElementById('upcoming-body');
+  if (!upcoming.length) { ub.innerHTML = '<div class="empty">No upcoming games found</div>'; }
+  else {
+    ub.innerHTML = `<table>
+      <thead><tr><th>Game</th><th>Date</th><th>Time</th><th>Venue</th><th>Round</th></tr></thead>
+      <tbody>
+        ${upcoming.map(ev => `<tr>
+          <td><strong>${ev.home || '—'}</strong> vs <strong>${ev.away || '—'}</strong></td>
+          <td>${ev.date || '—'}</td><td>${ev.time || '—'}</td>
+          <td>${ev.venue || '—'}</td><td>${ev.round || '—'}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+  }
+}
+
+async function adminRefresh() {
+  const btn = document.getElementById('admin-refresh-btn');
+  btn.disabled = true; btn.textContent = 'Pulling…';
+  try {
+    const r = await fetch('/sports/data/refresh', { method: 'POST', headers: adminHeaders() });
+    const d = await r.json();
+    if (r.ok) { await loadScores(); showAlert('status-bar', 'Refreshed!', 'success'); }
+    else alert(d.detail || 'Error');
+  } catch(e) { alert('Error: ' + e.message); }
+  finally { btn.disabled = false; btn.textContent = '⚡ Force Pull'; }
+}
+
+// ── BETS ──────────────────────────────────────────────────────────────────────
+async function loadBets() {
+  try {
+    const r = await fetch('/sports/bets');
+    const d = await r.json();
+    renderBetsKPI(d);
+    renderBetsTable(d.recent_bets || []);
+  } catch(e) {
+    document.getElementById('bets-table').innerHTML = `<div class="empty">Failed to load bets: ${e.message}</div>`;
+  }
+}
+
+function renderBetsKPI(d) {
+  const roi = d.roi_pct || 0;
+  document.getElementById('bets-kpi').innerHTML = `
+    <div class="kpi"><div class="label">Total Bets</div><div class="value">${d.total_bets||0}</div></div>
+    <div class="kpi"><div class="label">Win Rate</div><div class="value">${d.win_rate_pct||0}%</div></div>
+    <div class="kpi"><div class="label">Net P&L</div><div class="value ${(d.net_pnl||0)>=0?'pos':'neg'}">${fmt$(d.net_pnl)}</div></div>
+    <div class="kpi"><div class="label">ROI</div><div class="value ${roi>=0?'pos':'neg'}">${fmtPct(roi)}</div></div>
+    <div class="kpi"><div class="label">Total Staked</div><div class="value">$${(d.total_staked||0).toFixed(2)}</div></div>
+    <div class="kpi"><div class="label">Pending</div><div class="value">${d.pending_bets||0}</div></div>
+  `;
+}
+
+function renderBetsTable(bets) {
+  const el = document.getElementById('bets-table');
+  if (!bets.length) { el.innerHTML = '<div class="empty">No bets yet — add your first bet above!</div>'; return; }
+  el.innerHTML = `<table>
+    <thead><tr><th>Sport</th><th>Event</th><th>Pick</th><th>Odds</th><th>Stake</th><th>Result</th><th>P&L</th><th>Book</th><th></th></tr></thead>
+    <tbody>
+      ${bets.map(b => `<tr>
+        <td>${b.sport}</td>
+        <td>${b.event}</td>
+        <td><strong>${b.pick}</strong><br><small style="color:var(--text-dim)">${b.bet_type}</small></td>
+        <td>${b.odds}</td>
+        <td>$${(b.stake_usd||0).toFixed(2)}</td>
+        <td><span class="badge ${(b.result||'pending').toLowerCase()}">${b.result||'PENDING'}</span></td>
+        <td style="color:${b.pnl==null?'var(--text-dim)':b.pnl>=0?'var(--green)':'var(--red)'}">${b.pnl!=null?fmt$(b.pnl):'—'}</td>
+        <td>${b.sportsbook||'—'}</td>
+        <td>${b.result==='PENDING'?`<button class="btn btn-sm btn-green" onclick="openSettle(${b.id})">Settle</button>`:'&nbsp;'}</td>
+      </tr>`).join('')}
+    </tbody>
+  </table>`;
+}
+
+async function addBet() {
+  const sport = document.getElementById('b-sport').value;
+  const event = document.getElementById('b-event').value.trim();
+  const bet_type = document.getElementById('b-type').value;
+  const pick = document.getElementById('b-pick').value.trim();
+  const odds = document.getElementById('b-odds').value.trim();
+  const stake_usd = parseFloat(document.getElementById('b-stake').value);
+  const sportsbook = document.getElementById('b-book').value || null;
+  const notes = document.getElementById('b-notes').value.trim() || null;
+  const ed = document.getElementById('b-date').value;
+  const event_date = ed ? new Date(ed).toISOString() : null;
+
+  if (!event || !pick || !odds || isNaN(stake_usd) || stake_usd <= 0) {
+    showAlert('bet-alert', 'Fill in Event, Pick, Odds, and Stake', 'error'); return;
+  }
+  try {
+    const r = await fetch('/sports/bets', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({sport, event, bet_type, pick, odds, stake_usd, sportsbook, notes, event_date})
+    });
+    const d = await r.json();
+    if (r.ok) { showAlert('bet-alert', `✅ Bet added: ${pick} @ ${odds}`, 'success'); loadBets(); }
+    else showAlert('bet-alert', d.detail || 'Error', 'error');
+  } catch(e) { showAlert('bet-alert', 'Error: '+e.message, 'error'); }
+}
+
+function openSettle(betId) {
+  document.getElementById('settle-bet-id').value = betId;
+  document.getElementById('settle-result').value = 'WIN';
+  document.getElementById('settle-payout').value = '';
+  document.getElementById('settle-modal').classList.add('open');
+}
+
+async function submitSettle() {
+  const bet_id = parseInt(document.getElementById('settle-bet-id').value);
+  const result = document.getElementById('settle-result').value;
+  const payout_usd = parseFloat(document.getElementById('settle-payout').value) || 0;
+  try {
+    const r = await fetch(`/sports/bets/${bet_id}/settle`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({result, payout_usd})
+    });
+    const d = await r.json();
+    if (r.ok) { closeModal('settle-modal'); loadBets(); }
+    else alert(d.detail || 'Error settling bet');
+  } catch(e) { alert('Error: '+e.message); }
+}
+
+// ── CONTENT ───────────────────────────────────────────────────────────────────
+async function loadContent() {
+  try {
+    const r = await fetch('/sports/content');
+    const d = await r.json();
+    renderContent(d.content || []);
+  } catch(e) {
+    document.getElementById('content-table').innerHTML = `<div class="empty">Error: ${e.message}</div>`;
+  }
+}
+
+function renderContent(items) {
+  const el = document.getElementById('content-table');
+  if (!items.length) { el.innerHTML = '<div class="empty">No content yet — click "Generate from Live Data" to create posts!</div>'; return; }
+  el.innerHTML = `<table>
+    <thead><tr><th>Sport</th><th>Type</th><th>Title</th><th>Platform</th><th>Status</th><th>Created</th><th></th></tr></thead>
+    <tbody>
+      ${items.map(c => `<tr>
+        <td>${c.sport}</td>
+        <td><span class="badge ${c.content_type}">${c.content_type}</span></td>
+        <td style="max-width:320px">${c.title}</td>
+        <td>${c.platform||'—'}</td>
+        <td><span class="badge ${c.status}">${c.status}</span></td>
+        <td style="color:var(--text-dim);font-size:0.8em">${c.created_at ? new Date(c.created_at).toLocaleDateString() : '—'}</td>
+        <td>
+          <button class="btn btn-sm" style="background:var(--purple-bg);color:var(--purple)" onclick="previewContent(${c.id},'${escJs(c.title)}',${escJson(c)})">👁 Preview</button>
+        </td>
+      </tr>`).join('')}
+    </tbody>
+  </table>`;
+}
+
+function escJs(s) { return s.replace(/'/g,"&#39;").replace(/"/g,'&quot;'); }
+function escJson(c) { return "'" + JSON.stringify(c).replace(/'/g,"&#39;") + "'"; }
+
+let _currentContentId = null;
+function previewContent(id, title, c) {
+  if (typeof c === 'string') try { c = JSON.parse(c); } catch(e) {}
+  _currentContentId = id;
+  document.getElementById('cmodal-title').textContent = title || 'Content Preview';
+  document.getElementById('cmodal-body').textContent = (c && c.body) ? c.body : '—';
+  const postBtn = document.getElementById('cmodal-post-btn');
+  if (c && c.status === 'posted') {
+    postBtn.textContent = '✓ Already Posted'; postBtn.disabled = true;
+  } else {
+    postBtn.textContent = '✓ Mark Posted'; postBtn.disabled = false;
+    postBtn.onclick = () => markPosted(id);
+  }
+  document.getElementById('content-modal').classList.add('open');
+}
+
+async function markPosted(contentId) {
+  try {
+    const r = await fetch(`/sports/content/${contentId}/mark-posted`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({platform: document.getElementById('content-platform').value})
+    });
+    if (r.ok) { closeModal('content-modal'); loadContent(); }
+    else { const d = await r.json(); alert(d.detail || 'Error'); }
+  } catch(e) { alert('Error: '+e.message); }
+}
+
+async function generateContent() {
+  const btn = document.getElementById('gen-btn');
+  btn.disabled = true; btn.textContent = '⏳ Generating…';
+  const platform = document.getElementById('content-platform').value;
+  try {
+    const r = await fetch(`/sports/content/generate?platform=${encodeURIComponent(platform)}`, {
+      method: 'POST', headers: adminHeaders()
+    });
+    const d = await r.json();
+    if (r.ok) { showAlert('content-alert', `✅ Generated ${d.count} content pieces`, 'success'); loadContent(); }
+    else showAlert('content-alert', d.detail || JSON.stringify(d), 'error');
+  } catch(e) { showAlert('content-alert', 'Error: '+e.message, 'error'); }
+  finally { btn.disabled = false; btn.textContent = '⚡ Generate from Live Data'; }
+}
+
+// ── TRADING ───────────────────────────────────────────────────────────────────
+async function loadTrading() {
+  try {
+    const [sr, ur] = await Promise.all([
+      fetch('/sports/trading/signals'),
+      fetch('/sports/trading/universe'),
+    ]);
+    const signals = await sr.json();
+    const universe = await ur.json();
+    renderTradingKPI(signals.signals || []);
+    renderSignals(signals.signals || []);
+    renderUniverse(universe.universe || {});
+  } catch(e) {
+    document.getElementById('trading-table').innerHTML = `<div class="empty">Error: ${e.message}</div>`;
+  }
+}
+
+function renderTradingKPI(sigs) {
+  const pending   = sigs.filter(s => !s.confirmed);
+  const confirmed = sigs.filter(s => s.confirmed);
+  const buys = pending.filter(s => s.action === 'BUY');
+  const sells = pending.filter(s => s.action === 'SELL');
+  document.getElementById('trading-kpi').innerHTML = `
+    <div class="kpi"><div class="label">Total Signals</div><div class="value">${sigs.length}</div></div>
+    <div class="kpi"><div class="label">Pending</div><div class="value">${pending.length}</div></div>
+    <div class="kpi"><div class="label" style="color:var(--green)">BUY Signals</div><div class="value pos">${buys.length}</div></div>
+    <div class="kpi"><div class="label" style="color:var(--red)">SELL Signals</div><div class="value neg">${sells.length}</div></div>
+    <div class="kpi"><div class="label">Confirmed</div><div class="value">${confirmed.length}</div></div>
+  `;
+}
+
+function renderSignals(sigs) {
+  const el = document.getElementById('trading-table');
+  if (!sigs.length) { el.innerHTML = '<div class="empty">No signals yet — click "Scan Now" to check sports stocks.</div>'; return; }
+  el.innerHTML = `<table>
+    <thead><tr><th>Ticker</th><th>Action</th><th>RSI</th><th>Price</th><th>Reason</th><th>Date</th><th>Status</th><th></th></tr></thead>
+    <tbody>
+      ${sigs.map(s => `<tr>
+        <td><strong>${s.ticker}</strong></td>
+        <td><span class="badge ${(s.action||'').toLowerCase()}">${s.action}</span></td>
+        <td>${s.rsi!=null?s.rsi.toFixed(1):'—'}</td>
+        <td>${s.price_at_signal!=null?'$'+s.price_at_signal.toFixed(2):'—'}</td>
+        <td style="max-width:300px;font-size:0.8em">${s.reason||'—'}</td>
+        <td style="color:var(--text-dim);font-size:0.78em">${s.created_at?new Date(s.created_at).toLocaleString():'—'}</td>
+        <td>${s.confirmed?'<span class="badge confirmed">Confirmed</span>':'<span class="badge pending">Pending</span>'}</td>
+        <td>${!s.confirmed?`<button class="btn btn-sm btn-gold" onclick="confirmSignal(${s.id},'${s.ticker}','${s.action}')">✓ Confirm</button>`:'&nbsp;'}</td>
+      </tr>`).join('')}
+    </tbody>
+  </table>`;
+}
+
+function renderUniverse(stocks) {
+  const el = document.getElementById('universe-table');
+  const entries = Object.entries(stocks);
+  if (!entries.length) { el.innerHTML = '<div class="empty">Universe unavailable</div>'; return; }
+  el.innerHTML = `<table>
+    <thead><tr><th>Ticker</th><th>Company</th><th>Sector</th></tr></thead>
+    <tbody>
+      ${entries.map(([ticker, info]) => `<tr>
+        <td><strong>${ticker}</strong></td>
+        <td>${info.name}</td>
+        <td>${info.sector}</td>
+      </tr>`).join('')}
+    </tbody>
+  </table>`;
+}
+
+async function manualScan() {
+  const btn = document.getElementById('scan-btn');
+  btn.disabled = true; btn.textContent = '⏳ Scanning…';
+  try {
+    const r = await fetch('/sports/trading/scan', { method: 'POST', headers: adminHeaders() });
+    const d = await r.json();
+    if (r.ok) { showAlert('trading-alert', `✅ Scanned — ${d.new_signals} new signal(s)`, 'success'); loadTrading(); }
+    else showAlert('trading-alert', d.detail || 'Error', 'error');
+  } catch(e) { showAlert('trading-alert', 'Error: '+e.message, 'error'); }
+  finally { btn.disabled = false; btn.textContent = '🔍 Scan Now'; }
+}
+
+async function confirmSignal(signalId, ticker, action) {
+  if (!confirm(`⚠️ CONFIRM: Place a real ${action} order for 1 share of ${ticker}?\n\nThis will execute on your Alpaca account.`)) return;
+  try {
+    const r = await fetch(`/sports/trading/confirm/${signalId}`, { method: 'POST', headers: {'Content-Type':'application/json'} });
+    const d = await r.json();
+    if (r.ok) { showAlert('trading-alert', `✅ Order placed: ${action} 1 ${ticker} | Order ID: ${d.order?.id||'—'}`, 'success'); loadTrading(); }
+    else showAlert('trading-alert', d.detail || 'Error placing order', 'error');
+  } catch(e) { showAlert('trading-alert', 'Error: '+e.message, 'error'); }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+loadScores();
+setInterval(loadScores, 5 * 60 * 1000);  // auto-refresh every 5 min
+</script>
+</body>
+</html>
