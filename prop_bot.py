@@ -54,6 +54,7 @@ LIVE_TRADE = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 # RSI entry/exit thresholds
 RSI_BUY_BELOW  = float(os.getenv("PROP_RSI_BUY_BELOW", "30"))
 RSI_SELL_ABOVE = float(os.getenv("PROP_RSI_SELL_ABOVE", "70"))
+PROP_MIN_MOMENTUM_ABS = float(os.getenv("PROP_MIN_MOMENTUM_ABS", "0.10"))
 
 # Crypto-specific thresholds: AGGRESSIVE SCALPING FOR MILESTONE SPEED
 # Lowered from 30/70 to 35/65 to catch MORE entry/exit opportunities
@@ -1110,6 +1111,15 @@ async def run_prop_cycle():
             )
 
             if should_enter and direction != "hold":
+                if (direction == "long" and momentum < PROP_MIN_MOMENTUM_ABS) or (
+                    direction == "short" and momentum > -PROP_MIN_MOMENTUM_ABS
+                ):
+                    status = f"MOMENTUM_FILTERED ({momentum:+.2f}%)"
+                    latest_signals[contract] = {
+                        "symbol": config["symbol"], "price": price, "rsi": rsi, "trend": trend,
+                        "momentum": momentum, "status": status, "has_position": False, "checked_at": now.isoformat(),
+                    }
+                    continue
                 # Strong mean reversion signal: record confidence as distance from threshold
                 confidence = abs(rsi - (30 if direction == "long" else 70))
                 candidates.append((confidence, contract, config, direction, price, rsi, trend))

@@ -187,6 +187,50 @@ except (ValueError, TypeError):
     log.warning("Invalid CRYPTO_MAX_POSITIONS value, using default: 3")
     MAX_POSITIONS = 3
 
+TRADING_PROFILE = os.getenv("CRYPTO_TRADING_PROFILE", "balanced").strip().lower()
+if TRADING_PROFILE not in {"conservative", "balanced", "aggressive"}:
+    TRADING_PROFILE = "balanced"
+
+if TRADING_PROFILE == "conservative":
+    PROFILE_MIN_VOLUME_SPIKE = 1.6
+    PROFILE_MIN_CLOSE_POSITION = 0.60
+    PROFILE_RSI_EXIT_THRESHOLD = 68.0
+    PROFILE_TIER1_ATR_MULT = 2.2
+    PROFILE_TIER2_ATR_MULT = 3.8
+    PROFILE_TIER3_ATR_MULT = 6.5
+    PROFILE_STOP_ATR_MULT = 1.0
+    PROFILE_TIER1_PCT = 0.03
+    PROFILE_TIER2_PCT = 0.05
+    PROFILE_TIER3_PCT = 0.10
+    PROFILE_STOP_PCT = 0.98
+    PROFILE_TRAIL_PCT = 0.05
+elif TRADING_PROFILE == "aggressive":
+    PROFILE_MIN_VOLUME_SPIKE = 1.2
+    PROFILE_MIN_CLOSE_POSITION = 0.50
+    PROFILE_RSI_EXIT_THRESHOLD = 62.0
+    PROFILE_TIER1_ATR_MULT = 1.2
+    PROFILE_TIER2_ATR_MULT = 2.2
+    PROFILE_TIER3_ATR_MULT = 3.5
+    PROFILE_STOP_ATR_MULT = 0.8
+    PROFILE_TIER1_PCT = 0.015
+    PROFILE_TIER2_PCT = 0.03
+    PROFILE_TIER3_PCT = 0.05
+    PROFILE_STOP_PCT = 0.988
+    PROFILE_TRAIL_PCT = 0.035
+else:  # balanced
+    PROFILE_MIN_VOLUME_SPIKE = 1.35
+    PROFILE_MIN_CLOSE_POSITION = 0.55
+    PROFILE_RSI_EXIT_THRESHOLD = 65.0
+    PROFILE_TIER1_ATR_MULT = 1.6
+    PROFILE_TIER2_ATR_MULT = 2.8
+    PROFILE_TIER3_ATR_MULT = 4.5
+    PROFILE_STOP_ATR_MULT = 0.9
+    PROFILE_TIER1_PCT = 0.02
+    PROFILE_TIER2_PCT = 0.04
+    PROFILE_TIER3_PCT = 0.07
+    PROFILE_STOP_PCT = 0.985
+    PROFILE_TRAIL_PCT = 0.04
+
 # Unset by default - no ceiling, so the full account balance (principal +
 # compounded profit) is always in play. Set CRYPTO_MAX_ALLOCATION to cap
 # it at a fixed dollar amount instead, if ever wanted.
@@ -682,7 +726,11 @@ def _crypto_buy_signal_improved(rsi: float, prev_rsi: float, volume_ratio: float
     # Only enter if recovery has sufficient conviction:
     # - Volume spike (1.5x normal)
     # - Close in upper half of candle (strength confirmation)
-    if rsi < RSI_NO_ENTRY and volume_ratio >= 1.5 and close_position >= 0.50:
+    if (
+        rsi < RSI_NO_ENTRY
+        and volume_ratio >= PROFILE_MIN_VOLUME_SPIKE
+        and close_position >= PROFILE_MIN_CLOSE_POSITION
+    ):
         return "STRONG_BUY"
 
     return "NO_ACTION"
@@ -701,19 +749,19 @@ def _calculate_atr_targets(entry_price: float, atr: float) -> dict:
     if atr <= 0:
         # Fallback to percentage-based if ATR unavailable
         return {
-            "tier1_price": entry_price * 1.03,   # 3%
-            "tier2_price": entry_price * 1.05,   # 5%
-            "tier3_price": entry_price * 1.10,   # 10%
-            "stop_price": entry_price * 0.98,    # -2%
-            "trailing_stop_pct": 0.05,            # 5% trail
+            "tier1_price": entry_price * (1 + PROFILE_TIER1_PCT),
+            "tier2_price": entry_price * (1 + PROFILE_TIER2_PCT),
+            "tier3_price": entry_price * (1 + PROFILE_TIER3_PCT),
+            "stop_price": entry_price * PROFILE_STOP_PCT,
+            "trailing_stop_pct": PROFILE_TRAIL_PCT,
         }
     # ATR-based targets (ATR is typically 0.5-2% of price for crypto)
     return {
-        "tier1_price": entry_price + (2.0 * atr),    # First profit zone
-        "tier2_price": entry_price + (3.5 * atr),    # Second profit zone
-        "tier3_price": entry_price + (6.0 * atr),    # Let winners run
-        "stop_price": entry_price - atr,              # Emergency stop
-        "trailing_stop_pct": 0.05,                    # 5% trailing stop on final position
+        "tier1_price": entry_price + (PROFILE_TIER1_ATR_MULT * atr),
+        "tier2_price": entry_price + (PROFILE_TIER2_ATR_MULT * atr),
+        "tier3_price": entry_price + (PROFILE_TIER3_ATR_MULT * atr),
+        "stop_price": entry_price - (PROFILE_STOP_ATR_MULT * atr),
+        "trailing_stop_pct": PROFILE_TRAIL_PCT,
     }
 
 
@@ -1591,9 +1639,9 @@ async def run_crypto_cycle():
                 reason = f"🛑 HARD STOP (swing-based) @ ${stop_price:.2f} (-{(1 - price/entry)*100:.2f}%)"
 
             # PRIORITY 2: RSI overbought exit (65-70 = reversal signal, exit with profit)
-            elif rsi >= 65 and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE:
+            elif rsi >= PROFILE_RSI_EXIT_THRESHOLD and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE:
                 should_exit = True
-                reason = f"📤 RSI OVERBOUGHT EXIT (RSI {rsi:.1f} >= 65) @ ${price:.2f} (+{unrealized_pct*100:.2f}%)"
+                reason = f"📤 RSI OVERBOUGHT EXIT (RSI {rsi:.1f} >= {PROFILE_RSI_EXIT_THRESHOLD:.0f}) @ ${price:.2f} (+{unrealized_pct*100:.2f}%)"
 
             # PRIORITY 3: Profit taking above $1,001
             elif profit_take_exit:
@@ -1717,9 +1765,9 @@ async def run_crypto_cycle():
                         # No signal - log why
                         if rsi < RSI_STRONG_ARM_THRESHOLD and close_position < 0.50:
                             reason = "STRONG_OVERSOLD_NO_MOMENTUM"
-                        elif rsi < RSI_STRONG_ARM_THRESHOLD and volume_spike_ratio < 1.5:
+                        elif rsi < RSI_STRONG_ARM_THRESHOLD and volume_spike_ratio < PROFILE_MIN_VOLUME_SPIKE:
                             reason = "STRONG_OVERSOLD_LOW_VOLUME"
-                        elif rsi < RSI_ARM_THRESHOLD and close_position < 0.60:
+                        elif rsi < RSI_ARM_THRESHOLD and close_position < PROFILE_MIN_CLOSE_POSITION:
                             reason = "OVERSOLD_NO_MOMENTUM"
                         elif not is_recovering:
                             reason = "OVERSOLD_NOT_RECOVERING"
@@ -1853,12 +1901,13 @@ def run():
     log.info("🎯 UPGRADED STRATEGY (3-FILTER SYSTEM):")
     log.info("  FILTER 1: 200-day SMA trend confirmation (bull market only)")
     log.info("  FILTER 2: RSI cross-above from oversold (reversal confirmation)")
-    log.info("  FILTER 3: Volume + momentum confirmation (1.5x volume, close in upper 50%)")
+    log.info(f"  FILTER 3: Volume + momentum confirmation ({PROFILE_MIN_VOLUME_SPIKE:.2f}x volume, close >= {PROFILE_MIN_CLOSE_POSITION:.2f})")
     log.info("")
     log.info("📊 EXIT LOGIC (Professional-Grade):")
     log.info("  Priority 1: Hard stop loss (swing-based, risk management)")
-    log.info("  Priority 2: RSI overbought (65-70 = reversal exit)")
+    log.info(f"  Priority 2: RSI overbought ({PROFILE_RSI_EXIT_THRESHOLD:.0f}+ = reversal exit)")
     log.info("  Priority 3: Profit targets (3%, 5%, 10% ATR-based tiers)")
+    log.info(f"Profile: {TRADING_PROFILE.upper()} | ATR tiers: {PROFILE_TIER1_ATR_MULT}/{PROFILE_TIER2_ATR_MULT}/{PROFILE_TIER3_ATR_MULT}x")
     log.info("")
     log.info("Runs 24/7 - crypto has no market close, unlike prop_bot.py's stock/ETF trading")
     log.info("🔴 LIVE TRADING - Coinbase has no free paper-trading sandbox for Advanced Trade")
