@@ -5269,6 +5269,28 @@ async def set_grid_dynamic_spacing_endpoint(payload: SetGridDynamicSpacingReques
     return {"status": "updated", "dynamic_spacing_active": payload.enabled}
 
 
+class SetGridAvgSwingSpacingRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/grid-status/avg-swing-spacing", dependencies=[Depends(require_admin_key)])
+async def set_grid_avg_swing_spacing_endpoint(payload: SetGridAvgSwingSpacingRequest):
+    """Turns real average-swing-based dynamic grid spacing on or off - the
+    live wiring for crypto_grid_bot.compute_avg_swing_grid_pct, per the
+    account owner's own direct "make Grid Bot better" follow-up right
+    after seeing crypto_selection_backtest.py's run_grid_atr_spacing_comparison
+    show 1.5x avg swing beating today's fixed 1% by a wide margin on real
+    30-day data. ON by default (see is_avg_swing_spacing_active's own
+    docstring) - takes precedence over fee-tier spacing when both happen
+    to be active. Takes effect on the live bot's very next cycle for
+    every branch, no restart needed."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    await crypto_grid_bot_module.set_avg_swing_spacing_active(payload.enabled)
+    log.info(f"[dashboard] 📏 Grid Bot average-swing-based dynamic spacing {'ENABLED' if payload.enabled else 'disabled'}")
+    return {"status": "updated", "avg_swing_spacing_active": payload.enabled}
+
+
 class SetGridAutoRotateRequest(BaseModel):
     enabled: bool
 

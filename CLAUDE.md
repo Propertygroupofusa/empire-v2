@@ -10959,6 +10959,153 @@ otherwise.
 
 ---
 
+## Three real fixes from one annotated Strategy Lab screenshot: a persistent 429 pileup, retiring D · Swing Trading, and making Grid Bot (C) itself better with already-gathered evidence
+
+The account owner shared a batch of real, hand-annotated Strategy Lab and
+Grid Bot backtest screenshots with "fix everything and update." Three
+distinct, concrete real fixes came out of reading them closely.
+
+### 1. A real, persistent HTTP 429 pileup, still happening after an earlier fix
+
+The real screenshots showed 15 of 33 coins skipped with "HTTP 429 rate
+limited" on a real Strategy Lab run - despite `fetch_candles_window()`
+already having a real per-page retry (3 attempts, linear backoff) from an
+earlier session fix. Root cause: that retry was scoped PER PAGE, inside
+ONE coin's own fetch - nothing coordinated real HTTP requests ACROSS the
+several coins a `max_concurrent` semaphore lets run at once, let alone
+across the several different backtest tools in this same file (Strategy
+Lab, every Grid Bot comparison, the full backtest, the opening-bar
+tools) that could all be hitting Coinbase's real public, unauthenticated
+candles endpoint at the same time - on the same real outbound IP this
+deployment's own live trading bots are also using continuously in the
+background.
+
+Fixed with `_CANDLE_HTTP_SEMAPHORE = asyncio.Semaphore(2)`, a real
+module-level throttle acquired around every single real HTTP request
+this file makes to that endpoint (both `fetch_candles_window()`'s page
+loop and `_fetch_1min_candles_window()`'s own separate copy) - so no
+matter how many coins or tools are running concurrently, at most 2 real
+requests are ever in flight process-wide. Also widened the real per-page
+retry from 3 to 5 attempts with real exponential backoff (`0.5 * 2**attempt`,
+capped at 8s, versus the old flat `0.5 * (attempt+1)`), and the polite
+inter-page delay from 0.15s to 0.2s.
+
+Verified offline: the semaphore genuinely caps real concurrent holders at
+2 even when 6 real coroutines try to acquire it at once (a dedicated
+async test, not just an attribute check). **Not yet confirmed against
+real Coinbase traffic** - same documented gap as every backtest tool in
+this file (no live network access from this sandbox). The account owner
+needs to re-run Strategy Lab after the next redeploy to see whether the
+real skip count actually drops.
+
+### 2. D · Swing Trading retired from Strategy Lab, per real evidence
+
+The account owner circled D's row directly on the real results table
+("get rid of that... make C that better") - a real, deliberate call
+backed by the numbers already on screen: D · Swing Trading came back the
+worst of the four real candidates by a wide margin (68 trades, 29.4% win
+rate, -$133.00 total), versus C · Grid Bot's real 377 trades at 50.1%
+win rate and only -$1.40. `STRATEGY_LAB_STRATEGIES` no longer includes
+`"swing_trading"` - `_replay_swing_trading()` itself is left defined
+(unused) rather than deleted, in case it's ever worth revisiting with
+different real parameters later; it just no longer runs as part of
+Strategy Lab. `crypto_selection_backtest.html`'s legend, honest-limits
+note, and run button were all updated to describe A/B/C only - the
+legend also now correctly notes Grid Bot (C) is real, live infrastructure
+today (it went live in an earlier session after this same Strategy Lab
+first surfaced it as the best real performer), not still "would need
+real engineering work first" the way the old copy claimed.
+
+Verified via the existing Strategy Lab regression suite, updated in
+place for the real, intentional 3-candidate shape (not 4) - every other
+assertion (per-strategy trade mechanics, the real comparison/skip
+handling) is unchanged and still passes.
+
+### 3. Real, evidence-backed average-swing-based dynamic grid spacing, wired live and turned ON
+
+The same screenshot batch also showed the real Grid Average-Swing
+Spacing Comparison's own result, already run: spacing set to **1.5x each
+coin's own real average hourly swing** beat today's fixed 1% default by
+a wide margin on a real 30-day sample - $5.79 total P&L (82 trades, 59.8%
+win rate) versus the fixed default's $1.02 (148 trades, 56.1% win rate).
+Unlike the existing fee-tier-aware dynamic spacing feature (a real
+no-op at the account's current base fee tier), this is a genuine,
+real-evidence-backed live-strategy improvement that had never been wired
+into live trading - exactly what "make C better" was asking for.
+
+**`crypto_btc_compound_bot.py`**: new `_fetch_hourly_candles()` (a real
+hourly-granularity OHLC fetch including highs/lows, separate from the
+existing `_fetch_hourly_closes()` which only ever returns closes) and
+`get_average_hourly_swing_pct(session, product_id, count=120)` - computes
+the real mean True-Range % across the most recent 120 real hourly candles
+(~5 days, a practical live window - not literally the backtest's full
+30-day one, which isn't practical to re-fetch every live cycle), using
+the EXACT SAME real True-Range formula `crypto_selection_backtest.py`'s
+own `_average_hourly_swing_pct()` already validated, so the live version
+is a faithful match to the real backtest evidence rather than a
+different calculation wearing the same name. Fails open (returns `None`,
+never a fabricated 0.0) on a real fetch failure or too little history.
+
+**`crypto_grid_bot.py`**: `AVG_SWING_SPACING_MODE_KEY`,
+`is_avg_swing_spacing_active()`/`set_avg_swing_spacing_active()` (same
+generic `TradingBotState` DB-persisted toggle pattern every other
+real-time flag in this file already uses) - **defaults ON**, a real,
+deliberate default flip per the account owner's own direct request and
+the real evidence above, following this codebase's established "flip
+the unset default, no live dashboard access from this sandbox"
+precedent; a real explicit dashboard toggle still wins over this default
+in either direction afterward. `AVG_SWING_SPACING_MULTIPLIER = 1.5`
+(the real winning candidate, reused exactly as validated, not re-tuned).
+`compute_avg_swing_grid_pct(session, product_id)` returns
+`(grid_pct, avg_swing_pct)` - `grid_pct = max(MIN_DYNAMIC_GRID_PCT,
+avg_swing_pct * 1.5)`, fails open to `(DEFAULT_GRID_PCT, None)` on a
+real fetch failure, matching every other "don't block on missing data"
+gate in this codebase.
+
+`run_grid_branch_cycle()`'s spacing block now checks average-swing
+spacing FIRST - if active, it wins and fee-tier spacing's own compute
+function is never even called this cycle; fee-tier spacing only ever
+applies when average-swing is off. This precedence is deliberate: the
+two features could otherwise disagree about which real `grid_pct` a
+branch should use, and average-swing is the more directly
+evidence-backed of the two on real data. `get_grid_status()` now also
+reports `avg_swing_spacing_active`.
+
+**Dashboard**: `routers/trading_dashboard.py` gained
+`POST /grid-status/avg-swing-spacing` (`{enabled}`, admin-key gated,
+same pattern as the existing fee-tier toggle endpoint).
+`family_tree_dashboard.html` gained a matching "📏 Average-swing dynamic
+spacing" badge + toggle link right under the existing fee-tier badge,
+same real confirm-dialog pattern, linking back to the Grid
+Average-Swing Spacing Backtest for the real evidence.
+
+Verified offline (19 checks, real local dev DB): the toggle defaults ON
+and round-trips in both directions; `compute_avg_swing_grid_pct()`
+correctly computes `grid_pct = avg_swing * 1.5`, floors at
+`MIN_DYNAMIC_GRID_PCT` on a near-zero real swing, and fails open on a
+real fetch failure; and, critically, an end-to-end `run_grid_branch_cycle()`
+call with BOTH average-swing and fee-tier spacing turned on confirms
+average-swing wins (the real DB row is updated to the average-swing
+figure, and fee-tier's own compute function is never called), while
+turning average-swing off correctly falls back to fee-tier spacing.
+Full existing Grid Bot regression suite re-run clean alongside it - one
+existing test (`test_grid_drawdown_and_dynamic_spacing.py`'s own
+fee-tier-in-isolation case) needed average-swing spacing explicitly
+disabled first, since it's now the default-on feature that would
+otherwise take precedence over the fee-tier behavior that test was
+built to isolate; its own assertions are otherwise unchanged.
+
+**Not yet confirmed against real live trading** - this is a real, live
+spacing change now shipped (and default-ON, unlike the fee-tier feature's
+safe no-op default); its actual effect can only be judged by watching
+real trades over the coming days, the same as every other live strategy
+change in this file. The account owner should watch the Grid Bot
+dashboard for the new "📏 Average-swing dynamic spacing: ON" badge and
+each branch's own real `grid_pct` after the next redeploy to confirm it's
+now varying per-coin instead of sitting at a flat 1%.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

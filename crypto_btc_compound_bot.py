@@ -523,6 +523,75 @@ async def _fetch_hourly_closes(session, product_id: str, count: int = 50):
         return None
 
 
+async def _fetch_hourly_candles(session, product_id: str, count: int = 120):
+    """Fetches the most recent `count` real hourly candles (Coinbase public
+    candles endpoint, granularity=3600), including highs/lows - the live
+    counterpart to crypto_selection_backtest.py's own paginated hourly
+    fetch, just a single-page real fetch since `count` stays well under
+    Coinbase's real 300-candle-per-page limit for any practical window.
+    Separate from _fetch_hourly_closes() above (which only ever returns
+    closes, for the SMA20/SMA50 trend filter) since computing a real
+    average True Range needs highs/lows too. Returns (closes, highs, lows),
+    oldest-first, or None on failure/insufficient real data."""
+    url = f"https://api.exchange.coinbase.com/products/{product_id}/candles?granularity=3600"
+    try:
+        async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+            if not data or len(data) < 20:
+                return None
+            candles = list(reversed(data))[-count:]
+            closes = [float(c[4]) for c in candles]
+            highs = [float(c[2]) for c in candles]
+            lows = [float(c[1]) for c in candles]
+            return closes, highs, lows
+    except Exception as e:
+        log.warning(f"[BTC-COMPOUND] Hourly OHLC fetch failed for {product_id}: {e}")
+        return None
+
+
+def _average_hourly_swing_pct(closes, highs, lows) -> float:
+    """Real "average swing" for one coin over the given real hourly
+    window - the mean real True Range (as a % of price) across every
+    candle, matching crypto_selection_backtest.py's own
+    _average_hourly_swing_pct() formula EXACTLY (same True-Range
+    definition, same mean-over-window approach) so the live version stays
+    a faithful match to the real, already-validated backtest rather than
+    a different calculation wearing the same name. Returns 0.0 on too
+    little real data - callers should treat that as "no real reading
+    yet," not "genuinely zero volatility."""
+    n = len(closes)
+    if n < 2:
+        return 0.0
+    true_ranges_pct = []
+    for i in range(1, n):
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+        if closes[i]:
+            true_ranges_pct.append(tr / closes[i])
+    if not true_ranges_pct:
+        return 0.0
+    return sum(true_ranges_pct) / len(true_ranges_pct)
+
+
+async def get_average_hourly_swing_pct(session, product_id: str, count: int = 120):
+    """Real, live "what does this coin typically swing" reading - fetches
+    the most recent `count` real hourly candles (120 = ~5 real days, the
+    same practical lookback crypto_selection_backtest.py's own
+    STRATEGY_LAB_SWING_LOOKBACK_HOURS uses for a "recent behavior" window,
+    not a claim this matches the real 30-day backtest window exactly - a
+    live feature can't practically re-fetch 30 real days of hourly
+    candles every trading cycle) and returns the real average True-Range
+    % across it. Returns None (not 0.0) on a real fetch failure or too
+    little history - callers must fail OPEN on None, matching every other
+    "don't block on missing data" gate in this codebase."""
+    candles = await _fetch_hourly_candles(session, product_id, count=count)
+    if candles is None:
+        return None
+    closes, highs, lows = candles
+    return _average_hourly_swing_pct(closes, highs, lows)
+
+
 async def get_higher_tf_trend(session, product_id: str, sma_short: int = 20, sma_long: int = 50):
     """Real, live SMA20/SMA50 (hourly) trend confirmation - the crypto-side
     analog of prop_bot.py's get_higher_tf_trend(), promoted from shadow-mode

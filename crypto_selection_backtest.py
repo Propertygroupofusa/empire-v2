@@ -57,6 +57,26 @@ from models import CryptoTreeBranch, CryptoGridBranch, CryptoCoinTradeHistory
 
 SPEND = 150.0
 BACKTEST_DAYS = 30
+# Real, global throttle on Coinbase's public candles endpoint - found from
+# a real, live 429 pileup the account owner hit directly: 15 of 33 coins
+# skipped on a real Strategy Lab run even after the per-page retry below
+# already existed. Root cause the per-tool asyncio.Semaphore(max_concurrent)
+# alone couldn't fix: every real backtest tool in this file (Strategy Lab,
+# every Grid Bot comparison, the full backtest, etc.) opens its OWN
+# semaphore scoped only to that one call - nothing coordinates real HTTP
+# requests ACROSS tools, or across a single tool's own multi-page
+# pagination happening inside several concurrent coin fetches at once. A
+# real 6-coin-concurrent tool, each paginating 3-4 pages, can genuinely
+# burst well past Coinbase's real per-IP rate limit for its public,
+# unauthenticated endpoint - especially since this same Railway
+# deployment's live trading bots are hitting Coinbase concurrently in the
+# background too, sharing the identical real outbound IP. This semaphore
+# is acquired around every single real HTTP request this module makes to
+# that endpoint (both fetch_candles_window's page loop and
+# _fetch_1min_candles_window's own copy below), so no matter how many
+# coins or tools are running at once, at most 2 real requests are ever in
+# flight - a real, process-wide throttle, not just a per-tool one.
+_CANDLE_HTTP_SEMAPHORE = asyncio.Semaphore(2)
 # Real, effective size of the existing live dollar-based giveback cap
 # (MAX_PROFIT_GIVEBACK_USD, $3.75) at the module's own $150 spend size -
 # $3.75 / $150 = 2.5%. Used as the trailing-stop comparison's percentage
@@ -114,29 +134,30 @@ async def fetch_candles_window(session, product_id, start, end, min_candles=ATR_
             f"?granularity={GRANULARITY_SECONDS}&start={cursor.isoformat()}&end={page_end.isoformat()}"
         )
         page_data = None
-        for attempt in range(3):
+        for attempt in range(5):
             try:
-                async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
-                    if r.status == 429:
-                        last_error = f"HTTP 429 rate limited"
-                        await asyncio.sleep(0.5 * (attempt + 1))
-                        continue
-                    if r.status != 200:
-                        last_error = f"HTTP {r.status}"
+                async with _CANDLE_HTTP_SEMAPHORE:
+                    async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
+                        if r.status == 429:
+                            last_error = f"HTTP 429 rate limited"
+                            await asyncio.sleep(min(0.5 * (2 ** attempt), 8.0))
+                            continue
+                        if r.status != 200:
+                            last_error = f"HTTP {r.status}"
+                            break
+                        page_data = await r.json()
+                        last_error = None
                         break
-                    page_data = await r.json()
-                    last_error = None
-                    break
             except Exception as e:
                 last_error = f"{type(e).__name__}: {str(e)[:100]}"
                 print(f"  [{product_id}] fetch error for page starting {cursor.date()}: {e}")
-                await asyncio.sleep(0.5 * (attempt + 1))
+                await asyncio.sleep(min(0.5 * (2 ** attempt), 8.0))
         if page_data:
             all_candles.extend(page_data)
         elif last_error:
             break  # this page never came through even after retries - stop rather than silently pretend the window is complete
         cursor = page_end
-        await asyncio.sleep(0.15)  # be polite to the public endpoint
+        await asyncio.sleep(0.2)  # be polite to the public endpoint
 
     if len(all_candles) < min_candles:
         if last_error_out is not None:
@@ -1315,11 +1336,17 @@ def _summarize_strategy_trades(trades, spend):
     }
 
 
+# "swing_trading" (D) was removed here per the account owner's own direct
+# call after a real 30-day/68-trade sample came back the worst of the
+# four candidates by a wide margin (29.4% win rate, -$133.00 total) -
+# real evidence, not a guess. _replay_swing_trading() itself is left
+# defined below (unused by this dict) rather than deleted, in case it's
+# ever worth revisiting with different real parameters later - it just no
+# longer runs as part of Strategy Lab.
 STRATEGY_LAB_STRATEGIES = {
     "baseline": lambda closes, highs, lows, spend: backtest_one_coin(closes, highs, lows, spend=spend),
     "hourly_momentum": lambda closes, highs, lows, spend: _replay_hourly_momentum(closes, highs, lows, spend=spend),
     "grid_bot": lambda closes, highs, lows, spend: _replay_grid_bot(closes, highs, lows, spend=spend),
-    "swing_trading": lambda closes, highs, lows, spend: _replay_swing_trading(closes, highs, lows, spend=spend),
 }
 
 
@@ -3020,28 +3047,29 @@ async def _fetch_1min_candles_window(session, product_id: str, days: int = OPENI
             f"?granularity={OPENING_BAR_GRANULARITY_SECONDS}&start={cursor.isoformat()}&end={page_end.isoformat()}"
         )
         page_data = None
-        for attempt in range(3):
+        for attempt in range(5):
             try:
-                async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
-                    if r.status == 429:
-                        last_error = "HTTP 429 rate limited"
-                        await asyncio.sleep(0.5 * (attempt + 1))
-                        continue
-                    if r.status != 200:
-                        last_error = f"HTTP {r.status}"
+                async with _CANDLE_HTTP_SEMAPHORE:
+                    async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
+                        if r.status == 429:
+                            last_error = "HTTP 429 rate limited"
+                            await asyncio.sleep(min(0.5 * (2 ** attempt), 8.0))
+                            continue
+                        if r.status != 200:
+                            last_error = f"HTTP {r.status}"
+                            break
+                        page_data = await r.json()
+                        last_error = None
                         break
-                    page_data = await r.json()
-                    last_error = None
-                    break
             except Exception as e:
                 last_error = f"{type(e).__name__}: {str(e)[:100]}"
-                await asyncio.sleep(0.5 * (attempt + 1))
+                await asyncio.sleep(min(0.5 * (2 ** attempt), 8.0))
         if page_data:
             all_candles.extend(page_data)
         elif last_error:
             break
         cursor = page_end
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(0.2)
 
     if len(all_candles) < 120:
         if last_error_out is not None:

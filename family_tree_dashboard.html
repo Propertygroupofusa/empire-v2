@@ -573,6 +573,7 @@
         auto-deploys toward whichever coin currently ranks best (see the toggle below), no manual click ever required.
     </p>
     <div id="grid-dynamic-spacing-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
+    <div id="grid-avg-swing-spacing-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-auto-rotate-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div class="panel" id="grid-panel">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:8px;">
@@ -1858,6 +1859,7 @@ function renderGridStatus(data, tradeHistoryByBot) {
     toggleBtn.textContent = gridModeActive ? '⏸️ Disable grid trading' : '▶️ Enable grid trading';
 
     renderGridDynamicSpacingBadge(!!data.dynamic_spacing_active);
+    renderGridAvgSwingSpacingBadge(!!data.avg_swing_spacing_active);
     renderGridAutoRotateBadge(!!data.auto_rotate_active, data.auto_rotate_interval_minutes);
 
     document.getElementById('grid-total-allocated').textContent =
@@ -2172,6 +2174,44 @@ async function toggleGridDynamicSpacing(enable) {
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
         renderGridDynamicSpacingBadge(data.dynamic_spacing_active);
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+// Real, opt-in average-swing-based dynamic grid spacing toggle - the
+// evidence-backed follow-up to the fee-tier toggle above. Per the account
+// owner's own direct "make Grid Bot better" after seeing
+// run_grid_atr_spacing_comparison's real 30-day result (1.5x avg swing:
+// +$5.79 total, 59.8% win rate vs the fixed 1% default's +$1.02, 56.1%).
+// ON by default - see crypto_grid_bot.is_avg_swing_spacing_active's own
+// docstring. Takes precedence over fee-tier spacing when both are active.
+function renderGridAvgSwingSpacingBadge(active) {
+    const el = document.getElementById('grid-avg-swing-spacing-badge');
+    if (!el) return;
+    const label = active
+        ? '<strong style="color:var(--green);">ON</strong> - each real branch spaces itself at 1.5x its own coin\'s real recent average swing'
+        : '<strong style="color:var(--text-dim);">OFF</strong> - fixed 1% (or fee-tier) spacing regardless of each coin\'s own real swing';
+    el.innerHTML = `📏 Average-swing dynamic spacing: ${label} — ` +
+        `<a href="javascript:void(0)" onclick="toggleGridAvgSwingSpacing(${!active})" style="color: var(--navy);">${active ? 'turn off' : 'turn on'}</a> ` +
+        `<span style="color:var(--text-dim);">(real evidence: <a href="/crypto-selection-backtest-view" style="color: var(--navy);">Grid Average-Swing Spacing Backtest</a>)</span>`;
+}
+
+async function toggleGridAvgSwingSpacing(enable) {
+    const msg = enable
+        ? 'Turn ON average-swing dynamic spacing? Every real grid branch will start recomputing its own grid_pct from that coin\'s real recent hourly swing each cycle (1.5x its real average True Range) instead of a fixed 1% - a calm coin gets a tighter grid, a choppy one gets a wider one. Falls back to the fixed default if the real swing lookup ever fails. Takes precedence over fee-tier spacing if both are on.'
+        : 'Turn OFF average-swing dynamic spacing? Every real grid branch goes back to fixed 1% spacing (or fee-tier spacing, if that\'s still on).';
+    if (!confirm(msg)) return;
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/grid-status/avg-swing-spacing', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: enable }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        renderGridAvgSwingSpacingBadge(data.avg_swing_spacing_active);
     } catch (e) {
         alert('Error: ' + e.message);
     }

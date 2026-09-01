@@ -177,13 +177,13 @@
     <div id="ferResults"></div>
 
     <div class="note" style="margin-top: 28px;">
-        <strong>🧪 Strategy Lab (A/B/C/D) - testing a pasted outside proposal for real:</strong> a third-party writeup proposed three alternative strategies (Spot Swing Trading, an Automated Grid Bot, Hourly Momentum Trading) with no real backtest of its own - only illustrative "if this move happens, here's the math" arithmetic. This replays all three, PLUS the existing live baseline, against the identical real historical candles for every coin, so all four are directly comparable on real evidence rather than a guess.
+        <strong>🧪 Strategy Lab (A/B/C) - testing a pasted outside proposal for real:</strong> a third-party writeup proposed three alternative strategies (Spot Swing Trading, an Automated Grid Bot, Hourly Momentum Trading) with no real backtest of its own - only illustrative "if this move happens, here's the math" arithmetic. This replays the surviving candidates, PLUS the existing live baseline, against the identical real historical candles for every coin, so they're directly comparable on real evidence rather than a guess.
         <br><br>
-        <strong>A</strong> = Baseline (the live rules) &nbsp;·&nbsp; <strong>B</strong> = Hourly Momentum (RSI &gt; 55 + hourly uptrend, fixed 2.5% target / 1.5% stop) &nbsp;·&nbsp; <strong>C</strong> = Grid Bot (buys every 1% dip, sells every 1% rise, up to 10 concurrent slices) &nbsp;·&nbsp; <strong>D</strong> = Spot Swing Trading (buys a real oversold pullback near its own 5-day low, holds for a 7% target or up to 7 days)
+        <strong>A</strong> = Baseline (the live rules) &nbsp;·&nbsp; <strong>B</strong> = Hourly Momentum (RSI &gt; 55 + hourly uptrend, fixed 2.5% target / 1.5% stop) &nbsp;·&nbsp; <strong>C</strong> = Grid Bot 🏆 (buys every 1% dip, sells every 1% rise, up to 10 concurrent slices - this is the one that won, and it's real, live infrastructure today, see the Grid Bot dashboard)
         <br><br>
-        Honest limits: none of these are wired into live trading by this backtest - Grid Bot and Swing Trading don't fit the live engine's current one-position-per-branch design at all (a grid needs several real concurrent slices; a multi-day swing hold would conflict with the ~30s per-cycle exit checks), so going live with either would need real engineering work first, not just a promote click. The Grid Bot's fee assumption also reuses this file's existing real round-trip rate rather than the lower "maker-only" rate the pasted proposal assumed - worth confirming Coinbase's actual current fee schedule before trusting that difference either way. Shadow mode only.
+        Honest limits: A and B stay shadow-mode only (Hourly Momentum's multi-day-hold shape still doesn't fit the live engine's per-cycle exit checks, so promoting it would need real engineering work first, not just a promote click). Grid Bot's fee assumption also reuses this file's existing real round-trip rate rather than the lower "maker-only" rate the pasted proposal assumed - worth confirming Coinbase's actual current fee schedule before trusting that difference either way. <strong>D · Spot Swing Trading was removed from this comparison</strong> per real evidence: a real 30-day/68-trade sample came back the worst of the four by a wide margin (29.4% win rate, -$133.00 total) - the account owner's own direct call, after seeing that real result, was to retire it rather than keep testing it. Shadow mode only for A/B.
     </div>
-    <button class="run-btn" id="labBtn" onclick="runStrategyLab()">▶ Run Strategy Lab: A vs B vs C vs D (~30-90 seconds)</button>
+    <button class="run-btn" id="labBtn" onclick="runStrategyLab()">▶ Run Strategy Lab: A vs B vs C (~30-90 seconds)</button>
     <div id="labStatus"></div>
     <div id="labResults"></div>
 
@@ -1132,9 +1132,9 @@ function runForcedExitReversalBacktest() {
 
 const STRATEGY_LAB_LABELS = {
     baseline: 'A · Baseline (live)', hourly_momentum: 'B · Hourly Momentum',
-    grid_bot: 'C · Grid Bot', swing_trading: 'D · Swing Trading',
+    grid_bot: 'C · Grid Bot',
 };
-const STRATEGY_LAB_ORDER = ['baseline', 'hourly_momentum', 'grid_bot', 'swing_trading'];
+const STRATEGY_LAB_ORDER = ['baseline', 'hourly_momentum', 'grid_bot'];
 
 async function runStrategyLab() {
     const btn = document.getElementById('labBtn');
@@ -1265,7 +1265,7 @@ function renderStrategyLabResults(data) {
             <tbody>${coinRows}</tbody>
         </table>
         ${skippedHtml}
-        <p class="trade-note">Real evidence, not a recommendation on its own - see the honest limits noted above the run button, especially for Grid Bot and Swing Trading, before deciding whether to pursue building either for real.</p>
+        <p class="trade-note">Real evidence, not a recommendation on its own - see the honest limits noted above the run button. Grid Bot (C) already won this comparison and is live; D was removed after coming back the worst real performer.</p>
     `;
 }
 
