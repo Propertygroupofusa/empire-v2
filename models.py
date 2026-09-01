@@ -1881,3 +1881,116 @@ class CombinedEquitySnapshot(Base):
             "crypto_equity": self.crypto_equity,
             "combined_equity": self.combined_equity,
         }
+
+
+# ─── SPORTS SYSTEM ───────────────────────────────────────────────────────────
+
+class SportsBet(Base):
+    """One row per sports bet tracked by the user.
+    No real money movement — purely a journal/tracker.
+    """
+    __tablename__ = "sports_bets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sport = Column(String, index=True)          # NFL, NBA, MLB, NHL, Soccer…
+    event = Column(String)                       # "Chiefs vs Bills"
+    bet_type = Column(String)                    # moneyline, spread, over/under, prop
+    pick = Column(String)                        # what you bet on
+    odds = Column(String)                        # American odds string e.g. "-110" or "+250"
+    stake_usd = Column(Float, default=0.0)       # dollars wagered (journal only)
+    result = Column(String, nullable=True)       # WIN / LOSS / PUSH / PENDING
+    payout_usd = Column(Float, nullable=True)    # actual payout if settled
+    sportsbook = Column(String, nullable=True)   # DraftKings, FanDuel, etc.
+    notes = Column(Text, nullable=True)
+    event_date = Column(DateTime, nullable=True, index=True)
+    settled_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        pnl = None
+        if self.result == "WIN" and self.payout_usd is not None:
+            pnl = self.payout_usd - self.stake_usd
+        elif self.result in ("LOSS", "PUSH"):
+            pnl = -self.stake_usd if self.result == "LOSS" else 0.0
+        return {
+            "id": self.id,
+            "sport": self.sport,
+            "event": self.event,
+            "bet_type": self.bet_type,
+            "pick": self.pick,
+            "odds": self.odds,
+            "stake_usd": self.stake_usd,
+            "result": self.result,
+            "payout_usd": self.payout_usd,
+            "pnl": pnl,
+            "sportsbook": self.sportsbook,
+            "notes": self.notes,
+            "event_date": self.event_date.isoformat() if self.event_date else None,
+            "settled_at": self.settled_at.isoformat() if self.settled_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class SportsContent(Base):
+    """Auto-generated sports content posts (YouTube/social) produced by
+    sports_content_bot.py.
+    """
+    __tablename__ = "sports_content"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sport = Column(String, index=True)
+    content_type = Column(String)                # recap, preview, analysis, highlight
+    title = Column(String)
+    body = Column(Text)
+    platform = Column(String, nullable=True)     # YouTube, Twitter/X, Instagram…
+    status = Column(String, default="draft")     # draft, posted, scheduled
+    posted_at = Column(DateTime, nullable=True)
+    scheduled_for = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    metadata_json = Column(JSON, nullable=True)  # tags, hashtags, score data
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "sport": self.sport,
+            "content_type": self.content_type,
+            "title": self.title,
+            "body": self.body,
+            "platform": self.platform,
+            "status": self.status,
+            "posted_at": self.posted_at.isoformat() if self.posted_at else None,
+            "scheduled_for": self.scheduled_for.isoformat() if self.scheduled_for else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "metadata_json": self.metadata_json,
+        }
+
+
+class SportsTradeSignal(Base):
+    """Signal log for sports-related stock trades proposed by
+    sports_trading_bot.py.  No order is ever placed without explicit
+    user confirmation — this table just records what the bot suggested.
+    """
+    __tablename__ = "sports_trade_signals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ticker = Column(String, index=True)          # DKNG, NKE, PENN, etc.
+    action = Column(String)                      # BUY / SELL
+    reason = Column(Text)
+    price_at_signal = Column(Float, nullable=True)
+    rsi = Column(Float, nullable=True)
+    confirmed = Column(Boolean, default=False)   # user confirmed -> placed
+    placed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "ticker": self.ticker,
+            "action": self.action,
+            "reason": self.reason,
+            "price_at_signal": self.price_at_signal,
+            "rsi": self.rsi,
+            "confirmed": self.confirmed,
+            "placed_at": self.placed_at.isoformat() if self.placed_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }

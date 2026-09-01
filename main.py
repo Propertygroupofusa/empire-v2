@@ -75,6 +75,7 @@ routers_to_load = {
     'bot_race': None,
     'alpaca_dashboard': None,
     'trading_hub': None,
+    'sports': None,
 }
 
 for router_name in routers_to_load:
@@ -107,6 +108,7 @@ sweep = routers_to_load['sweep']
 bot_race = routers_to_load['bot_race']
 alpaca_dashboard = routers_to_load['alpaca_dashboard']
 trading_hub = routers_to_load['trading_hub']
+sports = routers_to_load['sports']
 
 # Load remaining modules gracefully
 payee_router = None
@@ -1179,6 +1181,23 @@ async def lifespan(app: FastAPI):
         print(f"[LIFESPAN] Traceback: {traceback.format_exc()}", flush=True)
         log.error(f"🛑 Alpaca Swing bot startup failed: {e}")
 
+    # ── Sports Hub: data refresh + trading signal scanner ────────────────────
+    try:
+        import sports_data_bot as _sdb
+        import threading as _thr
+        _thr.Thread(target=_sdb.run, daemon=True).start()
+        log.info("🏆 Sports data bot started (background thread)")
+    except Exception as e:
+        log.warning(f"Sports data bot startup failed (non-critical): {e}")
+
+    try:
+        import sports_trading_bot as _stb
+        import threading as _thr2
+        _thr2.Thread(target=_stb.run, daemon=True).start()
+        log.info("📈 Sports trading bot started (background thread)")
+    except Exception as e:
+        log.warning(f"Sports trading bot startup failed (non-critical): {e}")
+
     # bot_2_crypto_scalper.py retired: it traded crypto (BTC/ETH/SOL/AVAX/
     # DOGE/LINK) through Alpaca using the same ALPACA_API_KEY as prop_bot.py
     # trades stocks with - but Alpaca crypto is blocked for this account's
@@ -1296,6 +1315,7 @@ routers_list = [
     (bot_race, "/api", "Bot Race Dashboard"),
     (alpaca_dashboard, "/alpaca", "Alpaca Trading Dashboard"),
     (trading_hub, "/trading-hub", "Trading Hub - Live Bot Dashboard"),
+    (sports, "/sports", "Sports Hub"),
 ]
 
 for router_module, prefix, tag in routers_list:
