@@ -10883,6 +10883,84 @@ tier, in which case it should narrow automatically.
 
 ## References
 
+## Combined Live Entry Filters backtest - the real evidence needed before deciding whether to un-retire the crypto tree
+
+The account owner shared the real Coin Trade History table (every coin
+deeply red: POL -$392, BTC -$36, and every other coin negative) and
+asked "let's keep doing this until we get this changed to Green." Had to
+correct the premise first, not just build something: that table is the
+crypto family tree's own historical record, and the tree is currently
+RETIRED (`is_crypto_passive_mode()` true) - it takes zero new trades, so
+the table is frozen and literally cannot turn green on its own, in
+either direction, while retired. Offered the real fork directly
+(un-retire the tree now that real improvements are wired in, vs. leave
+it retired and focus on Grid Bot, the system actually trading) rather
+than silently picking one - the account owner asked for a real backtest
+first, before deciding.
+
+**The real gap this answers**: four real entry filters have each been
+individually backtested and promoted to live in
+`find_most_volatile_unclaimed_coin()`/`run_branch_cycle()` this
+session - RSI-overbought exclusion, BTC-relative-strength, higher-
+timeframe trend, and (most recently) the RSI(30)+support-zone timing
+filter - but no backtest had ever tested what they do STACKED TOGETHER,
+which is how the live bot genuinely applies them today. Each one's own
+individual comparison showed real improvement in isolation; whether four
+real filters compounding together still nets a real improvement (or
+over-filters into too few trades to matter) was still an open, real
+question.
+
+- **`_make_combined_live_entry_gate()`** (`crypto_selection_backtest.py`)
+  - composes all four real gates with a plain AND: the inline RSI-
+  overbought check (`engine.ENTRY_MAX_RSI`), `_make_btc_relative_strength_gate()`,
+  `_make_higher_tf_trend_gate()`, and `_make_support_resistance_gate()` -
+  reusing each already-validated gate function directly, never
+  reimplementing their logic. Each sub-gate already fails OPEN on
+  missing real history; a plain AND preserves that - a candle too early
+  for one sub-check still passes through it.
+- **`run_combined_live_entry_filters_backtest()`** - same real
+  target/stop/breakeven/trailing-stop replay twice per coin on identical
+  real historical data (unfiltered baseline vs. all-four-gated), same
+  pattern as every other comparison in this file.
+
+**Real, honest scope note, stated on the dashboard too**: this tests
+per-coin ENTRY TIMING discipline only - `find_most_volatile_unclaimed_coin()`'s
+own job (picking WHICH coin among several live candidates) is a
+different mechanism the single-coin `backtest_one_coin()` replay
+framework can't express. A real, expected consequence worth naming: four
+filters stacked will cut real trade COUNT more than any one alone -
+that's not itself a problem, what matters is whether real total P&L and
+ROI still improve, not the trade count.
+
+New `POST /crypto-selection-backtest/combined-live-entry-filters`
+(admin-key gated) and a new "▶ Run Combined Live Entry Filters Backtest"
+button + table on `crypto_selection_backtest.html`, placed right after
+the existing BTC-relative-strength comparison.
+
+Verified offline (`test_combined_live_entry_filters.py`, 8 checks, no
+live network access needed): the combined gate only allows a real entry
+when ALL FOUR real sub-conditions pass, verified by stubbing each
+sub-gate factory independently and confirming a single failing sub-gate
+(BTC-relative-strength, higher-tf trend, or the SR filter) blocks the
+whole combined gate on its own; a real, confirmed-overbought RSI blocks
+the combined gate even when every other real sub-gate would pass; and
+the full end-to-end backtest function (real fetch mocked) returns the
+correct real schema with both a baseline and a with_combined_filters
+result per coin.
+
+**Not yet run against real historical data** - same documented gap as
+every backtest tool in this file (no live network access to Coinbase
+from this sandbox). The account owner needs to open
+`/crypto-selection-backtest-view` after the next redeploy and tap the
+new button to get the real answer their own question needs - this tool
+only informs the un-retire decision, it doesn't make it. The crypto tree
+stays retired either way until the account owner explicitly says
+otherwise.
+
+---
+
+## References
+
 - **API Endpoints:** See API_ENDPOINTS.md
 - **Stripe docs:** https://stripe.com/docs/api/checkout/sessions
 - **HeyGen docs:** https://docs.heygen.com/

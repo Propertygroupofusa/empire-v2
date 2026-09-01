@@ -908,6 +908,117 @@ async def run_support_resistance_comparison(coins=None, days=BACKTEST_DAYS, rsi_
     }
 
 
+def _make_combined_live_entry_gate(closes, times, btc_times_sorted, btc_closes_sorted, lookback_hours: int = 25):
+    """Returns an entry_gate(i) closure that composes EVERY entry filter
+    currently live in `crypto_family_tree_bot.py`'s
+    `find_most_volatile_unclaimed_coin()` and `run_branch_cycle()` into
+    ONE combined gate - RSI-overbought exclusion
+    (`engine.ENTRY_MAX_RSI`), BTC-relative-strength, the real hourly
+    SMA20/SMA50 higher-timeframe trend, and the new RSI(30)+support-zone
+    entry-timing filter - so a real entry is only allowed when ALL FOUR
+    real, already-individually-validated filters agree. Each of these
+    has been backtested and promoted to live ONE AT A TIME; this is the
+    first replay of what they actually do TOGETHER, which is how the
+    live bot genuinely applies them today.
+
+    Real, honest scope note: this tests per-coin ENTRY TIMING discipline
+    only - `find_most_volatile_unclaimed_coin()`'s own job (picking WHICH
+    coin among several live candidates) is a different mechanism this
+    single-coin replay framework (`backtest_one_coin`) can't express.
+    Every sub-gate already fails OPEN on missing real history; composing
+    them with a plain AND preserves that - a candle with too little
+    history for one sub-check still passes through it, never
+    manufacturing a block out of an absence of data."""
+    btc_gate = _make_btc_relative_strength_gate(closes, times, lookback_hours, btc_times_sorted, btc_closes_sorted)
+    trend_gate = _make_higher_tf_trend_gate(closes)
+    sr_gate = _make_support_resistance_gate(closes)
+
+    def gate(i):
+        rsi = engine._rsi_from_closes(closes[:i + 1])
+        if rsi is not None and rsi >= engine.ENTRY_MAX_RSI:
+            return False
+        if not btc_gate(i):
+            return False
+        if not trend_gate(i):
+            return False
+        if not sr_gate(i):
+            return False
+        return True
+    return gate
+
+
+async def run_combined_live_entry_filters_backtest(coins=None, days=BACKTEST_DAYS, lookback_hours=25, max_concurrent=6):
+    """SHADOW-MODE, additive - never touches live trading, never places a
+    real order. Direct answer to the account owner's own question after
+    seeing the real Coin Trade History table all red (POL -$392, BTC
+    -$35, and every other coin negative): would the family tree, running
+    with EVERY entry filter currently wired live (RSI-overbought,
+    BTC-relative-strength, higher-timeframe trend, and the new
+    RSI(30)+support-zone timing filter) all applied TOGETHER, actually
+    have made money over the real last `days` days - the real evidence
+    needed before deciding whether to un-retire it. Every one of these
+    four filters has already been backtested and promoted to live
+    INDIVIDUALLY; none of the existing backtest tools test what they do
+    stacked together, which is how the live bot genuinely runs today.
+
+    Runs the exact same real target/stop/breakeven/trailing-stop replay
+    twice per coin on identical real historical hourly candles - an
+    unfiltered baseline vs. the combined-gated version - so the two are
+    directly, fairly comparable. Real extra cost versus the plain
+    baseline backtest: one additional real BTC-USD history fetch (shared
+    across every coin, not re-fetched per coin), same as the standalone
+    BTC-relative-strength comparison already pays."""
+    coins = [p for p in (coins or COIN_FAMILY_TREE) if p != "BTC-USD"]
+    semaphore = asyncio.Semaphore(max_concurrent)
+    async with aiohttp.ClientSession() as session:
+        btc_candles = await fetch_historical_candles(session, "BTC-USD", days=days)
+        if btc_candles is None:
+            return {"error": "could not fetch real BTC-USD history to compare against"}
+        btc_closes, _btc_highs, _btc_lows, btc_times = btc_candles
+
+        async def _one(product_id):
+            async with semaphore:
+                candles = await fetch_historical_candles(session, product_id, days=days)
+            if candles is None:
+                return product_id, None, "not enough historical data"
+            closes, highs, lows, times = candles
+            baseline = backtest_one_coin(closes, highs, lows)
+            gate = _make_combined_live_entry_gate(closes, times, btc_times, btc_closes, lookback_hours=lookback_hours)
+            filtered = backtest_one_coin(closes, highs, lows, entry_gate=gate)
+            return product_id, {"baseline": baseline, "with_combined_filters": filtered}, None
+
+        outcomes = await asyncio.gather(*(_one(pid) for pid in coins))
+
+    comparison = []
+    skipped = []
+    for product_id, result, skip_reason in outcomes:
+        if result is None:
+            skipped.append({"product_id": product_id, "reason": skip_reason})
+            continue
+        comparison.append({"product_id": product_id, **result})
+
+    def _sort_key(row):
+        filtered = row["with_combined_filters"]
+        return filtered["roi_pct_of_spend"] if filtered else -999.0
+    comparison.sort(key=_sort_key, reverse=True)
+
+    baseline_total = round(sum((row["baseline"] or {}).get("total_pnl", 0.0) for row in comparison), 2)
+    filtered_total = round(sum((row["with_combined_filters"] or {}).get("total_pnl", 0.0) for row in comparison), 2)
+
+    return {
+        "backtest_days": days,
+        "lookback_hours": lookback_hours,
+        "spend_per_trade": SPEND,
+        "coins_tested": len(coins),
+        "coins_with_results": len(comparison),
+        "skipped": skipped,
+        "baseline_total_pnl": baseline_total,
+        "with_combined_filters_total_pnl": filtered_total,
+        "better": "with_combined_filters" if filtered_total > baseline_total else "baseline",
+        "comparison": comparison,
+    }
+
+
 async def run_btc_relative_strength_comparison(coins=None, days=BACKTEST_DAYS, lookback_hours=25, max_concurrent=6):
     """SHADOW-MODE, additive comparison tool - does NOT touch or replace
     run_full_backtest()/backtest_one_coin()'s existing baseline behavior,

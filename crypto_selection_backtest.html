@@ -121,6 +121,20 @@
     <div id="rsResults"></div>
 
     <div class="note" style="margin-top: 28px;">
+        <strong>🌳 Would today's FULL live entry discipline actually have made money?</strong> Real question after the
+        Coin Trade History table showed every coin deeply red: RSI-overbought exclusion, BTC-relative-strength,
+        higher-timeframe trend, and the RSI(30)+support-zone timing filter have each been individually backtested and
+        promoted to live - but never tested TOGETHER, which is how the real bot actually applies them today. This
+        requires ALL FOUR real filters to agree before a real entry, replayed against a real, unfiltered baseline on
+        identical historical data. One honest scope note: this tests per-coin entry TIMING, not coin SELECTION (which
+        coin to pick among several candidates is a separate mechanism this replay can't express). Shadow mode only -
+        never places an order, doesn't change what the (currently retired) live bot does on its own.
+    </div>
+    <button class="run-btn" id="celfBtn" onclick="runCombinedLiveEntryFilters()">▶ Run Combined Live Entry Filters Backtest (~60-120 seconds)</button>
+    <div id="celfStatus"></div>
+    <div id="celfResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
         <strong>Higher-timeframe trend comparison:</strong> the Alpaca/stock side already requires a 1-hour SMA20/SMA50 uptrend before entering a long (prop_bot.py's get_higher_tf_trend) - the crypto side has never had that filter. This runs the same real target/stop/breakeven/giveback replay TWICE per coin on the same real historical hourly candles - once as-is (baseline), and once requiring the coin's own real SMA20 to be above its SMA50 before entering. Shadow mode only - this does not change what the live bot buys.
     </div>
     <button class="run-btn" id="tfBtn" onclick="runHigherTfTrend()">▶ Run Higher-Timeframe Trend Comparison (~30-90 seconds)</button>
@@ -650,6 +664,77 @@ function renderRelativeStrengthResults(data) {
             <tbody>${rows}</tbody>
         </table>
         <p class="trade-note">"Filtered" only enters a position when the coin's real return over the last ${data.lookback_hours} hours beats BTC-USD's real return over the identical window - same real target/stop/breakeven/giveback exit rules either way. A positive "ROI change" means the BTC filter would have genuinely helped that coin; negative means it would have cost real trades that were actually fine.</p>
+    `;
+}
+
+async function runCombinedLiveEntryFilters() {
+    const btn = document.getElementById('celfBtn');
+    const statusEl = document.getElementById('celfStatus');
+    const resultsEl = document.getElementById('celfResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real data, two replays per coin, all four filters combined)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/crypto-selection-backtest/combined-live-entry-filters', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderCombinedLiveEntryFiltersResults(data);
+        const verdict = data.better === 'with_combined_filters' ? 'the combined filters won' : 'the unfiltered baseline won';
+        statusEl.textContent = `Compared ${data.coins_with_results} coins over ${data.backtest_days} days. `
+            + `Baseline: $${data.baseline_total_pnl.toFixed(2)} total | With all 4 filters: $${data.with_combined_filters_total_pnl.toFixed(2)} total - ${verdict}.`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Combined Live Entry Filters Backtest (~60-120 seconds)';
+    }
+}
+
+function renderCombinedLiveEntryFiltersResults(data) {
+    const resultsEl = document.getElementById('celfResults');
+    if (!data.comparison || data.comparison.length === 0) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No coins produced usable comparison results.</p>';
+        return;
+    }
+    const rows = data.comparison.map(r => {
+        const b = r.baseline;
+        const f = r.with_combined_filters;
+        const bRoi = b ? b.roi_pct_of_spend : null;
+        const fRoi = f ? f.roi_pct_of_spend : null;
+        const delta = (bRoi != null && fRoi != null) ? fRoi - bRoi : null;
+        const deltaHtml = delta == null ? '—' : `<span class="${delta >= 0 ? 'pos' : 'neg'}">${delta >= 0 ? '+' : ''}${delta.toFixed(1)}pp</span>`;
+        return `<tr>
+            <td>${r.product_id}</td>
+            <td>${b ? b.num_trades : 0}</td>
+            <td class="${bRoi != null && bRoi >= 0 ? 'pos' : 'neg'}">${bRoi != null ? (bRoi >= 0 ? '+' : '') + bRoi.toFixed(1) + '%' : '—'}</td>
+            <td>${f ? f.num_trades : 0}</td>
+            <td class="${fRoi != null && fRoi >= 0 ? 'pos' : 'neg'}">${fRoi != null ? (fRoi >= 0 ? '+' : '') + fRoi.toFixed(1) + '%' : '—'}</td>
+            <td>${deltaHtml}</td>
+        </tr>`;
+    }).join('');
+
+    resultsEl.innerHTML = `
+        <table>
+            <thead><tr>
+                <th>Coin</th><th>Baseline trades</th><th>Baseline ROI</th><th>Filtered trades</th><th>Filtered ROI</th><th>ROI change</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+        <p class="trade-note">"Filtered" requires ALL FOUR real live filters (RSI-overbought exclusion, BTC-relative-strength, higher-timeframe trend, RSI(30)+support-zone) to agree before entering - the real combined discipline the live bot applies today. Fewer trades here is expected (each filter alone already cuts entries; four stacked together cut more) - what matters is whether the real total P&L and ROI genuinely improved, not the trade count. This is the real evidence that should inform whether to un-retire the family tree, not a guarantee either way.</p>
     `;
 }
 

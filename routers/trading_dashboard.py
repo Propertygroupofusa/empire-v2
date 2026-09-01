@@ -2660,6 +2660,32 @@ async def run_btc_relative_strength_backtest():
     return await crypto_selection_backtest_module.run_btc_relative_strength_comparison()
 
 
+@router.post("/crypto-selection-backtest/combined-live-entry-filters", dependencies=[Depends(require_admin_key)])
+async def run_combined_live_entry_filters_backtest_endpoint():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    Direct answer to the account owner's own "do a backtest" request
+    after seeing the real Coin Trade History table all red - would the
+    family tree, with EVERY entry filter currently wired live
+    (RSI-overbought, BTC-relative-strength, higher-timeframe trend, and
+    the RSI(30)+support-zone entry-timing filter) applied TOGETHER,
+    actually have made money over the real last 30 days - the real
+    evidence needed before deciding whether to un-retire it. Each of
+    these four filters has already been individually backtested and
+    promoted to live; none of the existing backtest tools test what they
+    do stacked together, which is how the live bot genuinely runs today.
+    See crypto_selection_backtest.py's
+    run_combined_live_entry_filters_backtest for the full real
+    methodology and its one honest scope note (per-coin entry timing
+    only, not coin selection).
+
+    Pulls real historical data from Coinbase's public candles endpoint,
+    plus one extra fetch for BTC-USD's own history - can take 30-90
+    seconds depending on that endpoint's response time."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_combined_live_entry_filters_backtest()
+
+
 @router.post("/crypto-selection-backtest/higher-tf-trend", dependencies=[Depends(require_admin_key)])
 async def run_higher_tf_trend_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders,
