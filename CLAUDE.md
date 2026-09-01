@@ -10335,6 +10335,49 @@ checks both clean.
 
 ---
 
+## "Run Backtest With Real Allocations" now reads BOTH real branch systems, not just the retired family tree
+
+The account owner circled this table directly, twice, on real live
+screenshots: every single coin showed "$150.00 (default)" with "0
+simulated with real branch dollars," writing "update this to our
+amount... pulling them from my bots." The table was technically correct
+- `_get_real_branch_allocations()` only ever read `CryptoTreeBranch` (the
+family tree), and the family tree is currently fully retired ($0, no
+branches) - but that answered the wrong real question. Every real dollar
+in the account is actually sitting in Grid Bot (`CryptoGridBranch`)
+right now, and the account owner's real point was "simulate what MY
+actual money is doing," not "simulate the family tree specifically."
+
+Fixed by having `_get_real_branch_allocations()` read and SUM both real
+tables together, by `product_id` - a coin's real total allocation is now
+its real family-tree dollars plus its real Grid Bot dollars, whichever
+of the two (or both) currently holds it. `run_full_backtest_with_real_allocations()`
+itself needed no changes - `coins_with_real_allocation`/`has_real_allocation`/
+`spend_used` are all already derived from this one function's output, so
+they picked up the fix automatically. The existing real-$0.00-branch
+pruning (the fix for a previous live `ZeroDivisionError`/HTTP 500) is
+unchanged and still applies to both tables.
+
+Verified offline (10 new checks) against the real local dev DB: a
+tree-only coin is still picked up (regression check); a Grid-Bot-only
+coin (the account's actual current real state) is now picked up too; a
+coin held by both real systems at once is correctly SUMMED, not
+attributed to just one; a real $0.00 branch (either system) is still
+pruned out entirely, not returned as a crash-prone 0.0; and the full
+`run_full_backtest_with_real_allocations()` end-to-end correctly flags a
+real Grid-Bot-funded coin as `has_real_allocation=True` with the right
+real dollar amount, while an unfunded coin still falls back to the $150
+default. Existing regression suite
+(`test_real_allocations_backtest.py`, `test_zero_allocation_backtest_crash.py`)
+re-run clean alongside it.
+
+**Not yet confirmed live** - the account owner needs to redeploy and tap
+"Run Backtest With Real Allocations" again to see Grid Bot's real 9
+branches (DOGE, STX, ETH, ATOM, AAVE, LINK, ETC, WIF, ARB) show up with
+their own real dollar amounts instead of the flat $150 default.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

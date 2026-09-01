@@ -53,7 +53,7 @@ import crypto_btc_compound_bot as engine
 import crypto_grid_bot as grid_engine  # only for its own real constants (TARGET_NET_MARGIN_PCT etc.) - no circular import, crypto_grid_bot never imports this module
 from crypto_family_tree_bot import COIN_FAMILY_TREE, BREAKEVEN_TRIGGER_PCT
 from database import AsyncSessionLocal
-from models import CryptoTreeBranch, CryptoCoinTradeHistory
+from models import CryptoTreeBranch, CryptoGridBranch, CryptoCoinTradeHistory
 
 SPEND = 150.0
 BACKTEST_DAYS = 30
@@ -1829,12 +1829,27 @@ async def _backtest_one_coin_with_semaphore(session, product_id, semaphore, spen
 
 
 async def _get_real_branch_allocations() -> dict:
-    """Real, current allocated_usd per coin from CryptoTreeBranch - summed
-    across every branch holding that coin, since multiple branches can
-    share one coin (see "Multiple branches can now share the same coin"
-    in CLAUDE.md) and Coinbase's real balance for it is pooled the same
-    way. Same aggregation-by-product_id pattern the per-coin trade
-    history already uses. Root (BTC-USD) included like any other coin.
+    """Real, current allocated_usd per coin, summed across BOTH real
+    branch systems this codebase runs - CryptoTreeBranch (the family
+    tree) AND CryptoGridBranch (Grid Bot) - since either one, or both at
+    once, can hold real deployed capital in a given coin. Originally this
+    only read CryptoTreeBranch; fixed after the account owner's own
+    direct, repeated correction ("update this to our amount... pulling
+    them from my bots") while the family tree sat fully retired ($0, no
+    branches) and every real dollar in the account was actually sitting
+    in Grid Bot instead - the table was technically working (nothing WAS
+    allocated in the tree), but it wasn't answering the real question,
+    which is "what would MY actual deployed money have done," regardless
+    of which of the two real systems is currently holding it.
+
+    Summed by product_id across BOTH tables together (not reported
+    separately) - if a coin ever has real money in both the tree AND Grid
+    Bot at once, that's genuinely the real total dollar exposure to that
+    coin, and the whole point of this function is to answer "how much of
+    MY real money is really riding on this coin right now," not to
+    attribute it to one system or the other. Same aggregation-by-
+    product_id pattern the per-coin trade history already uses. Root
+    (BTC-USD) included like any other coin.
 
     A coin whose only real branch(es) are sitting at a genuine $0.00
     balance (real production examples: POL-USD, SOL-USD - a never-funded
@@ -1849,8 +1864,11 @@ async def _get_real_branch_allocations() -> dict:
     already gets - matching this function's own documented contract."""
     allocations = {}
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(CryptoTreeBranch.product_id, CryptoTreeBranch.allocated_usd))
-        for product_id, allocated_usd in result.all():
+        tree_result = await db.execute(select(CryptoTreeBranch.product_id, CryptoTreeBranch.allocated_usd))
+        for product_id, allocated_usd in tree_result.all():
+            allocations[product_id] = allocations.get(product_id, 0.0) + allocated_usd
+        grid_result = await db.execute(select(CryptoGridBranch.product_id, CryptoGridBranch.allocated_usd))
+        for product_id, allocated_usd in grid_result.all():
             allocations[product_id] = allocations.get(product_id, 0.0) + allocated_usd
     return {pid: usd for pid, usd in allocations.items() if usd > 0.005}
 
@@ -1893,16 +1911,23 @@ async def run_full_backtest(coins=None, days=BACKTEST_DAYS, max_concurrent=6):
 async def run_full_backtest_with_real_allocations(coins=None, days=BACKTEST_DAYS, max_concurrent=6):
     """The account owner's own real point: a flat $150 for every coin is
     deliberately apples-to-apples for RANKING coins by quality, but it
-    doesn't reflect what your actual money would have done - the real
-    tree has $881.76 on BTC, $797.66 on POL, $49.58 on SOL, not an equal
-    $150 each. This is the direct counterpart to run_full_backtest() that
-    simulates each coin's REAL current branch dollars instead.
+    doesn't reflect what your actual real money would have done. This is
+    the direct counterpart to run_full_backtest() that simulates each
+    coin's REAL current dollars instead - pulled from
+    _get_real_branch_allocations(), which reads BOTH real branch systems
+    (the family tree AND Grid Bot, summed together) so this always
+    reflects wherever your real money actually is right now, not just one
+    of the two systems - e.g. with the family tree fully retired ($0) and
+    Grid Bot actively holding real capital across several coins, this
+    correctly simulates Grid Bot's real dollars, not a table of every
+    coin falling back to the $150 default.
 
-    A coin with no real branch/allocation right now still gets tested -
-    falls back to the same $150 default every other coin in
-    run_full_backtest() uses, so the table stays complete rather than
-    only showing the 2-3 coins the tree happens to be holding today.
-    Every coin's `spend_used` in the result tells you which case applied.
+    A coin with no real allocation right now (in either real system)
+    still gets tested - falls back to the same $150 default every other
+    coin in run_full_backtest() uses, so the table stays complete rather
+    than only showing whichever few coins real money happens to be in
+    today. Every coin's `spend_used` in the result tells you which case
+    applied.
 
     Real network calls to Coinbase's public candles endpoint - same host
     every other backtest in this file already depends on."""
