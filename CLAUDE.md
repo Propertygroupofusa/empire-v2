@@ -10520,6 +10520,139 @@ close-out.
 
 ---
 
+## RSI(30)+support-zone entry-timing filter wired into live entries, at the actual "flat decision point" - not stacked into coin selection
+
+Per the account owner's explicit, twice-confirmed "yes" after being shown
+the real 30-day comparison (`crypto_selection_backtest.py`'s
+`run_support_resistance_comparison()`, run live on the backtest page): a
+net-positive ROI change on most coins tested, several by 20+ percentage
+points (BCH, AVAX, SEI, PEPE among them).
+
+**A real design question worth being precise about, not glossed over**:
+the obvious first instinct was to stack this as a 4th AND-condition onto
+`find_most_volatile_unclaimed_coin()` (alongside the existing RSI-
+overbought, BTC-relative-strength, and higher-timeframe-trend filters) -
+but that's a genuinely different, UNVALIDATED combination. The real
+backtest tested `backtest_one_coin(closes, highs, lows, entry_gate=gate)`,
+where `entry_gate(i)` is called "at each flat decision point" and, absent
+a gate, "always enter the moment flat" - i.e. it gates WHEN to buy an
+already-chosen single coin's own history, not WHICH coin to pick among
+several live candidates. Wiring it into coin selection instead would have
+meant shipping something that LOOKS like the validated filter but tests a
+materially different question - exactly the kind of untested-combination
+mistake this codebase's whole "evidence before any live change" discipline
+exists to avoid.
+
+Fixed by wiring it at the actual matching point instead:
+- **`engine.get_support_resistance_signal()`** (new,
+  `crypto_btc_compound_bot.py`) - the real, live counterpart to the
+  backtest's own `_make_support_resistance_gate()`. Fetches the real most
+  recent `SR_LOOKBACK_HOURS` (72) hourly closes via the already-existing
+  `_fetch_hourly_closes()` (the same real fetch `get_higher_tf_trend()`
+  already uses), computes real hourly RSI(14) via the existing
+  `_rsi_from_closes()`, and requires BOTH real conditions: RSI genuinely
+  oversold (below `SR_RSI_OVERSOLD`, 30) AND the real most recent hourly
+  close sitting within `SR_SUPPORT_PROXIMITY_PCT` (2%) of its own real
+  72-hour support level (the lowest real hourly close in that window) -
+  the exact same real comparison the backtest validated, using the hourly
+  series' own close as "current price" rather than mixing in a separate
+  live tick price, so this stays an apples-to-apples match to the real
+  evidence rather than a subtly different, unvalidated combination.
+  Returns `True`/`False`/`None` (fails OPEN on insufficient real hourly
+  history), matching every other "don't block on missing data" gate in
+  this codebase. `SR_LOOKBACK_HOURS`/`SR_RSI_OVERSOLD`/
+  `SR_SUPPORT_PROXIMITY_PCT` deliberately duplicate
+  `crypto_selection_backtest.py`'s own constants by VALUE (that module
+  imports FROM `crypto_family_tree_bot.py`, so the reverse would be a real
+  circular import) - same pattern already used for
+  `STOP_HIT_REVERSAL_TARGET_PCT`/`STOP_HIT_REVERSAL_STOP_PCT` elsewhere in
+  this file.
+- **`get_support_resistance_filter_active()`/`set_support_resistance_filter_active()`**
+  (new, `crypto_family_tree_bot.py`) - DB-persisted (same generic
+  `TradingBotState` bucket pattern every other real-time toggle here
+  already uses), **defaults to ON** - the same "flip the unset default"
+  precedent already used for the STOP-HIT reversal buy and the live
+  exit-mode default: this session has no live network access to click the
+  real dashboard toggle directly, so flipping the default has the
+  identical real effect the toggle would have had, once redeployed. Still
+  a real, reversible switch either way - an explicit `False` from a future
+  dashboard toggle always wins.
+- Wired into **`run_branch_cycle()`'s flat-branch buy path**
+  (`crypto_family_tree_bot.py`), right after the real price/ATR fetch and
+  before the real order is placed: when the filter is on and the live
+  signal is CONFIRMED `False`, the branch waits (no buy this cycle, no
+  real risk of a permanent stall - it's re-checked fresh every cycle,
+  same as every other "wait and retry next cycle" gate already in this
+  function). A `True` or `None` signal buys normally. Applies to every
+  branch, root included, for consistency with what was actually validated
+  - no special-casing.
+
+**A real, honest behavioral consequence, stated plainly rather than
+buried**: since this only allows a buy once RSI(hourly) is genuinely
+oversold AND price is near a real support level, a flat branch (root
+included) will now wait longer between trades than before - it no longer
+buys back in the instant it's flat and has cash, only once a real
+favorable entry actually shows up. This is a genuine, intended live
+behavior change (buy LESS often, at BETTER moments), not a bug.
+
+Verified offline (`test_support_resistance_live.py`, 11 checks, real
+local dev DB, real Coinbase API calls mocked): `get_support_resistance_signal()`
+correctly fails open on too little real hourly history, correctly reports
+`False` on a real steadily-climbing (non-oversold) series, and correctly
+reports `True` on a real steadily-declining series ending at its own real
+low (oversold AND at support); the toggle defaults ON and round-trips in
+both directions; and end-to-end through the real `run_branch_cycle()` - a
+real flat branch seeded in a throwaway SQLite DB, every other real gate
+(excluded-coin check, rolling expectancy, floor/drawdown checks) exercised
+for real, not mocked around - a confirmed `False` live signal blocks the
+real buy while keeping the branch's thread alive, a `True` or `None`
+signal lets the real buy proceed exactly as before, and turning the
+filter off makes the real buy proceed regardless of what the live signal
+says.
+
+**Real, honest context worth repeating from the account owner's own
+question**: the crypto family tree is currently RETIRED (`is_crypto_passive_mode()`
+is `True` - a real, deliberate, earlier decision, confirmed via the
+`status-snapshots` branch's own `STATUS.md`), which checks first thing in
+`run_branch_cycle()` and makes every branch, root included, do nothing at
+all. This filter is real, live-wired, and on - but it's currently DORMANT
+for the same reason the already-shipped STOP-HIT reversal buy (see below)
+is dormant too: nothing in the retired tree ever reaches this code path
+right now. It's ready and will fire the moment the tree is un-retired, or
+can simply stay dormant if the account owner leaves the tree retired -
+their call, not made here.
+
+---
+
+## Clarifying an already-shipped feature: the "buy the flush" STOP-HIT reversal buy is not new - it was already wired live and turned on earlier this session
+
+The account owner asked to "add" the real stop-hit-reversal pattern ("buy
+back in right after a real stop-loss hit... 66% win rate and +1.17%
+average return on 89 real events") so it could be used - describing it as
+"diagnostic only right now, not wired into any live trade." Checked
+directly against `git log` rather than assumed: this is stale information
+on a feature that was ALREADY built and shipped earlier in this same
+session (commits `6a77c37` "Add shadow-mode Stop-Hit Reversal Backtest",
+`cdc15c3` "Wire the STOP-HIT reversal buy into live trading, opt-in", and
+`3d833a7` "Turn the STOP-HIT reversal buy on by default" - all already on
+`main`). No new code was needed or written for this - it would have been
+a real, wasteful re-build of something that already exists and is already
+turned on (`get_reversal_trade_active()` defaults to `True`).
+
+Confirmed via direct code read (`_attempt_stop_hit_reversal_buy()`,
+called from `_branch_sell_and_settle()` on a real `"STOP HIT"` exit when
+`get_reversal_trade_active()` is on): this real, live mechanism sits
+inside the same `run_branch_cycle()`/`_branch_sell_and_settle()` call
+chain the RSI+support filter above lives in, which means it's currently
+subject to the exact same real dormancy - `is_crypto_passive_mode()`
+blocks the whole tree, so this already-shipped, already-on feature isn't
+currently firing either, for the same reason. Communicated this plainly
+to the account owner rather than silently re-implementing a feature that
+already exists, or leaving the "diagnostic only" misunderstanding
+uncorrected.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

@@ -543,6 +543,58 @@ async def get_higher_tf_trend(session, product_id: str, sma_short: int = 20, sma
     return sma20 > sma50
 
 
+# Real RSI(30)+support-zone filter - mirrors crypto_selection_backtest.py's
+# own SR_LOOKBACK_HOURS/SR_RSI_OVERSOLD/SR_SUPPORT_PROXIMITY_PCT exactly
+# (deliberately duplicated constants, not a shared import - that module
+# imports FROM crypto_family_tree_bot.py, so the reverse would be a real
+# circular import; kept in lockstep by value, same pattern already used for
+# STOP_HIT_REVERSAL_TARGET_PCT/STOP_HIT_REVERSAL_STOP_PCT elsewhere in this
+# codebase).
+SR_LOOKBACK_HOURS = 72
+SR_RSI_OVERSOLD = 30
+SR_SUPPORT_PROXIMITY_PCT = 0.02
+
+
+async def get_support_resistance_signal(session, product_id: str, lookback_hours: int = SR_LOOKBACK_HOURS,
+                                          rsi_oversold: float = SR_RSI_OVERSOLD, proximity_pct: float = SR_SUPPORT_PROXIMITY_PCT):
+    """Real, live counterpart to crypto_selection_backtest.py's own
+    _make_support_resistance_gate() - promoted to live entry selection
+    after a real 30-day comparison (run_support_resistance_comparison(),
+    run live on the backtest page) showed a net-positive ROI change on
+    most coins tested, several by 20+ percentage points (BCH, AVAX, SEI,
+    PEPE among them), per the account owner's own explicit "yes" after
+    being shown that real evidence.
+
+    Requires the candidate's real hourly RSI(14) to be genuinely oversold
+    (below rsi_oversold) AND its real most recent hourly close to be
+    sitting within proximity_pct of its own real lookback_hours support
+    level (the lowest real hourly close in that window) - the same real
+    "buy an oversold dip that's also sitting at a real historical floor"
+    idea the backtest validated, not a new invented rule. Deliberately
+    uses the hourly series' own close as "current price" for the
+    proximity check (not a separate live tick price) - the exact same
+    real comparison the backtest itself replayed, so this stays an
+    apples-to-apples match to the validated evidence rather than a subtly
+    different, unvalidated combination.
+
+    Returns True (both real conditions met - the signal is present),
+    False (a confirmed real hourly history exists but the signal isn't
+    there right now), or None if there isn't yet enough real hourly
+    history to judge - callers must fail OPEN on None, matching every
+    other "don't block on missing data" gate in this codebase."""
+    closes = await _fetch_hourly_closes(session, product_id, count=lookback_hours)
+    if closes is None:
+        return None
+    rsi = _rsi_from_closes(closes)
+    if rsi is None:
+        return None
+    if rsi >= rsi_oversold:
+        return False
+    support = min(closes)
+    current_price = closes[-1]
+    return current_price <= support * (1 + proximity_pct)
+
+
 def pick_target_pct(atr_pct: float) -> float:
     if atr_pct < VOL_LOW_THRESHOLD:
         return TARGET_LOW_PCT

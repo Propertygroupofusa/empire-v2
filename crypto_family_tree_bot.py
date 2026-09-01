@@ -1089,6 +1089,54 @@ async def set_reversal_trade_active(enabled: bool):
         await db.commit()
 
 
+SUPPORT_RESISTANCE_FILTER_STATE_KEY = "crypto_family_tree_sr_filter_active"
+
+
+async def get_support_resistance_filter_active() -> bool:
+    """Defaults to ON - per the account owner's explicit "yes" (asked
+    twice, both confirmed) after being shown the real 30-day comparison
+    (crypto_selection_backtest.py's run_support_resistance_comparison(),
+    run live on the backtest page): a net-positive ROI change on most
+    coins tested, several by 20+ percentage points (BCH, AVAX, SEI, PEPE
+    among them). Same "flip the unset default" precedent already used
+    for the STOP-HIT reversal buy above and the live exit-mode default -
+    this session has no live network access to click the dashboard
+    toggle directly, so flipping the default has the identical real
+    effect the toggle would have had, once redeployed. Still a real,
+    reversible switch either way - an explicit False from a future
+    dashboard toggle always wins over this default.
+
+    Gates engine.get_support_resistance_signal() into run_branch_cycle()'s
+    flat-branch buy - the live analog of the validated backtest's
+    entry_gate(i), applied at the exact same "flat decision point" the
+    backtest tested (does THIS coin's entry get delayed until it's
+    genuinely oversold and near its own real support), not stacked into
+    coin SELECTION (find_most_volatile_unclaimed_coin), which would be a
+    different, unvalidated combination. A real, honest consequence worth
+    stating plainly: since this only allows a buy once RSI(hourly) is
+    genuinely oversold and price is near a real support level, a flat
+    branch (root included) will now wait longer between trades than
+    before - it no longer buys back in the instant it's flat, only once
+    a real favorable entry actually shows up."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == SUPPORT_RESISTANCE_FILTER_STATE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            return True
+        return bool(row.base_capital and row.base_capital >= 1.0)
+
+
+async def set_support_resistance_filter_active(enabled: bool):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == SUPPORT_RESISTANCE_FILTER_STATE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = TradingBotState(bot_name=SUPPORT_RESISTANCE_FILTER_STATE_KEY, base_capital=0.0)
+            db.add(row)
+        row.base_capital = 1.0 if enabled else 0.0
+        await db.commit()
+
+
 async def get_locked_usd() -> float:
     """The running total of skimmed profit walled off from ever being
     redeployed by any branch - see PROFIT_SKIM_PCT. Reusing TradingBotState
@@ -4429,6 +4477,24 @@ async def run_branch_cycle(bot_name: str) -> bool:
             if price is None:
                 log.warning(f"[TREE] {bot_name}: could not fetch price/volatility - skipping this cycle")
                 return True
+
+            # Real RSI(30)+support-zone entry-timing filter - the live
+            # analog of crypto_selection_backtest.py's own
+            # _make_support_resistance_gate(), applied at exactly the
+            # "flat decision point" that backtest tested (delay THIS
+            # buy until it's genuinely a good moment, not whether to
+            # switch coins - that's find_most_volatile_unclaimed_coin's
+            # own, separate job). Fails OPEN (buys normally) when there
+            # isn't yet enough real hourly history to judge, or when the
+            # account owner has this filter turned off - only a
+            # CONFIRMED real "not oversold / not near support" reading
+            # delays the buy, and only for this one cycle; it's re-checked
+            # fresh every cycle, so there's no risk of a permanent stall.
+            if await get_support_resistance_filter_active():
+                sr_signal = await engine.get_support_resistance_signal(session, branch.product_id)
+                if sr_signal is False:
+                    log.info(f"[TREE] {bot_name}: waiting for a real RSI(30)+support-zone entry on {branch.product_id} (not there yet)")
+                    return True
 
             target_pct = max(engine.pick_target_pct(atr_pct), engine.min_profit_target_pct(spend, atr_pct))
             fill = await engine.place_market_buy(session, spend, branch.product_id)
