@@ -1816,6 +1816,243 @@ async def run_grid_higher_tf_trend_comparison(coins=None, days=BACKTEST_DAYS, sm
     }
 
 
+# ============================================================================
+# Grid Bot AUTO-ROTATION effectiveness backtest
+# ============================================================================
+# Real, direct answer to "does moving a flat branch's idle real cash to a
+# better-ranked coin actually help, or would it have done just as well
+# staying put" - the exact mechanism behind crypto_grid_9 disappearing
+# (it reallocated its own idle real cash into crypto_grid_5 via
+# move_cash_between_grid_branches(), drained to ~$0, and - by the already
+# -documented "an emptied-out branch doesn't linger" design - was deleted).
+# No backtest existed for this before now; every other grid comparison in
+# this file (spacing, ATR, higher-tf-trend) tests a SINGLE coin's own
+# entry/exit rules, never whether MOVING capital between coins over time
+# beats leaving it parked.
+#
+# Real, honest simplification stated plainly: the live rotation sweep
+# (crypto_grid_bot.pick_best_ranked_coin_for_grid) ranks candidates using
+# real BACKTESTED ROI (from the CryptoBacktestRun table, itself the
+# output of a separate, already-running daily backtest) blended with live
+# BTC-relative-strength - a signal that can't be cleanly replayed at an
+# arbitrary point in the past without a circular "backtest inside a
+# backtest" dependency. This tool substitutes the one piece of that real
+# ranking signal that IS honestly replayable purely from real historical
+# candles at any past moment: BTC-relative-strength alone (a coin's own
+# real trailing ROTATION_RANK_LOOKBACK_HOURS return minus BTC-USD's real
+# return over the identical window - the same real comparison
+# calculate_relative_strength() already validates elsewhere in this
+# file). A real, defensible proxy for "which coin currently looks best,"
+# not a byte-for-byte replay of the live ranking function.
+# ============================================================================
+
+ROTATION_RANK_LOOKBACK_HOURS = 25  # matches the "~25-hour" bullish/relative-strength convention used codebase-wide
+ROTATION_COOLDOWN_HOURS = 2  # matches crypto_grid_bot.GRID_ROTATION_COOLDOWN_SECONDS (2h) exactly
+
+
+def _grid_step(price: float, reference: float, open_slices: list, slice_usd: float, grid_pct: float, num_levels: int):
+    """One real grid-mechanic decision at a single real price point -
+    factored out of _replay_grid_bot's own inner loop (identical real
+    buy/sell trigger and fee model, byte-for-byte) so a caller can drive
+    it incrementally across a real, possibly coin-switching timeline
+    instead of only ever replaying one coin's whole candle array at once.
+    Returns (new_reference, new_open_slices, trade_net_or_None)."""
+    if price <= reference * (1 - grid_pct) and len(open_slices) < num_levels:
+        return price, open_slices + [{"entry": price, "qty": slice_usd / price}], None
+    if price >= reference * (1 + grid_pct) and open_slices:
+        slot = open_slices[0]
+        remaining = open_slices[1:]
+        gross = slot["qty"] * (price - slot["entry"])
+        fee = slot["qty"] * (slot["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+        return price, remaining, gross - fee
+    return reference, open_slices, None
+
+
+def _best_ranked_candidate(candidates: dict, btc_times_sorted: list, btc_closes_sorted: list, at_time: int, lookback_hours: int = ROTATION_RANK_LOOKBACK_HOURS):
+    """Real BTC-relative-strength ranking among candidate coins at one
+    real point in time (see the section docstring above for why this,
+    not the live blended signal, is what's replayable here). Returns the
+    product_id with the highest real (coin_return - btc_return) alpha at
+    `at_time`, or None if no candidate has enough real history yet to
+    judge. `candidates`: {product_id: (times_sorted, closes_sorted)}."""
+    btc_now = _closest_close_at_or_before(btc_times_sorted, btc_closes_sorted, at_time)
+    btc_then = _closest_close_at_or_before(btc_times_sorted, btc_closes_sorted, at_time - lookback_hours * 3600)
+    btc_return = (btc_now - btc_then) / btc_then if (btc_now and btc_then and btc_then > 0) else None
+
+    best_id, best_alpha = None, None
+    for product_id, (times_sorted, closes_sorted) in candidates.items():
+        now = _closest_close_at_or_before(times_sorted, closes_sorted, at_time)
+        then = _closest_close_at_or_before(times_sorted, closes_sorted, at_time - lookback_hours * 3600)
+        if now is None or then is None or then <= 0:
+            continue
+        coin_return = (now - then) / then
+        alpha = (coin_return - btc_return) if btc_return is not None else coin_return
+        if best_alpha is None or alpha > best_alpha:
+            best_alpha, best_id = alpha, product_id
+    return best_id
+
+
+def _replay_grid_rotation(candidates: dict, btc_series: tuple, start_coin: str, spend: float = SPEND,
+                           grid_pct: float = STRATEGY_LAB_GRID_PCT, num_levels: int = STRATEGY_LAB_GRID_LEVELS,
+                           rotation_enabled: bool = True, rotation_cooldown_hours: int = ROTATION_COOLDOWN_HOURS):
+    """Real, shared-clock replay of ONE branch's own capital, starting on
+    `start_coin`, over every real hourly tick common to the candidate
+    pool's own real time window. `candidates`: {product_id: (closes,
+    highs, lows, times)} - highs/lows unused here (grid decisions are
+    close-only, matching _replay_grid_bot's own documented limitation),
+    kept in the tuple only so callers can pass the same fetched data this
+    module's other comparisons already use.
+
+    With `rotation_enabled=False` (the baseline), capital never leaves
+    `start_coin` - a direct call-through to the SAME real per-tick
+    mechanic (_grid_step) _replay_grid_bot's own full-window replay uses,
+    just walked one hour at a time instead of over the whole array at
+    once - so baseline results here are the real apples-to-apples
+    comparison point, not a different mechanic wearing the same name.
+
+    With `rotation_enabled=True`, every real hourly tick where the
+    branch is genuinely FLAT (no open slices - real rotation never
+    touches an open slice, matching move_cash_between_grid_branches'
+    own real "can only move cash from a FLAT branch" rule) and at least
+    `rotation_cooldown_hours` have passed since the last real rotation,
+    the pool is re-ranked via _best_ranked_candidate(); if a DIFFERENT
+    coin currently ranks best, capital "moves" (the reference price
+    resets to the new coin's real price at that tick, `open_slices`
+    stays empty since nothing was open to carry over - matching the real
+    live mechanism exactly).
+
+    Returns a dict shaped like _summarize_strategy_trades()'s own output
+    (so both scenarios render through the same real table), plus
+    `rotations` (how many real coin switches occurred) and
+    `final_coin`."""
+    btc_closes, btc_highs, btc_lows, btc_times = btc_series
+    btc_pairs = sorted(zip(btc_times, btc_closes))
+    btc_times_sorted = [t for t, _ in btc_pairs]
+    btc_closes_sorted = [c for t, c in btc_pairs]
+
+    rank_series = {}
+    for product_id, (closes, highs, lows, times) in candidates.items():
+        pairs = sorted(zip(times, closes))
+        rank_series[product_id] = ([t for t, _ in pairs], [c for t, c in pairs])
+
+    if start_coin not in candidates:
+        return None
+    start_times = candidates[start_coin][3]
+    if len(start_times) < 2:
+        return None
+
+    slice_usd = spend / num_levels
+    trades = []
+    current_coin = start_coin
+    current_times, current_closes = rank_series[current_coin]
+    reference = current_closes[0]
+    open_slices = []
+    last_rotation_at = None
+    rotations = 0
+
+    clock = sorted(set(start_times))
+    for t in clock:
+        price = _closest_close_at_or_before(current_times, current_closes, t)
+        if price is None:
+            continue
+        reference, open_slices, net = _grid_step(price, reference, open_slices, slice_usd, grid_pct, num_levels)
+        if net is not None:
+            trades.append(("GRID_CYCLE", net))
+
+        if rotation_enabled and not open_slices:
+            cooldown_clear = last_rotation_at is None or (t - last_rotation_at) >= rotation_cooldown_hours * 3600
+            if cooldown_clear:
+                best_id = _best_ranked_candidate(rank_series, btc_times_sorted, btc_closes_sorted, t)
+                if best_id and best_id != current_coin:
+                    current_coin = best_id
+                    current_times, current_closes = rank_series[current_coin]
+                    new_price = _closest_close_at_or_before(current_times, current_closes, t)
+                    if new_price is not None:
+                        reference = new_price
+                        last_rotation_at = t
+                        rotations += 1
+
+    final_price = _closest_close_at_or_before(current_times, current_closes, clock[-1])
+    for slot in open_slices:
+        gross = slot["qty"] * ((final_price or slot["entry"]) - slot["entry"])
+        trades.append(("OPEN_AT_WINDOW_END", gross))
+
+    result = _summarize_strategy_trades(trades, spend)
+    if result is None:
+        result = {"num_trades": 0, "win_rate": 0.0, "total_pnl": 0.0, "roi_pct_of_spend": 0.0, "avg_trade_pct": 0.0, "spend_used": spend}
+    result["open_slices_at_end"] = len(open_slices)
+    result["rotations"] = rotations
+    result["final_coin"] = current_coin
+    return result
+
+
+async def run_grid_rotation_effectiveness_backtest(coins=None, days=BACKTEST_DAYS, spend=SPEND, max_concurrent=6):
+    """SHADOW-MODE, additive - never touches live trading, never places a
+    real order. For each real candidate coin, replays what a single real
+    Grid Bot branch STARTING on that coin would have done over the real
+    last `days` days two ways: parked the whole time (baseline) vs. free
+    to auto-rotate to a better-ranked coin whenever flat (see
+    _replay_grid_rotation's own docstring for the real mechanics and its
+    one honest simplification - a BTC-relative-strength proxy standing in
+    for the live blended ranking signal). Fetches every real candidate's
+    full historical series ONCE (shared across every starting-coin
+    replay, not re-fetched per coin) - this is O(coins) real API calls,
+    not O(coins²)."""
+    coins = coins or COIN_FAMILY_TREE
+    semaphore = asyncio.Semaphore(max_concurrent)
+    last_error = {}
+
+    async def _fetch(session, product_id):
+        async with semaphore:
+            candles = await fetch_historical_candles(session, product_id, days=days, last_error_out=last_error)
+        return product_id, candles
+
+    async with aiohttp.ClientSession() as session:
+        btc_task = _fetch(session, "BTC-USD")
+        coin_tasks = [_fetch(session, pid) for pid in coins if pid != "BTC-USD"]
+        results = await asyncio.gather(btc_task, *coin_tasks)
+
+    fetched = {pid: candles for pid, candles in results if candles is not None}
+    skipped = [{"product_id": pid, "reason": last_error.get(pid, "not enough historical data")} for pid, candles in results if candles is None]
+    btc_series = fetched.get("BTC-USD")
+    candidates = {pid: c for pid, c in fetched.items() if pid != "BTC-USD"}
+
+    if btc_series is None or len(candidates) < 2:
+        return {"error": "not enough real historical data across the candidate pool to run this", "skipped": skipped}
+
+    per_coin = []
+    for start_coin in candidates:
+        baseline = _replay_grid_rotation(candidates, btc_series, start_coin, spend=spend, rotation_enabled=False)
+        with_rotation = _replay_grid_rotation(candidates, btc_series, start_coin, spend=spend, rotation_enabled=True)
+        per_coin.append({"product_id": start_coin, "baseline": baseline, "with_rotation": with_rotation})
+
+    def _total(key):
+        return round(sum((row[key] or {}).get("total_pnl", 0.0) for row in per_coin), 2)
+
+    baseline_total = _total("baseline")
+    rotation_total = _total("with_rotation")
+    coins_improved = sum(
+        1 for row in per_coin
+        if (row["with_rotation"] or {}).get("total_pnl", 0.0) > (row["baseline"] or {}).get("total_pnl", 0.0)
+    )
+
+    return {
+        "backtest_days": days,
+        "spend_per_trade": spend,
+        "rotation_rank_lookback_hours": ROTATION_RANK_LOOKBACK_HOURS,
+        "rotation_cooldown_hours": ROTATION_COOLDOWN_HOURS,
+        "coins_tested": len(coins),
+        "coins_with_results": len(per_coin),
+        "skipped": skipped,
+        "baseline_total_pnl": baseline_total,
+        "with_rotation_total_pnl": rotation_total,
+        "coins_improved_by_rotation": coins_improved,
+        "coins_tested_count": len(per_coin),
+        "better": "with_rotation" if rotation_total > baseline_total else "baseline",
+        "per_coin": per_coin,
+    }
+
+
 async def _backtest_one_coin_with_semaphore(session, product_id, semaphore, spend=None):
     async with semaphore:
         candles = await fetch_historical_candles(session, product_id)

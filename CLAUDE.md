@@ -10743,6 +10743,99 @@ exits.
 
 ## References
 
+## Grid Bot auto-rotation effectiveness backtest - the real question crypto_grid_9's disappearance raised
+
+Per the account owner's own direct follow-up after tracing crypto_grid_9's
+disappearance to the real, deliberate "an emptied-out branch doesn't
+linger" design (it reallocated its own idle real cash into
+crypto_grid_5, drained to ~$0, and was deleted): "can we run a backtest
+with what we have and see if this will help." No backtest existed for
+this specific question - every other real grid comparison in this file
+(fee-tier spacing, ATR spacing, higher-timeframe trend) tests a SINGLE
+coin's own entry/exit rules; none of them test whether MOVING capital
+between coins over time (the actual mechanism that drained grid_9) beats
+leaving it parked.
+
+**A real, honest simplification stated plainly, both in the code and on
+the dashboard**: the live rotation sweep
+(`crypto_grid_bot.pick_best_ranked_coin_for_grid`) ranks candidates using
+real backtested ROI (from the `CryptoBacktestRun` table - itself the
+output of a SEPARATE, already-running daily backtest) blended with live
+BTC-relative-strength. Replaying "real backtested ROI at an arbitrary
+past moment" would mean running a backtest inside a backtest - a real
+circular dependency. This tool substitutes the one piece of that live
+signal that IS honestly replayable purely from real historical candles
+at any past point: BTC-relative-strength alone (a coin's own real
+trailing 25-hour return minus BTC-USD's real return over the identical
+window - the same real comparison `calculate_relative_strength()`
+already validates elsewhere in this file). A real, defensible proxy for
+"which coin currently looks best," not a byte-for-byte replay of the
+live ranking function - the account owner should weigh the real results
+with that caveat in mind, not read them as "this is exactly what the
+live bot would have done."
+
+**Implementation** (`crypto_selection_backtest.py`):
+- `_grid_step()` - the real per-tick buy/sell mechanic, factored out of
+  the already-validated `_replay_grid_bot()`'s own inner loop (identical
+  real trigger conditions and fee model, byte-for-byte) so it can be
+  driven incrementally across a real, possibly coin-switching timeline
+  instead of only ever replaying one coin's whole candle array at once.
+- `_best_ranked_candidate()` - real BTC-relative-strength ranking among
+  candidates at one real point in time, using the same real
+  `_closest_close_at_or_before()` timestamp-alignment technique this
+  file's BTC-relative-strength comparison already validated (handles real
+  gaps between different coins' candle pages).
+- `_replay_grid_rotation()` - the real shared-clock replay: walks every
+  real hourly tick common to the candidate pool, applying `_grid_step()`
+  to whichever coin is currently held. With `rotation_enabled=False`
+  (the baseline), capital never leaves its starting coin. With
+  `rotation_enabled=True`, every real tick where the branch is genuinely
+  FLAT (real rotation never touches an open slice, matching
+  `move_cash_between_grid_branches()`'s own "only from a FLAT branch"
+  rule) and at least `ROTATION_COOLDOWN_HOURS` (2h, matching
+  `GRID_ROTATION_COOLDOWN_SECONDS` exactly) have passed since the last
+  real rotation, the pool is re-ranked; a different best-ranked coin
+  triggers a real "move" (reference price resets, no slices carry over,
+  matching the real live mechanism).
+- `run_grid_rotation_effectiveness_backtest()` - for every real candidate
+  coin, replays a branch STARTING there both ways over the identical
+  real 30-day history, and sums real total P&L across every starting
+  coin for each scenario.
+
+New `POST /crypto-selection-backtest/grid-rotation-effectiveness`
+(admin-key gated) and a new "▶ Run Grid Auto-Rotation Effectiveness
+Backtest" button + two result tables on `crypto_selection_backtest.html`
+(scenario totals, then a per-starting-coin breakdown showing how many
+real times each rotated and where it ended up).
+
+Verified offline (`test_grid_rotation_backtest.py`, 17 checks, no live
+network access needed - fully synthetic, real-shaped candle data):
+`_grid_step()` reproduces a real, hand-verified buy and a real, hand-
+verified sell with the exact real fee math; `_best_ranked_candidate()`
+correctly picks the real highest-alpha coin and returns `None` before
+there's enough real history to judge; **`_replay_grid_rotation(rotation_enabled=False)`
+matches the already-validated `_replay_grid_bot()`'s own real total P&L
+and trade count EXACTLY on identical data** - proving the baseline side
+of this comparison is a faithful tick-by-tick analog, not a different
+mechanic wearing the same name; `rotation_enabled=True` correctly
+rotates a branch onto a real, clearly-better-ranked coin once flat; and
+the full end-to-end endpoint function (real fetch mocked) returns the
+correct real schema and correctly shows one starting coin's "with
+rotation" scenario ending up on the better-ranked coin while its own
+baseline never leaves its starting coin.
+
+**Not yet run against real historical data** - same documented gap as
+every backtest tool in this file (no live network access to Coinbase
+from this sandbox). The account owner needs to open
+`/crypto-selection-backtest-view` after the next redeploy and tap the
+new button to see whether auto-rotation actually would have helped on
+real data - this tool only informs that decision; nothing here changes
+what the live Grid Bot does on its own.
+
+---
+
+## References
+
 - **API Endpoints:** See API_ENDPOINTS.md
 - **Stripe docs:** https://stripe.com/docs/api/checkout/sessions
 - **HeyGen docs:** https://docs.heygen.com/

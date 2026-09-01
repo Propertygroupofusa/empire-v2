@@ -214,6 +214,22 @@
     <div id="ghtResults"></div>
 
     <div class="note" style="margin-top: 28px;">
+        <strong>🔀 Does auto-rotation actually help?</strong> Direct answer to what happened to <code>crypto_grid_9</code>:
+        it reallocated its own idle real cash into <code>crypto_grid_5</code> via the real auto-rotation sweep, drained to
+        ~$0, and - by this codebase's existing "an emptied-out branch doesn't linger" design - was deleted. This replays a
+        single real branch's own capital, starting on each real candidate coin in turn, two ways over the identical real
+        historical data: parked on that one coin the whole time (baseline) vs. free to auto-rotate to a better-ranked coin
+        whenever it's genuinely flat, respecting the real 2-hour cooldown every live rotation already respects. One honest
+        simplification worth knowing: the live sweep ranks candidates using real backtested ROI blended with live
+        BTC-relative-strength - this instead uses BTC-relative-strength alone (the one piece of that signal that's
+        honestly replayable at any past real moment without a circular backtest-inside-a-backtest dependency), not a
+        byte-for-byte replay of the live ranking function. Shadow mode only - never places an order.
+    </div>
+    <button class="run-btn" id="griBtn" onclick="runGridRotationEffectivenessBacktest()">▶ Run Grid Auto-Rotation Effectiveness Backtest (~30-90 seconds)</button>
+    <div id="griStatus"></div>
+    <div id="griResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
         <strong>🎯 Narrow-range breakout continuation - does it really hold?</strong> A real trading concept the account owner described directly: "the best opportunity come from a narrow state... if you open above a narrow state... 87% chance there are more upside to come... if you open below a narrow state... 87% chance to follow through to the downside." That 87% is their own stated number, not yet checked against this system's real data. This replays every real coin's history looking for genuinely NARROW price ranges (tight relative to that SAME coin's own recent range history, not one fixed threshold - a coin's normal volatility varies too much for a flat number to mean the same thing everywhere), then checks the real FIRST candle that breaks outside each narrow range and whether price genuinely continued in that direction 24 real hours later. Reports the real hit rate, split by up vs. down breakouts, against an honest 50% coin-flip baseline. Shadow mode only - diagnostic, never wired to any real trade or entry filter.
     </div>
     <button class="run-btn" id="nrbBtn" onclick="runNarrowRangeBreakoutBacktest()">▶ Run Narrow-Range Breakout Backtest (~30-90 seconds)</button>
@@ -1482,6 +1498,84 @@ function renderGridHigherTfTrendResults(data) {
             <tbody>${coinRows}</tbody>
         </table>
         <p class="trade-note">Real sells are NEVER gated in either run - only new buys - so this isolates whether avoiding new entries during a confirmed real downtrend actually reduces the FIFO-oldest-slice-sold-at-a-loss pattern. Real evidence here, not a recommendation on its own - this is diagnostic only, nothing here changes what the live bot does.</p>
+    `;
+}
+
+async function runGridRotationEffectivenessBacktest() {
+    const btn = document.getElementById('griBtn');
+    const statusEl = document.getElementById('griStatus');
+    const resultsEl = document.getElementById('griResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real data, one branch replayed twice per starting coin)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/crypto-selection-backtest/grid-rotation-effectiveness', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderGridRotationEffectivenessResults(data);
+        const verdict = data.baseline_total_pnl === data.with_rotation_total_pnl ? 'tied' :
+            (data.with_rotation_total_pnl > data.baseline_total_pnl ? 'Rotation won' : 'Parked (baseline) won');
+        statusEl.textContent = `Tested ${data.coins_with_results} starting coins over ${data.backtest_days} days. `
+            + `Baseline (parked): $${data.baseline_total_pnl.toFixed(2)} total | With rotation: $${data.with_rotation_total_pnl.toFixed(2)} total. `
+            + `${verdict} - rotation improved ${data.coins_improved_by_rotation} of ${data.coins_with_results} starting coins.`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Grid Auto-Rotation Effectiveness Backtest (~30-90 seconds)';
+    }
+}
+
+function renderGridRotationEffectivenessResults(data) {
+    const resultsEl = document.getElementById('griResults');
+    if (!data.per_coin || data.per_coin.length === 0) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No coins produced usable comparison results.</p>';
+        return;
+    }
+    const better = data.better === 'with_rotation' ? 'with_rotation' : 'baseline';
+    const summaryRows = [
+        { key: 'baseline', label: 'Parked (baseline)', total: data.baseline_total_pnl },
+        { key: 'with_rotation', label: 'Free to auto-rotate', total: data.with_rotation_total_pnl },
+    ].map(row => {
+        const isBest = row.key === better;
+        const cls = row.total >= 0 ? 'pos' : 'neg';
+        return `<tr${isBest ? ' style="font-weight:700;"' : ''}>
+            <td>${row.label}${isBest ? ' 🏆' : ''}</td>
+            <td class="${cls}">${row.total >= 0 ? '+' : ''}$${row.total.toFixed(2)}</td>
+        </tr>`;
+    }).join('');
+
+    const coinRows = data.per_coin.map(row => {
+        const b = row.baseline, r = row.with_rotation;
+        const bCell = b ? `<td class="${b.total_pnl >= 0 ? 'pos' : 'neg'}">${b.total_pnl >= 0 ? '+' : ''}$${b.total_pnl.toFixed(2)} <span style="color:var(--text-dim);">(${b.num_trades}tr)</span></td>` : `<td style="color:var(--text-dim);">no trades</td>`;
+        const rCell = r ? `<td class="${r.total_pnl >= 0 ? 'pos' : 'neg'}">${r.total_pnl >= 0 ? '+' : ''}$${r.total_pnl.toFixed(2)} <span style="color:var(--text-dim);">(${r.num_trades}tr, ${r.rotations} rotation${r.rotations === 1 ? '' : 's'} → ${r.final_coin})</span></td>` : `<td style="color:var(--text-dim);">no trades</td>`;
+        return `<tr><td>${row.product_id}</td>${bCell}${rCell}</tr>`;
+    }).join('');
+
+    resultsEl.innerHTML = `
+        <table style="margin-top:14px;">
+            <thead><tr><th>Real scenario</th><th>Real total P&amp;L (summed across every starting coin)</th></tr></thead>
+            <tbody>${summaryRows}</tbody>
+        </table>
+        <table style="margin-top:14px;">
+            <thead><tr><th>Starting coin</th><th>Parked (baseline)</th><th>Free to rotate</th></tr></thead>
+            <tbody>${coinRows}</tbody>
+        </table>
+        <p class="trade-note">Each row starts one real branch's own capital on that coin - "Free to rotate" shows how many real times it switched and which real coin it ended up on. Real evidence here, not a recommendation on its own - this is diagnostic only, nothing here changes what the live Grid Bot does.</p>
     `;
 }
 

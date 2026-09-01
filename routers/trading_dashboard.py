@@ -2992,6 +2992,30 @@ async def run_grid_higher_tf_trend_backtest():
     return await crypto_selection_backtest_module.run_grid_higher_tf_trend_comparison()
 
 
+@router.post("/crypto-selection-backtest/grid-rotation-effectiveness", dependencies=[Depends(require_admin_key)])
+async def run_grid_rotation_effectiveness_backtest_endpoint():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    Direct answer to the account owner's own question after
+    crypto_grid_9 disappeared (reallocated its own idle real cash into
+    crypto_grid_5 and, per the existing "an emptied-out branch doesn't
+    linger" design, was deleted once drained): does the real auto-
+    rotation mechanism that moved that cash actually help real returns,
+    or would it have done just as well leaving the cash parked? Replays
+    a single real branch's own capital, starting on each real candidate
+    coin in turn, two ways over the identical real historical data -
+    parked the whole time vs. free to rotate to a better-ranked coin
+    whenever flat - see crypto_selection_backtest.py's
+    run_grid_rotation_effectiveness_backtest for the full real
+    methodology and its one honest simplification (a BTC-relative-
+    strength proxy standing in for the live blended ranking signal).
+
+    Pulls real historical data from Coinbase's public candles endpoint -
+    can take 30-90 seconds depending on that endpoint's response time."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_grid_rotation_effectiveness_backtest()
+
+
 class SetExitModeRequest(BaseModel):
     mode: str
 
