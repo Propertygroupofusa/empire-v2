@@ -3971,6 +3971,54 @@ async def set_alpaca_branch_mode_endpoint(payload: SetAlpacaBranchModeRequest):
     return {"status": "updated", "mode_active": payload.enabled}
 
 
+@router.get("/alpaca-overview/opening-bar-status", dependencies=[Depends(require_admin_key)])
+async def get_opening_bar_status():
+    """Real status of the opening-bar live trading system (the validated
+    multi-entry elephant/tail breakout - see prop_bot.py's own OPENING-BAR
+    LIVE TRADING section docstring for the full real design). Read-only -
+    never places an order. Off by default; a true no-op until explicitly
+    enabled here."""
+    if prop_bot_module is None:
+        raise HTTPException(status_code=500, detail="prop_bot module not available")
+    mode_active = await prop_bot_module.is_opening_bar_live_active()
+    positions = []
+    for contract, pos in prop_bot_module.open_opening_bar_positions.items():
+        config = prop_bot_module.FUTURES.get(contract, {})
+        positions.append({
+            "contract": contract,
+            "symbol": config.get("symbol"),
+            "entry_price": round(pos.get("entry_price", 0.0), 2),
+            "qty": pos.get("qty"),
+            "stop_price": round(pos.get("stop_price", 0.0), 2),
+            "leg_number": pos.get("leg_number"),
+            "qualifies_as": pos.get("qualifies_as"),
+        })
+    return {
+        "mode_active": mode_active,
+        "positions": positions,
+        "total_notional_usd": round(prop_bot_module._total_opening_bar_notional(), 2),
+        "watchlist": list(prop_bot_module.FUTURES.keys()),
+    }
+
+
+class SetOpeningBarLiveModeRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/alpaca-overview/opening-bar-mode", dependencies=[Depends(require_admin_key)])
+async def set_opening_bar_live_mode_endpoint(payload: SetOpeningBarLiveModeRequest):
+    """The real master switch for the opening-bar live trading system -
+    off by default (is_opening_bar_live_active). While off, its per-cycle
+    driver is a true no-op. Places real orders, sized via the same real
+    size_position()/check_margin_safety() every other real entry on this
+    account already goes through, once enabled."""
+    if prop_bot_module is None:
+        raise HTTPException(status_code=500, detail="prop_bot module not available")
+    await prop_bot_module.set_opening_bar_live_active(payload.enabled)
+    log.info(f"[dashboard] 🐘 Opening-bar live trading {'ENABLED - real orders will be placed' if payload.enabled else 'disabled'}")
+    return {"status": "updated", "mode_active": payload.enabled}
+
+
 class SetAlpacaBranchActiveRequest(BaseModel):
     active: bool
 

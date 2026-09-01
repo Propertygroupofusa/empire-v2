@@ -10378,6 +10378,148 @@ their own real dollar amounts instead of the flat $150 default.
 
 ---
 
+## Opening-bar multi-entry breakout connected to real live trading
+
+Per the account owner's own explicit authorization - "yes it's better yes
+that's what we want better and look for something better after we build
+this and get this live," in direct response to being told this was "a
+bigger step, not a switch-flip" - the validated opening-bar multi-entry
+elephant/tail breakout backtest (real 30-day/12-symbol results: $944.34
+across 21 trades, 57.1% win rate, vs. the older single-entry version's
+$570.64/15 trades/60.0% win rate) is now wired into real order placement
+on the Alpaca account, off by default.
+
+**Shared logic extracted, not duplicated** - `opening_bar_signals.py` (new
+file) now holds the real, dependency-free elephant/tail detection and
+multi-entry leg-replay functions (`_is_elephant_bar`, `_is_bottoming_tail_bar`,
+`_replay_opening_bar_breakout`, `_replay_one_opening_bar_leg`,
+`_replay_opening_bar_breakout_multi_entry`, `_group_bars_by_day`, and their
+constants), moved out of `alpaca_selection_backtest.py` verbatim (zero
+behavior change - re-verified against the exact same real scenarios that
+existed before the move). This had to be a relocation, not a copy:
+`alpaca_selection_backtest.py` already imports `FUTURES`/`get_headers`
+FROM `prop_bot.py`, so `prop_bot.py` importing the opening-bar logic back
+from that file would be a real circular import - both files now import
+from this new, dependency-free third module instead, so the real signal
+logic can never drift into two different implementations wearing the same
+name.
+
+**LIVE EXECUTION MODEL** - deliberately NOT a second, separately-written
+live streaming state machine (real risk of it silently diverging from the
+validated backtest logic, with real money on the line). Instead,
+`run_opening_bar_symbol_cycle()` (`prop_bot.py`) re-runs the EXACT SAME
+real `_replay_opening_bar_breakout_multi_entry()` every cycle against
+TODAY's real 2-minute bars (yesterday's session + today's so far, fetched
+fresh via a new `_fetch_live_2min_bars_for_opening_bar()` - a live-fetch
+duplicate of the backtest's own `_fetch_bars_2min_with_ohlc_and_times()`,
+kept separate rather than shared for the same circular-import reason
+above), and diffs the replay's own output against
+`open_opening_bar_positions` to decide what to do:
+- The replay's last trade exiting `"SESSION_END"` means that leg is open
+  right now (the replay ran out of real data before finding a real exit)
+  - if nothing is currently held for that contract, this places a real
+    BUY.
+- The replay's last trade exiting `"STOP"` or `"PUSH"` means that leg has
+  since exited - if a real position IS currently held, this places a real
+  SELL to close it.
+- The real fill happens at real current market price (today's latest real
+  bar close), not the replay's own historical trigger/exit price - an
+  honest, small, unavoidable gap from the backtest, the same kind of real
+  fill-vs-backtest gap already true of every other live strategy in this
+  file.
+
+**Kept in a SEPARATE dict** (`open_opening_bar_positions`), never
+`open_prop_positions` - the same "separate dict, own risk logic" isolation
+the ALPACA BRANCHES section already established for a different reason
+(per-branch capital instead of account-wide). Here the reason is
+different: `open_prop_positions`' Pass 1 exit management unconditionally
+applies the whole-account RSI/momentum exit rules to EVERY position in
+that dict - a real opening-bar position needs its own real STOP/PUSH exit
+logic instead, which would conflict if it shared that dict. Real position
+sizing reuses `size_position()` unmodified (the same real compounding-tier
+sizer every other entry on this account already uses - NOT the backtest's
+unrealistic flat $25,000/trade convention), and real entries are gated by
+the exact same `check_margin_safety()` every other entry path already goes
+through, with the opening-bar system's own real notional
+(`_total_opening_bar_notional()`) now counted into EVERY real margin-safety
+call site in this file (the whole-account scan's own `try_open`, a single
+Alpaca branch's own entry check, and this system's own), so real
+account-wide risk can never exceed `MAX_RISK_PERCENT` blind to what this
+system holds. `try_open()`'s own MANDATE CHECK now also skips a contract
+this system currently holds, and this system itself skips a contract
+already held by `open_prop_positions` or claimed by a real Alpaca branch -
+three independent decision processes can never buy the same real contract
+at once.
+
+DB-backed `is_opening_bar_live_active()`/`set_opening_bar_live_active()`
+toggle (same generic `TradingBotState` bucket pattern every other
+real-time flag in this file already uses, not a Railway env var - avoids
+the exact stray-quote-character bug class that silently disabled the
+crypto coordinator earlier this session) - **off by default**, a true
+no-op until explicitly enabled. `run_opening_bar_live_cycle()` is wired
+into `run()`'s main loop right after `run_alpaca_branches_cycle()`, same
+real single-threaded event loop, same `STOP_TRADING`/passive-mode checks
+every other real-time subsystem here already respects; an already-open
+real leg's STOP/PUSH exit is checked and fires regardless of a real
+account-wide kill condition - existing real risk management is never
+frozen, only new entries are blocked by one.
+
+New `GET /alpaca-overview/opening-bar-status` (real status, read-only,
+never places an order) and `POST /alpaca-overview/opening-bar-mode`
+(`{enabled}`, the real master switch) in `routers/trading_dashboard.py`.
+`alpaca_dashboard.html` gained a "🐘 Opening-Bar Live Trading" panel (mode
+badge, enable/disable button with a real confirm dialog, a real open-legs
+table) right under the existing Real Branches panel, refreshed on the same
+15s cycle (a cheap DB/in-memory-only read, no live broker call of its
+own).
+
+**Real, honest limitations, stated plainly rather than hidden**:
+- A real held leg is tracked in-memory only, not yet persisted to survive
+  a Railway restart the way `open_prop_positions`/`AlpacaBranch` positions
+  are - a restart mid-leg would show this system as flat even though
+  Alpaca itself still holds the real shares, until a later pass adds
+  `reconcile_positions_with_broker`-style handling for it. Accepted for
+  this first live version, same as `AlpacaBranch`'s own narrower
+  first-slice scope was explicitly accepted earlier this session.
+- A PUSH exit and the next leg's own entry can land in different real
+  cycles (this cycle exits leg N; a LATER cycle enters leg N+1 once the
+  replay shows its own trigger has fired) - a brief, honestly-accepted
+  flat gap versus the backtest's perfectly seamless roll, chosen
+  deliberately over a more complex same-cycle roll that would be harder to
+  verify correct without live data to test against.
+- Watches the full real `FUTURES` universe every cycle (roughly doubles
+  the real Alpaca API load versus the whole-account scan alone, similar to
+  the accepted cost of the higher-timeframe-trend filter added earlier
+  this session) rather than a curated symbol list, since the real
+  30-day/12-symbol backtest evidence covered that same universe.
+
+Verified offline (`test_opening_bar_live.py`, 23 checks) against the real
+local dev DB (real broker calls mocked): the toggle defaults off and
+round-trips; a qualifying leg the replay shows open right now places
+exactly one real BUY, sized positive via the real `size_position()`, and
+is tracked correctly (contract, leg number, qualifies_as, real stop
+price); the identical scenario re-run with the leg already held places NO
+duplicate real buy; a real STOP exit places exactly one real SELL, clears
+the tracked leg, and updates `daily_pnl`; a real PUSH exit does the same;
+`kill_halted=True` blocks a real new entry but does NOT block closing an
+already-open real leg (existing protection never freezes); a contract
+already held by the whole-account scan is correctly skipped for a new
+opening-bar entry; and real total notional sums correctly across multiple
+open legs. Full existing regression (`alpaca_selection_backtest.py`'s own
+elephant/tail/multi-entry functions, re-verified post-refactor to produce
+byte-identical real output to before the move) and a real AST route-count
+parse (116 total routes, zero duplicates) both re-run clean alongside it.
+
+**Not yet confirmed against real live trading** - this is real, live
+order-placement infrastructure now shipped, but stays a true no-op until
+the account owner explicitly enables it from the dashboard. Per the
+account owner's own explicit follow-up instruction ("look for something
+better after we build this and get this live"), further improvements to
+this system (or others) remain an open, ongoing search - not a one-time
+close-out.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

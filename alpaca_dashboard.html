@@ -401,6 +401,24 @@
         <div id="branches-content" class="empty">Loading…</div>
     </div>
 
+    <div class="section-title">🐘 Opening-Bar Live Trading <span id="opening-bar-mode-badge" style="font-size:0.7em; font-weight:600; margin-left:8px;"></span></div>
+    <p class="panel-sub" style="margin-bottom:10px;">
+        The real, validated multi-entry "elephant/tail" opening-bar breakout system, connected to real order
+        placement — a real 30-day/12-symbol backtest showed it making $944.34 across 21 trades (57.1% win rate)
+        vs. the older single-entry version's $570.64/15 trades. Every cycle it re-checks each real symbol's own
+        real 2-minute bars against the exact same validated signal logic the backtest used, and places a real
+        buy the instant a leg's entry trigger has fired, or a real sell the instant that leg's stop or "push"
+        exit has fired. Sized the same real, compounding way every other entry on this account already is, and
+        gated by the same real margin-safety check — off by default, a true no-op until enabled below.
+    </p>
+    <div class="panel" id="opening-bar-panel">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px; flex-wrap:wrap; gap:8px;">
+            <button id="opening-bar-mode-toggle-btn" class="unlock-btn" onclick="toggleOpeningBarMode()" disabled>Loading…</button>
+            <div id="opening-bar-notional" style="font-size:0.8em; color:var(--text-dim);"></div>
+        </div>
+        <div id="opening-bar-content" class="empty">Loading…</div>
+    </div>
+
     <div class="modal-overlay" id="create-branch-modal-overlay">
         <div class="modal-card">
             <div class="modal-title">🌱 New Real Branch</div>
@@ -911,6 +929,7 @@ async function refresh() {
         // Cheap (DB-only read, no live broker calls) - refreshed every
         // cycle along with everything else, unlike Next Best Trade above.
         loadBranches();
+        loadOpeningBar();
     } catch (e) {
         statusEl.textContent = 'Error: ' + e.message;
         statusEl.className = 'error';
@@ -1095,6 +1114,77 @@ async function toggleBranchMode() {
         alert('Could not update: ' + e.message);
     } finally {
         await loadBranches();
+    }
+}
+
+let openingBarModeActive = false;
+
+async function loadOpeningBar() {
+    try {
+        const data = await apiGet('/alpaca-overview/opening-bar-status');
+        renderOpeningBar(data);
+    } catch (e) {
+        document.getElementById('opening-bar-content').innerHTML = `<div class="empty">Could not load: ${e.message}</div>`;
+    }
+}
+
+function renderOpeningBar(data) {
+    openingBarModeActive = !!data.mode_active;
+    const modeBadge = document.getElementById('opening-bar-mode-badge');
+    modeBadge.textContent = openingBarModeActive ? '🟢 live ON' : '⚪ live off';
+    modeBadge.style.color = openingBarModeActive ? 'var(--green)' : 'var(--text-dim)';
+
+    const toggleBtn = document.getElementById('opening-bar-mode-toggle-btn');
+    toggleBtn.disabled = false;
+    toggleBtn.textContent = openingBarModeActive ? '⏸️ Disable opening-bar live trading' : '▶️ Enable opening-bar live trading';
+
+    const notionalEl = document.getElementById('opening-bar-notional');
+    if (notionalEl) {
+        notionalEl.textContent = (data.positions || []).length
+            ? `${fmtUsd(data.total_notional_usd)} real notional across ${data.positions.length} open leg(s)`
+            : '';
+    }
+
+    const positions = data.positions || [];
+    const contentEl = document.getElementById('opening-bar-content');
+    if (!positions.length) {
+        contentEl.innerHTML = `<div class="empty">${openingBarModeActive ? 'No real leg currently open - watching ' + (data.watchlist || []).length + ' symbols each cycle.' : 'Off - enable above to start watching for a real opening-bar signal.'}</div>`;
+        return;
+    }
+    contentEl.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:0.9em;"><thead><tr>
+        <th>Symbol</th><th>Leg</th><th>Type</th><th>Entry</th><th>Real stop</th><th>Qty</th>
+    </tr></thead><tbody>${positions.map(p => `
+        <tr>
+            <td>${p.symbol || p.contract}</td>
+            <td>${p.leg_number ?? '—'}</td>
+            <td>${p.qualifies_as || '—'}</td>
+            <td>${fmtUsd(p.entry_price)}</td>
+            <td>${fmtUsd(p.stop_price)}</td>
+            <td>${p.qty ?? '—'}</td>
+        </tr>`).join('')}</tbody></table>`;
+}
+
+async function toggleOpeningBarMode() {
+    const enabling = !openingBarModeActive;
+    const msg = enabling
+        ? 'Enable real opening-bar live trading? Every cycle it will place a real buy the instant a validated entry trigger fires on any watched symbol, and a real sell the instant that leg\'s stop or push exit fires.'
+        : 'Disable opening-bar live trading? No new real leg will be entered until re-enabled - any currently open real leg keeps running and will still be exited on its own real stop/push signal either way.';
+    if (!confirm(msg)) return;
+    const btn = document.getElementById('opening-bar-mode-toggle-btn');
+    btn.disabled = true;
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-overview/opening-bar-mode', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: enabling }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    } catch (e) {
+        alert('Could not update: ' + e.message);
+    } finally {
+        await loadOpeningBar();
     }
 }
 

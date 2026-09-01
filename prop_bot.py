@@ -14,7 +14,7 @@ import smtplib
 import time
 import traceback
 from email.mime.text import MIMEText
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 import aiohttp
 import uuid
@@ -25,6 +25,10 @@ import bot_mandates
 from bot_mandates import APEX_MANDATE, validate_entry, MOMENTUM_ENTRY, MEAN_REVERSION_ENTRY
 from alpaca_mean_reversion import should_exit_position_momentum, should_exit_position
 from profit_tracker import FiveHourProfitTracker
+from opening_bar_signals import (
+    ELEPHANT_BAR_LOOKBACK, OPENING_BAR_MAX_ENTRIES_PER_DAY,
+    _group_bars_by_day, _replay_opening_bar_breakout_multi_entry,
+)
 
 # Measurement system: Trade logging with full signal context
 try:
@@ -1703,6 +1707,15 @@ async def run_prop_cycle():
             log.info(f"[MANDATE] {contract} is claimed by a real Alpaca branch - SKIPPING (managed independently)")
             return False
 
+        # The opening-bar live system (see that section below) may already
+        # hold a real position in this exact contract - skip it here too,
+        # same reasoning as the branch check just above: two independent
+        # decision processes can never both buy the same real contract at
+        # once. A no-op check whenever that system is off or holds nothing.
+        if contract in open_opening_bar_positions:
+            log.info(f"[MANDATE] {contract} is held by the opening-bar live system - SKIPPING (managed independently)")
+            return False
+
         # MANDATE CHECK 2: Entry conditions validation
         total_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in open_prop_positions.values())
         is_valid, mandate_reason = validate_entry(
@@ -1720,12 +1733,15 @@ async def run_prop_cycle():
             return False
 
         # HARD MARGIN SAFETY CHECK — prevent over-leverage. Real notional
-        # held by the Alpaca branch system (see the ALPACA BRANCHES section
-        # below) counts against this same real account-wide risk cap too -
-        # those positions live in a separate dict, invisible to this check
-        # otherwise.
+        # held by the Alpaca branch system AND the opening-bar live system
+        # (see those sections below) both count against this same real
+        # account-wide risk cap too - those positions live in separate
+        # dicts, invisible to this check otherwise.
         buying_power = await get_account_buying_power(session)
-        is_safe, reason = check_margin_safety(buying_power, equity, len(open_prop_positions), extra_open_notional=_total_alpaca_branch_notional())
+        is_safe, reason = check_margin_safety(
+            buying_power, equity, len(open_prop_positions),
+            extra_open_notional=_total_alpaca_branch_notional() + _total_opening_bar_notional(),
+        )
         if not is_safe:
             log.warning(f"[APEX_589296] ⛔ MARGIN SAFETY: Blocking {contract} entry — {reason}")
             return False
@@ -2578,7 +2594,8 @@ async def run_alpaca_branch_cycle(session, branch, equity, buying_power, strateg
         return
 
     is_safe, margin_reason = check_margin_safety(
-        buying_power, equity, len(open_prop_positions), extra_open_notional=_total_alpaca_branch_notional(),
+        buying_power, equity, len(open_prop_positions),
+        extra_open_notional=_total_alpaca_branch_notional() + _total_opening_bar_notional(),
     )
     if not is_safe:
         log.warning(f"[ALPACA-BRANCH] {branch.bot_name}: margin safety blocked entry - {margin_reason}")
@@ -2941,6 +2958,250 @@ async def run_alpaca_branches_cycle():
                 log.error(f"[ALPACA-BRANCH] Idle-cash sweep error: {e}")
 
 
+# ============================================================================
+# OPENING-BAR LIVE TRADING (multi-entry elephant/tail breakout)
+# ============================================================================
+# Real, live connection of the validated opening-bar multi-entry backtest
+# (see opening_bar_signals.py + alpaca_selection_backtest.py's own
+# run_opening_bar_multi_entry_comparison - real 30-day/12-symbol results:
+# multi-entry made $944.34/21 trades/57.1% win rate vs single-entry's
+# $570.64/15 trades/60.0% win rate) into real order placement - per the
+# account owner's own explicit "yes it's better... build this and get this
+# live" authorization.
+#
+# Kept in a SEPARATE dict (open_opening_bar_positions), never
+# open_prop_positions - the same "separate dict, own risk logic" isolation
+# the ALPACA BRANCHES section above already established for a different
+# reason (per-branch capital instead of account-wide). Here the reason is
+# different: open_prop_positions' Pass 1 exit management unconditionally
+# applies the whole-account RSI/momentum exit rules to EVERY position in
+# that dict - an opening-bar position needs its own real STOP/PUSH exit
+# logic instead, which would conflict if it shared that dict.
+#
+# LIVE EXECUTION MODEL: rather than reimplement the validated backward-
+# looking replay (_replay_opening_bar_breakout_multi_entry) as a second,
+# separately-written live streaming state machine - real risk of the two
+# silently diverging, with real money on the line - this re-runs the EXACT
+# SAME real function every cycle against TODAY's real bars fetched fresh
+# (yesterday's session + today's session so far), and diffs its own output
+# against open_opening_bar_positions to decide what to do: a leg the
+# replay shows open right now (its last trade exits "SESSION_END", meaning
+# the replay ran out of real data before finding a real exit) gets a real
+# order placed if none is open yet; a leg the replay shows has since
+# exited (STOP or a PUSH) gets a real order placed to close it if one is
+# open. The live fill happens at real current market price, not the
+# replay's own historical trigger/exit price - an honest, small,
+# unavoidable gap from the backtest, the same kind of real fill-vs-backtest
+# gap already true of every other live strategy in this file.
+#
+# Real, honest limitations, stated plainly rather than hidden:
+# - A real held position here is tracked in-memory only (not persisted to
+#   BotPosition/reloaded on restart the way open_prop_positions/AlpacaBranch
+#   positions are) - a Railway restart mid-leg means this dict comes back
+#   empty even though Alpaca itself still holds the real shares. Accepted
+#   for this first live version, same as AlpacaBranch's own narrower
+#   first-slice scope was explicitly accepted earlier this session - a
+#   real gap to close in a later pass, not silently ignored.
+# - A PUSH exit and the next leg's own entry can land in different real
+#   cycles (this cycle exits leg N; a LATER cycle enters leg N+1 once the
+#   replay shows its own trigger has fired) - a brief, honestly-accepted
+#   flat gap versus the backtest's perfectly seamless roll, chosen
+#   deliberately over a more complex same-cycle roll that would be harder
+#   to verify correct without live data to test against.
+# ============================================================================
+
+OPENING_BAR_LIVE_MODE_KEY = "opening_bar_live_mode"
+
+
+async def is_opening_bar_live_active() -> bool:
+    """DB-persisted (same generic TradingBotState bucket pattern every
+    other real-time flag in this file already uses, not a Railway env var
+    - avoids the exact stray-quote-character bug class that silently
+    disabled the crypto coordinator earlier this session). False (off) by
+    default - a true no-op until the account owner explicitly turns it on
+    from the dashboard."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == OPENING_BAR_LIVE_MODE_KEY))
+        row = result.scalar_one_or_none()
+        return bool(row and row.base_capital and row.base_capital >= 1.0)
+
+
+async def set_opening_bar_live_active(enabled: bool):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == OPENING_BAR_LIVE_MODE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = TradingBotState(bot_name=OPENING_BAR_LIVE_MODE_KEY, base_capital=0.0)
+            db.add(row)
+        row.base_capital = 1.0 if enabled else 0.0
+        await db.commit()
+
+
+# Real per-symbol live opening-bar positions, kept SEPARATE from
+# open_prop_positions and open_alpaca_branch_positions - see the section
+# docstring above for why.
+open_opening_bar_positions = {}
+
+
+def _total_opening_bar_notional() -> float:
+    """Real notional value currently held across every open opening-bar
+    position - see check_margin_safety's extra_open_notional param."""
+    return sum(p.get("qty", 0) * p.get("entry_price", 0) for p in open_opening_bar_positions.values())
+
+
+async def _fetch_live_2min_bars_for_opening_bar(session, symbol: str, days: int = 3):
+    """Real, live 2-minute OHLC bars + real UTC timestamps, same
+    timeframe/feed as the already-validated backtest's own
+    _fetch_bars_2min_with_ohlc_and_times() - a live-fetch duplicate rather
+    than a shared import, since that function lives in
+    alpaca_selection_backtest.py, which already imports FROM this file (a
+    circular import the other way otherwise). days=3 is enough to always
+    include yesterday's full real session plus today's real bars so far,
+    regardless of a weekend/holiday skipping a day. Returns (bars, None)
+    or (None, reason)."""
+    start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=2Min&start={start}&limit=10000&feed=iex"
+    try:
+        async with session.get(url, headers=get_headers(), timeout=aiohttp.ClientTimeout(total=20)) as r:
+            if r.status != 200:
+                body = (await r.text())[:200]
+                return None, f"HTTP {r.status}: {body}"
+            data = await r.json()
+            bars = data.get("bars", [])
+            if len(bars) < 20:
+                return None, f"only {len(bars)} bars (need 20+)"
+            return [{"t": b["t"], "o": b["o"], "h": b["h"], "l": b["l"], "c": b["c"]} for b in bars], None
+    except Exception as e:
+        return None, f"{type(e).__name__}: {str(e)[:150]}"
+
+
+async def run_opening_bar_symbol_cycle(session, contract: str, config: dict, equity: float, buying_power: float, kill_halted: bool):
+    """One real cycle for one real symbol's opening-bar signal - see the
+    section docstring above for the live execution model. Long-only,
+    matching this account's real shorting-disabled constraint (unchanged
+    from every other strategy in this file)."""
+    symbol = config["symbol"]
+    bars, err = await _fetch_live_2min_bars_for_opening_bar(session, symbol)
+    if bars is None:
+        return
+
+    days_grouped = _group_bars_by_day(bars)
+    if len(days_grouped) < 2:
+        return
+
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    last_date, session_bars = days_grouped[-1]
+    if last_date != today_str:
+        return  # market hasn't produced a real bar today yet
+    preceding_bars = days_grouped[-2][1][-ELEPHANT_BAR_LOOKBACK * 2:]
+
+    trades = _replay_opening_bar_breakout_multi_entry(session_bars, preceding_bars, max_entries_per_day=OPENING_BAR_MAX_ENTRIES_PER_DAY)
+    if not trades:
+        return  # bar 1 never qualified today, or no leg has triggered yet
+
+    position = open_opening_bar_positions.get(contract)
+    last_trade = trades[-1]
+    current_price = session_bars[-1]["c"]
+
+    if last_trade["exit_reason"] == "SESSION_END":
+        # This leg is open right now - the real replay ran out of real
+        # data before finding a real exit, meaning it's still live.
+        if position is not None:
+            return  # already holding this leg
+        if kill_halted:
+            return
+        if contract in open_prop_positions:
+            return  # the whole-account scan already holds this real contract
+        if contract in await get_alpaca_branch_claimed_contracts():
+            return  # a real Alpaca branch already claims this contract
+        is_safe, reason = check_margin_safety(
+            buying_power, equity, len(open_prop_positions),
+            extra_open_notional=_total_alpaca_branch_notional() + _total_opening_bar_notional(),
+        )
+        if not is_safe:
+            log.warning(f"[OPENING-BAR] {contract} ({symbol}): margin safety blocked entry - {reason}")
+            return
+        if buying_power is None:
+            return
+        qty = size_position(buying_power, 1, current_price, account_equity=equity)
+        if qty is None:
+            log.info(f"[OPENING-BAR] {contract} ({symbol}): only ${buying_power:.2f} real buying power - skipping entry")
+            return
+        filled = await execute_futures_trade(
+            session, contract, "BUY", qty, current_price, 0.0, f"OPENING_BAR_{last_trade['qualifies_as'].upper()}",
+            stop_loss=last_trade["stop_price"], target=None,
+        )
+        if filled:
+            open_opening_bar_positions[contract] = {
+                "entry_price": current_price, "qty": qty, "stop_price": last_trade["stop_price"],
+                "leg_number": last_trade["leg_number"], "qualifies_as": last_trade["qualifies_as"],
+                "open_time": datetime.now(ET),
+            }
+            log.info(
+                f"[OPENING-BAR] 🟢 {contract} ({symbol}) leg {last_trade['leg_number']} ({last_trade['qualifies_as']}) "
+                f"OPENED @ ${current_price:.2f} | qty {qty} | real stop ${last_trade['stop_price']:.2f}"
+            )
+        else:
+            log.warning(f"[OPENING-BAR] {contract} ({symbol}): real buy did not fill - will retry next cycle")
+    else:
+        # STOP or a real PUSH - this leg has exited.
+        if position is None:
+            return  # nothing real currently held here to close
+        entry = position["entry_price"]
+        qty = position["qty"]
+        pnl = (current_price - entry) * qty
+        filled = await execute_futures_trade(session, contract, "SELL", qty, current_price, 0.0, "OPENING_BAR_EXIT", target=current_price)
+        if filled:
+            open_opening_bar_positions.pop(contract, None)
+            log.info(
+                f"[OPENING-BAR] {'📈' if pnl >= 0 else '📉'} {contract} ({symbol}) leg {position['leg_number']} "
+                f"CLOSED ({last_trade['exit_reason']}) @ ${current_price:.2f} | entry ${entry:.2f} | P&L: ${pnl:+.2f}"
+            )
+            global daily_pnl
+            daily_pnl += pnl
+            try:
+                await _db_save_closed_trade(contract, "long", entry, current_price, qty, pnl, f"OPENING_BAR {last_trade['exit_reason']}")
+            except Exception as e:
+                log.warning(f"[OPENING-BAR] {contract}: failed to persist closed trade: {e}")
+        else:
+            log.warning(f"[OPENING-BAR] {contract} ({symbol}): real sell did not fill - will retry next cycle")
+
+
+async def run_opening_bar_live_cycle():
+    """Real per-cycle driver for the opening-bar live system - a true
+    no-op unless is_opening_bar_live_active() is on. Runs right after the
+    Alpaca branches cycle, same real single-threaded event loop, same
+    STOP_TRADING/passive-mode checks every other real-time subsystem in
+    this file already respects."""
+    if not await is_opening_bar_live_active():
+        return
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        return
+    if await is_alpaca_passive_mode():
+        return
+
+    connector = aiohttp.TCPConnector(use_dns_cache=True, limit=10, limit_per_host=5, ttl_dns_cache=300)
+    timeout = aiohttp.ClientTimeout(total=60, connect=20, sock_read=30, sock_connect=10)
+    async with aiohttp.ClientSession(connector=connector, trust_env=False, timeout=timeout) as session:
+        equity = await get_account_equity(session)
+        if equity is None:
+            log.warning("[OPENING-BAR] could not fetch real account equity - skipping this cycle")
+            return
+        buying_power = await get_account_buying_power(session)
+        should_halt, halt_reason = check_kill_conditions(
+            buying_power=buying_power, equity=equity, daily_loss=daily_pnl, open_position_count=len(open_prop_positions),
+        )
+        if should_halt:
+            log.warning(f"[OPENING-BAR] real account-wide kill condition active ({halt_reason}) - no new opening-bar entries this cycle")
+
+        for contract, config in FUTURES.items():
+            try:
+                await run_opening_bar_symbol_cycle(session, contract, config, equity, buying_power, kill_halted=should_halt)
+            except Exception as e:
+                log.error(f"[OPENING-BAR] {contract} cycle error: {e}")
+            await asyncio.sleep(0.3)
+
+
 def check_credentials():
     """Verify Alpaca API credentials are configured before starting."""
     api_key = os.getenv("ALPACA_API_KEY", "").strip()
@@ -3042,6 +3303,23 @@ def run():
                 log.error(f"Traceback: {traceback.format_exc()}")
         except Exception as e:
             log.error(f"Alpaca branch cycle error: {e}")
+            log.error(f"Traceback: {traceback.format_exc()}")
+
+        # Real opening-bar live trading (see that section above) - a true
+        # no-op unless explicitly turned on. Run right after the Alpaca
+        # branches cycle, same real event loop/single-threaded design.
+        try:
+            loop.run_until_complete(run_opening_bar_live_cycle())
+        except RuntimeError as e:
+            if "attached to a different loop" in str(e):
+                log.warning(f"[OPENING-BAR] Event loop mismatch detected: {e} - recreating event loop")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            else:
+                log.error(f"Opening-bar live cycle error: {e}")
+                log.error(f"Traceback: {traceback.format_exc()}")
+        except Exception as e:
+            log.error(f"Opening-bar live cycle error: {e}")
             log.error(f"Traceback: {traceback.format_exc()}")
 
         time.sleep(30)
