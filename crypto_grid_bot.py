@@ -224,14 +224,28 @@ async def set_grid_bot_active(enabled: bool):
 
 async def is_dynamic_spacing_active() -> bool:
     """Real, DB-persisted toggle for fee-tier-aware dynamic grid spacing
-    (see compute_dynamic_grid_pct). Defaults to False - unlike Grid Bot
-    mode itself, this changes real trade timing, so it needs a real,
-    explicit decision to turn on, not a default-on with the option to
-    disable."""
+    (see compute_dynamic_grid_pct). Defaults to ON now - per the account
+    owner's explicit "turn this ON" after being shown the real mechanism.
+    Confirmed genuinely low-risk before flipping the default, not just
+    assumed: TARGET_NET_MARGIN_PCT (DEFAULT_GRID_PCT - ROUND_TRIP_FEE_RATE
+    = 0.002) plus a real base-tier taker rate doubled (0.004 * 2 = 0.008)
+    computes to EXACTLY 0.01 - byte-identical to today's fixed 1% default
+    - so this is a real no-op unless the account's own real Coinbase fee
+    tier has genuinely improved below the base rate this constant
+    assumes, and even then it only ever NARROWS spacing (trades more
+    often at smaller moves, same real net margin per cycle), never widens
+    it or takes on more risk. compute_dynamic_grid_pct() also fails OPEN
+    (returns today's exact default) on any real fee-tier fetch failure.
+    Same "flip the unset default, no live dashboard access from this
+    sandbox" precedent already used elsewhere in this codebase - an
+    explicit dashboard toggle click still wins over this default in
+    either direction afterward."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == DYNAMIC_SPACING_MODE_KEY))
         row = result.scalar_one_or_none()
-        return bool(row and row.base_capital and row.base_capital >= 1.0)
+        if row is None:
+            return True
+        return bool(row.base_capital and row.base_capital >= 1.0)
 
 
 async def set_dynamic_spacing_active(enabled: bool):

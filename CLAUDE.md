@@ -10836,6 +10836,53 @@ what the live Grid Bot does on its own.
 
 ## References
 
+## Fee-tier-aware dynamic grid spacing turned ON, after confirming the real math makes it a safe no-op today
+
+The account owner circled the dynamic-spacing toggle on a real live
+screenshot and wrote "Should I... turn this ON" directly on it. Rather
+than defer to "run the backtest first" out of habit, checked the real
+mechanism's own math before answering: `compute_dynamic_grid_pct()`
+computes `grid_pct = max(MIN_DYNAMIC_GRID_PCT, TARGET_NET_MARGIN_PCT +
+real_taker_rate*2)`, where `TARGET_NET_MARGIN_PCT = DEFAULT_GRID_PCT -
+ROUND_TRIP_FEE_RATE = 0.002`. At the real BASE Coinbase fee tier (taker
+~0.4%, the same rate `ROUND_TRIP_FEE_RATE`'s own "~0.4% each way"
+already assumes), that formula computes to `0.002 + 0.008 = 0.010` -
+**exactly** today's live fixed 1% default, confirmed by hand, not just
+asserted in the existing docstring's own claim. This feature can only
+ever narrow real spacing once the account's real fee tier has genuinely
+improved below that base rate - it never widens it or takes on more
+risk - and `compute_dynamic_grid_pct()` already fails OPEN (returns
+today's exact default) on any real fee-tier fetch failure. Given a
+real, small account unlikely to have crossed into a cheaper real 30-day-
+volume fee tier yet, turning this on right now is very likely a genuine
+no-op in practice, with no real downside if it isn't.
+
+`is_dynamic_spacing_active()`'s unset default flipped from `False` to
+`True` - the same "flip the unset default, no live dashboard access
+from this sandbox" precedent already used repeatedly this session
+(STOP-HIT reversal, the live exit-mode default, the RSI+support filter)
+- since no dashboard toggle click has ever been made on this deployment,
+this has the identical real effect the toggle would have had, once
+redeployed. `set_dynamic_spacing_active()` itself is unchanged - a real
+explicit dashboard toggle still wins over this default in either
+direction afterward.
+
+Verified offline (`test_dynamic_spacing_default_flip.py`, 4 checks,
+real local dev DB): the toggle now defaults ON when never explicitly
+set; an explicit OFF and an explicit ON both still work normally
+afterward; and the real base-tier math is hand-verified to land on
+EXACTLY `0.01`, confirming the safety claim rather than assuming it.
+
+**Not yet confirmed against the real live fee tier** - the account owner
+should watch the real branch cards after the next redeploy to confirm
+spacing genuinely stays at 1% (matching the "no-op at base tier" claim)
+unless their real Coinbase account has already crossed into a cheaper
+tier, in which case it should narrow automatically.
+
+---
+
+## References
+
 - **API Endpoints:** See API_ENDPOINTS.md
 - **Stripe docs:** https://stripe.com/docs/api/checkout/sessions
 - **HeyGen docs:** https://docs.heygen.com/
