@@ -82,6 +82,32 @@ SWING_SYMBOLS = {
     "RWM": {"name": "Short Russell 2000 (inverse)", "proxy": "RWM"},
 }
 
+# Real-ticker -> internal-key reverse map, the direct counterpart to
+# prop_bot.py's own _SYMBOL_TO_CONTRACT. Confirmed real, severe,
+# previously-undiscovered bug this exists to fix: every entry order in
+# this file placed `symbol` (the SWING_SYMBOLS dict KEY, e.g. "SIL",
+# "MES") directly with Alpaca's real /v2/orders equity endpoint, never
+# `config["proxy"]` (the real underlying ticker, e.g. "SLV", which is
+# what get_weekly_rsi/get_intraday_rsi actually analyzed). For the 6
+# futures-styled keys (MES/MNQ/MYM/M2K/MGC/MCL) this isn't a real,
+# tradable Alpaca equity ticker at all - every real entry attempt for
+# those silently failed (logged "Order failed", never crashed), meaning
+# 6 of this bot's 11 symbols could never actually place a real trade.
+# For "SIL" specifically it's WORSE, not just broken: "SIL" (Global X
+# Silver Miners ETF) IS a real, valid, different Alpaca-tradable ticker
+# from "SLV" (iShares Silver Trust) - so a real silver swing/intraday
+# entry would have bought real shares of a materially different, higher-
+# beta mining-stock ETF than the one its own RSI/price/SMA200 signal was
+# actually computed against. The 4 inverse-ETF keys (SH/PSQ/DOG/RWM) were
+# accidentally correct the whole time only because their key equals their
+# own proxy - masking the bug for those 4 while it stayed real and live
+# for the other 7. Fixed by placing every real order against the real
+# proxy ticker, and reconciling every open-positions lookup (which Alpaca
+# always keys by the real ticker) through this reverse map instead of
+# assuming a real held position is keyed by the internal SWING_SYMBOLS
+# key.
+PROXY_TO_KEY = {config["proxy"]: key for key, config in SWING_SYMBOLS.items()}
+
 # ========== SWING TRADING SETTINGS ==========
 WEEKLY_RSI_BUY = 30       # Entry when weekly RSI < 30
 WEEKLY_RSI_SELL = 70      # Exit when weekly RSI > 70
@@ -312,17 +338,30 @@ async def run_intraday_check():
 
             await asyncio.sleep(0.3)
 
+        # Real, confirmed, previously-undiscovered bug fixed here: same
+        # shape as run_swing_check()'s own fix above - this fetch used to
+        # live ONLY inside `if intraday_setups:` below, so on any real
+        # 15-minute cycle where nothing newly qualified as oversold
+        # intraday, `open_positions` was never assigned and the exit loop
+        # further down raised a real UnboundLocalError, crashing before
+        # ever checking an existing intraday position's own real
+        # stop-loss/profit-target/RSI-overbought exit. Fetched
+        # unconditionally now so exit management always runs.
+        open_positions = await get_open_positions(session)
+
         # Enter positions for intraday trades
         if intraday_setups:
             intraday_setups.sort(reverse=True)
-            open_positions = await get_open_positions(session)
-            intraday_count = sum(1 for s in open_positions.keys() if s in SWING_SYMBOLS)
+            # Real positions are keyed by the real ticker (proxy), never
+            # the internal SWING_SYMBOLS key - see PROXY_TO_KEY.
+            intraday_count = sum(1 for s in open_positions.keys() if s in PROXY_TO_KEY)
             slots = MAX_CONCURRENT_INTRADAY - intraday_count
 
             log.info(f"\n📈 Intraday positions: {intraday_count}/{MAX_CONCURRENT_INTRADAY}")
 
             for strength, symbol, config, rsi, price in intraday_setups[:slots]:
-                if symbol in open_positions:
+                proxy = config["proxy"]
+                if proxy in open_positions:
                     continue
 
                 # PRE-TRADE CHECK: Verify buying power
@@ -342,9 +381,9 @@ async def run_intraday_check():
                     notional = qty * price
                     log.info(f"  ⚠️  Resized {symbol} intraday to ${notional:.2f} (buying power limit)")
 
-                log.info(f"\n  🚀 INTRADAY ENTRY: {symbol} | RSI {rsi} | Price ${price:.2f} | Qty {qty}")
+                log.info(f"\n  🚀 INTRADAY ENTRY: {symbol} ({proxy}) | RSI {rsi} | Price ${price:.2f} | Qty {qty}")
 
-                order = await place_order(session, symbol, qty, "buy")
+                order = await place_order(session, proxy, qty, "buy")
                 if order and order.get("id"):
                     log.info(f"     ✅ Order confirmed: {order.get('id')}")
                 else:
@@ -352,12 +391,13 @@ async def run_intraday_check():
 
                 await asyncio.sleep(0.5)
 
-        # Check exits for intraday positions
-        for symbol, pos_data in open_positions.items():
-            if symbol not in SWING_SYMBOLS:
+        # Check exits for intraday positions - keyed by the real ticker
+        # (proxy), never the internal SWING_SYMBOLS key. See PROXY_TO_KEY.
+        for proxy, pos_data in open_positions.items():
+            key = PROXY_TO_KEY.get(proxy)
+            if key is None:
                 continue
 
-            proxy = SWING_SYMBOLS[symbol]["proxy"]
             data = await get_intraday_rsi(session, proxy)
 
             if not data:
@@ -383,8 +423,8 @@ async def run_intraday_check():
                 reason = f"HARD STOP-LOSS -{abs(pnl_pct):.2f}% hit (capital preservation)"
 
             if should_exit:
-                log.info(f"\n  🛑 INTRADAY EXIT {symbol}: {reason} | P&L {pnl_pct:+.2f}%")
-                order = await place_order(session, symbol, qty, "sell")
+                log.info(f"\n  🛑 INTRADAY EXIT {key} ({proxy}): {reason} | P&L {pnl_pct:+.2f}%")
+                order = await place_order(session, proxy, qty, "sell")
                 if order:
                     log.info(f"     Order: {order.get('id', 'N/A')}")
 
@@ -435,19 +475,41 @@ async def run_swing_check():
 
             await asyncio.sleep(0.5)  # Rate limit
 
+        # Real, confirmed, previously-undiscovered bug fixed here: this
+        # fetch used to live ONLY inside `if setups:` below - on any
+        # real, ordinary day where nothing newly qualified as oversold
+        # (the overwhelmingly common case), `open_positions` was NEVER
+        # assigned, and the exit-management loop further down (which
+        # unconditionally reads it) raised a real UnboundLocalError -
+        # crashing this entire function before it ever reached the exit
+        # checks. Since this crash is caught by run()'s own outer
+        # try/except and `last_swing_check` is only updated AFTER a
+        # successful call, this meant a real, already-open swing
+        # position's stop-loss/profit-target/RSI-overbought protection
+        # effectively never ran on any day without a coincidental fresh
+        # setup - a real position could sit well past its own real 2%
+        # stop for as long as that kept happening. Fetching this
+        # unconditionally, every real call, closes that gap - exit
+        # management now always runs regardless of whether any new
+        # entry setup exists this cycle.
+        open_positions = await get_open_positions(session)
+
         # Open positions with highest confidence
         if setups:
             setups.sort(reverse=True)  # Sort by confidence (descending)
 
-            open_positions = await get_open_positions(session)
             current_count = len(open_positions)
             slots_available = MAX_CONCURRENT_SWING - current_count
 
             log.info(f"\n📈 Open positions: {current_count}/{MAX_CONCURRENT_SWING}")
 
             for confidence, symbol, config, rsi, price in setups[:slots_available]:
-                if symbol in open_positions:
-                    log.info(f"  {symbol} already held, skipping")
+                # Real, always-tradable ticker - never the internal
+                # SWING_SYMBOLS key (see PROXY_TO_KEY's own docstring for
+                # the real, confirmed bug this fixes).
+                proxy = config["proxy"]
+                if proxy in open_positions:
+                    log.info(f"  {symbol} ({proxy}) already held, skipping")
                     continue
 
                 # PRE-TRADE CHECKS
@@ -466,23 +528,37 @@ async def run_swing_check():
                     notional = qty * price
                     log.info(f"  ⚠️  Resized {symbol} to ${notional:.2f} notional (was asking ${qty * price:.2f}, buying power limit)")
 
-                log.info(f"\n  🚀 ENTRY: {symbol} | RSI {rsi} | Price ${price:.2f} | Qty {qty} | Notional ${notional:.2f}")
+                log.info(f"\n  🚀 ENTRY: {symbol} ({proxy}) | RSI {rsi} | Price ${price:.2f} | Qty {qty} | Notional ${notional:.2f}")
 
-                order = await place_order(session, symbol, qty, "buy")
+                order = await place_order(session, proxy, qty, "buy")
                 if order and order.get("id"):
                     log.info(f"     ✅ Order confirmed: {order.get('id')} | Status: {order.get('status')}")
 
-                    # Record to database
+                    # Record to database. Real, confirmed, previously-
+                    # undiscovered bug fixed here: this write has always
+                    # constructed BotPosition with fields the real model
+                    # (models.py) doesn't have at all (`entry_time`,
+                    # `bot_name`, `status`) and a string `id` for a real
+                    # Integer autoincrement primary key - every single
+                    # real entry this bot ever placed silently failed to
+                    # persist here (caught by the except below, logged as
+                    # "Failed to record position", never crashing the
+                    # bot). This never affected the real order at Alpaca
+                    # or this bot's own exit protection (both read
+                    # Alpaca's live /v2/positions directly, never this
+                    # local row) - only local analytics/persistence was
+                    # broken. Uses the real model fields now: `bot`
+                    # (not `bot_name`), `opened_at` (not `entry_time`),
+                    # and lets `id` autoincrement rather than assigning a
+                    # string to an Integer primary key.
                     try:
                         position = BotPosition(
-                            id=f"swing_{uuid.uuid4().hex[:8]}",
-                            symbol=symbol,
+                            bot="alpaca_swing",
+                            symbol=proxy,
                             side="long",
                             entry_price=price,
                             qty=qty,
-                            entry_time=datetime.now(ET),
-                            bot_name="alpaca_swing",
-                            status="open"
+                            opened_at=datetime.now(ET),
                         )
                         async with AsyncSessionLocal() as db:
                             db.add(position)
@@ -497,11 +573,13 @@ async def run_swing_check():
         # Check exits for existing positions
         log.info(f"\n🔄 Checking {len(open_positions)} open positions for exits...")
 
-        for symbol, position_data in open_positions.items():
-            if symbol not in SWING_SYMBOLS:
+        for proxy, position_data in open_positions.items():
+            # Real Alpaca positions are keyed by the real ticker (proxy),
+            # never the internal SWING_SYMBOLS key - see PROXY_TO_KEY.
+            key = PROXY_TO_KEY.get(proxy)
+            if key is None:
                 continue
 
-            proxy = SWING_SYMBOLS[symbol]["proxy"]
             data = await get_weekly_rsi(session, proxy)
 
             if not data:
@@ -528,9 +606,9 @@ async def run_swing_check():
                 reason = f"HARD STOP-LOSS -{abs(pnl_pct):.2f}% hit (capital preservation for micro account)"
 
             if should_exit:
-                log.info(f"\n  🛑 EXIT {symbol}: {reason} | P&L {pnl_pct:+.2f}%")
+                log.info(f"\n  🛑 EXIT {key} ({proxy}): {reason} | P&L {pnl_pct:+.2f}%")
 
-                order = await place_order(session, symbol, qty, "sell")
+                order = await place_order(session, proxy, qty, "sell")
                 if order:
                     log.info(f"     Exit order placed: {order.get('id', 'N/A')}")
 
@@ -539,7 +617,7 @@ async def run_swing_check():
                     try:
                         payment = Payment(
                             id=f"swing_{uuid.uuid4().hex[:8]}",
-                            job_id=f"swing_{symbol}_{datetime.now(ET).strftime('%Y%m%d')}",
+                            job_id=f"swing_{proxy}_{datetime.now(ET).strftime('%Y%m%d')}",
                             worker_id="bot@pgusa.local",
                             client_id="alpaca_swing",
                             gross_amount=pnl_usd,

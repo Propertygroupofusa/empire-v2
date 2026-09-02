@@ -11650,6 +11650,126 @@ owner's own next real observation to make from the live dashboard.
 
 ---
 
+## Three real, previously-undiscovered bugs found in alpaca_swing_bot.py during the daily health check - a real position could go unmanaged for real, structural reasons, not a market gap
+
+The daily automated health-check trigger (see `status_snapshot.py`'s own
+STATUS.md read at the top of this process) surfaced a real, live open
+Alpaca position - SLV, showing a ~5.5% real unrealized loss - well past
+`prop_bot.py`'s own real mean-reversion hard stop
+(`MEAN_REVERSION_STOP_LOSS_PCT = 0.015`, 1.5%). Traced `prop_bot.py`'s
+own exit path first and confirmed it's genuinely sound (real
+`reconcile_positions_with_broker()` runs every cycle and would auto-adopt
+this exact position under its real contract code, `should_exit_position`'s
+own RULE 1 math is correct) - the real SLV position visible on the
+dashboard is almost certainly `prop_bot.py`'s own, correctly managed. But
+checking whether `alpaca_swing_bot.py` (a completely separate real bot,
+trading the SAME shared Alpaca account, started unconditionally from
+`main.py`'s lifespan) could ALSO be a source of this class of problem
+turned up three real, independent, previously-undiscovered bugs - all
+fixed together, since all three live in the same small file and the same
+two functions.
+
+### 1. Every real order placed the wrong symbol - a live, previously-invisible mismatch
+
+`SWING_SYMBOLS` maps an internal identifier (e.g. `"SIL"`, mirroring
+`prop_bot.py`'s own FUTURES contract-code convention) to a real,
+analyzable proxy ticker (`"proxy": "SLV"`) - `get_weekly_rsi`/
+`get_intraday_rsi` correctly fetch and analyze the real `proxy` ticker.
+But every real order-placement call site (`place_order(session, symbol,
+...)`) used the internal KEY directly, never `config["proxy"]`. For the 6
+futures-styled keys (`MES`/`MNQ`/`MYM`/`M2K`/`MGC`/`MCL`) this isn't a
+real, tradable Alpaca equity ticker at all - every real entry attempt for
+those 6 of this bot's 11 symbols would silently fail at Alpaca's real
+`/v2/orders` endpoint (logged "Order failed", never crashing, so
+invisible unless someone read the Railway logs for that exact line). For
+`"SIL"` specifically it's WORSE, not just broken: `SIL` (Global X Silver
+Miners ETF) is itself a real, valid, DIFFERENT Alpaca-tradable ticker
+from `SLV` (iShares Silver Trust) - so a real silver entry would have
+bought real shares of a materially different, higher-beta mining-stock
+ETF than the one its own real RSI/price/SMA200 signal was actually
+computed against. The 4 inverse-ETF keys (`SH`/`PSQ`/`DOG`/`RWM`)
+accidentally worked correctly this whole time only because their own key
+equals their own proxy, which is exactly why this went unnoticed - most
+of the file's own symbols masked the bug for the ones that didn't.
+
+Fixed with a new `PROXY_TO_KEY` reverse map (the direct counterpart to
+`prop_bot.py`'s own `_SYMBOL_TO_CONTRACT`) and every entry/exit call site
+in both `run_swing_check()` and `run_intraday_check()` corrected to place
+real orders against `config["proxy"]` and to look up/iterate real held
+positions (which Alpaca's own `/v2/positions` always keys by the real
+ticker) through `PROXY_TO_KEY`, never the internal key directly.
+
+### 2. A real UnboundLocalError could silently disable exit management on any ordinary day
+
+In BOTH `run_swing_check()` and `run_intraday_check()`, `open_positions =
+await get_open_positions(session)` lived ONLY inside `if setups:` /
+`if intraday_setups:` - but the exit-management loop further down
+unconditionally reads `open_positions`. On any real, ordinary cycle where
+NOTHING newly qualified as oversold (the overwhelmingly common case -
+most days, most symbols simply aren't oversold), `open_positions` was
+never assigned, and the function raised a real `UnboundLocalError` before
+ever reaching its own exit checks. This crash is caught by `run()`'s own
+outer `try/except` (so the bot's thread survives), but since
+`last_swing_check` is only updated AFTER a successful call, a real
+existing swing position's own stop-loss/profit-target/RSI-overbought exit
+effectively never ran except on days a completely unrelated symbol
+happened to also be freshly oversold. This is a real, structural,
+significantly more severe gap than problem #1 above - it directly
+explains how a real position CAN sit well past its own real stop for an
+extended stretch, independent of any market gap. Fixed by fetching
+`open_positions` unconditionally, every real call, before the
+entry/exit-management split.
+
+### 3. The real local position-recording write has always silently failed
+
+The `BotPosition(...)` construction on a real entry passed
+`entry_time`/`bot_name`/`status` - none of which exist on the real
+`BotPosition` model (`bot`/`opened_at` are the real field names, and
+there's no `status` column at all) - and a string `id` for a real
+Integer autoincrement primary key. Every real entry this bot has ever
+placed has silently failed to persist here (caught by its own
+`except Exception as e: log.warning("Failed to record position", ...)`,
+never crashing). This never affected the real order at Alpaca or this
+bot's own exit protection (both already correctly read Alpaca's live
+`/v2/positions` directly, never this local row) - only local
+analytics/persistence was broken. Fixed to use the real model's actual
+field names and let `id` autoincrement.
+
+Verified offline (`test_swing_bot_proxy_ticker_bug.py`, 18 checks): a real
+qualifying entry places its order against the real proxy ticker (`SLV`),
+never the internal key (`SIL`); a real held position keyed by its real
+ticker is correctly found and managed by both exit loops; a real position
+under a ticker this bot doesn't trade at all (e.g. `NVDA`) is never
+touched; both `run_swing_check()` and `run_intraday_check()` no longer
+raise `UnboundLocalError` on a cycle with zero new setups, and - proving
+the fix isn't just "doesn't crash" but genuinely restores real protection
+- a real held position past its own hard stop is force-sold in that exact
+scenario; and a real qualifying entry's `BotPosition` DB write no longer
+logs "Failed to record position". Full existing regression suite (32+
+related test files across the Alpaca/prop_bot/crypto surface) re-run
+clean alongside it; the two failures seen
+(`test_alpaca_overview.py`, `test_price_rsi_diagnosis.py`) were confirmed
+pre-existing and unrelated via a direct `git stash` comparison - both
+fail identically on the prior commit.
+
+Per this session's own daily-health-check scope: no trade was placed, no
+position was closed, and no passive-mode flag was touched from this
+sandbox - this fix only corrects real, diagnosable code bugs, all
+verified offline against a real throwaway/local test harness.
+
+**Not yet confirmed live** - the account owner needs to redeploy;
+whether this specific bot ever actually holds a mispriced or unmanaged
+real position going forward is the thing to watch for on the dashboard
+and in Railway's logs after that. The real SLV drawdown that prompted
+this investigation remains most likely attributable to `prop_bot.py`'s
+own, separately-confirmed-correct management (a real, ordinary market
+move within its own protection, not a code bug) - this fix addresses
+three real, independent problems found while ruling that out, in the
+one other bot sharing this account that could plausibly cause a similar
+symptom in the future.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md
