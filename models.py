@@ -1025,6 +1025,23 @@ class CryptoGridBranch(Base):
     # NULL, treated as unlocked (False) everywhere it's checked.
     locked = Column(Boolean, default=False, nullable=True)
 
+    # This branch's own real, self-tuned average-swing spacing multiplier -
+    # per the account owner's direct request to make Grid Bot "grow and be
+    # better than the hrs before and learn from its mistakes... every hr."
+    # NULL means "use the global validated default"
+    # (AVG_SWING_SPACING_MULTIPLIER, 1.5x) - only ever set once this
+    # specific branch's own real recent trade history (see
+    # crypto_grid_bot._maybe_self_tune_branch_spacing, run hourly) shows a
+    # genuinely poor or genuinely strong real win rate over its own last
+    # several closed trades. Bounded between the validated 1.5x default
+    # (the floor - this can never make a branch LESS fee-safe than what
+    # was already proven live) and a 3.0x ceiling, moved in small 0.1x
+    # steps, and self-correcting: it eases back down toward 1.5x again the
+    # moment that same branch's real recent trades improve. Nullable so an
+    # existing row (created before this column existed) reads back NULL
+    # and is treated as "still on the default," not a crash.
+    self_tuned_multiplier = Column(Float, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

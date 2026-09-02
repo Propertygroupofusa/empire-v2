@@ -129,6 +129,44 @@ AVG_SWING_SPACING_MULTIPLIER = 1.5
 # backtest's full 30-day one.
 AVG_SWING_LOOKBACK_HOURS = 120
 
+# Real, hourly, per-branch self-tuning of AVG_SWING_SPACING_MULTIPLIER -
+# per the account owner's direct request: "make sure it's built to grow
+# and be better than the hrs before and learn from it's mistakes and
+# makes it self better every hr." Deliberately NOT a new, unvalidated
+# strategy or a blind parameter search - it only ever nudges the ONE
+# already-validated, already-live lever (this branch's own spacing
+# multiplier) using that SAME branch's own real, recently-closed trades
+# as the judge, never a backtest simulation. Bounded on both ends so it
+# can never drift outside proven-safe territory:
+#   - the FLOOR is AVG_SWING_SPACING_MULTIPLIER itself (1.5x, the real
+#     backtested winner already live by default) - a branch can only ever
+#     get MORE conservative than the validated default in response to a
+#     real rough stretch, never looser than what evidence already proved
+#     safe.
+#   - the CEILING (3.0x) caps how far a single branch can widen, so one
+#     genuinely unlucky coin can't compound its own spacing forever.
+# Self-correcting, not one-way: a branch that's since recovered eases its
+# own multiplier back down toward 1.5x again the moment its real recent
+# trades improve - same "contestable, never a permanent verdict"
+# philosophy every other adaptive layer in this codebase already uses
+# (coin exclusion, the strongest-sibling throne, floor self-heals).
+# Every real adjustment is logged to the Live Activity feed with the
+# exact real numbers that triggered it, so this is auditable, not a
+# silent black box.
+SELF_TUNE_INTERVAL_SECONDS = int(os.getenv("GRID_SELF_TUNE_INTERVAL_SECONDS", str(60 * 60)))
+# How many of a branch's own most recent REAL closed trades to judge it
+# by - also doubles as the minimum trade count required before acting at
+# all (not enough real evidence yet with fewer than this many).
+SELF_TUNE_LOOKBACK_TRADES = 5
+SELF_TUNE_STEP = 0.1
+SELF_TUNE_MIN_MULTIPLIER = AVG_SWING_SPACING_MULTIPLIER
+SELF_TUNE_MAX_MULTIPLIER = 3.0
+SELF_TUNE_POOR_WIN_RATE_PCT = 40.0
+SELF_TUNE_GOOD_WIN_RATE_PCT = 60.0
+# In-process throttle only, same pattern as _last_grid_auto_rotate_at
+# right below.
+_last_grid_self_tune_at = 0.0
+
 # Real, automatic idle-cash rotation - per the account owner's explicit
 # request: "why don't my system automatic[ally]... move it until the
 # next coin that is doing good... so the money will never stay idle and
@@ -367,11 +405,17 @@ async def set_avg_swing_spacing_active(enabled: bool):
         await db.commit()
 
 
-async def compute_avg_swing_grid_pct(session, product_id: str) -> tuple:
+async def compute_avg_swing_grid_pct(session, product_id: str, multiplier: float = None) -> tuple:
     """Real, live average-swing-based grid_pct for one branch's own coin -
     fetches its real recent hourly True-Range average
-    (engine.get_average_hourly_swing_pct) and sizes spacing at
-    AVG_SWING_SPACING_MULTIPLIER (1.5x) times that. Unlike
+    (engine.get_average_hourly_swing_pct) and sizes spacing at `multiplier`
+    (defaulting to the real validated AVG_SWING_SPACING_MULTIPLIER, 1.5x,
+    when not given) times that. The caller passes a branch's own real
+    self_tuned_multiplier here when it has one - see
+    _maybe_self_tune_branch_spacing - so a branch with a genuinely rough
+    or genuinely strong recent real track record can trade at its own,
+    real-evidence-adjusted spacing instead of the flat global default.
+    Unlike
     compute_dynamic_grid_pct above (one spacing shared by every branch,
     tied to the account's own fee tier), this produces a DIFFERENT real
     grid_pct per branch, sized off that specific coin's own real recent
@@ -406,8 +450,9 @@ async def compute_avg_swing_grid_pct(session, product_id: str) -> tuple:
     avg_swing_pct = await engine.get_average_hourly_swing_pct(session, product_id, count=AVG_SWING_LOOKBACK_HOURS)
     if avg_swing_pct is None:
         return DEFAULT_GRID_PCT, None
+    effective_multiplier = multiplier if multiplier is not None else AVG_SWING_SPACING_MULTIPLIER
     fee_safe_floor = max(MIN_DYNAMIC_GRID_PCT, TARGET_NET_MARGIN_PCT + engine.ROUND_TRIP_FEE_RATE)
-    grid_pct = max(fee_safe_floor, avg_swing_pct * AVG_SWING_SPACING_MULTIPLIER)
+    grid_pct = max(fee_safe_floor, avg_swing_pct * effective_multiplier)
     return grid_pct, avg_swing_pct
 
 
@@ -1400,6 +1445,98 @@ def _grid_branch_real_equity(branch: CryptoGridBranch, slices: list, price: floa
     return branch.allocated_usd + unrealized
 
 
+async def _grid_branch_recent_trades(bot_name: str, limit: int) -> list:
+    """One branch's own most recent REAL completed trades, newest first -
+    the real judge _maybe_self_tune_branch_spacing() uses to decide
+    whether this specific branch has genuinely been struggling or doing
+    well lately."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(CryptoGridTradeHistory)
+            .where(CryptoGridTradeHistory.bot_name == bot_name)
+            .order_by(desc(CryptoGridTradeHistory.closed_at))
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+
+async def _maybe_self_tune_branch_spacing(branch: CryptoGridBranch):
+    """Real, hourly, per-branch self-tuning of average-swing spacing - see
+    SELF_TUNE_INTERVAL_SECONDS's own comment for the full real reasoning
+    and the reasoning for its bounds. Judges THIS branch's own last
+    SELF_TUNE_LOOKBACK_TRADES real closed trades (never a backtest
+    simulation) and, only once there's enough real evidence:
+      - a genuinely poor real win rate WIDENS this branch's own spacing
+        multiplier by one real step (more conservative, more fee-safe
+        breathing room) - never below AVG_SWING_SPACING_MULTIPLIER
+        (already the real validated default) or above SELF_TUNE_MAX_MULTIPLIER.
+      - a genuinely strong real win rate EASES it back down by one real
+        step toward that same validated 1.5x default - never below it.
+    A change is only ever made and persisted when it's actually different
+    from the branch's current real multiplier - a no-op cycle writes
+    nothing and logs nothing. Best-effort: a real failure here (a DB
+    hiccup) never touches this branch's own trading - caught and logged
+    by the caller, run_grid_self_tuning_sweep()."""
+    trades = await _grid_branch_recent_trades(branch.bot_name, SELF_TUNE_LOOKBACK_TRADES)
+    if len(trades) < SELF_TUNE_LOOKBACK_TRADES:
+        return  # not enough real evidence yet for this specific branch
+
+    wins = sum(1 for t in trades if t.pnl is not None and t.pnl > 0)
+    win_rate = wins / len(trades) * 100
+
+    current = branch.self_tuned_multiplier if branch.self_tuned_multiplier is not None else AVG_SWING_SPACING_MULTIPLIER
+    new_multiplier = current
+    reason = None
+    if win_rate < SELF_TUNE_POOR_WIN_RATE_PCT and current < SELF_TUNE_MAX_MULTIPLIER:
+        new_multiplier = round(min(SELF_TUNE_MAX_MULTIPLIER, current + SELF_TUNE_STEP), 2)
+        reason = (
+            f"a rough real stretch ({wins}/{len(trades)} = {win_rate:.0f}% win rate over its last "
+            f"{len(trades)} real trades) - widening to trade more conservatively"
+        )
+    elif win_rate >= SELF_TUNE_GOOD_WIN_RATE_PCT and current > SELF_TUNE_MIN_MULTIPLIER:
+        new_multiplier = round(max(SELF_TUNE_MIN_MULTIPLIER, current - SELF_TUNE_STEP), 2)
+        reason = (
+            f"a strong real stretch ({wins}/{len(trades)} = {win_rate:.0f}% win rate over its last "
+            f"{len(trades)} real trades) - easing back toward its validated {AVG_SWING_SPACING_MULTIPLIER}x default"
+        )
+
+    if reason is None or abs(new_multiplier - current) < 1e-9:
+        return  # no real change to make this hour
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
+        row = result.scalar_one_or_none()
+        if not row:
+            return
+        row.self_tuned_multiplier = new_multiplier
+        await db.commit()
+    branch.self_tuned_multiplier = new_multiplier
+
+    msg = (
+        f"📐 {branch.bot_name} self-tuned its own spacing multiplier {current}x -> {new_multiplier}x after "
+        f"{reason}."
+    )
+    log.info(f"[GRID] {msg}")
+    await _log_activity_safe(branch.bot_name, branch.product_id, "TUNE", msg)
+
+
+async def run_grid_self_tuning_sweep():
+    """Real, hourly driver for every real grid branch's own self-tuning -
+    called from run_grid_branches_cycle(), throttled by
+    _last_grid_self_tune_at/SELF_TUNE_INTERVAL_SECONDS. Runs across EVERY
+    real branch on record (not just currently-active ones - a paused
+    branch still has real trade history worth learning from, and this way
+    its own spacing is already tuned correctly the moment it's resumed),
+    one at a time so a real failure on one branch's own evaluation can
+    never block another's."""
+    branches = await get_grid_branches()
+    for branch in branches:
+        try:
+            await _maybe_self_tune_branch_spacing(branch)
+        except Exception as e:
+            log.warning(f"[GRID] self-tuning failed for {branch.bot_name} (non-fatal): {e}")
+
+
 async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     """One real cycle for one real grid branch - the live counterpart to
     crypto_selection_backtest.py's _replay_grid_bot(), same real
@@ -1456,10 +1593,12 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     new_grid_pct = None
     spacing_log_note = None
     if await is_avg_swing_spacing_active():
-        swing_pct, avg_swing_pct = await compute_avg_swing_grid_pct(session, branch.product_id)
+        effective_multiplier = branch.self_tuned_multiplier if branch.self_tuned_multiplier is not None else AVG_SWING_SPACING_MULTIPLIER
+        swing_pct, avg_swing_pct = await compute_avg_swing_grid_pct(session, branch.product_id, multiplier=effective_multiplier)
         new_grid_pct = swing_pct
         spacing_log_note = (
-            f"real avg swing {avg_swing_pct*100:.3f}% x {AVG_SWING_SPACING_MULTIPLIER}"
+            f"real avg swing {avg_swing_pct*100:.3f}% x {effective_multiplier}"
+            + (" (self-tuned)" if branch.self_tuned_multiplier is not None else "")
             if avg_swing_pct is not None else "real avg-swing lookup failed - fell back to default"
         )
     elif await is_dynamic_spacing_active():
@@ -1603,6 +1742,21 @@ async def run_grid_branches_cycle():
         except Exception as e:
             log.error(f"[GRID] auto-rotate sweep error: {e}")
 
+    # Real, hourly self-tuning sweep - per the account owner's direct
+    # request to make this bot "grow and be better than the hrs before
+    # and learn from it's mistakes... every hr." See
+    # SELF_TUNE_INTERVAL_SECONDS's own comment for the full real
+    # reasoning and bounds. Same in-process throttle pattern as the
+    # auto-rotate sweep right above.
+    global _last_grid_self_tune_at
+    now3 = time.time()
+    if now3 - _last_grid_self_tune_at >= SELF_TUNE_INTERVAL_SECONDS:
+        _last_grid_self_tune_at = now3
+        try:
+            await run_grid_self_tuning_sweep()
+        except Exception as e:
+            log.error(f"[GRID] self-tuning sweep error: {e}")
+
 
 async def get_grid_status() -> dict:
     """Real, live status for the dashboard - every branch's own real
@@ -1690,6 +1844,14 @@ async def get_grid_status() -> dict:
             "total_unrealized_net_usd": round(total_net_usd, 2) if current_price is not None and slices else None,
             "total_unrealized_net_pct": round(total_net_pct, 4) if total_net_pct is not None else None,
             "slices": slices_out,
+            # Real, hourly self-tuned spacing multiplier - None means this
+            # branch is still on the real validated global default
+            # (AVG_SWING_SPACING_MULTIPLIER); a real value means its own
+            # recent real trade history has genuinely nudged it wider (a
+            # rough stretch) or eased it back toward default (a strong
+            # one). See _maybe_self_tune_branch_spacing.
+            "self_tuned_multiplier": round(b.self_tuned_multiplier, 2) if b.self_tuned_multiplier is not None else None,
+            "effective_spacing_multiplier": round(b.self_tuned_multiplier, 2) if b.self_tuned_multiplier is not None else AVG_SWING_SPACING_MULTIPLIER,
         })
 
     # Real grand total across EVERY branch's own "if sold right now" figure

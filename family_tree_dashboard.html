@@ -1882,9 +1882,18 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals) {
             </tr></thead>
             <tbody>
                 ${branches.map(b => {
+                    // Real, hourly self-tuning badge - per the account owner's
+                    // direct "learn from its mistakes and make itself better
+                    // every hr" request. Only ever shown once this specific
+                    // branch's own real recent trades have actually moved it
+                    // away from the validated default - a branch still on
+                    // default shows nothing extra here.
+                    const selfTuneBadge = b.self_tuned_multiplier != null
+                        ? `<br><span style="color:var(--gold); font-size:0.85em;" title="This branch's own real recent trades have adjusted its spacing multiplier away from the validated default (1.5x) - widens after a rough real stretch, eases back after a strong one.">📐 self-tuned ${b.self_tuned_multiplier}x</span>`
+                        : '';
                     const slicesStr = b.open_slices > 0
-                        ? `${b.open_slices} / ${b.num_levels} <span style="color:var(--text-dim);">(ref ${fmtUsd(b.reference_price)})</span>`
-                        : `<span style="color:var(--text-dim);">flat (ref ${fmtUsd(b.reference_price)})</span>`;
+                        ? `${b.open_slices} / ${b.num_levels} <span style="color:var(--text-dim);">(ref ${fmtUsd(b.reference_price)})</span>${selfTuneBadge}`
+                        : `<span style="color:var(--text-dim);">flat (ref ${fmtUsd(b.reference_price)})</span>${selfTuneBadge}`;
                     const hist = tradeHistoryByBot[b.bot_name];
                     let resultsStr;
                     if (!hist || hist.trade_count === 0) {
@@ -1932,7 +1941,11 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals) {
             slice - it just sits until price naturally reaches it, or you pause/resume again later. The chart below each
             branch shows real slice entries against the live price - a slice colored red is currently sitting at a real
             unrealized loss right now; grid selling is FIFO by trigger price, not by which slice is winning, so a red
-            slice can still be the one sold next.
+            slice can still be the one sold next. A "📐 self-tuned" badge means this branch's own spacing has been
+            automatically nudged wider after a genuinely rough recent stretch (or eased back toward the validated
+            1.5x default after a strong one) - checked once an hour, per-branch, off that branch's own real closed
+            trades only, never a backtest guess. It can only ever get MORE cautious than the validated default, and
+            self-corrects back down the moment that branch's own results improve.
         </p>
         ${renderGridRealizedTotalBanner(historyTotals, data)}
         ${renderGridCloseAllBanner(data)}`;

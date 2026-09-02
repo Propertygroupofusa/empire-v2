@@ -11221,6 +11221,122 @@ banner.
 
 ---
 
+## Real, hourly, per-branch self-tuning of Grid Bot spacing - "learn from its mistakes and make itself better every hr"
+
+Per the account owner's direct request: "make sure it's built to grow
+and be better than the hrs before and learn from it's mistakes and
+makes it self better every hr." A genuinely automatic, hourly,
+self-correcting mechanism - but deliberately bounded to the ONE
+already-validated, already-live lever this session's own average-swing
+spacing feature established, never a new or unvalidated strategy
+invented on the fly. This codebase's whole real-money history argues
+against auto-promoting anything untested to live trading - so this
+"learns" the same way every other self-healing layer here already does
+(coin exclusion, the strongest-sibling throne, floor self-heals):
+bounded, reversible, and judged only by that SAME branch's own real,
+already-closed trades, never a backtest simulation.
+
+**`CryptoGridBranch.self_tuned_multiplier`** (new nullable column,
+`models.py`) - `NULL` means "still on the real validated global default"
+(`AVG_SWING_SPACING_MULTIPLIER`, 1.5x). Added via the existing generic
+startup column migration, no custom migration needed.
+
+**`_maybe_self_tune_branch_spacing(branch)`** (`crypto_grid_bot.py`) -
+reads that ONE branch's own most recent `SELF_TUNE_LOOKBACK_TRADES` (5)
+real closed trades from `CryptoGridTradeHistory`. Fewer than 5 - not
+enough real evidence yet, no action. Otherwise:
+- A genuinely poor real win rate (< 40%) **widens** this branch's own
+  multiplier by one real 0.1x step - more conservative, more fee-safe
+  breathing room after a rough real stretch.
+- A genuinely strong real win rate (>= 60%) **eases** it back down by
+  one real step, toward that same validated 1.5x default.
+- Anything in between (a real "mixed" stretch) makes no change.
+
+**Bounded on both real ends, deliberately**:
+- The FLOOR is `AVG_SWING_SPACING_MULTIPLIER` itself (1.5x) - a branch
+  can only ever get MORE conservative than the already-validated live
+  default in response to a rough real stretch, never looser than what
+  real evidence already proved safe. Even many consecutive strong real
+  stretches can never push it below 1.5x.
+- The CEILING (`SELF_TUNE_MAX_MULTIPLIER`, 3.0x) caps how far one
+  genuinely unlucky coin's own branch can widen, so it can't compound
+  its own spacing forever.
+- Self-correcting, not one-way - a branch that's since recovered eases
+  its own multiplier back down the moment its real recent trades
+  improve, same "contestable, never a permanent verdict" philosophy
+  every other adaptive layer in this codebase already uses.
+
+**`compute_avg_swing_grid_pct()`** gained an optional `multiplier`
+parameter (defaults to the global constant when omitted, so every
+existing caller is unaffected) - `run_grid_branch_cycle()`'s own
+average-swing spacing call site now passes `branch.self_tuned_multiplier`
+(or `None`) through it, so a branch's own self-tuned value genuinely
+reaches its real live spacing calculation, not just sitting unused on
+the row.
+
+**`run_grid_self_tuning_sweep()`** - the real hourly driver, covers
+EVERY branch on record (including a currently paused one, so its
+spacing is already tuned correctly the moment it's resumed), one at a
+time so a real failure evaluating one branch can never block another's.
+Wired into `run_grid_branches_cycle()` via a plain in-process throttle
+(`_last_grid_self_tune_at`/`SELF_TUNE_INTERVAL_SECONDS`, 1 hour default,
+`GRID_SELF_TUNE_INTERVAL_SECONDS` env-overridable) - same pattern this
+file's own auto-rotate sweep already uses, no new background thread.
+
+Every real adjustment is logged as a new `TUNE`-type Live Activity event
+("📐 crypto_grid_doge self-tuned its own spacing multiplier 1.50x ->
+1.60x after a rough real stretch (2/5 = 40% win rate over its last 5
+real trades) - widening to trade more conservatively.") - auditable, not
+a silent black box. `get_grid_status()` now also returns each branch's
+`self_tuned_multiplier`/`effective_spacing_multiplier`, and
+`family_tree_dashboard.html`'s branch table shows a small gold
+"📐 self-tuned Nx" badge (with an explanatory hover tooltip, plus a note
+in the section's own footer paragraph) whenever a branch has genuinely
+moved away from the default - a branch still on default shows nothing
+extra.
+
+Verified offline (`test_grid_self_tuning.py`, 14 checks, real throwaway
+SQLite DB): fewer than 5 real trades makes no change; a real 20% win
+rate widens by exactly one step (1.5x -> 1.6x), persisted to the DB and
+the in-memory object both; a real 80% win rate on an already-widened
+1.8x branch eases it back to exactly 1.7x; a branch already at the real
+1.5x floor is NOT pushed lower by another strong real stretch; a branch
+already at the real 3.0x ceiling is NOT pushed higher by another rough
+real stretch; a real win rate exactly AT the 40% threshold (not below
+it) makes no change, confirming the boundary is strict; a passed-in
+multiplier genuinely changes the real computed `grid_pct` (hand-verified
+against two different real multipliers on identical swing data); the
+sweep tunes both an active AND a paused branch, and a simulated real
+failure on one branch never blocks or crashes evaluation of another; and
+the real hourly throttle fires on the very first cycle, does NOT fire
+again immediately after, and fires again once the window has elapsed.
+Full existing Grid Bot regression suite (18 files) re-run clean
+alongside it - the only failure seen
+(`test_grid_drawdown_and_dynamic_spacing.py`) was already confirmed
+pre-existing and unrelated earlier this session via a direct `git stash`
+comparison.
+
+**Deliberately scoped to Grid Bot only, and to spacing specifically** -
+not the crypto family tree or Alpaca side (both already have their own
+distinct hourly/24h self-adjusting layers - the automatic backtest
+re-run + coin/symbol exclusion, and the rolling-expectancy kill switch),
+and not entry-signal selection or position sizing on the Grid Bot side
+either, both of which stay governed by the existing manual
+backtest-then-promote flow (the trailing-stop-pct sweep, exit-mode
+promotion) rather than anything automatic - a genuinely new, unvalidated
+live strategy should still need a human looking at real backtest
+evidence first, and this hourly mechanism was deliberately kept narrow
+enough that it can never become that.
+
+**Not yet confirmed live** - the account owner needs to redeploy; the
+real, visible proof this is working will be a branch's own card showing
+a "📐 self-tuned" badge (and a matching `TUNE` line in the Live Activity
+feed) the first time one of its branches genuinely crosses the poor- or
+good-win-rate threshold over its own last 5 real trades, checked once an
+hour going forward.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md
