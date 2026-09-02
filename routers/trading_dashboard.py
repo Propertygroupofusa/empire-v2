@@ -3118,6 +3118,35 @@ async def set_crypto_reversal_trade(payload: SetReversalTradeRequest):
     return {"status": "updated", "reversal_trade_active": payload.enabled}
 
 
+@router.post("/crypto-selection-backtest/trailing-stop-pct-sweep", dependencies=[Depends(require_admin_key)])
+async def run_trailing_stop_pct_sweep_backtest():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    Per the account owner's explicit follow-up request right after
+    QUICK_PROFIT was removed outright ("is there any way that we can
+    refine and update the trailing stop what we have"): the live 2.5%
+    trail width was never itself tested against any alternative - it was
+    only sized to match the OLD QUICK_PROFIT dollar-giveback cap, a
+    coincidence of the comparison it won, not evidence it's the best
+    trailing-stop width on its own merits. Replays the real trailing-stop
+    exit rule under several candidate trail percentages
+    (crypto_selection_backtest.py's TRAILING_STOP_PCT_CANDIDATES) against
+    the exact same real historical candles for every coin, so a
+    genuinely better width can be found with real evidence instead of
+    guessed at.
+
+    RESTORED - this route (along with the function it calls and its
+    dashboard button/table/promote-row) was accidentally deleted by an
+    unrelated later commit that added crypto_grid_bot.py, and stayed
+    missing until the account owner asked directly why they couldn't find
+    a "push a button to go live" option for it on the dashboard.
+
+    Pulls real historical data from Coinbase's public candles endpoint -
+    can take 30-90 seconds depending on that endpoint's response time."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_trailing_stop_pct_sweep_comparison()
+
+
 class SetTrailingStopPctRequest(BaseModel):
     pct: float
 

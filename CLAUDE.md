@@ -11915,6 +11915,80 @@ tap "Run Strategy Lab" again to see the real, apples-to-apples number.
 
 ---
 
+## Real regression found and fixed: the Trailing Stop Width Sweep tool - and its "promote to live" button - had been silently deleted by an unrelated commit
+
+The account owner's own garbled follow-up ("yeah they honor but am I able
+to push a button for it to go live I don't see that option it's not
+letting me pick it if I want to") was a real, legitimate complaint, not
+something they were missing on the page. Traced it with `git log`/`git
+show`/`git diff` archaeology rather than guessing: the entire Trailing
+Stop Width Sweep feature - built, tested, and documented earlier this
+same session (see "Trailing-stop candidate set revised again..." and the
+sweep's own original build above) - was silently, accidentally deleted
+by a completely unrelated later commit, `ab533fc` ("Add
+crypto_grid_bot.py: real, live Grid Bot branches, on by default"), which
+net-removed 153 lines from `crypto_selection_backtest.html` and 102 lines
+from `crypto_selection_backtest.py` while adding the new Grid Bot module
+- almost certainly an accidental large-diff collision rather than a
+deliberate removal, since nothing in that commit's own real purpose had
+anything to do with this tool.
+
+**What survived, and what didn't**: only the underlying real promotion-
+application mechanism - `get_live_trailing_stop_pct()`/
+`set_live_trailing_stop_pct()` in `crypto_family_tree_bot.py`, and the
+`POST /family-tree-status/set-trailing-stop-pct` route in
+`routers/trading_dashboard.py` - survived, since those live in different
+files the same destructive edit never touched, and the LIVE trailing-stop
+exit mode itself (promoted to 5.0% earlier this session) was never
+affected. What was actually gone: `TRAILING_STOP_PCT_CANDIDATES`, the
+whole `run_trailing_stop_pct_sweep_comparison()` function, its
+`POST /crypto-selection-backtest/trailing-stop-pct-sweep` route, and
+every piece of its dashboard UI (the note, the "▶ Run Trailing Stop Width
+Sweep" button, the results tables, and the promote-button row) - so the
+account owner genuinely had no way to run a fresh sweep or push a
+DIFFERENT width live, exactly matching their own real complaint.
+
+**Fixed by restoring all three pieces verbatim from git history**
+(`git show ab533fc^:<file>`), not reconstructed from memory:
+1. `crypto_selection_backtest.py` - `TRAILING_STOP_PCT_CANDIDATES =
+   [0.03, 0.04, 0.05, 0.075]` and the full
+   `run_trailing_stop_pct_sweep_comparison()` function restored, with an
+   added note explaining the real regression and restoration directly in
+   the code comment.
+2. `routers/trading_dashboard.py` - `POST
+   /crypto-selection-backtest/trailing-stop-pct-sweep` restored,
+   inserted right before the pre-existing (never-deleted)
+   `set-trailing-stop-pct` promote endpoint it feeds into.
+3. `crypto_selection_backtest.html` - the note/button/status/results
+   block and its full JS (`runTrailingStopPctSweep()`,
+   `renderTrailingStopPctSweepResults()`, `renderTrailPctPromoteRow()`,
+   `promoteTrailPct()`) restored at the correct position in the current
+   file (after the QUICK_PROFIT-vs-Trailing-Stop section, before the
+   later-added Partial-Exit-vs-Full-Trail section, since the file's own
+   layout had moved on since the deletion).
+
+Verified: `python3 -m py_compile` clean on both Python files; a real
+Python `HTMLParser` tag-balance check and `node --check` on the extracted
+inline `<script>` clean on the HTML file; a real AST route-count parse
+confirms 121 total routes with zero duplicates and the restored route
+correctly bound; a new dedicated offline test
+(`test_restored_trailing_stop_sweep.py`, 6 checks) confirms the restored
+function works end-to-end against a mocked fetch, reporting all 4 real
+candidates, the correct real live-trail-pct baseline, and a real
+best-overall-pct among the tested set; and the pre-existing
+`test_grid_level_spacing.py` (27 checks), `test_strategy_lab_live_spacing.py`
+(6 checks), and `test_grid_atr_spacing.py` (22 checks) all re-run clean
+alongside it, confirming no interference with other work done earlier
+this same session.
+
+**Not yet confirmed live** - the account owner needs to redeploy and open
+`/crypto-selection-backtest-view` to see the "▶ Run Trailing Stop Width
+Sweep" button and its promote row again; a fresh sweep run there is the
+real, direct fix for their own complaint about not being able to push a
+different width live.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

@@ -513,6 +513,123 @@ async def run_quick_profit_vs_trailing_stop_comparison(coins=None, days=BACKTEST
     }
 
 
+# Per the account owner's explicit follow-up ("is there any way that we
+# can refine and update the trailing stop what we have") right after
+# QUICK_PROFIT was removed outright in favor of trailing stop: the live
+# 2.5% trail (TRAILING_STOP_PCT) was never itself tested against any
+# alternative width - it was sized to match the OLD QUICK_PROFIT
+# dollar-giveback cap ($3.75/$150), a coincidence of the comparison it
+# won, not evidence it's the best trailing-stop width on its own merits.
+# These candidates originally bracketed it on both sides (tighter and
+# looser) so the sweep could find a genuinely better real width, not just
+# a different one.
+#
+# Revised again per the account owner's own direct read of the real
+# per-coin sweep results: the narrower candidates (1.5%/2.0%/2.5%) were
+# consistently the worst real performers across almost every coin in the
+# table (the most red), while the wider ones (3.0%/4.0%/5.0%) were
+# consistently the best (the most green) - a real, visible pattern of
+# wider trails outperforming tighter ones on this data (though NOT
+# perfectly monotonic per-coin - a few coins like LDO/SUI/ETC stayed
+# negative at every width tested, meaning trail width alone can't fix a
+# fundamentally bad setup on those). Dropped the three worst-performing
+# narrow candidates and added 0.075 (7.5%) to keep testing further in the
+# direction the real data was already pointing - 0.05 (5.0%, the
+# account owner's own currently-promoted live width) stays in the set so
+# it's never silently dropped out from under the live bot.
+#
+# RESTORED after being found accidentally deleted (along with its
+# dashboard button/table/promote-row and its POST route) by an unrelated
+# later commit that added crypto_grid_bot.py - the account owner asked
+# directly why they couldn't find a "push a button to go live" option for
+# this on the dashboard, and the honest answer traced back through git
+# history to this real regression, not something they were missing on
+# the page. The live promote mechanism itself
+# (get_live_trailing_stop_pct/set_live_trailing_stop_pct in
+# crypto_family_tree_bot.py, and the /family-tree-status/set-trailing-
+# stop-pct route) was never touched by that deletion and kept working the
+# whole time - only the tool that RUNS the real sweep and the button that
+# CALLS that promote endpoint were gone, so a value could still be
+# promoted via a raw API call but there was never a dashboard button to
+# do it with.
+TRAILING_STOP_PCT_CANDIDATES = [0.03, 0.04, 0.05, 0.075]
+
+
+async def run_trailing_stop_pct_sweep_comparison(coins=None, days=BACKTEST_DAYS, max_concurrent=6, candidates=None):
+    """SHADOW-MODE, additive comparison - never touches live trading,
+    places no real order. Replays the real trailing-stop exit rule under
+    several candidate trail percentages (TRAILING_STOP_PCT_CANDIDATES by
+    default) against the IDENTICAL real historical candles for every
+    coin, so a genuinely better trail width can be found with real
+    evidence - the same discipline (replay the bot's own real rules,
+    never guess) every other comparison tool in this file already
+    follows. Entry, target, stop, and breakeven are all identical across
+    every candidate - only the trail width itself varies, isolating the
+    one real question being asked."""
+    coins = coins or COIN_FAMILY_TREE
+    candidates = candidates or TRAILING_STOP_PCT_CANDIDATES
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def _one(product_id):
+        async with semaphore:
+            candles = await fetch_historical_candles(session, product_id, days=days)
+        if candles is None:
+            return product_id, None, "not enough historical data"
+        closes, highs, lows, _times = candles
+        by_pct = {
+            pct: _replay_with_exit_mode(closes, highs, lows, mode="trailing_stop", trail_pct=pct)
+            for pct in candidates
+        }
+        return product_id, by_pct, None
+
+    async with aiohttp.ClientSession() as session:
+        outcomes = await asyncio.gather(*(_one(pid) for pid in coins))
+
+    comparison = []
+    skipped = []
+    for product_id, by_pct, skip_reason in outcomes:
+        if by_pct is None:
+            skipped.append({"product_id": product_id, "reason": skip_reason})
+            continue
+        comparison.append({"product_id": product_id, "results": {str(pct): by_pct[pct] for pct in candidates}})
+
+    totals_by_pct = {}
+    coins_won_by_pct = {}
+    for pct in candidates:
+        key = str(pct)
+        totals_by_pct[key] = sum(
+            (row["results"][key]["total_pnl"] if row["results"][key] else 0.0) for row in comparison
+        )
+        coins_won_by_pct[key] = 0
+
+    for row in comparison:
+        best_pnl, best_key = None, None
+        for pct in candidates:
+            key = str(pct)
+            r = row["results"][key]
+            pnl = r["total_pnl"] if r else 0.0
+            if best_pnl is None or pnl > best_pnl:
+                best_pnl, best_key = pnl, key
+        if best_key is not None:
+            coins_won_by_pct[best_key] += 1
+
+    best_overall_pct = max(totals_by_pct, key=lambda k: totals_by_pct[k]) if totals_by_pct else None
+
+    return {
+        "backtest_days": days,
+        "spend_per_trade": SPEND,
+        "candidates": candidates,
+        "current_live_trail_pct": TRAILING_STOP_PCT,
+        "coins_tested": len(coins),
+        "coins_with_results": len(comparison),
+        "skipped": skipped,
+        "totals_by_pct": totals_by_pct,
+        "coins_won_by_pct": coins_won_by_pct,
+        "best_overall_pct": best_overall_pct,
+        "comparison": comparison,
+    }
+
+
 PARTIAL_EXIT_FRACTION = 0.5  # sell half at the first real target, per the account owner's own explicit request ("take most of your profits... take partials... and trailing the stop") - a common real professional convention (scale out, let the rest run), not a number this codebase already had
 
 
