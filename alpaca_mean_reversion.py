@@ -40,6 +40,7 @@ def should_exit_position(
     peak_pnl_pct: float = 0.0,  # highest unrealized % this position has ever reached - caller persists this (see BotPosition.peak_pct)
     breakeven_trigger_pct: float = 0.01,  # once peak reaches +1%, the stop can no longer go below breakeven
     max_giveback_pct: float = 0.005,  # once ANY real profit has been reached, cap how much of the peak can be given back before forcing an exit
+    log_prefix: str = "",
 ) -> Tuple[bool, str, str, float]:
     """
     Decide whether to exit a position (long or short) based on mean reversion rules.
@@ -51,6 +52,22 @@ def should_exit_position(
         pass it back in as peak_pnl_pct on the next call - a Railway restart wiping an
         in-memory-only peak would silently disarm both new rules below on exactly the
         positions that had run up the most.
+
+    log_prefix: real, empty by default - EVERY genuine live call site
+    (prop_bot.py's whole-account scan and its per-branch cycle) leaves
+    this unset, so their own log lines are completely unaffected.
+    alpaca_selection_backtest.py's shadow-mode replay (_replay_symbol)
+    calls this function on every simulated bar of a 30-day backtest,
+    passing the real ticker as `symbol` purely for a readable log line -
+    which meant a backtest run's own log output ("DIA (LONG): Max hold
+    time exceeded...") was, by that function's own prior docstring,
+    "indistinguishable from a genuine live-position log line at a
+    glance." Confirmed real: the account owner flagged exactly this
+    line from a real Railway log, worried it was a live trade closing
+    at a bad time - it was almost certainly backtest replay noise, not
+    a real position. Backtest callers now pass log_prefix="[BACKTEST] "
+    so every future occurrence of this exact confusion is immediately
+    resolved by reading the log line itself, not by tracing code.
     """
 
     if direction == "long":
@@ -78,7 +95,7 @@ def should_exit_position(
             reason = f"Breakeven stop hit: {unrealized_pnl_pct*100:.2f}% (was up {new_peak_pnl_pct*100:.2f}% at peak, can't close below breakeven)"
         else:
             reason = f"Stop loss hit: {unrealized_pnl_pct*100:.2f}% loss (limit: {stop_loss_pct*100:.2f}%)"
-        log.info(f"  🛑 {symbol} ({direction.upper()}): {reason}")
+        log.info(f"  🛑 {log_prefix}{symbol} ({direction.upper()}): {reason}")
         return True, reason, "stop_loss", new_peak_pnl_pct
 
     # ========== RULE 1b: Peak-profit giveback ==========
@@ -92,31 +109,31 @@ def should_exit_position(
     peak_giveback = new_peak_pnl_pct - unrealized_pnl_pct
     if new_peak_pnl_pct > 0 and peak_giveback >= max_giveback_pct:
         reason = f"Peak profit giveback: gave back {peak_giveback*100:.2f}% from a {new_peak_pnl_pct*100:.2f}% peak (limit: {max_giveback_pct*100:.2f}%)"
-        log.info(f"  💰 {symbol} ({direction.upper()}): {reason}")
+        log.info(f"  💰 {log_prefix}{symbol} ({direction.upper()}): {reason}")
         return True, reason, "trail", new_peak_pnl_pct
 
     # ========== RULE 2: Minimum Profit Target ==========
     if unrealized_pnl_pct >= min_profit_target_pct:
         reason = f"Hit minimum profit target: {unrealized_pnl_pct*100:.2f}% (required: {min_profit_target_pct*100:.2f}%)"
-        log.info(f"  ✅ {symbol} ({direction.upper()}): {reason}")
+        log.info(f"  ✅ {log_prefix}{symbol} ({direction.upper()}): {reason}")
         return True, reason, "profit", new_peak_pnl_pct
 
     # ========== RULE 3: RSI Exit Signal ==========
     if direction == "long" and current_rsi >= rsi_exit_threshold and unrealized_pnl_pct > 0:
         # Long: Sell on rally when RSI gets hot
         reason = f"RSI exit signal at {current_rsi:.1f} (threshold: {rsi_exit_threshold}); profit taken at +{unrealized_pnl_pct*100:.2f}%"
-        log.info(f"  📈 {symbol} (LONG): {reason}")
+        log.info(f"  📈 {log_prefix}{symbol} (LONG): {reason}")
         return True, reason, "rsi_exit", new_peak_pnl_pct
     elif direction == "short" and current_rsi <= rsi_exit_threshold and unrealized_pnl_pct > 0:
         # Short: Cover on bounce when RSI recovers
         reason = f"RSI exit signal at {current_rsi:.1f} (threshold: {rsi_exit_threshold}); profit taken at +{unrealized_pnl_pct*100:.2f}%"
-        log.info(f"  📉 {symbol} (SHORT): {reason}")
+        log.info(f"  📉 {log_prefix}{symbol} (SHORT): {reason}")
         return True, reason, "rsi_exit", new_peak_pnl_pct
 
     # ========== RULE 4: Max Hold Time ==========
     if position_age_seconds >= max_hold_seconds:
         reason = f"Max hold time exceeded: {position_age_seconds}s >= {max_hold_seconds}s"
-        log.info(f"  ⏱️  {symbol} ({direction.upper()}): {reason}")
+        log.info(f"  ⏱️  {log_prefix}{symbol} ({direction.upper()}): {reason}")
         return True, reason, "timeout", new_peak_pnl_pct
 
     # ========== NO EXIT: HOLD ==========
@@ -132,6 +149,7 @@ def should_exit_position_momentum(
     peak_pnl_pct: float = 0.0,
     max_hold_seconds: int = 86400,  # 24 real hours - a backstop only, much longer than mean-reversion's 2-hour default
     trail_pct: float = 0.03,  # exits on a pullback this large from the real peak since entry, not a fixed target off entry
+    log_prefix: str = "",
 ) -> Tuple[bool, str, str, float]:
     """Momentum's real exit rule - the direct live counterpart to
     alpaca_selection_backtest.py's _replay_symbol_momentum(), which this
@@ -145,7 +163,12 @@ def should_exit_position_momentum(
 
     Returns (should_exit, reason, exit_type, new_peak_pnl_pct) - same
     shape as should_exit_position() above, so callers persist the peak
-    the same way (BotPosition.peak_pct)."""
+    the same way (BotPosition.peak_pct).
+
+    log_prefix: see should_exit_position()'s own docstring - real, empty
+    by default for every genuine live call site; a shadow-mode backtest
+    replay passes "[BACKTEST] " so its own log lines are never mistaken
+    for a genuine live position closing."""
     unrealized_pnl_pct = (current_price - entry_price) / entry_price
     new_peak_pnl_pct = max(peak_pnl_pct, unrealized_pnl_pct)
     trailing_stop_pct = new_peak_pnl_pct - trail_pct
@@ -155,12 +178,12 @@ def should_exit_position_momentum(
             f"Momentum trailing stop: pulled back to {unrealized_pnl_pct*100:.2f}% from a "
             f"{new_peak_pnl_pct*100:.2f}% peak (trail: {trail_pct*100:.1f}%)"
         )
-        log.info(f"  📉 {symbol}: {reason}")
+        log.info(f"  📉 {log_prefix}{symbol}: {reason}")
         return True, reason, "trail", new_peak_pnl_pct
 
     if position_age_seconds >= max_hold_seconds:
         reason = f"Max hold time exceeded: {position_age_seconds}s >= {max_hold_seconds}s"
-        log.info(f"  ⏱️  {symbol}: {reason}")
+        log.info(f"  ⏱️  {log_prefix}{symbol}: {reason}")
         return True, reason, "timeout", new_peak_pnl_pct
 
     reason = f"Hold: P&L {unrealized_pnl_pct*100:.2f}% (peak {new_peak_pnl_pct*100:.2f}%, trailing stop at {trailing_stop_pct*100:.2f}%)"

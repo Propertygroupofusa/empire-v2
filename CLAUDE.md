@@ -11484,6 +11484,81 @@ slice.
 
 ---
 
+## Real log ambiguity found and fixed: a real Railway log line the account owner flagged was almost certainly backtest noise, not a live trade
+
+The account owner pasted a real Railway log entry, worried about it
+directly: `INFO:alpaca_mean_reversion:  ⏱️  DIA (LONG): Max hold time
+exceeded: 7200s >= 7200s`, tagged `"severity": "error"` by Railway's own
+monitoring. Traced it by reading the code rather than guessing.
+
+The log text itself is real and completely benign on its face - RULE 4
+(Max Hold Time) inside `should_exit_position()` (`alpaca_mean_reversion.py`)
+is an intentional, working 2-hour backstop, and `prop_bot.py`'s own Pass 1
+immediately calls `close_position()` the instant this fires (`if
+should_exit: await close_position(...)`) - so even read as a genuine live
+event, this is the system doing exactly what it's supposed to.
+
+But the REAL question - was this actually a live position - traced to
+something else: every live call site in `prop_bot.py` (the whole-account
+scan, and the ALPACA BRANCHES per-branch cycle) passes `symbol=contract`
+- the internal FUTURES contract code (e.g. `"MYM"` for the Dow proxy),
+never the real underlying ticker `"DIA"` (`FUTURES["MYM"]["symbol"] ==
+"DIA"`, confirmed - `"DIA"` is not itself a FUTURES key anywhere, and
+every real code path that populates `open_prop_positions` -
+`open_position()`, `manual_open_prop_position()`,
+`reconcile_positions_with_broker()`, `load_open_positions()` - strictly
+validates against real FUTURES keys). A literal `"DIA"` should be
+structurally impossible from any real live position.
+
+Found the real source instead: `alpaca_selection_backtest.py`'s own
+shadow-mode `_replay_symbol()` (used by the exit-rule-sensitivity
+comparison and the combined dual-strategy backtest) calls this EXACT
+SAME live `should_exit_position()` function on every simulated bar of a
+30-day backtest, passing the real ticker (`"DIA"`, not a contract code,
+since backtests replay real Alpaca history keyed by ticker) straight
+through as `symbol` - and that function's own PRIOR docstring already
+admitted the consequence: doing so made a backtest run's log output
+"indistinguishable from a genuine live-position log line at a glance."
+A backtest replaying 30 days of 15-minute bars can produce many such
+INFO lines in a short burst, which is very plausibly what got flagged
+`"severity": "error"` by Railway's own volume/anomaly detection - not a
+real Python exception.
+
+**Fixed properly rather than just explained away**: `should_exit_position()`/
+`should_exit_position_momentum()` (`alpaca_mean_reversion.py`) both
+gained an optional `log_prefix: str = ""` parameter, prepended directly
+into every one of their 8 combined real `log.info()` lines. Both real
+live call sites in `prop_bot.py` never pass it, so live log output is
+byte-for-byte unchanged. Both real backtest call sites in
+`alpaca_selection_backtest.py` (`_replay_symbol()` and the combined
+dual-strategy simulation loop) now pass `log_prefix="[BACKTEST] "` -
+so the exact same event that produced the account owner's real log line
+would now read `"[BACKTEST] DIA (LONG): Max hold time exceeded..."`,
+immediately readable as backtest activity rather than a real trade,
+with zero need to trace code to tell the difference again.
+
+Verified offline (`test_backtest_log_prefix.py`, 8 checks): a real
+live-style call (no `log_prefix`) produces the exact original log text,
+proving live behavior is completely unchanged; a real backtest-style
+call reproduces the account owner's own exact log shape but now carries
+the `[BACKTEST]` tag; the real `should_exit`/`exit_type`/`new_peak_pnl_pct`
+return values are confirmed identical regardless of `log_prefix` - purely
+cosmetic, never changes any real trading decision; and both real call
+sites in `alpaca_selection_backtest.py` are confirmed (via a direct
+source-file check, not just manual reading) to actually pass the new
+tag. Full existing Alpaca regression suite (19 files) re-run clean
+alongside it - the one failure seen (`test_alpaca_overview.py`) was
+already confirmed pre-existing and unrelated earlier this session.
+
+**Not yet confirmed live** - the account owner needs to redeploy; the
+real, visible proof this is working will be the very next occurrence of
+this exact log shape reading `[BACKTEST] DIA (LONG): ...` if it comes
+from a backtest (confirming the diagnosis) or plain `MYM (LONG): ...`
+if it's ever a genuine live position (which would then be real,
+immediately actionable information instead of ambiguous).
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

@@ -130,6 +130,7 @@ def _replay_symbol(
             rsi_profit_threshold_long=RSI_PROFIT_THRESHOLD_LONG,
             peak_pnl_pct=position["peak_pnl_pct"],
             breakeven_trigger_pct=BREAKEVEN_TRIGGER_PCT, max_giveback_pct=giveback_pct,
+            log_prefix="[BACKTEST] ",
         )
         position["peak_pnl_pct"] = new_peak
         if should_exit:
@@ -766,6 +767,7 @@ def _simulate_combined(events: list, pool_usd: float) -> dict:
                     rsi_profit_threshold_long=RSI_PROFIT_THRESHOLD_LONG,
                     peak_pnl_pct=pos["peak_pnl_pct"],
                     breakeven_trigger_pct=BREAKEVEN_TRIGGER_PCT, max_giveback_pct=MAX_GIVEBACK_PCT,
+                    log_prefix="[BACKTEST] ",
                 )
                 pos["peak_pnl_pct"] = new_peak
                 exited = should_exit
