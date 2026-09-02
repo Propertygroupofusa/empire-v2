@@ -1266,7 +1266,8 @@ async def run_narrow_range_breakout_backtest(symbols=None, days: int = BACKTEST_
 
     async def _one(session, symbol):
         async with semaphore:
-            bars, err = await _fetch_bars_with_ohlc_and_times(session, symbol, days)
+            ticker = FUTURES.get(symbol, {}).get("symbol", symbol)  # real Alpaca-tradable ticker (e.g. SIL -> SLV, MES -> SPY), not the raw contract code
+            bars, err = await _fetch_bars_with_ohlc_and_times(session, ticker, days)
         if bars is None:
             last_error[symbol] = err
             return symbol, None
@@ -1385,7 +1386,8 @@ async def run_opening_bar_breakout_backtest(symbols=None, days: int = BACKTEST_D
 
     async def _one(session, symbol):
         async with semaphore:
-            bars, err = await _fetch_bars_2min_with_ohlc_and_times(session, symbol, days)
+            ticker = FUTURES.get(symbol, {}).get("symbol", symbol)  # real Alpaca-tradable ticker (e.g. SIL -> SLV, MES -> SPY), not the raw contract code
+            bars, err = await _fetch_bars_2min_with_ohlc_and_times(session, ticker, days)
         if bars is None:
             last_error[symbol] = err
             return symbol, None
@@ -1484,7 +1486,8 @@ async def run_opening_bar_multi_entry_comparison(symbols=None, days: int = BACKT
 
     async def _one(session, symbol):
         async with semaphore:
-            bars, err = await _fetch_bars_2min_with_ohlc_and_times(session, symbol, days)
+            ticker = FUTURES.get(symbol, {}).get("symbol", symbol)  # real Alpaca-tradable ticker (e.g. SIL -> SLV, MES -> SPY), not the raw contract code
+            bars, err = await _fetch_bars_2min_with_ohlc_and_times(session, ticker, days)
         if bars is None:
             last_error[symbol] = err
             return symbol, None, None
@@ -1669,7 +1672,8 @@ async def run_opening_bar_narrow_state_comparison(symbols=None, days: int = BACK
 
     async def _one(session, symbol):
         async with semaphore:
-            bars, err = await _fetch_bars_2min_with_ohlc_and_times(session, symbol, days)
+            ticker = FUTURES.get(symbol, {}).get("symbol", symbol)  # real Alpaca-tradable ticker (e.g. SIL -> SLV, MES -> SPY), not the raw contract code
+            bars, err = await _fetch_bars_2min_with_ohlc_and_times(session, ticker, days)
         if bars is None:
             last_error[symbol] = err
             return symbol, None
@@ -1821,7 +1825,8 @@ async def run_wide_state_contrarian_backtest(symbols=None, days: int = BACKTEST_
 
     async def _one(session, symbol):
         async with semaphore:
-            bars, err = await _fetch_bars_2min_with_ohlc_and_times(session, symbol, days)
+            ticker = FUTURES.get(symbol, {}).get("symbol", symbol)  # real Alpaca-tradable ticker (e.g. SIL -> SLV, MES -> SPY), not the raw contract code
+            bars, err = await _fetch_bars_2min_with_ohlc_and_times(session, ticker, days)
         if bars is None:
             last_error[symbol] = err
             return symbol, None
@@ -2008,7 +2013,8 @@ async def run_opening_bar_short_side_backtest(symbols=None, days: int = BACKTEST
 
     async def _one(session, symbol):
         async with semaphore:
-            bars, err = await _fetch_bars_2min_with_ohlc_and_times(session, symbol, days)
+            ticker = FUTURES.get(symbol, {}).get("symbol", symbol)  # real Alpaca-tradable ticker (e.g. SIL -> SLV, MES -> SPY), not the raw contract code
+            bars, err = await _fetch_bars_2min_with_ohlc_and_times(session, ticker, days)
         if bars is None:
             last_error[symbol] = err
             return symbol, None
@@ -2162,7 +2168,8 @@ async def run_scaled_entry_comparison_backtest(symbols=None, days: int = BACKTES
 
     async def _one(session, symbol):
         async with semaphore:
-            bars, err = await _fetch_bars_2min_with_ohlc_and_times(session, symbol, days)
+            ticker = FUTURES.get(symbol, {}).get("symbol", symbol)  # real Alpaca-tradable ticker (e.g. SIL -> SLV, MES -> SPY), not the raw contract code
+            bars, err = await _fetch_bars_2min_with_ohlc_and_times(session, ticker, days)
         if bars is None:
             last_error[symbol] = err
             return symbol, None, None
@@ -2297,7 +2304,8 @@ async def run_red_bar_takeout_backtest(symbols=None, days: int = BACKTEST_DAYS, 
 
     async def _one(session, symbol):
         async with semaphore:
-            bars, err = await _fetch_bars_2min_with_ohlc_and_times(session, symbol, days)
+            ticker = FUTURES.get(symbol, {}).get("symbol", symbol)  # real Alpaca-tradable ticker (e.g. SIL -> SLV, MES -> SPY), not the raw contract code
+            bars, err = await _fetch_bars_2min_with_ohlc_and_times(session, ticker, days)
         if bars is None:
             last_error[symbol] = err
             return symbol, None
