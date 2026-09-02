@@ -12051,6 +12051,139 @@ discipline every other tool in this file already follows.
 
 ---
 
+## Grid Level/Spacing Comparison gets a real "promote to live" button, plus 2 more real candidates
+
+Right after the previous section shipped, the account owner's own direct
+follow-up exposed the real gap in it: "yeah but it doesn't let me pick
+something better well if it's nun thing better than what I have give me
+2 more better option to choose." Two real things closed here: (1) the
+Grid Level/Spacing Comparison and Strategy Lab tools could only backtest
+a fewer/wider-slice config, never actually PUSH it to live trading -
+unlike `exit_mode`/`trailing_stop_pct`, which already had this exact
+promote pattern; (2) 2 more real candidates, unconditionally - not
+contingent on the original 3 first proving out (this sandbox has no live
+network access to confirm that anyway).
+
+**The 2 new candidates** - `4_levels_1.5pct` and `3_levels_3.0pct` -
+extend the existing `GRID_LEVEL_SPACING_CANDIDATES` set (now 5 total: 3
+levels @ 2.0%/2.5%/3.0%, plus 4 levels @ 1.5% and 5 levels @ 2.0%), same
+real "fewer, bigger slices" shape as the original 3, continuing the same
+real direction the pasted critique that started this whole comparison
+argued for (narrower spacing trending worse, wider trending better in
+the existing sweep). Mirrored into Strategy Lab's own
+`STRATEGY_LAB_STRATEGIES` too, so both tools test the identical 5
+candidates side by side with "what I have."
+
+**The real promote mechanism** - `crypto_grid_bot.py` gained
+`get_live_grid_spacing_override()`/`set_live_grid_spacing_override()`,
+following the exact same DB-persisted, index-into-a-fixed-list pattern
+`get_live_exit_mode()`/`get_live_trailing_stop_pct()` already established
+(a `TradingBotState` row storing an index as a float, never a Railway env
+var - avoids the exact stray-quote-character bug class that once
+silently disabled the crypto coordinator earlier this session). Defaults
+to `"live_default"` - today's real per-branch behavior (per-allocation
+`num_levels` via `_safe_num_levels_for_allocation`, dynamic
+avg-swing/fee-tier spacing) completely unchanged - until the account
+owner explicitly promotes one of the 5 real candidates.
+
+`GRID_LEVEL_SPACING_CANDIDATES` itself is now defined directly in
+`crypto_grid_bot.py` too (mirrored BY VALUE into
+`crypto_selection_backtest.py`, not imported - that module imports FROM
+this one, engine-style, so the reverse would be a circular import; same
+duplicate-by-value discipline already used elsewhere in this file for
+`STOP_HIT_REVERSAL_TARGET_PCT`/`SR_LOOKBACK_HOURS`). If this dict is ever
+revised in one file, the other must be updated to match, or a "promoted"
+candidate could silently differ from what was actually backtested.
+
+**Real, live wiring, threaded into every place a branch's own levels or
+spacing gets set**:
+- A new `_effective_num_levels(allocated_usd)` wraps the existing
+  `_safe_num_levels_for_allocation()`, capping its result down (never up)
+  to a promoted candidate's own levels count when one is active. Wired
+  into all 3 real allocation-change call sites - `create_grid_branch()`,
+  `add_cash_to_grid_branch()`, `withdraw_from_grid_branch()` - so a
+  branch created or funded while a candidate is live picks up the real
+  fewer-levels cap immediately, not just on its next spacing cycle.
+- `run_grid_branch_cycle()`'s own spacing-selection block now checks the
+  real promoted override FIRST, before either dynamic-spacing mode - a
+  promoted candidate's own fixed `grid_pct` wins outright over both
+  average-swing and fee-tier spacing, and its own `num_levels` cap is
+  re-applied live, every single cycle (not just at the next
+  add-cash/withdraw event), so an already-existing branch picks up a
+  fresh promotion on its very next cycle rather than waiting on a cash
+  change. `"live_default"` (nothing ever promoted) changes nothing here -
+  byte-for-byte the same real behavior as before this mechanism existed.
+
+New `POST /grid-status/spacing-override` (`{label}`, admin-key gated,
+`routers/trading_dashboard.py`) - refuses an unknown label with a clear
+400; only `"live_default"` or one of the 5 real tested candidates can
+ever go live. `get_grid_status()` now also returns
+`grid_spacing_override`/`grid_spacing_override_candidates` for dashboard
+visibility.
+
+**Dashboard**: `crypto_selection_backtest.html`'s Grid Level/Spacing
+Comparison section gained a real "Push a real level/spacing config to the
+live Grid Bot" promote row (same `.promote-btn`/confirm-dialog/`is-live`
+pattern already established for the Trailing Stop Width Sweep's own
+promote buttons) - fetches the real current override on page load and
+after every backtest run, so it can never show a stale "live now" badge.
+Strategy Lab's own legend text was updated to point at this same promote
+row rather than describing promotion as only "a separate, deliberate
+decision" with no actual mechanism. `family_tree_dashboard.html`'s Grid
+Bot section gained a matching read-only "🎯 Grid level/spacing override"
+badge, linking back to the backtest page - so a promoted override is
+never invisible from the main dashboard, even though the actual promote
+buttons live on the backtest page next to the real evidence that
+justifies picking one.
+
+Verified offline (`test_grid_spacing_override_promote.py`, new, 25
+checks) against the real local dev DB: both new candidates exist with
+their real exact configs, mirrored identically between the two Python
+files; the override defaults to `"live_default"`, round-trips correctly
+to and from any of the 5 real candidates, rejects an unknown label with
+the real live value left completely untouched; `_effective_num_levels`
+caps a real $500 branch down to a promoted candidate's own levels count
+and never raises a small branch's levels above its own per-allocation
+default; `create_grid_branch`/`add_cash_to_grid_branch`/
+`withdraw_from_grid_branch` all apply the real live override immediately
+at the moment they're called; and, end-to-end through
+`run_grid_branch_cycle()`, a real promoted candidate is confirmed to win
+over BOTH avg-swing and fee-tier spacing (neither dynamic-spacing compute
+function is ever even called while an override is active), re-caps
+`num_levels` live in the same cycle, persists both to the real DB row,
+and correctly falls back to avg-swing spacing again once reverted to
+`"live_default"`. Full related regression suite (Grid Level/Spacing
+Comparison, average-swing spacing, ATR spacing, trailing-stop-pct sweep,
+auto-rotate, close-all, create-multiple-branches, fee-net-P&L,
+higher-timeframe-trend, auto-deploy-free-cash, backtest comparisons,
+BTC-relative-strength, core Grid Bot mechanics) re-run clean alongside
+it - 3 pre-existing test files from earlier this session
+(`test_grid_level_spacing.py`, `test_strategy_lab_grid_only.py`,
+`test_strategy_lab_live_spacing.py`) had their own hardcoded
+3-or-4-candidate-count assertions updated in place to the new real
+5/6-entry sets (their actual point - config correctness, replay
+mechanics - was unchanged and still passes); 2 other failures seen
+(`test_grid_drawdown_and_dynamic_spacing.py`,
+`test_fund_grid_from_tree.py`) were confirmed pre-existing and unrelated
+via a direct `git stash` comparison - both fail identically on the prior
+commit. Confirmed via a real AST route-count parse that the new route is
+bound correctly with no duplicate registrations (122 total routes, zero
+duplicates). Both touched HTML files re-verified with a real Python
+`HTMLParser` tag-balance check and `node --check` on each file's
+extracted inline `<script>` block.
+
+**Not yet run against real historical data, and not yet confirmed live**
+- same documented gap as every backtest tool in this file (no live
+network access to Coinbase from this sandbox). The account owner needs
+to open `/crypto-selection-backtest-view` after the next redeploy, run
+the Grid Level/Spacing Comparison and/or Strategy Lab to see the real
+numbers for all 5 candidates, and then use the new promote row to
+actually push whichever one the real evidence favors - this feature only
+provides the mechanism, exactly like every other promote button in this
+file, it doesn't recommend which candidate to pick.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

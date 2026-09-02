@@ -5339,6 +5339,32 @@ async def set_grid_avg_swing_spacing_endpoint(payload: SetGridAvgSwingSpacingReq
     return {"status": "updated", "avg_swing_spacing_active": payload.enabled}
 
 
+class SetGridSpacingOverrideRequest(BaseModel):
+    label: str
+
+
+@router.post("/grid-status/spacing-override", dependencies=[Depends(require_admin_key)])
+async def set_grid_spacing_override_endpoint(payload: SetGridSpacingOverrideRequest):
+    """One-click promotion of a real, backtested Grid Level/Spacing
+    Comparison candidate to LIVE trading - the account owner's own direct
+    follow-up after the comparison tool could only backtest, never push:
+    "give me 2 more better option to choose." payload.label must be
+    "live_default" (revert every real branch to today's unchanged
+    per-allocation/dynamic-spacing behavior) or one of
+    crypto_grid_bot.GRID_LEVEL_SPACING_CANDIDATES - a real, tested config,
+    never an invented one; an unknown label is refused with a clear 400.
+    Takes effect on the live bot's very next cycle for every branch (both
+    num_levels and grid_pct), no restart needed."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    try:
+        await crypto_grid_bot_module.set_live_grid_spacing_override(payload.label)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    log.info(f"[dashboard] 🎯 Grid Bot spacing/levels promoted to {payload.label!r}")
+    return {"status": "updated", "grid_spacing_override": payload.label}
+
+
 class SetGridAutoRotateRequest(BaseModel):
     enabled: bool
 

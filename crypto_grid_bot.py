@@ -538,6 +538,108 @@ def _safe_num_levels_for_allocation(allocated_usd: float) -> int:
     return max(1, min(DEFAULT_GRID_LEVELS, max_levels_by_min_trade))
 
 
+# ============================================================
+# Real, live "promote a backtested candidate" mechanism for the Grid
+# Level/Spacing Comparison (crypto_selection_backtest.py's
+# GRID_LEVEL_SPACING_CANDIDATES / run_grid_level_spacing_comparison) and
+# Strategy Lab's own matching entries - the account owner's direct
+# follow-up right after finally getting a real answer out of those two
+# tools: "yeah but it doesn't let me pick something better well if it's
+# nun thing better than what I have give me 2 more better option to
+# choose." Two real gaps closed here: (1) there was no way to actually
+# PUSH a winning candidate live, only backtest it - unlike exit_mode/
+# trailing_stop_pct above, which already have this exact promote pattern;
+# (2) 2 more real candidates, unconditionally (not contingent on first
+# confirming the existing 3 beat the live default, which this sandbox has
+# no live network access to confirm anyway).
+#
+# Mirrors GRID_LEVEL_SPACING_CANDIDATES in crypto_selection_backtest.py
+# BY VALUE, not by import - that module imports FROM this one (engine-
+# style, for its own real live spacing/fee helpers), so the reverse would
+# be a circular import. Same duplicate-by-value discipline already used
+# for STOP_HIT_REVERSAL_TARGET_PCT/SR_LOOKBACK_HOURS elsewhere in this
+# codebase. If this dict is ever revised, crypto_selection_backtest.py's
+# own copy must be updated to match, or a "promoted" candidate here could
+# silently differ from what was actually backtested there.
+GRID_LEVEL_SPACING_CANDIDATES = {
+    "3_levels_2.0pct": {"num_levels": 3, "grid_pct": 0.020},
+    "3_levels_2.5pct": {"num_levels": 3, "grid_pct": 0.025},
+    "5_levels_2.0pct": {"num_levels": 5, "grid_pct": 0.020},
+    # The 2 new real candidates added per the account owner's own direct
+    # request, unconditionally - a tighter fewer-levels variant (4
+    # levels/1.5%, between the existing 5-level/2.0% and 3-level/2.0%
+    # candidates) and a wider one (3 levels/3.0%, continuing the real
+    # direction the account owner's own pasted critique argued for -
+    # narrower candidates trending worse, wider trending better in the
+    # existing sweep - one step past the widest existing candidate).
+    "4_levels_1.5pct": {"num_levels": 4, "grid_pct": 0.015},
+    "3_levels_3.0pct": {"num_levels": 3, "grid_pct": 0.030},
+}
+GRID_SPACING_OVERRIDE_LEVELS = ["live_default"] + list(GRID_LEVEL_SPACING_CANDIDATES.keys())
+GRID_SPACING_OVERRIDE_KEY = "crypto_grid_live_spacing_override"
+
+
+async def get_live_grid_spacing_override() -> str:
+    """Which real, backtested Grid Level/Spacing candidate the live Grid
+    Bot is currently promoted to, or "live_default" for today's real
+    per-branch behavior completely unchanged (per-allocation num_levels
+    via _safe_num_levels_for_allocation, dynamic avg-swing/fee-tier
+    spacing - see run_grid_branch_cycle). DB-persisted the same generic
+    TradingBotState-index pattern get_live_exit_mode()/
+    get_live_trailing_stop_pct() already use. Falls back to
+    "live_default" on any stale/out-of-range stored value (e.g.
+    GRID_LEVEL_SPACING_CANDIDATES gets revised later) - there's currently
+    nothing else it could correctly mean."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == GRID_SPACING_OVERRIDE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None or row.base_capital is None:
+            return "live_default"
+        level = int(row.base_capital)
+        if 0 <= level < len(GRID_SPACING_OVERRIDE_LEVELS):
+            return GRID_SPACING_OVERRIDE_LEVELS[level]
+        return "live_default"
+
+
+async def set_live_grid_spacing_override(label: str):
+    """label="live_default" reverts every real grid branch back to
+    today's unchanged per-allocation/dynamic-spacing behavior; otherwise
+    must be one of GRID_LEVEL_SPACING_CANDIDATES - a real, backtested
+    config, never an invented one."""
+    if label not in GRID_SPACING_OVERRIDE_LEVELS:
+        raise ValueError(
+            f"unknown grid spacing override {label!r} - must be 'live_default' or one of "
+            f"{list(GRID_LEVEL_SPACING_CANDIDATES.keys())} (only a real, backtested config can go live)"
+        )
+    level = float(GRID_SPACING_OVERRIDE_LEVELS.index(label))
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == GRID_SPACING_OVERRIDE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = TradingBotState(bot_name=GRID_SPACING_OVERRIDE_KEY, base_capital=level)
+            db.add(row)
+        else:
+            row.base_capital = level
+        await db.commit()
+
+
+async def _effective_num_levels(allocated_usd: float) -> int:
+    """The real levels count a branch should use right now - today's
+    per-allocation default (_safe_num_levels_for_allocation), capped
+    further by a real promoted Grid Level/Spacing override's own levels
+    count when one is active. Never raises the count above the real
+    per-allocation default - a promoted candidate can only ever make a
+    branch use FEWER, bigger real slices, matching every real candidate's
+    own "fewer levels" shape; it never asks a branch to run MORE levels
+    than its own allocation can safely support."""
+    base = _safe_num_levels_for_allocation(allocated_usd)
+    override_label = await get_live_grid_spacing_override()
+    if override_label == "live_default":
+        return base
+    cap = GRID_LEVEL_SPACING_CANDIDATES[override_label]["num_levels"]
+    return max(1, min(base, cap))
+
+
 async def create_grid_branch(product_id: str, allocated_usd: float, skip_free_cash_check: bool = False) -> CryptoGridBranch:
     """Creates a real new grid branch - a pure bookkeeping operation plus
     one real live price fetch to anchor its starting reference_price,
@@ -583,7 +685,7 @@ async def create_grid_branch(product_id: str, allocated_usd: float, skip_free_ca
     if price is None:
         raise ValueError(f"could not fetch a real live price for {product_id} right now - try again shortly")
 
-    num_levels = _safe_num_levels_for_allocation(allocated_usd)
+    num_levels = await _effective_num_levels(allocated_usd)
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoGridBranch))
@@ -628,7 +730,7 @@ async def add_cash_to_grid_branch(bot_name: str, amount: float) -> CryptoGridBra
         if branch is None:
             raise ValueError(f"no grid branch named {bot_name}")
         branch.allocated_usd += amount
-        branch.num_levels = _safe_num_levels_for_allocation(branch.allocated_usd)
+        branch.num_levels = await _effective_num_levels(branch.allocated_usd)
         await db.commit()
         await db.refresh(branch)
     log.info(f"[GRID] 💰 Added ${amount:.2f} to {bot_name} - now ${branch.allocated_usd:.2f} ({branch.num_levels} real levels)")
@@ -698,7 +800,7 @@ async def withdraw_from_grid_branch(bot_name: str, amount: float) -> dict:
             log.info(f"[GRID] 💵 Withdrew ${amount:.2f} from {bot_name} - fully drained, branch removed and {product_id} released")
             return {"bot_name": bot_name, "product_id": product_id, "amount": amount, "remaining_allocated_usd": 0.0, "branch_deleted": True}
 
-        branch.num_levels = _safe_num_levels_for_allocation(branch.allocated_usd)
+        branch.num_levels = await _effective_num_levels(branch.allocated_usd)
         await db.commit()
         await db.refresh(branch)
     log.info(f"[GRID] 💵 Withdrew ${amount:.2f} from {bot_name} - now ${branch.allocated_usd:.2f} ({branch.num_levels} real levels), freed back to real spendable cash")
@@ -1665,19 +1767,48 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     drawdown_pct = (stored_peak_equity - equity) / stored_peak_equity if stored_peak_equity > 0 else 0.0
     drawdown_breached = drawdown_pct >= GRID_DRAWDOWN_BREAKER_PCT
 
+    # ---- Real "promote a backtested candidate" override (Grid
+    # Level/Spacing Comparison) - takes precedence over BOTH average-swing
+    # and fee-tier dynamic spacing when active, so a branch can never
+    # disagree with what was actually clicked "promote" on. Also re-caps
+    # num_levels live, every single cycle (not just at the next add-cash/
+    # withdraw event), so an already-existing branch picks up a fresh
+    # promotion immediately rather than waiting on its own next cash
+    # change. "live_default" (the default, nothing ever promoted) changes
+    # nothing here - byte-for-byte the same behavior as before this
+    # mechanism existed.
+    grid_spacing_override = await get_live_grid_spacing_override()
+    override_cfg = GRID_LEVEL_SPACING_CANDIDATES.get(grid_spacing_override)
+    if override_cfg is not None:
+        real_effective_levels = max(1, min(_safe_num_levels_for_allocation(branch.allocated_usd), override_cfg["num_levels"]))
+        if real_effective_levels != branch.num_levels:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
+                row = result.scalar_one_or_none()
+                if row:
+                    row.num_levels = real_effective_levels
+                    await db.commit()
+            log.info(f"[GRID] {branch.bot_name}: promoted candidate {grid_spacing_override!r} capped real levels {branch.num_levels} -> {real_effective_levels}")
+            branch.num_levels = real_effective_levels
+
     # ---- Real dynamic spacing (opt-in; average-swing takes precedence over fee-tier) ----
     # Only ever recomputed/persisted when the account owner has actually
     # turned one of these on - a branch running the fixed default spacing
-    # pays zero extra real API cost for this, every cycle. Average-swing
-    # spacing (real, evidence-backed - see AVG_SWING_SPACING_MODE_KEY's own
-    # comment) is checked FIRST and wins if active; fee-tier spacing (a
-    # real no-op at the base fee tier) only applies when average-swing is
-    # off, so the two can never disagree about which real grid_pct a
-    # branch should be using this cycle.
+    # pays zero extra real API cost for this, every cycle. A real promoted
+    # candidate override (above) wins over BOTH of these outright.
+    # Average-swing spacing (real, evidence-backed - see
+    # AVG_SWING_SPACING_MODE_KEY's own comment) is checked next and wins
+    # if active; fee-tier spacing (a real no-op at the base fee tier) only
+    # applies when neither of the other two is, so none of the three can
+    # ever disagree about which real grid_pct a branch should be using
+    # this cycle.
     grid_pct = branch.grid_pct
     new_grid_pct = None
     spacing_log_note = None
-    if await is_avg_swing_spacing_active():
+    if override_cfg is not None:
+        new_grid_pct = override_cfg["grid_pct"]
+        spacing_log_note = f"real promoted candidate {grid_spacing_override!r}"
+    elif await is_avg_swing_spacing_active():
         effective_multiplier = branch.self_tuned_multiplier if branch.self_tuned_multiplier is not None else AVG_SWING_SPACING_MULTIPLIER
         swing_pct, avg_swing_pct = await compute_avg_swing_grid_pct(session, branch.product_id, multiplier=effective_multiplier)
         new_grid_pct = swing_pct
@@ -1981,6 +2112,8 @@ async def get_grid_status() -> dict:
         "mode_active": mode_active,
         "dynamic_spacing_active": await is_dynamic_spacing_active(),
         "avg_swing_spacing_active": await is_avg_swing_spacing_active(),
+        "grid_spacing_override": await get_live_grid_spacing_override(),
+        "grid_spacing_override_candidates": GRID_LEVEL_SPACING_CANDIDATES,
         "auto_rotate_active": await is_grid_auto_rotate_active(),
         "auto_rotate_interval_minutes": GRID_AUTO_ROTATE_INTERVAL_SECONDS // 60,
         "drawdown_breaker_pct": GRID_DRAWDOWN_BREAKER_PCT,

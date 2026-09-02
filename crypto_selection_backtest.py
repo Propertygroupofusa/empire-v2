@@ -1477,17 +1477,25 @@ def _summarize_strategy_trades(trades, spend):
 # crypto_grid_bot.compute_avg_swing_grid_pct). Repointed so this stays an
 # honest match to today's real live behavior, not a stale snapshot.
 #
-# The three "grid_bot_*lvl_*pct" candidates below are "what might be
-# better than what I have" - per the account owner's direct follow-up
-# request to find and report real candidates alongside the live config,
-# not a separate page they'd have to visit. These reuse the EXACT SAME
-# real (num_levels, grid_pct) pairs already defined and independently
+# The "grid_bot_*lvl_*pct" candidates below are "what might be better
+# than what I have" - per the account owner's direct follow-up request to
+# find and report real candidates alongside the live config, not a
+# separate page they'd have to visit. These reuse the EXACT SAME real
+# (num_levels, grid_pct) pairs already defined and independently
 # validated in GRID_LEVEL_SPACING_CANDIDATES (built to test a pasted
 # critique's "fewer, bigger slices" proposal) - never new, unvalidated
 # numbers invented here. Real, honest tradeoff worth restating: fewer,
 # wider-spaced levels mean fewer but larger real slices - each one risks
 # more dollars per cycle in exchange for a real shot at a bigger real
 # win per fill.
+#
+# "4_levels_1.5pct" and "3_levels_3.0pct" are the 2 additional real
+# candidates added per the account owner's own direct, unconditional
+# follow-up ("give me 2 more better option to choose") - same real
+# (num_levels, grid_pct) values as crypto_grid_bot.py's own
+# GRID_LEVEL_SPACING_CANDIDATES, which is what a real "promote to live"
+# click on any of these 5 candidates actually applies - never a value
+# invented separately here.
 STRATEGY_LAB_STRATEGIES = {
     "grid_bot": lambda closes, highs, lows, spend: _replay_grid_bot(
         closes, highs, lows, spend=spend,
@@ -1502,6 +1510,12 @@ STRATEGY_LAB_STRATEGIES = {
     ),
     "grid_bot_5lvl_2.0pct": lambda closes, highs, lows, spend: _replay_grid_bot(
         closes, highs, lows, spend=spend, grid_pct=0.020, num_levels=5,
+    ),
+    "grid_bot_4lvl_1.5pct": lambda closes, highs, lows, spend: _replay_grid_bot(
+        closes, highs, lows, spend=spend, grid_pct=0.015, num_levels=4,
+    ),
+    "grid_bot_3lvl_3.0pct": lambda closes, highs, lows, spend: _replay_grid_bot(
+        closes, highs, lows, spend=spend, grid_pct=0.030, num_levels=3,
     ),
 }
 
@@ -2037,10 +2051,21 @@ async def run_grid_atr_spacing_comparison(coins=None, days=BACKTEST_DAYS, max_co
 # (a real tradeoff the critique's own "same 68% win rate, but wins 2-3x
 # larger" claim never actually backed with a replay - this is that
 # missing replay).
+# "4_levels_1.5pct" and "3_levels_3.0pct" are the 2 additional real
+# candidates added per the account owner's own direct, unconditional
+# follow-up ("give me 2 more better option to choose") right after the
+# original 3 - not contingent on those 3 first beating the live default,
+# since this sandbox has no live network access to confirm that anyway.
+# Mirrors crypto_grid_bot.py's own GRID_LEVEL_SPACING_CANDIDATES BY VALUE
+# exactly (that module can't import this one back - circular import, see
+# its own comment) - keep the two in sync, since a "promote to live"
+# click applies crypto_grid_bot.py's copy directly.
 GRID_LEVEL_SPACING_CANDIDATES = {
     "3_levels_2.0pct": {"num_levels": 3, "grid_pct": 0.020},
     "3_levels_2.5pct": {"num_levels": 3, "grid_pct": 0.025},
     "5_levels_2.0pct": {"num_levels": 5, "grid_pct": 0.020},
+    "4_levels_1.5pct": {"num_levels": 4, "grid_pct": 0.015},
+    "3_levels_3.0pct": {"num_levels": 3, "grid_pct": 0.030},
 }
 GRID_LEVEL_SPACING_LIVE_DEFAULT_LABEL = "live default (10 levels, 1.5x avg-swing spacing)"
 

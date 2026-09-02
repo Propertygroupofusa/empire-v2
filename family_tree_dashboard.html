@@ -576,6 +576,7 @@
     <div id="grid-avg-swing-spacing-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-auto-rotate-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-min-roi-floor-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
+    <div id="grid-spacing-override-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div class="panel" id="grid-panel">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:8px;">
             <button id="grid-mode-toggle-btn" class="unlock-btn" onclick="toggleGridMode()" disabled>Loading…</button>
@@ -1863,6 +1864,7 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals) {
     renderGridAvgSwingSpacingBadge(!!data.avg_swing_spacing_active);
     renderGridAutoRotateBadge(!!data.auto_rotate_active, data.auto_rotate_interval_minutes);
     renderGridMinRoiFloorBadge(data.min_required_roi_pct);
+    renderGridSpacingOverrideBadge(data.grid_spacing_override);
 
     document.getElementById('grid-total-allocated').textContent =
         `${fmtUsd(data.total_allocated_usd)} total real capital across ${data.branch_count} grid branch${data.branch_count === 1 ? '' : 'es'}`;
@@ -2313,6 +2315,25 @@ function renderGridMinRoiFloorBadge(minRoiPct) {
     el.innerHTML = `🎯 Genuine-edge floor: a coin must show at least <strong>${minRoiPct.toFixed(0)}%</strong> real backtested ROI ` +
         `before ANY automatic action (Quick Buy, auto-deploy, auto-rotate) will deploy real capital into it - ` +
         `if nothing clears this bar, real cash stays unallocated rather than funding a mediocre pick.`;
+}
+
+// Real, live "promote a backtested candidate" override for the Grid
+// Level/Spacing Comparison - per the account owner's own direct
+// follow-up ("give me 2 more better option to choose") after the
+// comparison tool could only backtest, never push a winner live. Purely
+// visibility here (the actual promote buttons live on the backtest page
+// itself, next to the real numbers that justify picking one) - so it's
+// never a silent override nobody can see is active from this dashboard.
+function renderGridSpacingOverrideBadge(overrideLabel) {
+    const el = document.getElementById('grid-spacing-override-badge');
+    if (!el) return;
+    const label = overrideLabel || 'live_default';
+    const isDefault = label === 'live_default';
+    const shown = isDefault
+        ? '<strong style="color:var(--text-dim);">none</strong> - today\'s real per-allocation levels + dynamic spacing, unchanged'
+        : `<strong style="color:var(--gold);">${label.replace(/_/g, ' ')}</strong> - overriding every real branch's own levels cap and spacing`;
+    el.innerHTML = `🎯 Grid level/spacing override: ${shown} — ` +
+        `<span style="color:var(--text-dim);">promote or revert a real candidate from the <a href="/crypto-selection-backtest-view" style="color: var(--navy);">Grid Level/Spacing Comparison</a> tool</span>`;
 }
 
 function renderGridAutoRotateBadge(active, intervalMinutes) {

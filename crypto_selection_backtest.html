@@ -184,11 +184,11 @@
     <div id="ferResults"></div>
 
     <div class="note" style="margin-top: 28px;">
-        <strong>🧪 Strategy Lab - Grid Bot (what I have) vs. real candidates that might beat it:</strong> Baseline and Hourly Momentum were both dropped from this report per the account owner's own direct call after a real run came back deeply negative for both (Baseline: -$473.97/979 trades/22.9% win rate; Hourly Momentum: -$343.69/788 trades/47.7% win rate) against Grid Bot's real +$67.92/325 trades/62.5% win rate - not close, real evidence, not a guess. Spot Swing Trading was retired earlier the same way (29.4% win rate, -$133.00 total). Grid Bot is real, live infrastructure today (see the Grid Bot dashboard) - this report now shows it alongside three real "fewer, bigger slices" candidates (reusing the same already-validated configs from the Grid Level/Spacing Comparison tool below) so a genuinely better real setup, if one exists, shows up right next to what's actually running - no separate page needed.
+        <strong>🧪 Strategy Lab - Grid Bot (what I have) vs. real candidates that might beat it:</strong> Baseline and Hourly Momentum were both dropped from this report per the account owner's own direct call after a real run came back deeply negative for both (Baseline: -$473.97/979 trades/22.9% win rate; Hourly Momentum: -$343.69/788 trades/47.7% win rate) against Grid Bot's real +$67.92/325 trades/62.5% win rate - not close, real evidence, not a guess. Spot Swing Trading was retired earlier the same way (29.4% win rate, -$133.00 total). Grid Bot is real, live infrastructure today (see the Grid Bot dashboard) - this report now shows it alongside five real "fewer, bigger slices" candidates (reusing the same already-validated configs from the Grid Level/Spacing Comparison tool below) so a genuinely better real setup, if one exists, shows up right next to what's actually running - no separate page needed.
         <br><br>
-        <strong>Grid Bot (live)</strong> = today's real config: up to 10 concurrent slices, spacing set per-coin by the real average-swing-based formula (not a flat 1%) &nbsp;·&nbsp; the three candidates trade fewer, wider-spaced slices instead - real fewer/bigger trades, each risking more dollars per fill for a shot at a bigger real win.
+        <strong>Grid Bot (live)</strong> = today's real config: up to 10 concurrent slices, spacing set per-coin by the real average-swing-based formula (not a flat 1%) &nbsp;·&nbsp; the five candidates trade fewer, wider-spaced slices instead (3/4/5 levels at 1.5-3.0% spacing) - real fewer/bigger trades, each risking more dollars per fill for a shot at a bigger real win.
         <br><br>
-        Honest limits: every candidate's fee assumption reuses this file's existing real round-trip taker rate (every real order this codebase places is a market order, not a maker order). Promoting a different real config than what's live today would be a separate, deliberate decision made from this comparison's real evidence, same as every other live strategy change in this file.
+        Honest limits: every candidate's fee assumption reuses this file's existing real round-trip taker rate (every real order this codebase places is a market order, not a maker order). Once you've seen the real numbers here, any of these 5 candidates can actually be pushed LIVE with one click - scroll down to the Grid Level/Spacing Comparison tool's own "Push a real level/spacing config to the live Grid Bot" promote row, which applies the exact same real configs tested in both places.
     </div>
     <button class="run-btn" id="labBtn" onclick="runStrategyLab()">▶ Run Strategy Lab: Grid Bot vs. real candidates (~30-90 seconds)</button>
     <div id="labStatus"></div>
@@ -222,16 +222,19 @@
     <div id="gasResults"></div>
 
     <div class="note" style="margin-top: 28px;">
-        <strong>🧮 "Fewer, bigger slices" - does the specific 3-level/2-2.5% proposal actually beat today's live default?</strong>
+        <strong>🧮 "Fewer, bigger slices" - does a fewer/wider-spacing config actually beat today's live default, and can I push one live?</strong>
         Direct, real answer to a pasted critique's specific claim ("reduce grid levels 6→3, widen take-profit to
-        2.0-2.5%... same 68% win rate, but wins 2-3x larger... -$1.57 → +$15-25 on the same capital"). Replays that exact
-        proposal (3 levels @ 2.0%, 3 levels @ 2.5%, and a middle-ground 5 levels @ 2.0%) against today's real live default
-        (up to 10 levels, spacing sized per-coin off real average swing) on identical real historical candles - so the
-        claim gets tested with real numbers instead of taken on faith. Shadow mode only - never places an order.
+        2.0-2.5%... same 68% win rate, but wins 2-3x larger... -$1.57 → +$15-25 on the same capital"). Replays 5 real
+        candidates (3 levels @ 2.0%/2.5%/3.0%, and two middle-ground configs at 4 levels @ 1.5% and 5 levels @ 2.0%)
+        against today's real live default (up to 10 levels, spacing sized per-coin off real average swing) on identical
+        real historical candles - so the claim gets tested with real numbers instead of taken on faith. Shadow mode only
+        - never places an order on its own, but any of these 5 real candidates can be promoted to LIVE trading below once
+        you've seen the real numbers.
     </div>
     <button class="run-btn" id="glsBtn" onclick="runGridLevelSpacingBacktest()">▶ Run Grid Level/Spacing Comparison (~30-90 seconds)</button>
     <div id="glsStatus"></div>
     <div id="glsResults"></div>
+    <div id="glsPromoteWrap"></div>
 
     <div class="note" style="margin-top: 28px;">
         <strong>📉 A higher-timeframe trend filter for Grid Bot - does it stop the narrow-spacing losses?</strong>
@@ -1298,15 +1301,20 @@ const STRATEGY_LAB_LABELS = {
     'grid_bot_3lvl_2.0pct': 'Candidate: 3 levels, 2.0% spacing',
     'grid_bot_3lvl_2.5pct': 'Candidate: 3 levels, 2.5% spacing',
     'grid_bot_5lvl_2.0pct': 'Candidate: 5 levels, 2.0% spacing',
+    'grid_bot_4lvl_1.5pct': 'Candidate: 4 levels, 1.5% spacing',
+    'grid_bot_3lvl_3.0pct': 'Candidate: 3 levels, 3.0% spacing',
 };
-const STRATEGY_LAB_ORDER = ['grid_bot', 'grid_bot_3lvl_2.0pct', 'grid_bot_3lvl_2.5pct', 'grid_bot_5lvl_2.0pct'];
+const STRATEGY_LAB_ORDER = [
+    'grid_bot', 'grid_bot_3lvl_2.0pct', 'grid_bot_3lvl_2.5pct', 'grid_bot_5lvl_2.0pct',
+    'grid_bot_4lvl_1.5pct', 'grid_bot_3lvl_3.0pct',
+];
 
 async function runStrategyLab() {
     const btn = document.getElementById('labBtn');
     const statusEl = document.getElementById('labStatus');
     const resultsEl = document.getElementById('labResults');
     btn.disabled = true;
-    btn.textContent = 'Running... (real data, Grid Bot + 3 candidates replayed per coin)';
+    btn.textContent = 'Running... (real data, Grid Bot + 5 candidates replayed per coin)';
     statusEl.textContent = '';
     statusEl.className = '';
     resultsEl.innerHTML = '';
@@ -1677,7 +1685,7 @@ async function runGridLevelSpacingBacktest() {
     const statusEl = document.getElementById('glsStatus');
     const resultsEl = document.getElementById('glsResults');
     btn.disabled = true;
-    btn.textContent = 'Running... (real data, 4 candidates replayed per coin)';
+    btn.textContent = 'Running... (real data, 5 candidates replayed per coin)';
     statusEl.textContent = '';
     statusEl.className = '';
     resultsEl.innerHTML = '';
@@ -1699,12 +1707,79 @@ async function runGridLevelSpacingBacktest() {
         renderGridLevelSpacingResults(data);
         const best = data.summary[data.best_candidate];
         statusEl.textContent = `Compared ${data.coins_with_results} coins over ${data.backtest_days} days. Best on this real sample: ${data.best_candidate} ($${best.total_pnl.toFixed(2)} total).`;
+        await refreshGridSpacingOverrideStatus();
+        renderGridSpacingPromoteRow();
     } catch (e) {
         statusEl.textContent = 'Error: ' + e.message;
         statusEl.className = 'error';
     } finally {
         btn.disabled = false;
         btn.textContent = '▶ Run Grid Level/Spacing Comparison (~30-90 seconds)';
+    }
+}
+
+let currentGridSpacingOverride = 'live_default';
+const GRID_SPACING_PROMOTE_CANDIDATES = ['3_levels_2.0pct', '3_levels_2.5pct', '5_levels_2.0pct', '4_levels_1.5pct', '3_levels_3.0pct'];
+
+async function refreshGridSpacingOverrideStatus() {
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/grid-status', { headers: { 'X-Admin-Key': key } });
+        if (!res.ok) return;
+        const data = await res.json();
+        currentGridSpacingOverride = data.grid_spacing_override || 'live_default';
+    } catch (e) {
+        // Best-effort only - the promote row still renders against whatever
+        // it last knew (or "live_default" on a fresh page load).
+    }
+}
+
+function renderGridSpacingPromoteRow() {
+    const wrap = document.getElementById('glsPromoteWrap');
+    if (!wrap) return;
+    const rows = ['live_default', ...GRID_SPACING_PROMOTE_CANDIDATES].map(label => {
+        const isLive = label === currentGridSpacingOverride;
+        const text = label === 'live_default' ? 'Live default (revert)' : label.replace(/_/g, ' ');
+        return `<button class="promote-btn${isLive ? ' is-live' : ''}" ${isLive ? 'disabled' : ''}
+            onclick="promoteGridSpacing('${label}', this)">${isLive ? '✓ Live now' : `Promote ${text}`}</button>`;
+    }).join('');
+    wrap.innerHTML = `
+        <p style="margin-top:20px;font-weight:700;">Push a real level/spacing config to the live Grid Bot:</p>
+        <div class="promote-row">${rows}</div>
+        <p style="margin-top:8px;font-size:0.78em;color:var(--text-dim);">
+            A real, immediate change - takes effect on every real branch's very next cycle (both its real levels cap and
+            its real spacing), no restart needed. Only these 5 tested configs can ever be promoted - there's no way to
+            push an untested level/spacing combo. "Live default" reverts every branch back to today's unchanged
+            per-allocation levels plus dynamic avg-swing/fee-tier spacing.
+        </p>`;
+}
+
+async function promoteGridSpacing(label, btn) {
+    const desc = label === 'live_default'
+        ? "revert to today's live default (unchanged per-branch behavior)"
+        : `promote "${label.replace(/_/g, ' ')}"`;
+    if (!confirm(
+        `Really ${desc} for the LIVE Grid Bot? This changes every real branch's own levels cap and spacing starting ` +
+        `its very next cycle - a real, immediate change to how real money gets traded, not a backtest.`
+    )) return;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Promoting...';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/grid-status/spacing-override', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ label }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        currentGridSpacingOverride = data.grid_spacing_override;
+        renderGridSpacingPromoteRow();
+    } catch (e) {
+        alert('Could not promote grid spacing: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = original;
     }
 }
 
