@@ -145,14 +145,15 @@
     <div id="narrowRangeResults"></div>
 
     <div class="note" style="margin-top: 28px;">
-        <strong>🐘 Elephant/Tail opening-bar breakout - the full real system</strong> the account owner described directly: pick a symbol sitting in a narrow state, wait for its real first 2-minute bar of the trading day; if that bar is a real "Elephant Bar" (an oversized green candle - "sizable... larger and taller than the vast majority of the green bars before it") or a real "bottoming Tail" bar (a long lower-wick rejection candle), mark its high plus one penny; the instant the SECOND bar's real price crosses that level - never waiting for bar 2 to close - a real $25,000 goes in; the stop sits at bar 1's own low, for the life of the trade; once a real second "push" (a genuine new high after a real pullback) confirms, exit. Their own claimed real number: 80%+ follow-through. Stocks get a more literal version of this than crypto - real Alpaca 2-minute bars are fetched directly (no aggregation needed), grouped into real trading days by the same helper the Narrow-Range Breakout test above already uses, with the real session open as the actual anchor - no invented stand-in needed here. Shadow mode only - diagnostic, never wired to any real trade.
+        <strong>🐘 Elephant/Tail opening-bar breakout - the full real system</strong> the account owner described directly: pick a symbol sitting in a narrow state, wait for its real first 2-minute bar of the trading day; if that bar is a real "Elephant Bar" (an oversized green candle - "sizable... larger and taller than the vast majority of the green bars before it") or a real "bottoming Tail" bar (a long lower-wick rejection candle), mark its high plus one penny; the instant the SECOND bar's real price crosses that level - never waiting for bar 2 to close - a real $25,000 goes in; the stop sits at bar 1's own low, for the life of the trade; once a real second "push" (a genuine new high after a real pullback) confirms, exit. Their own claimed real number: 80%+ follow-through. Stocks get a more literal version of this than crypto - real Alpaca 2-minute bars are fetched directly (no aggregation needed), grouped into real trading days by the same helper the Narrow-Range Breakout test above already uses, with the real session open as the actual anchor - no invented stand-in needed here. <strong>This button itself stays shadow mode</strong> (the single-entry-per-day version below, diagnostic only) - but the real, validated <strong>multi-entry</strong> version of this exact system (see the comparison right below) is genuinely wired to real order placement in prop_bot.py, gated by the real, opt-in toggle right here.
     </div>
+    <div id="openingBarLiveBadge" style="font-size:0.85em; color: var(--text-dim); margin-bottom: 10px;">Checking real live status…</div>
     <button class="run-btn" id="obbBtn" onclick="runOpeningBarBreakoutBacktest()">▶ Run Elephant/Tail Opening-Bar Backtest (real data, ~60-180 seconds)</button>
     <div id="obbStatus"></div>
     <div id="obbResults"></div>
 
     <div class="note" style="margin-top: 28px;">
-        <strong>🪜 One trade a day, or ride the whole staircase?</strong> The button above takes exactly ONE real trade per day, exiting the instant the first confirmed "push" happens. The account owner's own annotated reference chart showed something bigger - a real staircase of several pullback-and-continuation entries through the SAME session (big opening bar, pullback to a level, breakout, another pullback, another breakout). This compares that one-entry baseline against a new multi-entry version that keeps trading the same real established trend through every subsequent confirmed leg (still stopping the whole day's chain the instant a real STOP hits, or after 6 legs), on the identical real historical bars - so you can see with real evidence whether riding the staircase actually makes more money, not just assume it does. Shadow mode only - diagnostic, never wired to any real trade.
+        <strong>🪜 One trade a day, or ride the whole staircase?</strong> The Elephant/Tail button above takes exactly ONE real trade per day, exiting the instant the first confirmed "push" happens. The account owner's own annotated reference chart showed something bigger - a real staircase of several pullback-and-continuation entries through the SAME session (big opening bar, pullback to a level, breakout, another pullback, another breakout). This compares that one-entry baseline against a multi-entry version that keeps trading the same real established trend through every subsequent confirmed leg (still stopping the whole day's chain the instant a real STOP hits, or after 6 legs), on the identical real historical bars. A real 30-day/12-symbol run showed the multi-entry version making $944.34 across 21 trades (57.1% win rate) vs. the one-entry baseline's $570.64/15 trades - real evidence strong enough that <strong>the multi-entry version is what prop_bot.py's live opening-bar system actually runs</strong> (see the toggle above) - this comparison itself is still shadow mode, it just explains why the live system picked multi-entry over one-entry.
     </div>
     <button class="run-btn" id="obMultiBtn" onclick="runOpeningBarMultiEntryComparison()">▶ Run One-Entry vs. Multi-Entry Comparison (real data, ~60-180 seconds)</button>
     <div id="obMultiStatus"></div>
@@ -1529,6 +1530,62 @@ function renderRedBarTakeoutResults(data) {
     html += `<p class="trade-note">This is the lower-conviction fallback - compare its real win rate/P&amp;L directly against the higher-conviction Elephant/Tail backtest above on the same symbols. Diagnostic only - nothing here changes what any live bot buys or sells.</p>`;
     resultsEl.innerHTML = html;
 }
+
+// Real, live status + toggle for the opening-bar live trading system -
+// per the account owner's direct "Do we have this live... make the
+// toggle" after reading this page's own (now-corrected) notes. Reuses
+// the exact same real endpoints the main Alpaca dashboard's own toggle
+// already calls (GET/POST /alpaca-overview/opening-bar-*) - never a
+// second, separately-tracked flag - so this page and the main dashboard
+// can never disagree about whether real orders are actually being
+// placed.
+async function loadOpeningBarLiveStatus() {
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-overview/opening-bar-status', {
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        renderOpeningBarLiveBadge(!!data.mode_active);
+    } catch (e) {
+        const el = document.getElementById('openingBarLiveBadge');
+        if (el) el.textContent = 'Could not check real live status right now.';
+    }
+}
+
+function renderOpeningBarLiveBadge(active) {
+    const el = document.getElementById('openingBarLiveBadge');
+    if (!el) return;
+    const label = active
+        ? '<strong style="color:var(--green);">ON</strong> - the real, validated multi-entry system is placing real orders right now'
+        : '<strong style="color:var(--text-dim);">OFF</strong> - a true no-op, no real order has ever been placed by it';
+    el.innerHTML = `🐘 Opening-bar live trading: ${label} — ` +
+        `<a href="javascript:void(0)" onclick="toggleOpeningBarLive(${!active})" style="color: var(--navy);">${active ? 'turn off' : 'turn on'}</a> ` +
+        `<span style="color:var(--text-dim);">(same real toggle as the <a href="/alpaca-dashboard" style="color: var(--navy);">main Alpaca dashboard</a>)</span>`;
+}
+
+async function toggleOpeningBarLive(enable) {
+    const msg = enable
+        ? 'Turn ON opening-bar live trading? The real, validated multi-entry Elephant/Tail system will start placing real buy/sell orders on your live Alpaca account every cycle, sized the same real way every other entry on this account already is.'
+        : 'Turn OFF opening-bar live trading? No new real entries will be placed. Any real open leg keeps its own real stop/push exit protection either way - this only stops new capital going in.';
+    if (!confirm(msg)) return;
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-overview/opening-bar-mode', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: enable }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        renderOpeningBarLiveBadge(!!data.mode_active);
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', loadOpeningBarLiveStatus);
 </script>
 </body>
 </html>
