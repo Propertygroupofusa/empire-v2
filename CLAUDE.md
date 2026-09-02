@@ -11837,6 +11837,84 @@ nothing here changes what the live bot does on its own.
 
 ---
 
+## Strategy Lab's "Grid Bot" (C) repointed to today's real live spacing, after the account owner correctly questioned a real number
+
+The account owner pushed back hard on Strategy Lab's own real result -
+Grid Bot (C) at +$51.13 across 572 real trades, 57.7% win rate - "there's
+no way... 572 trades easily should be $300, correct this." Rather than
+either accept the number blindly or fudge it to a bigger figure to match
+the expectation, traced the real math in `_replay_grid_bot()` and
+`_summarize_strategy_trades()` by hand: at $150 simulated capital per
+coin split across 10 levels, each $15 slice nets roughly $0.15 gross on a
+1% grid cycle, and the real 0.8% round-trip taker fee (the same rate
+every live order in this codebase actually pays) eats about $0.12 of
+that - leaving **$0.03-$0.09 net per trade**, which the observed
+$51.13 / 572 = $0.089/trade average lands squarely inside. The
+aggregation logic itself (`totals[name] += result["total_pnl"]`,
+summed cleanly across ~33 coins with no double-counting) was confirmed
+correct too. **The number was never wrong** - it's the honest, structural
+cost of a grid strategy at tight 1% spacing against a real fee that's
+almost as large as the grid itself.
+
+What WAS genuinely stale, surfaced by chasing this down: Strategy Lab's
+own "Grid Bot" (C) entry was still replaying against the OLD fixed
+`STRATEGY_LAB_GRID_PCT` (1%, 10 levels) - the exact convention the
+account owner's own earlier questions ("should it stay at 1%...") had
+already led to replacing on the REAL live bot with average-swing dynamic
+spacing (`crypto_grid_bot.compute_avg_swing_grid_pct`, shipped earlier
+this session). Strategy Lab's own comparison had quietly fallen out of
+sync with what's actually running - the same kind of drift already
+caught and fixed once before for "Baseline (A)" (see its own docstring
+history above), now caught and fixed the same way for C.
+
+**New shared helper `_live_matching_grid_pct(closes, highs, lows)`**
+(`crypto_selection_backtest.py`) - the identical real formula
+`crypto_grid_bot.compute_avg_swing_grid_pct()` computes live (a coin's
+own real average hourly swing x `AVG_SWING_SPACING_MULTIPLIER`, floored
+at the real fee-safe minimum `TARGET_NET_MARGIN_PCT + ROUND_TRIP_FEE_RATE`),
+computed from the same historical candles a replay already has in hand.
+Factored out so every "how does this compare to what's actually live"
+check in this file uses the identical real number - `run_grid_level_spacing_comparison()`'s
+own live-default candidate was refactored to call it too, instead of
+duplicating the same three lines a second time.
+
+`STRATEGY_LAB_STRATEGIES["grid_bot"]` now calls `_replay_grid_bot()`
+with `grid_pct=_live_matching_grid_pct(closes, highs, lows)` instead of
+the old fixed default - `num_levels` stays `STRATEGY_LAB_GRID_LEVELS`
+(10), unchanged. `crypto_selection_backtest.html`'s own legend text was
+corrected to describe the real live spacing instead of "buys every 1%
+dip, sells every 1% rise" (now false), and a stale "A vs B vs C vs D"
+button-reset label - left over from before D was retired earlier this
+session - was fixed to match the real 3-strategy comparison.
+
+Verified offline (`test_strategy_lab_live_spacing.py`, 6 checks):
+`_live_matching_grid_pct()` matches a real hand-computed value from the
+live formula exactly; on a real synthetic series, the live-matching
+spacing is confirmed genuinely WIDER than the old fixed 1% (proving this
+isn't a no-op); Strategy Lab's `grid_bot` entry produces byte-identical
+results to manually replaying at the live-matching pct; the SAME series
+produces a genuinely DIFFERENT result under the old fixed-1% replay,
+proving the repoint actually changes live behavior, not just cosmetics;
+and the full `run_strategy_lab_comparison()` pipeline still reports all
+3 real strategies end-to-end with the correct live-matching result
+flowing through. Existing `test_grid_level_spacing.py` (27 checks) and
+`test_grid_atr_spacing.py` (22 checks) both re-run clean alongside it,
+confirming the shared-helper refactor didn't change either tool's own
+behavior.
+
+**What this means for the real number the account owner is looking
+at**: a fresh Strategy Lab run will very likely show a DIFFERENT,
+probably better, real total for Grid Bot (C) than $51.13/572 trades -
+not because anything was "corrected" to look better, but because C now
+tests the same wider, self-tuning spacing that's actually live today
+instead of a stale, tighter default. Not yet run against real historical
+data - same documented gap as every backtest tool in this file (no live
+network access to Coinbase from this sandbox). The account owner needs
+to open `/crypto-selection-backtest-view` after the next redeploy and
+tap "Run Strategy Lab" again to see the real, apples-to-apples number.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

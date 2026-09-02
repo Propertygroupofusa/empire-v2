@@ -1343,10 +1343,26 @@ def _summarize_strategy_trades(trades, spend):
 # defined below (unused by this dict) rather than deleted, in case it's
 # ever worth revisiting with different real parameters later - it just no
 # longer runs as part of Strategy Lab.
+# "grid_bot" (C) previously replayed at the OLD fixed 1%/10-level
+# STRATEGY_LAB_GRID_PCT convention - after the account owner questioned a
+# real 572-trade/$51.13 result as implausibly low, tracing the per-trade
+# math confirmed the number itself was correct (thin, expected margins at
+# 1% spacing against a real 0.8% round-trip fee), but also surfaced that
+# this entry no longer matched what's actually live: Grid Bot's real
+# spacing has since moved to the average-swing dynamic formula
+# (_live_matching_grid_pct - identical to crypto_grid_bot.compute_avg_swing_grid_pct).
+# Repointed here so Strategy Lab's own "Grid Bot" comparison stays an
+# honest match to today's real live behavior, not a stale snapshot of an
+# earlier, tighter default - same correction already applied once before
+# to "Baseline (A)" when its own exit rule drifted out of sync with live.
 STRATEGY_LAB_STRATEGIES = {
     "baseline": lambda closes, highs, lows, spend: backtest_one_coin(closes, highs, lows, spend=spend),
     "hourly_momentum": lambda closes, highs, lows, spend: _replay_hourly_momentum(closes, highs, lows, spend=spend),
-    "grid_bot": lambda closes, highs, lows, spend: _replay_grid_bot(closes, highs, lows, spend=spend),
+    "grid_bot": lambda closes, highs, lows, spend: _replay_grid_bot(
+        closes, highs, lows, spend=spend,
+        grid_pct=_live_matching_grid_pct(closes, highs, lows),
+        num_levels=STRATEGY_LAB_GRID_LEVELS,
+    ),
 }
 
 
@@ -1752,6 +1768,22 @@ def _average_hourly_swing_pct(closes, highs, lows) -> float:
     return sum(true_ranges_pct) / len(true_ranges_pct)
 
 
+def _live_matching_grid_pct(closes, highs, lows) -> float:
+    """The real, exact grid_pct today's live Grid Bot would compute for
+    this coin - identical formula to crypto_grid_bot.compute_avg_swing_grid_pct()
+    (this coin's own real average hourly swing x AVG_SWING_SPACING_MULTIPLIER,
+    floored at the real fee-safe minimum TARGET_NET_MARGIN_PCT +
+    ROUND_TRIP_FEE_RATE), computed from the same historical candles a
+    replay already has in hand rather than a second live fetch. Shared
+    here so every real "how does this compare to what's actually live"
+    check in this file (Strategy Lab's own Grid Bot entry,
+    run_grid_level_spacing_comparison's live-default candidate) uses the
+    identical real number, never two slightly different guesses at it."""
+    fee_safe_floor = max(grid_engine.MIN_DYNAMIC_GRID_PCT, grid_engine.TARGET_NET_MARGIN_PCT + engine.ROUND_TRIP_FEE_RATE)
+    avg_swing_pct = _average_hourly_swing_pct(closes, highs, lows)
+    return max(fee_safe_floor, avg_swing_pct * grid_engine.AVG_SWING_SPACING_MULTIPLIER)
+
+
 # Real candidate grid spacings, each a multiple of a coin's OWN real
 # average swing over the test window - per the account owner's direct
 # question: "what is the average swing of coins... do you think it
@@ -1906,7 +1938,6 @@ async def run_grid_level_spacing_comparison(coins=None, days=BACKTEST_DAYS, max_
     coins = coins or COIN_FAMILY_TREE
     candidates = dict(candidates) if candidates else dict(GRID_LEVEL_SPACING_CANDIDATES)
     semaphore = asyncio.Semaphore(max_concurrent)
-    fee_safe_floor = max(grid_engine.MIN_DYNAMIC_GRID_PCT, grid_engine.TARGET_NET_MARGIN_PCT + engine.ROUND_TRIP_FEE_RATE)
 
     async with aiohttp.ClientSession() as session:
         async def _one(product_id):
@@ -1916,7 +1947,7 @@ async def run_grid_level_spacing_comparison(coins=None, days=BACKTEST_DAYS, max_
                 return product_id, None, None, "not enough historical data"
             closes, highs, lows, _times = candles
             avg_swing_pct = _average_hourly_swing_pct(closes, highs, lows)
-            live_grid_pct = max(fee_safe_floor, avg_swing_pct * grid_engine.AVG_SWING_SPACING_MULTIPLIER)
+            live_grid_pct = _live_matching_grid_pct(closes, highs, lows)
             per_candidate = {
                 GRID_LEVEL_SPACING_LIVE_DEFAULT_LABEL: {
                     "num_levels": STRATEGY_LAB_GRID_LEVELS, "grid_pct_used": live_grid_pct,

@@ -179,7 +179,7 @@
     <div class="note" style="margin-top: 28px;">
         <strong>🧪 Strategy Lab (A/B/C) - testing a pasted outside proposal for real:</strong> a third-party writeup proposed three alternative strategies (Spot Swing Trading, an Automated Grid Bot, Hourly Momentum Trading) with no real backtest of its own - only illustrative "if this move happens, here's the math" arithmetic. This replays the surviving candidates, PLUS the existing live baseline, against the identical real historical candles for every coin, so they're directly comparable on real evidence rather than a guess.
         <br><br>
-        <strong>A</strong> = Baseline (the live rules) &nbsp;·&nbsp; <strong>B</strong> = Hourly Momentum (RSI &gt; 55 + hourly uptrend, fixed 2.5% target / 1.5% stop) &nbsp;·&nbsp; <strong>C</strong> = Grid Bot 🏆 (buys every 1% dip, sells every 1% rise, up to 10 concurrent slices - this is the one that won, and it's real, live infrastructure today, see the Grid Bot dashboard)
+        <strong>A</strong> = Baseline (the live rules) &nbsp;·&nbsp; <strong>B</strong> = Hourly Momentum (RSI &gt; 55 + hourly uptrend, fixed 2.5% target / 1.5% stop) &nbsp;·&nbsp; <strong>C</strong> = Grid Bot 🏆 (buys/sells at each coin's own real average-swing-based spacing - today's actual live formula, not a flat 1% - up to 10 concurrent slices; this is the one that won, and it's real, live infrastructure today, see the Grid Bot dashboard)
         <br><br>
         Honest limits: A and B stay shadow-mode only (Hourly Momentum's multi-day-hold shape still doesn't fit the live engine's per-cycle exit checks, so promoting it would need real engineering work first, not just a promote click). Grid Bot's fee assumption also reuses this file's existing real round-trip rate rather than the lower "maker-only" rate the pasted proposal assumed - worth confirming Coinbase's actual current fee schedule before trusting that difference either way. <strong>D · Spot Swing Trading was removed from this comparison</strong> per real evidence: a real 30-day/68-trade sample came back the worst of the four by a wide margin (29.4% win rate, -$133.00 total) - the account owner's own direct call, after seeing that real result, was to retire it rather than keep testing it. Shadow mode only for A/B.
     </div>
@@ -1179,7 +1179,7 @@ async function runStrategyLab() {
         statusEl.className = 'error';
     } finally {
         btn.disabled = false;
-        btn.textContent = '▶ Run Strategy Lab: A vs B vs C vs D (~30-90 seconds)';
+        btn.textContent = '▶ Run Strategy Lab: A vs B vs C (~30-90 seconds)';
     }
 }
 
