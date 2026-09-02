@@ -11106,6 +11106,67 @@ now varying per-coin instead of sitting at a flat 1%.
 
 ---
 
+## Real, severe bug found from the account owner's own transaction history: average-swing spacing could floor below the real fee cost, guaranteeing a loss on every completed cycle
+
+The account owner spotted this directly from real Coinbase transaction
+screenshots, not from a dashboard: several completed Grid Bot round
+trips bought and sold for almost the identical price - ATOM-USD $4.97
+in, $4.97 out; ARB-USD $4.98 in, $4.98 out - and asked why, since "it
+should be only taking profits." A fair, correct read: a real completed
+cycle needs the gross price move to clear Coinbase's real ~0.8%
+round-trip fee before it's a genuine profit, and these numbers show it
+wasn't.
+
+Root cause, traced directly to the average-swing dynamic spacing
+feature shipped earlier this same session:
+`compute_avg_swing_grid_pct()` floored its result at the bare
+`MIN_DYNAMIC_GRID_PCT` (0.3%) - a constant copied from the OTHER dynamic
+spacing feature (fee-tier), where it's genuinely safe because that
+feature's own formula (`TARGET_NET_MARGIN_PCT + round_trip_fee_rate`)
+already bakes the real fee in before the floor is ever applied, so it
+never actually reaches 0.3% in practice. Average-swing spacing computes
+purely from a coin's own recent volatility, with nothing fee-aware in
+it at all - so a real, genuinely calm coin (avg_swing_pct * 1.5 landing
+below 0.3%) could floor there directly, and every completed cycle at
+that spacing is a **guaranteed real loss before it even opens**: a 0.3%
+gross move can never cover a real ~0.8% fee. Confirmed by direct math,
+not just inference: `MIN_DYNAMIC_GRID_PCT (0.003) < ROUND_TRIP_FEE_RATE
+(0.008)`.
+
+Fixed by flooring `compute_avg_swing_grid_pct()` at
+`max(MIN_DYNAMIC_GRID_PCT, TARGET_NET_MARGIN_PCT + engine.ROUND_TRIP_FEE_RATE)`
+- the exact same real fee-safe minimum `compute_dynamic_grid_pct()`
+already uses, which equals today's live `DEFAULT_GRID_PCT` (1%) exactly
+at the base fee tier. A real, genuinely calm coin now floors at the
+same spacing every branch already traded at safely before this feature
+existed, instead of an unsafe 0.3% nothing could actually profit at. A
+real, genuinely volatile coin is completely unaffected - its own
+swing-based spacing was already well above either floor.
+
+Verified offline (7 new checks, plus updating one pre-existing test's
+own stale assertion of the old, buggy floor value): the real fee-safe
+floor is confirmed to equal today's live default exactly; the OLD floor
+is directly confirmed to have been below the real fee cost (not a
+hypothetical); a real calm-coin scenario now floors at the new, safe
+minimum and is confirmed net-POSITIVE after real fees, while the OLD
+floor on the identical scenario is confirmed net-NEGATIVE; a real
+volatile coin's own swing-based spacing is confirmed unaffected; and a
+real fetch failure still fails open, unaffected by this fix. Full
+existing Grid Bot regression suite (94 checks across 4 related files)
+re-run clean alongside it.
+
+**Real, honest scope note**: this fix only stops FUTURE cycles from
+completing at an unsafe spacing - it doesn't undo the real, already-
+completed round trips visible in the account owner's own screenshots.
+Those were real, small losses (each on the order of a few cents to
+tens of cents per cycle, given the real ~0.8% fee on ~$5-25 slice
+sizes) - not large, but genuinely losses, and genuinely caused by this
+bug. Not yet confirmed against real live trading - the account owner
+should watch for real completed cycles no longer showing an
+entry/exit price this close together after the next redeploy.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

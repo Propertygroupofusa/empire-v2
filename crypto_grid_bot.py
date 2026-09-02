@@ -371,13 +371,34 @@ async def compute_avg_swing_grid_pct(session, product_id: str) -> tuple:
     """Real, live average-swing-based grid_pct for one branch's own coin -
     fetches its real recent hourly True-Range average
     (engine.get_average_hourly_swing_pct) and sizes spacing at
-    AVG_SWING_SPACING_MULTIPLIER (1.5x) times that, floored at
-    MIN_DYNAMIC_GRID_PCT (the same real floor the fee-tier feature already
-    uses, so a near-zero real swing can never produce a degenerate,
-    effectively-always-triggering grid). Unlike compute_dynamic_grid_pct
-    above (one spacing shared by every branch, tied to the account's own
-    fee tier), this produces a DIFFERENT real grid_pct per branch, sized
-    off that specific coin's own real recent behavior.
+    AVG_SWING_SPACING_MULTIPLIER (1.5x) times that. Unlike
+    compute_dynamic_grid_pct above (one spacing shared by every branch,
+    tied to the account's own fee tier), this produces a DIFFERENT real
+    grid_pct per branch, sized off that specific coin's own real recent
+    behavior.
+
+    Real bug found and fixed after the account owner spotted real
+    completed round trips buying and selling for almost the identical
+    price (ATOM $4.97 -> $4.97, ARB $4.98 -> $4.98) - real, guaranteed
+    losses once Coinbase's real ~0.8% round-trip fee is subtracted. Root
+    cause: this originally floored grid_pct at the bare MIN_DYNAMIC_GRID_PCT
+    (0.3%) - a constant that's only ever safe for compute_dynamic_grid_pct
+    above, which is fee-AWARE by construction (its own formula already adds
+    the real round-trip fee rate before applying that floor, so it never
+    actually reaches 0.3% in practice). This function computes grid_pct
+    purely from a coin's own volatility, with nothing fee-aware in it at
+    all - a real, genuinely calm coin's avg_swing_pct * 1.5 can land well
+    below 0.3%, and once it does, EVERY completed cycle at that spacing is
+    a guaranteed real loss before it even opens, since the gross price move
+    can never cover the real fee. Fixed by flooring at the SAME real
+    fee-safe minimum compute_dynamic_grid_pct's own formula already uses
+    (TARGET_NET_MARGIN_PCT + engine.ROUND_TRIP_FEE_RATE, which equals
+    today's live DEFAULT_GRID_PCT exactly at the base fee tier) - a calm
+    coin now floors at the same real, already-profitable 1% every branch
+    already traded at before this feature existed, instead of an unsafe
+    0.3% nothing could actually profit at. MIN_DYNAMIC_GRID_PCT itself is
+    kept as an even lower defensive backstop underneath that, unreachable
+    in practice, same role it already plays for the fee-tier feature.
 
     Fails OPEN on a real fetch failure - returns (DEFAULT_GRID_PCT, None),
     matching every other "don't block real trading on missing data" gate
@@ -385,7 +406,8 @@ async def compute_avg_swing_grid_pct(session, product_id: str) -> tuple:
     avg_swing_pct = await engine.get_average_hourly_swing_pct(session, product_id, count=AVG_SWING_LOOKBACK_HOURS)
     if avg_swing_pct is None:
         return DEFAULT_GRID_PCT, None
-    grid_pct = max(MIN_DYNAMIC_GRID_PCT, avg_swing_pct * AVG_SWING_SPACING_MULTIPLIER)
+    fee_safe_floor = max(MIN_DYNAMIC_GRID_PCT, TARGET_NET_MARGIN_PCT + engine.ROUND_TRIP_FEE_RATE)
+    grid_pct = max(fee_safe_floor, avg_swing_pct * AVG_SWING_SPACING_MULTIPLIER)
     return grid_pct, avg_swing_pct
 
 
