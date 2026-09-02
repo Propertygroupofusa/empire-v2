@@ -2530,14 +2530,27 @@ async def get_alpaca_branch_trade_history(limit_recent: int = 50):
             ).group_by(AlpacaBranchTradeHistory.bot_name)
         )
         branches = []
+        total_trade_count = 0
+        total_realized_pnl = 0.0
+        total_wins = 0
         for bot_name, trade_count, total_pnl, avg_pnl, wins in agg_result.all():
+            branch_pnl = round(total_pnl, 2) if total_pnl is not None else 0.0
             branches.append({
                 "bot_name": bot_name,
                 "trade_count": trade_count,
-                "total_pnl": round(total_pnl, 2) if total_pnl is not None else 0.0,
+                "total_pnl": branch_pnl,
                 "avg_pnl": round(avg_pnl, 2) if avg_pnl is not None else 0.0,
                 "win_rate": round(wins / trade_count * 100, 1) if trade_count else 0.0,
             })
+            # Real, exact totals accumulated from the same raw query results
+            # above (wins as an exact int, total_pnl unrounded) - never
+            # reconstructed from the already-rounded per-branch win_rate/
+            # total_pnl, which would compound rounding error across many
+            # branches. Same fix already shipped on the Grid Bot side's
+            # get_grid_trade_history() for the identical real gap.
+            total_trade_count += trade_count
+            total_realized_pnl += total_pnl if total_pnl is not None else 0.0
+            total_wins += wins or 0
         branches.sort(key=lambda b: b["total_pnl"], reverse=True)
 
         recent_result = await db.execute(
@@ -2545,7 +2558,22 @@ async def get_alpaca_branch_trade_history(limit_recent: int = 50):
         )
         recent_trades = [row.to_dict() for row in recent_result.scalars().all()]
 
-    return {"branches": branches, "recent_trades": recent_trades}
+    # Real, all-time grand total across EVERY branch this account has ever
+    # traded - the direct Alpaca-side counterpart to the Grid Bot fix
+    # shipped earlier this session ("what about the real life total of
+    # profit that's been taken and in the total amount USD"). Covers a
+    # branch since paused/deleted too - a completed AlpacaBranchTradeHistory
+    # row is real, permanent P&L regardless of whether the branch that
+    # earned it still exists today.
+    overall_win_rate = round(total_wins / total_trade_count * 100, 1) if total_trade_count else 0.0
+
+    return {
+        "branches": branches,
+        "recent_trades": recent_trades,
+        "total_trade_count": total_trade_count,
+        "total_realized_pnl": round(total_realized_pnl, 2),
+        "overall_win_rate": overall_win_rate,
+    }
 
 
 async def run_alpaca_branch_cycle(session, branch, equity, buying_power, strategy_family, live_entry_variant, kill_halted: bool):

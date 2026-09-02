@@ -11337,6 +11337,58 @@ hour going forward.
 
 ---
 
+## Dashboard audit: the same "no all-time realized total" gap existed on the Alpaca side too, now fixed
+
+The account owner asked directly whether Alpaca had been checked for the
+same kind of gap just fixed on Grid Bot. It had the identical shape:
+`get_alpaca_branch_trade_history()` (`prop_bot.py`) already aggregated
+real P&L PER BRANCH, but never summed a real all-time grand total across
+every branch this account has ever run - the exact same gap Grid Bot had
+before the earlier fix this session. Fixed the same way: accumulated
+`total_realized_pnl`/`total_trade_count`/`overall_win_rate` from the
+same raw per-branch query rows (exact win counts, unrounded P&L - never
+reconstructed from already-rounded per-branch percentages, which would
+compound rounding error). Covers a branch since paused/deleted too - a
+completed `AlpacaBranchTradeHistory` row is real, permanent P&L
+regardless of whether the branch that earned it still exists today.
+
+`alpaca_dashboard.html`'s Real Branches section gained a matching
+"🏆 Total real profit already taken (all-time)" banner under the branch
+table, same visual treatment as the Grid Bot one.
+
+**Deliberately did NOT add a live unrealized total to match Grid Bot's**
+- audited this directly rather than blindly copying the pattern: Grid
+Bot's per-slice unrealized figure is safe because each slice's own qty
+and entry price are tracked internally and multiplied against a fresh
+live price fetch, entirely within this codebase's own bookkeeping. An
+Alpaca branch's open position is a REAL Alpaca broker position that can
+share the exact same underlying symbol with other real holdings outside
+the branch system (a manual "Trade this" click, the automatic
+whole-account scan) - Alpaca's own `/v2/positions` endpoint reports only
+ONE aggregated position per symbol, with no reliable way to attribute
+which slice of its real unrealized P&L belongs to which branch
+specifically. Showing a fabricated per-branch unrealized split would
+risk being actively misleading rather than helpful, so this only ever
+shows the one number that's genuinely unambiguous: real, already-realized
+P&L. Flagged directly to the account owner rather than silently building
+something that could show a wrong number with high confidence.
+
+Verified offline (`test_alpaca_branch_realized_total.py`, 8 checks, real
+throwaway SQLite DB): matches the exact same test shape already validated
+for Grid Bot - a real grand total across multiple branches (including one
+since deleted) matches a hand-summed total; `overall_win_rate` is exact,
+not reconstructed from rounded per-branch percentages; and zero real
+trades returns an honest 0.0/0/0.0 rather than crashing. Full existing
+Alpaca regression suite (21 files) re-run clean alongside it - the one
+failure seen (`test_alpaca_overview.py`) was confirmed pre-existing and
+unrelated via a direct `git stash` comparison to the prior commit.
+
+**Not yet confirmed live** - the account owner needs to redeploy and open
+the Alpaca dashboard's Real Branches section to see the new all-time
+realized total banner.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

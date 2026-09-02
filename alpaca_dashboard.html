@@ -952,7 +952,7 @@ const ALPACA_CONTRACTS = {
 
 let branchModeActive = false;
 
-function renderBranches(data, tradeHistoryByBot) {
+function renderBranches(data, tradeHistoryByBot, historyTotals) {
     branchModeActive = !!data.mode_active;
     const modeBadge = document.getElementById('branch-mode-badge');
     modeBadge.textContent = branchModeActive ? '🟢 branch trading ON' : '⚪ branch trading off';
@@ -1076,18 +1076,57 @@ function renderBranches(data, tradeHistoryByBot) {
             own current allocated capital, so you can see how well the branch is actually trading, not just how big
             it's gotten. Reads "No closed trades yet" until a branch's own first real trade actually closes - there's
             no real performance number to show before that.
-        </p>`;
+        </p>
+        ${renderAlpacaBranchRealizedTotalBanner(historyTotals)}`;
+}
+
+// Real, all-time "profit already taken" total across every real Alpaca
+// branch - the direct counterpart to the Grid Bot section's own identical
+// banner (see family_tree_dashboard.html), added for the same real reason:
+// the per-branch "Real results" column above only ever shows one branch at
+// a time, with no single bottom-line number covering every branch this
+// account has ever run - including one since paused. Deliberately does
+// NOT also show a live unrealized total the way Grid Bot's does - an open
+// Alpaca branch position is a REAL Alpaca broker position that can be
+// (and often is) sharing the exact same underlying symbol with other real
+// holdings outside the branch system (a manual "Trade this" click, the
+// automatic whole-account scan) - Alpaca's own /v2/positions endpoint
+// only ever reports one aggregated position per symbol, with no reliable
+// way to attribute which slice of its real unrealized P&L belongs to
+// which branch specifically. Showing a fabricated per-branch unrealized
+// split would risk being actively misleading, so this only shows the one
+// number that's genuinely unambiguous: real, already-realized P&L.
+function renderAlpacaBranchRealizedTotalBanner(historyTotals) {
+    const h = historyTotals || {};
+    const realizedKnown = h.total_realized_pnl !== null && h.total_realized_pnl !== undefined;
+    if (!realizedKnown) {
+        return `<div style="margin-top:14px; padding:12px 14px; background:var(--bg); border-radius:8px; font-size:0.85em; color:var(--text-dim);">
+            🏆 Could not load the real all-time realized total right now - refresh in a moment.
+        </div>`;
+    }
+    const realized = h.total_realized_pnl;
+    const tradeCount = h.total_trade_count || 0;
+    const winRate = h.overall_win_rate || 0;
+    const color = realized > 0 ? 'var(--green)' : (realized < 0 ? '#c0392b' : 'var(--text-dim)');
+    return `<div style="margin-top:14px; padding:14px; background:var(--bg); border-radius:8px; border:1px solid var(--border);">
+        <div style="font-size:1.05em; font-weight:700; color:${color};">
+            🏆 Total real profit already taken (all-time, every closed branch trade): ${realized >= 0 ? '+' : ''}${fmtUsd(realized)}
+        </div>
+        <div style="font-size:0.8em; color:var(--text-dim); margin-top:2px;">
+            ${tradeCount} real completed trade${tradeCount === 1 ? '' : 's'} across every real Alpaca branch ever run · ${winRate.toFixed(0)}% win rate
+        </div>
+    </div>`;
 }
 
 async function loadBranches() {
     try {
         const [data, history] = await Promise.all([
             apiGet('/alpaca-overview/branches'),
-            apiGet('/alpaca-overview/branch-trade-history').catch(function () { return { branches: [] }; }),
+            apiGet('/alpaca-overview/branch-trade-history').catch(function () { return { branches: [], total_realized_pnl: null, total_trade_count: 0, overall_win_rate: 0 }; }),
         ]);
         const tradeHistoryByBot = {};
         (history.branches || []).forEach(function (h) { tradeHistoryByBot[h.bot_name] = h; });
-        renderBranches(data, tradeHistoryByBot);
+        renderBranches(data, tradeHistoryByBot, history);
     } catch (e) {
         document.getElementById('branches-content').innerHTML = `<div class="empty">Could not load: ${e.message}</div>`;
     }
