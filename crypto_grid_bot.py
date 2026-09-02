@@ -976,6 +976,36 @@ async def _first_ranked_coin_beating_btc(ranked_product_ids: list) -> str:
     return ranked_product_ids[0]
 
 
+# Real, absolute "genuine edge" floor - per the account owner's direct,
+# urgent request after watching every real Grid Bot branch sit negative:
+# "apparently is picking bad picks from the beginning... should only
+# execute moves when it finds a genuine edge (+20-30% real advantage)."
+# Confirmed true by reading the code directly: pick_best_ranked_coin_for_grid()
+# and _best_available_coin_and_roi() below always picked the single
+# BEST-RANKED real candidate with no absolute quality floor - if
+# literally every coin's real latest backtested ROI was negative, these
+# functions still confidently returned "the best of the worst" with
+# nothing distinguishing that from a real, earned opportunity. Every
+# automatic capital-deployment path in this file (the $20 Quick Buy
+# auto-pick, the auto-deploy-free-cash sweep, the auto-rotate sweep, and
+# the real move-cash-candidate ranking) funnels through these same two
+# functions, so this one fix covers all of them - "across the board, all
+# the time," per the account owner's own words.
+#
+# MIN_REQUIRED_ROI_PCT (20% default) is the low end of the account
+# owner's own stated 20-30% range, and deliberately not an invented
+# number - it's a real, already-achieved figure in this account's own
+# backtest history (USO +21.6% ROI/74.2% win rate, BLUR-USD +21.8% ROI -
+# see the real coin-selection backtest results referenced throughout
+# this session), so it's a real bar, not a fantasy one. A coin must
+# clear BOTH the existing relative ranking AND this absolute floor
+# before any automatic path is allowed to deploy real capital into it -
+# when NOTHING clears it, every one of those paths correctly does
+# nothing this cycle (real capital sits in cash) rather than always
+# finding somewhere, however mediocre, to go.
+MIN_REQUIRED_ROI_PCT = float(os.getenv("GRID_MIN_REQUIRED_ROI_PCT", "20.0"))
+
+
 async def pick_best_ranked_coin_for_grid() -> str:
     """Real coin auto-pick for the $20 Quick Buy button - the single best
     real backtested-ROI coin (from CryptoBacktestRun, the same real
@@ -999,7 +1029,9 @@ async def pick_best_ranked_coin_for_grid() -> str:
     over the live filter alone.
 
     Raises ValueError if nothing real qualifies (no coin has a real
-    backtest run yet, or every ranked coin is excluded/claimed)."""
+    backtest run yet, every ranked coin is excluded/claimed, or nothing
+    real clears the real MIN_REQUIRED_ROI_PCT edge floor - see its own
+    comment above)."""
     import crypto_family_tree_bot as tree  # lazy - avoids a circular import at module load, same pattern as get_real_free_cash_usd above
     from models import CryptoBacktestRun
 
@@ -1027,7 +1059,15 @@ async def pick_best_ranked_coin_for_grid() -> str:
             "run a coin-selection backtest first, or pick a specific coin instead"
         )
     candidates.sort(key=lambda r: r.roi_pct_of_spend, reverse=True)
-    return await _first_ranked_coin_beating_btc([c.product_id for c in candidates])
+    best_pid = await _first_ranked_coin_beating_btc([c.product_id for c in candidates])
+    best_roi = latest_by_coin[best_pid].roi_pct_of_spend
+    if best_roi is None or best_roi < MIN_REQUIRED_ROI_PCT:
+        raise ValueError(
+            f"no real coin currently clears the real minimum edge floor ({MIN_REQUIRED_ROI_PCT:.0f}% real "
+            f"backtested ROI) - the best real candidate right now is {best_pid} at "
+            f"{best_roi:.1f}% ROI, which isn't a genuine enough edge to deploy new capital into"
+        )
+    return best_pid
 
 
 async def _best_available_coin_and_roi(exclude_bot_name: str = None) -> tuple:
@@ -1047,9 +1087,11 @@ async def _best_available_coin_and_roi(exclude_bot_name: str = None) -> tuple:
     for "no move needed, already the best."
 
     Returns (None, None) if nothing real qualifies (no coin has a real
-    backtest run yet, or every ranked coin is excluded/claimed by some
-    OTHER active branch) - never raises, so an automatic caller can just
-    skip a branch this cycle rather than crash on a real data gap."""
+    backtest run yet, every ranked coin is excluded/claimed by some
+    OTHER active branch, or nothing real clears the real
+    MIN_REQUIRED_ROI_PCT edge floor - see its own comment above) - never
+    raises, so an automatic caller can just skip a branch this cycle
+    rather than crash on a real data gap."""
     import crypto_family_tree_bot as tree  # lazy - avoids a circular import at module load, same pattern as get_real_free_cash_usd above
     from models import CryptoBacktestRun
 
@@ -1083,7 +1125,10 @@ async def _best_available_coin_and_roi(exclude_bot_name: str = None) -> tuple:
     best_pid = await _first_ranked_coin_beating_btc([c.product_id for c in candidates])
     if best_pid is None:
         return None, None
-    return best_pid, latest_by_coin[best_pid].roi_pct_of_spend
+    best_roi = latest_by_coin[best_pid].roi_pct_of_spend
+    if best_roi is None or best_roi < MIN_REQUIRED_ROI_PCT:
+        return None, None
+    return best_pid, best_roi
 
 
 async def get_grid_cash_move_candidates(from_bot_name: str) -> dict:
@@ -1944,6 +1989,7 @@ async def get_grid_status() -> dict:
         "total_allocated_usd": round(total_allocated, 2),
         "total_unrealized_net_usd": total_unrealized_net_usd,
         "real_free_cash_usd": await get_real_free_cash_usd(),
+        "min_required_roi_pct": MIN_REQUIRED_ROI_PCT,
         "branches": out,
     }
 

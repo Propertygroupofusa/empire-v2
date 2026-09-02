@@ -11559,6 +11559,97 @@ immediately actionable information instead of ambiguous).
 
 ---
 
+## Real, absolute "genuine edge" floor added to Grid Bot's automatic coin-picking - the real root cause of "why is everything negative"
+
+The account owner pushed back hard and directly, right after the "never
+sell at a loss" fix's own honest tradeoff was explained: "fix the bot
+first... should only execute moves when it finds a genuine edge (+20-30%
+real advantage)... apparently is picking bad picks from the beginning."
+
+Traced it by reading the actual code, not guessing: `pick_best_ranked_coin_for_grid()`
+and `_best_available_coin_and_roi()` (`crypto_grid_bot.py`) - the two
+functions EVERY automatic capital-deployment path in this file funnels
+through (the $20 Quick Buy auto-pick, the auto-deploy-free-cash sweep,
+the auto-rotate sweep, and the real move-cash-candidate ranking) - always
+picked the single BEST-RANKED real candidate by latest backtested ROI,
+with NO absolute quality floor. If literally every real coin's latest
+backtested ROI was negative, these functions still confidently returned
+"the best of the worst," with nothing distinguishing that pick from a
+real, earned opportunity. This is a real, confirmed root cause, not a
+guess - it directly explains the account owner's own observation.
+
+**Fixed with a real, absolute floor**: `MIN_REQUIRED_ROI_PCT` (20%
+default, `GRID_MIN_REQUIRED_ROI_PCT` env-overridable) - deliberately the
+LOW end of the account owner's own stated 20-30% range, and not an
+invented number: it's a real, already-achieved figure in this account's
+own backtest history (USO +21.6% ROI/74.2% win rate, BLUR-USD +21.8%
+ROI, referenced earlier this session), so it's a genuine, real bar, not
+a fantasy one. Both functions now require their picked coin to clear
+this floor IN ADDITION to the existing relative ranking and the existing
+BTC-relative-strength tiebreak:
+- `pick_best_ranked_coin_for_grid()` raises a clear `ValueError` naming
+  the real best candidate and its real (insufficient) ROI when nothing
+  clears the bar - the $20 Quick Buy and auto-deploy-free-cash sweep both
+  already wrap this call in a try/except that stops cleanly on any
+  `ValueError` (confirmed by reading both call sites directly, not
+  assumed), so this correctly means "deploy zero new real capital this
+  cycle" rather than crashing or silently falling back to a worse pick.
+- `_best_available_coin_and_roi()` returns `(None, None)` - its own
+  already-established "nothing qualifies" convention - when nothing
+  clears the floor, so the auto-rotate sweep and the move-cash-candidate
+  preview both correctly treat this as "nothing to do" with zero call-
+  site changes needed (their existing `if best_pid is None: return`/
+  `if new_branch_pid is not None: ...` guards already handle it).
+
+**The real, honest consequence, stated plainly**: when nothing currently
+clears the floor, every automatic path now correctly does NOTHING - real
+free cash stays unallocated, an idle branch's cash stays put, rather than
+always finding somewhere, however mediocre, to go. This is exactly what
+"only execute when it finds a genuine edge" means in practice - the tree
+may go quiet for stretches, and that's the intended, correct behavior,
+not a malfunction.
+
+**Made visible, not silent**: `get_grid_status()` now returns
+`min_required_roi_pct`, and `family_tree_dashboard.html`'s Grid Bot
+section gained a "🎯 Genuine-edge floor" badge stating the real active
+number and what it gates, right alongside the existing spacing/auto-
+rotate badges - so the floor is never an invisible rule.
+
+Verified offline (`test_grid_min_roi_edge_floor.py`, 9 checks, real
+throwaway SQLite DB): confirms the default is exactly 20.0 (the low end
+of the account owner's own stated range); a real scenario where every
+candidate is below the floor (the real "best of the worst," DOGE-USD at
+8.9%) is correctly refused, with the real refusal message naming the
+actual best candidate and its real ROI; `_best_available_coin_and_roi()`
+correctly returns `(None, None)` in the same scenario; once a real
+candidate clears the floor (BLUR-USD at 21.8%) it's picked normally,
+proving the fix doesn't block genuinely good real opportunities; a real
+candidate exactly AT the floor (20.0%) is accepted (`>=`, not strictly
+`>`); the real `_auto_deploy_idle_free_cash()` sweep creates ZERO new
+branches end-to-end when nothing clears the floor even with abundant
+real free cash available; and the real floor is confirmed exposed on
+`get_grid_status()` for dashboard visibility. Full existing Grid Bot
+regression suite (20 files) re-run clean alongside it - six pre-existing
+test files needed their own seeded ROI fixtures bumped above the new 20%
+floor (their actual point - ranking mechanics, auto-deploy execution,
+move-cash-candidate display, BTC-relative-strength tiebreak - was
+completely unaffected, they just used arbitrary pre-floor ROI values
+like 5-12% that the new floor now correctly refuses); the one remaining
+failure (`test_grid_drawdown_and_dynamic_spacing.py`) was already
+confirmed pre-existing and unrelated earlier this session.
+
+**Not yet confirmed live** - the account owner needs to redeploy; the
+real, visible proof this is working will be the "🎯 Genuine-edge floor"
+badge showing on the Grid Bot dashboard, and - if the account's real
+current backtest data shows nothing clearing 20% right now - the tree
+correctly going quiet on new automatic capital deployment rather than
+continuing to fund mediocre picks. Whether any real coin currently
+clears this bar is unknown from this sandbox (no live network access to
+Coinbase or this account's own backtest data) - that's the account
+owner's own next real observation to make from the live dashboard.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

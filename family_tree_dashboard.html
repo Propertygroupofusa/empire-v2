@@ -575,6 +575,7 @@
     <div id="grid-dynamic-spacing-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-avg-swing-spacing-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-auto-rotate-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
+    <div id="grid-min-roi-floor-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div class="panel" id="grid-panel">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:8px;">
             <button id="grid-mode-toggle-btn" class="unlock-btn" onclick="toggleGridMode()" disabled>Loading…</button>
@@ -1861,6 +1862,7 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals) {
     renderGridDynamicSpacingBadge(!!data.dynamic_spacing_active);
     renderGridAvgSwingSpacingBadge(!!data.avg_swing_spacing_active);
     renderGridAutoRotateBadge(!!data.auto_rotate_active, data.auto_rotate_interval_minutes);
+    renderGridMinRoiFloorBadge(data.min_required_roi_pct);
 
     document.getElementById('grid-total-allocated').textContent =
         `${fmtUsd(data.total_allocated_usd)} total real capital across ${data.branch_count} grid branch${data.branch_count === 1 ? '' : 'es'}`;
@@ -2294,6 +2296,25 @@ async function toggleGridAvgSwingSpacing(enable) {
 // coin is currently ranked best (the same real signal already live via
 // the $20 Quick Buy button), on a real 30-min sweep, plus immediately
 // right after a slice sells for profit. ON by default.
+// Real, absolute "genuine edge" floor - per the account owner's direct,
+// urgent request after watching every real branch sit negative: "should
+// only execute moves when it finds a genuine edge... apparently is
+// picking bad picks from the beginning." pick_best_ranked_coin_for_grid()/
+// _best_available_coin_and_roi() (crypto_grid_bot.py) now refuse to
+// deploy real capital into ANY coin whose latest real backtested ROI
+// doesn't clear this floor - every automatic path (Quick Buy auto-pick,
+// auto-deploy free cash, auto-rotate) funnels through those two
+// functions, so this one number governs all of them. Read-only display
+// here (env-configured, not yet a dashboard toggle) - purely for
+// visibility, so it's never a silent, invisible rule.
+function renderGridMinRoiFloorBadge(minRoiPct) {
+    const el = document.getElementById('grid-min-roi-floor-badge');
+    if (!el || minRoiPct == null) return;
+    el.innerHTML = `🎯 Genuine-edge floor: a coin must show at least <strong>${minRoiPct.toFixed(0)}%</strong> real backtested ROI ` +
+        `before ANY automatic action (Quick Buy, auto-deploy, auto-rotate) will deploy real capital into it - ` +
+        `if nothing clears this bar, real cash stays unallocated rather than funding a mediocre pick.`;
+}
+
 function renderGridAutoRotateBadge(active, intervalMinutes) {
     const el = document.getElementById('grid-auto-rotate-badge');
     if (!el) return;
