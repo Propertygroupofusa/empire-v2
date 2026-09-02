@@ -1049,6 +1049,33 @@ _last_auto_backtest_at = 0.0
 # how much smaller this real universe is to begin with.
 TOP_N_ELIGIBLE_SYMBOLS = _safe_int_env("PROP_TOP_N_SYMBOLS", "5")
 
+# Real, structural gap found and fixed per the account owner's own direct
+# question ("a tree grows both ways... why doesn't my system gain profits
+# both ways"): the top-N filter above judges every symbol - including the
+# 4 real 1x inverse ETFs (SH/PSQ/DOG/RWM, see FUTURES above) that exist
+# SPECIFICALLY to let this account profit when the market falls - by the
+# exact same recent-ROI yardstick as the 7 long-only index/commodity
+# symbols. During a real sustained uptrend (the shape every recent
+# backtest screenshot this session showed: SH/RWM/DOG all posting real
+# negative or weak numbers across almost every comparison tool), the
+# inverse ETFs naturally rank at the bottom and get pushed OUT of the top
+# 5 - locking the account out of ever positioning for a real downturn
+# until well after the market has already turned, since the ROI needed to
+# re-earn a top-5 spot only shows up once the decline is already
+# underway. That's the opposite of what these 4 symbols were built for:
+# real, standing coverage for the direction the other 7 can't profit
+# from, not a 5th-place-or-better contestant against them.
+#
+# Exempted from the top-N ranking specifically - never excluded by it,
+# regardless of how the other 7 are currently ranked or how the market's
+# recent direction has treated them. The OTHER real exclusion layer
+# (AUTO_EXCLUDE_RUN_WINDOW consecutive negative-ROI runs) still applies
+# to these 4 exactly like every other symbol - if one of them is
+# genuinely, persistently losing money on its own terms (not just "not
+# top-5 right now"), that's real evidence worth acting on and this
+# exemption doesn't shield it from that.
+INDEX_HEDGE_SYMBOLS = {"SH", "PSQ", "DOG", "RWM"}
+
 
 async def _compute_top_ranked_symbols():
     """Real, live ranking by latest AlpacaBacktestRun.roi_pct_of_spend per
@@ -1112,7 +1139,7 @@ async def get_effective_excluded_symbols() -> set:
     top_ranked = await _compute_top_ranked_symbols()
     if top_ranked is not None:
         for symbol in {config["symbol"] for config in FUTURES.values()}:
-            if symbol not in top_ranked:
+            if symbol not in top_ranked and symbol not in INDEX_HEDGE_SYMBOLS:
                 excluded.add(symbol)
 
     return excluded
@@ -1137,7 +1164,7 @@ async def describe_symbol_exclusion_reason(symbol: str) -> str:
     if len(recent) >= AUTO_EXCLUDE_RUN_WINDOW and all(roi < 0 for roi in recent):
         return f"last {AUTO_EXCLUDE_RUN_WINDOW} real backtest runs were all negative ROI"
     top_ranked = await _compute_top_ranked_symbols()
-    if top_ranked is not None and symbol not in top_ranked:
+    if top_ranked is not None and symbol not in top_ranked and symbol not in INDEX_HEDGE_SYMBOLS:
         return f"outside the current top {TOP_N_ELIGIBLE_SYMBOLS} symbols by real backtested ROI"
     return "currently excluded"
 
