@@ -2996,6 +2996,25 @@ async def run_grid_atr_spacing_backtest():
     return await crypto_selection_backtest_module.run_grid_atr_spacing_comparison()
 
 
+@router.post("/crypto-selection-backtest/grid-level-spacing", dependencies=[Depends(require_admin_key)])
+async def run_grid_level_spacing_backtest():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    Direct, real answer to a pasted third-party critique's specific
+    "fewer, bigger slices" proposal (reduce grid levels 6->3, widen
+    take-profit to 2.0-2.5%) - replays the existing, already-validated
+    grid strategy at each candidate's real (num_levels, grid_pct) pair
+    against today's real live default (up to 10 levels, spacing sized
+    per-coin off real average swing), on identical real historical
+    Coinbase candles per coin. See crypto_selection_backtest.py's
+    run_grid_level_spacing_comparison for the full real methodology.
+
+    Pulls real historical data from Coinbase's public candles endpoint -
+    can take 30-90 seconds depending on that endpoint's response time."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_grid_level_spacing_comparison()
+
+
 @router.post("/crypto-selection-backtest/grid-higher-tf-trend", dependencies=[Depends(require_admin_key)])
 async def run_grid_higher_tf_trend_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.

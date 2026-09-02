@@ -215,6 +215,18 @@
     <div id="gasResults"></div>
 
     <div class="note" style="margin-top: 28px;">
+        <strong>🧮 "Fewer, bigger slices" - does the specific 3-level/2-2.5% proposal actually beat today's live default?</strong>
+        Direct, real answer to a pasted critique's specific claim ("reduce grid levels 6→3, widen take-profit to
+        2.0-2.5%... same 68% win rate, but wins 2-3x larger... -$1.57 → +$15-25 on the same capital"). Replays that exact
+        proposal (3 levels @ 2.0%, 3 levels @ 2.5%, and a middle-ground 5 levels @ 2.0%) against today's real live default
+        (up to 10 levels, spacing sized per-coin off real average swing) on identical real historical candles - so the
+        claim gets tested with real numbers instead of taken on faith. Shadow mode only - never places an order.
+    </div>
+    <button class="run-btn" id="glsBtn" onclick="runGridLevelSpacingBacktest()">▶ Run Grid Level/Spacing Comparison (~30-90 seconds)</button>
+    <div id="glsStatus"></div>
+    <div id="glsResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
         <strong>📉 A higher-timeframe trend filter for Grid Bot - does it stop the narrow-spacing losses?</strong>
         Direct follow-up after narrower grid spacing showed real losses: those losses come from buying into a real
         decline (several dips stack up open slices at descending prices), then FIFO-selling the OLDEST, higher-priced
@@ -1504,6 +1516,85 @@ function renderGridAtrSpacingResults(data) {
             <tbody>${coinRows}</tbody>
         </table>
         <p class="trade-note">Every coin gets a DIFFERENT real grid_pct under each swing-based candidate (that's the whole point) - shown per cell, since there's no single "the spacing" the way the fee-tier table has one. Real evidence here, not a recommendation on its own - this is diagnostic only, nothing here changes what the live bot does.</p>
+    `;
+}
+
+async function runGridLevelSpacingBacktest() {
+    const btn = document.getElementById('glsBtn');
+    const statusEl = document.getElementById('glsStatus');
+    const resultsEl = document.getElementById('glsResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real data, 4 candidates replayed per coin)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/crypto-selection-backtest/grid-level-spacing', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - reload the page to re-enter it');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderGridLevelSpacingResults(data);
+        const best = data.summary[data.best_candidate];
+        statusEl.textContent = `Compared ${data.coins_with_results} coins over ${data.backtest_days} days. Best on this real sample: ${data.best_candidate} ($${best.total_pnl.toFixed(2)} total).`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Grid Level/Spacing Comparison (~30-90 seconds)';
+    }
+}
+
+function renderGridLevelSpacingResults(data) {
+    const resultsEl = document.getElementById('glsResults');
+    if (!data.comparison || data.comparison.length === 0) {
+        resultsEl.innerHTML = '<p style="margin-top:16px;color:var(--text-dim)">No coins produced usable comparison results.</p>';
+        return;
+    }
+    const names = data.candidate_names || [];
+    const summaryRows = names.map(name => {
+        const s = data.summary[name];
+        const isBest = name === data.best_candidate;
+        const isLive = name === data.live_default_label;
+        const cls = s.total_pnl >= 0 ? 'pos' : 'neg';
+        return `<tr${isBest ? ' style="font-weight:700;"' : ''}>
+            <td>${name}${isBest ? ' 🏆' : ''}${isLive ? ' <span style="color:var(--text-dim);">(live today)</span>' : ''}</td>
+            <td>${s.num_trades}</td>
+            <td>${s.win_rate == null ? '—' : s.win_rate.toFixed(1) + '%'}</td>
+            <td class="${cls}">${s.total_pnl >= 0 ? '+' : ''}$${s.total_pnl.toFixed(2)}</td>
+        </tr>`;
+    }).join('');
+
+    const coinRows = data.comparison.map(row => {
+        const cells = names.map(name => {
+            const r = row[name];
+            if (!r || r.no_trades) return `<td style="color:var(--text-dim);">${r ? r.num_levels + 'lv/' + r.grid_pct_used + '%, ' : ''}no trades</td>`;
+            const cls = r.total_pnl >= 0 ? 'pos' : 'neg';
+            return `<td class="${cls}">${r.num_levels}lv/${r.grid_pct_used}%<br>${r.total_pnl >= 0 ? '+' : ''}$${r.total_pnl.toFixed(2)} <span style="color:var(--text-dim);">(${r.num_trades}tr, ${r.win_rate.toFixed(0)}%)</span></td>`;
+        }).join('');
+        return `<tr><td>${row.product_id}<br><span style="color:var(--text-dim);font-size:0.85em;">real avg swing ${row.avg_swing_pct}%</span></td>${cells}</tr>`;
+    }).join('');
+
+    resultsEl.innerHTML = `
+        <table style="margin-top:14px;">
+            <thead><tr><th>Real candidate</th><th>Trades</th><th>Win rate</th><th>Real total P&amp;L</th></tr></thead>
+            <tbody>${summaryRows}</tbody>
+        </table>
+        <table style="margin-top:14px;">
+            <thead><tr><th>Coin (real avg swing)</th>${names.map(n => `<th>${n}</th>`).join('')}</tr></thead>
+            <tbody>${coinRows}</tbody>
+        </table>
+        <p class="trade-note">Each cell shows levels/spacing used, real total P&amp;L, trade count, and win rate. Real evidence here, not a recommendation on its own - this is diagnostic only, nothing here changes what the live bot does unless you decide to act on these numbers.</p>
     `;
 }
 

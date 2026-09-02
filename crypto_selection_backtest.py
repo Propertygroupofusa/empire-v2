@@ -1865,6 +1865,121 @@ async def run_grid_atr_spacing_comparison(coins=None, days=BACKTEST_DAYS, max_co
     }
 
 
+# Real candidates directly testing a pasted third-party critique's own
+# "fewer, bigger slices" proposal - "reduce grid levels 6→3, increase
+# take-profit 0.8%→2.0-2.5%, position size $41→$82/slice" - against
+# today's real live setup (up to 10 levels, spacing sized per-coin off
+# real average swing at 1.5x, already validated and shipped earlier this
+# session). Each candidate is a (num_levels, grid_pct) pair; grid_pct is
+# a FIXED percentage here (not swing-based) since that's what the critique
+# itself proposed - a flat 2.0%/2.5% target, not "1.5x whatever this coin
+# happens to do." Real, honest framing: fewer levels means fewer, larger
+# real slices competing for the same total spend - each slice risks more
+# dollars per cycle, and a wider grid_pct means fewer real fills overall
+# (a real tradeoff the critique's own "same 68% win rate, but wins 2-3x
+# larger" claim never actually backed with a replay - this is that
+# missing replay).
+GRID_LEVEL_SPACING_CANDIDATES = {
+    "3_levels_2.0pct": {"num_levels": 3, "grid_pct": 0.020},
+    "3_levels_2.5pct": {"num_levels": 3, "grid_pct": 0.025},
+    "5_levels_2.0pct": {"num_levels": 5, "grid_pct": 0.020},
+}
+GRID_LEVEL_SPACING_LIVE_DEFAULT_LABEL = "live default (10 levels, 1.5x avg-swing spacing)"
+
+
+async def run_grid_level_spacing_comparison(coins=None, days=BACKTEST_DAYS, max_concurrent=6, candidates=None):
+    """SHADOW-MODE, additive comparison - never touches live trading,
+    never places an order. Direct, real answer to a pasted third-party
+    critique's specific "fewer, bigger slices" proposal (reduce grid
+    levels 6→3, widen take-profit to 2.0-2.5%, and its own unbacked claim
+    this would turn "-$1.57 into +$15-25 on the same capital"): replays
+    the existing, already-validated _replay_grid_bot at each candidate's
+    real (num_levels, grid_pct) pair, and at today's real live default
+    (num_levels=STRATEGY_LAB_GRID_LEVELS, grid_pct = each coin's own real
+    average hourly swing x AVG_SWING_SPACING_MULTIPLIER, fee-safe floored
+    - the identical real formula crypto_grid_bot.compute_avg_swing_grid_pct
+    itself uses, computed here from the SAME real historical candles the
+    replay itself uses rather than a second live fetch) - all against the
+    identical real historical Coinbase candles per coin, so every
+    candidate is directly, fairly comparable to what's genuinely live
+    today, not just to each other."""
+    coins = coins or COIN_FAMILY_TREE
+    candidates = dict(candidates) if candidates else dict(GRID_LEVEL_SPACING_CANDIDATES)
+    semaphore = asyncio.Semaphore(max_concurrent)
+    fee_safe_floor = max(grid_engine.MIN_DYNAMIC_GRID_PCT, grid_engine.TARGET_NET_MARGIN_PCT + engine.ROUND_TRIP_FEE_RATE)
+
+    async with aiohttp.ClientSession() as session:
+        async def _one(product_id):
+            async with semaphore:
+                candles = await fetch_historical_candles(session, product_id, days=days)
+            if candles is None:
+                return product_id, None, None, "not enough historical data"
+            closes, highs, lows, _times = candles
+            avg_swing_pct = _average_hourly_swing_pct(closes, highs, lows)
+            live_grid_pct = max(fee_safe_floor, avg_swing_pct * grid_engine.AVG_SWING_SPACING_MULTIPLIER)
+            per_candidate = {
+                GRID_LEVEL_SPACING_LIVE_DEFAULT_LABEL: {
+                    "num_levels": STRATEGY_LAB_GRID_LEVELS, "grid_pct_used": live_grid_pct,
+                    "result": _replay_grid_bot(closes, highs, lows, grid_pct=live_grid_pct, num_levels=STRATEGY_LAB_GRID_LEVELS),
+                }
+            }
+            for name, cfg in candidates.items():
+                per_candidate[name] = {
+                    "num_levels": cfg["num_levels"], "grid_pct_used": cfg["grid_pct"],
+                    "result": _replay_grid_bot(closes, highs, lows, grid_pct=cfg["grid_pct"], num_levels=cfg["num_levels"]),
+                }
+            return product_id, avg_swing_pct, per_candidate, None
+
+        outcomes = await asyncio.gather(*(_one(pid) for pid in coins))
+
+    comparison = []
+    skipped = []
+    candidate_names = [GRID_LEVEL_SPACING_LIVE_DEFAULT_LABEL] + list(candidates.keys())
+    totals = {name: 0.0 for name in candidate_names}
+    trade_counts = {name: 0 for name in candidate_names}
+    win_counts = {name: 0 for name in candidate_names}
+    for product_id, avg_swing_pct, per_candidate, skip_reason in outcomes:
+        if per_candidate is None:
+            skipped.append({"product_id": product_id, "reason": skip_reason})
+            continue
+        row = {"product_id": product_id, "avg_swing_pct": round(avg_swing_pct * 100, 3)}
+        for name in candidate_names:
+            entry = per_candidate[name]
+            result = entry["result"]
+            row[name] = {
+                "num_levels": entry["num_levels"], "grid_pct_used": round(entry["grid_pct_used"] * 100, 3),
+                **(result or {"no_trades": True}),
+            }
+            if result is not None:
+                totals[name] += result["total_pnl"]
+                trade_counts[name] += result["num_trades"]
+                win_counts[name] += round(result["win_rate"] / 100 * result["num_trades"])
+        comparison.append(row)
+
+    summary = {
+        name: {
+            "total_pnl": round(totals[name], 2),
+            "num_trades": trade_counts[name],
+            "win_rate": round(win_counts[name] / trade_counts[name] * 100, 1) if trade_counts[name] else None,
+        }
+        for name in candidate_names
+    }
+    best = max(summary.items(), key=lambda kv: kv[1]["total_pnl"])[0]
+
+    return {
+        "backtest_days": days,
+        "spend_per_trade": SPEND,
+        "coins_tested": len(coins),
+        "coins_with_results": len(comparison),
+        "candidate_names": candidate_names,
+        "live_default_label": GRID_LEVEL_SPACING_LIVE_DEFAULT_LABEL,
+        "skipped": skipped,
+        "summary": summary,
+        "best_candidate": best,
+        "comparison": comparison,
+    }
+
+
 async def run_grid_higher_tf_trend_comparison(coins=None, days=BACKTEST_DAYS, sma_short=20, sma_long=50, max_concurrent=6):
     """SHADOW-MODE, additive comparison - never touches live trading,
     never places an order. Direct answer to the account owner's own

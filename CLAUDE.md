@@ -11772,6 +11772,73 @@ symptom in the future.
 
 ## References
 
+---
+
+## Grid Level/Spacing Comparison - testing a pasted critique's specific "fewer, bigger slices" claim with real numbers
+
+The account owner pasted a third-party critique of Grid Bot arguing for a
+specific real config change - "reduce grid levels 6→3, widen take-profit
+0.8%→2.0-2.5%, bigger $82 slices instead of $41" - with an unbacked claim
+that this would turn "-$1.57 into +$15-25 on the same capital." Several
+of that critique's other claims were already corrected as inaccurate
+(Grid Bot already has a real 25% drawdown breaker; spacing is already
+dynamic and real-backtest-validated, not fixed at 0.5-1%; the DOGE
+-$1.57 example was the exact scenario already fixed by the never-sell-
+at-a-loss change) - but the ONE piece worth actually testing was the
+specific numeric proposal itself, since nothing backed the "+$15-25"
+number with a real replay.
+
+**`run_grid_level_spacing_comparison()`** (`crypto_selection_backtest.py`)
+- SHADOW-MODE, additive, never touches live trading. Replays the
+existing, already-validated `_replay_grid_bot()` at each of 3 real
+candidates matching the critique's own proposal
+(`GRID_LEVEL_SPACING_CANDIDATES`: `3_levels_2.0pct`, `3_levels_2.5pct`,
+a middle-ground `5_levels_2.0pct`) against today's REAL live default
+(`GRID_LEVEL_SPACING_LIVE_DEFAULT_LABEL`: up to
+`STRATEGY_LAB_GRID_LEVELS` levels, spacing computed per-coin via the
+identical real formula `crypto_grid_bot.compute_avg_swing_grid_pct`
+itself uses - `max(fee-safe floor, avg_swing_pct * AVG_SWING_SPACING_MULTIPLIER)`
+- computed from the same real historical candles the replay itself
+uses, no second live fetch needed) - all on identical real historical
+Coinbase candles per coin, so every candidate is directly, fairly
+comparable to what's genuinely live today, not just to each other.
+
+New `POST /crypto-selection-backtest/grid-level-spacing` (admin-key
+gated) and a new "▶ Run Grid Level/Spacing Comparison" button + two
+result tables on `crypto_selection_backtest.html`, right after the
+existing Grid Average-Swing Spacing Comparison section.
+
+Verified offline (`test_grid_level_spacing.py`, 27 checks): every fixed
+candidate's own `num_levels`/`grid_pct_used` exactly matches its real
+config; the live-default candidate's `grid_pct_used` exactly matches the
+real live formula hand-computed from a known real average swing; and - a
+real behavioral proof, not just numeric labels - `num_levels` genuinely
+caps how many real concurrent slices can open on an identical,
+deterministically-declining price path (a real 3-level cap opens exactly
+3 slices on a 6-step decline, a 5-level cap opens exactly 5, an
+uncapped-relative-to-the-data 10-level cap opens all 6) - confirming
+"fewer levels" is a real, different mechanism, not a cosmetic label.
+Full existing Grid Bot regression suite (21 files) re-run clean
+alongside it; the one failure seen
+(`test_grid_drawdown_and_dynamic_spacing.py`) was confirmed pre-existing
+and unrelated via a direct `git stash` comparison - it fails identically
+on the prior commit (a stale assertion of dynamic spacing's OLD default,
+before that default was deliberately flipped to ON earlier this
+session).
+
+**Not yet run against real historical data** - same documented gap as
+every backtest tool in this file (no live network access to Coinbase
+from this sandbox). The account owner needs to open
+`/crypto-selection-backtest-view` after the next redeploy and tap the
+new button to see whether the critique's specific fewer/bigger-slice
+proposal actually beats today's real live default - this tool only
+informs that decision with real evidence instead of an unbacked claim;
+nothing here changes what the live bot does on its own.
+
+---
+
+## References
+
 - **API Endpoints:** See API_ENDPOINTS.md
 - **Stripe docs:** https://stripe.com/docs/api/checkout/sessions
 - **HeyGen docs:** https://docs.heygen.com/
