@@ -1848,7 +1848,7 @@ let gridModeActive = false;
 // correctly enforced server-side; this just fixes what the label says.
 let cryptoPassiveModeActive = false;
 
-function renderGridStatus(data, tradeHistoryByBot) {
+function renderGridStatus(data, tradeHistoryByBot, historyTotals) {
     gridModeActive = !!data.mode_active;
     const badge = document.getElementById('grid-mode-badge');
     badge.textContent = gridModeActive ? '🟢 grid trading ON' : '⚪ grid trading off';
@@ -1934,7 +1934,47 @@ function renderGridStatus(data, tradeHistoryByBot) {
             unrealized loss right now; grid selling is FIFO by trigger price, not by which slice is winning, so a red
             slice can still be the one sold next.
         </p>
+        ${renderGridRealizedTotalBanner(historyTotals, data)}
         ${renderGridCloseAllBanner(data)}`;
+}
+
+// Real, all-time "profit already taken" total - per the account owner's
+// direct follow-up right after seeing the existing "if sold right now"
+// banner below this one: "yeah it shows the real live running total but
+// what about the real life total of profit that's been taken and in the
+// total amount USD." That existing banner only ever covers UNREALIZED
+// P&L on slices still open right now; this one covers REALIZED P&L -
+// every real completed sell, all-time, across every branch this bot has
+// ever traded (including one since paused/withdrawn/deleted) - plus a
+// combined grand total of the two, so there's one real number that
+// answers "what has this whole section actually made me, total."
+function renderGridRealizedTotalBanner(historyTotals, statusData) {
+    const h = historyTotals || {};
+    const realizedKnown = h.total_realized_pnl !== null && h.total_realized_pnl !== undefined;
+    if (!realizedKnown) {
+        return `<div style="margin-top:14px; padding:12px 14px; background:var(--bg); border-radius:8px; font-size:0.85em; color:var(--text-dim);">
+            🏆 Could not load the real all-time realized total right now - refresh in a moment.
+        </div>`;
+    }
+    const realized = h.total_realized_pnl;
+    const tradeCount = h.total_trade_count || 0;
+    const winRate = h.overall_win_rate || 0;
+    const realizedColor = realized > 0 ? 'var(--green)' : (realized < 0 ? 'var(--red)' : 'var(--text-dim)');
+    const unrealized = statusData ? statusData.total_unrealized_net_usd : null;
+    const unrealizedKnown = unrealized !== null && unrealized !== undefined;
+    const combined = unrealizedKnown ? realized + unrealized : null;
+    const combinedColor = combined !== null ? (combined > 0 ? 'var(--green)' : (combined < 0 ? 'var(--red)' : 'var(--text-dim)')) : 'var(--text-dim)';
+    return `<div style="margin-top:14px; padding:14px; background:var(--bg); border-radius:8px; border:1px solid var(--border);">
+        <div style="font-size:1.05em; font-weight:700; color:${realizedColor};">
+            🏆 Total real profit already taken (all-time, every closed trade): ${realized >= 0 ? '+' : ''}${fmtUsd(realized)}
+        </div>
+        <div style="font-size:0.8em; color:var(--text-dim); margin-top:2px;">
+            ${tradeCount} real completed trade${tradeCount === 1 ? '' : 's'} across every Grid Bot branch ever run · ${winRate.toFixed(0)}% win rate
+        </div>
+        <div style="font-size:0.95em; font-weight:700; margin-top:10px; color:${combinedColor};">
+            💵 Combined grand total right now (taken + what's still open, net of real fees): ${combined === null ? 'unknown right now' : `${combined >= 0 ? '+' : ''}${fmtUsd(combined)}`}
+        </div>
+    </div>`;
 }
 
 // Real, one bottom-line total across every Grid Bot branch, plus the real
@@ -2258,11 +2298,11 @@ async function loadGridStatus() {
     try {
         const [data, history] = await Promise.all([
             apiGet('/grid-status'),
-            apiGet('/grid-status/trade-history').catch(function () { return { branches: [] }; }),
+            apiGet('/grid-status/trade-history').catch(function () { return { branches: [], total_realized_pnl: null, total_trade_count: 0, overall_win_rate: 0 }; }),
         ]);
         const tradeHistoryByBot = {};
         (history.branches || []).forEach(function (h) { tradeHistoryByBot[h.bot_name] = h; });
-        renderGridStatus(data, tradeHistoryByBot);
+        renderGridStatus(data, tradeHistoryByBot, history);
     } catch (e) {
         document.getElementById('grid-content').innerHTML = `<div class="empty">Could not load: ${e.message}</div>`;
     }

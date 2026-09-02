@@ -11167,6 +11167,60 @@ entry/exit price this close together after the next redeploy.
 
 ---
 
+## Grid Bot dashboard now shows the real all-time realized profit total, not just "if sold right now"
+
+Right after explaining what the "next to sell" label on a branch chart
+meant, the account owner asked the direct follow-up: "yeah it shows the
+real live running total but what about the real life total of profit
+that's been taken and in the total amount USD." A fair distinction -
+the Grid Bot section's only existing bottom-line total
+(`renderGridCloseAllBanner`) was ALWAYS unrealized-only: "if every open
+slice sold right now." There was no visible number anywhere for real
+profit ALREADY locked in from completed sells, and no single combined
+figure covering both.
+
+`get_grid_trade_history()` (`crypto_grid_bot.py`) already aggregated
+real P&L PER BRANCH, but never summed it into one all-time grand total.
+Added `total_realized_pnl`/`total_trade_count`/`overall_win_rate` to its
+response - accumulated from the SAME raw per-branch query rows already
+being built (exact win counts and unrounded P&L, not reconstructed from
+the already-rounded per-branch percentages, which would compound
+rounding error across many branches). Deliberately covers every branch
+that has EVER closed a real trade, including one since
+paused/withdrawn/rotated away and deleted - a completed
+`CryptoGridTradeHistory` row is real, permanent profit or loss
+regardless of whether the branch that earned it still exists today.
+
+`family_tree_dashboard.html`'s Grid Bot section gained a new
+"🏆 Total real profit already taken (all-time)" banner, placed right
+above the existing unrealized-only banner, plus a "💵 Combined grand
+total right now (taken + what's still open)" line underneath it -
+`realized + total_unrealized_net_usd`, the single number that directly
+answers "what has this whole section actually made me, total." Honest
+about missing data: shows "unknown right now" instead of a fabricated
+number if a live price fetch fails and the unrealized side can't be
+computed that moment - the realized side is unaffected either way since
+it never depends on a live price.
+
+Verified offline (`test_grid_realized_total.py`, 9 checks, real
+throwaway SQLite DB): the real grand total across multiple branches
+matches a hand-summed total, including a branch whose row no longer
+exists in `CryptoGridBranch` (deleted/rotated away) but whose real trade
+history still counts; `overall_win_rate` is confirmed exact (not
+reconstructed from rounded per-branch percentages) against two
+deliberately unevenly-rounding branches (42.9% of 7 trades + 66.7% of 3
+trades still correctly sums to the real, exact 50.0% overall, not a
+rounding-drifted number); and zero real trades on record returns an
+honest 0.0/0/0.0 rather than crashing on a division by zero. Full
+existing Grid Bot regression suite re-run clean alongside it.
+
+**Not yet confirmed live** - the account owner needs to redeploy and
+open the Grid Bot section to see the new real all-time realized total
+and combined grand-total figure above the existing "if sold right now"
+banner.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

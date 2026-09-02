@@ -1823,14 +1823,26 @@ async def get_grid_trade_history(limit_recent: int = 50) -> dict:
             ).group_by(CryptoGridTradeHistory.bot_name)
         )
         branches = []
+        total_trade_count = 0
+        total_realized_pnl = 0.0
+        total_wins = 0
         for bot_name, trade_count, total_pnl, avg_pnl, wins in agg_result.all():
+            branch_pnl = round(total_pnl, 2) if total_pnl is not None else 0.0
             branches.append({
                 "bot_name": bot_name,
                 "trade_count": trade_count,
-                "total_pnl": round(total_pnl, 2) if total_pnl is not None else 0.0,
+                "total_pnl": branch_pnl,
                 "avg_pnl": round(avg_pnl, 2) if avg_pnl is not None else 0.0,
                 "win_rate": round(wins / trade_count * 100, 1) if trade_count else 0.0,
             })
+            # Real, exact totals accumulated from the same raw query results
+            # above (wins as an exact int, total_pnl as its real unrounded
+            # value) - never reconstructed from the already-rounded
+            # per-branch win_rate/total_pnl, which would compound rounding
+            # error across many branches.
+            total_trade_count += trade_count
+            total_realized_pnl += total_pnl if total_pnl is not None else 0.0
+            total_wins += wins or 0
         branches.sort(key=lambda b: b["total_pnl"], reverse=True)
 
         recent_result = await db.execute(
@@ -1838,7 +1850,23 @@ async def get_grid_trade_history(limit_recent: int = 50) -> dict:
         )
         recent_trades = [row.to_dict() for row in recent_result.scalars().all()]
 
-    return {"branches": branches, "recent_trades": recent_trades}
+    # Real, all-time grand total across EVERY branch this bot has ever
+    # traded - per the account owner's direct follow-up after seeing the
+    # existing "if sold right now" (unrealized-only) total: "what about the
+    # real life total of profit that's been taken." Deliberately covers
+    # every branch that has EVER closed a real trade, including one since
+    # paused/withdrawn/deleted, since a completed CryptoGridTradeHistory row
+    # is real, permanent profit/loss regardless of whether the branch that
+    # earned it still exists today.
+    overall_win_rate = round(total_wins / total_trade_count * 100, 1) if total_trade_count else 0.0
+
+    return {
+        "branches": branches,
+        "recent_trades": recent_trades,
+        "total_trade_count": total_trade_count,
+        "total_realized_pnl": round(total_realized_pnl, 2),
+        "overall_win_rate": overall_win_rate,
+    }
 
 
 def run():
