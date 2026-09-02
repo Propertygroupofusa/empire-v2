@@ -11989,6 +11989,68 @@ different width live.
 
 ---
 
+## Strategy Lab pruned to Grid Bot + real "what might be better" candidates, after the account owner circled A and B for deletion
+
+Right after the trailing-stop-sweep restoration, the account owner
+annotated a real Strategy Lab screenshot directly - circling A · Baseline
+(-$473.97, 979 trades, 22.9% win rate) and B · Hourly Momentum
+(-$343.69, 788 trades, 47.7% win rate) with "DELETE" - against C · Grid
+Bot's real +$67.92 (325 trades, 62.5% win rate). Confirmed, then asked
+for the report to keep improving: "figure out what's better than what I
+have and put it with what I have."
+
+**A and B removed from `STRATEGY_LAB_STRATEGIES`** - the same real,
+evidence-backed pattern already used to retire D · Spot Swing Trading
+earlier this session. `backtest_one_coin()`/`_replay_hourly_momentum()`
+themselves are untouched (both still used elsewhere in this file) - only
+their entries in this one dict were dropped.
+
+**"What might be better" added alongside "what I have," in the same
+report** - rather than invent new, unvalidated candidates, reused the
+EXACT SAME real `(num_levels, grid_pct)` pairs already defined and
+independently validated in `GRID_LEVEL_SPACING_CANDIDATES` (built
+earlier this session to test a pasted critique's "fewer, bigger slices"
+proposal): 3 levels/2.0%, 3 levels/2.5%, 5 levels/2.0% - real, fewer,
+wider-spaced-slice variants of Grid Bot, replayed against the identical
+real historical candles as the live config. `run_strategy_lab_comparison()`
+itself needed zero logic changes - it already loops generically over
+`STRATEGY_LAB_STRATEGIES.items()` for every real total/summary/sort
+computation, so changing the dict's contents was the whole fix on the
+Python side. `crypto_selection_backtest.html`'s `STRATEGY_LAB_LABELS`/
+`STRATEGY_LAB_ORDER` (also fully generic - every render function loops
+over these) were updated to match; the legend, run button, and status
+text were rewritten to describe the real new comparison ("Grid Bot (what
+I have) vs. real candidates that might beat it") instead of the retired
+A/B/C/D framing.
+
+Verified offline (`test_strategy_lab_grid_only.py`, 8 checks): confirms
+`baseline`/`hourly_momentum` are genuinely gone and exactly the 4
+expected real entries remain; each real candidate's own replay matches a
+manual `_replay_grid_bot()` call with its exact `(grid_pct, num_levels)`
+pair byte-for-byte; the 5-level candidate genuinely opens more real
+slices than the 3-level one on an identical decline (proving `num_levels`
+is a real, live mechanism here, not a cosmetic label); and the full
+`run_strategy_lab_comparison()` pipeline reports exactly the 4 real
+entries end-to-end, with `best_strategy` always one of them. Full
+existing regression suite re-run clean alongside it -
+`test_grid_level_spacing.py` (27 checks), `test_grid_atr_spacing.py` (22
+checks), and `test_restored_trailing_stop_sweep.py` (6 checks) all
+unaffected; `test_strategy_lab_live_spacing.py`'s own stale assertion of
+the old 3-entry set was updated in place to expect the new 4-entry set,
+its other 5 checks (the live-spacing repoint itself) unchanged and still
+passing.
+
+**Not yet run against real historical data** - same documented gap as
+every backtest tool in this file (no live network access to Coinbase
+from this sandbox). The account owner needs to open
+`/crypto-selection-backtest-view` after the next redeploy and tap "▶ Run
+Strategy Lab" to see the real numbers - whether any of the 3 candidates
+actually beats today's live Grid Bot config is a decision for after
+seeing that real data, the same "evidence before any live change"
+discipline every other tool in this file already follows.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

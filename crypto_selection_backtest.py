@@ -1453,56 +1453,76 @@ def _summarize_strategy_trades(trades, spend):
     }
 
 
-# "swing_trading" (D) was removed here per the account owner's own direct
-# call after a real 30-day/68-trade sample came back the worst of the
-# four candidates by a wide margin (29.4% win rate, -$133.00 total) -
-# real evidence, not a guess. _replay_swing_trading() itself is left
-# defined below (unused by this dict) rather than deleted, in case it's
-# ever worth revisiting with different real parameters later - it just no
-# longer runs as part of Strategy Lab.
-# "grid_bot" (C) previously replayed at the OLD fixed 1%/10-level
-# STRATEGY_LAB_GRID_PCT convention - after the account owner questioned a
-# real 572-trade/$51.13 result as implausibly low, tracing the per-trade
-# math confirmed the number itself was correct (thin, expected margins at
-# 1% spacing against a real 0.8% round-trip fee), but also surfaced that
-# this entry no longer matched what's actually live: Grid Bot's real
-# spacing has since moved to the average-swing dynamic formula
-# (_live_matching_grid_pct - identical to crypto_grid_bot.compute_avg_swing_grid_pct).
-# Repointed here so Strategy Lab's own "Grid Bot" comparison stays an
-# honest match to today's real live behavior, not a stale snapshot of an
-# earlier, tighter default - same correction already applied once before
-# to "Baseline (A)" when its own exit rule drifted out of sync with live.
+# "baseline" (A, plain target/stop/breakeven exit) and "hourly_momentum"
+# (B, RSI+trend/fixed-target) were both removed here per the account
+# owner's own explicit, direct call after a real run showed both deeply
+# negative (A: -$473.97/979 trades/22.9% win rate; B: -$343.69/788
+# trades/47.7% win rate) against Grid Bot's real +$67.92/325 trades/62.5%
+# win rate - real evidence, not a guess. Both replay functions
+# (backtest_one_coin, _replay_hourly_momentum) are left defined and still
+# used elsewhere in this file (backtest_one_coin is the whole module's
+# core replay primitive) - only their entries in THIS dict were removed.
+# "swing_trading" (D) was removed earlier in this same session for the
+# same real-evidence reason (29.4% win rate, -$133.00 total,
+# _replay_swing_trading() itself left defined, unused by this dict).
+#
+# "grid_bot" (the sole survivor, "what I have") previously replayed at
+# the OLD fixed 1%/10-level STRATEGY_LAB_GRID_PCT convention - after the
+# account owner questioned a real 572-trade/$51.13 result as implausibly
+# low, tracing the per-trade math confirmed the number itself was correct
+# (thin, expected margins at 1% spacing against a real 0.8% round-trip
+# fee), but also surfaced that this entry no longer matched what's
+# actually live: Grid Bot's real spacing has since moved to the
+# average-swing dynamic formula (_live_matching_grid_pct - identical to
+# crypto_grid_bot.compute_avg_swing_grid_pct). Repointed so this stays an
+# honest match to today's real live behavior, not a stale snapshot.
+#
+# The three "grid_bot_*lvl_*pct" candidates below are "what might be
+# better than what I have" - per the account owner's direct follow-up
+# request to find and report real candidates alongside the live config,
+# not a separate page they'd have to visit. These reuse the EXACT SAME
+# real (num_levels, grid_pct) pairs already defined and independently
+# validated in GRID_LEVEL_SPACING_CANDIDATES (built to test a pasted
+# critique's "fewer, bigger slices" proposal) - never new, unvalidated
+# numbers invented here. Real, honest tradeoff worth restating: fewer,
+# wider-spaced levels mean fewer but larger real slices - each one risks
+# more dollars per cycle in exchange for a real shot at a bigger real
+# win per fill.
 STRATEGY_LAB_STRATEGIES = {
-    "baseline": lambda closes, highs, lows, spend: backtest_one_coin(closes, highs, lows, spend=spend),
-    "hourly_momentum": lambda closes, highs, lows, spend: _replay_hourly_momentum(closes, highs, lows, spend=spend),
     "grid_bot": lambda closes, highs, lows, spend: _replay_grid_bot(
         closes, highs, lows, spend=spend,
         grid_pct=_live_matching_grid_pct(closes, highs, lows),
         num_levels=STRATEGY_LAB_GRID_LEVELS,
+    ),
+    "grid_bot_3lvl_2.0pct": lambda closes, highs, lows, spend: _replay_grid_bot(
+        closes, highs, lows, spend=spend, grid_pct=0.020, num_levels=3,
+    ),
+    "grid_bot_3lvl_2.5pct": lambda closes, highs, lows, spend: _replay_grid_bot(
+        closes, highs, lows, spend=spend, grid_pct=0.025, num_levels=3,
+    ),
+    "grid_bot_5lvl_2.0pct": lambda closes, highs, lows, spend: _replay_grid_bot(
+        closes, highs, lows, spend=spend, grid_pct=0.020, num_levels=5,
     ),
 }
 
 
 async def run_strategy_lab_comparison(coins=None, days=BACKTEST_DAYS, max_concurrent=3):
     """SHADOW-MODE, additive comparison - never touches live trading, never
-    places an order. Direct answer to the account owner's own request
-    ("I would like to try all of the options just to see what my options
-    are... a b c d to see which one I like") after a pasted third-party
-    proposal (Spot Swing Trading / Automated Grid Bot / Hourly Momentum
-    Trading) that itself contained no real backtest, only illustrative
-    arithmetic. Replays the EXISTING live baseline (backtest_one_coin)
-    alongside all three new strategies above, on the identical real
-    historical Coinbase candles per coin, so all four are directly, fairly
-    comparable on the same data.
+    places an order. Originally built to test a pasted outside proposal
+    (Spot Swing Trading / Automated Grid Bot / Hourly Momentum Trading)
+    for real against the existing live baseline. All three of those
+    alternatives (baseline, hourly momentum, swing trading) were removed
+    from STRATEGY_LAB_STRATEGIES per the account owner's own direct,
+    evidence-backed calls once real numbers came in - Grid Bot was the
+    clear real winner every time (see the dict's own comment block for
+    the exact figures). This now reports Grid Bot's real live config
+    ("grid_bot" - what's actually running today) alongside three real
+    "what might be better" candidates (fewer, wider-spaced levels) drawn
+    from the already-validated GRID_LEVEL_SPACING_CANDIDATES set, per the
+    account owner's own direct follow-up request to see real candidates
+    "put... with what I have" in one report rather than a separate page.
 
     Real, honest limits stated plainly, not hidden:
-    - "Baseline (A)" previously replayed a RETIRED exit rule
-      (TARGET/STOP/GIVEBACK) instead of the live bot's real
-      exit_mode="trailing_stop" - found and fixed after a real
-      1,674-trade sample showed -$1,301.59 and the account owner asked
-      why. backtest_one_coin() now matches the live rule; see its own
-      docstring for the full real history. Not yet confirmed against a
-      fresh real run on the deployed dashboard.
     - Real 31-of-36 coins skipped in a real live run, all reporting a
       blanket "not enough historical data" - traced to fetch_candles_window's
       own old behavior of silently giving up on ANY non-200 response
@@ -1514,27 +1534,16 @@ async def run_strategy_lab_comparison(coins=None, days=BACKTEST_DAYS, max_concur
       requests this tool fires at once. skipped[].reason now reports the
       real captured cause (e.g. "HTTP 429 rate limited") instead of the
       old generic message, so if coins are still being skipped after
-      this, the real reason is visible instead of guessed at again. Not
-      yet confirmed live - needs a real re-run to see if the skip count
-      actually drops.
-    - grid_bot's own fee assumption may be too pessimistic relative to
-      Coinbase's real grid-bot product specifically (see _replay_grid_bot's
-      own docstring) - or this codebase's existing fee constant may be too
-      OPTIMISTIC for every strategy here, since every real order this
-      codebase places is a market/taker order, not the maker rate the
-      pasted proposal assumed. Worth confirming Coinbase's actual current
-      fee schedule directly rather than trusting either source blind.
-    - None of these three are wired into live trading. Promoting any of
-      them - even hourly_momentum, the closest to what's already live -
-      would be a real, separate, deliberate decision once real evidence
-      from this comparison exists, the same "evidence before any live
-      change" rule every other strategy decision in this file already
-      follows. grid_bot and swing_trading also don't fit the live branch
-      engine's current single-position-per-branch design at all (a grid
-      needs several real concurrent open slices; a multi-day swing hold
-      would conflict with the tree's existing ~30s per-cycle exit checks)
-      - going live with either would need real architecture work first,
-      not just a promote button."""
+      this, the real reason is visible instead of guessed at again.
+    - Every candidate's own fee assumption reuses this file's existing
+      real round-trip taker rate, since every real order this codebase
+      places is a market/taker order, not a maker rate. Grid Bot itself
+      is real, live infrastructure today (see the Grid Bot dashboard) -
+      promoting a different (num_levels, grid_pct) candidate than what's
+      currently live would be a real, separate, deliberate decision made
+      from this comparison's real evidence, the same "evidence before any
+      live change" rule every other strategy decision in this file
+      already follows."""
     coins = coins or COIN_FAMILY_TREE
     semaphore = asyncio.Semaphore(max_concurrent)
     last_errors = {}
