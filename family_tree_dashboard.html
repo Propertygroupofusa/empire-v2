@@ -1940,8 +1940,11 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals) {
             against. Pausing a branch releases its coin so a new branch can claim it, but never force-closes a real open
             slice - it just sits until price naturally reaches it, or you pause/resume again later. The chart below each
             branch shows real slice entries against the live price - a slice colored red is currently sitting at a real
-            unrealized loss right now; grid selling is FIFO by trigger price, not by which slice is winning, so a red
-            slice can still be the one sold next. A "📐 self-tuned" badge means this branch's own spacing has been
+            unrealized loss right now. Real fix, live: the bot never force-sells a slice at a real loss just because
+            the branch's own rise trigger fired - it walks its open slices oldest-first and sells the FIRST one that's
+            genuinely profitable right now (marked "next to sell"), skipping any older, still-underwater slice, which
+            stays open until it recovers on its own. If nothing open is profitable yet, nothing sells this cycle - no
+            "next to sell" badge shows at all. A "📐 self-tuned" badge means this branch's own spacing has been
             automatically nudged wider after a genuinely rough recent stretch (or eased back toward the validated
             1.5x default after a strong one) - checked once an hour, per-branch, off that branch's own real closed
             trades only, never a backtest guess. It can only ever get MORE cautious than the validated default, and
@@ -2148,14 +2151,29 @@ function renderGridBranchChart(b) {
     const viewBoxTop = Math.min(0, topmostLabelY - LABEL_TOP_MARGIN);
     const H = 124 - viewBoxTop;
 
+    // Real "next to sell" marker - per a real, live-confirmed fix: the
+    // live bot no longer force-sells the literal oldest slice unconditionally
+    // (it used to, and that's exactly what let a real branch close trades
+    // at a genuine loss - see run_grid_branch_cycle's own
+    // _pick_profitable_slice_to_sell). It now walks its own open slices
+    // oldest-first and sells the FIRST one that would actually be
+    // net-profitable at the live price, skipping over any older slice
+    // that's still underwater. This marker mirrors that exact real logic
+    // (using unrealized_net_usd, the identical fee-adjusted figure the
+    // live sell path itself is gated on) instead of always pointing at
+    // slot 0 - so it can never mislead about which slice would genuinely
+    // sell next. No slice qualifies at all -> no badge shows, matching the
+    // real live behavior of holding everything until something is
+    // actually profitable.
+    const nextToSellIndex = slices.findIndex(s => s.unrealized_net_usd != null && s.unrealized_net_usd > 0);
     const sliceMarkers = slices.map((s, i) => {
         const netUsd = s.unrealized_net_usd;
         const isLoss = netUsd == null ? false : netUsd < 0;
         const color = netUsd == null ? 'var(--text-dim)' : (isLoss ? 'var(--red)' : 'var(--green)');
-        const isOldest = i === 0;
+        const isNextToSell = i === nextToSellIndex;
         const cx = x(s.entry_price);
         const labelY = axisY - 14 - (laneByIndex[i] || 0) * LANE_HEIGHT;
-        const ring = isOldest ? `<circle cx="${cx}" cy="${axisY}" r="10" fill="none" stroke="var(--gold)" stroke-width="2"/>` : '';
+        const ring = isNextToSell ? `<circle cx="${cx}" cy="${axisY}" r="10" fill="none" stroke="var(--gold)" stroke-width="2"/>` : '';
         const sign = netUsd == null ? '' : (netUsd >= 0 ? '+' : '-');
         const pctStr = s.unrealized_net_pct != null ? ` (${s.unrealized_net_pct >= 0 ? '+' : ''}${(s.unrealized_net_pct * 100).toFixed(2)}%)` : '';
         const label = netUsd == null ? '—' : `${sign}$${Math.abs(netUsd).toFixed(2)}${pctStr}`;
@@ -2163,7 +2181,7 @@ function renderGridBranchChart(b) {
             ${ring}
             <circle cx="${cx}" cy="${axisY}" r="6" fill="${color}"/>
             <text x="${cx}" y="${labelY}" text-anchor="middle" font-size="10" font-weight="700" fill="${color}">${label}</text>
-            ${isOldest ? `<text x="${cx}" y="${axisY + 22}" text-anchor="middle" font-size="9" fill="var(--gold)" font-weight="700">next to sell</text>` : ''}`;
+            ${isNextToSell ? `<text x="${cx}" y="${axisY + 22}" text-anchor="middle" font-size="9" fill="var(--gold)" font-weight="700">next to sell</text>` : ''}`;
     }).join('');
 
     const netSummary = (slices.length > 0 && b.total_unrealized_net_usd != null) ? (() => {

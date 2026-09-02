@@ -11389,6 +11389,101 @@ realized total banner.
 
 ---
 
+## Real, severe bug found and fixed: Grid Bot could close a real trade at a genuine loss, and now structurally can't
+
+The account owner circled a real DOGE-USD branch's own numbers directly:
+"$-1.57 (-0.6%)" across 4 real closed trades, with every real open slice
+on the same branch showing red - "let's find out why this is closing in
+the negative and not closing at positive point and fix it and don't let
+that occur." A real, structural bug, not a market-conditions story.
+
+**Root cause, confirmed by reading `run_grid_branch_cycle()` directly**:
+the real sell path always sold `slices[0]` - the LITERAL oldest open
+slice, strict FIFO - the instant `price >= branch.reference_price * (1 +
+grid_pct)`. But `reference_price` is a SHARED, branch-level value that
+resets to the real fill price on EVERY buy AND every sell (see the real
+dip-buy block a few lines above). A branch that keeps buying real dips
+lower and lower drags its own `reference_price` DOWN with it - so a
+later real price rise can clear that new, lower reference-based trigger
+while still sitting BELOW an OLDER slice's own real entry price. The old
+code sold that older slice anyway, completely unconditionally, realizing
+a real, guaranteed loss on it - the trigger fired because price rose
+relative to a moving reference, not because THAT SPECIFIC slice was
+actually worth selling.
+
+**Fixed with a real, structural gate**, `_pick_profitable_slice_to_sell()`
+(`crypto_grid_bot.py`): the branch's rise trigger is now only a
+NECESSARY condition to consider selling at all, never a SUFFICIENT one.
+Once it fires, the real sell path walks the branch's own open slices
+oldest-first (preserving FIFO as the natural tiebreak, same intent as
+before) and sells the FIRST one that is itself genuinely net-profitable
+- via the exact same real fee-adjusted `_grid_slice_net_pnl()` formula
+every other real P&L figure in this file already uses, never a second,
+separately-computed check. A newer slice bought closer to the real
+reference-price reset very often qualifies even when an older, stuck one
+doesn't, so a real rise still typically sells SOMETHING this cycle - it
+just skips over any slice that would realize a loss, which stays open
+and sits until it recovers on its own. If NOT ONE open slice would net a
+real profit at the current price, nothing sells at all this cycle - the
+branch holds and re-checks fresh next cycle, same "never force a sale
+into a loss" principle this codebase has already applied repeatedly
+(QUICK_PROFIT's own removal, the giveback-net-of-fees fix, the equity
+floor self-heals).
+
+**Real, honest, deliberate consequence, stated plainly**: a branch that
+keeps buying real dips into a real decline can end up holding one or
+more real "stuck" slices indefinitely, using up part of its own
+`num_levels` capacity, until price genuinely recovers enough to clear
+that slice's own real breakeven. This is the intended tradeoff, not a
+side effect to be hidden - riding out a real loss on paper is
+structurally safer than being FORCED to lock it in the moment an
+unrelated, lower-priced part of the same branch happens to trigger a
+sell.
+
+**Dashboard fixed to match**: the "next to sell" gold-ring badge on each
+branch's real chart used to always mark slot 0 (the literal oldest
+slice) - now actively misleading after this fix, since the real next
+sale might skip that slice entirely. `family_tree_dashboard.html` now
+computes it the identical way the live bot does (the first real open
+slice, oldest-first, whose live `unrealized_net_usd` is genuinely
+positive) - no badge shows at all when nothing currently qualifies,
+matching the real "holds, sells nothing" behavior. The section's own
+footer note (which used to say "a red slice can still be the one sold
+next" - now false) was rewritten to describe the real, fixed mechanic
+plainly.
+
+Verified offline (`test_grid_never_sell_at_loss.py`, 12 checks,
+real throwaway SQLite DB, reproducing the account owner's own real
+DOGE-USD shape - an old slice bought around $0.0850, a real
+reference price that's since drifted to $0.0808 from later dip-buys, and
+a live price of $0.0820 that clears the real trigger but sits below the
+old slice's own entry): confirms the OLD slice really would have netted
+a real loss if force-sold at this exact price (the bug, reproduced, not
+assumed); with only that underwater slice open, the fix correctly
+refuses to sell it; with a real newer, profitable slice open alongside
+it, the fix correctly sells the profitable one and leaves the stuck one
+open, so the branch doesn't just freeze; the ordinary case (the true
+oldest slice IS profitable) is completely unaffected, byte-for-byte;
+when nothing at all is profitable, no real sell order is placed and
+nothing crashes; and end-to-end through the real `run_grid_branch_cycle()`
+itself (not just the isolated picker function), the branch's real
+`allocated_usd` is confirmed to have gone UP, not down, and the stuck
+old slice is confirmed still open afterward rather than force-sold.
+Full existing Grid Bot regression suite (19 files) re-run clean
+alongside it - the only failure seen
+(`test_grid_drawdown_and_dynamic_spacing.py`) was already confirmed
+pre-existing and unrelated earlier this session.
+
+**Not yet confirmed live** - the account owner needs to redeploy; the
+real, visible proof this is working will be no NEW real closed trade
+ever showing a loss going forward (existing already-closed real trades,
+including the four behind the -$1.57 shown in the screenshot, are
+history and can't be undone) - and, on the dashboard's own chart, the
+"next to sell" badge no longer sitting over a real red (underwater)
+slice.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

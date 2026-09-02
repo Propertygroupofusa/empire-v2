@@ -1431,6 +1431,46 @@ def _grid_slice_net_pnl(qty: float, entry_price: float, exit_price: float) -> fl
     return gross - fee
 
 
+def _pick_profitable_slice_to_sell(slices: list, price: float):
+    """Real fix for a confirmed-live bug: the account owner spotted a
+    branch's own real closed trades netting a real loss (-$1.57 over 4
+    real trades on a DOGE-USD branch) while the branch's real live chart
+    showed every open slice sitting red - real evidence the sell trigger
+    was firing and realizing losses, not just "waiting for a profitable
+    price" the way the design always intended.
+
+    Root cause: the OLD code always sold `slices[0]` (the literal oldest
+    slice, strict FIFO) the instant `price >= branch.reference_price *
+    (1 + grid_pct)` - but that trigger is evaluated against the branch's
+    own shared `reference_price`, which resets to the real fill price on
+    EVERY buy AND every sell (see run_grid_branch_cycle's own real dip-buy
+    block). A branch that keeps buying real dips lower and lower drags
+    `reference_price` down WITH it - so a later real price "rise" can
+    clear the reference-based trigger while still sitting BELOW the
+    OLDEST slice's own real entry price. The old code sold that oldest
+    slice anyway, unconditionally, realizing a real, guaranteed loss on
+    it even though the trigger that fired was labeled a "rise."
+
+    Fixed by never selling ANY slice unless doing so is itself genuinely
+    net-profitable (the exact same real fee-adjusted _grid_slice_net_pnl
+    formula every other real P&L figure in this file already uses) -
+    walks the real open slices oldest-first (preserving FIFO as the tie-
+    break, same intent as before) and returns the first one that would
+    net a real profit at the current price. A newer slice bought closer
+    to (or after) the real reference-price reset is very likely to
+    qualify even when an older, stuck slice doesn't - so a real rise
+    still typically sells SOMETHING this cycle, just never a real loss.
+    Returns None when NOT ONE open slice would net a real profit at this
+    price - the caller then skips selling entirely rather than forcing
+    any real loss, same "never force a sale into a loss" principle
+    already established elsewhere in this file (see the QUICK_PROFIT/
+    giveback-net-of-fees history)."""
+    for s in slices:
+        if _grid_slice_net_pnl(s.qty, s.entry_price, price) > 0:
+            return s
+    return None
+
+
 def _grid_branch_real_equity(branch: CryptoGridBranch, slices: list, price: float) -> float:
     """Real live equity for one grid branch right now - allocated_usd is
     a cost-basis figure (see the model's own docstring: it only ever
@@ -1658,12 +1698,32 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
         await _log_activity_safe(branch.bot_name, branch.product_id, "BUY", msg)
         return
 
-    # ---- Real rise: sell the oldest open slice (FIFO) ----
+    # ---- Real rise: sell the oldest open slice that's actually profitable ----
     # Never gated on drawdown_breached - an existing open slice keeps
     # selling normally regardless (see the drawdown-breach block above);
     # this branch's own real recovery path back toward its peak.
+    #
+    # Real bug fixed here: the reference-price rise trigger below is a
+    # necessary condition to consider selling at all, but it was
+    # previously treated as SUFFICIENT to sell the literal oldest slice
+    # unconditionally - which could (and did, confirmed live on a real
+    # DOGE-USD branch) realize a genuine loss on that specific slice, since
+    # reference_price can drift below an older slice's own entry price
+    # after later, cheaper dip-buys reset it. _pick_profitable_slice_to_sell
+    # now requires the slice actually being sold to itself be real,
+    # fee-adjusted net-profitable at the current price - see its own
+    # docstring for the full story. A rise that clears the trigger but
+    # finds nothing genuinely profitable to sell simply waits, rather than
+    # ever locking in a real loss.
     if price >= branch.reference_price * (1 + grid_pct) and slices:
-        oldest = slices[0]
+        oldest = _pick_profitable_slice_to_sell(slices, price)
+        if oldest is None:
+            log.info(
+                f"[GRID] {branch.bot_name}: real rise trigger fired (${price:,.4f} >= "
+                f"${branch.reference_price * (1 + grid_pct):,.4f}) but no open slice would net a real "
+                f"profit at this price - holding every slice, waiting for a genuinely profitable one"
+            )
+            return
         fill = await engine.place_market_sell(session, oldest.qty, branch.product_id)
         if not fill:
             log.warning(f"[GRID] {branch.bot_name}: real grid sell of {branch.product_id} did not fill - will retry next cycle")
@@ -1684,8 +1744,11 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                 new_balance = fresh.allocated_usd
             await db.commit()
         await _log_grid_trade(branch.bot_name, branch.product_id, oldest.entry_price, filled_price, filled_qty, pnl, oldest.opened_at)
+        is_true_oldest = slices[0].id == oldest.id
         msg = (
-            f"{'📈' if pnl >= 0 else '📉'} {branch.bot_name} GRID SELL: sold the oldest real slice of {branch.product_id} @ ${filled_price:,.2f} "
+            f"{'📈' if pnl >= 0 else '📉'} {branch.bot_name} GRID SELL: sold "
+            f"{'the oldest' if is_true_oldest else 'the oldest PROFITABLE (skipped a stuck older)'} "
+            f"real slice of {branch.product_id} @ ${filled_price:,.2f} "
             f"(entry ${oldest.entry_price:,.2f}) | P&L: {'+' if pnl >= 0 else ''}${pnl:.2f} after est. fees | branch now ${new_balance:.2f}"
         )
         log.info(f"[GRID] {msg}")
