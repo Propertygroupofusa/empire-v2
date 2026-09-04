@@ -12184,6 +12184,107 @@ file, it doesn't recommend which candidate to pick.
 
 ---
 
+## Real misreporting bug found from a pasted log line: the LONG-ONLY MODE banner described the OPPOSITE entry rule from what the bot actually trades
+
+The account owner pasted four log-shaped lines, one of them
+`[MES] Entry signal: RSI < 30`. Checked them against the real code
+rather than taking them at face value, and two separate things came out
+of it.
+
+**First, the pasted lines themselves are not this app's output.** Real
+`prop_bot.py` scan lines are all prefixed `[APEX_589296]` and interpolate
+real numbers (`[APEX_589296] MES (SPY) | $123.45 | RSI:28 | Momentum:+1.2% |
+UPTREND`). A direct grep confirms the literal strings
+`"prop_bot scanning 17 futures symbols"`, `"Entry signal: RSI < 30"`,
+`"Position allocated:"` and `"P&L: +$X.XX (updated live)"` exist nowhere
+in the codebase as log statements (`"Entry signal: RSI < 30"` appears
+only as a stale *comment* in `alpaca_swing_bot.py:470`), and the pasted
+text carries literal `$X,XXX` / `+$X.XX` placeholders where real f-string
+logs would carry actual numbers. One detail did check out, which is what
+made it worth investigating rather than dismissing: `FUTURES` really does
+hold exactly **17** symbols now (`MES, MNQ, MYM, M2K, MGC, MCL, SIL, SH,
+PSQ, DOG, RWM` plus the six large-cap equities `AAPL, AMZN, GOOGL, META,
+MSFT, NVDA`).
+
+**Second, and the real bug: `prop_bot.py` had a live log banner that
+genuinely did claim "RSI < 30" — and it was wrong in the most misleading
+possible direction.** `run_prop_cycle()` logged a hardcoded string every
+cycle (shorting is permanently disabled on this real account, so the
+`if not shorting_enabled:` branch always fires):
+
+```
+[APEX_589296] 📈 LONG-ONLY MODE: 3 concurrent long positions | RSI < 30 entry, 2% profit target, -1.5% stop
+```
+
+Every substantive claim in it had gone stale as the live strategy moved
+on over this session:
+
+| Banner claimed | Real live value |
+|---|---|
+| `3 concurrent long positions` | `dynamic_max_positions` (2 at 1.0x scale, 1 at 1.5x+) |
+| `RSI < 30 entry` | momentum: RSI **>** 55 + price > SMA20; mean-reversion: RSI **<** 40 |
+| `2% profit target` | `MEAN_REVERSION_PROFIT_TARGET_PCT` = **3%** (the "moderate" scenario) |
+| `-1.5% stop` | `MEAN_REVERSION_STOP_LOSS_PCT` = -1.5% (the one part that was still right) |
+
+The entry line is the serious one. Under `momentum` — the real default
+family (`get_live_strategy_family()`) — the bot buys **strength**, RSI
+*above* `MOMENTUM_RSI_ENTRY` (55). The banner described buying
+**weakness** at RSI *below* 30: not a stale number, an inverted signal
+direction. This is a log the account owner actually reads on Railway to
+decide whether the bot is behaving, so a banner that confidently
+describes the opposite strategy is a real defect — the same class of
+problem as the `[BACKTEST]` log-prefix fix earlier in this file (a log
+line that misleads about what really happened), not a cosmetic comment
+nit.
+
+**Fixed** by moving the banner to *after* `strategy_family = await
+get_live_strategy_family()` (that call is what re-syncs
+`APEX_MANDATE["entry"]` to the live family, so reading the threshold
+before it would have been stale in a second, subtler way) and
+interpolating the real live values every cycle instead of hardcoding
+any of them. The stale comment block above it (lines describing "Entry:
+RSI < 30 (oversold)" / "Exit: 2%+ profit target") was rewritten too. Real
+output now:
+
+```
+[APEX_589296] 📈 LONG-ONLY MODE (momentum): max 2 concurrent long positions | RSI > 55 + price > SMA20 entry | 3.0% trailing stop off peak
+[APEX_589296] 📈 LONG-ONLY MODE (mean_reversion): max 2 concurrent long positions | RSI < 40 (oversold) entry | 3.0% profit target, -1.5% stop
+```
+
+No trading logic changed — this only fixes what the bot *says* it is
+doing. Entry gates, exit rules, sizing and risk checks are all
+byte-for-byte untouched.
+
+Verified offline (`test_longonly_banner_live_values.py`, 18 checks, real
+throwaway SQLite DB so `set_live_strategy_family()` round-trips for
+real): rather than reimplement the banner, the test **extracts the real
+shipped block verbatim from `prop_bot.py`'s own source and `exec`s it**
+against the real module globals, matching this file's "import the live
+functions directly, not reimplementing them" discipline. Confirms the old
+hardcoded string is genuinely gone from the source; confirms the banner
+is positioned *after* the `get_live_strategy_family()` call (so
+`APEX_MANDATE` is live, not stale — an ordering bug the test would catch
+if it regressed); confirms the momentum banner reports the real `RSI >
+55` direction and never the old inverted `RSI < 30`, with the real 3.0%
+trailing stop; confirms the mean-reversion banner reports the real `RSI <
+40` threshold (not 30) and the real 3.0% profit target (not the stale
+2%); confirms the max-position count genuinely tracks
+`dynamic_max_positions` rather than a baked-in 3 (checked at both 2 and
+1); and confirms the two families produce genuinely different banners,
+proving the value is read live rather than being another constant.
+`main.py` re-imports clean at the unchanged **371** routes, and
+`prop_bot.py` compiles clean.
+
+**A correction to an earlier statement in this same session**: a health
+check reported that `NVDA` looked like a manual, bot-unmanaged buy
+because it "isn't in the bot's approved list." That was wrong — `NVDA`
+**is** a real key in `FUTURES` (one of the six large-cap equities in the
+17-symbol universe), so it is genuinely bot-managed with a real stop and
+target. `ARBB` and `BTC` are the two open Alpaca positions that really
+are outside the universe and therefore unmanaged.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

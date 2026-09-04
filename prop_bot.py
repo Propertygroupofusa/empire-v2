@@ -1892,13 +1892,9 @@ async def run_prop_cycle():
         cash_remaining = await get_account_cash(session)
         log.info(f"[APEX_589296] Cash available: {'$%.2f' % cash_remaining if cash_remaining is not None else 'unknown'}")
 
-        # Long-only strategy: Shorting not available on this account.
-        # Running 3 concurrent longs with mean reversion discipline:
-        # - Entry: RSI < 30 (oversold)
-        # - Exit: 2%+ profit target, -1.5% hard stop, RSI > 70, or 2-hour timeout
+        # Long-only strategy: shorting is not available on this account
+        # (get_account_shorting_enabled - a real account-level restriction).
         shorting_enabled = await get_account_shorting_enabled(session)
-        if not shorting_enabled:
-            log.info("[APEX_589296] 📈 LONG-ONLY MODE: 3 concurrent long positions | RSI < 30 entry, 2% profit target, -1.5% stop")
 
         # Which real strategy family is live right now - read once per
         # cycle (also re-syncs APEX_MANDATE["entry"] as a side effect, see
@@ -1906,6 +1902,37 @@ async def run_prop_cycle():
         # "momentum" (today's unchanged behavior) until explicitly
         # switched via the dashboard.
         strategy_family = await get_live_strategy_family()
+
+        if not shorting_enabled:
+            # Report the REAL live entry/exit rule, read fresh each cycle -
+            # never a hardcoded one. This banner used to be a fixed string
+            # reading "3 concurrent long positions | RSI < 30 entry, 2%
+            # profit target, -1.5% stop", which went stale on every count
+            # once the live strategy moved on: the real max is
+            # dynamic_max_positions (2 at 1.0x scale, not a fixed 3), the
+            # real profit target is MEAN_REVERSION_PROFIT_TARGET_PCT (3%,
+            # the "moderate" scenario), and - worst of all - the real entry
+            # rule under the default momentum family is RSI ABOVE
+            # MOMENTUM_RSI_ENTRY, the exact OPPOSITE direction from what the
+            # banner claimed. That inverted the described signal in a log
+            # the account owner actually reads to make real money decisions.
+            # Must stay after get_live_strategy_family() above, which is
+            # what re-syncs APEX_MANDATE["entry"] to the live family.
+            rsi_threshold = APEX_MANDATE["entry"]["rsi_threshold"]
+            if strategy_family == "mean_reversion":
+                entry_desc = f"RSI < {rsi_threshold} (oversold) entry"
+                exit_desc = (
+                    f"{MEAN_REVERSION_PROFIT_TARGET_PCT * 100:.1f}% profit target, "
+                    f"-{MEAN_REVERSION_STOP_LOSS_PCT * 100:.1f}% stop"
+                )
+            else:
+                entry_desc = f"RSI > {rsi_threshold} + price > SMA20 entry"
+                exit_desc = f"{MOMENTUM_TRAIL_PCT * 100:.1f}% trailing stop off peak"
+            log.info(
+                f"[APEX_589296] 📈 LONG-ONLY MODE ({strategy_family}): "
+                f"max {dynamic_max_positions} concurrent long positions | "
+                f"{entry_desc} | {exit_desc}"
+            )
 
         scans = {}
         for contract, config in FUTURES.items():
