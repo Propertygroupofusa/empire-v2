@@ -12661,6 +12661,93 @@ section's "Real Free Cash" instead of a fraction of it.
 
 ---
 
+## Alpaca can refuse every order at the account level, and nothing in this app said so
+
+The account owner tried to Close a position from the dashboard and got a
+raw browser alert:
+
+```
+Close failed: Alpaca close failed (403):
+{"code":40310000,"message":"new orders are rejected by user request"}
+```
+
+**Nothing in this codebase was wrong.** That is Alpaca's own wording for
+`trade_suspended_by_user` - a "suspend trading" switch the ACCOUNT HOLDER
+sets on Alpaca's side. While it is on, Alpaca rejects *every* new order:
+every bot's automatic entry, and the dashboard's own manual Close button
+alike. The app had no way to say so, so the only signal was a bare 403
+with a JSON blob in an alert box.
+
+This also explains the Alpaca side looking frozen. Total Profit moved
+($20.33 -> $27.84) purely from unrealized P&L on already-open positions;
+no new order could have executed regardless of signal quality or the
+`size_position` risk-cap fix shipped earlier this session. Both are real
+and separate: the risk cap genuinely was blocking new entries, and on top
+of that Alpaca was refusing everything outright.
+
+**`_alpaca_order_block_state(account)`** (`routers/trading_dashboard.py`)
+- reads `trade_suspended_by_user` / `trading_blocked` / `account_blocked`
+straight off the `/v2/account` payload BOTH dashboard endpoints already
+fetch every poll. Zero new API calls; these fields were always there and
+simply never read. Returns the three real flags plus one plain-English
+`orders_blocked_reason`. The user-set suspension takes priority when
+several are set at once, because it is the only one the account holder
+can actually fix themselves. A missing field defaults to not-blocked -
+never fabricate a block from an absent value.
+
+Deliberately ONE shared helper called from both `/status` and
+`/alpaca-overview`, not the same rule written twice: two copies of a rule
+drifting apart is a bug class this repo was bitten by earlier the same day
+(the two disagreeing "free cash" figures, directly above).
+
+**This app reads the flag and deliberately never clears it.** An
+account-level trading suspension is the account holder's own decision, the
+same principle every passive-mode and kill-switch control in this file
+already follows.
+
+`alpaca_dashboard.html` gained a red banner at the top of the page
+(`renderOrdersBlockedBanner`) stating plainly that Alpaca is blocking
+orders, that it is a setting on their Alpaca account rather than a problem
+with this app, that their money and positions are untouched, and - for the
+user-set case - exactly where to switch it back off (Alpaca's own site or
+app -> account settings -> Suspend Trading).
+
+**A real mistake caught by this fix's own test, before it shipped:** the
+flags were first added to `get_dashboard_status` (`/status`) - which also
+fetches the account and looked right in the diff - while the dashboard
+banner actually reads `/alpaca-overview`. The test failed immediately
+(`get_alpaca_overview` at a completely different line number), which is
+what prompted extracting the shared helper rather than patching a second
+copy into place. This is the same "re-check which function you are
+actually inside" lesson as the earlier `_safe_float`/decorator
+misplacement bug.
+
+Verified offline (`test_alpaca_orders_blocked.py`, 21 checks, real
+throwaway SQLite DB, only the live Alpaca HTTP calls faked): a healthy
+account reports no block and is byte-for-byte unaffected; the EXACT real
+live state from the screenshot (`trade_suspended_by_user: true`) produces
+a real reason naming Alpaca as the source, saying this app cannot change
+it, and noting manual Close is affected too; equity and positions still
+return normally while suspended (read-only data is never degraded by a
+trading block); `account_blocked` and `trading_blocked` each report their
+own distinct reason rather than being conflated; the user-set suspension
+wins when all three are set; absent flags never fabricate a block; the
+pure helper is safe on an empty dict; and - the guarantee that matters -
+`/status` and `/alpaca-overview` return identical block state across
+healthy, suspended and blocked accounts, so the two endpoints can never
+disagree. Related regression suite (`test_spendable_agrees_with_grid.py`,
+`test_grid_free_cash_deployed.py`, `test_combined_networth_fix.py`,
+`test_alpaca_branch_realized_total.py`, `test_close_extended_hours.py`)
+re-run clean alongside it. 124 routes, zero duplicates; HTML tag balance
+and `node --check` both clean.
+
+**Not yet confirmed live** - needs a redeploy. If the suspension is still
+on, the red banner appears immediately at the top of the Alpaca dashboard;
+once the account holder switches it off at Alpaca, the banner disappears
+on its own and both the Close buttons and the bots work again.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

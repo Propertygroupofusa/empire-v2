@@ -311,6 +311,7 @@
 
     <div id="entry-variant-badge" style="display:none; font-size:0.8em; color: var(--text-dim); margin-bottom: 12px;"></div>
 
+    <div id="orders-blocked-banner" style="display:none;"></div>
     <div id="passive-mode-banner" style="display:none;"></div>
 
     <div class="narrative" id="narrative">Loading account summary…</div>
@@ -711,6 +712,41 @@ async function closePositionExtendedHours(symbol, btn, force) {
     }
 }
 
+// Alpaca itself can refuse EVERY new order at the account level. When it does,
+// each bot entry and each manual Close comes back as a bare 403 and nothing on
+// this page explained why. Confirmed live 2026-09-04: a manual Close on SH
+// returned 403 {"code":40310000,"message":"new orders are rejected by user
+// request"} - Alpaca's own wording for a trading suspension the ACCOUNT HOLDER
+// set on Alpaca's side. This app can read that flag but deliberately never
+// changes it; only the account holder can, in Alpaca's own settings.
+function renderOrdersBlockedBanner(data) {
+    const el = document.getElementById('orders-blocked-banner');
+    if (!data.orders_blocked_reason) {
+        el.style.display = 'none';
+        el.innerHTML = '';
+        return;
+    }
+    el.style.display = '';
+    const howToFix = data.trade_suspended_by_user
+        ? `<div style="margin-top:10px; font-size:0.9em;">
+               <strong>How to turn it back on:</strong> log in to Alpaca (the website or the app),
+               open your account settings, and switch <em>Suspend Trading</em> back off.
+               Once it's off, your Close buttons here work again and the bots can trade again —
+               nothing else needs changing on this page.
+           </div>`
+        : `<div style="margin-top:10px; font-size:0.9em;">This one has to be sorted out with Alpaca support directly.</div>`;
+    el.innerHTML = `<div class="panel" style="background: var(--red-bg); border: 1px solid var(--red); padding: 14px 18px; margin-bottom: 16px;">
+        <strong>🚫 Alpaca is blocking every order right now.</strong>
+        <div style="margin-top:6px;">${data.orders_blocked_reason}</div>
+        ${howToFix}
+        <div style="font-size:0.8em; color: var(--text-dim); margin-top:8px;">
+            This is a setting on your Alpaca account, not a problem with this app — and it is not
+            something this app will change for you. Your positions and money are untouched; they
+            just can't be bought or sold until it's switched off.
+        </div>
+    </div>`;
+}
+
 function renderPassiveModeBanner(data) {
     const el = document.getElementById('passive-mode-banner');
     el.style.display = '';
@@ -958,6 +994,7 @@ async function refresh() {
         }
 
         isAlpacaPassive = !!data.alpaca_passive_mode;
+        renderOrdersBlockedBanner(data);
         renderPassiveModeBanner(data);
         renderEntryVariantBadge(data.entry_variant, data.strategy_family);
 

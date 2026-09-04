@@ -313,6 +313,63 @@ async def _fetch_alpaca_account(session: aiohttp.ClientSession) -> dict:
         return await r.json()
 
 
+def _alpaca_order_block_state(account: dict) -> dict:
+    """Real, account-level ORDER BLOCKS reported by Alpaca itself.
+
+    These fields were always present in the /v2/account payload both
+    dashboard endpoints already fetch, and were simply never read - so
+    when one is on, EVERY real order fails (every bot's automatic entry
+    AND the dashboard's own manual Close button) with a bare 403 and
+    nothing anywhere explains why.
+
+    Confirmed live 2026-09-04: a manual Close on SH returned
+        403 {"code":40310000,"message":"new orders are rejected by user request"}
+    which is Alpaca's own wording for `trade_suspended_by_user` - a
+    switch the ACCOUNT HOLDER sets on Alpaca's side. Nothing in this
+    codebase was wrong; it just had no way to say so. This app reads the
+    flag and deliberately never changes it: clearing an account-level
+    trading suspension is the account holder's own decision, the same
+    principle every passive-mode/kill-switch control here already
+    follows.
+
+    `trading_blocked`/`account_blocked` are Alpaca-side restrictions with
+    the same practical effect, reported separately so the banner can name
+    the real one. The user-set suspension takes priority when several are
+    set at once - it is the only one the account holder can actually fix
+    themselves.
+
+    A missing field defaults to not-blocked: never fabricate a block from
+    an absent value, the same "no data is not bad data" default used
+    throughout this codebase.
+
+    Deliberately ONE helper shared by /status and /alpaca-overview rather
+    than the same logic written twice - two copies of a rule silently
+    drifting apart is a bug this codebase has already been bitten by (see
+    the two disagreeing "free cash" figures in CLAUDE.md).
+    """
+    trade_suspended_by_user = bool(account.get("trade_suspended_by_user", False))
+    trading_blocked = bool(account.get("trading_blocked", False))
+    account_blocked = bool(account.get("account_blocked", False))
+    if trade_suspended_by_user:
+        reason = (
+            "Alpaca is rejecting ALL new orders because trading is suspended on your account "
+            "(Alpaca's 'suspend_trade' setting). No bot entry and no manual Close can execute "
+            "until you turn it off in Alpaca's own account settings - this app cannot change it."
+        )
+    elif account_blocked:
+        reason = "Alpaca has blocked this account entirely - contact Alpaca support."
+    elif trading_blocked:
+        reason = "Alpaca has trading blocked on this account - contact Alpaca support."
+    else:
+        reason = None
+    return {
+        "trade_suspended_by_user": trade_suspended_by_user,
+        "trading_blocked": trading_blocked,
+        "account_blocked": account_blocked,
+        "orders_blocked_reason": reason,
+    }
+
+
 async def _fetch_alpaca_positions(session: aiohttp.ClientSession) -> list:
     async with session.get(f"{ALPACA_BASE_URL}/v2/positions", headers=ALPACA_HEADERS) as r:
         if r.status != 200:
@@ -464,6 +521,7 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
 
     margin_multiplier = account.get("multiplier")
     shorting_enabled = account.get("shorting_enabled")
+    order_block = _alpaca_order_block_state(account)
 
     bots = await _get_or_init_bots(db, equity)
     rebalanced = _rebalance_bots(bots, equity)
@@ -496,6 +554,7 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
         "margin_min_equity": MARGIN_MIN_EQUITY,
         "live_trading": os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true",
         "stop_trading": os.getenv("STOP_TRADING", "false").lower() == "true",
+        **order_block,
     }
 
 
@@ -3731,6 +3790,9 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
             }
             for p in positions
         ],
+        # Same shared helper /status uses, so the two endpoints can never
+        # disagree about whether Alpaca is refusing orders right now.
+        **_alpaca_order_block_state(account),
     }
 
 
