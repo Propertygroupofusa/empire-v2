@@ -4304,6 +4304,209 @@ async def run_red_bar_takeout_backtest(coins=None, days: int = OPENING_BAR_DAYS,
     }
 
 
+MARKET_PHASE_SMA_FAST = 20
+MARKET_PHASE_SMA_SLOW = 50
+MARKET_PHASE_SLOPE_LOOKBACK = 12      # hours the slow SMA's own slope is measured over
+MARKET_PHASE_FLAT_SLOPE_PCT = 0.001   # 0.1% over that lookback counts as "flat"
+MARKET_PHASES = ("up", "top", "down", "bottom")
+
+
+def _market_phase_at(closes: list, i: int):
+    """Classify which of the four real market-cycle phases index i sits
+    in - bottom / up / top / down - from the account owner's own pasted
+    trading lesson ("you have to first be able to determine which... of
+    the four parts of the cycle are you in... every part of the cycle
+    [requires] a different approach").
+
+    REAL, HONEST LIMITS, stated plainly rather than buried:
+    - The transcript describes the four phases but never says how to
+      IDENTIFY one at the right edge of a live chart, which is the only
+      part that can actually be traded. This function is therefore ONE
+      concrete, testable interpretation, not a transcription of a rule
+      the lesson supplied.
+    - It deliberately reuses the SAME SMA20/SMA50 pairing already live in
+      crypto_btc_compound_bot.get_higher_tf_trend() rather than
+      introducing a new indicator wearing a new name - so a "phase" here
+      is built from a real signal this codebase already trades on.
+    - MARKET_PHASE_SLOPE_LOOKBACK and MARKET_PHASE_FLAT_SLOPE_PCT are
+      INVENTED thresholds - the lesson gave no numbers - same disclosure
+      already made for _sma_state_at's own narrow_pct above.
+    - Strictly right-edge: every value comes from _sma_at, which reads
+      only closes at or before i. No lookahead, so a phase label here is
+      one the live bot could genuinely have known at that moment.
+
+    The four cases, using the fast SMA's side of the slow SMA plus the
+    slow SMA's own real slope over the last MARKET_PHASE_SLOPE_LOOKBACK
+    hours:
+      up     - fast above slow AND the slow SMA is genuinely rising
+      down   - fast below slow AND the slow SMA is genuinely falling
+      top    - fast above slow but the slow SMA has stalled/rolled over
+      bottom - fast below slow but the slow SMA has stalled/turned up
+    Returns None until there's enough real history for both SMAs plus
+    the slope lookback."""
+    fast = _sma_at(closes, i, MARKET_PHASE_SMA_FAST)
+    slow = _sma_at(closes, i, MARKET_PHASE_SMA_SLOW)
+    slow_prev = _sma_at(closes, i - MARKET_PHASE_SLOPE_LOOKBACK, MARKET_PHASE_SMA_SLOW)
+    if fast is None or slow is None or slow_prev is None or slow_prev <= 0:
+        return None
+    slope = (slow - slow_prev) / slow_prev
+    above = fast > slow
+    if above and slope > MARKET_PHASE_FLAT_SLOPE_PCT:
+        return "up"
+    if not above and slope < -MARKET_PHASE_FLAT_SLOPE_PCT:
+        return "down"
+    return "top" if above else "bottom"
+
+
+def _make_market_phase_gate(closes: list, phase: str):
+    """Real entry gate allowing a NEW BUY only while the market is in
+    `phase`. Same per-index callback interface every other gate in this
+    file already uses (_make_higher_tf_trend_gate, _make_support_resistance_gate),
+    so it plugs into the already-validated replays with zero changes to
+    them - and, like every gate here, it never blocks a SELL: an already
+    open real slice keeps its own exit protection regardless of phase.
+
+    Fails CLOSED (blocks) before there's enough real history to classify
+    a phase at all - deliberately different from this file's other gates,
+    which fail open. The question being tested is "does trading ONLY in
+    phase X beat trading always," so counting unclassifiable candles as
+    "X" would quietly contaminate every phase's result with the same
+    shared warm-up window and make the four look more alike than they
+    are."""
+    def gate(i: int) -> bool:
+        return _market_phase_at(closes, i) == phase
+    return gate
+
+
+def _market_phase_distribution(closes: list) -> dict:
+    """Real count of how many hourly candles fell in each phase, plus
+    how many were unclassifiable (warm-up). Reported alongside the P&L
+    so a phase that barely occurred in the real sample is visibly thin
+    evidence rather than looking like a conclusion."""
+    counts = {p: 0 for p in MARKET_PHASES}
+    counts["unclassified"] = 0
+    for i in range(len(closes)):
+        phase = _market_phase_at(closes, i)
+        counts[phase if phase else "unclassified"] += 1
+    return counts
+
+
+async def run_market_phase_breakdown_backtest(coins=None, days=BACKTEST_DAYS, max_concurrent=3):
+    """SHADOW-MODE, additive - never touches live trading, never places an
+    order. Tests the one genuinely checkable claim in the account owner's
+    pasted four-phase market-cycle lesson: that the SAME strategy performs
+    differently depending on which part of the cycle it is run in, and so
+    needs a different "tool bag" per phase.
+
+    Method: for every coin, replay TODAY'S REAL LIVE Grid Bot config
+    (_live_matching_grid_pct spacing, STRATEGY_LAB_GRID_LEVELS levels -
+    the same config STRATEGY_LAB_STRATEGIES["grid_bot"] uses, so this is
+    measured against what genuinely runs today, not a stale convention)
+    five times against the IDENTICAL real historical candles:
+      - "always" - unrestricted, the real baseline
+      - one run per phase, entering ONLY while that phase holds
+    Everything else - exits, fees, level count, spacing - is byte-for-byte
+    the same across all five, so any difference is attributable to entry
+    phase and nothing else.
+
+    What a real result would mean:
+      - If the four phase runs' per-trade ROI look about the same, the
+        lesson's core claim does NOT hold for this strategy on this data,
+        and phase-switching would add complexity for nothing.
+      - If one or two phases carry essentially all the real profit, that
+        IS a real, actionable edge - and the next step would be a live
+        phase gate, decided separately from real evidence, exactly like
+        every other promotion in this file.
+
+    Real limits, stated up front: the phase definition is this session's
+    own interpretation (see _market_phase_at), one strategy is tested
+    rather than the lesson's four different "tool bags," and a phase that
+    occurred rarely in the real sample yields a thin, low-confidence
+    number no matter how good its ROI looks - which is exactly why the
+    real per-phase hour counts are returned alongside the P&L."""
+    coins = coins or COIN_FAMILY_TREE
+    semaphore = asyncio.Semaphore(max_concurrent)
+    last_errors = {}
+    scenarios = ["always", *MARKET_PHASES]
+
+    async with aiohttp.ClientSession() as session:
+        async def _one(product_id):
+            async with semaphore:
+                candles = await fetch_historical_candles(session, product_id, days=days, last_error_out=last_errors)
+            if candles is None:
+                return product_id, None, None, last_errors.get(product_id, "not enough historical data")
+            closes, highs, lows, _times = candles
+            grid_pct = _live_matching_grid_pct(closes, highs, lows)
+            results = {}
+            for name in scenarios:
+                gate = None if name == "always" else _make_market_phase_gate(closes, name)
+                results[name] = _replay_grid_bot(
+                    closes, highs, lows,
+                    grid_pct=grid_pct, num_levels=STRATEGY_LAB_GRID_LEVELS,
+                    entry_gate=gate,
+                )
+            return product_id, results, _market_phase_distribution(closes), None
+
+        outcomes = await asyncio.gather(*(_one(pid) for pid in coins))
+
+    per_coin, skipped = [], []
+    totals = {name: 0.0 for name in scenarios}
+    trade_counts = {name: 0 for name in scenarios}
+    win_counts = {name: 0 for name in scenarios}
+    phase_hours = {p: 0 for p in MARKET_PHASES}
+    phase_hours["unclassified"] = 0
+
+    for product_id, results, distribution, skip_reason in outcomes:
+        if results is None:
+            skipped.append({"product_id": product_id, "reason": skip_reason})
+            continue
+        per_coin.append({"product_id": product_id, "phase_hours": distribution, **results})
+        for key, count in distribution.items():
+            phase_hours[key] += count
+        for name, result in results.items():
+            if result is None:
+                continue
+            totals[name] += result["total_pnl"]
+            trade_counts[name] += result["num_trades"]
+            win_counts[name] += round(result["win_rate"] / 100 * result["num_trades"])
+
+    summary = {
+        name: {
+            "total_pnl": round(totals[name], 2),
+            "num_trades": trade_counts[name],
+            "win_rate": round(win_counts[name] / trade_counts[name] * 100, 1) if trade_counts[name] else None,
+            # Real per-trade average - the only fair way to compare a phase
+            # that was rarely active against one that was active constantly.
+            "avg_pnl_per_trade": round(totals[name] / trade_counts[name], 4) if trade_counts[name] else None,
+        }
+        for name in scenarios
+    }
+    phase_only = {p: summary[p] for p in MARKET_PHASES if trade_counts[p]}
+    best_phase = (max(phase_only.items(), key=lambda kv: kv[1]["avg_pnl_per_trade"])[0]
+                  if phase_only else None)
+
+    per_coin.sort(key=lambda r: (r["always"]["total_pnl"] if r["always"] else -1e9), reverse=True)
+
+    return {
+        "backtest_days": days,
+        "scenarios": scenarios,
+        "phases": list(MARKET_PHASES),
+        "coins_tested": len(coins),
+        "per_coin": per_coin,
+        "skipped": skipped,
+        "summary": summary,
+        "phase_hours": phase_hours,
+        "best_phase_by_avg_trade": best_phase,
+        "params": {
+            "sma_fast": MARKET_PHASE_SMA_FAST,
+            "sma_slow": MARKET_PHASE_SMA_SLOW,
+            "slope_lookback_hours": MARKET_PHASE_SLOPE_LOOKBACK,
+            "flat_slope_pct": MARKET_PHASE_FLAT_SLOPE_PCT,
+            "grid_levels": STRATEGY_LAB_GRID_LEVELS,
+        },
+    }
+
+
 async def main():
     print(f"Backtesting {len(COIN_FAMILY_TREE)} coins over the last {BACKTEST_DAYS} days of REAL Coinbase hourly candles.")
     print(f"Replaying the live bot's real target/stop/breakeven/giveback rules, ${SPEND:.0f} redeployed per trade.\n")

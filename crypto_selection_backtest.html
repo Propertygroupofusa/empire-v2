@@ -195,6 +195,15 @@
     <div id="labResults"></div>
 
     <div class="note" style="margin-top: 28px;">
+        <strong>🔄 Market-phase breakdown - does the four-part cycle actually change results?</strong> The lesson goes: every market, on every timeframe, cycles bottom → up → top → down → repeat, and you must first identify which part you're in, then use a matching "tool bag," or you'll be inconsistent. The part of that which is genuinely testable is whether the SAME strategy performs differently depending on the phase - so this tests exactly that. Today's <em>real live</em> Grid Bot config is replayed five times per coin on identical real historical candles: unrestricted (the baseline), then entering only during each of the four phases. Everything else - exits, fees, level count, spacing - is byte-for-byte identical across all five, so any difference is down to entry phase and nothing else.
+        <br><br>
+        <strong>Honest limits, up front:</strong> the lesson describes the four phases but never says how to identify one at the <em>right edge</em> of a live chart, which is the only part that's actually tradeable - so the phase definition here (SMA20 vs SMA50, plus the slow SMA's own 12-hour slope) is this session's own interpretation, deliberately reusing an SMA pairing this codebase already trades on rather than inventing a new indicator. The slope thresholds are invented numbers; the lesson gave none. One strategy is tested, not four different "tool bags." And a phase that barely occurred in the real sample yields a thin number no matter how good its ROI looks - which is exactly why the real per-phase hour counts come back alongside the P&amp;L. Shadow mode only; nothing here changes what the live bot does.
+    </div>
+    <button class="run-btn" id="mpBtn" onclick="runMarketPhaseBreakdown()">▶ Run Market-Phase Breakdown (~30-90 seconds)</button>
+    <div id="mpStatus"></div>
+    <div id="mpResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
         <strong>🛡️ Grid Bot drawdown breaker - does it actually help?</strong> Grid Bot went live with no account-level protection at all - a losing branch could keep buying new slices into a real, sustained decline forever. A real per-branch drawdown circuit breaker now ships live (pauses NEW buys once real equity drops a % below its own peak - existing open slices keep selling normally, never force-sold). This replays several real candidate thresholds, plus a real no-breaker baseline, against the identical real historical candles per coin, using the exact same real equity/peak/drawdown math the live breaker itself uses. Shadow mode only - never places an order.
     </div>
     <button class="run-btn" id="gdbBtn" onclick="runGridDrawdownBreakerBacktest()">▶ Run Grid Drawdown Breaker Comparison (~30-90 seconds)</button>
@@ -1439,6 +1448,125 @@ function renderStrategyLabResults(data) {
         </table>
         ${skippedHtml}
         <p class="trade-note">Real evidence, not a recommendation on its own - see the honest limits noted above the run button. Grid Bot (C) already won this comparison and is live; D was removed after coming back the worst real performer.</p>
+    `;
+}
+
+const MARKET_PHASE_LABELS = {
+    always: 'Always (no phase filter)',
+    up: '📈 Uptrend',
+    top: '🔺 Topping',
+    down: '📉 Downtrend',
+    bottom: '🔻 Bottoming',
+};
+
+async function runMarketPhaseBreakdown() {
+    const btn = document.getElementById('mpBtn');
+    const statusEl = document.getElementById('mpStatus');
+    const resultsEl = document.getElementById('mpResults');
+    btn.disabled = true;
+    btn.textContent = 'Running... (real data, 5 replays per coin)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    resultsEl.innerHTML = '';
+
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/crypto-selection-backtest/market-phase-breakdown', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - try again');
+        }
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+
+        renderMarketPhaseResults(data);
+        const best = data.best_phase_by_avg_trade;
+        statusEl.textContent = `Tested ${data.per_coin.length} of ${data.coins_tested} real coins over ${data.backtest_days} days`
+            + (data.skipped.length ? ` (${data.skipped.length} skipped)` : '')
+            + (best ? `. Best real phase by average $/trade: ${MARKET_PHASE_LABELS[best]}.` : '.');
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Market-Phase Breakdown (~30-90 seconds)';
+    }
+}
+
+function renderMarketPhaseResults(data) {
+    const resultsEl = document.getElementById('mpResults');
+    if (!data.per_coin.length) {
+        resultsEl.innerHTML = `<p style="margin-top:16px;color:var(--text-dim)">No real coins produced enough historical data to test.</p>`;
+        return;
+    }
+    const order = data.scenarios;
+
+    const summaryRows = order.map(key => {
+        const s = data.summary[key];
+        const cls = s.total_pnl >= 0 ? 'pos' : 'neg';
+        const isBest = key === data.best_phase_by_avg_trade;
+        return `<tr${isBest ? ' style="font-weight:700;"' : ''}>
+            <td>${MARKET_PHASE_LABELS[key]}${isBest ? ' 🏆' : ''}</td>
+            <td>${s.num_trades}</td>
+            <td>${s.win_rate == null ? '—' : s.win_rate.toFixed(1) + '%'}</td>
+            <td class="${cls}">${s.total_pnl >= 0 ? '+' : ''}$${s.total_pnl.toFixed(2)}</td>
+            <td class="${s.avg_pnl_per_trade == null ? '' : (s.avg_pnl_per_trade >= 0 ? 'pos' : 'neg')}">${
+                s.avg_pnl_per_trade == null ? '—'
+                    : (s.avg_pnl_per_trade >= 0 ? '+' : '') + '$' + s.avg_pnl_per_trade.toFixed(4)}</td>
+        </tr>`;
+    }).join('');
+
+    // Real hour counts: how much of the real sample each phase actually
+    // covered. A phase with very few real hours is thin evidence no
+    // matter how its P&L looks - shown right beside the P&L for exactly
+    // that reason, never buried.
+    const hours = data.phase_hours || {};
+    const totalHours = Object.values(hours).reduce((a, b) => a + b, 0) || 1;
+    const hourRows = [...data.phases, 'unclassified'].map(p => {
+        const n = hours[p] || 0;
+        return `<tr><td>${MARKET_PHASE_LABELS[p] || 'Warm-up (not yet classifiable)'}</td>
+            <td>${n.toLocaleString()}</td>
+            <td>${(n / totalHours * 100).toFixed(1)}%</td></tr>`;
+    }).join('');
+
+    const coinRows = data.per_coin.map(row => {
+        const cells = order.map(key => {
+            const r = row[key];
+            if (!r) return `<td style="color:var(--text-dim);">no trades</td>`;
+            const cls = r.total_pnl >= 0 ? 'pos' : 'neg';
+            return `<td class="${cls}">${r.total_pnl >= 0 ? '+' : ''}$${r.total_pnl.toFixed(2)} <span style="color:var(--text-dim);">(${r.num_trades}tr)</span></td>`;
+        }).join('');
+        return `<tr><td>${row.product_id}</td>${cells}</tr>`;
+    }).join('');
+
+    const skipped = data.skipped || [];
+    const skippedHtml = skipped.length ? `
+        <table style="margin-top:14px;">
+            <thead><tr><th>Skipped coin</th><th>Real reason</th></tr></thead>
+            <tbody>${skipped.map(s => `<tr><td>${s.product_id}</td><td>${s.reason}</td></tr>`).join('')}</tbody>
+        </table>` : '';
+
+    const p = data.params;
+    resultsEl.innerHTML = `
+        <table style="margin-top:14px;">
+            <thead><tr><th>Entry phase</th><th>Trades</th><th>Win rate</th><th>Real total P&amp;L</th><th>Real avg $/trade</th></tr></thead>
+            <tbody>${summaryRows}</tbody>
+        </table>
+        <p class="trade-note">Compare on <strong>average $/trade</strong>, not total P&amp;L - a phase that was rarely active takes fewer trades and will always show a smaller total even if each trade was better.</p>
+        <table style="margin-top:14px;">
+            <thead><tr><th>How much of the real sample each phase covered</th><th>Hours</th><th>Share</th></tr></thead>
+            <tbody>${hourRows}</tbody>
+        </table>
+        <table style="margin-top:14px;">
+            <thead><tr><th>Coin</th>${order.map(k => `<th>${MARKET_PHASE_LABELS[k]}</th>`).join('')}</tr></thead>
+            <tbody>${coinRows}</tbody>
+        </table>
+        ${skippedHtml}
+        <p class="trade-note">Phase definition used here: SMA${p.sma_fast} vs SMA${p.sma_slow} on real hourly closes, with the slow SMA's own slope measured over ${p.slope_lookback_hours} hours (flat = within ±${(p.flat_slope_pct * 100).toFixed(2)}%). Strictly right-edge - no lookahead - so every phase label is one the live bot could genuinely have known at that moment. If the four phases come back looking about the same on average $/trade, the cycle claim does not hold for this strategy on this data and phase-switching would add complexity for nothing.</p>
     `;
 }
 

@@ -12477,6 +12477,127 @@ line restarting from the corrected basis rather than showing a crash.
 
 ---
 
+## Market-phase breakdown backtest - testing the four-phase cycle lesson for real
+
+The account owner pasted a trading lesson on the four-phase market cycle:
+bottom → up → top → down → repeat, claimed fractal across every market
+and every timeframe, with the argument that you must first identify
+which phase you're in and then apply a matching "tool bag" (topping
+tools, bottoming tools, uptrend tools, downtrend tools) or you'll be an
+inconsistent, losing trader.
+
+**Evaluated honestly before building anything**, same as every other
+pasted proposal in this file:
+- **The regime-dependence half is genuinely real**, and this account has
+  its own evidence for it: the momentum-vs-mean-reversion comparison
+  flipped winners between real 30-day windows earlier this session
+  (momentum +$68.08 in one, mean-reversion +$77.51 across three others),
+  which is exactly what "the same strategy performs differently in
+  different market conditions" looks like in real data.
+- **The "up, top, down, bottom, repeat" framing by itself predicts
+  nothing** - it describes every possible price path, so it can never be
+  wrong and therefore can never be tested as stated. The hard part is
+  identifying the phase at the RIGHT EDGE of a live chart in real time,
+  which is the only part that's tradeable, and the transcript never
+  addresses it at all.
+- **This codebase already has roughly the four tool bags** and has for
+  a while - Grid Bot (range/chop), momentum entries (uptrend),
+  mean-reversion entries (pullback/bottoming), and the 1x inverse ETFs
+  SH/PSQ/DOG/RWM bought long (downtrend). What it has never had is a
+  regime CLASSIFIER choosing between them. That gap is the real,
+  testable thing, so that's what got built.
+
+**`_market_phase_at(closes, i)`** (`crypto_selection_backtest.py`) - one
+concrete, testable interpretation of the four phases, stated plainly as
+this session's own interpretation rather than a transcription (the
+lesson supplies no identification rule). Deliberately reuses the SAME
+SMA20/SMA50 pairing already live in `crypto_btc_compound_bot.get_higher_tf_trend()`
+rather than inventing a new indicator wearing a new name, so a "phase"
+here is built from a signal this codebase already trades on. Uses the
+fast SMA's side of the slow SMA plus the slow SMA's own real slope over
+`MARKET_PHASE_SLOPE_LOOKBACK` (12) hours: `up` (above + genuinely
+rising), `down` (below + genuinely falling), `top` (above but the slow
+SMA has stalled/rolled over), `bottom` (below but stalled/turning up).
+`MARKET_PHASE_SLOPE_LOOKBACK` and `MARKET_PHASE_FLAT_SLOPE_PCT` (0.1%)
+are INVENTED thresholds - the lesson gave no numbers - the same
+disclosure already made for `_sma_state_at`'s own `narrow_pct`. Strictly
+right-edge via `_sma_at`, no lookahead, so every label is one the live
+bot could genuinely have known at that moment.
+
+**`_make_market_phase_gate(closes, phase)`** - same per-index
+`entry_gate(i)` callback interface every other gate in this file already
+uses, so it plugs into the already-validated `_replay_grid_bot()` with
+ZERO changes to it. Gates NEW BUYS only; a sell is never gated, matching
+the "existing protection never pauses on a filter" rule used everywhere
+in this codebase. Deliberately fails CLOSED during warm-up (unlike this
+file's other gates, which fail open) - the question being tested is "does
+trading ONLY in phase X beat trading always," so counting unclassifiable
+candles as X would contaminate all four phases with the same shared
+warm-up window and make them look more alike than they are.
+
+**`run_market_phase_breakdown_backtest()`** - SHADOW MODE, additive,
+never places an order. Replays TODAY'S REAL LIVE Grid Bot config
+(`_live_matching_grid_pct` spacing, `STRATEGY_LAB_GRID_LEVELS` levels -
+the same config `STRATEGY_LAB_STRATEGIES["grid_bot"]` uses, so this is
+measured against what genuinely runs today) five ways per coin on
+identical real historical candles: unrestricted, then entering only
+during each phase. Everything else - exits, fees, level count, spacing -
+is byte-for-byte identical across all five, so any difference is
+attributable to entry phase and nothing else. Returns real per-phase
+HOUR COUNTS alongside the P&L, and an `avg_pnl_per_trade` per scenario:
+a phase that was rarely active takes fewer trades and will always show a
+smaller total even if each trade was better, so `best_phase_by_avg_trade`
+ranks on per-trade average, never raw total.
+
+New `POST /crypto-selection-backtest/market-phase-breakdown` (admin-key
+gated) and a new section on `crypto_selection_backtest.html`, right under
+Strategy Lab - a per-phase summary table (trades, win rate, total P&L,
+real avg $/trade), a real per-phase sample-coverage table, and a per-coin
+breakdown, with the honest limits repeated in the UI copy itself, not
+just in code comments.
+
+Verified offline (`test_market_phase_breakdown.py`, 35 checks, no live
+network needed - the real Coinbase fetch is mocked, every classification
+and replay runs the real shipped functions): the warm-up boundary is
+exact (None at i=60, classified at i=61); on a linear ramp the fast SMA
+sits exactly 15.0 above the slow and the slow SMA's 12h slope is exactly
+12/163.5, both hand-computed and matched to 1e-9; a sustained rise reads
+`up` and a sustained decline reads `down`; a gentle rise then a plateau
+correctly reads `top` (fast still above, slope 0.00061 inside the flat
+band) and its mirror reads `bottom`; a dead-flat market reads `bottom`,
+never `top` (fast == slow is not "above" - a documented edge, asserted
+rather than left implicit); the classifier matches an independently
+written reference implementation on EVERY index of a mixed series that
+genuinely exercises all four phases; appending 40 violent future candles
+changes NO past label (proving no lookahead); the gate allows buys only
+on genuinely-matching indexes and fails closed during warm-up; hour
+counts sum to every candle with warm-up reported honestly as
+unclassified; an always-open gate reproduces the ungated replay
+byte-for-byte while a blocking gate produces no buy-driven trades;
+an already-open slice still SELLS after the gate shuts (exits never
+gated); and end-to-end the runner reports the right schema, surfaces a
+real fetch failure with its own reason, sums hour counts across coins,
+matches the baseline total to the per-coin sum, and picks the best phase
+by average $/trade. Full related regression suite (strategy lab ×3, grid
+level/spacing, grid ATR spacing, restored trailing-stop sweep, combined
+live entry filters, higher-TF trend gate, BTC-relative strength, real
+allocations) re-run clean alongside it.
+
+**Not yet run against real historical data** - same documented gap as
+every backtest tool in this file (no live network access to Coinbase from
+this sandbox). The account owner needs to open
+`/crypto-selection-backtest-view` after the next redeploy and tap "▶ Run
+Market-Phase Breakdown". **What the real result will mean**: if the four
+phases come back looking about the same on average $/trade, the lesson's
+core claim does NOT hold for this strategy on this data and
+phase-switching would add complexity for nothing. If one or two phases
+carry essentially all the real profit, that IS a real edge - and wiring a
+live phase gate would then be a separate, deliberate decision made from
+that evidence, exactly like every other promotion in this file. Nothing
+here changes what the live bot does on its own.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

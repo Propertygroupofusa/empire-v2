@@ -3035,6 +3035,38 @@ async def run_strategy_lab_backtest():
     return await crypto_selection_backtest_module.run_strategy_lab_comparison()
 
 
+@router.post("/crypto-selection-backtest/market-phase-breakdown", dependencies=[Depends(require_admin_key)])
+async def run_market_phase_breakdown_backtest():
+    """SHADOW-MODE ONLY - does not touch live trading, places no orders.
+    Built after the account owner pasted a trading lesson on the four-phase
+    market cycle (bottom -> up -> top -> down -> repeat) arguing you must
+    first identify which phase you're in and then apply a matching "tool
+    bag," or you'll be an inconsistent trader.
+
+    That lesson's core claim - the same strategy performs differently
+    depending on the phase - is genuinely testable, so this tests it:
+    today's REAL live Grid Bot config is replayed five ways on identical
+    real historical candles per coin (unrestricted, then entering only
+    during each of the four phases). Real per-phase hour counts come back
+    alongside the P&L so a phase that barely occurred reads as thin
+    evidence rather than a conclusion. See
+    crypto_selection_backtest.run_market_phase_breakdown_backtest() and
+    _market_phase_at() for the real replay logic and the honest limits -
+    most importantly that the phase DEFINITION is this session's own
+    interpretation (the lesson never says how to identify a phase at the
+    right edge of a live chart, which is the only part that's tradeable).
+
+    Nothing here changes what the live bot does. Wiring a phase gate into
+    live entries would be a real, separate decision made from these real
+    numbers, same as every other promotion in this codebase.
+
+    Pulls real historical data from Coinbase's public candles endpoint -
+    can take 30-90 seconds depending on that endpoint's response time."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_market_phase_breakdown_backtest()
+
+
 @router.post("/crypto-selection-backtest/grid-drawdown-breaker", dependencies=[Depends(require_admin_key)])
 async def run_grid_drawdown_breaker_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
