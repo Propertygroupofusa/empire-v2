@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>🌳 Family Tree Dashboard - Coinbase Compounding</title>
+<title>🪙 Coinbase Trading Dashboard - Grid Bot + Family Tree</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -482,13 +482,13 @@
 
     <div class="header">
         <div>
-            <h1>🌳 Family Tree — Coinbase Compounding</h1>
-            <p>Live from the database · branches drawn as a real family tree, root at top</p>
+            <h1>🪙 Coinbase Trading</h1>
+            <p id="page-subtitle">Live from the database · Grid Bot and the family tree, both on the same real Coinbase wallet</p>
             <p style="margin-top: 4px; font-size: 0.85em;"><a href="/crypto-selection-backtest-view" style="color: var(--navy);">📊 Coin selection backtest →</a></p>
         </div>
         <div style="text-align:right;">
             <div class="header-totals">
-                <div class="header-total-row">🌳 Coinbase: <span id="header-total-coinbase" class="v">—</span></div>
+                <div class="header-total-row">🪙 Coinbase: <span id="header-total-coinbase" class="v">—</span></div>
                 <div class="header-total-row">📈 Alpaca: <span id="header-total-alpaca" class="v">—</span></div>
             </div>
             <div id="status">Loading…</div>
@@ -561,12 +561,15 @@
         </div>
     </div>
     <p class="panel-sub" style="margin-bottom:10px;">
-        Real, genuinely separate grid-trading branches - buys a real slice when a coin's price closes 1% below its own
-        reference price (up to 10 concurrent slices), sells the OLDEST slice (FIFO) once it closes 1% above it, real fees
-        included both ways. Built after Strategy Lab's real 30-day A/B/C/D comparison showed Grid Bot as the clear best
-        performer (+$69.50 total P&amp;L, 59.2% win rate, 637 trades - vs. the live baseline's real -$1,457.43 over the
-        same coins/window). Its own real capital, its own real position tracking - never touches or shares state with the
-        family tree branches above. Master switch defaults ON; nothing trades until a real branch actually exists below.
+        <strong>This is the live crypto engine on this account</strong> - the only crypto system currently placing real
+        Coinbase orders. Real, genuinely separate grid-trading branches: buys a real slice when a coin closes one grid
+        step below its own reference price (up to 10 concurrent slices), then sells the oldest slice that is genuinely
+        net-profitable at the current price - never one that would realize a loss just because an unrelated, lower slice
+        moved the reference. Real fees included both ways. The grid step itself is per-coin and dynamic, not a fixed
+        percentage - see the spacing badges directly below. Built after Strategy Lab's real 30-day comparison showed Grid
+        Bot as the clear best performer against every other candidate on the same coins and window. Its own real capital,
+        its own real position tracking - never touches or shares state with the family tree branches below. Master switch
+        defaults ON; nothing trades until a real branch actually exists below.
         Every branch also carries a real drawdown circuit breaker (pauses NEW buys only, once real equity drops 25% below
         its own peak - existing slices keep selling normally) - it's the account-level protection Grid Bot never had
         before. Real idle cash - whether it's sitting in a flat branch or was never allocated to one at all - also
@@ -599,7 +602,7 @@
     </div>
 
     <div class="section-title" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
-        <span>Tree</span>
+        <span id="tree-section-title">🌳 Family Tree</span>
         <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
             <label style="display:flex; align-items:center; gap:6px; font-size:0.78em; font-weight:400; color:var(--text-dim); cursor:pointer;">
                 <input type="checkbox" id="hide-empty-branches-toggle" onchange="onHideEmptyBranchesToggle()">
@@ -608,6 +611,7 @@
             <button id="spawn-branch-btn" class="sell-btn" style="width:auto; margin-top:0;" onclick="spawnBranch(this)" disabled title="Checking real free cash...">🌱 Start new $50 branch</button>
         </div>
     </div>
+    <div id="tree-section-note" style="font-size:0.8em; color:var(--text-dim); margin:-4px 0 10px; line-height:1.45;"></div>
     <div id="hide-empty-branches-note" style="font-size:0.78em; color:var(--text-dim); margin:-4px 0 10px;"></div>
     <div class="tree-canvas"><div class="tree-canvas-inner" id="tree"></div></div>
 
@@ -3040,6 +3044,7 @@ async function refresh() {
         updateUnlockButtonState(data);
         cryptoPassiveModeActive = !!data.crypto_passive_mode;
         renderCryptoPassiveModeBanner(data);
+        renderTreeSectionHeader(data);
         renderRollingExpectancyBanner(data);
         renderUsdcBlindSpotBanner(data);
         renderExitModeBadge(data.exit_mode, data.trailing_stop_pct);
@@ -3302,6 +3307,38 @@ function renderCryptoPassiveModeBanner(data) {
                 A real, one-way action.
             </div>
         </div>`;
+    }
+}
+
+// The Tree section's own header + note, driven by the SAME real
+// data.crypto_passive_mode flag renderCryptoPassiveModeBanner() reads - never
+// hardcoded "retired" text, so if the tree is ever un-retired this section
+// stops calling itself retired on the very same refresh.
+//
+// Why this note exists at all: the family tree is retired and frozen, but its
+// MODULE is not dead code and must not be deleted - crypto_grid_bot.py imports
+// crypto_family_tree_bot in two real places (get_real_free_cash_usd, and the
+// coin-ranking path) for get_locked_usd() and shared coin-selection helpers,
+// routers/trading_dashboard.py references it in 75 places, and Grid Bot's own
+// entire UI lives on this same page. The page said none of that, so a retired
+// section sitting at the top of a page named after it read as the main event.
+function renderTreeSectionHeader(data) {
+    const titleEl = document.getElementById('tree-section-title');
+    const noteEl = document.getElementById('tree-section-note');
+    if (!titleEl || !noteEl) return;
+    if (data.crypto_passive_mode) {
+        titleEl.innerHTML = '🌳 Family Tree <span style="font-size:0.7em; font-weight:600; color:var(--text-dim);">· RETIRED</span>';
+        noteEl.innerHTML =
+            'Retired and frozen — no branch trades, places an order, or calls an API. ' +
+            'Its P&amp;L below is closed history and cannot move. ' +
+            '<strong>Kept, not deleted, on purpose:</strong> Grid Bot above imports this module for locked-profit ' +
+            'and coin-selection helpers, and runs on this same page — deleting it would break the one crypto ' +
+            'system that is actually trading.';
+    } else {
+        titleEl.textContent = '🌳 Family Tree';
+        noteEl.innerHTML =
+            'Live and trading, alongside Grid Bot above, on the same real Coinbase wallet. ' +
+            'Branches drawn as a real family tree, root at top.';
     }
 }
 

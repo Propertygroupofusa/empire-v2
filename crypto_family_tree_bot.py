@@ -1,6 +1,30 @@
 """
 FAMILY TREE COMPOUNDING BOT — Coinbase, multiple single-position branches
 
+⚠️ DO NOT DELETE THIS MODULE, even though the family tree itself is retired.
+
+The tree is retired and frozen (is_crypto_passive_mode() is True, so
+run_branch_cycle() returns immediately for every branch, root included - no
+orders, no API calls, and its recorded P&L is closed history that cannot
+move). That makes it look like dead code. It is not:
+
+  * crypto_grid_bot.py - the ONLY crypto system currently placing real
+    Coinbase orders - lazily imports this module at 5 sites and calls 3 real
+    functions from it: get_locked_usd() (in get_real_free_cash_usd, so every
+    real free-cash figure Grid Bot spends against depends on it),
+    get_effective_excluded_coins() (twice, in the coin-ranking path that
+    picks what Grid Bot actually buys), and _log_activity() (the shared Live
+    Activity feed). Counted directly, not from memory - an earlier note in
+    this repo said "two places," which was wrong.
+  * routers/trading_dashboard.py references crypto_family_tree_bot_module in
+    75 places; main.py and status_snapshot.py import it too.
+  * Grid Bot's entire dashboard UI lives inside family_tree_dashboard.html -
+    the "tree page" and the "Grid Bot page" are the same screen.
+
+So this file's real job today is a shared library for the system that IS
+trading. Retired ≠ unused. Removing it breaks live trading; the correct move
+has always been to leave it retired and upgrade around it.
+
 Built on top of crypto_btc_compound_bot.py's proven engine (auth, order
 placement, ATR-based volatility, adaptive profit target, stop-loss) rather
 than duplicating it - this module imports that one as a library (see

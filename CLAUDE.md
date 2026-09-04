@@ -12835,6 +12835,74 @@ already depends on.
 
 ---
 
+## The dashboard now says what it actually is: Grid Bot's page, with the retired tree kept as its library
+
+Confirmed the dependency findings and asked directly to "let the dashboard
+reflect this then update is upgrad is what we need" - keep the tree, stop
+the page from presenting a retired system as the main event.
+
+**Corrected an earlier claim in this same file while doing it.** An earlier
+section said `crypto_grid_bot.py` imports the tree "in two real places."
+Counted directly: it lazily imports it at **5 sites** and calls **3 distinct
+functions** - `get_locked_usd()` (inside `get_real_free_cash_usd`, so every
+real free-cash figure Grid Bot spends against depends on it),
+`get_effective_excluded_coins()` (twice, in the coin-ranking path that picks
+what Grid Bot actually buys), and `_log_activity()` (the shared Live Activity
+feed). One of the 5 imports is genuinely unused - harmless dead code, left
+alone deliberately rather than touched in a docs-and-labels change.
+`routers/trading_dashboard.py` really does reference the module 75 times, and
+`main.py`/`status_snapshot.py` import it too.
+
+**`crypto_family_tree_bot.py` gained a "DO NOT DELETE" header** stating why a
+module whose own bot is retired and frozen is not dead code, with the verified
+numbers above. The reason lived only in a chat answer before; now it is in the
+file anyone would open before deleting it.
+
+**`family_tree_dashboard.html`:**
+- Page `<title>`/`<h1>` retitled from "Family Tree - Coinbase Compounding" to
+  "Coinbase Trading" - the page has been the whole Coinbase side (Grid Bot's
+  entire UI included) for a while; it was still named after the one system on
+  it that stopped trading.
+- The Tree section header was the bare word "Tree". Now
+  `renderTreeSectionHeader(data)`, called right after
+  `renderCryptoPassiveModeBanner(data)` and driven by the **same real
+  `data.crypto_passive_mode` flag** - never hardcoded. Retired: a `· RETIRED`
+  marker plus a note that it is frozen, that its P&L is closed history that
+  cannot move, and that the module is kept on purpose because Grid Bot imports
+  it. Un-retired: the marker disappears and the note says it is live and
+  trading. Hardcoding "RETIRED" into markup would have gone stale the moment
+  the tree is ever turned back on.
+- **Three stale claims in the Grid Bot paragraph, fixed** (all three were
+  wrong against today's real code): it described a fixed 1% grid step (spacing
+  has been per-coin dynamic since average-swing spacing shipped), plain FIFO
+  selling (the never-sell-at-a-loss fix means it sells the oldest slice that
+  is genuinely net-profitable, not simply the oldest), and pointed at "the
+  family tree branches above" when the tree section is BELOW it on the page.
+  It now also states plainly that Grid Bot is the live crypto engine.
+
+Verified (`test_tree_section_header.js`, 22 checks): extracts the real shipped
+`renderTreeSectionHeader` from the HTML verbatim and runs it against a DOM stub
+- never a reimplementation. Both flag states produce genuinely different title
+and note text (not one constant); the retired note names Grid Bot and the
+"actually trading" consequence; the active note drops every "frozen"/"retired"
+word; missing DOM elements never throw; the function is confirmed wired into
+the real refresh path; no hardcoded "RETIRED" survives in static markup; and
+each of the three stale Grid Bot claims is confirmed gone. HTML tag balance and
+`node --check` clean; 124 router routes, zero duplicates; all five touched/
+importing Python files compile; related regression suite
+(`test_spendable_agrees_with_grid.py`, `test_alpaca_orders_blocked.py`,
+`test_branch_deficit_explains_positions.py`, `test_grid_free_cash_deployed.py`,
+`test_combined_networth_fix.py`, `test_grid_realized_total.py`) re-run clean.
+
+No trading logic changed - this is labels, copy, and a code comment. What the
+bots do is byte-for-byte identical.
+
+**Not yet confirmed live** - needs a redeploy; the page should then open as
+"Coinbase Trading" with Grid Bot framed as the live engine and the Tree section
+marked RETIRED with its keep-it reason stated inline.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md
