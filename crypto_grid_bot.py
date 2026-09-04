@@ -481,6 +481,54 @@ async def get_grid_allocated_total() -> float:
         return sum(b.allocated_usd for b in result.scalars().all())
 
 
+async def get_grid_holdings_market_value():
+    """Real live market value of every coin Grid Bot is ACTUALLY holding
+    right now - the sum of qty * live price across every open slice on
+    every branch, priced once per distinct product_id (not once per
+    branch, so several branches sharing a coin never cost extra real
+    API calls). Read-only; never places an order.
+
+    Deliberately NOT allocated_usd. allocated_usd is a cost-basis figure
+    that is never debited at buy time (see _grid_branch_real_equity), so
+    it is part cash-still-sitting-in-the-real-USD-wallet and part coin -
+    adding it on top of a real USD balance would double-count the cash
+    half. The market value of the OPEN SLICES is precisely the piece
+    that genuinely is NOT in the USD wallet any more, which makes it
+    exactly what a real net-worth figure has to add to that balance.
+
+    Returns (market_value, complete). complete is False when a real
+    price fetch failed for a branch that genuinely holds open slices -
+    so a caller can refuse to publish an understated total rather than
+    quietly passing off a partial number as the real one.
+    """
+    branches = await get_grid_branches()
+    holdings = {}          # bot_name -> (product_id, slices)
+    needed_products = set()
+    for b in branches:
+        slices = await get_grid_slices(b.bot_name)
+        if slices:
+            holdings[b.bot_name] = (b.product_id, slices)
+            needed_products.add(b.product_id)
+    if not needed_products:
+        return 0.0, True
+
+    live_prices = {}
+    async with engine.aiohttp.ClientSession() as session:
+        for product_id in needed_products:
+            price, _atr = await engine.get_price_and_volatility(session, product_id)
+            live_prices[product_id] = price
+
+    total = 0.0
+    complete = True
+    for _bot_name, (product_id, slices) in holdings.items():
+        price = live_prices.get(product_id)
+        if price is None:
+            complete = False
+            continue
+        total += sum(s.qty * price for s in slices)
+    return round(total, 2), complete
+
+
 async def get_real_free_cash_usd():
     """Real, honest 'how much can I actually deploy into a NEW grid
     branch right now' figure - per the account owner's own direct

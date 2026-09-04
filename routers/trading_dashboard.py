@@ -24,7 +24,7 @@ from datetime import datetime, timezone, timedelta
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, func, case, text, delete
+from sqlalchemy import select, func, case, text, delete, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -769,6 +769,12 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
 
     out = []
     total_equity_now = 0.0
+    # Real live market value of the coin the family tree itself is
+    # holding right now, and whether every holding branch could actually
+    # be priced this poll. Feeds real_crypto_net_worth_usd below - see
+    # there for why market value (not allocated_usd) is the right term.
+    tree_holdings_market_value = 0.0
+    tree_holdings_complete = True
     for b in branches:
         pos = positions_by_bot.get(b.bot_name)
         current_price = current_price_by_bot.get(b.bot_name) if pos else None
@@ -793,6 +799,14 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         if pos is not None and current_price is not None:
             equity_now = b.allocated_usd + pos.qty * (current_price - pos.entry_price)
         total_equity_now += equity_now
+        if pos is not None:
+            if current_price is not None:
+                tree_holdings_market_value += pos.qty * current_price
+            else:
+                # Genuinely holding coin we couldn't price this poll -
+                # any net-worth total built from here would understate
+                # the real account, so say so instead of guessing.
+                tree_holdings_complete = False
         peak_equity = b.peak_equity if b.peak_equity else equity_now
         drawdown_pct = ((peak_equity - equity_now) / peak_equity * 100) if peak_equity > 0 else 0.0
         drawdown_breaker_pct = (
@@ -878,6 +892,50 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         spendable_for_spawn = round(real_balance - locked_usd - flat_allocated_sum - grid_allocated_sum, 2)
         can_spawn = seed_usd is not None and spendable_for_spawn >= seed_usd
 
+    # ── Real total Coinbase net worth ────────────────────────────────
+    # "How much money is actually on this exchange right now", as
+    # opposed to total_equity_usd below, which is only ever the family
+    # TREE's own bookkeeping. That distinction caused a real, confirmed
+    # bug: as capital moved out of the tree and into Grid Bot, the
+    # combined $1M tracker recorded the transfer as a catastrophic loss
+    # (-$1,157.10 / -53.49% on the account owner's own screenshot) even
+    # though every one of those dollars was still sitting right there in
+    # the same real Coinbase account.
+    #
+    # The one formula that can't double-count, given how this codebase
+    # actually books money:
+    #
+    #     real USD wallet balance
+    #   + market value of coin the TREE holds
+    #   + market value of coin GRID BOT holds
+    #
+    # Everything cash-side - genuinely free cash, locked_usd, a flat
+    # branch's earmark, a grid branch's not-yet-deployed level reserve -
+    # is already inside the real USD balance and is counted exactly
+    # once there. Everything that has genuinely left the wallet to buy
+    # coin is counted exactly once at what it's really worth now.
+    # (allocated_usd is the wrong term to add: it is cost basis that
+    # never moves at buy time, so it straddles both halves.)
+    #
+    # None - never a fabricated or partial number - whenever any real
+    # piece is missing this poll; the caller treats that as "this side
+    # is unavailable right now", exactly like a hard failure.
+    real_crypto_net_worth_usd = None
+    if real_balance is not None and tree_holdings_complete:
+        grid_holdings_value, grid_holdings_complete = 0.0, True
+        if crypto_grid_bot_module is not None:
+            try:
+                grid_holdings_value, grid_holdings_complete = (
+                    await crypto_grid_bot_module.get_grid_holdings_market_value()
+                )
+            except Exception as exc:
+                grid_holdings_complete = False
+                log.warning(f"[dashboard] grid holdings market value unavailable this poll: {exc}")
+        if grid_holdings_complete:
+            real_crypto_net_worth_usd = round(
+                real_balance + tree_holdings_market_value + grid_holdings_value, 2
+            )
+
     crypto_passive_mode = await crypto_family_tree_bot_module.is_crypto_passive_mode() if crypto_family_tree_bot_module else False
     rolling_expectancy = await crypto_family_tree_bot_module.get_rolling_expectancy() if crypto_family_tree_bot_module else None
     exit_mode = await crypto_family_tree_bot_module.get_live_exit_mode() if crypto_family_tree_bot_module else "trailing_stop"
@@ -898,6 +956,10 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         # below) - a real, useful aggregate on its own, not built solely
         # for that feature.
         "total_equity_usd": round(total_equity_now + locked_usd, 2),
+        # Real total Coinbase net worth (cash + every coin actually held,
+        # tree AND Grid Bot) - see the block above. This, NOT
+        # total_equity_usd, is what the combined $1M tracker uses.
+        "real_crypto_net_worth_usd": real_crypto_net_worth_usd,
         "locked_usd": locked_usd,
         "spendable_for_spawn": spendable_for_spawn,
         "seed_usd": seed_usd,
@@ -913,6 +975,11 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
 
 
 COMBINED_GOAL_USD = 1_000_000.0
+# Which real definition of the crypto side today's snapshots are written
+# under - see CombinedEquitySnapshot.formula_version in models.py. Bump
+# this ONLY when the meaning of crypto_equity genuinely changes, so the
+# chart never compares two rows that were never measuring the same thing.
+COMBINED_EQUITY_FORMULA_VERSION = 2
 # Throttles how often a real CombinedEquitySnapshot row is written -
 # hourly is plenty of real resolution for the account owner's own stated
 # use ("visualize monthly down the line how close we can get to it"),
@@ -930,7 +997,9 @@ async def _log_combined_equity_snapshot_if_due(db: AsyncSession, alpaca_equity, 
     this same endpoint also returns."""
     try:
         result = await db.execute(
-            select(CombinedEquitySnapshot).order_by(CombinedEquitySnapshot.created_at.desc()).limit(1)
+            select(CombinedEquitySnapshot)
+            .where(CombinedEquitySnapshot.formula_version == COMBINED_EQUITY_FORMULA_VERSION)
+            .order_by(CombinedEquitySnapshot.created_at.desc()).limit(1)
         )
         last = result.scalar_one_or_none()
         if last is not None:
@@ -939,6 +1008,7 @@ async def _log_combined_equity_snapshot_if_due(db: AsyncSession, alpaca_equity, 
                 return
         db.add(CombinedEquitySnapshot(
             alpaca_equity=alpaca_equity, crypto_equity=crypto_equity, combined_equity=combined_equity,
+            formula_version=COMBINED_EQUITY_FORMULA_VERSION,
         ))
         await db.commit()
     except Exception as exc:
@@ -1107,7 +1177,22 @@ async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
     crypto_error = None
     try:
         crypto_data = await get_family_tree_status(db)
-        crypto_equity = crypto_data["total_equity_usd"]
+        # Real total Coinbase net worth - real USD wallet balance plus the
+        # live market value of every coin actually held, across BOTH the
+        # family tree and Grid Bot. Deliberately NOT total_equity_usd,
+        # which only ever counted the tree's own bookkeeping: with the
+        # tree retired and every real dollar since moved into Grid Bot,
+        # that figure reads $0.00 and made a pure internal transfer look
+        # like the account had lost half its money. Never falls back to
+        # it either - a tree-only number mixed into this same history
+        # would recreate exactly that phantom crash.
+        crypto_equity = crypto_data["real_crypto_net_worth_usd"]
+        if crypto_equity is None:
+            crypto_error = (
+                "Real Coinbase net worth couldn't be fully priced this poll "
+                "(a real balance or live price fetch came back empty) - skipped "
+                "rather than reported as a partial total."
+            )
     except Exception as exc:
         crypto_error = str(exc)
         log.warning(f"[dashboard] combined-equity: crypto side unavailable this poll: {exc}")
@@ -1123,10 +1208,31 @@ async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
     if alpaca_equity is not None and crypto_equity is not None:
         await _log_combined_equity_snapshot_if_due(db, alpaca_equity, crypto_equity, combined_equity)
 
+    # Only rows written under the CURRENT real definition of the crypto
+    # side are comparable to each other. Older rows are kept forever
+    # (real history is never rewritten in this codebase) but are never
+    # charted alongside newer ones: mixing the two definitions is what
+    # produced the phantom -53% crash in the first place, and blindly
+    # switching over would just produce the mirror image of it - a
+    # phantom overnight JUMP the account never actually earned.
     history_result = await db.execute(
-        select(CombinedEquitySnapshot).order_by(CombinedEquitySnapshot.created_at.desc()).limit(800)
+        select(CombinedEquitySnapshot)
+        .where(CombinedEquitySnapshot.formula_version == COMBINED_EQUITY_FORMULA_VERSION)
+        .order_by(CombinedEquitySnapshot.created_at.desc())
+        .limit(800)
     )
     history = list(reversed(history_result.scalars().all()))
+
+    legacy_count_result = await db.execute(
+        select(func.count()).select_from(CombinedEquitySnapshot)
+        .where(
+            or_(
+                CombinedEquitySnapshot.formula_version.is_(None),
+                CombinedEquitySnapshot.formula_version != COMBINED_EQUITY_FORMULA_VERSION,
+            )
+        )
+    )
+    excluded_legacy_snapshots = int(legacy_count_result.scalar() or 0)
 
     projected_years_to_goal, projection_basis_days = _project_years_to_goal(history, combined_equity, COMBINED_GOAL_USD)
     observations = _build_progress_observations(alpaca_data, crypto_data)
@@ -1140,6 +1246,7 @@ async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
         "goal": COMBINED_GOAL_USD,
         "combined_progress_pct": combined_progress_pct,
         "history": [h.to_dict() for h in history],
+        "excluded_legacy_snapshots": excluded_legacy_snapshots,
         "projected_years_to_goal": projected_years_to_goal,
         "projection_basis_days": projection_basis_days,
         "observations": observations,

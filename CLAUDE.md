@@ -12367,6 +12367,116 @@ still very likely the better fill.
 
 ---
 
+## Real, severe reporting bug found and fixed: the combined $1M tracker showed a -53% crash that never happened
+
+The account owner sent a real dashboard reading - **"▼ -$1,157.10
+(-53.49%) over the last 7.5 days of real tracking"** plus "at the current
+path, $1M isn't projected" - along with a pasted third-party analysis
+that read those same numbers and concluded the account had lost half its
+money and should preserve remaining capital, restart tiny, or walk away
+entirely. That advice was founded on a number that was wrong.
+
+**No such loss happened.** `get_combined_equity_progress()` took its
+crypto side from `get_family_tree_status()["total_equity_usd"]`, which
+only ever counted **family tree branches + locked_usd**. It has always
+been blind to two real things: cash sitting in the real Coinbase USD
+wallet, and every dollar of real capital held by **Grid Bot**. The
+family tree is retired; over that same week its capital moved out of the
+tree and into Grid Bot - so `total_equity_usd` fell toward $0.00 while
+every one of those dollars stayed in the same real Coinbase account. The
+tracker booked a pure internal transfer as a catastrophic loss.
+
+Confirmed against the app's own real status snapshot (2026-09-04
+06:18 UTC, read off the `status-snapshots` branch): tree **Total
+Allocated $0.00**, Grid Bot **allocated $837.94** across 3 real branches
+with 5 real open slices, real Coinbase **USD balance $897.75**, Alpaca
+**equity $1,006.05**. The tracker was therefore reporting a combined
+$1,006.05 - Alpaca alone - against a $2,163.15 baseline logged back when
+the tree still held its capital. That is exactly the -53.49% shown.
+This is the same class of blind spot already found and fixed once for
+"Run Backtest With Real Allocations" (which also read only
+`CryptoTreeBranch` and had to be taught to read both real branch
+systems).
+
+**The fix - a real net-worth figure that cannot double-count.** New
+`real_crypto_net_worth_usd` on `get_family_tree_status()`:
+
+```
+  real USD wallet balance
++ market value of the coin the TREE holds
++ market value of the coin GRID BOT holds
+```
+
+Everything cash-side - genuinely free cash, `locked_usd`, a flat
+branch's earmark, a grid branch's not-yet-deployed level reserve - is
+already inside the real USD balance and is counted there exactly once.
+Everything that genuinely left the wallet to buy coin is counted exactly
+once at what it is really worth now. `allocated_usd` is deliberately NOT
+the term added: per `_grid_branch_real_equity`'s own documented
+semantics it is cost basis that is never debited at buy time, so it
+straddles both halves and adding it to a real balance would double-count
+the cash. New `crypto_grid_bot.get_grid_holdings_market_value()` supplies
+Grid Bot's half (qty x live price across every open slice, priced once
+per distinct product_id, read-only, never places an order). Returns
+`None` - never a partial or fabricated total - if the real USD balance or
+any real holding's live price is missing this poll; the combined endpoint
+then treats the crypto side as unavailable exactly like a hard failure,
+so an outage skips a snapshot instead of corrupting history.
+
+**Old snapshots are kept but never charted beside new ones.** New
+`CombinedEquitySnapshot.formula_version` (nullable, added via the
+existing generic startup column migration; NULL/1 = the old tree-only
+definition, 2 = real Coinbase net worth). Blindly switching definitions
+without this would have produced the exact mirror image of the bug - a
+phantom overnight JUMP of about the same $1,157 the account never
+earned. The chart, momentum line and projection now read only rows of
+the current version; older rows are preserved (real history is never
+rewritten here) and counted back as `excluded_legacy_snapshots`, which
+both dashboards surface honestly as "Tracking restarted here: the crypto
+side now counts real Coinbase cash plus every coin Grid Bot holds, not
+just the family tree."
+
+Verified offline (`test_combined_networth_fix.py`, 17 checks) against a
+real throwaway SQLite DB seeded with the exact real shape from that
+status snapshot, with only the live Coinbase HTTP calls mocked:
+reproduces the real bug (tree-only figure reads $0.00); the fixed figure
+comes back at a real $1,506.49 (real balance + real market value of the
+5 open grid slices), hand-verified to the cent; it is provably NOT the
+naive `balance + allocated_usd` double-count; a coin the TREE holds is
+counted at real market value too; an unpriceable holding and a failed
+balance fetch each yield `None` rather than a partial total; the
+combined endpoint's crypto side rises from $0.00 to $1,506.49 (combined
+$2,512.54, in line with the original $2,163.15 baseline - confirming no
+real 53% loss ever occurred); a partial poll reports unavailable and logs
+no snapshot; legacy rows are excluded from the charted history yet every
+real row survives in the table; and the -53.49% phantom crash is
+reproduced from mixed-definition rows and confirmed impossible from the
+charted history afterward. `test_combined_equity_progress.py` (11 checks)
+was updated in place for the deliberate field change - its own point
+(combined math, throttling, one-side-unavailable handling) is unchanged
+and still passes. `test_family_tree_total_equity_usd.py`,
+`test_progress_report.py`, `test_cash_reconciliation.py`,
+`test_reconciliation_report.py` and
+`test_reconciliation_excludes_other_bots.py` all re-run clean alongside
+it. `main.py` imports at 372 routes; a real AST parse confirms 123 router
+routes with zero duplicates; both dashboards pass a real HTML
+tag-balance check and `node --check` on their extracted inline scripts.
+
+**What this does and does not change.** It changes what the tracker
+REPORTS, not a single real dollar or any live trading rule. The real
+losses this account has genuinely taken are still real and still visible
+in the per-coin trade history (POL-USD -$392.43 and the rest). What was
+never real is the -53% collapse, and any decision - shrink the account,
+stop trading, walk away - taken because of that specific number deserves
+to be revisited against the corrected figure.
+
+**Not yet confirmed live** - needs a redeploy; the combined panel should
+then show a crypto side near the real Coinbase net worth (roughly
+$1,500 at the snapshot's own prices) instead of $0.00, with the momentum
+line restarting from the corrected basis rather than showing a crash.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

@@ -1890,6 +1890,23 @@ class CombinedEquitySnapshot(Base):
     alpaca_equity = Column(Float)
     crypto_equity = Column(Float)
     combined_equity = Column(Float)
+    # Which real DEFINITION of crypto_equity this row was written under.
+    # Rows are only ever comparable to other rows of the same version -
+    # mixing two definitions on one chart produces a phantom crash (or
+    # a phantom jump) that never happened to any real dollar.
+    #
+    #   1 (or NULL, for a row written before this column existed) - the
+    #     crypto side was the family tree's OWN bookkeeping only
+    #     (branch equity + locked_usd). Blind to real cash sitting in the
+    #     Coinbase wallet and to every dollar of real capital held by
+    #     Grid Bot, so moving money from the tree into Grid Bot recorded
+    #     a "loss" the account never actually took.
+    #   2 - real total Coinbase net worth: the real USD wallet balance
+    #     plus the live market value of every coin actually held, across
+    #     BOTH the family tree and Grid Bot.
+    #
+    # See get_combined_equity_progress() in routers/trading_dashboard.py.
+    formula_version = Column(Integer, default=1)
 
     def to_dict(self):
         return {
@@ -1897,4 +1914,5 @@ class CombinedEquitySnapshot(Base):
             "alpaca_equity": self.alpaca_equity,
             "crypto_equity": self.crypto_equity,
             "combined_equity": self.combined_equity,
+            "formula_version": self.formula_version if self.formula_version is not None else 1,
         }

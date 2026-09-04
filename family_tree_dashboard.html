@@ -3946,7 +3946,18 @@ function renderCombinedProgress(data) {
 
     const momentumEl = document.getElementById('combined-momentum');
     const momentum = fmtCombinedMomentum(data.history);
-    momentumEl.innerHTML = momentum || 'A real snapshot logs roughly once an hour - momentum shows up here once at least two exist.';
+    // A rebuilt-from-scratch history is the honest outcome of correcting
+    // what the crypto side MEANS (it now counts real Coinbase cash and
+    // every coin Grid Bot holds, not just the family tree's own books).
+    // Older rows measured something different, so they are kept but never
+    // charted next to these - say that plainly instead of implying the
+    // tracker simply hasn't started yet.
+    const legacy = data.excluded_legacy_snapshots || 0;
+    const restartNote = legacy > 0
+        ? 'Tracking restarted here: the crypto side now counts real Coinbase cash plus every coin Grid Bot holds, not just the family tree. ' +
+          legacy + ' older snapshot(s) measured something different and are kept but not charted alongside these. A real snapshot logs roughly once an hour.'
+        : 'A real snapshot logs roughly once an hour - momentum shows up here once at least two exist.';
+    momentumEl.innerHTML = momentum || restartNote;
 
     document.getElementById('combined-projection').innerHTML = fmtProjection(data);
 
@@ -3954,7 +3965,9 @@ function renderCombinedProgress(data) {
     if (data.history && data.history.length >= 2) {
         chartWrap.innerHTML = buildCombinedEquitySparklineSvg(data.history);
     } else {
-        chartWrap.innerHTML = '<div class="combined-chart-empty">Chart fills in as real history accumulates - check back in about an hour.</div>';
+        chartWrap.innerHTML = '<div class="combined-chart-empty">' + (legacy > 0
+            ? 'Chart restarts from the corrected crypto figure - it fills back in as real hourly snapshots accumulate.'
+            : 'Chart fills in as real history accumulates - check back in about an hour.') + '</div>';
     }
 
     const splitEl = document.getElementById('combined-split');
