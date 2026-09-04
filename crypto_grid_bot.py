@@ -481,6 +481,56 @@ async def get_grid_allocated_total() -> float:
         return sum(b.allocated_usd for b in result.scalars().all())
 
 
+async def get_grid_undeployed_reserve_total() -> float:
+    """Real USD a grid branch still needs held in RESERVE for the levels
+    it hasn't bought yet - its allocation MINUS the real cost basis it
+    has already converted into coin.
+
+    This exists because subtracting a branch's FULL allocated_usd from
+    the real USD wallet (what get_real_free_cash_usd used to do) double-
+    counts every dollar already spent on coin. A branch that has bought
+    its slices no longer competes for that USD - the money physically
+    left the wallet at buy time, so the real balance already reflects it.
+    Subtracting it a second time understates real free cash by exactly
+    the deployed cost basis.
+
+    Confirmed against real production numbers (2026-09-04): a real
+    $881.00 USD wallet with $837.94 of grid allocation, of which
+    ~$625.89 was already sitting in 6 real open slices, reported just
+    $43.06 free - while ~$668.95 was genuinely deployable. The bot was
+    refusing to put roughly $626 of its own real money to work.
+
+    Deliberately uses each slice's own cost basis (qty * entry_price -
+    the real USD that actually left the wallet), never live market
+    value: a slice that has since gained doesn't free up extra USD, and
+    one that has lost doesn't owe any back. Cost basis is the only
+    figure that answers "how much of this allocation is no longer cash."
+
+    Clamped at 0 per branch - a branch whose slices cost more than its
+    own allocation (real fee/rounding drift) needs no reserve at all,
+    and must never be allowed to ADD phantom free cash to the total.
+
+    This can only ever raise reported free cash toward what the real
+    wallet already holds, never above it, and it removes no safety:
+    every unfilled level stays fully reserved here, and
+    engine.place_market_buy() still clamps any real order to the live
+    wallet balance immediately before submitting."""
+    async with AsyncSessionLocal() as db:
+        branches = (await db.execute(select(CryptoGridBranch))).scalars().all()
+        slices = (await db.execute(select(CryptoGridSlice))).scalars().all()
+
+    deployed_by_bot = {}
+    for s in slices:
+        if s.qty is None or s.entry_price is None:
+            continue
+        deployed_by_bot[s.bot_name] = deployed_by_bot.get(s.bot_name, 0.0) + s.qty * s.entry_price
+
+    return round(sum(
+        max(0.0, (b.allocated_usd or 0.0) - deployed_by_bot.get(b.bot_name, 0.0))
+        for b in branches
+    ), 2)
+
+
 async def get_grid_holdings_market_value():
     """Real live market value of every coin Grid Bot is ACTUALLY holding
     right now - the sum of qty * live price across every open slice on
@@ -565,9 +615,16 @@ async def get_real_free_cash_usd():
         open_bots = {row[0] for row in open_bots_result.all()}
         tree_flat_allocated = sum(b.allocated_usd for b in tree_branches if b.bot_name not in open_bots)
 
-    grid_allocated_total = await get_grid_allocated_total()
+    # Only each grid branch's still-UNSPENT reserve competes for real USD -
+    # a dollar already converted to coin left the wallet at buy time, so
+    # real_balance has already accounted for it and subtracting the full
+    # allocation again would count it twice. See
+    # get_grid_undeployed_reserve_total() for the real production numbers
+    # that exposed this (~$626 of the account's own money reported as
+    # unavailable). Every unfilled level is still fully reserved.
+    grid_reserve_total = await get_grid_undeployed_reserve_total()
 
-    return round(real_balance - locked_usd - tree_flat_allocated - grid_allocated_total, 2)
+    return round(real_balance - locked_usd - tree_flat_allocated - grid_reserve_total, 2)
 
 
 def _safe_num_levels_for_allocation(allocated_usd: float) -> int:
