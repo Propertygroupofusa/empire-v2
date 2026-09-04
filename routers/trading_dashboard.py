@@ -4307,9 +4307,29 @@ async def get_alpaca_branches_status():
         })
 
     buying_power = None
+    # Real dollars currently sitting in OPEN POSITIONS. Without this, a
+    # negative real_spendable_usd reads as nonsense: the account owner sees
+    # "$165.90 total - $813.00 already in other active branches = -$647.10"
+    # with no explanation of why buying power is only $165.90, and reasonably
+    # concludes the minus sign must be a bug. It isn't - the rest of the real
+    # money is tied up in open positions, and naming that makes the figure
+    # self-explanatory instead of alarming. Confirmed live 2026-09-04: the
+    # -$647.10 deficit was almost exactly the SH position ($645.00).
+    open_position_notional = None
+    open_position_count = None
     try:
         async with aiohttp.ClientSession() as session:
             buying_power = await prop_bot_module.get_account_buying_power(session)
+            try:
+                open_positions = await _fetch_alpaca_positions(session)
+                open_position_notional = round(
+                    sum(abs(_safe_float(p.get("market_value")) or 0.0) for p in open_positions), 2
+                )
+                open_position_count = len(open_positions)
+            except Exception as e:
+                # Purely explanatory - a failure here must never break the
+                # real spendable figure the Create button is gated on.
+                log.warning(f"[dashboard] open-position fetch failed for branch status: {e}")
     except Exception as e:
         log.warning(f"[dashboard] real buying-power fetch failed for branch status: {e}")
 
@@ -4323,6 +4343,8 @@ async def get_alpaca_branches_status():
         "buying_power": round(buying_power, 2) if buying_power is not None else None,
         "already_allocated_usd": round(already_allocated, 2),
         "real_spendable_usd": round(real_spendable, 2) if real_spendable is not None else None,
+        "open_position_notional_usd": open_position_notional,
+        "open_position_count": open_position_count,
     }
 
 

@@ -1100,6 +1100,11 @@ function renderBranches(data, tradeHistoryByBot, historyTotals) {
             own. A branch's own real order still clamps to whatever's actually available at the moment it buys, so
             this won't overspend - it just means a branch may end up funded for less than its own allocated amount
             if it tries to enter while this deficit holds.
+            ${data.open_position_notional_usd ? `<div style="margin-top:6px;">
+                Specifically: <strong>${fmtUsd(data.open_position_notional_usd)}</strong> is tied up in
+                ${data.open_position_count} open position(s) right now. That money is invested, not lost —
+                closing a position frees it and shrinks this deficit by that amount.
+            </div>` : ''}
         </div>` : '';
     content.innerHTML = `
         ${deficitHtml}
@@ -1370,9 +1375,23 @@ async function loadBranchSpendableHint() {
         const spendable = fmtUsd(data.real_spendable_usd);
         const total = fmtUsd(data.buying_power);
         const allocated = fmtUsd(data.already_allocated_usd);
+        // A negative figure here is real, not a sign bug - but it reads as
+        // nonsense unless we say WHERE the money actually is. It's in open
+        // positions. Naming that (and the biggest one) turns "-$647.10?!"
+        // into "oh, that's SH".
+        let whereItWent = '';
+        if (data.real_spendable_usd < 0 && data.open_position_notional_usd) {
+            whereItWent = `<div style="margin-top:6px; color: var(--text-dim);">`
+                + `Your buying power is low because <strong>${fmtUsd(data.open_position_notional_usd)}</strong> `
+                + `is currently tied up in ${data.open_position_count} open position(s). `
+                + `That money isn't lost — it's invested. Closing a position frees it back up, `
+                + `and this number turns positive again.`
+                + `</div>`;
+        }
         hintEl.innerHTML = `💰 <strong>${spendable}</strong> real free buying power right now `
             + `(${total} total − ${allocated} already in other active branches) `
-            + `<a href="javascript:void(0)" onclick="useMaxSpendable()" style="color:var(--accent);">Use max</a>`;
+            + `<a href="javascript:void(0)" onclick="useMaxSpendable()" style="color:var(--accent);">Use max</a>`
+            + whereItWent;
     } catch (e) {
         hintEl.textContent = 'Could not fetch real buying power right now - the amount will still be checked when you hit Create.';
     }

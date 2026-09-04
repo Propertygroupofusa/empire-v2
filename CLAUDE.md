@@ -12748,6 +12748,93 @@ on its own and both the Close buttons and the bots work again.
 
 ---
 
+## The negative "real free buying power" figure now says WHERE the money went
+
+The account owner circled this on the New Real Branch modal and wrote
+*"that need to be +647.4 to make that make sense"*:
+
+```
+💰 $-647.10 real free buying power right now
+   ($165.90 total − $813.00 already in other active branches)
+```
+
+**Both numbers were correct and the minus sign was real** - it is not a
+sign bug, and flipping it would have been a lie. But the message never
+said why buying power was only $165.90, so it read as nonsense.
+
+The answer: $841.67 of the account's real money is tied up in 4 open
+positions (ARBB $64.05 + BTC $35.12 + NVDA $97.50 + SH $645.00). Cash
+$165.90 + invested $841.67 = $1,007.57, exactly the real equity. And the
+deficit is almost entirely ONE position: closing SH ($645.00) alone takes
+-$647.10 to -$2.10.
+
+`get_alpaca_branches_status()` (`routers/trading_dashboard.py`) now also
+returns `open_position_notional_usd` / `open_position_count`, fetched via
+the existing `_fetch_alpaca_positions` inside the session it already
+opens for buying power. Both places the deficit appears - the New Real
+Branch modal hint and the red banner above the branches table - now add a
+plain sentence naming the tied-up amount and that the money is invested,
+not lost, and that closing a position frees it and shrinks the deficit by
+that amount.
+
+**The explanatory fetch is wrapped in its own try/except**: it is purely
+cosmetic, and a positions-fetch outage must never disturb the real
+`real_spendable_usd` figure the Create button is actually gated on. On
+failure it reports `None`, never a fabricated `0` - the same "no data is
+not zero" default used throughout this codebase.
+
+Verified offline (`test_branch_deficit_explains_positions.py`, 13 checks,
+real throwaway SQLite DB seeded with the account owner's own real
+numbers): the exact real -$647.10 deficit reproduces from $165.90 buying
+power and $813.00 allocated across the two real branches; the real
+$841.67 notional and count of 4 are reported; cash + invested reconciles
+to the real $1,007.57 equity exactly; closing SH alone is confirmed to
+land the deficit within $2.10 of zero; a healthy account reports a
+positive figure with the notional still correct; a simulated positions
+outage leaves `real_spendable_usd` completely intact and reports `None`
+rather than 0; genuinely zero open positions reports a real 0.0/0; and a
+paused branch's allocation is still excluded (unchanged rule). Related
+regression suite (`test_alpaca_orders_blocked.py`,
+`test_branch_spendable_hint.py`, `test_alpaca_branches.py`,
+`test_branch_symbol_rankings.py`,
+`test_alpaca_branch_reinforcement_progress.py`) re-run clean. 124 routes,
+zero duplicates; HTML tag balance and `node --check` clean.
+
+## Why the retired crypto family tree is NOT being deleted
+
+Asked directly: "if you see no need for the tree get rid or update
+upgrade it." Checked the real dependency graph rather than answering from
+impression - deleting it is not safe, and un-retiring it is not wise:
+
+- **Grid Bot imports it.** `crypto_grid_bot.py` does
+  `import crypto_family_tree_bot as tree` in two real places
+  (`get_real_free_cash_usd`, and the coin-ranking path) for
+  `get_locked_usd()` and shared coin-selection helpers. Deleting the tree
+  module breaks the one crypto system that is currently making money.
+- **Grid Bot's entire UI lives inside `family_tree_dashboard.html`** (221
+  references to "grid" in that file). The "tree dashboard" is also the
+  Grid Bot dashboard.
+- **75 references** to `crypto_family_tree_bot_module` in
+  `routers/trading_dashboard.py`, plus imports in `main.py` and
+  `status_snapshot.py`.
+
+And it costs nothing to leave: `is_crypto_passive_mode()` is checked at
+the very top of `run_branch_cycle()`, so every branch does nothing at
+all. Total Allocated $0.00, one flat branch, no trades, no orders, no
+API calls. The -$497.49 is frozen history and cannot grow.
+
+**Un-retiring it is the option to avoid.** Its own rolling expectancy is
+-$5.05/trade over the last 20 real trades, and Grid Bot is already doing
+the same job (real crypto trading on the same wallet) at a real profit.
+Turning the tree back on would put money back into the system with the
+worse record while the better one is running.
+
+The honest recommendation, stated to the account owner: leave it retired,
+do not delete it, and treat its code as the shared library Grid Bot
+already depends on.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md
