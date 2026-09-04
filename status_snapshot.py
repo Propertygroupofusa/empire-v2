@@ -99,6 +99,17 @@ async def _build_crypto_section() -> str:
         f"- **Retired (buy-and-hold BTC passive mode):** {'YES - no new entries, existing positions unmanaged' if passive_mode else 'No - actively trading'}",
         f"- **Real free cash available to fund a branch:** {_fmt_usd(spendable)}",
         f"- **Real Coinbase USD / USDC balance:** {_fmt_usd(real_usd)} / {_fmt_usd(real_usdc)}",
+        # The exact figure the combined $1M tracker's crypto side reads. Printed
+        # here so a session with no live dashboard access can verify the real
+        # number DIRECTLY instead of re-deriving it from wallet balance + branch
+        # holdings and hoping the arithmetic matches - the precise gap that made
+        # the "-53% crash that never happened" bug hard to confirm fixed. A real
+        # "—" means an unpriceable holding or a failed balance fetch this poll:
+        # the tracker honestly reports the crypto side unavailable rather than a
+        # partial total, and skips logging a snapshot (never a fabricated 0).
+        f"- **Real crypto net worth (what the combined $1M tracker uses):** "
+        f"{_fmt_usd(status.get('real_crypto_net_worth_usd'))} "
+        "= real USD wallet + market value of every coin the tree and Grid Bot actually hold",
         f"- **Tree-wide entries paused (negative rolling expectancy):** "
         + (f"YES - last {rolling.get('num_trades')} real trades averaged {_fmt_usd(rolling.get('expectancy'))}/trade (real total {_fmt_usd(rolling.get('total_pnl'))})" if rolling.get("negative") else "No"),
         f"- **Branches:** {len(branches)}",
