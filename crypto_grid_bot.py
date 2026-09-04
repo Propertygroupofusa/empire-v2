@@ -475,7 +475,16 @@ async def get_grid_allocated_total() -> float:
     """Real total capital already committed across EVERY grid branch
     (active or paused - a paused branch releases its coin claim but its
     real allocated_usd stays committed, same as any other branch type in
-    this codebase)."""
+    this codebase).
+
+    NOT a free-cash figure, and deliberately no longer subtracted from
+    the real USD wallet balance anywhere. allocated_usd is cost basis
+    that is never debited at buy time, so it straddles cash still in the
+    wallet and coin already bought - subtracting it from a real balance
+    double-counts the deployed half. Both real free-cash callers
+    (get_real_free_cash_usd here, spendable_for_spawn in
+    routers/trading_dashboard.py) use get_grid_undeployed_reserve_total()
+    instead. Kept for reporting/analytics only."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoGridBranch))
         return sum(b.allocated_usd for b in result.scalars().all())
@@ -588,12 +597,11 @@ async def get_real_free_cash_usd():
     branch holding a position has already deployed that money into
     crypto, not cash - same real distinction
     routers/trading_dashboard.py's own spendable_for_spawn already
-    makes) minus every Grid Bot branch's own allocated_usd (its FULL
-    amount, active or paused - a deliberately conservative
-    simplification: some of a grid branch's own allocation may already
-    be sitting in open slices as real crypto rather than literal cash,
-    but treating the whole thing as reserved is the safe direction,
-    never overstating what's genuinely free).
+    makes) minus every Grid Bot branch's still-UNSPENT reserve (see
+    get_grid_undeployed_reserve_total - deliberately NOT the full
+    allocated_usd, which double-counts every dollar a branch has
+    already converted into coin and physically removed from the
+    wallet; every unfilled level is still reserved in full).
 
     Grid Bot and the family tree draw from the exact same shared real
     Coinbase wallet, so this is the one real number both systems should

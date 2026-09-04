@@ -886,10 +886,21 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         # this endpoint's own "real free cash" number would silently
         # disagree with Grid Bot's (see crypto_grid_bot.get_real_free_cash_usd,
         # the same real subtraction, kept in sync with this one).
-        grid_allocated_sum = (
-            await crypto_grid_bot_module.get_grid_allocated_total()
+        #
+        # Only each grid branch's still-UNSPENT reserve competes for real
+        # USD here, NOT its full allocated_usd. A grid branch's allocation
+        # is cost basis that is never debited at buy time, so a dollar it
+        # has already converted into coin physically left the wallet
+        # already - real_balance reflects that, and subtracting the full
+        # allocation would count the same dollar twice. Confirmed live
+        # (2026-09-04): this endpoint reported $26.14 spendable while
+        # crypto_grid_bot's own already-fixed figure read $206.36 off the
+        # identical wallet - two numbers on one dashboard, and this was
+        # the wrong one. Every unfilled grid level stays fully reserved.
+        grid_reserve_sum = (
+            await crypto_grid_bot_module.get_grid_undeployed_reserve_total()
         ) if crypto_grid_bot_module is not None else 0.0
-        spendable_for_spawn = round(real_balance - locked_usd - flat_allocated_sum - grid_allocated_sum, 2)
+        spendable_for_spawn = round(real_balance - locked_usd - flat_allocated_sum - grid_reserve_sum, 2)
         can_spawn = seed_usd is not None and spendable_for_spawn >= seed_usd
 
     # ── Real total Coinbase net worth ────────────────────────────────

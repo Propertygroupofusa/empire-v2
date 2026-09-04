@@ -12598,6 +12598,69 @@ here changes what the live bot does on its own.
 
 ---
 
+## Real bug found and fixed: the dashboard showed two disagreeing "free cash" numbers, and the Family Tree one was wrong
+
+Surfaced by the app's own `status-snapshots` output at 2026-09-04 13:41
+UTC, immediately after the Grid Bot free-cash fix above deployed. Two
+figures on the same dashboard, computed from the identical real Coinbase
+USD wallet ($864.27), disagreed by an order of magnitude:
+
+- Grid Bot section - **Real Free Cash: $206.36** (the corrected math)
+- Family Tree section - **Spendable: $26.14** (`spendable_for_spawn`)
+
+Root cause: exactly the same double-count already fixed in
+`crypto_grid_bot.get_real_free_cash_usd()`, still present in the OTHER
+function. `spendable_for_spawn` (`routers/trading_dashboard.py`)
+subtracted every grid branch's **full** `allocated_usd` from the real
+wallet balance - but `allocated_usd` is cost basis that is never debited
+at buy time, so a dollar a branch has already converted into coin
+physically left the wallet already. `real_balance` reflects that;
+subtracting the full allocation counts the same dollar twice.
+
+The two functions were deliberately written to stay in sync - the
+comment above `spendable_for_spawn` says so explicitly and points at
+`get_real_free_cash_usd` as "the same real subtraction, kept in sync
+with this one." Fixing only one side broke that contract and produced
+the visible disagreement. Fixed by pointing `spendable_for_spawn` at
+`get_grid_undeployed_reserve_total()` too, so both read the same real
+number. Every unfilled grid level stays fully reserved, and
+`engine.place_market_buy()` still clamps any real order to the live
+wallet balance immediately before submitting - no safety was removed.
+
+`get_grid_allocated_total()` now has no callers at all. Kept (it's a
+legitimate reporting figure) but its docstring now says plainly that it
+is NOT a free-cash number and must not be subtracted from a real wallet
+balance, so the same bug can't be reintroduced by reaching for the
+obvious-looking function.
+
+**Real, practical effect**: the family tree's own "Start new branch" /
+"Add cash" / "Move cash between branches" actions were gated on $26.14
+when roughly $206 was genuinely deployable - real money the account
+could not put to work.
+
+Verified offline (`test_spendable_agrees_with_grid.py`, 11 checks)
+against a real throwaway SQLite DB seeded with the live shape: both
+functions now return the identical figure; the reproduction of the OLD
+math returns **exactly $26.14**, matching the real dashboard number
+that prompted this, while the fixed math returns ~$206 - confirming the
+reproduction is faithful and not an approximation; the difference
+between them is exactly the deployed cost basis; a flat FAMILY-TREE
+branch's full allocation is still subtracted in full (unchanged and
+correct - a flat tree branch holds no coin, so its allocation genuinely
+is still cash earmarked in the wallet); and both functions still return
+`None` rather than a fabricated number on a real balance-fetch failure.
+Related regression suite (`test_grid_free_cash_deployed.py`,
+`test_combined_networth_fix.py`, `test_cash_reconciliation.py`,
+`test_grid_realized_total.py`, `test_reallocate_cash.py`) re-run clean
+alongside it. Confirmed via a real AST route parse: 124 routes, zero
+duplicates.
+
+**Not yet confirmed live** - needs a redeploy; the Family Tree section's
+"Spendable" figure should then read the same number as the Grid Bot
+section's "Real Free Cash" instead of a fraction of it.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md
