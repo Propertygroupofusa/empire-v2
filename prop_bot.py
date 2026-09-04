@@ -1903,36 +1903,55 @@ async def run_prop_cycle():
         # switched via the dashboard.
         strategy_family = await get_live_strategy_family()
 
-        if not shorting_enabled:
-            # Report the REAL live entry/exit rule, read fresh each cycle -
-            # never a hardcoded one. This banner used to be a fixed string
-            # reading "3 concurrent long positions | RSI < 30 entry, 2%
-            # profit target, -1.5% stop", which went stale on every count
-            # once the live strategy moved on: the real max is
-            # dynamic_max_positions (2 at 1.0x scale, not a fixed 3), the
-            # real profit target is MEAN_REVERSION_PROFIT_TARGET_PCT (3%,
-            # the "moderate" scenario), and - worst of all - the real entry
-            # rule under the default momentum family is RSI ABOVE
-            # MOMENTUM_RSI_ENTRY, the exact OPPOSITE direction from what the
-            # banner claimed. That inverted the described signal in a log
-            # the account owner actually reads to make real money decisions.
-            # Must stay after get_live_strategy_family() above, which is
-            # what re-syncs APEX_MANDATE["entry"] to the live family.
-            rsi_threshold = APEX_MANDATE["entry"]["rsi_threshold"]
-            if strategy_family == "mean_reversion":
-                entry_desc = f"RSI < {rsi_threshold} (oversold) entry"
-                exit_desc = (
-                    f"{MEAN_REVERSION_PROFIT_TARGET_PCT * 100:.1f}% profit target, "
-                    f"-{MEAN_REVERSION_STOP_LOSS_PCT * 100:.1f}% stop"
-                )
-            else:
-                entry_desc = f"RSI > {rsi_threshold} + price > SMA20 entry"
-                exit_desc = f"{MOMENTUM_TRAIL_PCT * 100:.1f}% trailing stop off peak"
-            log.info(
-                f"[APEX_589296] 📈 LONG-ONLY MODE ({strategy_family}): "
-                f"max {dynamic_max_positions} concurrent long positions | "
-                f"{entry_desc} | {exit_desc}"
+        # Print the real live entry/exit rule EVERY cycle, whether or not the
+        # Alpaca account happens to permit shorting.
+        #
+        # This used to be guarded by `if not shorting_enabled:`, which was fine
+        # only while the account could never short. On 2026-09-04 the account
+        # owner enabled Shorting on their Alpaca account, and that silently
+        # switched this banner off - losing the one log line that reports what
+        # the bot is actually doing, for a reason completely unrelated to it.
+        #
+        # The bot remains long-only by construction regardless of the account
+        # setting: both entry gates (check_momentum_entry_gate /
+        # check_mean_reversion_entry_gate) only ever produce long entries, and
+        # validate_dual_direction - the one function that could ever return
+        # "short" - has no live call site anywhere (confirmed by grep; it
+        # survives only in alpaca_selection_backtest.py's comments). So the
+        # account permitting shorting changes nothing about what this bot does;
+        # it just shouldn't cost us the banner.
+        # Read fresh each cycle - never a hardcoded string. This banner used to
+        # be fixed text reading "3 concurrent long positions | RSI < 30 entry,
+        # 2% profit target, -1.5% stop", which went stale on every count once
+        # the live strategy moved on: the real max is dynamic_max_positions (2
+        # at 1.0x scale, not a fixed 3), the real profit target is
+        # MEAN_REVERSION_PROFIT_TARGET_PCT (3%, the "moderate" scenario), and -
+        # worst of all - the real entry rule under the default momentum family
+        # is RSI ABOVE MOMENTUM_RSI_ENTRY, the exact OPPOSITE direction from
+        # what the banner claimed. That inverted the described signal in a log
+        # the account owner actually reads to make real money decisions.
+        # Must stay after get_live_strategy_family() above, which is what
+        # re-syncs APEX_MANDATE["entry"] to the live family.
+        rsi_threshold = APEX_MANDATE["entry"]["rsi_threshold"]
+        if strategy_family == "mean_reversion":
+            entry_desc = f"RSI < {rsi_threshold} (oversold) entry"
+            exit_desc = (
+                f"{MEAN_REVERSION_PROFIT_TARGET_PCT * 100:.1f}% profit target, "
+                f"-{MEAN_REVERSION_STOP_LOSS_PCT * 100:.1f}% stop"
             )
+        else:
+            entry_desc = f"RSI > {rsi_threshold} + price > SMA20 entry"
+            exit_desc = f"{MOMENTUM_TRAIL_PCT * 100:.1f}% trailing stop off peak"
+        # Name the account's real shorting permission explicitly, so "LONG-ONLY"
+        # is never mistaken for "the account can't short anyway" once it can.
+        shorting_note = (
+            " | account permits shorting, bot does not use it" if shorting_enabled else ""
+        )
+        log.info(
+            f"[APEX_589296] 📈 LONG-ONLY MODE ({strategy_family}): "
+            f"max {dynamic_max_positions} concurrent long positions | "
+            f"{entry_desc} | {exit_desc}{shorting_note}"
+        )
 
         scans = {}
         for contract, config in FUTURES.items():
