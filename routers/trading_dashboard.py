@@ -3645,6 +3645,183 @@ async def close_alpaca_position(symbol: str, db: AsyncSession = Depends(get_db))
     return {"status": "closed", "symbol": symbol, "qty": qty, "realized_pnl": round(pnl, 2), "order": close_result}
 
 
+class CloseExtendedHoursRequest(BaseModel):
+    """Optional overrides for a real pre-market/after-hours close."""
+    limit_price: float | None = None   # None -> price it off the real live bid
+    max_spread_pct: float = 1.0        # refuse if the real spread is wider than this
+    force: bool = False                # override the spread guard deliberately
+
+
+@router.post("/alpaca-overview/close-extended-hours/{symbol}", dependencies=[Depends(require_admin_key)])
+async def close_alpaca_position_extended_hours(
+    symbol: str,
+    payload: CloseExtendedHoursRequest = CloseExtendedHoursRequest(),
+):
+    """Close one real Alpaca position during PRE-MARKET (4:00-9:30am ET) or
+    AFTER-HOURS (4:00-8:00pm ET), when the ordinary market-order close can't
+    execute at all.
+
+    Why this needed its own endpoint rather than a flag on
+    close_alpaca_position(): that one calls DELETE /v2/positions/{symbol},
+    which Alpaca always submits as a MARKET order, and a market order is
+    rejected outside 9:30-4:00 ET. Alpaca's extended-hours session accepts
+    only `type=limit` + `time_in_force=day` + `extended_hours=true` - three
+    requirements the liquidate endpoint can't express - so a real
+    extended-hours close has to be a hand-built limit order.
+
+    REAL, HONEST DIFFERENCE from the market close, and the reason this
+    returns "submitted" rather than "closed": a limit order can sit unfilled.
+    The market close is effectively guaranteed to fill and its realized P&L
+    is known immediately, so that endpoint records a real Payment row. This
+    one CANNOT know the fill price (or whether it fills at all) at the moment
+    it returns, so it deliberately records NO earnings row and reports no
+    realized P&L - inventing either would be fabricating a number. The
+    position's real P&L lands through the normal path once the order actually
+    fills.
+
+    THE SPREAD GUARD is the point, not a formality. Extended-hours books are
+    thin: an ETF that trades a 1-cent spread at midday can show 20-50 cents
+    pre-market, and crossing that spread to get out ~5 hours early can easily
+    cost more than the early exit is worth. So this prices the sell at the
+    real live BID (a marketable limit, which is what actually fills) but
+    FIRST measures the real bid/ask spread and refuses outright when it's
+    wider than `max_spread_pct` (1% default). `force: true` overrides it, and
+    an explicit `limit_price` skips the pricing entirely (the guard still
+    reports the real spread either way). The refusal names the real numbers so
+    the decision to wait for 9:30 is an informed one, not a blocked button.
+    """
+    symbol = symbol.upper()
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        raise HTTPException(status_code=500, detail="Alpaca credentials not configured")
+    if payload.limit_price is not None and payload.limit_price <= 0:
+        raise HTTPException(status_code=400, detail="limit_price must be positive")
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{ALPACA_BASE_URL}/v2/positions/{symbol}", headers=ALPACA_HEADERS) as r:
+            if r.status != 200:
+                raise HTTPException(status_code=404, detail=f"No open position for {symbol}")
+            position = await r.json()
+
+        try:
+            qty = float(position.get("qty", 0))
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=502, detail=f"Alpaca returned an unreadable qty for {symbol}")
+        if qty == 0:
+            raise HTTPException(status_code=400, detail=f"{symbol} position qty is 0 - nothing to close")
+        # Long-only by design: shorting is disabled on this real account
+        # (get_account_shorting_enabled in prop_bot.py - every real short has
+        # failed live with "account is not allowed to short"), so a negative
+        # qty here would mean something unexpected. Refuse rather than guess
+        # at a buy-to-cover that this account can't place anyway.
+        if qty < 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{symbol} is a SHORT position ({qty}) - extended-hours cover is not supported on this account",
+            )
+
+        # Real live quote, same feed=iex convention every other Alpaca data
+        # fetch in this codebase already uses.
+        bid = ask = None
+        try:
+            quote_url = f"https://data.alpaca.markets/v2/stocks/{symbol}/quotes/latest?feed=iex"
+            async with session.get(quote_url, headers=ALPACA_HEADERS) as r:
+                if r.status == 200:
+                    q = (await r.json()).get("quote") or {}
+                    bid = float(q.get("bp") or 0) or None
+                    ask = float(q.get("ap") or 0) or None
+        except Exception as e:
+            log.warning(f"Extended-hours close: live quote fetch failed for {symbol}: {e}")
+
+        spread = spread_pct = None
+        if bid and ask and ask > bid:
+            spread = ask - bid
+            spread_pct = (spread / ask) * 100
+
+        limit_price = payload.limit_price
+        if limit_price is None:
+            if not bid:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        f"No real live bid available for {symbol} right now, so a safe limit price can't be "
+                        f"priced automatically. Pass an explicit limit_price, or wait for the 9:30am ET open."
+                    ),
+                )
+            # Sell AT the bid: a marketable limit that actually fills, rather
+            # than resting at the midpoint and possibly never executing.
+            limit_price = round(bid, 2)
+
+        # The guard only makes sense when a real spread was actually measured.
+        if spread_pct is not None and spread_pct > payload.max_spread_pct and not payload.force:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{symbol}'s real extended-hours spread is {spread_pct:.2f}% "
+                    f"(bid ${bid:.2f} / ask ${ask:.2f}, ${spread:.2f} wide) - wider than the "
+                    f"{payload.max_spread_pct:.2f}% limit. Selling into this would likely cost more than "
+                    f"exiting early gains. Wait for the 9:30am ET open, or resend with force:true to "
+                    f"accept this spread deliberately."
+                ),
+            )
+
+        # Same held_for_orders reasoning as the market close above: an
+        # existing open order on this symbol holds the shares Alpaca counts
+        # as available and the new sell gets rejected 403. DELETE
+        # /v2/positions does this via cancel_orders=true; a hand-built order
+        # has to cancel them itself.
+        cancelled = 0
+        try:
+            async with session.get(
+                f"{ALPACA_BASE_URL}/v2/orders?status=open&symbols={symbol}", headers=ALPACA_HEADERS
+            ) as r:
+                open_orders = await r.json() if r.status == 200 else []
+            for o in open_orders or []:
+                async with session.delete(
+                    f"{ALPACA_BASE_URL}/v2/orders/{o.get('id')}", headers=ALPACA_HEADERS
+                ) as r:
+                    if r.status in (200, 204):
+                        cancelled += 1
+        except Exception as e:
+            log.warning(f"Extended-hours close: could not clear open orders on {symbol}: {e}")
+
+        order_body = {
+            "symbol": symbol,
+            "qty": str(abs(qty)),
+            "side": "sell",
+            "type": "limit",              # required for extended hours
+            "time_in_force": "day",       # required for extended hours
+            "limit_price": str(limit_price),
+            "extended_hours": True,
+        }
+        async with session.post(f"{ALPACA_BASE_URL}/v2/orders", headers=ALPACA_HEADERS, json=order_body) as r:
+            if r.status not in (200, 201):
+                body = await r.text()
+                raise HTTPException(status_code=502, detail=f"Alpaca extended-hours order rejected ({r.status}): {body}")
+            order = await r.json()
+
+    log.info(
+        f"Extended-hours SELL submitted for {symbol}: qty={abs(qty)} @ limit ${limit_price} "
+        f"(bid ${bid} / ask ${ask}, spread {spread_pct if spread_pct is None else round(spread_pct, 2)}%), "
+        f"cancelled {cancelled} resting order(s)"
+    )
+    return {
+        "status": "submitted",
+        "symbol": symbol,
+        "qty": abs(qty),
+        "limit_price": limit_price,
+        "bid": bid,
+        "ask": ask,
+        "spread_pct": round(spread_pct, 3) if spread_pct is not None else None,
+        "cancelled_open_orders": cancelled,
+        "order": order,
+        "note": (
+            "This is a LIMIT order in the extended-hours session - it is not filled yet and may not fill. "
+            "Check Open Positions to confirm. Realized P&L is intentionally not reported here because the "
+            "real fill price isn't known at submit time."
+        ),
+    }
+
+
 @router.post("/alpaca-overview/liquidate-and-buy-spy", dependencies=[Depends(require_admin_key)])
 async def liquidate_alpaca_and_buy_spy(db: AsyncSession = Depends(get_db)):
     """Per the account owner's explicit, real decision: retire active

@@ -12285,6 +12285,88 @@ are outside the universe and therefore unmanaged.
 
 ---
 
+## Pre-market / after-hours position close, built over a recommendation against it
+
+The account owner tried to sell SH from the dashboard at 9pm ET and found
+they had to wait for the open. Confirmed why, in the real code: the Sell
+button calls `close_alpaca_position()`, which uses Alpaca's
+`DELETE /v2/positions/{symbol}` - and Alpaca always submits that as a
+**market order**, which is rejected outside 9:30-4:00 ET. The button
+wasn't broken; it had nothing to execute against.
+
+Offered pre-market selling as an option **and recommended against it** -
+extended-hours books on an inverse ETF like SH are thin, and crossing a
+20-50c spread to exit ~5 hours early usually costs more than the early
+exit is worth. The account owner asked for it anyway, quoting the offer
+back. Their call, so it was built in full - with the stated concern
+turned into a real, enforced guard rather than a warning that gets
+clicked past.
+
+**`POST /alpaca-overview/close-extended-hours/{symbol}`** (admin-key
+gated, `routers/trading_dashboard.py`) - a separate endpoint rather than
+a flag on the existing close, because Alpaca's extended-hours session
+accepts only `type=limit` + `time_in_force=day` + `extended_hours=true`,
+three requirements the liquidate endpoint structurally can't express.
+
+- **Prices at the real live BID** (`/v2/stocks/{symbol}/quotes/latest?feed=iex`,
+  the same `feed=iex` convention every other Alpaca data fetch in this
+  codebase already uses) - a marketable limit that actually fills, rather
+  than resting at the midpoint and possibly never executing. An explicit
+  `limit_price` overrides it.
+- **The spread guard is the feature**, not a formality: it measures the
+  real bid/ask spread first and REFUSES outright (400) when it's wider
+  than `max_spread_pct` (1% default), naming the real bid, ask, dollar
+  spread and percentage, and pointing at the 9:30 open. `force: true`
+  overrides it deliberately. This is the recommendation-against
+  encoded as real behavior - the decision to cross a bad spread stays
+  possible but has to be made knowingly.
+- **Cancels resting orders first** - the same `held_for_orders` 403 the
+  market close already handles via `cancel_orders=true`; a hand-built
+  order has to `GET /v2/orders?status=open&symbols={sym}` and
+  `DELETE /v2/orders/{id}` itself.
+- **Returns `"submitted"`, never `"closed"`, and deliberately records NO
+  `Payment` row** - a real, honest difference from the market close. A
+  limit order can sit unfilled and its fill price isn't known at submit
+  time, so reporting a realized P&L here would be fabricating a number.
+  The market close can record one precisely because it's effectively
+  guaranteed to fill.
+- Refuses a short position (400) - shorting is disabled on this real
+  account, so a negative qty means something unexpected rather than a
+  buy-to-cover worth guessing at - and refuses (503) when no real live
+  bid is available and no explicit price was given, rather than inventing
+  a price.
+
+`alpaca_dashboard.html` gained a secondary "Close (ext. hrs)" button per
+open position, styled subdued next to the primary Close and carrying a
+tooltip spelling out the session windows and the spread risk. When the
+server's spread guard refuses, the client surfaces the real refusal text
+and offers "Sell anyway at this spread?" - a real informed choice, not a
+dead-end error.
+
+Verified offline (`test_close_extended_hours.py`, 30 checks, `aiohttp`
+replaced with a scripted fake that records every real request the
+endpoint actually makes): the submitted order body carries the real
+`limit`/`day`/`extended_hours=true` trio, the correct side and qty, and a
+limit price equal to the real live bid; a wide (1.86%) spread is refused
+with the real numbers in the message and **no order submitted**;
+`force: true` crosses it anyway; an explicit `limit_price` is used
+verbatim while the real spread is still measured and reported; both
+resting orders are cancelled and the cancels are confirmed to happen
+BEFORE the sell is submitted; a missing position 404s, a short position
+400s, a missing live bid 503s (with no order placed in any of the three),
+a non-positive `limit_price` 400s, and a real Alpaca rejection surfaces
+as a 502 carrying the real response body. `python3 -m py_compile` clean;
+a real AST route-count parse confirms **123** routes with zero duplicate
+method+path pairs and the new route bound to the correct function; HTML
+tag-balance and `node --check` on the extracted inline script both clean.
+
+**Not yet confirmed live** - needs a real pre-market or after-hours
+window to exercise. Worth noting the recommendation stands regardless of
+the mechanism now existing: for SH specifically, waiting for 9:30 is
+still very likely the better fill.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

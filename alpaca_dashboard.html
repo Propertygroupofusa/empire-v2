@@ -625,7 +625,12 @@ function renderPositions(positions, autoCloseProfitPct, autoCloseMaxHoldDays) {
             <td><span class="pill ${pl >= 0 ? 'pos' : 'neg'}">${fmtUsd(pl)} (${fmtPct(plpc)})</span></td>
             <td>${fmtOpenedAt(p.opened_at)}</td>
             <td>${fmtAutoCloses(p, autoCloseProfitPct, autoCloseMaxHoldDays)}</td>
-            <td><button class="close-btn" onclick="closePosition('${p.symbol}', this)">Close</button></td>
+            <td>
+                <button class="close-btn" onclick="closePosition('${p.symbol}', this)">Close</button>
+                <button class="close-btn" style="margin-top:4px;background:#475569"
+                        title="Pre-market (4:00-9:30am ET) or after-hours (4:00-8:00pm ET) only. Places a LIMIT order at the live bid — may not fill, and the spread is usually much wider than at midday."
+                        onclick="closePositionExtendedHours('${p.symbol}', this)">Close (ext. hrs)</button>
+            </td>
         </tr>`;
     }).join('');
     return `<table>
@@ -652,6 +657,57 @@ async function closePosition(symbol, btn) {
         alert('Close failed: ' + e.message);
         btn.disabled = false;
         btn.textContent = 'Close';
+    }
+}
+
+// Pre-market / after-hours close. Alpaca rejects market orders outside
+// 9:30-4:00 ET, so this places a real LIMIT order at the live bid with
+// extended_hours=true. The server refuses outright when the real spread is
+// wider than 1% - that refusal is the feature, not an error, so it's offered
+// back as a deliberate "sell anyway" choice rather than a dead end.
+async function closePositionExtendedHours(symbol, btn, force) {
+    if (!force && !confirm(
+        `Sell ${symbol} in the extended-hours session?\n\n` +
+        `Places a real LIMIT order at the current bid. It may not fill, and pre-market spreads ` +
+        `are usually far wider than at 9:30am — you often give back more on the fill than you gain ` +
+        `by exiting early.`
+    )) return;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Submitting…';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/alpaca-overview/close-extended-hours/' + encodeURIComponent(symbol), {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ force: !!force }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            // The spread guard refusing is a real, informative outcome.
+            if (res.status === 400 && !force && /spread/i.test(data.detail || '')) {
+                btn.disabled = false;
+                btn.textContent = original;
+                if (confirm((data.detail || '') + '\n\nSell anyway at this spread?')) {
+                    return closePositionExtendedHours(symbol, btn, true);
+                }
+                return;
+            }
+            throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+        const sp = (data.spread_pct === null || data.spread_pct === undefined)
+            ? 'unknown' : data.spread_pct.toFixed(2) + '%';
+        alert(
+            `${symbol}: limit sell submitted for ${data.qty} @ ${fmtUsd(data.limit_price)}\n` +
+            `Bid ${fmtUsd(data.bid)} / Ask ${fmtUsd(data.ask)} — spread ${sp}\n\n` +
+            `This is NOT filled yet. Check Open Positions to confirm it went through.`
+        );
+        refresh();
+    } catch (e) {
+        alert('Extended-hours sell failed: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = original;
     }
 }
 
