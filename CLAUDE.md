@@ -13060,6 +13060,61 @@ of real data answers it directly.
 
 ---
 
+## Real display bug: the fee badge printed a sentence that contradicted itself
+
+Caught in the account owner's own screenshot of the redeployed dashboard,
+with maker orders switched on:
+
+> 💸 Real round-trip fee: **1.00%** (read live from your Coinbase fee tier)
+> · every branch's spacing is floored at **0.70%**, the smallest move that
+> can actually clear that fee.
+
+0.70% cannot clear a 1.00% fee. Both numbers were individually correct and
+the pairing was wrong: `get_grid_status()` reported
+`real_round_trip_fee_rate = get_effective_round_trip_fee_rate()` (the
+**taker** round trip, 0.50%/leg x 2 = 1.00%) while `fee_safe_min_grid_pct`
+came from `fee_safe_floor_pct()`, which derives from
+`expected_leg_fee_rate()` - the **maker** rate once limit orders are live
+(`max(0.003, 0.002 + 0.0025*2) = 0.70%`). The badge paired a maker-derived
+floor with a taker fee. The real round trip under limit orders is 0.50%,
+which the 0.70% floor clears with the intended 0.20% net margin.
+
+Nothing about the trading math was wrong - only what the dashboard *said*
+about it. Fixed by reporting the fee actually being paid: a new
+`effective_round_trip_fee_rate` (`expected_leg_fee_rate() * 2`) sits
+alongside the existing market rate, and `renderGridFeeRateBadge` leads with
+it, mentioning the market rate only as the contrast ("that's the
+limit-order rate you're on now; market orders would cost 1.00%") and only
+when the two genuinely differ - so market mode never shows a misleading
+"cheaper" claim.
+
+**The account's real fee tier, now that it has been read live:** 0.25%/leg
+maker, 0.50%/leg taker - far better than Coinbase's retail base tier
+(1.20% taker) that earlier sections of this file estimated against. Those
+estimates were wrong for this account and are superseded here. At the
+promoted `3_levels_2.0pct` spacing override: limit orders net 1.50% of a
+2.0% move (~75% kept, ~$1.40 per ~$93 slice); market orders net 1.00%
+(~50%, ~$0.93). So limit orders are worth roughly **1.5x** here, not the
+~7x estimated against base tier - still a real, worthwhile gain, just a
+smaller one. The conservative 2.4% fallback was never used: the live fetch
+worked, which is the design behaving correctly.
+
+Verified offline (`test_fee_badge_consistency.py`, 17 checks) against a
+real throwaway SQLite DB seeded with the account's own real tier: the
+exact screenshot is reproduced (1.00% beside a 0.70% floor) and confirmed
+impossible; the fixed effective rate is the real maker round trip; the
+floor clears it by exactly `TARGET_NET_MARGIN_PCT` rather than by luck;
+the same invariant (reported floor > reported fee) holds in market mode
+too, where the floor correctly widens to 1.20%; and the real
+`get_grid_status()` payload carries both rates in both modes, with them
+matching in market mode so no "cheaper" claim is shown. Existing
+`test_real_fee_rate.py` (16), `test_maker_orders.py` (20),
+`test_grid_never_sell_at_loss.py` (12), `test_grid_realized_total.py` (9),
+`test_grid_free_cash_deployed.py` (10) and
+`test_spendable_agrees_with_grid.py` (11) all re-run clean alongside it.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

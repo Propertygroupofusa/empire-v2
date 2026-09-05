@@ -2335,7 +2335,15 @@ function renderGridMinRoiFloorBadge(minRoiPct) {
 function renderGridFeeRateBadge(data) {
     const el = document.getElementById('grid-fee-rate-badge');
     if (!el || data == null || data.real_round_trip_fee_rate == null) return;
-    const pct = data.real_round_trip_fee_rate * 100;
+    // The fee ACTUALLY being paid - with limit orders on this is roughly half
+    // the market rate, and it's the rate the spacing floor is derived from.
+    // Showing the market rate here instead made the badge contradict itself.
+    const effective = data.effective_round_trip_fee_rate != null
+        ? data.effective_round_trip_fee_rate
+        : data.real_round_trip_fee_rate;
+    const pct = effective * 100;
+    const marketPct = data.real_round_trip_fee_rate * 100;
+    const cheaper = marketPct - pct > 0.005;
     const observed = data.real_fee_rate_observed;
     const minPct = data.fee_safe_min_grid_pct != null ? data.fee_safe_min_grid_pct * 100 : null;
     el.innerHTML =
@@ -2344,6 +2352,10 @@ function renderGridFeeRateBadge(data) {
             ? `(read live from your Coinbase fee tier)`
             : `<span style="color:#b45309">(not yet read from Coinbase — using a deliberately cautious estimate, ` +
               `so the bot waits longer rather than selling into a real loss)</span>`) +
+        (cheaper
+            ? ` — that's the limit-order rate you're on now; market orders would cost ` +
+              `<strong>${marketPct.toFixed(2)}%</strong>.`
+            : ``) +
         (minPct != null
             ? ` · every branch's spacing is floored at <strong>${minPct.toFixed(2)}%</strong>, the smallest move that ` +
               `can actually clear that fee. A grid tighter than this loses money on every completed round trip.`

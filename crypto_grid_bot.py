@@ -2546,6 +2546,13 @@ async def get_grid_status() -> dict:
         # actually clear it. Surfaced so an understated fee assumption can
         # never silently eat the profit again.
         "real_round_trip_fee_rate": status_fee_rate,
+        # What the NEXT real round trip is actually expected to cost. With
+        # maker orders on this is roughly half the market rate above, and it
+        # is the rate fee_safe_min_grid_pct is derived from - reporting only
+        # the market rate beside a maker-derived floor made the dashboard
+        # contradict itself ("floored at 0.70%, the smallest move that can
+        # clear that fee" printed next to a 1.00% fee).
+        "effective_round_trip_fee_rate": (await expected_leg_fee_rate()) * 2,
         "real_fee_rate_observed": _cached_real_round_trip_fee_rate is not None,
         "fee_safe_min_grid_pct": await fee_safe_floor_pct(),
         # Maker (post-only limit) orders: roughly half the fee of the market
