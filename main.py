@@ -17,6 +17,7 @@ from sqlalchemy import text, inspect, String, Integer, Enum as SAEnum
 from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from datetime import datetime
 import os
+import sys
 import asyncio
 import uvicorn
 import logging
@@ -226,7 +227,26 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import alpaca_swing_bot: {e}")
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+# stream=stdout + force=True, both deliberate.
+#
+# Python's basicConfig is a NO-OP once the root logger already has a
+# handler - and the router-import loop above calls basicConfig() on any
+# failed import, so this line's format never actually applied. force=True
+# tears that accidental early handler down and installs this one.
+#
+# stdout matters because Railway classifies everything a container writes
+# to STDERR as severity "error", regardless of the Python level inside the
+# text. basicConfig defaults to stderr, so every ordinary INFO line was
+# arriving in Railway tagged as an error - which has twice sent the
+# account owner chasing a benign startup diagnostic. Real errors are still
+# real errors; they just say ERROR in the line itself now instead of
+# every line looking like one.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    stream=sys.stdout,
+    force=True,
+)
 log = logging.getLogger("pgusa")
 
 # Deployment marker - forces fresh Railway build
