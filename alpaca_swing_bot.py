@@ -135,6 +135,23 @@ WIN_AVG = 5.0   # Average win size on micro account (~0.5% of account)
 LOSS_AVG = 2.0  # Average loss size (tight stops on micro account)
 POSITION_SIZE_BASE = 50.0        # Base position size in dollars for micro account ($50 minimum notional)
 
+# Hard ceiling on any single position, as a fraction of real equity.
+#
+# This bot trades the SAME real Alpaca account as prop_bot.py, whose own
+# MAX_RISK_PERCENT caps total open notional at 20% of equity - and whose
+# check_margin_safety() then refuses every new entry once that budget is
+# spent. A position opened oversized here therefore doesn't just risk too
+# much on its own; it eats the other bot's entire entry budget too.
+#
+# Confirmed live on 2026-09-05: GLD held at 1 share / $405.61 on a
+# $1,010.13 account - 40% of everything - where this bot's own intended
+# size was $101. The cause was `max(1, int(position_size / price))`
+# forcing a 1-whole-share floor: for any ticker priced above the intended
+# size, that floor silently overshoots to the price of one share, however
+# far past the intended size that lands. Both sizing paths now skip the
+# symbol instead of overshooting, and clamp to this ceiling.
+MAX_POSITION_PCT_OF_EQUITY = 0.20
+
 
 async def get_intraday_rsi(session, symbol, timeframe="15Min"):
     """
@@ -366,20 +383,39 @@ async def run_intraday_check():
 
                 # PRE-TRADE CHECK: Verify buying power
                 if buying_power is None or buying_power < RISK_PER_TRADE:
-                    log.warning(f"⛔ INTRADAY ENTRY BLOCKED {symbol}: Insufficient buying power ${buying_power:.2f if buying_power else '?'}")
+                    bp_str = f"${buying_power:.2f}" if buying_power is not None else "unknown"
+                    log.warning(f"⛔ INTRADAY ENTRY BLOCKED {symbol}: Insufficient buying power {bp_str}")
                     continue
 
                 # Size: use 1.5% risk per trade
                 # If stop is 0.5%, calculate qty based on risk amount
                 # qty = risk / (stop_loss_pct * price)
                 stop_distance = price * INTRADAY_STOP_LOSS
-                qty = max(1, int(RISK_PER_TRADE / stop_distance)) if stop_distance > 0 else 1
+                if price <= 0 or stop_distance <= 0:
+                    continue
+                # Risk-based sizing alone is unbounded in NOTIONAL terms: a
+                # 0.5% stop turns $14.70 of risk into a ~$2,900 position,
+                # which is nearly 3x this whole account. Clamp to the same
+                # account-wide ceiling the swing path uses.
+                max_notional = equity * MAX_POSITION_PCT_OF_EQUITY
+                risk_qty = int(RISK_PER_TRADE / stop_distance)
+                qty = min(risk_qty, int(max_notional / price))
                 notional = qty * price
 
                 if notional > (buying_power * 0.8):  # Cap at 80% of buying power
-                    qty = max(1, int((buying_power * 0.8) / price))
+                    qty = int((buying_power * 0.8) / price)
                     notional = qty * price
-                    log.info(f"  ⚠️  Resized {symbol} intraday to ${notional:.2f} (buying power limit)")
+
+                # Same reasoning as the swing path: whole-share orders only,
+                # so an unaffordable share means no trade - never a forced
+                # 1-share buy that blows past every limit above.
+                if qty < 1:
+                    log.info(
+                        f"  ⏭️  {symbol} ({proxy}) intraday skipped: one share costs ${price:,.2f}, "
+                        f"past this account's ${max_notional:,.2f} per-position ceiling or its available buying power"
+                    )
+                    continue
+                log.info(f"  📏 {symbol} intraday sized to {qty} share(s) / ${notional:.2f} notional")
 
                 log.info(f"\n  🚀 INTRADAY ENTRY: {symbol} ({proxy}) | RSI {rsi} | Price ${price:.2f} | Qty {qty}")
 
@@ -515,18 +551,44 @@ async def run_swing_check():
                 # PRE-TRADE CHECKS
                 # 1. Verify buying power is sufficient
                 if buying_power is None or buying_power < POSITION_SIZE_BASE:
-                    log.warning(f"⛔ ENTRY BLOCKED {symbol}: Insufficient buying power ${buying_power:.2f if buying_power else '?'}")
+                    log.warning(f"⛔ ENTRY BLOCKED {symbol}: Insufficient buying power {buying_power_str}")
                     continue
 
                 # Size position: $50 base, scaled by equity
                 position_size = POSITION_SIZE_BASE * (equity / MIN_EQUITY if equity else 1.0)
-                qty = max(1, int(position_size / price)) if price > 0 else 1
+                # Never let one position exceed the account-wide ceiling
+                # (see MAX_POSITION_PCT_OF_EQUITY - this bot shares its real
+                # account with prop_bot.py's own 20% risk budget).
+                if equity:
+                    position_size = min(position_size, equity * MAX_POSITION_PCT_OF_EQUITY)
+
+                # A whole share has to actually FIT inside the intended
+                # size. The old `max(1, int(...))` floor bought one share
+                # regardless - which is how a $405 GLD share ended up
+                # taking 40% of a $1,010 account against a $101 intended
+                # size. Skipping is the correct answer: this bot can only
+                # place whole-share orders, so an unaffordable share means
+                # no trade, not a 4x oversized one.
+                if price <= 0 or price > position_size:
+                    log.info(
+                        f"  ⏭️  {symbol} ({proxy}) skipped: one share costs ${price:,.2f}, "
+                        f"more than the ${position_size:,.2f} this account should put in a single position"
+                    )
+                    continue
+                qty = int(position_size / price)
                 notional = qty * price
 
                 if notional > (buying_power * 0.8):  # Use max 80% of available buying power
-                    qty = max(1, int((buying_power * 0.8) / price))
+                    capped_qty = int((buying_power * 0.8) / price)
+                    if capped_qty < 1:
+                        log.info(
+                            f"  ⏭️  {symbol} ({proxy}) skipped: one share costs ${price:,.2f}, "
+                            f"more than 80% of the ${buying_power:,.2f} buying power available"
+                        )
+                        continue
+                    log.info(f"  ⚠️  Resized {symbol} from ${notional:.2f} to ${capped_qty * price:.2f} notional (buying power limit)")
+                    qty = capped_qty
                     notional = qty * price
-                    log.info(f"  ⚠️  Resized {symbol} to ${notional:.2f} notional (was asking ${qty * price:.2f}, buying power limit)")
 
                 log.info(f"\n  🚀 ENTRY: {symbol} ({proxy}) | RSI {rsi} | Price ${price:.2f} | Qty {qty} | Notional ${notional:.2f}")
 

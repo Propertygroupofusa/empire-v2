@@ -13115,6 +13115,106 @@ matching in market mode so no "cheaper" claim is shown. Existing
 
 ---
 
+## Daily health check 2026-09-05: alpaca_swing_bot.py could buy one share at any price, however oversized
+
+The scheduled check read the app's own `status-snapshots/STATUS.md`
+(2026-09-05 13:46 UTC). Nothing was wrong on the crypto side - the family
+tree is retired and frozen at -$497.49, and Grid Bot is quietly working:
+realized P&L up to **$7.16** from $5.57, all four branches now at the
+**3.00% spacing** the fee-safe floor fix produces, every recent Activity
+line a real profitable sell.
+
+The Alpaca side told a different story. Equity $1,010.13, cash **$0.23**,
+and among the open positions:
+
+| Symbol | Qty | Value | % of the whole account |
+|---|---|---|---|
+| GLD | **1.0** | $405.61 | **40%** |
+| USO | 3.046641 | $432.44 | 43% |
+
+`alpaca_swing_bot.py`'s own intended position size at that equity is
+**$101** (`POSITION_SIZE_BASE * equity / MIN_EQUITY` = 50 x 1010/500).
+GLD's exactly-1.0 whole-share quantity is this bot's signature - it only
+ever places integer-qty orders, where prop_bot.py's notional orders
+produce the fractional quantities on the other rows.
+
+### Bug 1: `max(1, int(...))` turns "can't afford it" into "buy one anyway"
+
+```python
+qty = max(1, int(position_size / price))   # position_size $101, GLD $405.61
+```
+
+`int(101/405.61)` is 0, so the floor forces **1 share at $405.61** - 4x
+the intended size, on a bot that cannot place fractional orders. For any
+ticker priced above the intended size the floor silently overshoots to
+whatever one share happens to cost; at the $500 survival equity a single
+GLD share would be 81% of the account.
+
+This matters beyond the one position because **this bot shares its real
+Alpaca account with prop_bot.py**, whose `MAX_RISK_PERCENT` caps total
+open notional at 20% of equity and whose `check_margin_safety()` then
+refuses every new entry once that budget is spent. An oversized position
+opened here doesn't just risk too much on its own - it eats the other
+bot's entire entry allowance. That is the same "why isn't Alpaca growing"
+stall diagnosed yesterday: `size_position()` was fixed then, but this
+second sizer on the same account still had no equity-relative cap at all.
+
+The intraday path had the same defect in a different shape - risk-based
+sizing with no notional bound whatsoever: $14.70 of risk over a 0.5% stop
+implies **146 shares / $2,920**, nearly 3x the entire account, trimmed
+only by an 80%-of-buying-power clamp that itself ended in `max(1, ...)`.
+
+**Fixed** by making both paths skip a symbol whose single share doesn't
+fit, rather than overshooting, and adding `MAX_POSITION_PCT_OF_EQUITY`
+(0.20, matching prop_bot's own account-wide rule since they share one
+real account). On the swing path that ceiling is defence-in-depth - its
+equity-scaled size is 10% of equity by construction, always under the
+cap - and it genuinely binds on the intraday path, clamping that $2,920
+to $200.
+
+### Bug 2: two more invalid f-string format specs, on the paths that fire when cash is low
+
+```python
+log.warning(f"...Insufficient buying power ${buying_power:.2f if buying_power else '?'}")
+```
+
+The same `ValueError: Invalid format specifier` class already fixed at
+this file's equity log line - these two survived that pass, on the
+ENTRY-BLOCKED branches of both `run_swing_check()` and
+`run_intraday_check()`. The spec is invalid regardless of the value, so
+the line raises whenever it is reached, and it is reached exactly when
+buying power is low - which, at **$0.23 real cash**, is now. The entry
+loop sits above exit management in both functions, so the exception
+aborts the function before any held position gets its stop-loss or
+profit-target check. That is the same "exit management never runs"
+failure mode as the earlier `UnboundLocalError` fix, on a different
+trigger, and it is live right now.
+
+Verified offline (`test_swing_bot_position_cap.py`, 23 checks): the real
+GLD position is reproduced to the cent ($405.61, 40% of equity, 4x its
+own intended size) from the old formula, then confirmed skipped by the
+new one; an affordable ticker still sizes normally and inside the
+intended size; thin buying power skips instead of forcing a share; the
+intraday $2,920 overshoot is reproduced (146 shares - `int()` truncation
+on 146.999..., real float behaviour) and confirmed clamped to $200; the
+old format spec is confirmed to genuinely raise `ValueError` while both
+fixed lines format cleanly at the real $0.23 cash level; and an AST walk
+confirms each replacement name is actually bound in the function that
+uses it. The sizing checks execute the **real shipped blocks extracted
+from source**, never a reimplementation. Full related suite
+(`test_swing_bot_proxy_ticker_bug.py` 18, `test_swing_bot_equity_log_crash.py`
+2, `test_size_position_risk_cap.py` 8, `test_alpaca_branches.py` 35)
+re-run clean; `test_longonly_banner_live_values.py` fails identically
+with and without this change (confirmed by `git stash`) - pre-existing
+and unrelated, it reads `prop_bot.py`, which this change never touches.
+
+Per the health check's own scope: no trade placed, no position closed,
+no passive-mode flag touched. **The already-open GLD position is left
+exactly as it is** - closing it is the account owner's decision alone.
+This fix only stops the next oversized entry from being opened.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md
