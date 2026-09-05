@@ -579,6 +579,7 @@
     <div id="grid-avg-swing-spacing-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-auto-rotate-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-min-roi-floor-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
+    <div id="grid-fee-rate-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-spacing-override-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div class="panel" id="grid-panel">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:8px;">
@@ -1868,6 +1869,7 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals) {
     renderGridAvgSwingSpacingBadge(!!data.avg_swing_spacing_active);
     renderGridAutoRotateBadge(!!data.auto_rotate_active, data.auto_rotate_interval_minutes);
     renderGridMinRoiFloorBadge(data.min_required_roi_pct);
+    renderGridFeeRateBadge(data);
     renderGridSpacingOverrideBadge(data.grid_spacing_override);
 
     document.getElementById('grid-total-allocated').textContent =
@@ -2319,6 +2321,31 @@ function renderGridMinRoiFloorBadge(minRoiPct) {
     el.innerHTML = `🎯 Genuine-edge floor: a coin must show at least <strong>${minRoiPct.toFixed(0)}%</strong> real backtested ROI ` +
         `before ANY automatic action (Quick Buy, auto-deploy, auto-rotate) will deploy real capital into it - ` +
         `if nothing clears this bar, real cash stays unallocated rather than funding a mediocre pick.`;
+}
+
+// The REAL Coinbase fee every grid P&L figure is priced against. Made
+// visible after a real bug (2026-09-05): the P&L formula that decides
+// whether a slice is profitable ENOUGH TO SELL used a hardcoded 0.4%/side
+// assumption while the account's genuine live rate was never consulted.
+// Understating it green-lights real losing sells as "wins", so the number
+// itself now has to be on screen, along with whether it was genuinely
+// observed from Coinbase or is still the conservative fallback.
+function renderGridFeeRateBadge(data) {
+    const el = document.getElementById('grid-fee-rate-badge');
+    if (!el || data == null || data.real_round_trip_fee_rate == null) return;
+    const pct = data.real_round_trip_fee_rate * 100;
+    const observed = data.real_fee_rate_observed;
+    const minPct = data.fee_safe_min_grid_pct != null ? data.fee_safe_min_grid_pct * 100 : null;
+    el.innerHTML =
+        `💸 Real round-trip fee: <strong>${pct.toFixed(2)}%</strong> ` +
+        (observed
+            ? `(read live from your Coinbase fee tier)`
+            : `<span style="color:#b45309">(not yet read from Coinbase — using a deliberately cautious estimate, ` +
+              `so the bot waits longer rather than selling into a real loss)</span>`) +
+        (minPct != null
+            ? ` · every branch's spacing is floored at <strong>${minPct.toFixed(2)}%</strong>, the smallest move that ` +
+              `can actually clear that fee. A grid tighter than this loses money on every completed round trip.`
+            : ``);
 }
 
 // Real, live "promote a backtested candidate" override for the Grid

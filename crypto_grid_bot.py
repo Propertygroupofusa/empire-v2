@@ -258,6 +258,122 @@ TARGET_NET_MARGIN_PCT = DEFAULT_GRID_PCT - engine.ROUND_TRIP_FEE_RATE
 # a real, currently-unknown-to-this-sandbox fee tier.
 MIN_DYNAMIC_GRID_PCT = 0.003
 
+# ── THE REAL ROUND-TRIP FEE RATE ────────────────────────────────────────
+# Real bug found 2026-09-05, from the account's own live snapshot: every
+# branch was trading at 2.00% spacing while _grid_slice_net_pnl() priced
+# every round trip at engine.ROUND_TRIP_FEE_RATE (0.008 = 0.4% each way),
+# a HARDCODED assumption. get_real_fee_tier() has always fetched the
+# account's genuine live Coinbase taker rate every cycle - and its own
+# docstring admits the maker/taker numbers were "not consumed by anything
+# yet" beyond spacing. The real rate never reached the P&L formula.
+#
+# That matters because _grid_slice_net_pnl() is not just a display figure -
+# _pick_profitable_slice_to_sell() uses it to decide whether a slice is
+# genuinely profitable enough to sell at all. Understate the fee and the
+# "never sell at a loss" guarantee silently degrades into "never sell at a
+# loss ASSUMING FEES WE MADE UP", green-lighting real losing sells and
+# booking inflated P&L into allocated_usd.
+#
+# Coinbase Advanced Trade's real retail base tier is 1.20% taker - a 2.40%
+# round trip, 3x the assumed 0.80%. On 2.00% spacing that turns every
+# completed cycle into a real -0.40% loss BY CONSTRUCTION. This sandbox
+# has no Coinbase credentials and cannot confirm which tier this account
+# is actually on; the fix is to stop guessing and use the real number the
+# app already fetches.
+#
+# CONSERVATIVE_ROUND_TRIP_FEE_RATE is used ONLY when no real rate has ever
+# been observed (never fetched, never persisted). It errs HIGH on purpose:
+# guessing low sells into real losses, guessing high only makes the bot
+# wait longer for a genuinely profitable exit. Never fail optimistic on a
+# number that gates real money.
+CONSERVATIVE_ROUND_TRIP_FEE_RATE = float(
+    os.getenv("GRID_CONSERVATIVE_ROUND_TRIP_FEE_RATE", "0.024")
+)
+
+# Last real observed round-trip fee rate, persisted so a restart doesn't
+# fall back to the conservative default while real trading continues.
+REAL_FEE_RATE_STATE_KEY = "grid_real_round_trip_fee_rate"
+
+# In-process cache of the same, refreshed each cycle by refresh_real_fee_rate().
+_cached_real_round_trip_fee_rate = None
+
+
+async def refresh_real_fee_rate(session) -> float:
+    """Fetch the account's REAL current Coinbase taker rate and cache it as
+    the real round-trip rate (taker x 2 - every order this codebase places
+    is a market order, so taker is the rate that genuinely applies on both
+    legs). Persists it so a restart keeps using the real number instead of
+    dropping back to the conservative default.
+
+    Returns the effective real round-trip rate. On a real fetch failure it
+    changes nothing and returns whatever the last real observation was."""
+    global _cached_real_round_trip_fee_rate
+    _maker, taker, tier_name, err = await engine.get_real_fee_tier(session)
+    if taker is None:
+        log.warning(
+            f"[GRID] real fee-tier lookup failed ({err}) - keeping last known "
+            f"real round-trip rate {await get_effective_round_trip_fee_rate()*100:.3f}%"
+        )
+        return await get_effective_round_trip_fee_rate()
+
+    real_rate = float(taker) * 2
+    previous = _cached_real_round_trip_fee_rate
+    _cached_real_round_trip_fee_rate = real_rate
+    if previous is None or abs(previous - real_rate) > 1e-9:
+        log.info(
+            f"[GRID] real Coinbase fee tier {tier_name or 'unknown'}: taker "
+            f"{taker*100:.3f}% -> real round-trip {real_rate*100:.3f}% "
+            f"(codebase's old hardcoded assumption was "
+            f"{engine.ROUND_TRIP_FEE_RATE*100:.3f}%)"
+        )
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(TradingBotState).where(TradingBotState.bot_name == REAL_FEE_RATE_STATE_KEY)
+                )
+                row = result.scalar_one_or_none()
+                if row is None:
+                    db.add(TradingBotState(bot_name=REAL_FEE_RATE_STATE_KEY, base_capital=real_rate))
+                else:
+                    row.base_capital = real_rate
+                await db.commit()
+        except Exception as e:
+            # Best-effort persistence only - the in-process cache is already
+            # correct, so a DB hiccup must never block real trading.
+            log.warning(f"[GRID] could not persist real fee rate: {type(e).__name__}: {e}")
+    return real_rate
+
+
+async def get_effective_round_trip_fee_rate() -> float:
+    """The real round-trip fee rate to price every slice's P&L against:
+    this cycle's live observation, else the last real one persisted, else
+    the deliberately-conservative default. Never the old optimistic
+    hardcoded guess."""
+    global _cached_real_round_trip_fee_rate
+    if _cached_real_round_trip_fee_rate is not None:
+        return _cached_real_round_trip_fee_rate
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(TradingBotState).where(TradingBotState.bot_name == REAL_FEE_RATE_STATE_KEY)
+            )
+            row = result.scalar_one_or_none()
+            if row is not None and row.base_capital and row.base_capital > 0:
+                _cached_real_round_trip_fee_rate = float(row.base_capital)
+                return _cached_real_round_trip_fee_rate
+    except Exception:
+        pass
+    return CONSERVATIVE_ROUND_TRIP_FEE_RATE
+
+
+async def fee_safe_floor_pct() -> float:
+    """The real minimum grid spacing that can actually clear a round trip,
+    priced against the REAL fee rate rather than the old hardcoded one.
+    Every spacing mode floors at this - a branch can never again be set to
+    a spacing whose full cycle is a guaranteed real loss."""
+    real_rate = await get_effective_round_trip_fee_rate()
+    return max(MIN_DYNAMIC_GRID_PCT, TARGET_NET_MARGIN_PCT + real_rate)
+
 
 async def is_grid_bot_active() -> bool:
     """Master on/off switch for the whole grid-branch system - real,
@@ -369,7 +485,10 @@ async def compute_dynamic_grid_pct(session) -> tuple:
     timeframe-trend/BTC-relative-strength filters both do the same)."""
     maker, taker, tier_name, err = await engine.get_real_fee_tier(session)
     if taker is None:
-        return DEFAULT_GRID_PCT, None, None
+        # Fail to the REAL fee-safe floor, not the old fixed default - a
+        # lookup failure must never hand back a spacing that cannot cover
+        # the real round trip.
+        return await fee_safe_floor_pct(), None, None
     round_trip_fee_rate = taker * 2  # every real order this codebase places is a MARKET (taker) order
     grid_pct = max(MIN_DYNAMIC_GRID_PCT, TARGET_NET_MARGIN_PCT + round_trip_fee_rate)
     return grid_pct, tier_name, taker
@@ -451,7 +570,11 @@ async def compute_avg_swing_grid_pct(session, product_id: str, multiplier: float
     if avg_swing_pct is None:
         return DEFAULT_GRID_PCT, None
     effective_multiplier = multiplier if multiplier is not None else AVG_SWING_SPACING_MULTIPLIER
-    fee_safe_floor = max(MIN_DYNAMIC_GRID_PCT, TARGET_NET_MARGIN_PCT + engine.ROUND_TRIP_FEE_RATE)
+    # Priced against the REAL fee rate this account pays, not the old
+    # hardcoded assumption - a branch can never be set to a spacing whose
+    # full round trip is a guaranteed real loss. See
+    # CONSERVATIVE_ROUND_TRIP_FEE_RATE for the bug this fixes.
+    fee_safe_floor = await fee_safe_floor_pct()
     grid_pct = max(fee_safe_floor, avg_swing_pct * effective_multiplier)
     return grid_pct, avg_swing_pct
 
@@ -1666,7 +1789,12 @@ async def _log_activity_safe(bot_name, product_id, event_type, message):
         log.warning(f"[GRID] activity-feed log failed (non-fatal): {e}")
 
 
-def _grid_slice_net_pnl(qty: float, entry_price: float, exit_price: float) -> float:
+def _grid_slice_net_pnl(
+    qty: float,
+    entry_price: float,
+    exit_price: float,
+    round_trip_fee_rate: float = None,
+) -> float:
     """THE single real fee/profit formula for one grid slice's round
     trip - shared by BOTH run_grid_branch_cycle()'s real sell (the
     actual dollars booked into a branch's allocated_usd when a real
@@ -1683,15 +1811,24 @@ def _grid_slice_net_pnl(qty: float, entry_price: float, exit_price: float) -> fl
     they'd stay that way if either one were ever edited alone.
 
     gross = qty * (exit_price - entry_price); fee = qty * (entry_price +
-    exit_price) * (ROUND_TRIP_FEE_RATE / 2) - the real round-trip taker
-    fee on both legs' notional, matching this module's whole real
-    Strategy Lab evidence (see the module docstring)."""
+    exit_price) * (round_trip_fee_rate / 2) - the real round-trip taker
+    fee on both legs' notional.
+
+    round_trip_fee_rate: the REAL rate for this account, from
+    get_effective_round_trip_fee_rate(). It is a required-in-practice
+    argument passed by every real caller; it defaults to None only so the
+    signature stays callable from a sync context, and None falls back to
+    the deliberately-conservative rate rather than the old optimistic
+    hardcoded engine.ROUND_TRIP_FEE_RATE - see
+    CONSERVATIVE_ROUND_TRIP_FEE_RATE for why erring high is the safe
+    direction here."""
+    rate = round_trip_fee_rate if round_trip_fee_rate is not None else CONSERVATIVE_ROUND_TRIP_FEE_RATE
     gross = qty * (exit_price - entry_price)
-    fee = qty * (entry_price + exit_price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+    fee = qty * (entry_price + exit_price) * (rate / 2)
     return gross - fee
 
 
-def _pick_profitable_slice_to_sell(slices: list, price: float):
+def _pick_profitable_slice_to_sell(slices: list, price: float, round_trip_fee_rate: float = None):
     """Real fix for a confirmed-live bug: the account owner spotted a
     branch's own real closed trades netting a real loss (-$1.57 over 4
     real trades on a DOGE-USD branch) while the branch's real live chart
@@ -1726,7 +1863,7 @@ def _pick_profitable_slice_to_sell(slices: list, price: float):
     already established elsewhere in this file (see the QUICK_PROFIT/
     giveback-net-of-fees history)."""
     for s in slices:
-        if _grid_slice_net_pnl(s.qty, s.entry_price, price) > 0:
+        if _grid_slice_net_pnl(s.qty, s.entry_price, price, round_trip_fee_rate) > 0:
             return s
     return None
 
@@ -2004,8 +2141,9 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     # docstring for the full story. A rise that clears the trigger but
     # finds nothing genuinely profitable to sell simply waits, rather than
     # ever locking in a real loss.
+    real_fee_rate = await get_effective_round_trip_fee_rate()
     if price >= branch.reference_price * (1 + grid_pct) and slices:
-        oldest = _pick_profitable_slice_to_sell(slices, price)
+        oldest = _pick_profitable_slice_to_sell(slices, price, real_fee_rate)
         if oldest is None:
             log.info(
                 f"[GRID] {branch.bot_name}: real rise trigger fired (${price:,.4f} >= "
@@ -2018,7 +2156,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
             log.warning(f"[GRID] {branch.bot_name}: real grid sell of {branch.product_id} did not fill - will retry next cycle")
             return
         filled_qty, filled_price = fill
-        pnl = _grid_slice_net_pnl(filled_qty, oldest.entry_price, filled_price)
+        pnl = _grid_slice_net_pnl(filled_qty, oldest.entry_price, filled_price, real_fee_rate)
         new_balance = branch.allocated_usd + pnl
         async with AsyncSessionLocal() as db:
             slice_result = await db.execute(select(CryptoGridSlice).where(CryptoGridSlice.id == oldest.id))
@@ -2070,6 +2208,16 @@ async def run_grid_branches_cycle():
     if not branches:
         return
     async with engine.aiohttp.ClientSession() as session:
+        # Refresh the account's REAL Coinbase fee rate ONCE per cycle (not
+        # once per branch - it is an account-wide rate, so one real API
+        # call covers every branch). Everything downstream - the sell
+        # gate, the booked P&L, the spacing floor - prices against this
+        # real number instead of the old hardcoded assumption.
+        try:
+            await refresh_real_fee_rate(session)
+        except Exception as e:
+            log.warning(f"[GRID] real fee-rate refresh failed (non-fatal): {type(e).__name__}: {e}")
+
         for branch in branches:
             try:
                 await run_grid_branch_cycle(session, branch)
@@ -2120,6 +2268,10 @@ async def get_grid_status() -> dict:
     levels and every open slice's own entry). Read-only."""
     mode_active = await is_grid_bot_active()
     branches = await get_grid_branches()
+    # The REAL fee rate this account actually pays - the dashboard's
+    # "if sold right now" figures must be priced against the same real
+    # number a genuine sale would book, never the old optimistic guess.
+    status_fee_rate = await get_effective_round_trip_fee_rate()
 
     distinct_products = {b.product_id for b in branches}
     live_prices = {}
@@ -2172,7 +2324,7 @@ async def get_grid_status() -> dict:
                 # exact same function run_grid_branch_cycle()'s real sell
                 # calls, so this hypothetical "if sold now" figure can
                 # never drift from what a real sale would actually book.
-                net_usd = _grid_slice_net_pnl(s.qty, s.entry_price, current_price)
+                net_usd = _grid_slice_net_pnl(s.qty, s.entry_price, current_price, status_fee_rate)
                 cost_basis = s.qty * s.entry_price
                 net_pct = (net_usd / cost_basis) if cost_basis else None
                 total_net_usd += net_usd
@@ -2236,6 +2388,14 @@ async def get_grid_status() -> dict:
         "total_unrealized_net_usd": total_unrealized_net_usd,
         "real_free_cash_usd": await get_real_free_cash_usd(),
         "min_required_roi_pct": MIN_REQUIRED_ROI_PCT,
+        # The REAL round-trip fee every P&L figure above is priced against,
+        # plus whether it was genuinely observed from Coinbase or is still
+        # the conservative fallback, and the minimum spacing that can
+        # actually clear it. Surfaced so an understated fee assumption can
+        # never silently eat the profit again.
+        "real_round_trip_fee_rate": status_fee_rate,
+        "real_fee_rate_observed": _cached_real_round_trip_fee_rate is not None,
+        "fee_safe_min_grid_pct": max(MIN_DYNAMIC_GRID_PCT, TARGET_NET_MARGIN_PCT + status_fee_rate),
         "branches": out,
     }
 
@@ -2270,6 +2430,7 @@ async def close_all_grid_slices() -> dict:
     total_realized_pnl = 0.0
     branches_closed = 0
     slices_closed = 0
+    close_all_fee_rate = await get_effective_round_trip_fee_rate()
     async with engine.aiohttp.ClientSession() as session:
         for b in branches:
             slices = await get_grid_slices(b.bot_name)
@@ -2289,7 +2450,7 @@ async def close_all_grid_slices() -> dict:
             branch_pnl = 0.0
             async with AsyncSessionLocal() as db:
                 for s in slices:
-                    pnl = _grid_slice_net_pnl(s.qty, s.entry_price, filled_price)
+                    pnl = _grid_slice_net_pnl(s.qty, s.entry_price, filled_price, close_all_fee_rate)
                     branch_pnl += pnl
                     await _log_grid_trade(b.bot_name, b.product_id, s.entry_price, filled_price, s.qty, pnl, s.opened_at)
                     slice_result = await db.execute(select(CryptoGridSlice).where(CryptoGridSlice.id == s.id))
