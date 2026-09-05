@@ -12979,6 +12979,87 @@ to the corrected behaviour, their original intent preserved.
 
 ---
 
+## Maker (post-only limit) orders for Grid Bot - the fee lever, built and left off
+
+Direct follow-up to the real-fee-rate fix above. Once P&L was priced
+against the account's genuine Coinbase rate, the arithmetic was stark:
+on a 2.6% grid at base-tier taker fees, **Coinbase takes 92 cents of every
+dollar a trade earns and the account keeps 8.**
+
+Grid trading is a limit-order strategy *by nature* - buy X% below, sell X%
+above - but Grid Bot has always placed **market** orders to do it, paying
+the taker premium for nothing. `engine.get_real_fee_tier()` has returned
+the maker rate the whole time; nothing ever consumed it.
+
+| | fee/leg | keep of a 2.6% move | per $93 slice |
+|---|---|---|---|
+| Market orders (taker) | ~1.2% | **8%** | $0.19 |
+| Limit orders (maker) | ~0.6% | **54%** | $1.30 |
+
+**Deliberately maker-FIRST, market-FALLBACK, not a resting-grid rewrite.**
+The existing price trigger, slice selection and never-sell-at-a-loss gate
+are untouched. A post-only order that does not fill inside
+`MAKER_ORDER_WAIT_SECONDS` (45s) is cancelled and retried as the market
+order the bot would have placed anyway - so the worst case is today's
+behaviour plus a short delay, never a missed or duplicated trade.
+
+**Engine** (`crypto_btc_compound_bot.py`):
+- `get_best_bid_ask()` - real top of book, so a post-only order can rest
+  at the bid (buying) / ask (selling) instead of crossing and paying taker.
+- `cancel_order()`, `_await_fill()`, `_place_maker_order()` - place, wait,
+  and **always** cancel an unfilled order before returning. A fill landing
+  in the same instant as the cancel is **kept**, not dropped; dropping it
+  would leave the account holding real coin this code thinks it never
+  bought.
+- `place_maker_buy()`/`place_maker_sell()` apply the same real-balance,
+  minimum-size and precision clamps the market versions already do.
+
+**Grid** (`crypto_grid_bot.py`):
+- `is_maker_orders_active()` - DB-persisted, **default OFF**. Every other
+  default in this file was flipped on from real backtest evidence; this is
+  a brand-new real ORDER-EXECUTION path that has never touched the live
+  account, and arithmetic in its favour is not the same thing as having
+  watched it fill. One dashboard click turns it on.
+- `grid_buy()`/`grid_sell()` return the real per-leg rate actually paid
+  alongside the fill.
+- **`CryptoGridSlice.entry_fee_rate`** (new nullable column) records what
+  the BUY leg really cost. With maker live the two legs of one round trip
+  can genuinely differ, and assuming maker on a taker fill would
+  *understate* profit exactly as badly as the old hardcoded guess
+  overstated it - this fix must not ship its own mirror image. NULL on
+  pre-existing rows; callers fall back to the current expected rate.
+- `fee_safe_floor_pct()` drops from **2.6% to 1.4%** under maker fees, so
+  the grid can trade tighter at the same real net margin. **That is where
+  most of the benefit is** - more fills, not just fatter trades.
+- Close-all deliberately stays a MARKET sell (pressing "close everything"
+  must actually fill) and is priced at the real taker rate regardless of
+  the toggle.
+
+`POST /grid-status/maker-orders` plus a dashboard toggle showing the real
+market-vs-limit rates side by side.
+
+Verified offline (`test_maker_orders.py`, 20/20): off by default; each mode
+prices at its own real rate; maker keeps 54% of a 2.6% move vs 8%; the
+fee-safe floor drops so more trades fire; a maker-bought slice prices
+maker+maker while a taker-bought one does not; a legacy slice with no
+recorded rate falls back without crashing; the sell gate tells two
+differently-priced slices apart; a maker fill places no duplicate market
+order; a miss falls back and honestly records the taker rate it paid; with
+the toggle off no limit order is attempted at all; unfilled orders are
+cancelled before fallback; `post_only` is set and orders rest at bid/ask.
+Full Grid Bot suite re-run - the only failures are the two confirmed
+pre-existing ones, byte-identical to their baseline.
+
+**Not confirmed against the live account** - no Coinbase credentials in
+this sandbox, so no maker order has actually been watched to fill. The
+honest unknown is fill RATE: a post-only order resting at the bid only
+fills when the market comes to it. If most orders time out and fall back,
+the benefit shrinks toward zero while costing a 45s delay per trade. The
+Live Activity feed logs every real MAKER fill explicitly, so the first day
+of real data answers it directly.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md
