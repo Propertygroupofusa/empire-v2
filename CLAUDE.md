@@ -12903,6 +12903,82 @@ marked RETIRED with its keep-it reason stated inline.
 
 ---
 
+## Real, severe bug found and fixed: Grid Bot priced every trade against a made-up fee, not the account's real one
+
+Found while answering "find out how to make these numbers better." The
+2026-09-04 snapshot showed all three grid branches trading at **2.00%
+spacing** with a real all-time realized profit of only **$5.57**, while
+every branch simultaneously sat below its own peak equity - the exact
+fingerprint of booking "wins" that are not wins.
+
+Root cause: `_grid_slice_net_pnl()` - THE single formula that decides both
+what P&L gets booked into `allocated_usd` AND, via
+`_pick_profitable_slice_to_sell()`, whether a slice is profitable **enough
+to sell at all** - priced every round trip at a **hardcoded**
+`engine.ROUND_TRIP_FEE_RATE` (0.008 = 0.4% each way).
+`engine.get_real_fee_tier()` has always fetched the account's genuine live
+Coinbase maker/taker rates every single cycle; its own docstring admits
+those numbers were "returned too for completeness/future use but **not
+consumed by anything yet**" beyond grid spacing. The real rate never
+reached the P&L formula.
+
+That is not a cosmetic gap. Understating the fee silently degrades the
+never-sell-at-a-loss guarantee into "never sell at a loss **assuming fees
+we made up**" - green-lighting real losing sells and booking inflated P&L.
+
+Coinbase Advanced Trade's real retail base tier is **1.20% taker** - a
+**2.40% round trip**, 3x the assumed 0.80%. On 2.00% spacing that makes
+every completed cycle a real **-0.40% loss by construction**. Reproduced
+against a real $178 ETH slice at its branch's own live spacing: the old
+formula reported **+$2.12** where the real base-tier fee makes it
+**-$0.76** - overstated by **$2.88 per trade**.
+
+**Fixed:**
+- `refresh_real_fee_rate()` fetches the real live rate once per cycle
+  (account-wide, so one real API call covers every branch) and **persists**
+  it to `TradingBotState`, so a restart keeps the real number.
+- `get_effective_round_trip_fee_rate()` resolves live > persisted >
+  `CONSERVATIVE_ROUND_TRIP_FEE_RATE`. That fallback deliberately errs
+  **HIGH** (base-tier 2.4%): guessing low sells into real losses, guessing
+  high only makes the bot wait longer for a genuinely profitable exit.
+  Never fail optimistic on a number that gates real money.
+- All four `_grid_slice_net_pnl()` call sites now pass the real rate - the
+  sell gate, the booked P&L, the dashboard "if sold now" figure, and
+  close-all - so none can drift from the others or from reality.
+- `fee_safe_floor_pct()` prices the spacing floor against the real rate. A
+  branch can no longer be set to a spacing whose round trip cannot clear
+  fees, and a fee-tier fetch failure now falls back to that floor instead
+  of a fixed default that may itself be unprofitable. **The live 2.00%
+  branches will auto-correct upward on their next cycle**, since
+  avg-swing spacing recomputes and floors every cycle.
+- Surfaced on the dashboard: the real rate, whether it was genuinely
+  observed from Coinbase or is still the conservative fallback, and the
+  fee-safe minimum spacing - so an understated fee can never silently eat
+  the profit again.
+
+**Not confirmed against the live account** - this sandbox has no Coinbase
+credentials and cannot read the real tier. The fix is to stop guessing and
+use the number the app already fetches; the account's real tier appears on
+the dashboard after the next deploy. If it turns out to be better than
+base tier, spacing tightens automatically and trade frequency rises.
+
+Verified offline (`test_real_fee_rate.py`, 16/16) reproducing the real
+live 2.00%-spacing shape: the conservative default errs high; a
+never-observed rate falls back conservatively; the old formula calls a
+real 2% cycle a win while the real rate makes it a loss; the sell gate
+refuses that trade at the real rate but still sells a genuinely profitable
+5% move; the fee-safe floor now exceeds the 2.00% every branch is live at
+while the old floor sat below the real round trip; a real observed rate
+wins over the fallback and survives a restart via the DB; and a real fetch
+failure keeps the last known real rate rather than reverting. Full Grid Bot
+suite (24 files) re-run - the only remaining failures are confirmed
+pre-existing via a direct `git stash` comparison (byte-identical before and
+after). Four tests that hand-computed expectations at the old rate now pass
+it explicitly; two that asserted the old unsafe floor were updated in place
+to the corrected behaviour, their original intent preserved.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md
