@@ -5750,6 +5750,34 @@ async def set_grid_avg_swing_spacing_endpoint(payload: SetGridAvgSwingSpacingReq
     return {"status": "updated", "avg_swing_spacing_active": payload.enabled}
 
 
+class SetGridMakerOrdersRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/grid-status/maker-orders", dependencies=[Depends(require_admin_key)])
+async def set_grid_maker_orders_endpoint(payload: SetGridMakerOrdersRequest):
+    """Turn real MAKER (post-only limit) orders on or off for Grid Bot.
+
+    Grid trading is a limit-order strategy by nature - buy X% below, sell
+    X% above - but this bot has always placed MARKET orders to do it,
+    paying the taker premium for nothing. At Coinbase's real base tier
+    that is roughly 1.2%/leg taker versus 0.6%/leg maker: on a 2.6% grid,
+    the difference between keeping ~8% of each trade's gross move and
+    keeping ~54% of it.
+
+    Maker-FIRST, market-FALLBACK: a post-only order that does not fill
+    inside its wait window is cancelled and retried as the market order
+    the bot would have placed anyway, so the worst case is today's
+    behaviour plus a short delay - never a missed or duplicated trade.
+
+    Takes effect on the live bot's very next cycle, no restart needed."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    await crypto_grid_bot_module.set_maker_orders_active(payload.enabled)
+    log.info(f"[dashboard] 💸 Grid Bot maker (post-only limit) orders {'ENABLED' if payload.enabled else 'disabled'}")
+    return {"status": "updated", "maker_orders_active": payload.enabled}
+
+
 class SetGridSpacingOverrideRequest(BaseModel):
     label: str
 

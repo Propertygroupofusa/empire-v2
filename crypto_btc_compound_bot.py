@@ -780,6 +780,182 @@ async def place_market_sell(session, qty: float, product_id: str = PRODUCT_ID):
     return await _place_and_confirm(session, path, order)
 
 
+async def get_best_bid_ask(session, product_id: str = PRODUCT_ID):
+    """Real current top of book for product_id. Returns (bid, ask) or
+    (None, None) on a real failure - never a fabricated price.
+
+    Needed for maker (post-only) orders: to earn the maker rate an order
+    has to REST on the book rather than cross it, so it must be priced at
+    or behind the current best bid (buying) / best ask (selling). A market
+    order crosses by definition and always pays the taker rate."""
+    path = f"/api/v3/brokerage/product_book?product_id={product_id}&limit=1"
+    try:
+        async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path), timeout=15) as r:
+            if r.status != 200:
+                return None, None
+            book = (await r.json()).get("pricebook", {})
+            bids, asks = book.get("bids") or [], book.get("asks") or []
+            bid = float(bids[0]["price"]) if bids else None
+            ask = float(asks[0]["price"]) if asks else None
+            return bid, ask
+    except Exception as e:
+        log.warning(f"[BTC-COMPOUND] {product_id}: real order-book fetch failed: {type(e).__name__}: {e}")
+        return None, None
+
+
+async def cancel_order(session, order_id: str) -> bool:
+    """Cancel a real resting order. Returns True if Coinbase accepted the
+    cancel. Used when a maker order hasn't filled inside its wait window -
+    it MUST be cancelled before any fallback order is placed, or the
+    account could end up holding both."""
+    path = "/api/v3/brokerage/orders/batch_cancel"
+    try:
+        async with session.post(COINBASE_BASE_URL + path, headers=_auth_headers("POST", path),
+                                json={"order_ids": [order_id]}, timeout=15) as r:
+            if r.status not in (200, 201):
+                return False
+            results = (await r.json()).get("results") or []
+            return bool(results and results[0].get("success"))
+    except Exception as e:
+        log.warning(f"[BTC-COMPOUND] cancel of order {order_id} failed: {type(e).__name__}: {e}")
+        return False
+
+
+async def _await_fill(session, order_id: str, wait_seconds: int):
+    """Poll a real resting order for up to wait_seconds. Returns
+    (filled_qty, avg_price) on a real fill, or None if it is still
+    unfilled when the window closes. A PARTIAL fill is returned as the
+    real partial - never rounded up to the full requested size."""
+    detail_path = f"/api/v3/brokerage/orders/historical/{order_id}"
+    for _ in range(max(1, wait_seconds)):
+        await asyncio.sleep(1)
+        try:
+            async with session.get(COINBASE_BASE_URL + detail_path,
+                                   headers=_auth_headers("GET", detail_path), timeout=15) as r:
+                if r.status != 200:
+                    continue
+                detail = (await r.json()).get("order", {})
+                filled_size = float(detail.get("filled_size", 0) or 0)
+                filled_value = float(detail.get("filled_value", 0) or 0)
+                if detail.get("status") in ("FILLED", "DONE") and filled_size > 0:
+                    return filled_size, filled_value / filled_size
+                if detail.get("status") in ("CANCELLED", "EXPIRED", "FAILED"):
+                    return (filled_size, filled_value / filled_size) if filled_size > 0 else None
+        except Exception:
+            continue
+    return None
+
+
+async def _place_maker_order(session, order: dict, wait_seconds: int):
+    """Place a real post-only limit order and wait for it to fill.
+
+    post_only=true tells Coinbase to REJECT the order outright rather than
+    let it cross the book - that is what guarantees the maker rate. A
+    rejection here is therefore normal and expected (the price moved into
+    us between reading the book and placing), not an error worth retrying
+    blind; the caller falls back to a market order.
+
+    Returns (filled_qty, avg_price) on a real fill, else None. Always
+    cancels a real unfilled order before returning, so no resting order is
+    ever left behind for a caller's fallback to double up on."""
+    path = "/api/v3/brokerage/orders"
+    product_id = order.get("product_id")
+    try:
+        async with session.post(COINBASE_BASE_URL + path, headers=_auth_headers("POST", path),
+                                json=order, timeout=15) as r:
+            resp = await r.json()
+            if r.status not in (200, 201) or not resp.get("success"):
+                reason = _describe_order_rejection(resp)
+                log.info(f"[BTC-COMPOUND] {product_id}: maker order not accepted ({reason}) - caller will fall back")
+                return None
+            order_id = resp["success_response"]["order_id"]
+    except Exception as e:
+        log.warning(f"[BTC-COMPOUND] {product_id}: maker order placement failed: {type(e).__name__}: {e}")
+        return None
+
+    fill = await _await_fill(session, order_id, wait_seconds)
+    if fill is None:
+        # Cancel FIRST, then re-check: a fill can land in the same instant
+        # the cancel does, and silently dropping it would leave the account
+        # holding real coin this code thinks it never bought.
+        await cancel_order(session, order_id)
+        late = await _await_fill(session, order_id, 2)
+        if late is not None:
+            log.info(f"[BTC-COMPOUND] {product_id}: maker order filled as it was being cancelled - keeping the real fill")
+            return late
+        log.info(f"[BTC-COMPOUND] {product_id}: maker order did not fill in {wait_seconds}s - cancelled, falling back")
+        return None
+    return fill
+
+
+async def place_maker_buy(session, usd_amount: float, product_id: str = PRODUCT_ID, wait_seconds: int = 45):
+    """Real post-only limit BUY resting at the current best bid, so it
+    earns the MAKER fee instead of the taker fee a market order always
+    pays. Returns (filled_qty, avg_price) or None (caller falls back).
+
+    Applies the same real-balance and minimum-size clamps place_market_buy
+    already does - a maker order is still real money leaving the account."""
+    real_usd, _ = await get_usd_balance(session)
+    if real_usd is not None and real_usd < usd_amount:
+        usd_amount = real_usd
+    if usd_amount < MIN_TRADE_USD:
+        return None
+
+    bid, ask = await get_best_bid_ask(session, product_id)
+    if bid is None:
+        return None
+    decimals = await get_product_size_decimals(session, product_id)
+    qty = usd_amount / bid
+    factor = 10 ** decimals
+    qty = math.floor(qty * factor) / factor
+    if qty <= 0:
+        return None
+
+    order = {
+        "client_order_id": str(uuid.uuid4()),
+        "product_id": product_id,
+        "side": "BUY",
+        "order_configuration": {"limit_limit_gtc": {
+            "base_size": f"{qty:.{decimals}f}",
+            "limit_price": f"{bid:.10f}".rstrip("0").rstrip("."),
+            "post_only": True,
+        }},
+    }
+    return await _place_maker_order(session, order, wait_seconds)
+
+
+async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wait_seconds: int = 45):
+    """Real post-only limit SELL resting at the current best ask, earning
+    the MAKER fee. Returns (filled_qty, avg_price) or None (caller falls
+    back). Applies the same real-balance and precision clamps
+    place_market_sell already does."""
+    base_currency = product_id.split("-")[0]
+    real_balance, _ = await get_asset_balance(session, base_currency)
+    if real_balance is not None and real_balance < qty:
+        qty = real_balance
+    decimals = await get_product_size_decimals(session, product_id)
+    factor = 10 ** decimals
+    qty = math.floor(qty * factor) / factor
+    if qty <= 0:
+        return None
+
+    bid, ask = await get_best_bid_ask(session, product_id)
+    if ask is None:
+        return None
+
+    order = {
+        "client_order_id": str(uuid.uuid4()),
+        "product_id": product_id,
+        "side": "SELL",
+        "order_configuration": {"limit_limit_gtc": {
+            "base_size": f"{qty:.{decimals}f}",
+            "limit_price": f"{ask:.10f}".rstrip("0").rstrip("."),
+            "post_only": True,
+        }},
+    }
+    return await _place_maker_order(session, order, wait_seconds)
+
+
 _last_order_error = {}
 
 

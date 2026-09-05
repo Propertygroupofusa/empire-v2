@@ -297,6 +297,13 @@ REAL_FEE_RATE_STATE_KEY = "grid_real_round_trip_fee_rate"
 # In-process cache of the same, refreshed each cycle by refresh_real_fee_rate().
 _cached_real_round_trip_fee_rate = None
 
+# The account's real per-leg MAKER rate, cached alongside it. A maker
+# (resting limit) fill costs roughly half a taker (market) fill, so once
+# maker orders are live this is the rate that actually applies - assuming
+# the taker rate on a maker fill would understate profit just as badly as
+# the old hardcoded guess overstated it.
+_cached_real_maker_fee_rate = None
+
 
 async def refresh_real_fee_rate(session) -> float:
     """Fetch the account's REAL current Coinbase taker rate and cache it as
@@ -307,8 +314,10 @@ async def refresh_real_fee_rate(session) -> float:
 
     Returns the effective real round-trip rate. On a real fetch failure it
     changes nothing and returns whatever the last real observation was."""
-    global _cached_real_round_trip_fee_rate
-    _maker, taker, tier_name, err = await engine.get_real_fee_tier(session)
+    global _cached_real_round_trip_fee_rate, _cached_real_maker_fee_rate
+    maker, taker, tier_name, err = await engine.get_real_fee_tier(session)
+    if maker is not None:
+        _cached_real_maker_fee_rate = float(maker)
     if taker is None:
         log.warning(
             f"[GRID] real fee-tier lookup failed ({err}) - keeping last known "
@@ -366,13 +375,128 @@ async def get_effective_round_trip_fee_rate() -> float:
     return CONSERVATIVE_ROUND_TRIP_FEE_RATE
 
 
+# ── MAKER ORDERS ────────────────────────────────────────────────────────
+# Grid trading is a limit-order strategy by nature: buy X% below, sell X%
+# above. It was placing MARKET orders to do that job and paying the taker
+# premium for nothing. At Coinbase's real base tier that is ~1.2%/leg taker
+# vs ~0.6%/leg maker - on a 2.6% grid it is the difference between keeping
+# 8% of each trade's gross move and keeping 54% of it.
+#
+# Deliberately maker-FIRST, market-FALLBACK rather than a full resting-grid
+# rewrite: the existing price trigger, slice selection and
+# never-sell-at-a-loss gate are all preserved exactly, and a maker order
+# that does not fill inside its window is cancelled and retried as the
+# market order the bot would have placed anyway. So the worst case is
+# today's behaviour plus a short delay - never a missed or duplicated trade.
+MAKER_ORDERS_MODE_KEY = "grid_maker_orders_mode"
+
+# How long a real post-only order is left resting before giving up and
+# falling back to a market order. Long enough to be filled in a normally
+# active book, short enough that a real trigger is not missed outright.
+MAKER_ORDER_WAIT_SECONDS = int(os.getenv("GRID_MAKER_ORDER_WAIT_SECONDS", "45"))
+
+
+async def is_maker_orders_active() -> bool:
+    """Real, DB-persisted toggle for maker (post-only limit) orders.
+
+    Defaults to OFF, deliberately. Every other spacing/exit default in this
+    file was flipped on from real backtest evidence; this one is a brand-new
+    real ORDER-EXECUTION path that has never touched the live account, and
+    the arithmetic in its favour (see above) is not the same thing as having
+    watched it fill. The account owner turns it on from the dashboard."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == MAKER_ORDERS_MODE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            return False
+        return bool(row.base_capital and row.base_capital >= 1.0)
+
+
+async def set_maker_orders_active(enabled: bool):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == MAKER_ORDERS_MODE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            db.add(TradingBotState(bot_name=MAKER_ORDERS_MODE_KEY, base_capital=1.0 if enabled else 0.0))
+        else:
+            row.base_capital = 1.0 if enabled else 0.0
+        await db.commit()
+
+
+async def expected_leg_fee_rate() -> float:
+    """The REAL per-leg fee rate the next order is expected to pay: the
+    maker rate when maker orders are on, the taker rate otherwise. Half the
+    round-trip rate, since a round trip is two legs."""
+    global _cached_real_maker_fee_rate
+    if await is_maker_orders_active() and _cached_real_maker_fee_rate is not None:
+        return _cached_real_maker_fee_rate
+    return (await get_effective_round_trip_fee_rate()) / 2
+
+
+async def grid_buy(session, usd_amount: float, product_id: str):
+    """Real grid BUY: maker first (cheap, may not fill), market fallback
+    (always fills, costs more). Returns (filled_qty, price, leg_fee_rate)
+    or None - the real rate actually paid comes back with the fill so the
+    slice can record it and be priced honestly later."""
+    if await is_maker_orders_active():
+        fill = await engine.place_maker_buy(session, usd_amount, product_id, MAKER_ORDER_WAIT_SECONDS)
+        if fill:
+            qty, price = fill
+            log.info(f"[GRID] {product_id}: real MAKER buy filled {qty:.8f} @ ${price:,.6f} (cheaper fee)")
+            return qty, price, (_cached_real_maker_fee_rate
+                                if _cached_real_maker_fee_rate is not None
+                                else (await get_effective_round_trip_fee_rate()) / 2)
+    fill = await engine.place_market_buy(session, usd_amount, product_id)
+    if not fill:
+        return None
+    qty, price = fill
+    return qty, price, (await get_effective_round_trip_fee_rate()) / 2
+
+
+async def grid_sell(session, qty: float, product_id: str):
+    """Real grid SELL: maker first, market fallback. Returns
+    (filled_qty, price, leg_fee_rate) or None."""
+    if await is_maker_orders_active():
+        fill = await engine.place_maker_sell(session, qty, product_id, MAKER_ORDER_WAIT_SECONDS)
+        if fill:
+            filled_qty, price = fill
+            log.info(f"[GRID] {product_id}: real MAKER sell filled {filled_qty:.8f} @ ${price:,.6f} (cheaper fee)")
+            return filled_qty, price, (_cached_real_maker_fee_rate
+                                       if _cached_real_maker_fee_rate is not None
+                                       else (await get_effective_round_trip_fee_rate()) / 2)
+    fill = await engine.place_market_sell(session, qty, product_id)
+    if not fill:
+        return None
+    filled_qty, price = fill
+    return filled_qty, price, (await get_effective_round_trip_fee_rate()) / 2
+
+
+async def slice_round_trip_fee_rate(slice_row, exit_leg_rate: float = None) -> float:
+    """The REAL round-trip fee for one specific slice: the rate its BUY leg
+    genuinely paid (recorded on the slice) plus the rate its SELL leg is
+    expected to pay. With maker orders live the two legs can genuinely
+    differ, so assuming one rate for both would misprice the trade - the
+    exact class of bug that made the bot sell real losers as wins."""
+    entry_rate = getattr(slice_row, "entry_fee_rate", None)
+    if entry_rate is None or entry_rate <= 0:
+        entry_rate = (await get_effective_round_trip_fee_rate()) / 2
+    if exit_leg_rate is None:
+        exit_leg_rate = await expected_leg_fee_rate()
+    return entry_rate + exit_leg_rate
+
+
 async def fee_safe_floor_pct() -> float:
     """The real minimum grid spacing that can actually clear a round trip,
     priced against the REAL fee rate rather than the old hardcoded one.
     Every spacing mode floors at this - a branch can never again be set to
     a spacing whose full cycle is a guaranteed real loss."""
-    real_rate = await get_effective_round_trip_fee_rate()
-    return max(MIN_DYNAMIC_GRID_PCT, TARGET_NET_MARGIN_PCT + real_rate)
+    # With maker orders live the real round trip is two MAKER legs, roughly
+    # half a taker round trip - so the smallest move that can clear fees
+    # drops too, and the grid can trade meaningfully tighter (more fills) at
+    # the same real net margin. This is where most of the maker benefit
+    # actually shows up, not just in a bigger margin per trade.
+    leg = await expected_leg_fee_rate()
+    return max(MIN_DYNAMIC_GRID_PCT, TARGET_NET_MARGIN_PCT + leg * 2)
 
 
 async def is_grid_bot_active() -> bool:
@@ -1828,7 +1952,22 @@ def _grid_slice_net_pnl(
     return gross - fee
 
 
-def _pick_profitable_slice_to_sell(slices: list, price: float, round_trip_fee_rate: float = None):
+def _slice_rate(s, round_trip_fee_rate, exit_leg_rate):
+    """The real round-trip rate for ONE slice. When exit_leg_rate is given
+    (maker orders live), each slice is priced with the rate its own BUY leg
+    really paid plus the rate its SELL leg is expected to pay - the two can
+    genuinely differ once maker and market fills are mixed. Otherwise every
+    slice shares the one flat rate, exactly as before."""
+    if exit_leg_rate is None:
+        return round_trip_fee_rate
+    entry_rate = getattr(s, "entry_fee_rate", None)
+    if entry_rate is None or entry_rate <= 0:
+        entry_rate = exit_leg_rate
+    return entry_rate + exit_leg_rate
+
+
+def _pick_profitable_slice_to_sell(slices: list, price: float, round_trip_fee_rate: float = None,
+                                   exit_leg_rate: float = None):
     """Real fix for a confirmed-live bug: the account owner spotted a
     branch's own real closed trades netting a real loss (-$1.57 over 4
     real trades on a DOGE-USD branch) while the branch's real live chart
@@ -1863,7 +2002,7 @@ def _pick_profitable_slice_to_sell(slices: list, price: float, round_trip_fee_ra
     already established elsewhere in this file (see the QUICK_PROFIT/
     giveback-net-of-fees history)."""
     for s in slices:
-        if _grid_slice_net_pnl(s.qty, s.entry_price, price, round_trip_fee_rate) > 0:
+        if _grid_slice_net_pnl(s.qty, s.entry_price, price, _slice_rate(s, round_trip_fee_rate, exit_leg_rate)) > 0:
             return s
     return None
 
@@ -2104,13 +2243,17 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
         if spend < MIN_TRADE_USD:
             log.info(f"[GRID] {branch.bot_name}: only ${spend:.2f} real spendable for a new slice (below ${MIN_TRADE_USD:.2f} minimum) - waiting")
             return
-        fill = await engine.place_market_buy(session, spend, branch.product_id)
+        fill = await grid_buy(session, spend, branch.product_id)
         if not fill:
             log.warning(f"[GRID] {branch.bot_name}: real grid buy into {branch.product_id} did not fill - will retry next cycle")
             return
-        filled_qty, filled_price = fill
+        filled_qty, filled_price, buy_leg_fee = fill
         async with AsyncSessionLocal() as db:
-            db.add(CryptoGridSlice(bot_name=branch.bot_name, product_id=branch.product_id, entry_price=filled_price, qty=filled_qty))
+            # entry_fee_rate records the rate this leg REALLY paid (maker or
+            # taker), so this slice can be priced honestly when it later sells.
+            db.add(CryptoGridSlice(bot_name=branch.bot_name, product_id=branch.product_id,
+                                   entry_price=filled_price, qty=filled_qty,
+                                   entry_fee_rate=buy_leg_fee))
             result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
             fresh = result.scalar_one_or_none()
             if fresh:
@@ -2142,8 +2285,9 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     # finds nothing genuinely profitable to sell simply waits, rather than
     # ever locking in a real loss.
     real_fee_rate = await get_effective_round_trip_fee_rate()
+    exit_leg_rate = await expected_leg_fee_rate()
     if price >= branch.reference_price * (1 + grid_pct) and slices:
-        oldest = _pick_profitable_slice_to_sell(slices, price, real_fee_rate)
+        oldest = _pick_profitable_slice_to_sell(slices, price, real_fee_rate, exit_leg_rate)
         if oldest is None:
             log.info(
                 f"[GRID] {branch.bot_name}: real rise trigger fired (${price:,.4f} >= "
@@ -2151,12 +2295,15 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                 f"profit at this price - holding every slice, waiting for a genuinely profitable one"
             )
             return
-        fill = await engine.place_market_sell(session, oldest.qty, branch.product_id)
+        fill = await grid_sell(session, oldest.qty, branch.product_id)
         if not fill:
             log.warning(f"[GRID] {branch.bot_name}: real grid sell of {branch.product_id} did not fill - will retry next cycle")
             return
-        filled_qty, filled_price = fill
-        pnl = _grid_slice_net_pnl(filled_qty, oldest.entry_price, filled_price, real_fee_rate)
+        filled_qty, filled_price, sell_leg_fee = fill
+        # Priced with the rate THIS slice's buy leg really paid plus the rate
+        # its sell leg really paid - not one assumed rate for both.
+        pnl = _grid_slice_net_pnl(filled_qty, oldest.entry_price, filled_price,
+                                  await slice_round_trip_fee_rate(oldest, sell_leg_fee))
         new_balance = branch.allocated_usd + pnl
         async with AsyncSessionLocal() as db:
             slice_result = await db.execute(select(CryptoGridSlice).where(CryptoGridSlice.id == oldest.id))
@@ -2272,6 +2419,10 @@ async def get_grid_status() -> dict:
     # "if sold right now" figures must be priced against the same real
     # number a genuine sale would book, never the old optimistic guess.
     status_fee_rate = await get_effective_round_trip_fee_rate()
+    # Only used to price per-slice once maker orders are live, where the two
+    # legs of a round trip can genuinely cost different rates. Left None when
+    # maker orders are off so every slice shares one flat rate, as before.
+    status_exit_leg_rate = await expected_leg_fee_rate() if await is_maker_orders_active() else None
 
     distinct_products = {b.product_id for b in branches}
     live_prices = {}
@@ -2324,7 +2475,8 @@ async def get_grid_status() -> dict:
                 # exact same function run_grid_branch_cycle()'s real sell
                 # calls, so this hypothetical "if sold now" figure can
                 # never drift from what a real sale would actually book.
-                net_usd = _grid_slice_net_pnl(s.qty, s.entry_price, current_price, status_fee_rate)
+                net_usd = _grid_slice_net_pnl(s.qty, s.entry_price, current_price,
+                                              _slice_rate(s, status_fee_rate, status_exit_leg_rate))
                 cost_basis = s.qty * s.entry_price
                 net_pct = (net_usd / cost_basis) if cost_basis else None
                 total_net_usd += net_usd
@@ -2395,7 +2547,12 @@ async def get_grid_status() -> dict:
         # never silently eat the profit again.
         "real_round_trip_fee_rate": status_fee_rate,
         "real_fee_rate_observed": _cached_real_round_trip_fee_rate is not None,
-        "fee_safe_min_grid_pct": max(MIN_DYNAMIC_GRID_PCT, TARGET_NET_MARGIN_PCT + status_fee_rate),
+        "fee_safe_min_grid_pct": await fee_safe_floor_pct(),
+        # Maker (post-only limit) orders: roughly half the fee of the market
+        # orders this bot has always used. Off until turned on deliberately.
+        "maker_orders_active": await is_maker_orders_active(),
+        "real_maker_fee_rate": _cached_real_maker_fee_rate,
+        "maker_order_wait_seconds": MAKER_ORDER_WAIT_SECONDS,
         "branches": out,
     }
 
@@ -2431,6 +2588,9 @@ async def close_all_grid_slices() -> dict:
     branches_closed = 0
     slices_closed = 0
     close_all_fee_rate = await get_effective_round_trip_fee_rate()
+    # Close-all always uses a market sell (it must fill), so its exit leg is
+    # always the real TAKER rate regardless of the maker-orders toggle.
+    close_all_exit_leg_rate = close_all_fee_rate / 2 if await is_maker_orders_active() else None
     async with engine.aiohttp.ClientSession() as session:
         for b in branches:
             slices = await get_grid_slices(b.bot_name)
@@ -2450,7 +2610,11 @@ async def close_all_grid_slices() -> dict:
             branch_pnl = 0.0
             async with AsyncSessionLocal() as db:
                 for s in slices:
-                    pnl = _grid_slice_net_pnl(s.qty, s.entry_price, filled_price, close_all_fee_rate)
+                    # Deliberately a MARKET sell above: "close everything" must
+                    # actually fill, so this leg genuinely pays the taker rate
+                    # even when maker orders are on. Priced accordingly.
+                    pnl = _grid_slice_net_pnl(s.qty, s.entry_price, filled_price,
+                                              _slice_rate(s, close_all_fee_rate, close_all_exit_leg_rate))
                     branch_pnl += pnl
                     await _log_grid_trade(b.bot_name, b.product_id, s.entry_price, filled_price, s.qty, pnl, s.opened_at)
                     slice_result = await db.execute(select(CryptoGridSlice).where(CryptoGridSlice.id == s.id))

@@ -580,6 +580,7 @@
     <div id="grid-auto-rotate-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-min-roi-floor-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-fee-rate-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
+    <div id="grid-maker-orders-toggle" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-spacing-override-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div class="panel" id="grid-panel">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:8px;">
@@ -1870,6 +1871,7 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals) {
     renderGridAutoRotateBadge(!!data.auto_rotate_active, data.auto_rotate_interval_minutes);
     renderGridMinRoiFloorBadge(data.min_required_roi_pct);
     renderGridFeeRateBadge(data);
+    renderGridMakerOrdersToggle(data);
     renderGridSpacingOverrideBadge(data.grid_spacing_override);
 
     document.getElementById('grid-total-allocated').textContent =
@@ -2346,6 +2348,52 @@ function renderGridFeeRateBadge(data) {
             ? ` · every branch's spacing is floored at <strong>${minPct.toFixed(2)}%</strong>, the smallest move that ` +
               `can actually clear that fee. A grid tighter than this loses money on every completed round trip.`
             : ``);
+}
+
+// Maker (post-only limit) orders. Grid trading is a limit-order strategy by
+// nature, but this bot has always used MARKET orders and paid the taker
+// premium for nothing. Off until turned on deliberately - it is a real
+// change to how orders reach the exchange, not a tuning parameter.
+function renderGridMakerOrdersToggle(data) {
+    const el = document.getElementById('grid-maker-orders-toggle');
+    if (!el || data == null) return;
+    const on = !!data.maker_orders_active;
+    const taker = data.real_round_trip_fee_rate != null ? data.real_round_trip_fee_rate / 2 : null;
+    const maker = data.real_maker_fee_rate;
+    let compare = '';
+    if (taker != null && maker != null) {
+        compare = ` Your real rates: market <strong>${(taker * 100).toFixed(2)}%</strong> per leg vs ` +
+                  `limit <strong>${(maker * 100).toFixed(2)}%</strong> per leg.`;
+    }
+    el.innerHTML =
+        `${on ? '💸' : '🐢'} Order type: <strong>${on ? 'LIMIT (cheaper fees)' : 'MARKET (higher fees)'}</strong>.` +
+        compare +
+        ` Limit orders rest on the book to earn the lower fee; if one doesn't fill in ` +
+        `${data.maker_order_wait_seconds || 45}s it's cancelled and placed as a market order instead, so a trade is ` +
+        `never missed — just occasionally delayed. ` +
+        `<a href="#" onclick="toggleGridMakerOrders(${!on});return false;" style="color:var(--accent)">` +
+        `${on ? 'Switch back to market orders' : 'Switch to limit orders'}</a>`;
+}
+
+async function toggleGridMakerOrders(enable) {
+    const msg = enable
+        ? 'Switch Grid Bot to LIMIT orders?\n\nThis roughly halves the fee on every trade. If a limit order ' +
+          'does not fill within 45 seconds it is cancelled and placed as a market order instead, so no trade ' +
+          'is missed.\n\nThis changes how real orders reach Coinbase.'
+        : 'Switch Grid Bot back to MARKET orders?\n\nEvery trade will pay the higher taker fee again.';
+    if (!confirm(msg)) return;
+    try {
+        const res = await fetch(API_BASE + '/grid-status/maker-orders', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': getAdminKey(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: enable }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        loadGridStatus();
+    } catch (e) {
+        alert('Could not change order type: ' + e.message);
+    }
 }
 
 // Real, live "promote a backtested candidate" override for the Grid

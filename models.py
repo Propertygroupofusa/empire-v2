@@ -1062,6 +1062,14 @@ class CryptoGridSlice(Base):
     entry_price = Column(Float)
     qty = Column(Float)
     opened_at = Column(DateTime, default=datetime.utcnow)
+    # The REAL per-leg Coinbase fee rate actually paid to open this slice.
+    # A maker (resting limit) fill costs roughly half a taker (market) fill,
+    # so once maker orders are live the two legs of one round trip can
+    # genuinely cost different rates. Recording the buy leg's real rate here
+    # is what lets _grid_slice_net_pnl() price that slice honestly instead of
+    # assuming both legs paid the same thing. NULL on rows created before
+    # this column existed - callers fall back to the current expected rate.
+    entry_fee_rate = Column(Float, nullable=True)
 
 
 class CryptoGridTradeHistory(Base):
