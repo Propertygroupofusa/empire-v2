@@ -830,19 +830,8 @@
 
 <script>
 const API_BASE = 'https://empire-v2-production.up.railway.app/api/trading-dashboard';
-const KEY_STORAGE = 'bmb_admin_key';
-let adminKey = localStorage.getItem(KEY_STORAGE) || '';
-
-function getAdminKey() {
-    if (!adminKey) {
-        adminKey = prompt('Enter admin key to load real family tree data:') || '';
-        if (adminKey) localStorage.setItem(KEY_STORAGE, adminKey);
-    }
-    return adminKey;
-}
 
 async function apiGet(path, timeoutMs) {
-    const key = getAdminKey();
     // Real, bounded timeout (20s default) - a plain fetch() with no
     // AbortController can otherwise sit indefinitely on a stalled real
     // mobile connection (a dropped signal, the page backgrounded and
@@ -853,7 +842,7 @@ async function apiGet(path, timeoutMs) {
     let res;
     try {
         res = await fetch(API_BASE + path, {
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             signal: controller.signal,
         });
     } catch (e) {
@@ -1188,10 +1177,9 @@ async function sellBranch(botName, btn) {
     btn.disabled = true;
     btn.textContent = 'Selling…';
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/family-tree-status/close/' + encodeURIComponent(botName), {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -1209,10 +1197,9 @@ async function takeRootProfit(btn) {
     btn.disabled = true;
     btn.textContent = 'Taking profit…';
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/family-tree-status/root-take-profit', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -1235,10 +1222,9 @@ async function addCashToBranch(botName, btn) {
     btn.disabled = true;
     btn.textContent = 'Buying…';
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/family-tree-status/add-cash/' + encodeURIComponent(botName), {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ amount }),
         });
         const data = await res.json();
@@ -1271,10 +1257,9 @@ async function rootPartialSell(btn) {
     btn.disabled = true;
     btn.textContent = 'Selling…';
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/family-tree-status/root-partial-sell', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ amount_usd: amount }),
         });
         const data = await res.json();
@@ -1321,10 +1306,9 @@ async function spawnBranch(btn) {
     btn.disabled = true;
     btn.textContent = 'Starting…';
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/family-tree-status/spawn-branch', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -1421,10 +1405,9 @@ async function confirmUnlockProfit() {
     confirmBtn.disabled = true;
     confirmBtn.textContent = 'Unlocking…';
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/family-tree-status/unlock-profit', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ amount, bot_name: botName }),
         });
         const data = await res.json();
@@ -1540,10 +1523,9 @@ async function confirmReallocateCash() {
     confirmBtn.disabled = true;
     confirmBtn.textContent = 'Moving…';
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/family-tree-status/reallocate-cash', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ from_bot_name: fromBot, to_bot_name: toBot, amount }),
         });
         const data = await res.json();
@@ -1650,12 +1632,11 @@ async function confirmFundGrid() {
     confirmBtn.disabled = true;
     confirmBtn.textContent = 'Moving…';
     try {
-        const key = getAdminKey();
         const body = { from_bot_name: fromBot, amount };
         if (toGridBotName) body.to_grid_bot_name = toGridBotName;
         const res = await fetch(API_BASE + '/grid-status/fund-from-tree', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         });
         const data = await res.json();
@@ -1823,12 +1804,11 @@ async function confirmMoveGridCash() {
     confirmBtn.disabled = true;
     confirmBtn.textContent = 'Moving…';
     try {
-        const key = getAdminKey();
         const body = { from_bot_name: fromBot, amount };
         if (toBot) body.to_bot_name = toBot;
         const res = await fetch(API_BASE + '/grid-status/move-cash', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         });
         const data = await res.json();
@@ -2054,10 +2034,9 @@ async function closeAllGridSlices(btn) {
     btn.disabled = true;
     btn.textContent = 'Closing everything…';
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/grid-status/close-all', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -2248,10 +2227,9 @@ async function toggleGridDynamicSpacing(enable) {
         : 'Turn OFF dynamic spacing? Every real grid branch goes back to the fixed 1% spacing.';
     if (!confirm(msg)) return;
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/grid-status/dynamic-spacing', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled: enable }),
         });
         const data = await res.json();
@@ -2286,10 +2264,9 @@ async function toggleGridAvgSwingSpacing(enable) {
         : 'Turn OFF average-swing dynamic spacing? Every real grid branch goes back to fixed 1% spacing (or fee-tier spacing, if that\'s still on).';
     if (!confirm(msg)) return;
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/grid-status/avg-swing-spacing', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled: enable }),
         });
         const data = await res.json();
@@ -2397,7 +2374,7 @@ async function toggleGridMakerOrders(enable) {
     try {
         const res = await fetch(API_BASE + '/grid-status/maker-orders', {
             method: 'POST',
-            headers: { 'X-Admin-Key': getAdminKey(), 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled: enable }),
         });
         const data = await res.json();
@@ -2444,10 +2421,9 @@ async function toggleGridAutoRotate(enable) {
         : 'Turn OFF automatic idle-cash rotation? Real idle cash will only move (or deploy into a new branch) when you do it yourself.';
     if (!confirm(msg)) return;
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/grid-status/auto-rotate', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled: enable }),
         });
         const data = await res.json();
@@ -2481,10 +2457,9 @@ async function toggleGridMode() {
     const btn = document.getElementById('grid-mode-toggle-btn');
     btn.disabled = true;
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/grid-status/mode', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled: enabling }),
         });
         const data = await res.json();
@@ -2498,10 +2473,9 @@ async function toggleGridMode() {
 
 async function toggleGridBranchActive(botName, newActive) {
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + `/grid-status/${botName}/active`, {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ active: newActive }),
         });
         const data = await res.json();
@@ -2521,10 +2495,9 @@ async function toggleGridBranchActive(botName, newActive) {
 async function toggleGridBranchLocked(botName, newLocked) {
     if (newLocked && !confirm(`Lock ${botName}? Its real cash won't be withdrawable or movable (by hand or by auto-rotate) until you unlock it again. Its own normal grid trading is unaffected.`)) return;
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + `/grid-status/${botName}/lock`, {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ locked: newLocked }),
         });
         const data = await res.json();
@@ -2582,10 +2555,9 @@ async function confirmWithdrawGridBranch() {
     confirmBtn.disabled = true;
     confirmBtn.textContent = 'Withdrawing…';
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + `/grid-status/${botName}/withdraw`, {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ amount }),
         });
         const data = await res.json();
@@ -2626,10 +2598,9 @@ async function gridQuickBuy(btn) {
     btn.disabled = true;
     btn.textContent = 'Picking best coin…';
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/grid-status/quick-buy', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ amount_usd: 20 }),
         });
         const data = await res.json();
@@ -2724,10 +2695,9 @@ async function confirmCreateGridBranch() {
     const confirmBtn = document.getElementById('create-grid-confirm-btn');
     confirmBtn.disabled = true;
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/grid-status/create-branch', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ product_id: productId, allocated_usd: amount }),
         });
         const data = await res.json();
@@ -2814,10 +2784,9 @@ async function confirmCreateMultipleGridBranches() {
     const confirmBtn = document.getElementById('create-multi-grid-confirm-btn');
     confirmBtn.disabled = true;
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/grid-status/create-multiple-branches', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ count: count, amount_per_branch: amount }),
         });
         const data = await res.json();
@@ -3269,10 +3238,9 @@ async function previewReconcile(currency) {
     statusEl.textContent = `Computing the real reconcile plan for ${currency}…`;
     planWrap.innerHTML = '';
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + `/family-tree-status/reconcile-asset/${encodeURIComponent(currency)}?dry_run=true`, {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -3307,10 +3275,9 @@ async function executeReconcile(currency) {
     const planWrap = document.getElementById('reconcile-plan-wrap');
     statusEl.textContent = 'Correcting…';
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + `/family-tree-status/reconcile-asset/${encodeURIComponent(currency)}?dry_run=false`, {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -3363,10 +3330,9 @@ async function toggleReversalTrade(enable) {
         : 'Turn OFF the real STOP-HIT reversal buy? Branches will go back to the normal coin-switch behavior after a STOP HIT.';
     if (!confirm(msg)) return;
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/family-tree-status/set-reversal-trade', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled: enable }),
         });
         const data = await res.json();
@@ -3504,10 +3470,9 @@ async function confirmLiquidateAndBuyBtc() {
     const banner = document.getElementById('crypto-passive-mode-banner');
     banner.innerHTML = '<div class="panel" style="padding:14px 18px;">Selling every real position and buying BTC…</div>';
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/family-tree-status/liquidate-and-buy-btc', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -3534,10 +3499,9 @@ async function previewConsolidate() {
     statusEl.textContent = 'Computing the real merge plan…';
     planWrap.innerHTML = '';
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/family-tree-status/consolidate-branches?dry_run=true', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -3569,10 +3533,9 @@ async function executeConsolidate() {
     const planWrap = document.getElementById('consolidate-plan-wrap');
     statusEl.textContent = 'Combining…';
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/family-tree-status/consolidate-branches?dry_run=false', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -3761,10 +3724,9 @@ async function clearBtcPredictionLog() {
     btn.disabled = true;
     btn.textContent = 'Clearing...';
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/family-tree-status/btc-projection/log/reset', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -3783,10 +3745,9 @@ async function runBtcProjectionBacktest() {
     btn.disabled = true;
     btn.textContent = 'Running... (~10-40s)';
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/family-tree-status/btc-projection/backtest', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -3836,10 +3797,9 @@ async function runBtcDirectionalBacktest() {
     btn.disabled = true;
     btn.textContent = 'Running... (~10-40s)';
     try {
-        const key = getAdminKey();
         const res = await fetch(API_BASE + '/family-tree-status/btc-projection/directional-backtest', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
