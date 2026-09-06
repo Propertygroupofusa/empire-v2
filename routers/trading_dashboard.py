@@ -29,7 +29,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db, AsyncSessionLocal
-from admin_auth import require_admin_key
 from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory, PricePredictionCalibration, PricePredictionLog, BtcTickerWindowAnchor, AlpacaBranch, CombinedEquitySnapshot, AlpacaBacktestRun
 
 NUM_BOTS = int(os.getenv("PROP_NUM_BOTS", "8"))
@@ -143,7 +142,7 @@ TICKER_CRYPTO_PRODUCTS = ["BTC-USD", "ETH-USD", "XRP-USD", "DOGE-USD", "SOL-USD"
 TICKER_STOCK_SYMBOLS = ["SPY", "QQQ"]
 
 
-@router.get("/ticker", dependencies=[Depends(require_admin_key)])
+@router.get("/ticker")
 async def get_ticker():
     """Real live price ticker for the dashboards - per the account owner's
     explicit request for a scrolling price strip like the one on Fortune's
@@ -492,7 +491,7 @@ async def get_closed_trades():
         raise HTTPException(status_code=502, detail=str(e))
 
 
-@router.get("/status", dependencies=[Depends(require_admin_key)])
+@router.get("/status")
 async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
     """Real account snapshot: equity, cash, positions, today's trades, and
     each of the NUM_BOTS tracked buckets' current share. Every poll,
@@ -563,7 +562,7 @@ class WithdrawRequestBody(BaseModel):
     amount: float
 
 
-@router.post("/withdraw-request", dependencies=[Depends(require_admin_key)])
+@router.post("/withdraw-request")
 async def create_withdrawal_request(payload: WithdrawRequestBody, db: AsyncSession = Depends(get_db)):
     """Logs a real withdrawal request against one specific bot's tracked
     capital. Does not move any money - the actual ACH transfer has to be
@@ -598,7 +597,7 @@ async def create_withdrawal_request(payload: WithdrawRequestBody, db: AsyncSessi
     return withdrawal.to_dict()
 
 
-@router.post("/withdraw-request/{withdrawal_id}/complete", dependencies=[Depends(require_admin_key)])
+@router.post("/withdraw-request/{withdrawal_id}/complete")
 async def complete_withdrawal_request(withdrawal_id: int, db: AsyncSession = Depends(get_db)):
     """Mark a withdrawal request completed once you've actually done the
     real transfer manually in Alpaca's app - this is also when the
@@ -625,7 +624,7 @@ async def complete_withdrawal_request(withdrawal_id: int, db: AsyncSession = Dep
     return withdrawal.to_dict()
 
 
-@router.post("/withdraw-all-profit", dependencies=[Depends(require_admin_key)])
+@router.post("/withdraw-all-profit")
 async def withdraw_all_profit(db: AsyncSession = Depends(get_db)):
     """One-tap version of create_withdrawal_request above, for every bot
     that currently has real profit instead of picking one bot at a time.
@@ -662,7 +661,7 @@ async def withdraw_all_profit(db: AsyncSession = Depends(get_db)):
     return {"requested": [w.to_dict() for w in created], "total": round(total, 2)}
 
 
-@router.post("/withdrawals/complete-all-requested", dependencies=[Depends(require_admin_key)])
+@router.post("/withdrawals/complete-all-requested")
 async def complete_all_requested_withdrawals(db: AsyncSession = Depends(get_db)):
     """Bulk version of complete_withdrawal_request - confirms every
     currently 'requested' withdrawal (from either the single-bot or
@@ -691,14 +690,14 @@ async def complete_all_requested_withdrawals(db: AsyncSession = Depends(get_db))
     return {"completed": [w.to_dict() for w in pending], "total": round(total, 2)}
 
 
-@router.get("/withdrawals", dependencies=[Depends(require_admin_key)])
+@router.get("/withdrawals")
 async def list_withdrawals(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(WithdrawalRequest).order_by(WithdrawalRequest.requested_at.desc()))
     withdrawals = result.scalars().all()
     return {"withdrawals": [w.to_dict() for w in withdrawals]}
 
 
-@router.get("/trades", dependencies=[Depends(require_admin_key)])
+@router.get("/trades")
 async def get_todays_trades():
     """Detail behind /status's todays_trade_count - the actual filled
     orders (symbol, side, qty, fill price, time), not just a count. Same
@@ -720,7 +719,7 @@ async def get_todays_trades():
     }
 
 
-@router.get("/signals", dependencies=[Depends(require_admin_key)])
+@router.get("/signals")
 async def get_live_signals():
     """Live per-symbol price/RSI/trend from prop_bot.py's most recent scan
     cycle - the same numbers that were previously only visible in Railway
@@ -739,7 +738,7 @@ async def get_live_signals():
     }
 
 
-@router.get("/crypto-coinbase-status", dependencies=[Depends(require_admin_key)])
+@router.get("/crypto-coinbase-status")
 async def get_crypto_coinbase_status():
     """Same read-only in-memory view as /signals, but for
     crypto_coinbase_bot.py - the 24/7 BTC/ETH bot trading through a
@@ -759,7 +758,7 @@ async def get_crypto_coinbase_status():
     }
 
 
-@router.get("/family-tree-status", dependencies=[Depends(require_admin_key)])
+@router.get("/family-tree-status")
 async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     """Real DB state of every crypto_family_tree_bot.py branch. Unlike
     /crypto-coinbase-status above, there's no single in-memory module dict
@@ -1211,7 +1210,7 @@ def _build_progress_observations(alpaca_data, crypto_data):
     return observations
 
 
-@router.get("/combined-equity-progress", dependencies=[Depends(require_admin_key)])
+@router.get("/combined-equity-progress")
 async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
     """Real, combined progress toward the account owner's own $1,000,000
     goal across BOTH real trading systems at once - per their explicit
@@ -1323,7 +1322,7 @@ async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
     }
 
 
-@router.get("/family-tree-status/coin-history", dependencies=[Depends(require_admin_key)])
+@router.get("/family-tree-status/coin-history")
 async def get_coin_trade_history(db: AsyncSession = Depends(get_db)):
     """Real per-coin trade history and P&L, per the account owner's
     explicit request: since branches switch coins over time and different
@@ -1374,7 +1373,7 @@ async def get_coin_trade_history(db: AsyncSession = Depends(get_db)):
     return {"coins": coins, "coin_count": len(coins)}
 
 
-@router.get("/family-tree-status/activity-feed", dependencies=[Depends(require_admin_key)])
+@router.get("/family-tree-status/activity-feed")
 async def get_activity_feed(limit: int = 50):
     """Real, live feed of what the bot has actually just done - per the
     account owner's explicit request to SEE it working (buying, selling,
@@ -1575,7 +1574,7 @@ async def _latest_btc_calibration_and_method(db, bpp):
     return latest_calibration, method
 
 
-@router.get("/family-tree-status/btc-projection", dependencies=[Depends(require_admin_key)])
+@router.get("/family-tree-status/btc-projection")
 async def get_btc_price_projection():
     """Real, live 15-minute-ahead price projection for BTC - per the
     account owner's explicit request: "can we set up a system that can
@@ -1619,7 +1618,7 @@ async def get_btc_price_projection():
     return projection
 
 
-@router.get("/family-tree-status/btc-projection/log", dependencies=[Depends(require_admin_key)])
+@router.get("/family-tree-status/btc-projection/log")
 async def get_btc_prediction_log(limit: int = 20):
     """Real, individual prediction-by-prediction track record for the BTC
     15-minute projection - per the account owner's explicit follow-up
@@ -1679,7 +1678,7 @@ async def get_btc_prediction_log(limit: int = 20):
     }
 
 
-@router.post("/family-tree-status/btc-projection/log/reset", dependencies=[Depends(require_admin_key)])
+@router.post("/family-tree-status/btc-projection/log/reset")
 async def reset_btc_prediction_log():
     """Per the account owner's explicit request, after spotting a real
     duplicate row in their own "Recent Predictions" list (the exact
@@ -1755,7 +1754,7 @@ async def _get_or_create_hourly_window_anchor(db, product_id: str, live_price: f
     return anchor
 
 
-@router.get("/family-tree-status/btc-projection/chart", dependencies=[Depends(require_admin_key)])
+@router.get("/family-tree-status/btc-projection/chart")
 async def get_btc_price_chart():
     """Real, live BTC ticker + countdown for the dashboard - per the
     account owner's explicit request for "a ticker and a timing... like
@@ -1869,7 +1868,7 @@ async def get_btc_price_chart():
     }
 
 
-@router.post("/family-tree-status/btc-projection/backtest", dependencies=[Depends(require_admin_key)])
+@router.post("/family-tree-status/btc-projection/backtest")
 async def run_btc_price_projection_backtest(days: float = 3.0):
     """SHADOW-MODE - never touches live trading, places no order. Runs a
     real backtest of the 15-minute-ahead projection above against real
@@ -1899,7 +1898,7 @@ async def run_btc_price_projection_backtest(days: float = 3.0):
     return result
 
 
-@router.post("/family-tree-status/btc-projection/directional-backtest", dependencies=[Depends(require_admin_key)])
+@router.post("/family-tree-status/btc-projection/directional-backtest")
 async def run_btc_directional_signal_backtest(days: float = 3.0):
     """SHADOW-MODE - never touches live trading, places no order, and this
     result is never read by anything that trades or bets. Built as the
@@ -1918,7 +1917,7 @@ async def run_btc_directional_signal_backtest(days: float = 3.0):
     return result
 
 
-@router.post("/family-tree-status/root-take-profit", dependencies=[Depends(require_admin_key)])
+@router.post("/family-tree-status/root-take-profit")
 async def take_root_profit():
     """Manually cash in BTC's (the tree's permanent root) profit right
     now, on demand - per the account owner's explicit request, since BTC
@@ -1985,7 +1984,7 @@ class RootPartialSellRequest(BaseModel):
     amount_usd: float
 
 
-@router.post("/family-tree-status/root-partial-sell", dependencies=[Depends(require_admin_key)])
+@router.post("/family-tree-status/root-partial-sell")
 async def root_partial_sell_endpoint(payload: RootPartialSellRequest):
     """Sells a specific real dollar amount out of root's BTC-USD position,
     leaving the rest untouched - per the account owner's own explicit,
@@ -2052,7 +2051,7 @@ class AddCashRequest(BaseModel):
     amount: float
 
 
-@router.post("/family-tree-status/add-cash/{bot_name}", dependencies=[Depends(require_admin_key)])
+@router.post("/family-tree-status/add-cash/{bot_name}")
 async def add_cash_to_branch(bot_name: str, payload: AddCashRequest, db: AsyncSession = Depends(get_db)):
     """Manually deploys real, currently-unallocated cash directly into ANY
     branch's position right now - originally built scoped to root only
@@ -2180,7 +2179,7 @@ class ReallocateCashRequest(BaseModel):
     amount: float
 
 
-@router.post("/family-tree-status/reallocate-cash", dependencies=[Depends(require_admin_key)])
+@router.post("/family-tree-status/reallocate-cash")
 async def reallocate_cash_between_branches(payload: ReallocateCashRequest, db: AsyncSession = Depends(get_db)):
     """Moves real, already-bookkept cash directly from one FLAT branch's
     allocated_usd into another branch's position - built after a real
@@ -2318,7 +2317,7 @@ async def reallocate_cash_between_branches(payload: ReallocateCashRequest, db: A
     }
 
 
-@router.post("/family-tree-status/consolidate-branches", dependencies=[Depends(require_admin_key)])
+@router.post("/family-tree-status/consolidate-branches")
 async def consolidate_family_tree_branches(dry_run: bool = True):
     """Merges every real branch sharing the same coin into one - per the
     account owner's explicit request, after the shared-coin-branches
@@ -2342,7 +2341,7 @@ async def consolidate_family_tree_branches(dry_run: bool = True):
     return await crypto_family_tree_bot_module.consolidate_branches_by_coin(dry_run=dry_run)
 
 
-@router.post("/family-tree-status/reconcile-asset/{currency}", dependencies=[Depends(require_admin_key)])
+@router.post("/family-tree-status/reconcile-asset/{currency}")
 async def reconcile_asset(currency: str, dry_run: bool = True):
     """Corrects a real SHORTFALL the Reconciliation panel flags - every
     real branch's tracked qty for this currency, summed, exceeds what
@@ -2362,7 +2361,7 @@ async def reconcile_asset(currency: str, dry_run: bool = True):
     return await crypto_family_tree_bot_module.reconcile_asset_to_real_balance(currency.upper(), dry_run=dry_run)
 
 
-@router.post("/family-tree-status/liquidate-and-buy-btc", dependencies=[Depends(require_admin_key)])
+@router.post("/family-tree-status/liquidate-and-buy-btc")
 async def liquidate_family_tree_and_buy_btc():
     """Per the account owner's explicit, real decision - the crypto-side
     counterpart to the Alpaca liquidate-and-buy-SPY action: retires the
@@ -2388,7 +2387,7 @@ async def liquidate_family_tree_and_buy_btc():
     return await crypto_family_tree_bot_module.liquidate_family_tree_and_buy_btc()
 
 
-@router.post("/family-tree-status/close/{bot_name}", dependencies=[Depends(require_admin_key)])
+@router.post("/family-tree-status/close/{bot_name}")
 async def close_family_tree_branch(bot_name: str):
     """Manually force one branch to sell its open position right now, at
     market - a real Coinbase order via the exact same
@@ -2471,7 +2470,7 @@ async def close_family_tree_branch(bot_name: str):
     }
 
 
-@router.post("/family-tree-status/spawn-branch", dependencies=[Depends(require_admin_key)])
+@router.post("/family-tree-status/spawn-branch")
 async def spawn_family_tree_branch(db: AsyncSession = Depends(get_db)):
     """Manually starts a brand-new $50 branch right now, on demand -
     per the account owner, the same "$50 in, let it grow, swap coins,
@@ -2555,7 +2554,7 @@ async def spawn_family_tree_branch(db: AsyncSession = Depends(get_db)):
     }
 
 
-@router.post("/family-tree-status/spawn-branch/{product_id}", dependencies=[Depends(require_admin_key)])
+@router.post("/family-tree-status/spawn-branch/{product_id}")
 async def spawn_family_tree_branch_on_coin(product_id: str, db: AsyncSession = Depends(get_db)):
     """Same real $50-seed spawn as spawn_family_tree_branch() above, except
     the caller picks the coin directly instead of the bot auto-selecting via
@@ -2644,7 +2643,7 @@ class UnlockProfitRequest(BaseModel):
     bot_name: str | None = None  # omit to release as free spendable cash; set to add directly into that branch's balance
 
 
-@router.post("/family-tree-status/unlock-profit", dependencies=[Depends(require_admin_key)])
+@router.post("/family-tree-status/unlock-profit")
 async def unlock_locked_profit(payload: UnlockProfitRequest, db: AsyncSession = Depends(get_db)):
     """Manually releases real money back OUT of the crypto family tree's
     locked-profit ledger (see PROFIT_SKIM_PCT / the dust sweep in
@@ -2698,7 +2697,7 @@ async def unlock_locked_profit(payload: UnlockProfitRequest, db: AsyncSession = 
     return {"status": "cashed_out", "amount": round(released, 2), "new_locked_usd": round(current_locked - released, 2)}
 
 
-@router.get("/family-tree-status/coin-watchlist", dependencies=[Depends(require_admin_key)])
+@router.get("/family-tree-status/coin-watchlist")
 async def family_tree_coin_watchlist():
     """Real-time (NOT backtested) view of every family-tree coin's live
     bullish/overbought/BTC-relative-strength status, per the account
@@ -2718,7 +2717,7 @@ class SetManualCoinOverrideRequest(BaseModel):
     excluded: bool
 
 
-@router.post("/family-tree-status/coin-manual-override", dependencies=[Depends(require_admin_key)])
+@router.post("/family-tree-status/coin-manual-override")
 async def set_family_tree_manual_coin_override(payload: SetManualCoinOverrideRequest):
     """Real, dashboard-driven toggle of one coin's manual-exclusion status
     - per the account owner's explicit complaint that the live watchlist's
@@ -2754,7 +2753,7 @@ async def set_family_tree_manual_coin_override(payload: SetManualCoinOverrideReq
     }
 
 
-@router.get("/family-tree-status/reconciliation", dependencies=[Depends(require_admin_key)])
+@router.get("/family-tree-status/reconciliation")
 async def family_tree_reconciliation():
     """Real DB-vs-Coinbase reconciliation, per the account owner's direct
     request after seeing real branches get permanently stuck retrying an
@@ -2770,7 +2769,7 @@ async def family_tree_reconciliation():
     return await crypto_family_tree_bot_module.get_reconciliation_report()
 
 
-@router.post("/crypto-selection-backtest", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest")
 async def run_crypto_selection_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders,
     and no bot reads this result. Answers a real question raised about
@@ -2793,7 +2792,7 @@ async def run_crypto_selection_backtest():
     return await crypto_selection_backtest_module.run_full_backtest()
 
 
-@router.post("/crypto-selection-backtest/real-allocations", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/real-allocations")
 async def run_crypto_selection_backtest_real_allocations():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     Per the account owner's explicit request: the main backtest above
@@ -2814,7 +2813,7 @@ async def run_crypto_selection_backtest_real_allocations():
     return await crypto_selection_backtest_module.run_full_backtest_with_real_allocations()
 
 
-@router.post("/crypto-selection-backtest/btc-relative-strength", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/btc-relative-strength")
 async def run_btc_relative_strength_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders,
     and no bot reads this result yet. Per the account owner's explicit
@@ -2837,7 +2836,7 @@ async def run_btc_relative_strength_backtest():
     return await crypto_selection_backtest_module.run_btc_relative_strength_comparison()
 
 
-@router.post("/crypto-selection-backtest/combined-live-entry-filters", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/combined-live-entry-filters")
 async def run_combined_live_entry_filters_backtest_endpoint():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     Direct answer to the account owner's own "do a backtest" request
@@ -2863,7 +2862,7 @@ async def run_combined_live_entry_filters_backtest_endpoint():
     return await crypto_selection_backtest_module.run_combined_live_entry_filters_backtest()
 
 
-@router.post("/crypto-selection-backtest/higher-tf-trend", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/higher-tf-trend")
 async def run_higher_tf_trend_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders,
     and no bot reads this result yet. Answers a real question the account
@@ -2886,7 +2885,7 @@ async def run_higher_tf_trend_backtest():
     return await crypto_selection_backtest_module.run_higher_tf_trend_comparison()
 
 
-@router.post("/crypto-selection-backtest/support-resistance", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/support-resistance")
 async def run_support_resistance_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders,
     and no bot reads this result yet. Tests the account owner's own real
@@ -2909,7 +2908,7 @@ async def run_support_resistance_backtest():
     return await crypto_selection_backtest_module.run_support_resistance_comparison()
 
 
-@router.post("/crypto-selection-backtest/quick-profit-vs-trailing-stop", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/quick-profit-vs-trailing-stop")
 async def run_quick_profit_vs_trailing_stop_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     Built after a pasted proposal argued for letting winners run behind a
@@ -2933,7 +2932,7 @@ async def run_quick_profit_vs_trailing_stop_backtest():
     return await crypto_selection_backtest_module.run_quick_profit_vs_trailing_stop_comparison()
 
 
-@router.post("/crypto-selection-backtest/partial-exit-vs-full-trail", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/partial-exit-vs-full-trail")
 async def run_partial_exit_vs_full_trail_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     Tests the account owner's own real proposal directly: "take most of
@@ -2955,7 +2954,7 @@ async def run_partial_exit_vs_full_trail_backtest():
     return await crypto_selection_backtest_module.run_partial_exit_vs_full_trail_comparison()
 
 
-@router.post("/crypto-selection-backtest/narrow-range-breakout", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/narrow-range-breakout")
 async def run_narrow_range_breakout_backtest_endpoint():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     Tests the account owner's own real trading claim directly: "the best
@@ -2977,7 +2976,7 @@ async def run_narrow_range_breakout_backtest_endpoint():
     return await crypto_selection_backtest_module.run_narrow_range_breakout_backtest()
 
 
-@router.post("/crypto-selection-backtest/opening-bar-breakout", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/opening-bar-breakout")
 async def run_opening_bar_breakout_backtest_endpoint():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     Tests the account owner's own fully-specified real trading system,
@@ -3000,7 +2999,7 @@ async def run_opening_bar_breakout_backtest_endpoint():
     return await crypto_selection_backtest_module.run_opening_bar_breakout_backtest()
 
 
-@router.post("/crypto-selection-backtest/opening-bar-narrow-state-comparison", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/opening-bar-narrow-state-comparison")
 async def run_opening_bar_narrow_state_comparison_endpoint():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     Compares three real narrow-state definitions against the IDENTICAL
@@ -3015,7 +3014,7 @@ async def run_opening_bar_narrow_state_comparison_endpoint():
     return await crypto_selection_backtest_module.run_opening_bar_narrow_state_comparison()
 
 
-@router.post("/crypto-selection-backtest/wide-state-contrarian", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/wide-state-contrarian")
 async def run_wide_state_contrarian_backtest_endpoint():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     The account owner's own SEPARATE real trading idea from the
@@ -3030,7 +3029,7 @@ async def run_wide_state_contrarian_backtest_endpoint():
     return await crypto_selection_backtest_module.run_wide_state_contrarian_backtest()
 
 
-@router.post("/crypto-selection-backtest/opening-bar-short-side", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/opening-bar-short-side")
 async def run_opening_bar_short_side_backtest_endpoint():
     """SHADOW-MODE ONLY, DIAGNOSTIC ONLY - does not touch live trading,
     places no orders. The real bearish mirror of the live Elephant/Tail
@@ -3047,7 +3046,7 @@ async def run_opening_bar_short_side_backtest_endpoint():
     return await crypto_selection_backtest_module.run_opening_bar_short_side_backtest()
 
 
-@router.post("/crypto-selection-backtest/scaled-entry-comparison", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/scaled-entry-comparison")
 async def run_scaled_entry_comparison_backtest_endpoint():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     The account owner's own real scaling-in mechanic, transcribed
@@ -3063,7 +3062,7 @@ async def run_scaled_entry_comparison_backtest_endpoint():
     return await crypto_selection_backtest_module.run_scaled_entry_comparison_backtest()
 
 
-@router.post("/crypto-selection-backtest/red-bar-takeout", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/red-bar-takeout")
 async def run_red_bar_takeout_backtest_endpoint():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     The account owner's own real THIRD, lower-conviction setup,
@@ -3079,7 +3078,7 @@ async def run_red_bar_takeout_backtest_endpoint():
     return await crypto_selection_backtest_module.run_red_bar_takeout_backtest()
 
 
-@router.post("/crypto-selection-backtest/strategy-lab", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/strategy-lab")
 async def run_strategy_lab_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     Built after the account owner pasted a third-party proposal (Spot
@@ -3105,7 +3104,7 @@ async def run_strategy_lab_backtest():
     return await crypto_selection_backtest_module.run_strategy_lab_comparison()
 
 
-@router.post("/crypto-selection-backtest/market-phase-breakdown", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/market-phase-breakdown")
 async def run_market_phase_breakdown_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     Built after the account owner pasted a trading lesson on the four-phase
@@ -3137,7 +3136,7 @@ async def run_market_phase_breakdown_backtest():
     return await crypto_selection_backtest_module.run_market_phase_breakdown_backtest()
 
 
-@router.post("/crypto-selection-backtest/grid-drawdown-breaker", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/grid-drawdown-breaker")
 async def run_grid_drawdown_breaker_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     Grid Bot went live with no account-level protection at all - a
@@ -3159,7 +3158,7 @@ async def run_grid_drawdown_breaker_backtest():
     return await crypto_selection_backtest_module.run_grid_drawdown_breaker_comparison()
 
 
-@router.post("/crypto-selection-backtest/grid-fee-tier-spacing", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/grid-fee-tier-spacing")
 async def run_grid_fee_tier_spacing_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     Real backtest for Grid Bot's opt-in fee-tier-aware dynamic spacing
@@ -3183,7 +3182,7 @@ async def run_grid_fee_tier_spacing_backtest():
     return await crypto_selection_backtest_module.run_grid_fee_tier_spacing_comparison()
 
 
-@router.post("/crypto-selection-backtest/grid-atr-spacing", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/grid-atr-spacing")
 async def run_grid_atr_spacing_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     Direct answer to the account owner's own question: "what is the
@@ -3205,7 +3204,7 @@ async def run_grid_atr_spacing_backtest():
     return await crypto_selection_backtest_module.run_grid_atr_spacing_comparison()
 
 
-@router.post("/crypto-selection-backtest/grid-level-spacing", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/grid-level-spacing")
 async def run_grid_level_spacing_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     Direct, real answer to a pasted third-party critique's specific
@@ -3224,7 +3223,7 @@ async def run_grid_level_spacing_backtest():
     return await crypto_selection_backtest_module.run_grid_level_spacing_comparison()
 
 
-@router.post("/crypto-selection-backtest/grid-higher-tf-trend", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/grid-higher-tf-trend")
 async def run_grid_higher_tf_trend_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     Direct follow-up to the account owner's own question after seeing
@@ -3246,7 +3245,7 @@ async def run_grid_higher_tf_trend_backtest():
     return await crypto_selection_backtest_module.run_grid_higher_tf_trend_comparison()
 
 
-@router.post("/crypto-selection-backtest/grid-rotation-effectiveness", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/grid-rotation-effectiveness")
 async def run_grid_rotation_effectiveness_backtest_endpoint():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     Direct answer to the account owner's own question after
@@ -3274,7 +3273,7 @@ class SetExitModeRequest(BaseModel):
     mode: str
 
 
-@router.post("/family-tree-status/set-exit-mode", dependencies=[Depends(require_admin_key)])
+@router.post("/family-tree-status/set-exit-mode")
 async def set_crypto_exit_mode(payload: SetExitModeRequest):
     """Promotes one of the 2 real, backtested exit philosophies (see
     crypto_selection_backtest.py's run_quick_profit_vs_trailing_stop_comparison,
@@ -3304,7 +3303,7 @@ class SetReversalTradeRequest(BaseModel):
     enabled: bool
 
 
-@router.post("/family-tree-status/set-reversal-trade", dependencies=[Depends(require_admin_key)])
+@router.post("/family-tree-status/set-reversal-trade")
 async def set_crypto_reversal_trade(payload: SetReversalTradeRequest):
     """Turns the real, opt-in STOP-HIT reversal buy on or off - the live
     wiring of what crypto_selection_backtest.py's
@@ -3327,7 +3326,7 @@ async def set_crypto_reversal_trade(payload: SetReversalTradeRequest):
     return {"status": "updated", "reversal_trade_active": payload.enabled}
 
 
-@router.post("/crypto-selection-backtest/trailing-stop-pct-sweep", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/trailing-stop-pct-sweep")
 async def run_trailing_stop_pct_sweep_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     Per the account owner's explicit follow-up request right after
@@ -3360,7 +3359,7 @@ class SetTrailingStopPctRequest(BaseModel):
     pct: float
 
 
-@router.post("/family-tree-status/set-trailing-stop-pct", dependencies=[Depends(require_admin_key)])
+@router.post("/family-tree-status/set-trailing-stop-pct")
 async def set_crypto_trailing_stop_pct(payload: SetTrailingStopPctRequest):
     """Promotes one of the real, backtested trailing-stop widths (see
     crypto_selection_backtest.py's run_trailing_stop_pct_sweep_comparison,
@@ -3385,7 +3384,7 @@ async def set_crypto_trailing_stop_pct(payload: SetTrailingStopPctRequest):
     return {"status": "promoted", "trailing_stop_pct": payload.pct}
 
 
-@router.post("/crypto-selection-backtest/stop-hit-reversal", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/stop-hit-reversal")
 async def run_crypto_stop_hit_reversal_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     Built directly from the account owner's own real question, right
@@ -3413,7 +3412,7 @@ async def run_crypto_stop_hit_reversal_backtest():
     return await crypto_selection_backtest_module.run_stop_hit_reversal_backtest()
 
 
-@router.post("/crypto-selection-backtest/forced-exit-reversal", dependencies=[Depends(require_admin_key)])
+@router.post("/crypto-selection-backtest/forced-exit-reversal")
 async def run_crypto_forced_exit_reversal_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     The direct follow-up to the Stop-Hit Reversal Backtest above, per the
@@ -3434,7 +3433,7 @@ async def run_crypto_forced_exit_reversal_backtest():
     return await crypto_selection_backtest_module.run_forced_exit_reversal_backtest()
 
 
-@router.post("/alpaca-selection-backtest", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-selection-backtest")
 async def run_alpaca_selection_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     The Alpaca-side counterpart to /crypto-selection-backtest above, per
@@ -3453,7 +3452,7 @@ async def run_alpaca_selection_backtest():
     return await alpaca_selection_backtest_module.run_full_backtest()
 
 
-@router.post("/alpaca-selection-backtest/exit-rule-comparison", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-selection-backtest/exit-rule-comparison")
 async def run_alpaca_exit_rule_comparison():
     """SHADOW-MODE ONLY - never touches live trading, places no order.
     Per the account owner's real question after ~4 months of live Alpaca
@@ -3469,7 +3468,7 @@ async def run_alpaca_exit_rule_comparison():
     return await alpaca_selection_backtest_module.run_exit_rule_sensitivity_comparison()
 
 
-@router.post("/alpaca-selection-backtest/momentum-comparison", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-selection-backtest/momentum-comparison")
 async def run_alpaca_momentum_comparison():
     """SHADOW-MODE ONLY - never touches live trading, places no order.
     Per the account owner's real request: everything built so far is
@@ -3488,7 +3487,7 @@ async def run_alpaca_momentum_comparison():
     return await alpaca_selection_backtest_module.run_momentum_vs_mean_reversion_comparison()
 
 
-@router.post("/alpaca-selection-backtest/momentum-comparison-multi-window", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-selection-backtest/momentum-comparison-multi-window")
 async def run_alpaca_momentum_comparison_multi_window(num_windows: int = 3):
     """SHADOW-MODE ONLY - never touches live trading, places no order.
     Built after the account owner ran the single-window momentum-vs-mean-
@@ -3507,7 +3506,7 @@ async def run_alpaca_momentum_comparison_multi_window(num_windows: int = 3):
     return await alpaca_selection_backtest_module.run_momentum_vs_mean_reversion_multi_window(num_windows=num_windows)
 
 
-@router.post("/alpaca-selection-backtest/combined-strategy", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-selection-backtest/combined-strategy")
 async def run_alpaca_combined_strategy_backtest():
     """SHADOW-MODE ONLY - never touches live trading, places no order.
     Real answer to the account owner's direct question after seeing the
@@ -3527,7 +3526,7 @@ async def run_alpaca_combined_strategy_backtest():
     return await alpaca_selection_backtest_module.run_combined_dual_strategy_backtest()
 
 
-@router.post("/alpaca-selection-backtest/entry-signal-ab-test", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-selection-backtest/entry-signal-ab-test")
 async def run_alpaca_entry_signal_ab_test():
     """SHADOW-MODE ONLY - never touches live trading, places no order.
     Real, well-reasoned pushback on the live momentum entry (RSI > 55 AND
@@ -3545,7 +3544,7 @@ async def run_alpaca_entry_signal_ab_test():
     return await alpaca_selection_backtest_module.run_entry_signal_ab_test()
 
 
-@router.post("/alpaca-selection-backtest/narrow-range-breakout", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-selection-backtest/narrow-range-breakout")
 async def run_alpaca_narrow_range_breakout_backtest():
     """SHADOW-MODE ONLY - never touches live trading, places no order.
     The Alpaca-side counterpart to the crypto narrow-range-breakout
@@ -3564,7 +3563,7 @@ async def run_alpaca_narrow_range_breakout_backtest():
     return await alpaca_selection_backtest_module.run_narrow_range_breakout_backtest()
 
 
-@router.post("/alpaca-selection-backtest/opening-bar-breakout", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-selection-backtest/opening-bar-breakout")
 async def run_alpaca_opening_bar_breakout_backtest():
     """SHADOW-MODE ONLY - never touches live trading, places no order.
     Tests the account owner's own fully-specified real trading system,
@@ -3579,7 +3578,7 @@ async def run_alpaca_opening_bar_breakout_backtest():
     return await alpaca_selection_backtest_module.run_opening_bar_breakout_backtest()
 
 
-@router.post("/alpaca-selection-backtest/opening-bar-multi-entry-comparison", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-selection-backtest/opening-bar-multi-entry-comparison")
 async def run_alpaca_opening_bar_multi_entry_comparison():
     """SHADOW-MODE ONLY - never touches live trading, places no order.
     Per the account owner's own real reference chart (a staircase of
@@ -3593,7 +3592,7 @@ async def run_alpaca_opening_bar_multi_entry_comparison():
     return await alpaca_selection_backtest_module.run_opening_bar_multi_entry_comparison()
 
 
-@router.post("/alpaca-selection-backtest/opening-bar-narrow-state-comparison", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-selection-backtest/opening-bar-narrow-state-comparison")
 async def run_alpaca_opening_bar_narrow_state_comparison():
     """SHADOW-MODE ONLY - never touches live trading, places no order.
     The Alpaca-side counterpart to the crypto comparison above - compares
@@ -3606,7 +3605,7 @@ async def run_alpaca_opening_bar_narrow_state_comparison():
     return await alpaca_selection_backtest_module.run_opening_bar_narrow_state_comparison()
 
 
-@router.post("/alpaca-selection-backtest/wide-state-contrarian", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-selection-backtest/wide-state-contrarian")
 async def run_alpaca_wide_state_contrarian_backtest():
     """SHADOW-MODE ONLY - never touches live trading, places no order.
     The Alpaca-side counterpart to the crypto wide-state contrarian
@@ -3622,7 +3621,7 @@ async def run_alpaca_wide_state_contrarian_backtest():
     return await alpaca_selection_backtest_module.run_wide_state_contrarian_backtest()
 
 
-@router.post("/alpaca-selection-backtest/opening-bar-short-side", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-selection-backtest/opening-bar-short-side")
 async def run_alpaca_opening_bar_short_side_backtest():
     """SHADOW-MODE ONLY, DIAGNOSTIC ONLY - never touches live trading,
     places no order. The Alpaca-side counterpart to the crypto bearish-
@@ -3635,7 +3634,7 @@ async def run_alpaca_opening_bar_short_side_backtest():
     return await alpaca_selection_backtest_module.run_opening_bar_short_side_backtest()
 
 
-@router.post("/alpaca-selection-backtest/scaled-entry-comparison", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-selection-backtest/scaled-entry-comparison")
 async def run_alpaca_scaled_entry_comparison_backtest():
     """SHADOW-MODE ONLY - never touches live trading, places no order.
     The Alpaca-side counterpart to the crypto scaled-entry comparison
@@ -3647,7 +3646,7 @@ async def run_alpaca_scaled_entry_comparison_backtest():
     return await alpaca_selection_backtest_module.run_scaled_entry_comparison_backtest()
 
 
-@router.post("/alpaca-selection-backtest/red-bar-takeout", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-selection-backtest/red-bar-takeout")
 async def run_alpaca_red_bar_takeout_backtest():
     """SHADOW-MODE ONLY - never touches live trading, places no order.
     The Alpaca-side counterpart to the crypto red-bar-takeout backtest
@@ -3659,7 +3658,7 @@ async def run_alpaca_red_bar_takeout_backtest():
     return await alpaca_selection_backtest_module.run_red_bar_takeout_backtest()
 
 
-@router.post("/macro-event-backtest", dependencies=[Depends(require_admin_key)])
+@router.post("/macro-event-backtest")
 async def run_macro_event_backtest_endpoint():
     """SHADOW-MODE ONLY - never touches live trading, places no order. Per
     the account owner's own direct request after sharing a real US Balance
@@ -3695,7 +3694,7 @@ def _safe_float(v):
         return None
 
 
-@router.get("/alpaca-overview", dependencies=[Depends(require_admin_key)])
+@router.get("/alpaca-overview")
 async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
     """Real Alpaca account snapshot for a focused, at-a-glance dashboard:
     equity, each bot_N bucket's capital/profit, every real open position,
@@ -3796,7 +3795,7 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
     }
 
 
-@router.post("/alpaca-overview/close/{symbol}", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-overview/close/{symbol}")
 async def close_alpaca_position(symbol: str, db: AsyncSession = Depends(get_db)):
     """Manually close one real open Alpaca position at market price - the
     same DELETE /v2/positions/{symbol} Alpaca's own app uses, so this is a
@@ -3864,7 +3863,7 @@ class CloseExtendedHoursRequest(BaseModel):
     force: bool = False                # override the spread guard deliberately
 
 
-@router.post("/alpaca-overview/close-extended-hours/{symbol}", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-overview/close-extended-hours/{symbol}")
 async def close_alpaca_position_extended_hours(
     symbol: str,
     payload: CloseExtendedHoursRequest = CloseExtendedHoursRequest(),
@@ -4034,7 +4033,7 @@ async def close_alpaca_position_extended_hours(
     }
 
 
-@router.post("/alpaca-overview/liquidate-and-buy-spy", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-overview/liquidate-and-buy-spy")
 async def liquidate_alpaca_and_buy_spy(db: AsyncSession = Depends(get_db)):
     """Per the account owner's explicit, real decision: retire active
     Alpaca trading entirely (prop_bot.py's mean-reversion futures-proxy
@@ -4164,7 +4163,7 @@ async def liquidate_alpaca_and_buy_spy(db: AsyncSession = Depends(get_db)):
     }
 
 
-@router.post("/alpaca-overview/resume-active-trading", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-overview/resume-active-trading")
 async def resume_alpaca_active_trading():
     """Reverses is_alpaca_passive_mode() - per the account owner's explicit
     request to let prop_bot.py/alpaca_swing_bot.py resume real automatic
@@ -4191,7 +4190,7 @@ class SetEntryVariantRequest(BaseModel):
     variant: str
 
 
-@router.post("/alpaca-overview/set-entry-variant", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-overview/set-entry-variant")
 async def set_alpaca_entry_variant(payload: SetEntryVariantRequest):
     """Promotes one of the 4 real, backtested entry-gate variants (see
     alpaca_selection_backtest.py's ENTRY_VARIANTS / run_entry_signal_ab_test,
@@ -4222,7 +4221,7 @@ class SetStrategyFamilyRequest(BaseModel):
     family: str
 
 
-@router.post("/alpaca-overview/set-strategy-family", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-overview/set-strategy-family")
 async def set_alpaca_strategy_family(payload: SetStrategyFamilyRequest):
     """Switches the live Alpaca strategy between "momentum" (buy strength,
     trailing stop) and "mean_reversion" (buy oversold, fixed target/stop/
@@ -4255,7 +4254,7 @@ async def set_alpaca_strategy_family(payload: SetStrategyFamilyRequest):
     return {"status": "switched", "strategy_family": family}
 
 
-@router.get("/alpaca-overview/branches", dependencies=[Depends(require_admin_key)])
+@router.get("/alpaca-overview/branches")
 async def get_alpaca_branches_status():
     """Real status of the Alpaca branch system - a smaller, real first
     slice toward something like the crypto family tree's compounding
@@ -4348,7 +4347,7 @@ async def get_alpaca_branches_status():
     }
 
 
-@router.get("/alpaca-overview/branch-trade-history", dependencies=[Depends(require_admin_key)])
+@router.get("/alpaca-overview/branch-trade-history")
 async def get_alpaca_branch_trade_history_endpoint():
     """Real, per-branch win rate and cumulative P&L for the Alpaca
     branches - per the account owner's explicit request to see the real
@@ -4364,7 +4363,7 @@ async def get_alpaca_branch_trade_history_endpoint():
     return await prop_bot_module.get_alpaca_branch_trade_history()
 
 
-@router.get("/alpaca-overview/branch-symbol-rankings", dependencies=[Depends(require_admin_key)])
+@router.get("/alpaca-overview/branch-symbol-rankings")
 async def get_alpaca_branch_symbol_rankings():
     """Real backtested ROI per contract, ranked best to worst - per the
     account owner's explicit request to see this directly inside the New
@@ -4420,7 +4419,7 @@ class CreateAlpacaBranchRequest(BaseModel):
     allocated_usd: float
 
 
-@router.post("/alpaca-overview/branches", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-overview/branches")
 async def create_alpaca_branch_endpoint(payload: CreateAlpacaBranchRequest):
     """Creates a real new Alpaca branch - a pure bookkeeping operation
     (see prop_bot.create_alpaca_branch's own docstring), never a trade by
@@ -4466,7 +4465,7 @@ class SetAlpacaBranchModeRequest(BaseModel):
     enabled: bool
 
 
-@router.post("/alpaca-overview/branches/mode", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-overview/branches/mode")
 async def set_alpaca_branch_mode_endpoint(payload: SetAlpacaBranchModeRequest):
     """The real master switch for the whole Alpaca branch system - off by
     default (is_alpaca_branch_mode_active). While off, every branch cycle
@@ -4480,7 +4479,7 @@ async def set_alpaca_branch_mode_endpoint(payload: SetAlpacaBranchModeRequest):
     return {"status": "updated", "mode_active": payload.enabled}
 
 
-@router.get("/alpaca-overview/opening-bar-status", dependencies=[Depends(require_admin_key)])
+@router.get("/alpaca-overview/opening-bar-status")
 async def get_opening_bar_status():
     """Real status of the opening-bar live trading system (the validated
     multi-entry elephant/tail breakout - see prop_bot.py's own OPENING-BAR
@@ -4514,7 +4513,7 @@ class SetOpeningBarLiveModeRequest(BaseModel):
     enabled: bool
 
 
-@router.post("/alpaca-overview/opening-bar-mode", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-overview/opening-bar-mode")
 async def set_opening_bar_live_mode_endpoint(payload: SetOpeningBarLiveModeRequest):
     """The real master switch for the opening-bar live trading system -
     off by default (is_opening_bar_live_active). While off, its per-cycle
@@ -4532,7 +4531,7 @@ class SetAlpacaBranchActiveRequest(BaseModel):
     active: bool
 
 
-@router.post("/alpaca-overview/branches/{bot_name}/active", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-overview/branches/{bot_name}/active")
 async def set_alpaca_branch_active_endpoint(bot_name: str, payload: SetAlpacaBranchActiveRequest):
     """Pauses or resumes ONE specific branch without touching the master
     switch or any other branch. A paused branch's own contract is also
@@ -4560,7 +4559,7 @@ class AlpacaUnlockProfitRequest(BaseModel):
     amount: float
 
 
-@router.post("/alpaca-overview/unlock-profit", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-overview/unlock-profit")
 async def unlock_alpaca_locked_profit(payload: AlpacaUnlockProfitRequest):
     """Cash-out ONLY, per the account owner's explicit choice - no
     "add to a bucket" mode (see _subtract_alpaca_locked_usd's docstring
@@ -4579,7 +4578,7 @@ async def unlock_alpaca_locked_profit(payload: AlpacaUnlockProfitRequest):
     return {"status": "cashed_out", "amount": round(released, 2), "new_locked_usd": round(current_locked - released, 2)}
 
 
-@router.post("/alpaca-overview/trade-this/{ticker}", dependencies=[Depends(require_admin_key)])
+@router.post("/alpaca-overview/trade-this/{ticker}")
 async def manual_open_prop_position(ticker: str):
     """Manually opens a real long position on prop_bot.py's real funded-
     account evaluation - the "Trade this" action on the stock/ETF
@@ -4705,7 +4704,7 @@ async def manual_open_prop_position(ticker: str):
     }
 
 
-@router.get("/alpaca-overview/entry-eligibility", dependencies=[Depends(require_admin_key)])
+@router.get("/alpaca-overview/entry-eligibility")
 async def alpaca_entry_eligibility():
     """Per the account owner's real request after "Trade this" refused USO
     with "RSI 58.9 not oversold" - rather than finding out only after
@@ -5011,7 +5010,7 @@ def _rolling_rsi(closes: list, period: int = 14) -> list:
     return rsi_series
 
 
-@router.get("/price-history/{symbol}", dependencies=[Depends(require_admin_key)])
+@router.get("/price-history/{symbol}")
 async def get_price_history(symbol: str):
     """Real OHLC candles + an RSI series for the dashboard's live chart -
     fetched fresh from the exact same public data sources the bots already
@@ -5055,7 +5054,7 @@ async def get_price_history(symbol: str):
     return {"symbol": symbol, "candles": candles, "rsi": _rolling_rsi(closes)}
 
 
-@router.get("/dividends", dependencies=[Depends(require_admin_key)])
+@router.get("/dividends")
 async def get_dividend_tracker():
     """Real dividend income received into the account, grouped by symbol -
     pulled straight from Alpaca's account-activities history (activity
@@ -5676,14 +5675,14 @@ async def get_profit_locks():
 # comparison showed Grid Bot as the clear best real performer.
 # ============================================================================
 
-@router.get("/grid-status", dependencies=[Depends(require_admin_key)])
+@router.get("/grid-status")
 async def get_grid_status_endpoint():
     if crypto_grid_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
     return await crypto_grid_bot_module.get_grid_status()
 
 
-@router.get("/grid-status/trade-history", dependencies=[Depends(require_admin_key)])
+@router.get("/grid-status/trade-history")
 async def get_grid_trade_history_endpoint():
     if crypto_grid_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
@@ -5694,7 +5693,7 @@ class SetGridBotModeRequest(BaseModel):
     enabled: bool
 
 
-@router.post("/grid-status/mode", dependencies=[Depends(require_admin_key)])
+@router.post("/grid-status/mode")
 async def set_grid_bot_mode_endpoint(payload: SetGridBotModeRequest):
     """The real master switch for the whole grid-branch system. Real
     branches can be created while the mode is off (so they're ready
@@ -5712,7 +5711,7 @@ class SetGridDynamicSpacingRequest(BaseModel):
     enabled: bool
 
 
-@router.post("/grid-status/dynamic-spacing", dependencies=[Depends(require_admin_key)])
+@router.post("/grid-status/dynamic-spacing")
 async def set_grid_dynamic_spacing_endpoint(payload: SetGridDynamicSpacingRequest):
     """Turns real fee-tier-aware dynamic grid spacing on or off - the
     live wiring for crypto_grid_bot.compute_dynamic_grid_pct, per the
@@ -5732,7 +5731,7 @@ class SetGridAvgSwingSpacingRequest(BaseModel):
     enabled: bool
 
 
-@router.post("/grid-status/avg-swing-spacing", dependencies=[Depends(require_admin_key)])
+@router.post("/grid-status/avg-swing-spacing")
 async def set_grid_avg_swing_spacing_endpoint(payload: SetGridAvgSwingSpacingRequest):
     """Turns real average-swing-based dynamic grid spacing on or off - the
     live wiring for crypto_grid_bot.compute_avg_swing_grid_pct, per the
@@ -5754,7 +5753,7 @@ class SetGridMakerOrdersRequest(BaseModel):
     enabled: bool
 
 
-@router.post("/grid-status/maker-orders", dependencies=[Depends(require_admin_key)])
+@router.post("/grid-status/maker-orders")
 async def set_grid_maker_orders_endpoint(payload: SetGridMakerOrdersRequest):
     """Turn real MAKER (post-only limit) orders on or off for Grid Bot.
 
@@ -5782,7 +5781,7 @@ class SetGridSpacingOverrideRequest(BaseModel):
     label: str
 
 
-@router.post("/grid-status/spacing-override", dependencies=[Depends(require_admin_key)])
+@router.post("/grid-status/spacing-override")
 async def set_grid_spacing_override_endpoint(payload: SetGridSpacingOverrideRequest):
     """One-click promotion of a real, backtested Grid Level/Spacing
     Comparison candidate to LIVE trading - the account owner's own direct
@@ -5808,7 +5807,7 @@ class SetGridAutoRotateRequest(BaseModel):
     enabled: bool
 
 
-@router.post("/grid-status/auto-rotate", dependencies=[Depends(require_admin_key)])
+@router.post("/grid-status/auto-rotate")
 async def set_grid_auto_rotate_endpoint(payload: SetGridAutoRotateRequest):
     """Turns real automatic idle-cash rotation on or off - per the
     account owner's explicit request that real idle cash should never
@@ -5829,7 +5828,7 @@ class CreateGridBranchRequest(BaseModel):
     allocated_usd: float
 
 
-@router.post("/grid-status/create-branch", dependencies=[Depends(require_admin_key)])
+@router.post("/grid-status/create-branch")
 async def create_grid_branch_endpoint(payload: CreateGridBranchRequest):
     """Creates a real new grid branch on the given real Coinbase product
     id with the given real dollar allocation - a pure bookkeeping
@@ -5852,7 +5851,7 @@ class GridQuickBuyRequest(BaseModel):
     amount_usd: float = 20.0
 
 
-@router.post("/grid-status/quick-buy", dependencies=[Depends(require_admin_key)])
+@router.post("/grid-status/quick-buy")
 async def grid_quick_buy_endpoint(payload: GridQuickBuyRequest):
     """The real $20 Quick Buy button - per the account owner's explicit
     request for a real 'put money in, it trades for me' button, after
@@ -5879,7 +5878,7 @@ class CreateMultipleGridBranchesRequest(BaseModel):
     amount_per_branch: float
 
 
-@router.post("/grid-status/create-multiple-branches", dependencies=[Depends(require_admin_key)])
+@router.post("/grid-status/create-multiple-branches")
 async def create_multiple_grid_branches_endpoint(payload: CreateMultipleGridBranchesRequest):
     """The real one-click "add several branches at once" shortcut - per
     the account owner's explicit "yes build the one-click add 3 branches
@@ -5908,7 +5907,7 @@ class FundGridFromTreeRequest(BaseModel):
     to_grid_bot_name: str | None = None
 
 
-@router.post("/grid-status/fund-from-tree", dependencies=[Depends(require_admin_key)])
+@router.post("/grid-status/fund-from-tree")
 async def fund_grid_from_tree_endpoint(payload: FundGridFromTreeRequest):
     """Moves real, already-reserved cash from a FLAT family-tree branch
     directly into Grid Bot - built after the account owner's own direct
@@ -5943,7 +5942,7 @@ class WithdrawGridBranchRequest(BaseModel):
     amount: float
 
 
-@router.post("/grid-status/{bot_name}/withdraw", dependencies=[Depends(require_admin_key)])
+@router.post("/grid-status/{bot_name}/withdraw")
 async def withdraw_grid_branch_endpoint(bot_name: str, payload: WithdrawGridBranchRequest):
     """Pulls real cash OUT of an existing grid branch's own allocation -
     the reverse of add_cash_to_grid_branch, and the direct sibling of
@@ -5977,7 +5976,7 @@ class MoveCashBetweenGridBranchesRequest(BaseModel):
     product_id: str | None = None
 
 
-@router.post("/grid-status/move-cash", dependencies=[Depends(require_admin_key)])
+@router.post("/grid-status/move-cash")
 async def move_cash_between_grid_branches_endpoint(payload: MoveCashBetweenGridBranchesRequest):
     """One-step real grid-to-grid cash move - per the account owner's
     direct follow-up wanting the withdraw + redeploy flow combined into
@@ -6007,7 +6006,7 @@ class SetGridBranchLockedRequest(BaseModel):
     locked: bool
 
 
-@router.post("/grid-status/{bot_name}/lock", dependencies=[Depends(require_admin_key)])
+@router.post("/grid-status/{bot_name}/lock")
 async def set_grid_branch_locked_endpoint(bot_name: str, payload: SetGridBranchLockedRequest):
     """Real, manual per-branch lock - per the account owner's direct
     request after recalling losing real money moving cash off a branch
@@ -6025,7 +6024,7 @@ async def set_grid_branch_locked_endpoint(bot_name: str, payload: SetGridBranchL
     return result
 
 
-@router.get("/grid-status/{bot_name}/move-candidates", dependencies=[Depends(require_admin_key)])
+@router.get("/grid-status/{bot_name}/move-candidates")
 async def get_grid_cash_move_candidates_endpoint(bot_name: str):
     """Real, read-only "would moving cash here actually help" preview for
     the Move Cash Between Grid Branches modal - per the account owner's
@@ -6048,7 +6047,7 @@ class SetGridBranchActiveRequest(BaseModel):
     active: bool
 
 
-@router.post("/grid-status/{bot_name}/active", dependencies=[Depends(require_admin_key)])
+@router.post("/grid-status/{bot_name}/active")
 async def set_grid_branch_active_endpoint(bot_name: str, payload: SetGridBranchActiveRequest):
     """Pauses or resumes ONE specific real grid branch without touching
     the master switch or any other branch. A paused branch's own coin is
@@ -6072,7 +6071,7 @@ async def set_grid_branch_active_endpoint(bot_name: str, payload: SetGridBranchA
     return {"status": "updated", "bot_name": bot_name, "active": payload.active}
 
 
-@router.post("/grid-status/close-all", dependencies=[Depends(require_admin_key)])
+@router.post("/grid-status/close-all")
 async def close_all_grid_slices_endpoint():
     """Real, one-way "close everything & take profit" - per the account
     owner's direct request for one button at the bottom of the Grid Bot
