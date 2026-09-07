@@ -33,6 +33,11 @@
         min-height: 100vh;
         padding: 24px;
     }
+    @media (max-width: 640px) {
+        body {
+            padding: 12px 16px;
+        }
+    }
 
     .container { max-width: 1280px; margin: 0 auto; }
 
@@ -44,8 +49,25 @@
         flex-wrap: wrap;
         gap: 10px;
     }
+    @media (max-width: 640px) {
+        .header {
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 12px;
+        }
+    }
     .header h1 { font-size: 1.5em; font-weight: 800; color: var(--navy); }
+    @media (max-width: 640px) {
+        .header h1 {
+            font-size: 1.2em;
+        }
+    }
     .header p { color: var(--text-dim); font-size: 0.85em; margin-top: 2px; }
+    @media (max-width: 640px) {
+        .header p {
+            font-size: 0.78em;
+        }
+    }
     .header-totals { margin-bottom: 4px; }
     .header-total-row { font-size: 0.85em; font-weight: 700; color: var(--navy); white-space: nowrap; }
     .header-total-row .v { font-weight: 800; }
@@ -59,6 +81,12 @@
         grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
         gap: 14px;
         margin-bottom: 22px;
+    }
+    @media (max-width: 768px) {
+        .kpi-row {
+            grid-template-columns: 1fr;
+            gap: 10px;
+        }
     }
     .kpi {
         background: var(--panel);
@@ -133,8 +161,25 @@
     .obs-row .obs-icon { flex-shrink: 0; }
     @media (max-width: 700px) { .combined-progress-layout { flex-direction: column; } }
 
+    /* Two-column grid responsive - stacks on tablets/mobile */
+    .two-col-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 1024px) {
+        .two-col-grid { grid-template-columns: 1fr; }
+    }
+
     .coin-history-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+    @media (max-width: 640px) {
+        .coin-history-table {
+            font-size: 0.75em;
+        }
+    }
     .coin-history-table th, .coin-history-table td { padding: 9px 10px; text-align: right; border-bottom: 1px solid var(--border); }
+    @media (max-width: 640px) {
+        .coin-history-table th,
+        .coin-history-table td {
+            padding: 7px 8px;
+        }
+    }
     .coin-history-table th:first-child, .coin-history-table td:first-child { text-align: left; }
     .coin-history-table th { color: var(--text-dim); font-weight: 700; text-transform: uppercase; font-size: 0.72em; letter-spacing: 0.4px; }
     .coin-history-table tbody tr.coin-row { cursor: pointer; }
@@ -160,6 +205,13 @@
 
     .bar-list { display: flex; flex-direction: column; gap: 10px; }
     .bar-row { display: grid; grid-template-columns: 110px 1fr 90px; align-items: center; gap: 10px; font-size: 0.82em; }
+    @media (max-width: 640px) {
+        .bar-row {
+            grid-template-columns: 80px 1fr 70px;
+            gap: 8px;
+            font-size: 0.75em;
+        }
+    }
     .bar-row .bar-label { color: var(--text-dim); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .bar-track { background: #eef1f6; border-radius: 5px; height: 16px; overflow: hidden; position: relative; }
     .bar-fill { height: 100%; border-radius: 5px; background: linear-gradient(90deg, #ffcf5e, var(--gold)); }
@@ -252,6 +304,17 @@
         cursor: pointer;
         font-size: 0.76em;
         font-weight: 600;
+        min-height: 36px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    @media (max-width: 640px) {
+        .sell-btn {
+            min-height: 44px;
+            padding: 8px 12px;
+            font-size: 0.8em;
+        }
     }
     .sell-btn:hover { background: var(--red); color: #fff; }
     .sell-btn:disabled { opacity: 0.5; cursor: default; }
@@ -268,6 +331,17 @@
         cursor: pointer;
         font-size: 0.76em;
         font-weight: 600;
+        min-height: 36px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    @media (max-width: 640px) {
+        .advice-btn {
+            min-height: 44px;
+            padding: 8px 12px;
+            font-size: 0.8em;
+        }
     }
     .advice-btn:hover { background: var(--bg); }
     .advice-panel {
@@ -307,6 +381,17 @@
         cursor: pointer;
         font-size: 0.76em;
         font-weight: 700;
+        min-height: 36px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    @media (max-width: 640px) {
+        .unlock-btn {
+            min-height: 44px;
+            padding: 8px 12px;
+            font-size: 0.8em;
+        }
     }
     .unlock-btn:hover { background: var(--gold); color: #fff; }
     .unlock-btn:disabled { opacity: 0.5; cursor: default; }
@@ -322,18 +407,42 @@
         width: 100%; max-width: 420px; box-shadow: 0 10px 40px rgba(0,0,0,0.25);
         max-height: 90vh; overflow-y: auto;
     }
+    @media (max-width: 640px) {
+        .modal-card {
+            padding: 20px;
+            max-width: 95%;
+            border-radius: 12px;
+        }
+    }
     .modal-title { font-size: 1.15em; font-weight: 800; color: var(--navy); }
     .modal-sub { font-size: 0.82em; color: var(--text-dim); margin-top: 4px; margin-bottom: 16px; }
     .modal-label { display: block; font-size: 0.78em; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 6px; }
     .modal-input {
         width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
         font-size: 1em; font-family: inherit; color: var(--text);
+        min-height: 40px;
+    }
+    @media (max-width: 640px) {
+        .modal-input {
+            min-height: 44px;
+            font-size: 1.05em;
+        }
     }
     .mode-toggle { display: flex; flex-direction: column; gap: 8px; }
     .mode-btn {
         font-family: inherit; text-align: left; padding: 10px 12px; border-radius: 8px;
         border: 1.5px solid var(--border); background: #fff; color: var(--text);
         cursor: pointer; font-size: 0.88em; font-weight: 600;
+        min-height: 40px;
+        display: flex;
+        align-items: center;
+    }
+    @media (max-width: 640px) {
+        .mode-btn {
+            min-height: 44px;
+            font-size: 0.85em;
+            padding: 12px 12px;
+        }
     }
     .mode-btn.selected { border-color: var(--navy); background: #eef2fb; color: var(--navy); }
     .branch-pick-list { display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto; }
@@ -341,18 +450,55 @@
         font-family: inherit; text-align: left; padding: 9px 12px; border-radius: 8px;
         border: 1.5px solid var(--border); background: #fff; color: var(--text);
         cursor: pointer; font-size: 0.85em;
+        min-height: 40px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+    @media (max-width: 640px) {
+        .branch-pick-btn {
+            min-height: 44px;
+            font-size: 0.82em;
+            padding: 10px 12px;
+        }
     }
     .branch-pick-btn .coin-name { font-weight: 700; }
     .branch-pick-btn .bot-id { color: var(--text-dim); font-size: 0.85em; margin-left: 6px; }
     .branch-pick-btn.selected { border-color: var(--green); background: var(--green-bg); }
     .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+    @media (max-width: 640px) {
+        .modal-actions {
+            flex-direction: column-reverse;
+            gap: 8px;
+        }
+    }
     .modal-btn-secondary {
         font-family: inherit; padding: 9px 16px; border-radius: 8px; border: 1px solid var(--border);
         background: #fff; color: var(--text-dim); cursor: pointer; font-weight: 600; font-size: 0.9em;
+        min-height: 40px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    @media (max-width: 640px) {
+        .modal-btn-secondary {
+            min-height: 44px;
+            font-size: 0.85em;
+        }
     }
     .modal-btn-primary {
         font-family: inherit; padding: 9px 18px; border-radius: 8px; border: none;
         background: var(--gold); color: #fff; cursor: pointer; font-weight: 700; font-size: 0.9em;
+        min-height: 40px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    @media (max-width: 640px) {
+        .modal-btn-primary {
+            min-height: 44px;
+            font-size: 0.85em;
+        }
     }
     .modal-btn-primary:disabled { opacity: 0.5; cursor: default; }
 
@@ -474,6 +620,19 @@
     .btc-tick-countdown.urgent { background: var(--red-bg); }
     .btc-tick-chart-wrap { width: 100%; overflow: hidden; border-radius: 8px; background: var(--bg); }
     .btc-tick-chart-wrap svg { display: block; width: 100%; height: auto; }
+
+    /* Button group utilities for section headers */
+    .button-group { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    @media (max-width: 640px) {
+        .button-group {
+            gap: 6px;
+            flex-direction: column;
+        }
+        .button-group .sell-btn,
+        .button-group .unlock-btn {
+            width: 100%;
+        }
+    }
 </style>
 </head>
 <body>
@@ -590,7 +749,7 @@
         <div id="grid-content" class="empty">Loading…</div>
     </div>
 
-    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
+    <div class="two-col-grid">
         <div class="panel">
             <div class="panel-title">Branch Ranking by Next-Spawn Progress</div>
             <div class="panel-sub">Real per-branch % toward its own next spawn tier, closest first - re-sorts live as each branch's real percentage moves, not just its balance</div>
