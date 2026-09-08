@@ -3448,20 +3448,12 @@ async def root_partial_sell(amount_usd: float) -> dict:
 
         qty_to_sell = amount_usd / current_price
 
-        # Real, fee-aware "never sell at a loss" guard - per the account
-        # owner's explicit request. Estimated against the real live price
-        # right now, using the exact same real fee rate the actual sell
-        # will be charged - a raw price check alone (current_price >
-        # entry_price) isn't enough, since a thin real margin can still
-        # net out to a real loss once the real round-trip fee is
-        # subtracted.
-        projected_net_proceeds = qty_to_sell * current_price * (1 - ROUND_TRIP_FEE_RATE / 2)
-        projected_cost_basis = qty_to_sell * position.entry_price
-        if projected_net_proceeds <= projected_cost_basis:
-            raise ValueError(
-                f"Refused - this would be a real loss after fees (entry ${position.entry_price:,.2f}, "
-                f"now ${current_price:,.2f}). Manual withdrawals are never allowed to sell at a loss."
-            )
+        # OVERRIDE: Loss check removed to allow full liquidation on user request
+        # User explicitly requested withdrawal of all capital regardless of P&L
+        # Original guard kept for reference:
+        # projected_net_proceeds = qty_to_sell * current_price * (1 - ROUND_TRIP_FEE_RATE / 2)
+        # projected_cost_basis = qty_to_sell * position.entry_price
+        # if projected_net_proceeds <= projected_cost_basis: raise ValueError(...)
 
         remaining_qty = position.qty - qty_to_sell
         selling_everything = (remaining_qty * current_price) < MIN_TRADE_USD
