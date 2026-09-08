@@ -1229,6 +1229,7 @@ function branchCardHtml(b) {
             // chose it anyway. Sells a real, specific dollar amount and
             // leaves the rest of the position untouched.
             sellBtnHtml += `<button class="sell-btn" style="background:#7a3b12;margin-top:6px;" onclick="rootPartialSell(this)">💸 Withdraw cash from BTC</button>`;
+            sellBtnHtml += `<button class="sell-btn" style="background:#c44536;margin-top:6px;margin-left:6px;" onclick="rootWithdrawAll(this, ${p.estimated_value})">🚀 Withdraw All Now</button>`;
         }
         // Real-time "is now actually a good time to sell this" advisory -
         // reuses the bot's own real STOP/TRAILING-STOP exit math
@@ -1427,6 +1428,34 @@ async function rootPartialSell(btn) {
         refresh();
     } catch (e) {
         alert('Withdraw failed: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+    }
+}
+
+// Auto-withdraw all BTC balance at market price without prompting for amount
+async function rootWithdrawAll(btn, currentBalanceUsd) {
+    if (!currentBalanceUsd || currentBalanceUsd <= 0) {
+        alert('No BTC balance to withdraw.');
+        return;
+    }
+    if (!confirm(`Withdraw ALL $${currentBalanceUsd.toFixed(2)} from BTC right now at market price? Real order, can't be undone.`)) return;
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Withdrawing…';
+    try {
+        const res = await fetch(API_BASE + '/family-tree-status/root-partial-sell', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ amount_usd: currentBalanceUsd }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        alert(`Withdrew ${data.filled_qty.toFixed(8)} BTC @ ${fmtUsd(data.filled_price)} - ${fmtUsd(data.proceeds)} real cash freed (P&L ${data.realized_pnl >= 0 ? '+' : ''}${fmtUsd(data.realized_pnl)}). Root balance now ${fmtUsd(data.root_new_balance)}.`);
+        refresh();
+    } catch (e) {
+        alert('Withdrawal failed: ' + e.message);
     } finally {
         btn.disabled = false;
         btn.textContent = originalText;
