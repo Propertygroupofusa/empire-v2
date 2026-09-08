@@ -39,6 +39,7 @@ import asyncio
 import logging
 import os
 import random
+import sys
 import time
 from datetime import datetime
 
@@ -47,6 +48,17 @@ from sqlalchemy import select, func, case, desc
 import crypto_btc_compound_bot as engine
 from database import AsyncSessionLocal
 from models import CryptoGridBranch, CryptoGridSlice, CryptoGridTradeHistory, TradingBotState, CryptoTreeBranch, BotPosition
+
+# ── SHADOW MODE INTEGRATION ────────────────────────────────────────────────
+# Non-invasive learning validation: observes every trade without affecting execution
+sys.path.insert(0, '/home/user/Delfina')
+try:
+    from stage2.orchestration.shadow_mode_init import get_shadow_manager
+    shadow_manager = get_shadow_manager()
+    SHADOW_MODE_ENABLED = True
+except ImportError:
+    SHADOW_MODE_ENABLED = False
+    shadow_manager = None
 
 log = logging.getLogger("crypto_grid_bot")
 
@@ -196,6 +208,13 @@ GRID_AUTO_ROTATE_MIN_USD = float(os.getenv("GRID_AUTO_ROTATE_MIN_USD", "10.0"))
 # no DB persistence needed for a value that only ever needs to survive
 # within one process's lifetime.
 _last_grid_auto_rotate_at = 0.0
+
+# ── SHADOW MODE MONITORING THROTTLE ────────────────────────────────────────
+# Periodic check of shadow mode learning engine progress - logs status every
+# N seconds during the accumulation phase (30-50 trades). Useful for alerting
+# when validation threshold is reached without spam. 10 minutes = 600 seconds.
+SHADOW_MODE_MONITOR_INTERVAL_SECONDS = int(os.getenv("SHADOW_MODE_MONITOR_INTERVAL_SECONDS", str(10 * 60)))
+_last_shadow_monitor_at = 0.0
 
 # Real, minimum time a branch's own coin has to have been in place before
 # it's eligible to rotate away again via the periodic sweep - a real,
@@ -2248,6 +2267,21 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
             log.warning(f"[GRID] {branch.bot_name}: real grid buy into {branch.product_id} did not fill - will retry next cycle")
             return
         filled_qty, filled_price, buy_leg_fee = fill
+
+        # ── SHADOW MODE: Log order created (fire-and-forget, non-blocking) ────
+        if SHADOW_MODE_ENABLED and shadow_manager:
+            try:
+                order_id = f"{branch.bot_name}_{int(time.time()*1000)}"
+                shadow_manager.on_order_created(
+                    client_order_id=order_id,
+                    symbol=branch.product_id,
+                    side='BUY',
+                    price=filled_price,
+                    quantity=filled_qty
+                )
+            except Exception as e:
+                log.warning(f"[SHADOW] Failed to log order (non-blocking): {e}")
+
         async with AsyncSessionLocal() as db:
             # entry_fee_rate records the rate this leg REALLY paid (maker or
             # taker), so this slice can be priced honestly when it later sells.
@@ -2305,6 +2339,30 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
         pnl = _grid_slice_net_pnl(filled_qty, oldest.entry_price, filled_price,
                                   await slice_round_trip_fee_rate(oldest, sell_leg_fee))
         new_balance = branch.allocated_usd + pnl
+
+        # ── SHADOW MODE: Log position closed (fire-and-forget, non-blocking) ────
+        if SHADOW_MODE_ENABLED and shadow_manager:
+            try:
+                order_id = f"{branch.bot_name}_{oldest.id}_{int(time.time()*1000)}"
+                hold_time_minutes = int((time.time() - oldest.opened_at.timestamp()) / 60) if oldest.opened_at else 0
+                gross_pnl = filled_qty * (filled_price - oldest.entry_price)
+                exit_reason = 'profit_target' if pnl >= 0 else 'stop_loss'
+
+                shadow_manager.on_position_closed(
+                    client_order_id=order_id,
+                    symbol=branch.product_id,
+                    entry_price=oldest.entry_price,
+                    exit_price=filled_price,
+                    quantity=filled_qty,
+                    realized_pnl=gross_pnl,
+                    total_fees=(await slice_round_trip_fee_rate(oldest, sell_leg_fee)) * filled_qty * oldest.entry_price / 100,
+                    hold_time_minutes=hold_time_minutes,
+                    exit_reason=exit_reason,
+                    risk_amount=branch.allocated_usd / branch.num_levels
+                )
+            except Exception as e:
+                log.warning(f"[SHADOW] Failed to log position close (non-blocking): {e}")
+
         async with AsyncSessionLocal() as db:
             slice_result = await db.execute(select(CryptoGridSlice).where(CryptoGridSlice.id == oldest.id))
             slice_row = slice_result.scalar_one_or_none()
@@ -2343,6 +2401,42 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
             except Exception as e:
                 log.warning(f"[GRID] {branch.bot_name}: post-sale auto-rotate check failed (non-fatal, will retry next sweep): {e}")
         return
+
+
+async def check_shadow_mode_status():
+    """Periodic check of shadow mode learning engine progress - logs current
+    status every SHADOW_MODE_MONITOR_INTERVAL_SECONDS. Non-blocking, graceful
+    failure if shadow mode unavailable."""
+    if not SHADOW_MODE_ENABLED or not shadow_manager:
+        return
+
+    try:
+        status = shadow_manager.get_status()
+        trades_logged = status.get('trades_logged', 0)
+        target = 50
+        improvement_pct = status.get('improvement_pct', 0.0)
+        quality_correlation = status.get('quality_correlation', 0.0)
+        agreement_rate = status.get('agreement_rate_pct', 0.0)
+        ready_for_controlled_live = status.get('ready_for_controlled_live', False)
+
+        msg = (
+            f"[SHADOW] Status: {trades_logged}/{target} trades logged | "
+            f"Improvement: {improvement_pct:+.1f}% | "
+            f"Quality Corr: {quality_correlation:.3f} | "
+            f"Agreement: {agreement_rate:.1f}% | "
+            f"CONTROLLED_LIVE ready: {ready_for_controlled_live}"
+        )
+        log.info(msg)
+
+        # Alert if we just hit the validation threshold
+        if trades_logged >= 30 and trades_logged < 35:
+            alert_msg = (
+                f"[SHADOW] ⚡ VALIDATION THRESHOLD REACHED: {trades_logged}/50 trades. "
+                f"Ready for assessment. Run: python scripts/monitor_shadow_mode.py --detail --report"
+            )
+            log.warning(alert_msg)
+    except Exception as e:
+        log.debug(f"[SHADOW] Status check failed (non-blocking): {type(e).__name__}: {e}")
 
 
 async def run_grid_branches_cycle():
@@ -2403,6 +2497,19 @@ async def run_grid_branches_cycle():
             await run_grid_self_tuning_sweep()
         except Exception as e:
             log.error(f"[GRID] self-tuning sweep error: {e}")
+
+    # Shadow mode periodic status check - logs learning engine progress
+    # every SHADOW_MODE_MONITOR_INTERVAL_SECONDS (default 10 minutes).
+    # Non-invasive, graceful failure if shadow mode unavailable. Same
+    # in-process throttle pattern as the sweeps above.
+    global _last_shadow_monitor_at
+    now_shadow = time.time()
+    if now_shadow - _last_shadow_monitor_at >= SHADOW_MODE_MONITOR_INTERVAL_SECONDS:
+        _last_shadow_monitor_at = now_shadow
+        try:
+            await check_shadow_mode_status()
+        except Exception as e:
+            log.debug(f"[GRID] shadow mode status check error (non-fatal): {e}")
 
 
 async def get_grid_status() -> dict:
