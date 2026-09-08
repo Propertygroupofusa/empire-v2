@@ -2965,8 +2965,16 @@ def run():
     # reasoning crypto_family_tree_bot.py's own run() already documents
     # (a fresh asyncio.run() per cycle previously caused a real thread
     # crash elsewhere in this codebase under uvloop).
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    # CRITICAL FIX: Reuse existing event loop if one is already set (e.g., by bot_runner.py).
+    # This prevents "Semaphore is bound to a different event loop" errors.
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
     while True:
         try:
