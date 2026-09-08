@@ -21,8 +21,10 @@ import random
 import uuid
 from datetime import datetime, timezone, timedelta
 
+import json as json_module
 import aiohttp
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import select, func, case, text, delete, or_
 from sqlalchemy.exc import IntegrityError
@@ -5679,14 +5681,32 @@ async def get_profit_locks():
 async def get_grid_status_endpoint():
     if crypto_grid_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
-    return await crypto_grid_bot_module.get_grid_status()
+    data = await crypto_grid_bot_module.get_grid_status()
+    # Force fresh data on every request - prevent browser caching stale grid status
+    return JSONResponse(
+        content=data,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+    )
 
 
 @router.get("/grid-status/trade-history")
 async def get_grid_trade_history_endpoint():
     if crypto_grid_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
-    return await crypto_grid_bot_module.get_grid_trade_history()
+    data = await crypto_grid_bot_module.get_grid_trade_history()
+    # Force fresh data on every request - prevent browser caching stale trade history
+    return JSONResponse(
+        content=data,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+    )
 
 
 class SetGridBotModeRequest(BaseModel):
