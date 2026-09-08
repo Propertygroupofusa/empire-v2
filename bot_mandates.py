@@ -283,13 +283,13 @@ ALPACA_MANDATE = {
     # Entry: DUAL DIRECTION - Long on oversold, Short on overbought
     "entry": {
         "long": {
-            "rsi_threshold_oversold": 30,  # RSI < 30 = buy signal
+            "rsi_threshold_oversold": 35,  # LOWERED from 30 (more aggressive entry signals)
             "volume_ratio_min": 1.5,
             "min_buying_power": 100,
             "min_position_size": 30,
         },
         "short": {
-            "rsi_threshold_overbought": 70,  # RSI > 70 = sell/short signal
+            "rsi_threshold_overbought": 65,  # LOWERED from 70 (more aggressive entry signals)
             "volume_ratio_min": 1.5,
             "min_buying_power": 100,
             "min_position_size": 30,
@@ -314,9 +314,9 @@ ALPACA_MANDATE = {
 
     # Capital
     "capital": {
-        "max_per_position": 200,
+        "max_per_position": 500,  # INCREASED from 200 (2.5x faster deployment)
         "max_open_positions": 6,  # 3 longs + 3 shorts (matches entry)
-        "max_total_notional_pct": 0.60,
+        "max_total_notional_pct": 0.80,  # INCREASED from 0.60 (80% vs 60% deployment)
         "critical_cash_balance": 50,
         "max_daily_loss_pct": 0.03,  # 3%
     },
