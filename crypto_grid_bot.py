@@ -46,6 +46,7 @@ from datetime import datetime
 from sqlalchemy import select, func, case, desc
 
 import crypto_btc_compound_bot as engine
+import crypto_mean_reversion_bot as mean_reversion_engine
 from database import AsyncSessionLocal
 from models import CryptoGridBranch, CryptoGridSlice, CryptoGridTradeHistory, TradingBotState, CryptoTreeBranch, BotPosition
 
@@ -215,6 +216,10 @@ _last_grid_auto_rotate_at = 0.0
 # when validation threshold is reached without spam. 10 minutes = 600 seconds.
 SHADOW_MODE_MONITOR_INTERVAL_SECONDS = int(os.getenv("SHADOW_MODE_MONITOR_INTERVAL_SECONDS", str(10 * 60)))
 _last_shadow_monitor_at = 0.0
+
+# Mean Reversion Bot Integration
+MEAN_REVERSION_CYCLE_SECONDS = int(os.getenv("MEAN_REVERSION_CYCLE_SECONDS", str(5 * 60)))  # Run every 5 minutes
+_last_mean_reversion_at = 0.0
 
 # Real, minimum time a branch's own coin has to have been in place before
 # it's eligible to rotate away again via the periodic sweep - a real,
@@ -2511,6 +2516,22 @@ async def run_grid_branches_cycle():
         except Exception as e:
             log.debug(f"[GRID] shadow mode status check error (non-fatal): {e}")
 
+    # Mean Reversion Bot Cycle - runs every MEAN_REVERSION_CYCLE_SECONDS
+    # (default 5 minutes). Separate directional trades complementing the
+    # grid bot's market-neutral strategy. Buys oversold coins (RSI < 30),
+    # exits on mean reversion (RSI > 60) or profit targets/stops.
+    # Non-invasive, graceful failure if mean reversion unavailable.
+    global _last_mean_reversion_at
+    now_mr = time.time()
+    if now_mr - _last_mean_reversion_at >= MEAN_REVERSION_CYCLE_SECONDS:
+        _last_mean_reversion_at = now_mr
+        try:
+            async with AsyncSessionLocal() as db:
+                mr_engine = mean_reversion_engine.get_mean_reversion_engine()
+                await mr_engine.run_cycle(db)
+        except Exception as e:
+            log.error(f"[MR] Cycle error (non-fatal): {type(e).__name__}: {e}")
+
 
 async def get_grid_status() -> dict:
     """Real, live status for the dashboard - every branch's own real
@@ -2823,6 +2844,67 @@ async def get_grid_trade_history(limit_recent: int = 50) -> dict:
         "total_realized_pnl": round(total_realized_pnl, 2),
         "overall_win_rate": overall_win_rate,
     }
+
+
+async def scale_grid_bot_capital(scale_factor: float = 1.25) -> dict:
+    """Scale up grid bot allocations by multiplying existing allocated_usd
+    by scale_factor (default 1.25 = 25% increase). Real capital scaling per
+    the account owner's explicit "scale grid bot by increasing capital
+    allocation" request.
+
+    Returns dict with status and updated allocations."""
+    if scale_factor <= 1.0:
+        return {"error": "scale_factor must be > 1.0", "status": "failed"}
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.active))
+        branches = result.scalars().all()
+
+        if not branches:
+            return {"error": "No active grid branches to scale", "status": "failed"}
+
+        updates = []
+        total_old_allocation = 0.0
+        total_new_allocation = 0.0
+
+        for branch in branches:
+            old_usd = branch.allocated_usd or 0.0
+            new_usd = round(old_usd * scale_factor, 2)
+            total_old_allocation += old_usd
+            total_new_allocation += new_usd
+
+            branch.allocated_usd = new_usd
+            updates.append({
+                "bot_name": branch.bot_name,
+                "product_id": branch.product_id,
+                "old_allocated_usd": round(old_usd, 2),
+                "new_allocated_usd": new_usd,
+                "increase_pct": round((new_usd - old_usd) / max(old_usd, 1) * 100, 1)
+            })
+
+        try:
+            await db.commit()
+            msg = (
+                f"✅ Grid Bot Capital Scaling Complete: "
+                f"{len(branches)} branches scaled by {(scale_factor-1)*100:.0f}% | "
+                f"Old total: ${total_old_allocation:,.2f} → New total: ${total_new_allocation:,.2f}"
+            )
+            log.warning(msg)
+            await _log_activity_safe("grid_bot_system", "SCALING", "SCALE", msg)
+
+            return {
+                "status": "success",
+                "scale_factor": scale_factor,
+                "branches_scaled": len(branches),
+                "total_old_allocation": round(total_old_allocation, 2),
+                "total_new_allocation": round(total_new_allocation, 2),
+                "total_increase": round(total_new_allocation - total_old_allocation, 2),
+                "updates": updates
+            }
+        except Exception as e:
+            await db.rollback()
+            log.error(f"[GRID] Capital scaling failed: {e}")
+            return {"error": str(e), "status": "failed"}
 
 
 def run():
