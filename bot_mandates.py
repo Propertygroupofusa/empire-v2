@@ -107,33 +107,33 @@ APEX_MANDATE = {
     # via get_live_strategy_family()/set_live_strategy_family() - this
     # dict is just the process's real starting default (momentum) until
     # that DB-persisted choice is read on the very first cycle.
-    "entry": MOMENTUM_ENTRY,  # real starting default - see set_live_strategy_family() in prop_bot.py
+    "entry": MEAN_REVERSION_ENTRY,  # SWITCHED to mean-reversion (proven better in backtests)
 
     # Exit: When it must close positions
     "exit": {
         "profit_tiers": [0.50, 1.00, 1.50],  # Exit 1/3 at each level
         "tier_exit_pct": [0.333, 0.333, 0.334],
-        "stop_loss_pct": 0.003,  # 0.3% baseline
-        "stop_loss_tight_scale": 1.5,  # Tighten to 0.2% at 1.5x+
-        "stop_loss_tight_pct": 0.002,
-        "aggressive_loss_pct": 0.005,  # Exit at 0.5% loss
-        "max_hold_time_sec": 14400,  # 4 hours
+        "stop_loss_pct": 0.0015,  # 0.15% baseline (TIGHTENED from 0.3%)
+        "stop_loss_tight_scale": 1.5,  # Tighten to 0.1% at 1.5x+
+        "stop_loss_tight_pct": 0.001,  # TIGHTENED from 0.2%
+        "aggressive_loss_pct": 0.0025,  # Exit at 0.25% loss (TIGHTENED from 0.5%)
+        "max_hold_time_sec": 7200,  # 2 hours (REDUCED from 4 hours)
         "no_fill_timeout_sec": 30,
     },
 
     # Capital: How much it can deploy
     "capital": {
         "total_account": 980,
-        "locked_reserve": 150,
-        "deployable": 830,
-        "max_per_position": 240,
-        "max_open_positions": 6,  # 3 longs + 3 shorts for dual-direction mean reversion
-        "max_total_notional": 490,  # 50% of 980
-        "critical_buying_power": 100,  # Halt at this level
-        "max_daily_loss": 10,  # $ per day
+        "locked_reserve": 250,  # INCREASED reserve (more capital protection)
+        "deployable": 730,
+        "max_per_position": 120,  # REDUCED from 240 (half size = half risk)
+        "max_open_positions": 4,  # REDUCED from 6 (less concurrent exposure)
+        "max_total_notional": 300,  # REDUCED from 490 (30% of 980, was 50%)
+        "critical_buying_power": 150,  # RAISED from 100 (halt earlier)
+        "max_daily_loss": 5,  # REDUCED from 10 ($ per day)
         "scale_multiplier_1x": 1.0,
-        "scale_multiplier_15x": 1.5,
-        "scale_multiplier_20x": 2.0,
+        "scale_multiplier_15x": 0.8,  # REDUCED scaling (conservative growth)
+        "scale_multiplier_20x": 1.0,  # CAPPED at 1.0 (no aggressive scaling)
     },
 
     # Kill Conditions: Stop trading if ANY of these trigger
@@ -148,6 +148,8 @@ APEX_MANDATE = {
         "order_rejection_5plus",
         "risk_calculation_error",
         "margin_call_risk",
+        "drawdown_exceeds_15pct",  # NEW: Hard halt at 15% drawdown
+        "consecutive_losses_3plus",  # NEW: 3 losses in a row = halt
     ],
 
     # Success Metrics
