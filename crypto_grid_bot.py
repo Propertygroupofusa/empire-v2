@@ -2846,18 +2846,26 @@ async def get_grid_trade_history(limit_recent: int = 50) -> dict:
     }
 
 
-async def scale_grid_bot_capital(scale_factor: float = 1.25) -> dict:
+async def scale_grid_bot_capital(scale_factor: float = 1.25, dry_run: bool = False) -> dict:
     """Scale up grid bot allocations by multiplying existing allocated_usd
     by scale_factor (default 1.25 = 25% increase). Real capital scaling per
     the account owner's explicit "scale grid bot by increasing capital
     allocation" request.
+
+    SAFETY:
+    - Does NOT disable any branches (active flag never touched)
+    - Does NOT modify grid bot's logic or parameters
+    - Grid bot continues trading while scaling occurs
+    - Updates are atomic (commit or full rollback)
+    - dry_run=True shows what would change without applying
 
     Returns dict with status and updated allocations."""
     if scale_factor <= 1.0:
         return {"error": "scale_factor must be > 1.0", "status": "failed"}
 
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.active))
+        # Query only active branches - never modify disabled ones
+        result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.active == True))
         branches = result.scalars().all()
 
         if not branches:
@@ -2868,26 +2876,57 @@ async def scale_grid_bot_capital(scale_factor: float = 1.25) -> dict:
         total_new_allocation = 0.0
 
         for branch in branches:
+            # SAFETY: Verify branch is STILL active and allocated_usd is a number
+            if not branch.active:
+                continue  # Skip any disabled branches
+
             old_usd = branch.allocated_usd or 0.0
+            if old_usd <= 0:
+                continue  # Skip branches with no allocation
+
             new_usd = round(old_usd * scale_factor, 2)
             total_old_allocation += old_usd
             total_new_allocation += new_usd
 
-            branch.allocated_usd = new_usd
-            updates.append({
+            # Build update record
+            update_rec = {
                 "bot_name": branch.bot_name,
                 "product_id": branch.product_id,
+                "active": branch.active,  # Verify it's still active
                 "old_allocated_usd": round(old_usd, 2),
                 "new_allocated_usd": new_usd,
                 "increase_pct": round((new_usd - old_usd) / max(old_usd, 1) * 100, 1)
-            })
+            }
+            updates.append(update_rec)
 
+            # SAFETY: Only modify allocated_usd, nothing else
+            if not dry_run:
+                branch.allocated_usd = new_usd
+
+        if not updates:
+            return {"error": "No valid branches to scale (all inactive or zero allocation)", "status": "failed"}
+
+        # DRY RUN: Show what would happen without applying
+        if dry_run:
+            return {
+                "status": "dry_run_success",
+                "scale_factor": scale_factor,
+                "branches_to_scale": len(updates),
+                "total_old_allocation": round(total_old_allocation, 2),
+                "total_new_allocation": round(total_new_allocation, 2),
+                "total_increase_preview": round(total_new_allocation - total_old_allocation, 2),
+                "preview_updates": updates,
+                "message": "DRY RUN: No changes applied. Re-run with dry_run=False to execute."
+            }
+
+        # APPLY CHANGES: Atomic commit or full rollback
         try:
             await db.commit()
             msg = (
                 f"✅ Grid Bot Capital Scaling Complete: "
-                f"{len(branches)} branches scaled by {(scale_factor-1)*100:.0f}% | "
-                f"Old total: ${total_old_allocation:,.2f} → New total: ${total_new_allocation:,.2f}"
+                f"{len(updates)} branches scaled by {(scale_factor-1)*100:.0f}% | "
+                f"Old total: ${total_old_allocation:,.2f} → New total: ${total_new_allocation:,.2f} | "
+                f"GRID BOT REMAINS ACTIVE - no branches disabled"
             )
             log.warning(msg)
             await _log_activity_safe("grid_bot_system", "SCALING", "SCALE", msg)
@@ -2895,11 +2934,18 @@ async def scale_grid_bot_capital(scale_factor: float = 1.25) -> dict:
             return {
                 "status": "success",
                 "scale_factor": scale_factor,
-                "branches_scaled": len(branches),
+                "branches_scaled": len(updates),
                 "total_old_allocation": round(total_old_allocation, 2),
                 "total_new_allocation": round(total_new_allocation, 2),
                 "total_increase": round(total_new_allocation - total_old_allocation, 2),
-                "updates": updates
+                "updates": updates,
+                "safety_notes": [
+                    "✅ Grid bot remains ACTIVE",
+                    "✅ No branches were disabled",
+                    "✅ Only allocated_usd field was modified",
+                    "✅ Grid bot picks up new allocations on next cycle (~30 sec)",
+                    "✅ All changes logged to activity feed"
+                ]
             }
         except Exception as e:
             await db.rollback()
