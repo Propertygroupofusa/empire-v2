@@ -76,7 +76,17 @@ BACKTEST_DAYS = 30
 # _fetch_1min_candles_window's own copy below), so no matter how many
 # coins or tools are running at once, at most 2 real requests are ever in
 # flight - a real, process-wide throttle, not just a per-tool one.
-_CANDLE_HTTP_SEMAPHORE = asyncio.Semaphore(2)
+# CRITICAL FIX: Create lazily to avoid "bound to a different event loop" error.
+# Don't create at module import time; create on first use within the running loop.
+_CANDLE_HTTP_SEMAPHORE = None
+
+def _get_candle_semaphore():
+    """Get or create the HTTP semaphore for candle fetching.
+    Must be called from within an async context to bind to the current event loop."""
+    global _CANDLE_HTTP_SEMAPHORE
+    if _CANDLE_HTTP_SEMAPHORE is None:
+        _CANDLE_HTTP_SEMAPHORE = asyncio.Semaphore(2)
+    return _CANDLE_HTTP_SEMAPHORE
 # Real, effective size of the existing live dollar-based giveback cap
 # (MAX_PROFIT_GIVEBACK_USD, $3.75) at the module's own $150 spend size -
 # $3.75 / $150 = 2.5%. Used as the trailing-stop comparison's percentage
@@ -136,7 +146,7 @@ async def fetch_candles_window(session, product_id, start, end, min_candles=ATR_
         page_data = None
         for attempt in range(5):
             try:
-                async with _CANDLE_HTTP_SEMAPHORE:
+                async with _get_candle_semaphore():
                     async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
                         if r.status == 429:
                             last_error = f"HTTP 429 rate limited"
@@ -3346,7 +3356,7 @@ async def _fetch_1min_candles_window(session, product_id: str, days: int = OPENI
         page_data = None
         for attempt in range(5):
             try:
-                async with _CANDLE_HTTP_SEMAPHORE:
+                async with _get_candle_semaphore():
                     async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
                         if r.status == 429:
                             last_error = "HTTP 429 rate limited"
