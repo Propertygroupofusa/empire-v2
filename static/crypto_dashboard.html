@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crypto Trading Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+            background: #0a0e27;
+            color: #e0e0e0;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            color: #00ff88;
+            font-size: 2em;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .card {
+            background: #1a1f3a;
+            border: 1px solid rgba(0, 255, 136, 0.2);
+            border-radius: 8px;
+            padding: 20px;
+        }
+
+        .card h2 {
+            color: #00ff88;
+            margin-bottom: 15px;
+            font-size: 1.3em;
+        }
+
+        .input-group {
+            margin-bottom: 15px;
+        }
+
+        .input-group label {
+            display: block;
+            margin-bottom: 5px;
+            color: #aaa;
+            font-size: 0.9em;
+        }
+
+        .input-group input,
+        .input-group select {
+            width: 100%;
+            padding: 10px;
+            background: #0f1626;
+            border: 1px solid rgba(0, 255, 136, 0.3);
+            color: #e0e0e0;
+            border-radius: 4px;
+            font-size: 1em;
+        }
+
+        .input-group input:focus,
+        .input-group select:focus {
+            outline: none;
+            border-color: #00ff88;
+            box-shadow: 0 0 10px rgba(0, 255, 136, 0.2);
+        }
+
+        .btn {
+            width: 100%;
+            padding: 12px;
+            background: #00ff88;
+            color: #0a0e27;
+            border: none;
+            border-radius: 4px;
+            font-size: 1em;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .btn:hover {
+            background: #00dd77;
+            box-shadow: 0 0 20px rgba(0, 255, 136, 0.5);
+        }
+
+        .btn:disabled {
+            background: #555;
+            color: #999;
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
+
+        .btn-danger {
+            background: #c44536;
+        }
+
+        .btn-danger:hover:not(:disabled) {
+            background: #a83830;
+            box-shadow: 0 0 20px rgba(196, 69, 54, 0.5);
+        }
+
+        .error {
+            background: rgba(255, 107, 107, 0.1);
+            border: 1px solid rgba(255, 107, 107, 0.5);
+            color: #ff6b6b;
+            padding: 12px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+
+        .success {
+            background: rgba(81, 207, 102, 0.1);
+            border: 1px solid rgba(81, 207, 102, 0.5);
+            color: #51cf66;
+            padding: 12px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+
+        .loading {
+            color: #aaa;
+            text-align: center;
+            padding: 20px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }
+
+        table thead {
+            border-bottom: 1px solid rgba(0, 255, 136, 0.2);
+        }
+
+        table th {
+            text-align: left;
+            padding: 10px;
+            color: #00ff88;
+            font-weight: 600;
+        }
+
+        table td {
+            padding: 10px;
+            border-bottom: 1px solid rgba(0, 255, 136, 0.1);
+        }
+
+        .positive {
+            color: #51cf66;
+        }
+
+        .negative {
+            color: #ff6b6b;
+        }
+
+        .withdraw-card {
+            grid-column: span 1;
+        }
+
+        .full-width {
+            grid-column: 1 / -1;
+        }
+
+        .text-right {
+            text-align: right;
+        }
+
+        .description {
+            color: #aaa;
+            font-size: 0.9em;
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>💰 Crypto Trading Dashboard</h1>
+
+        <div class="grid">
+            <!-- Error/Success Messages -->
+            <div id="errorDiv" class="error" style="grid-column: 1 / -1; display: none;"></div>
+            <div id="successDiv" class="success" style="grid-column: 1 / -1; display: none;"></div>
+
+            <!-- Place Order Card -->
+            <div class="card">
+                <h2>₿ Place Order</h2>
+                <form id="orderForm">
+                    <div class="input-group">
+                        <label>Product ID</label>
+                        <select id="productId" required>
+                            <option value="BTC-USD">BTC-USD (Bitcoin)</option>
+                            <option value="ETH-USD">ETH-USD (Ethereum)</option>
+                            <option value="SOL-USD">SOL-USD (Solana)</option>
+                            <option value="XRP-USD">XRP-USD (Ripple)</option>
+                            <option value="DOGE-USD">DOGE-USD (Dogecoin)</option>
+                            <option value="AAVE-USD">AAVE-USD (Aave)</option>
+                            <option value="STX-USD">STX-USD (Stacks)</option>
+                        </select>
+                    </div>
+
+                    <div class="input-group">
+                        <label>Amount</label>
+                        <input type="number" id="amount" placeholder="0.1" step="0.00000001" required />
+                    </div>
+
+                    <div class="input-group">
+                        <label>Order Type</label>
+                        <select id="orderType">
+                            <option value="market">Market</option>
+                            <option value="limit">Limit</option>
+                        </select>
+                    </div>
+
+                    <div class="input-group">
+                        <label>Side</label>
+                        <select id="side">
+                            <option value="buy">Buy</option>
+                            <option value="sell">Sell</option>
+                        </select>
+                    </div>
+
+                    <button type="submit" class="btn" id="placeOrderBtn">Place Order</button>
+                </form>
+            </div>
+
+            <!-- Emergency Withdrawal Card -->
+            <div class="card withdraw-card">
+                <h2>🚀 Emergency Withdrawal</h2>
+                <p class="description">Sell all BTC immediately at market price</p>
+                <button class="btn btn-danger" id="withdrawBtn" style="width: 100%;">
+                    💰 Withdraw All BTC Now
+                </button>
+            </div>
+
+            <!-- Assets Table Card -->
+            <div class="card full-width">
+                <h2>💰 Your Assets</h2>
+                <div id="assetsContainer">
+                    <div class="loading">Loading assets...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '/api/crypto';
+        const UI = {
+            errorDiv: document.getElementById('errorDiv'),
+            successDiv: document.getElementById('successDiv'),
+            orderForm: document.getElementById('orderForm'),
+            assetsContainer: document.getElementById('assetsContainer'),
+            placeOrderBtn: document.getElementById('placeOrderBtn'),
+            withdrawBtn: document.getElementById('withdrawBtn')
+        };
+
+        // Show error message
+        function showError(message) {
+            UI.errorDiv.textContent = message;
+            UI.errorDiv.style.display = 'block';
+            UI.successDiv.style.display = 'none';
+            setTimeout(() => {
+                UI.errorDiv.style.display = 'none';
+            }, 5000);
+        }
+
+        // Show success message
+        function showSuccess(message) {
+            UI.successDiv.textContent = message;
+            UI.successDiv.style.display = 'block';
+            UI.errorDiv.style.display = 'none';
+        }
+
+        // Fetch accounts
+        async function fetchAccounts() {
+            try {
+                UI.assetsContainer.innerHTML = '<div class="loading">Loading assets...</div>';
+                const response = await fetch(`${API_BASE}/accounts`);
+                if (!response.ok) throw new Error('Failed to fetch accounts');
+
+                const accounts = await response.json();
+
+                if (!accounts.length) {
+                    UI.assetsContainer.innerHTML = '<p>No crypto assets yet. Place an order to get started!</p>';
+                    return;
+                }
+
+                // Build table
+                let html = `
+                    <div style="overflow-x: auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Asset</th>
+                                <th style="text-align: right;">Amount</th>
+                                <th style="text-align: right;">Price</th>
+                                <th style="text-align: right;">Value</th>
+                                <th style="text-align: right;">P&L</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                `;
+
+                accounts.forEach(asset => {
+                    const pnlClass = asset.pnl >= 0 ? 'positive' : 'negative';
+                    const pnlSign = asset.pnl >= 0 ? '+' : '';
+                    const pnlPctSign = asset.pnl_pct >= 0 ? '+' : '';
+
+                    html += `
+                        <tr>
+                            <td>${asset.currency}</td>
+                            <td class="text-right">${asset.amount.toFixed(8)}</td>
+                            <td class="text-right">$${asset.current_price.toFixed(2)}</td>
+                            <td class="text-right">$${asset.value.toFixed(2)}</td>
+                            <td class="text-right ${pnlClass}">
+                                ${pnlSign}$${asset.pnl.toFixed(2)} (${pnlPctSign}${asset.pnl_pct.toFixed(2)}%)
+                            </td>
+                        </tr>
+                    `;
+                });
+
+                html += `
+                        </tbody>
+                    </table>
+                    </div>
+                `;
+
+                UI.assetsContainer.innerHTML = html;
+            } catch (error) {
+                console.error('Error fetching accounts:', error);
+                showError('Failed to fetch crypto assets');
+            }
+        }
+
+        // Place order
+        UI.orderForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            UI.placeOrderBtn.disabled = true;
+            UI.placeOrderBtn.textContent = 'Processing...';
+
+            try {
+                const orderData = {
+                    product_id: document.getElementById('productId').value,
+                    size: document.getElementById('amount').value,
+                    order_type: document.getElementById('orderType').value,
+                    side: document.getElementById('side').value
+                };
+
+                const response = await fetch(`${API_BASE}/order`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(orderData)
+                });
+
+                if (response.ok) {
+                    showSuccess('✓ Order placed successfully!');
+                    UI.orderForm.reset();
+                    setTimeout(fetchAccounts, 1000);
+                } else {
+                    const error = await response.json();
+                    showError(error.detail || 'Order failed');
+                }
+            } catch (error) {
+                showError('Failed to place order: ' + error.message);
+            } finally {
+                UI.placeOrderBtn.disabled = false;
+                UI.placeOrderBtn.textContent = 'Place Order';
+            }
+        });
+
+        // Withdraw all BTC
+        UI.withdrawBtn.addEventListener('click', async () => {
+            const confirmed = confirm('Withdraw ALL BTC at market price? This action cannot be undone.');
+            if (!confirmed) return;
+
+            UI.withdrawBtn.disabled = true;
+            UI.withdrawBtn.textContent = 'Processing...';
+
+            try {
+                const response = await fetch(`${API_BASE}/withdraw`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ product_id: 'BTC-USD' })
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    showSuccess(
+                        `✓ Sold ${data.btc_amount.toFixed(8)} BTC at $${data.btc_price.toFixed(2)}. ` +
+                        `Proceeds: $${data.estimated_proceeds.toFixed(2)}`
+                    );
+                    setTimeout(fetchAccounts, 1000);
+                } else {
+                    const error = await response.json();
+                    showError(error.detail || 'Withdrawal failed');
+                }
+            } catch (error) {
+                showError('Failed to complete withdrawal: ' + error.message);
+            } finally {
+                UI.withdrawBtn.disabled = false;
+                UI.withdrawBtn.textContent = '💰 Withdraw All BTC Now';
+            }
+        });
+
+        // Initial load
+        fetchAccounts();
+
+        // Refresh every 30 seconds
+        setInterval(fetchAccounts, 30000);
+    </script>
+</body>
+</html>
