@@ -402,7 +402,7 @@
                 const response = await fetch(`${API_BASE}/withdraw`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ product_id: productId })
+                    body: JSON.stringify({ product_id: productId, force: true })
                 });
 
                 if (response.ok) {

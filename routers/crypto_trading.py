@@ -39,6 +39,7 @@ class OrderRequest(BaseModel):
 class WithdrawRequest(BaseModel):
     """Request model for emergency BTC withdrawal"""
     product_id: str = "BTC-USD"
+    force: bool = False  # Force liquidation even at a loss
 
 
 def generate_auth_headers(method: str, path: str, body: str = "") -> Dict[str, str]:
