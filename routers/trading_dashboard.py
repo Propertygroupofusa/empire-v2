@@ -1982,6 +1982,7 @@ async def take_root_profit():
 
 class RootPartialSellRequest(BaseModel):
     amount_usd: float
+    force_loss: bool = False  # Allow emergency liquidation even at a loss
 
 
 @router.post("/family-tree-status/root-partial-sell")
@@ -2002,7 +2003,10 @@ async def root_partial_sell_endpoint(payload: RootPartialSellRequest):
     if crypto_family_tree_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
     try:
-        return await crypto_family_tree_bot_module.root_partial_sell(payload.amount_usd)
+        return await crypto_family_tree_bot_module.root_partial_sell(
+            payload.amount_usd,
+            force_loss=payload.force_loss
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

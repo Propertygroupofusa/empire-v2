@@ -3377,7 +3377,7 @@ async def liquidate_family_tree_and_buy_btc() -> dict:
     }
 
 
-async def root_partial_sell(amount_usd: float) -> dict:
+async def root_partial_sell(amount_usd: float, force_loss: bool = False) -> dict:
     """Sells a SPECIFIC real dollar amount out of root's BTC-USD position,
     leaving the rest of the position untouched - the deliberate, explicit
     real feature the account owner asked for after weighing the tradeoff
@@ -3388,6 +3388,9 @@ async def root_partial_sell(amount_usd: float) -> dict:
     existing manual-sell path was a FULL close - there was no way to pull
     out just part of it to fund something else (here: seeding new Grid
     Bot branches) without selling the whole real position.
+
+    force_loss: If True, allows emergency liquidation even if it results in a loss
+    (e.g., closing an underwater position to stop bleeding).
 
     Real, deliberate design choices:
     - Refuses (ValueError) if amount_usd isn't positive, root has no open
@@ -3455,12 +3458,16 @@ async def root_partial_sell(amount_usd: float) -> dict:
         # entry_price) isn't enough, since a thin real margin can still
         # net out to a real loss once the real round-trip fee is
         # subtracted.
+        #
+        # However, force_loss=True allows emergency liquidation to stop bleeding
+        # (e.g., closing an underwater position when breaker has been triggered).
         projected_net_proceeds = qty_to_sell * current_price * (1 - ROUND_TRIP_FEE_RATE / 2)
         projected_cost_basis = qty_to_sell * position.entry_price
-        if projected_net_proceeds <= projected_cost_basis:
+        if projected_net_proceeds <= projected_cost_basis and not force_loss:
             raise ValueError(
                 f"Refused - this would be a real loss after fees (entry ${position.entry_price:,.2f}, "
-                f"now ${current_price:,.2f}). Manual withdrawals are never allowed to sell at a loss."
+                f"now ${current_price:,.2f}). Manual withdrawals are never allowed to sell at a loss. "
+                f"Use force=true to override for emergency liquidation."
             )
 
         remaining_qty = position.qty - qty_to_sell
