@@ -179,18 +179,21 @@ async def place_order(order: OrderRequest):
 
 
 @router.post("/withdraw")
-async def withdraw_all_btc(withdraw_req: WithdrawRequest):
+async def withdraw_all_asset(withdraw_req: WithdrawRequest):
     """
-    Emergency withdrawal: Sell all BTC at market price immediately
+    Emergency withdrawal: Sell all of an asset at market price immediately
+    Supports any asset: BTC, ETH, AAVE, etc.
 
     Flow:
-    1. Fetch BTC account balance
-    2. Get current BTC-USD price
+    1. Fetch asset account balance
+    2. Get current price
     3. Create market sell order for full amount
     4. Return transaction details
     """
     try:
-        # Step 1: Fetch BTC account balance
+        asset = withdraw_req.product_id.split("-")[0]  # Extract base asset (BTC, AAVE, etc.)
+        product_id = withdraw_req.product_id  # Full pair like BTC-USD, AAVE-USD
+
         headers = generate_auth_headers("GET", "/api/v3/brokerage/accounts")
 
         async with httpx.AsyncClient() as client:
@@ -208,57 +211,57 @@ async def withdraw_all_btc(withdraw_req: WithdrawRequest):
                 )
 
             accounts_data = response.json()
-            btc_account = None
+            asset_account = None
 
             for account in accounts_data.get("accounts", []):
-                if account.get("currency") == "BTC":
-                    btc_account = account
+                if account.get("currency") == asset:
+                    asset_account = account
                     break
 
-            if not btc_account:
+            if not asset_account:
                 raise HTTPException(
                     status_code=404,
-                    detail="No BTC account found"
+                    detail=f"No {asset} account found"
                 )
 
-            btc_amount = float(btc_account.get("available_balance", {}).get("value", 0))
+            asset_amount = float(asset_account.get("available_balance", {}).get("value", 0))
 
-            if btc_amount <= 0:
+            if asset_amount <= 0:
                 raise HTTPException(
                     status_code=400,
-                    detail="No BTC available to withdraw"
+                    detail=f"No {asset} available to withdraw"
                 )
 
-            # Step 2: Get current BTC price
+            # Get current price
             try:
                 price_response = await client.get(
-                    "https://api.coinbase.com/v2/prices/BTC-USD/spot",
+                    f"https://api.coinbase.com/v2/prices/{product_id}/spot",
                     timeout=5.0
                 )
 
                 if price_response.status_code == 200:
                     price_data = price_response.json()
-                    btc_price = float(price_data.get("data", {}).get("amount", 0))
+                    asset_price = float(price_data.get("data", {}).get("amount", 0))
                 else:
-                    btc_price = 0
+                    asset_price = 0
             except Exception as e:
-                logger.warning(f"Failed to get BTC price: {e}")
-                btc_price = 0
+                logger.warning(f"Failed to get {asset} price: {e}")
+                asset_price = 0
 
-            if btc_price <= 0:
+            if asset_price <= 0:
                 raise HTTPException(
                     status_code=400,
-                    detail="Could not fetch BTC price"
+                    detail=f"Could not fetch {asset} price"
                 )
 
-            # Step 3: Create market sell order
+            # Create market sell order
             order_payload = {
                 "client_order_id": str(uuid.uuid4()),
-                "product_id": "BTC-USD",
+                "product_id": product_id,
                 "side": "sell",
                 "order_configuration": {
                     "market_market_ioc": {
-                        "base_size": str(btc_amount)
+                        "base_size": str(asset_amount)
                     }
                 }
             }
@@ -285,9 +288,10 @@ async def withdraw_all_btc(withdraw_req: WithdrawRequest):
 
             return {
                 "success": True,
-                "btc_amount": btc_amount,
-                "btc_price": btc_price,
-                "estimated_proceeds": btc_amount * btc_price,
+                "asset": asset,
+                "amount": asset_amount,
+                "price": asset_price,
+                "estimated_proceeds": asset_amount * asset_price,
                 "order_id": order_data.get("order_id"),
                 "status": order_data.get("order_status", "pending")
             }

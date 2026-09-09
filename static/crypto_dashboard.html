@@ -237,12 +237,20 @@
                 </form>
             </div>
 
-            <!-- Emergency Withdrawal Card -->
+            <!-- Emergency Withdrawal Cards -->
             <div class="card withdraw-card">
-                <h2>🚀 Emergency Withdrawal</h2>
+                <h2>🚀 Withdraw BTC</h2>
                 <p class="description">Sell all BTC immediately at market price</p>
-                <button class="btn btn-danger" id="withdrawBtn" style="width: 100%;">
-                    💰 Withdraw All BTC Now
+                <button class="btn btn-danger" id="withdrawBtcBtn" style="width: 100%;">
+                    💰 Withdraw All BTC
+                </button>
+            </div>
+
+            <div class="card withdraw-card">
+                <h2>🚀 Withdraw AAVE</h2>
+                <p class="description">Sell all AAVE immediately at market price</p>
+                <button class="btn btn-danger" id="withdrawAaveBtn" style="width: 100%;">
+                    💰 Withdraw All AAVE
                 </button>
             </div>
 
@@ -264,7 +272,8 @@
             orderForm: document.getElementById('orderForm'),
             assetsContainer: document.getElementById('assetsContainer'),
             placeOrderBtn: document.getElementById('placeOrderBtn'),
-            withdrawBtn: document.getElementById('withdrawBtn')
+            withdrawBtcBtn: document.getElementById('withdrawBtcBtn'),
+            withdrawAaveBtn: document.getElementById('withdrawAaveBtn')
         };
 
         // Show error message
@@ -381,25 +390,25 @@
             }
         });
 
-        // Withdraw all BTC
-        UI.withdrawBtn.addEventListener('click', async () => {
-            const confirmed = confirm('Withdraw ALL BTC at market price? This action cannot be undone.');
+        // Generic withdrawal handler
+        async function withdrawAsset(productId, assetName, buttonEl) {
+            const confirmed = confirm(`Withdraw ALL ${assetName} at market price? This action cannot be undone.`);
             if (!confirmed) return;
 
-            UI.withdrawBtn.disabled = true;
-            UI.withdrawBtn.textContent = 'Processing...';
+            buttonEl.disabled = true;
+            buttonEl.textContent = 'Processing...';
 
             try {
                 const response = await fetch(`${API_BASE}/withdraw`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ product_id: 'BTC-USD' })
+                    body: JSON.stringify({ product_id: productId })
                 });
 
                 if (response.ok) {
                     const data = await response.json();
                     showSuccess(
-                        `✓ Sold ${data.btc_amount.toFixed(8)} BTC at $${data.btc_price.toFixed(2)}. ` +
+                        `✓ Sold ${data.amount.toFixed(8)} ${data.asset} at $${data.price.toFixed(2)}. ` +
                         `Proceeds: $${data.estimated_proceeds.toFixed(2)}`
                     );
                     setTimeout(fetchAccounts, 1000);
@@ -410,9 +419,19 @@
             } catch (error) {
                 showError('Failed to complete withdrawal: ' + error.message);
             } finally {
-                UI.withdrawBtn.disabled = false;
-                UI.withdrawBtn.textContent = '💰 Withdraw All BTC Now';
+                buttonEl.disabled = false;
+                buttonEl.textContent = `💰 Withdraw All ${assetName}`;
             }
+        }
+
+        // Withdraw all BTC
+        UI.withdrawBtcBtn.addEventListener('click', () => {
+            withdrawAsset('BTC-USD', 'BTC', UI.withdrawBtcBtn);
+        });
+
+        // Withdraw all AAVE
+        UI.withdrawAaveBtn.addEventListener('click', () => {
+            withdrawAsset('AAVE-USD', 'AAVE', UI.withdrawAaveBtn);
         });
 
         // Initial load
