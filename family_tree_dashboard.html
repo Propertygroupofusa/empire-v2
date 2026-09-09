@@ -1278,6 +1278,12 @@ function branchCardHtml(b) {
         // first buy) - the endpoint handles this case by opening a fresh
         // position, so the button stays available either way.
         sellBtnHtml = `<button class="sell-btn" style="background:var(--navy);" onclick="addCashToBranch('${b.bot_name}', this)">💰 Add cash to ${coin}</button>`;
+
+        // For flat branches with idle allocated cash, also offer a close/withdraw option
+        // so idle capital can be moved to other branches or freed up
+        if (b.allocated_usd > 0) {
+            sellBtnHtml += `<button class="sell-btn" style="background:#c44536;margin-top:6px;" onclick="closeFlatBranch('${b.bot_name}', '${coin}', ${b.allocated_usd}, this)">🚨 Close &amp; free ${fmtUsd(b.allocated_usd)}</button>`;
+        }
     }
 
     // Real reason this branch's last buy/sell attempt was rejected by
@@ -1371,6 +1377,26 @@ async function emergencyCloseBranch(botName, btn) {
         alert('Emergency close failed: ' + e.message);
         btn.disabled = false;
         btn.textContent = '🚨 Force close at loss';
+    }
+}
+
+async function closeFlatBranch(botName, coin, amount, btn) {
+    if (!confirm(`Close ${botName} and free ${fmtUsd(amount)} idle cash? This will unallocate the capital from this branch so it can be moved to other grid branches. Cannot be undone.`)) return;
+    btn.disabled = true;
+    btn.textContent = 'Closing…';
+    try {
+        const res = await fetch(API_BASE + '/family-tree-status/emergency-close/' + encodeURIComponent(botName), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        alert(`${botName} closed and ${fmtUsd(amount)} freed. Capital now available to deploy to grid branches.`);
+        refresh();
+    } catch (e) {
+        alert('Close failed: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = `🚨 Close &amp; free ${fmtUsd(amount)}`;
     }
 }
 

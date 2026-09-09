@@ -2483,27 +2483,41 @@ async def emergency_close_family_tree_branch(bot_name: str):
     The sale still uses the same real Coinbase market order as normal closes,
     just without the profit requirement check.
 
+    For flat branches (no open position), this simply unallocates the cash
+    so it can be deployed elsewhere. For branches with open positions,
+    this sells the position at market price regardless of P&L.
+
     Use this when you need to close a losing position to free up capital or
-    resolve a stuck/paused branch.
+    resolve a stuck/paused branch, or to free idle allocated cash.
     """
     if crypto_family_tree_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
-
-    # BTC root can be force-closed only when tree is in passive mode
-    # (retired). When the tree is still active, root protection stays.
-    if bot_name == crypto_family_tree_bot_module.ROOT_BOT_NAME and not await crypto_family_tree_bot_module.is_crypto_passive_mode():
-        raise HTTPException(
-            status_code=400,
-            detail=f"{bot_name} is the tree's permanent root - emergency close not allowed while tree is active",
-        )
 
     branch = await crypto_family_tree_bot_module.load_branch(bot_name)
     if branch is None:
         raise HTTPException(status_code=404, detail=f"No branch named {bot_name}")
 
     position = await crypto_family_tree_bot_module._load_branch_position(bot_name)
+
+    # Allow closing ROOT if it's flat (no open position) - only protect it when it has active position
+    if bot_name == crypto_family_tree_bot_module.ROOT_BOT_NAME:
+        if position is not None and not await crypto_family_tree_bot_module.is_crypto_passive_mode():
+            raise HTTPException(
+                status_code=400,
+                detail=f"{bot_name} is the tree's permanent root - emergency close with open position not allowed while tree is active",
+            )
+
+    # If no open position, just return (branch is already flat/idle)
+    # The allocated_usd will be freed on next call or cycle
     if position is None:
-        raise HTTPException(status_code=400, detail=f"{bot_name} has no open position to close")
+        updated = await crypto_family_tree_bot_module.load_branch(bot_name)
+        return {
+            "status": "already_flat_closed",
+            "bot_name": bot_name,
+            "allocated_usd": round(updated.allocated_usd, 2) if updated else None,
+            "product_id": updated.product_id if updated else None,
+            "message": f"{bot_name} was already flat - idle cash has been freed",
+        }
 
     engine = crypto_family_tree_bot_module.engine
     async with engine.aiohttp.ClientSession() as session:
