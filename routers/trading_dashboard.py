@@ -2474,6 +2474,62 @@ async def close_family_tree_branch(bot_name: str):
     }
 
 
+@router.post("/family-tree-status/emergency-close/{bot_name}")
+async def emergency_close_family_tree_branch(bot_name: str):
+    """Force-close a family tree branch even if it's currently at a loss.
+
+    This bypasses the normal "never sell at a loss" protection and allows
+    the user to liquidate a position and free up capital when needed.
+    The sale still uses the same real Coinbase market order as normal closes,
+    just without the profit requirement check.
+
+    Use this when you need to close a losing position to free up capital or
+    resolve a stuck/paused branch.
+    """
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+
+    # BTC root can be force-closed only when tree is in passive mode
+    # (retired). When the tree is still active, root protection stays.
+    if bot_name == crypto_family_tree_bot_module.ROOT_BOT_NAME and not await crypto_family_tree_bot_module.is_crypto_passive_mode():
+        raise HTTPException(
+            status_code=400,
+            detail=f"{bot_name} is the tree's permanent root - emergency close not allowed while tree is active",
+        )
+
+    branch = await crypto_family_tree_bot_module.load_branch(bot_name)
+    if branch is None:
+        raise HTTPException(status_code=404, detail=f"No branch named {bot_name}")
+
+    position = await crypto_family_tree_bot_module._load_branch_position(bot_name)
+    if position is None:
+        raise HTTPException(status_code=400, detail=f"{bot_name} has no open position to close")
+
+    engine = crypto_family_tree_bot_module.engine
+    async with engine.aiohttp.ClientSession() as session:
+        # Get current price for logging, but don't enforce profit check
+        current_price, _atr_pct = await engine.get_price_and_volatility(session, branch.product_id)
+        if current_price is None:
+            raise HTTPException(status_code=503, detail="Could not fetch a live price - try again")
+
+        # Force sell regardless of profit/loss
+        await crypto_family_tree_bot_module._branch_sell_and_settle(
+            session, bot_name, branch.product_id, position, f"EMERGENCY CLOSE (dashboard) - forced at ${current_price:,.2f}"
+        )
+
+    # Run cycle immediately to rebuy on the next coin instead of sitting idle
+    await crypto_family_tree_bot_module.run_branch_cycle(bot_name)
+
+    updated = await crypto_family_tree_bot_module.load_branch(bot_name)
+    return {
+        "status": "emergency_closed",
+        "bot_name": bot_name,
+        "allocated_usd": round(updated.allocated_usd, 2) if updated else None,
+        "product_id": updated.product_id if updated else None,
+        "message": f"Emergency close executed: {bot_name} position closed at market price",
+    }
+
+
 @router.post("/family-tree-status/spawn-branch")
 async def spawn_family_tree_branch(db: AsyncSession = Depends(get_db)):
     """Manually starts a brand-new $50 branch right now, on demand -
