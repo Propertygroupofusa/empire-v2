@@ -77,8 +77,7 @@ from alpaca.trading.client import TradingClient
 try:
     client = TradingClient(
         api_key=os.getenv('ALPACA_API_KEY'),
-        secret_key=os.getenv('ALPACA_SECRET_KEY'),
-        base_url=os.getenv('ALPACA_BASE_URL')
+        secret_key=os.getenv('ALPACA_SECRET_KEY')
     )
     account = client.get_account()
     print(f"SUCCESS|{account.equity}|{account.buying_power}")

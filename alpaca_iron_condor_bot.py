@@ -96,7 +96,7 @@ class IronCondorBot:
                 "Missing ALPACA_API_KEY or ALPACA_SECRET_KEY in environment"
             )
 
-        return TradingClient(api_key=api_key, secret_key=secret_key, base_url=base_url)
+        return TradingClient(api_key=api_key, secret_key=secret_key)
 
     def get_market_time(self) -> datetime:
         """Get current time in NYSE timezone"""
