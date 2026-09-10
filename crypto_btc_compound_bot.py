@@ -74,7 +74,8 @@ def _safe_int_env(name: str, default: str) -> int:
         return int(default)
 
 
-COINBASE_API_KEY_NAME = os.getenv("COINBASE_API_KEY_NAME", "")
+# Use COINBASE_API_KEY (the actual Railway variable name, not COINBASE_API_KEY_NAME)
+COINBASE_API_KEY_NAME = os.getenv("COINBASE_API_KEY", "")
 COINBASE_API_PRIVATE_KEY = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\n", "\n")
 COINBASE_HOST = "api.coinbase.com"
 COINBASE_BASE_URL = f"https://{COINBASE_HOST}"
@@ -84,9 +85,9 @@ BOT_NAME = "crypto_btc_compound"
 
 # Startup validation
 if not COINBASE_API_KEY_NAME:
-    log.warning("⚠️  COINBASE_API_KEY_NAME env var is NOT SET - Coinbase API calls will fail with HTTP 401")
+    log.warning("⚠️  COINBASE_API_KEY env var is NOT SET - Coinbase API calls will fail with HTTP 401")
 else:
-    log.info(f"✓ COINBASE_API_KEY_NAME is set: {COINBASE_API_KEY_NAME[:10]}...")
+    log.info(f"✓ COINBASE_API_KEY is set: {COINBASE_API_KEY_NAME[:15]}...")
 
 if not COINBASE_API_PRIVATE_KEY:
     log.warning("⚠️  COINBASE_API_PRIVATE_KEY env var is NOT SET - Coinbase API calls will fail with HTTP 401")
