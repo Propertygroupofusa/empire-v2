@@ -163,7 +163,8 @@ FUTURES = {
     # exists for these, so the ETF ticker is used as both the key and the
     # traded symbol.
     "SH":  {"name": "Short S&P 500 (inverse of SPY)",   "qty": 1, "symbol": "SH"},
-    "PSQ": {"name": "Short Nasdaq (inverse of QQQ)",    "qty": 1, "symbol": "PSQ"},
+    # "PSQ": DISABLED Sept 10 - 25% win rate, -$427 loss on 4 trades. Performance filter for edge optimization.
+    # "PSQ": {"name": "Short Nasdaq (inverse of QQQ)",    "qty": 1, "symbol": "PSQ"},
     "DOG": {"name": "Short Dow 30 (inverse of DIA)",    "qty": 1, "symbol": "DOG"},
     "RWM": {"name": "Short Russell 2000 (inverse of IWM)", "qty": 1, "symbol": "RWM"},
     # Individual mega-cap tech equities - per the account owner's explicit
@@ -1074,7 +1075,7 @@ TOP_N_ELIGIBLE_SYMBOLS = _safe_int_env("PROP_TOP_N_SYMBOLS", "5")
 # genuinely, persistently losing money on its own terms (not just "not
 # top-5 right now"), that's real evidence worth acting on and this
 # exemption doesn't shield it from that.
-INDEX_HEDGE_SYMBOLS = {"SH", "PSQ", "DOG", "RWM"}
+INDEX_HEDGE_SYMBOLS = {"SH", "DOG", "RWM"}  # PSQ removed Sept 10: 25% win rate, -$427/4 trades
 
 
 async def _compute_top_ranked_symbols():
