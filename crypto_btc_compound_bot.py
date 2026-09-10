@@ -82,6 +82,19 @@ PRODUCT_ID = "BTC-USD"
 SYMBOL = "BTC/USD"
 BOT_NAME = "crypto_btc_compound"
 
+# Startup validation
+if not COINBASE_API_KEY_NAME:
+    log.warning("⚠️  COINBASE_API_KEY_NAME env var is NOT SET - Coinbase API calls will fail with HTTP 401")
+else:
+    log.info(f"✓ COINBASE_API_KEY_NAME is set: {COINBASE_API_KEY_NAME[:10]}...")
+
+if not COINBASE_API_PRIVATE_KEY:
+    log.warning("⚠️  COINBASE_API_PRIVATE_KEY env var is NOT SET - Coinbase API calls will fail with HTTP 401")
+elif COINBASE_API_PRIVATE_KEY.startswith("-----BEGIN"):
+    log.info(f"✓ COINBASE_API_PRIVATE_KEY is set (PEM format, {len(COINBASE_API_PRIVATE_KEY)} chars)")
+else:
+    log.info(f"✓ COINBASE_API_PRIVATE_KEY is set (base64 format, {len(COINBASE_API_PRIVATE_KEY)} chars)")
+
 CYCLE_SECONDS = _safe_int_env("BTC_COMPOUND_CYCLE_SECONDS", "30")
 MIN_TRADE_USD = _safe_float_env("BTC_COMPOUND_MIN_TRADE_USD", "5.00")
 STOP_LOSS_PCT = _safe_float_env("BTC_COMPOUND_STOP_LOSS_PCT", "0.02")  # -2% default
