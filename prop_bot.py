@@ -3429,39 +3429,40 @@ def run():
             log.error(f"Traceback: {traceback.format_exc()}")
 
         # Real Alpaca branches (see the ALPACA BRANCHES section above) -
+        # DISABLED for Coinbase-only bot. Uncomment if using Alpaca.
         # a true no-op unless explicitly turned on. Run right after the
         # whole-account scan, in the same real event loop/single-threaded
         # design as everything else in this file.
-        try:
-            loop.run_until_complete(run_alpaca_branches_cycle())
-        except RuntimeError as e:
-            if "attached to a different loop" in str(e):
-                log.warning(f"[ALPACA-BRANCH] Event loop mismatch detected: {e} - recreating event loop")
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            else:
-                log.error(f"Alpaca branch cycle error: {e}")
-                log.error(f"Traceback: {traceback.format_exc()}")
-        except Exception as e:
-            log.error(f"Alpaca branch cycle error: {e}")
-            log.error(f"Traceback: {traceback.format_exc()}")
+        # try:
+        #     loop.run_until_complete(run_alpaca_branches_cycle())
+        # except RuntimeError as e:
+        #     if "attached to a different loop" in str(e):
+        #         log.warning(f"[ALPACA-BRANCH] Event loop mismatch detected: {e} - recreating event loop")
+        #         loop = asyncio.new_event_loop()
+        #         asyncio.set_event_loop(loop)
+        #     else:
+        #         log.error(f"Alpaca branch cycle error: {e}")
+        #         log.error(f"Traceback: {traceback.format_exc()}")
+        # except Exception as e:
+        #     log.error(f"Alpaca branch cycle error: {e}")
+        #     log.error(f"Traceback: {traceback.format_exc()}")
 
-        # Real opening-bar live trading (see that section above) - a true
-        # no-op unless explicitly turned on. Run right after the Alpaca
+        # Real opening-bar live trading (see that section above) - DISABLED for Coinbase-only bot.
+        # a true no-op unless explicitly turned on. Run right after the Alpaca
         # branches cycle, same real event loop/single-threaded design.
-        try:
-            loop.run_until_complete(run_opening_bar_live_cycle())
-        except RuntimeError as e:
-            if "attached to a different loop" in str(e):
-                log.warning(f"[OPENING-BAR] Event loop mismatch detected: {e} - recreating event loop")
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            else:
-                log.error(f"Opening-bar live cycle error: {e}")
-                log.error(f"Traceback: {traceback.format_exc()}")
-        except Exception as e:
-            log.error(f"Opening-bar live cycle error: {e}")
-            log.error(f"Traceback: {traceback.format_exc()}")
+        # try:
+        #     loop.run_until_complete(run_opening_bar_live_cycle())
+        # except RuntimeError as e:
+        #     if "attached to a different loop" in str(e):
+        #         log.warning(f"[OPENING-BAR] Event loop mismatch detected: {e} - recreating event loop")
+        #         loop = asyncio.new_event_loop()
+        #         asyncio.set_event_loop(loop)
+        #     else:
+        #         log.error(f"Opening-bar live cycle error: {e}")
+        #         log.error(f"Traceback: {traceback.format_exc()}")
+        # except Exception as e:
+        #     log.error(f"Opening-bar live cycle error: {e}")
+        #     log.error(f"Traceback: {traceback.format_exc()}")
 
         time.sleep(30)
 
