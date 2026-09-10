@@ -207,9 +207,12 @@ daily_pnl = 0.0
 def _load_signing_key():
     raw = COINBASE_API_PRIVATE_KEY.strip()
     if not raw:
+        log.error("COINBASE_API_PRIVATE_KEY not set or empty - check Railway environment variables")
         raise ValueError("COINBASE_API_PRIVATE_KEY not set")
     if raw.startswith("-----BEGIN"):
+        log.debug(f"Using PEM format private key (ES256 algorithm), key starts with: {raw[:50]}...")
         return serialization.load_pem_private_key(raw.encode(), password=None), "ES256"
+    log.debug(f"Using base64 format Ed25519 key (EdDSA algorithm), key starts with: {raw[:50]}...")
     decoded = base64.b64decode(raw, validate=True)
     if len(decoded) != 64:
         raise ValueError(f"Ed25519 key must be 64 bytes decoded, got {len(decoded)}")
@@ -217,6 +220,10 @@ def _load_signing_key():
 
 
 def _build_jwt(method: str, path: str) -> str:
+    if not COINBASE_API_KEY_NAME:
+        log.error("COINBASE_API_KEY_NAME not set - check Railway environment variables")
+        raise ValueError("COINBASE_API_KEY_NAME not set")
+
     private_key, algorithm = _load_signing_key()
     now = int(time.time())
     payload = {
@@ -227,7 +234,9 @@ def _build_jwt(method: str, path: str) -> str:
         "uri": f"{method} {COINBASE_HOST}{path}",
     }
     headers = {"kid": COINBASE_API_KEY_NAME, "nonce": secrets.token_hex(16)}
-    return pyjwt.encode(payload, private_key, algorithm=algorithm, headers=headers)
+    jwt_token = pyjwt.encode(payload, private_key, algorithm=algorithm, headers=headers)
+    log.debug(f"Built JWT for {method} {path} using algorithm {algorithm}, sub={COINBASE_API_KEY_NAME}")
+    return jwt_token
 
 
 def _auth_headers(method: str, path: str) -> dict:
@@ -244,9 +253,19 @@ async def get_asset_balance(session, currency: str) -> tuple:
             params = {"limit": 250}
             if cursor:
                 params["cursor"] = cursor
-            async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path), params=params, timeout=15) as r:
+            try:
+                headers = _auth_headers("GET", path)
+            except ValueError as e:
+                log.error(f"Failed to build auth headers for {currency}: {e}")
+                return None, f"Auth header build failed: {str(e)}"
+
+            async with session.get(COINBASE_BASE_URL + path, headers=headers, params=params, timeout=15) as r:
                 if r.status != 200:
                     body = (await r.text())[:300]
+                    if r.status == 401:
+                        log.error(f"HTTP 401 Unauthorized fetching {currency}: {body}. API key name: {COINBASE_API_KEY_NAME[:10] if COINBASE_API_KEY_NAME else 'NOT SET'}...")
+                    else:
+                        log.warning(f"HTTP {r.status} fetching {currency}: {body}")
                     return None, f"HTTP {r.status}: {body}"
                 data = await r.json()
                 for account in data.get("accounts", []):
@@ -261,6 +280,7 @@ async def get_asset_balance(session, currency: str) -> tuple:
     except aiohttp.ClientError as e:
         return None, f"Coinbase connection failed: {type(e).__name__}"
     except Exception as e:
+        log.exception(f"Exception in get_asset_balance for {currency}")
         return None, f"{type(e).__name__}: {str(e)[:150]}"
 
 
@@ -279,13 +299,23 @@ async def get_all_asset_balances(session) -> tuple:
     cursor = None
     balances = {}
     try:
+        try:
+            headers = _auth_headers("GET", path)
+        except ValueError as e:
+            log.error(f"Failed to build auth headers for get_all_asset_balances: {e}")
+            return None, f"Auth header build failed: {str(e)}"
+
         while True:
             params = {"limit": 250}
             if cursor:
                 params["cursor"] = cursor
-            async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path), params=params, timeout=15) as r:
+            async with session.get(COINBASE_BASE_URL + path, headers=headers, params=params, timeout=15) as r:
                 if r.status != 200:
                     body = (await r.text())[:300]
+                    if r.status == 401:
+                        log.error(f"HTTP 401 Unauthorized fetching all balances: {body}. API key name: {COINBASE_API_KEY_NAME[:10] if COINBASE_API_KEY_NAME else 'NOT SET'}...")
+                    else:
+                        log.warning(f"HTTP {r.status} fetching all balances: {body}")
                     return None, f"HTTP {r.status}: {body}"
                 data = await r.json()
                 for account in data.get("accounts", []):
@@ -301,6 +331,7 @@ async def get_all_asset_balances(session) -> tuple:
     except aiohttp.ClientError as e:
         return None, f"Coinbase connection failed: {type(e).__name__}"
     except Exception as e:
+        log.exception(f"Exception in get_all_asset_balances")
         return None, f"{type(e).__name__}: {str(e)[:150]}"
 
 
