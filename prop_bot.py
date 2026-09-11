@@ -29,6 +29,7 @@ from opening_bar_signals import (
     ELEPHANT_BAR_LOOKBACK, OPENING_BAR_MAX_ENTRIES_PER_DAY,
     _group_bars_by_day, _replay_opening_bar_breakout_multi_entry,
 )
+from bot_recovery import loop_detector, circuit_breaker, api_retry, failure_alert, get_recovery_status
 
 # Measurement system: Trade logging with full signal context
 try:
@@ -1823,10 +1824,20 @@ async def run_prop_cycle():
             log.warning(f"[APEX_589296] ⚠️  Cash unavailable from API, using default qty: {qty}")
 
         log.info(f"[APEX_589296] 🟢 READY TO ENTER: {side.upper()} {contract} | Price: ${price:.2f} | Qty: {qty} | Risk: ${qty * price:.2f}")
+
+        # Loop detection: check if we're repeatedly trying to open same position
+        action = f"open_{contract}_{side}"
+        is_loop, status = loop_detector.record_action("PROP_BOT", action)
+
+        if is_loop:
+            log.warning(f"[APEX_589296] 🔄 LOOP DETECTED on {contract} ({side}) — skipping entry to break cycle")
+            return False  # Skip this entry, prevent infinite loop
+
         opened = await open_position(session, contract, config, side, price, rsi, trend, qty)
         if opened and cash_remaining is not None:
             cash_remaining -= qty * price
             log.info(f"[APEX_589296] 💳 POSITION OPENED | Cash remaining after position: ${cash_remaining:.2f}")
+            loop_detector.reset("PROP_BOT")  # Reset loop detector on successful entry
         return opened
 
     connector = aiohttp.TCPConnector(use_dns_cache=True, limit=20, limit_per_host=5, ttl_dns_cache=300)
@@ -2086,6 +2097,14 @@ async def run_prop_cycle():
                 await _db_update_peak_pct(contract, new_peak_pnl_pct)
 
             if should_exit:
+                # Loop detection: check if we're repeatedly closing same position
+                action = f"close_{contract}_{exit_type}"
+                is_loop, status = loop_detector.record_action("PROP_BOT", action)
+
+                if is_loop:
+                    log.warning(f"[APEX_589296] 🔄 LOOP DETECTED on {contract} ({exit_type}) — skipping this close to break cycle")
+                    continue  # Skip this close, let position hold to break the loop
+
                 await close_position(session, contract, config, position, price, rsi, trend, reason)
 
             await asyncio.sleep(0.3)
@@ -2227,6 +2246,12 @@ async def run_prop_cycle():
             await asyncio.sleep(0.3)
 
     # Check if today was profitable
+    # Recovery status: log auto-recovery metrics at end of cycle
+    recovery_status = get_recovery_status("PROP_BOT")
+    if recovery_status["is_looping"]:
+        log.warning(f"⚠️  RECOVERY: Loop detected (cycle #{recovery_status['loop_count']}) — auto-recovery active")
+    log.info(f"[RECOVERY] Loop: {recovery_status['is_looping']} | Daily loss: ${recovery_status['daily_loss']:.2f} | API failures: {recovery_status['api_failures']}")
+
     today = now.strftime("%Y-%m-%d")
     if daily_pnl > 0 and (not profitable_days or profitable_days[-1] != today):
         profitable_days.append(today)

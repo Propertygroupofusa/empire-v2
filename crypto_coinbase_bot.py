@@ -60,6 +60,7 @@ from database import AsyncSessionLocal
 from models import BotPosition, TradingBotState, CryptoRSIState, CryptoTradeLog, CryptoSupplementalCapital
 from bot_mandates import CRYPTO_MANDATE
 from network_config import get_cached_response, cache_response, NETWORK_ENV_CONFIG
+from bot_recovery import loop_detector, circuit_breaker, api_retry, failure_alert, get_recovery_status
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("crypto_coinbase_bot")
@@ -1534,6 +1535,14 @@ async def run_crypto_cycle():
                     reason = f"MAX HOLD TIME ({held_min:.0f}min >= {CRYPTO_MAX_HOLD_SECONDS//60}min, {unrealized_pct*100:+.2f}%)"
 
                 if partial_exit:
+                    # Loop detection: check if we're repeatedly selling same position
+                    action = f"partial_sell_{symbol}"
+                    is_loop, _ = loop_detector.record_action("CRYPTO_BOT", action)
+
+                    if is_loop:
+                        log.warning(f"[CRYPTO] 🔄 LOOP DETECTED on {symbol} (partial sell) — skipping to break cycle")
+                        continue
+
                     # Sell 25% of original position
                     filled = await place_order(session, symbol, "sell", sell_qty, price)
                     if filled:
@@ -1541,6 +1550,14 @@ async def run_crypto_cycle():
                         daily_pnl += pnl_partial
                         log.info(f"[CRYPTO] 💰 PARTIAL {symbol} ({reason}) | Qty: {sell_qty:.8f} | P&L: ${pnl_partial:.2f} | Remaining: {remaining_qty:.8f}")
                 elif should_exit:
+                    # Loop detection: check if we're repeatedly closing same position
+                    action = f"close_{symbol}_{reason.split()[0]}"  # Use first word of reason
+                    is_loop, _ = loop_detector.record_action("CRYPTO_BOT", action)
+
+                    if is_loop:
+                        log.warning(f"[CRYPTO] 🔄 LOOP DETECTED on {symbol} ({reason}) — skipping to break cycle")
+                        continue
+
                     # Full exit: sell all remaining
                     filled = await place_order(session, symbol, "sell", remaining_qty if remaining_qty > 0 else qty, price)
                     if filled:
@@ -1818,8 +1835,18 @@ async def run_crypto_cycle():
                 continue
 
             log.info(f"[CRYPTO] 📡 BUY {symbol} — RSI:{rsi}")
+
+            # Loop detection: check if we're repeatedly buying same symbol
+            action = f"open_{symbol}_long"
+            is_loop, _ = loop_detector.record_action("CRYPTO_BOT", action)
+
+            if is_loop:
+                log.warning(f"[CRYPTO] 🔄 LOOP DETECTED on {symbol} (buy) — skipping entry to break cycle")
+                continue
+
             filled = await place_order(session, symbol, "buy", qty, price)
             if filled:
+                loop_detector.reset("CRYPTO_BOT")  # Reset on successful entry
                 # UPGRADE: Use swing-based stop loss instead of fixed percentages
                 targets = _calculate_atr_targets(price, atr)
 
@@ -1873,6 +1900,12 @@ async def run_crypto_cycle():
 
         # ── Pass 3: DISABLED (Coinbase SPOT does not support shorting) ────
         # Long-only mode: only BUY entries and SELL exits for closing longs.
+
+        # Recovery status: log auto-recovery metrics at end of cycle
+        recovery_status = get_recovery_status("CRYPTO_BOT")
+        if recovery_status["is_looping"]:
+            log.warning(f"⚠️  RECOVERY: Loop detected (cycle #{recovery_status['loop_count']}) — auto-recovery active")
+        log.info(f"[RECOVERY] Loop: {recovery_status['is_looping']} | Daily loss: ${recovery_status['daily_loss']:.2f} | API failures: {recovery_status['api_failures']}")
 
         # ── CRITICAL: Flush all RSI state changes to database (end of cycle) ──
         # This happens AFTER all trading logic (Pass 1, 2, 3), so database latency
