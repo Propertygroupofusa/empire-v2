@@ -1,492 +1,629 @@
 #!/usr/bin/env python3
-"""
-Automated Iron Condor Bot for Alpaca Paper Trading
-Implements passive 30-45 DTE spreads with defined risk and profit targets
-Entry: 10:00 AM ET | Exit check: 2:00 PM ET
-"""
+"""Automated, paper-only iron condor trading through Alpaca's REST APIs."""
 
-import os
+import argparse
 import json
 import logging
-from datetime import datetime, timedelta
-from typing import Optional, Dict, List, Tuple
-from enum import Enum
+import os
+import re
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
+from zoneinfo import ZoneInfo
 
-from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import (
-    MarketOrderRequest, LimitOrderRequest, GetOrdersRequest,
-    QueryOrderStatus
-)
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderStatus
-from alpaca.data.historical import StockHistoricalDataClient
-import pytz
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 log = logging.getLogger(__name__)
 
-# =====================================================================
-# IRON CONDOR RULES (LOCKED IN)
-# =====================================================================
+OCC_PATTERN = re.compile(r"^(.+?)(\d{6})([CP])(\d{8})$")
+FINAL_ORDER_STATUSES = {"canceled", "expired", "rejected", "replaced", "suspended"}
+
+
+def eastern_now() -> datetime:
+    try:
+        return datetime.now(ZoneInfo("America/New_York"))
+    except Exception as exc:
+        raise RuntimeError(
+            "Eastern timezone data is unavailable; install project requirements"
+        ) from exc
 
 ENTRY_RULES = {
-    "underlyings": ["SPY", "QQQ", "IWM"],  # Preferred order
+    "underlyings": ["SPY", "QQQ", "IWM"],
     "dte_min": 30,
     "dte_max": 45,
     "short_delta_min": 0.20,
     "short_delta_max": 0.30,
-    "spread_width": 5,  # $5 between short and long
-    "target_credit_min": 25,
-    "target_credit_max": 50,
-    "limit_order_discount": 0.05,  # Place limit $0.05 below target
-    "position_size": 1,  # 1 contract (1 spread = 4 legs)
+    "spread_width": Decimal("5.00"),
+    "target_credit_min": Decimal("0.25"),
+    "target_credit_max": Decimal("0.50"),
+    "limit_order_discount": Decimal("0.05"),
+    "position_size": 1,
+    "max_risk_pct": Decimal("0.02"),
 }
 
 EXIT_RULES = {
-    "profit_target_pct": 0.50,  # Close at 50% of max profit
-    "stop_loss_pct": 1.00,  # Hard stop at 100% loss
-    "days_to_expiry_exit": 5,  # Close on last 5 days
+    "profit_target_pct": Decimal("0.50"),
+    "stop_loss_pct": Decimal("1.00"),
+    "days_to_expiry_exit": 5,
 }
 
 MARKET_HOURS = {
-    "entry_window_start": "10:00",  # 10:00 AM ET
+    "entry_window_start": "10:00",
     "entry_window_end": "12:00",
-    "exit_check_time": "14:00",  # 2:00 PM ET
+    "exit_window_start": "14:00",
+    "exit_window_end": "14:30",
 }
 
 
-class SpreadType(Enum):
-    CALL = "call"
-    PUT = "put"
-    IRON_CONDOR = "iron_condor"
+def money(value: Decimal) -> Decimal:
+    return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-class TradeStatus(Enum):
-    PENDING_ENTRY = "pending_entry"
-    ENTRY_PLACED = "entry_placed"
-    ACTIVE = "active"
-    PROFITABLE = "profitable"
-    STOPPED_OUT = "stopped_out"
-    CLOSED = "closed"
+@dataclass(frozen=True)
+class OptionQuote:
+    symbol: str
+    underlying: str
+    expiration: date
+    option_type: str
+    strike: Decimal
+    delta: Decimal
+    bid: Decimal
+    ask: Decimal
+
+
+@dataclass(frozen=True)
+class IronCondorCandidate:
+    underlying: str
+    expiration: date
+    short_call: OptionQuote
+    long_call: OptionQuote
+    short_put: OptionQuote
+    long_put: OptionQuote
+    natural_credit: Decimal
+    limit_credit: Decimal
+
+    @property
+    def symbols(self) -> List[str]:
+        return [
+            self.short_call.symbol,
+            self.long_call.symbol,
+            self.short_put.symbol,
+            self.long_put.symbol,
+        ]
+
+
+class AlpacaAPIError(RuntimeError):
+    pass
+
+
+class AlpacaREST:
+    def __init__(self) -> None:
+        self.api_key = os.getenv("ALPACA_API_KEY", "").strip()
+        self.secret_key = os.getenv("ALPACA_SECRET_KEY", "").strip()
+        self.trading_url = os.getenv(
+            "ALPACA_BASE_URL", "https://paper-api.alpaca.markets"
+        ).rstrip("/")
+        self.data_url = os.getenv(
+            "ALPACA_DATA_URL", "https://data.alpaca.markets"
+        ).rstrip("/")
+        self.timeout = float(os.getenv("ALPACA_HTTP_TIMEOUT", "20"))
+
+        if not self.api_key or not self.secret_key:
+            raise ValueError("Missing ALPACA_API_KEY or ALPACA_SECRET_KEY")
+        if self.trading_url != "https://paper-api.alpaca.markets":
+            raise ValueError(
+                "This bot is paper-only; ALPACA_BASE_URL must be "
+                "https://paper-api.alpaca.markets"
+            )
+
+        retries = Retry(
+            total=3,
+            backoff_factor=0.5,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset({"GET", "HEAD", "OPTIONS"}),
+        )
+        self.session = requests.Session()
+        self.session.headers.update(
+            {
+                "APCA-API-KEY-ID": self.api_key,
+                "APCA-API-SECRET-KEY": self.secret_key,
+                "Accept": "application/json",
+            }
+        )
+        self.session.mount("https://", HTTPAdapter(max_retries=retries))
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        data_api: bool = False,
+        params: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        base_url = self.data_url if data_api else self.trading_url
+        try:
+            response = self.session.request(
+                method,
+                f"{base_url}{path}",
+                params=params,
+                json=payload,
+                timeout=self.timeout,
+            )
+        except requests.RequestException as exc:
+            raise AlpacaAPIError(f"{method} {path} failed: {exc}") from exc
+
+        if response.status_code >= 400:
+            detail = response.text[:1000]
+            raise AlpacaAPIError(
+                f"{method} {path} returned {response.status_code}: {detail}"
+            )
+        if response.status_code == 204 or not response.content:
+            return {}
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise AlpacaAPIError(f"{method} {path} returned invalid JSON") from exc
+
+    def get(self, path: str, **kwargs: Any) -> Dict[str, Any]:
+        return self.request("GET", path, **kwargs)
+
+    def post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self.request("POST", path, payload=payload)
 
 
 class IronCondorBot:
-    """Automated iron condor spread bot for Alpaca paper trading"""
+    def __init__(self, state_path: Optional[Path] = None) -> None:
+        self.api = AlpacaREST()
+        self.state_path = state_path or Path(
+            os.getenv("IRON_CONDOR_STATE_PATH", "iron_condor_state.json")
+        )
+        self.state = self._load_state()
+        account = self._validate_account()
+        log.info(
+            "[ACCOUNT] Equity: $%.2f | Options buying power: $%.2f",
+            float(account["equity"]),
+            float(account.get("options_buying_power") or 0),
+        )
 
-    def __init__(self):
-        self.client = self._init_alpaca_client()
-        self.account = self.client.get_account()
-        self.trades_log = []
-        self.tz = pytz.timezone("America/New_York")
+    def _load_state(self) -> Dict[str, Any]:
+        if not self.state_path.exists():
+            return {"trades": []}
+        try:
+            state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Cannot read state file {self.state_path}: {exc}") from exc
+        if not isinstance(state.get("trades"), list):
+            raise ValueError(f"Invalid state file {self.state_path}: missing trades list")
+        return state
 
-        log.info(f"[BOT] Connected to Alpaca paper trading")
-        log.info(f"[ACCOUNT] Equity: ${self.account.equity:.2f} | "
-                 f"Buying Power: ${self.account.buying_power:.2f}")
+    def _save_state(self) -> None:
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
+        temporary_path.write_text(
+            json.dumps(self.state, indent=2, sort_keys=True), encoding="utf-8"
+        )
+        temporary_path.replace(self.state_path)
 
-    def _init_alpaca_client(self) -> TradingClient:
-        """Initialize Alpaca trading client from environment variables"""
-        api_key = os.getenv("ALPACA_API_KEY")
-        secret_key = os.getenv("ALPACA_SECRET_KEY")
-        base_url = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
-
-        if not api_key or not secret_key:
+    def _validate_account(self) -> Dict[str, Any]:
+        account = self.api.get("/v2/account")
+        if account.get("status") != "ACTIVE" or account.get("trading_blocked"):
+            raise ValueError("Alpaca paper account is not active for trading")
+        level = int(account.get("options_trading_level") or 0)
+        if level < 3:
             raise ValueError(
-                "Missing ALPACA_API_KEY or ALPACA_SECRET_KEY in environment"
+                f"Options trading level {level} cannot trade defined-risk spreads; level 3 required"
             )
-
-        return TradingClient(api_key=api_key, secret_key=secret_key)
+        return account
 
     def get_market_time(self) -> datetime:
-        """Get current time in NYSE timezone"""
-        return datetime.now(self.tz)
+        return eastern_now()
 
-    def is_market_hours(self) -> bool:
-        """Check if market is currently open (9:30 AM - 4:00 PM ET)"""
-        now = self.get_market_time()
-        if now.weekday() >= 5:  # Weekend
+    def _clock(self) -> Dict[str, Any]:
+        return self.api.get("/v2/clock")
+
+    def _in_window(self, start: str, end: str) -> bool:
+        clock = self._clock()
+        if not clock.get("is_open"):
             return False
-        market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
-        market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
-        return market_open <= now <= market_close
+        now = self.get_market_time().time()
+        start_time = datetime.strptime(start, "%H:%M").time()
+        end_time = datetime.strptime(end, "%H:%M").time()
+        return start_time <= now <= end_time
 
     def is_entry_window(self) -> bool:
-        """Check if we're in the entry window (10:00 AM - 12:00 PM ET)"""
-        if not self.is_market_hours():
-            return False
-        now = self.get_market_time()
-        entry_start = now.replace(hour=10, minute=0, second=0, microsecond=0)
-        entry_end = now.replace(hour=12, minute=0, second=0, microsecond=0)
-        return entry_start <= now <= entry_end
+        return self._in_window(
+            MARKET_HOURS["entry_window_start"], MARKET_HOURS["entry_window_end"]
+        )
 
-    def is_exit_check_time(self) -> bool:
-        """Check if it's time for exit check (2:00 PM ET)"""
-        if not self.is_market_hours():
-            return False
-        now = self.get_market_time()
-        exit_time_start = now.replace(hour=14, minute=0, second=0, microsecond=0)
-        exit_time_end = now.replace(hour=14, minute=30, second=0, microsecond=0)
-        return exit_time_start <= now <= exit_time_end
+    def is_exit_window(self) -> bool:
+        return self._in_window(
+            MARKET_HOURS["exit_window_start"], MARKET_HOURS["exit_window_end"]
+        )
 
-    def get_options_chain(self, symbol: str, dte_min: int = 30, dte_max: int = 45) -> Optional[Dict]:
-        """
-        Fetch options chain for symbol with specified DTE range.
-        Note: Alpaca's options data is limited. This is a stub for real implementation.
-        """
-        try:
-            # In production, connect to real options data source
-            # (IB, TD Ameritrade, Polygon.io, etc.)
-            log.info(f"[OPTIONS] Fetching chain for {symbol} ({dte_min}-{dte_max} DTE)")
+    @staticmethod
+    def parse_option_snapshot(symbol: str, snapshot: Dict[str, Any]) -> OptionQuote:
+        match = OCC_PATTERN.match(symbol)
+        if not match:
+            raise ValueError(f"Invalid OCC option symbol: {symbol}")
+        underlying, expiration_text, option_code, strike_text = match.groups()
+        quote = snapshot.get("latestQuote") or {}
+        greeks = snapshot.get("greeks") or {}
+        bid = Decimal(str(quote.get("bp") or 0))
+        ask = Decimal(str(quote.get("ap") or 0))
+        delta = Decimal(str(greeks.get("delta") or 0))
+        if bid < 0 or ask <= 0 or bid > ask or delta == 0:
+            raise ValueError(f"Unusable quote for {symbol}")
+        return OptionQuote(
+            symbol=symbol,
+            underlying=underlying,
+            expiration=datetime.strptime(expiration_text, "%y%m%d").date(),
+            option_type="call" if option_code == "C" else "put",
+            strike=Decimal(strike_text) / Decimal("1000"),
+            delta=delta,
+            bid=bid,
+            ask=ask,
+        )
 
-            # PLACEHOLDER: Real implementation would fetch from data provider
-            # For now, return None to indicate no live options data available in paper account
-            log.warning(f"[OPTIONS] Live options data not available (requires external data source)")
-            return None
+    def get_options_chain(
+        self, symbol: str, expiration: Optional[date] = None
+    ) -> List[OptionQuote]:
+        today = self.get_market_time().date()
+        params: Dict[str, Any] = {
+            "feed": os.getenv("ALPACA_OPTIONS_FEED", "indicative"),
+            "limit": 1000,
+            "expiration_date_gte": (today + timedelta(days=ENTRY_RULES["dte_min"])).isoformat(),
+            "expiration_date_lte": (today + timedelta(days=ENTRY_RULES["dte_max"])).isoformat(),
+        }
+        if expiration:
+            params = {
+                "feed": os.getenv("ALPACA_OPTIONS_FEED", "indicative"),
+                "limit": 1000,
+                "expiration_date": expiration.isoformat(),
+            }
 
-        except Exception as e:
-            log.error(f"[OPTIONS] Error fetching chain: {e}")
-            return None
-
-    def build_iron_condor(
-        self,
-        symbol: str,
-        expiration: str,
-        short_call_strike: float,
-        short_put_strike: float,
-        credit: float
-    ) -> Tuple[List[Dict], float]:
-        """
-        Build iron condor spread with 4 legs:
-        - SELL call at short_call_strike
-        - BUY call at short_call_strike + $5
-        - SELL put at short_put_strike
-        - BUY put at short_put_strike - $5
-
-        Returns: (legs list, max_risk in dollars)
-        """
-        spread_width = ENTRY_RULES["spread_width"]
-        max_risk = spread_width * 100  # $500 for $5 width
-        max_profit = credit * 100
-
-        legs = [
-            {
-                "symbol": symbol,
-                "side": OrderSide.SELL,
-                "type": "call",
-                "strike": short_call_strike,
-                "expiration": expiration,
-            },
-            {
-                "symbol": symbol,
-                "side": OrderSide.BUY,
-                "type": "call",
-                "strike": short_call_strike + spread_width,
-                "expiration": expiration,
-            },
-            {
-                "symbol": symbol,
-                "side": OrderSide.SELL,
-                "type": "put",
-                "strike": short_put_strike,
-                "expiration": expiration,
-            },
-            {
-                "symbol": symbol,
-                "side": OrderSide.BUY,
-                "type": "put",
-                "strike": short_put_strike - spread_width,
-                "expiration": expiration,
-            },
-        ]
-
-        log.info(f"[SPREAD] {symbol} {expiration} Iron Condor")
-        log.info(f"  Short Call: ${short_call_strike} | Long Call: ${short_call_strike + spread_width}")
-        log.info(f"  Short Put:  ${short_put_strike} | Long Put: ${short_put_strike - spread_width}")
-        log.info(f"  Credit: ${credit} | Max Risk: ${max_risk} | Max Profit: ${max_profit}")
-
-        return legs, max_risk
-
-    def place_entry_order(
-        self,
-        symbol: str,
-        expiration: str,
-        short_call_strike: float,
-        short_put_strike: float,
-        target_credit: float
-    ) -> Optional[str]:
-        """
-        Place entry order for iron condor spread.
-        Uses limit order at (target_credit - $0.05)
-        """
-        try:
-            if not self.is_entry_window():
-                log.warning("[ENTRY] Not in entry window")
-                return None
-
-            # Build spread
-            legs, max_risk = self.build_iron_condor(
-                symbol, expiration, short_call_strike, short_put_strike, target_credit
+        snapshots: Dict[str, Any] = {}
+        while True:
+            response = self.api.get(
+                f"/v1beta1/options/snapshots/{symbol}",
+                data_api=True,
+                params=params,
             )
+            snapshots.update(response.get("snapshots") or {})
+            page_token = response.get("next_page_token")
+            if not page_token:
+                break
+            params["page_token"] = page_token
 
-            # Validate position sizing
-            account_equity = float(self.account.equity)
-            allocation_pct = max_risk / account_equity
+        chain: List[OptionQuote] = []
+        for contract_symbol, snapshot in snapshots.items():
+            try:
+                chain.append(self.parse_option_snapshot(contract_symbol, snapshot))
+            except ValueError:
+                continue
+        return chain
 
-            if allocation_pct > 0.02:  # Max 2% risk per trade
-                log.warning(f"[ENTRY] Position size exceeds 2% risk limit ({allocation_pct:.2%})")
-                return None
+    @staticmethod
+    def select_candidate(
+        underlying: str, chain: Iterable[OptionQuote]
+    ) -> Optional[IronCondorCandidate]:
+        by_expiration: Dict[date, List[OptionQuote]] = {}
+        for quote in chain:
+            if quote.underlying == underlying:
+                by_expiration.setdefault(quote.expiration, []).append(quote)
 
-            # Place limit order
-            limit_price = target_credit - ENTRY_RULES["limit_order_discount"]
+        candidates: List[IronCondorCandidate] = []
+        midpoint_delta = (
+            Decimal(str(ENTRY_RULES["short_delta_min"]))
+            + Decimal(str(ENTRY_RULES["short_delta_max"]))
+        ) / 2
+        width = ENTRY_RULES["spread_width"]
 
-            # NOTE: Alpaca's options order API requires special handling
-            # This is a simplified placeholder - real implementation needs proper options routing
-            log.info(f"[ENTRY] Placing limit order for {symbol} at ${limit_price:.2f} credit")
-            log.info(f"[ENTRY] Order would execute through Alpaca options trading")
+        for expiration, quotes in by_expiration.items():
+            calls = {quote.strike: quote for quote in quotes if quote.option_type == "call"}
+            puts = {quote.strike: quote for quote in quotes if quote.option_type == "put"}
+            short_calls = [
+                quote
+                for quote in calls.values()
+                if Decimal(str(ENTRY_RULES["short_delta_min"]))
+                <= quote.delta
+                <= Decimal(str(ENTRY_RULES["short_delta_max"]))
+            ]
+            short_puts = [
+                quote
+                for quote in puts.values()
+                if Decimal(str(ENTRY_RULES["short_delta_min"]))
+                <= abs(quote.delta)
+                <= Decimal(str(ENTRY_RULES["short_delta_max"]))
+            ]
+            if not short_calls or not short_puts:
+                continue
 
-            # In production, use Alpaca's options order API
-            # For now, log intent and return mock order ID
-            order_id = f"MOCK_{symbol}_{datetime.utcnow().isoformat()}"
+            short_call = min(short_calls, key=lambda quote: abs(quote.delta - midpoint_delta))
+            short_put = min(short_puts, key=lambda quote: abs(abs(quote.delta) - midpoint_delta))
+            long_call = calls.get(short_call.strike + width)
+            long_put = puts.get(short_put.strike - width)
+            if not long_call or not long_put or short_put.strike >= short_call.strike:
+                continue
 
-            self.trades_log.append({
-                "timestamp": datetime.utcnow().isoformat(),
-                "type": "entry_placed",
-                "symbol": symbol,
-                "expiration": expiration,
-                "short_call": short_call_strike,
-                "short_put": short_put_strike,
-                "target_credit": target_credit,
-                "limit_price": limit_price,
-                "max_risk": max_risk,
-                "status": "pending_fill"
-            })
-
-            return order_id
-
-        except Exception as e:
-            log.error(f"[ENTRY] Error placing order: {e}")
-            return None
-
-    def check_exit_conditions(self) -> None:
-        """
-        Check all open positions for:
-        1. 50% profit exits (close immediately)
-        2. 100% stop loss (close immediately)
-        3. Last 5 days to expiration (close at max profit)
-        """
-        if not self.is_exit_check_time():
-            log.debug("[EXIT] Not at scheduled exit check time")
-            return
-
-        try:
-            positions = self.client.get_all_positions()
-
-            if not positions:
-                log.info("[EXIT] No open positions")
-                return
-
-            log.info(f"[EXIT] Checking {len(positions)} position(s) for exits")
-
-            for position in positions:
-                self._evaluate_position_for_exit(position)
-
-        except Exception as e:
-            log.error(f"[EXIT] Error checking positions: {e}")
-
-    def _evaluate_position_for_exit(self, position) -> None:
-        """Evaluate single position against exit rules"""
-        try:
-            symbol = position.symbol
-            qty = float(position.qty)
-            unrealized_pl = float(position.unrealized_pl)
-            unrealized_plpc = float(position.unrealized_plpc)
-
-            log.info(f"[EXIT] {symbol}: P&L ${unrealized_pl:.2f} ({unrealized_plpc*100:.2f}%)")
-
-            # For iron condor spreads, evaluate against profit targets
-            # NOTE: Real implementation tracks spread-level P&L, not individual legs
-
-            # Exit rule 1: 50% profit
-            if unrealized_plpc >= 0.50:
-                log.info(f"[EXIT] {symbol} hit 50% profit target - closing")
-                self._close_position(symbol, "profit_target")
-
-            # Exit rule 2: Stop loss at 100% loss
-            elif unrealized_plpc <= -1.00:
-                log.warning(f"[EXIT] {symbol} hit stop loss - closing")
-                self._close_position(symbol, "stop_loss")
-
-            # Exit rule 3: Last 5 days to expiration
-            else:
-                # Check expiration date if tracked
-                log.debug(f"[EXIT] {symbol} holding ({unrealized_plpc*100:.2f}% P&L)")
-
-        except Exception as e:
-            log.error(f"[EXIT] Error evaluating position: {e}")
-
-    def _close_position(self, symbol: str, reason: str) -> bool:
-        """Close a position by symbol"""
-        try:
-            log.info(f"[CLOSE] Closing {symbol} ({reason})")
-
-            # Get current position
-            position = self.client.get_position(symbol)
-            if not position:
-                log.warning(f"[CLOSE] Position not found: {symbol}")
-                return False
-
-            # Market order to close (immediate exit)
-            qty = int(position.qty)
-            side = OrderSide.SELL if qty > 0 else OrderSide.BUY
-
-            order = self.client.submit_order(
-                MarketOrderRequest(
-                    symbol=symbol,
-                    qty=abs(qty),
-                    side=side,
-                    time_in_force=TimeInForce.DAY
+            natural_credit = money(
+                short_call.bid + short_put.bid - long_call.ask - long_put.ask
+            )
+            if not (
+                ENTRY_RULES["target_credit_min"]
+                <= natural_credit
+                <= ENTRY_RULES["target_credit_max"]
+            ):
+                continue
+            limit_credit = money(
+                max(
+                    ENTRY_RULES["target_credit_min"],
+                    natural_credit - ENTRY_RULES["limit_order_discount"],
+                )
+            )
+            candidates.append(
+                IronCondorCandidate(
+                    underlying,
+                    expiration,
+                    short_call,
+                    long_call,
+                    short_put,
+                    long_put,
+                    natural_credit,
+                    limit_credit,
                 )
             )
 
-            log.info(f"[CLOSE] {symbol} closed: Order {order.id}")
+        if not candidates:
+            return None
+        target_credit = (
+            ENTRY_RULES["target_credit_min"] + ENTRY_RULES["target_credit_max"]
+        ) / 2
+        return min(
+            candidates,
+            key=lambda candidate: (
+                abs(candidate.limit_credit - target_credit), candidate.expiration
+            ),
+        )
 
-            self.trades_log.append({
-                "timestamp": datetime.utcnow().isoformat(),
-                "type": "exit",
-                "symbol": symbol,
-                "reason": reason,
-                "order_id": order.id
-            })
+    @staticmethod
+    def _entry_payload(candidate: IronCondorCandidate, contracts: int) -> Dict[str, Any]:
+        legs = [
+            (candidate.short_call.symbol, "sell", "sell_to_open"),
+            (candidate.long_call.symbol, "buy", "buy_to_open"),
+            (candidate.short_put.symbol, "sell", "sell_to_open"),
+            (candidate.long_put.symbol, "buy", "buy_to_open"),
+        ]
+        return {
+            "order_class": "mleg",
+            "qty": str(contracts),
+            "type": "limit",
+            "limit_price": str(-candidate.limit_credit),
+            "time_in_force": "day",
+            "client_order_id": f"ic-entry-{candidate.underlying}-{int(datetime.now().timestamp())}",
+            "legs": [
+                {
+                    "symbol": symbol,
+                    "ratio_qty": "1",
+                    "side": side,
+                    "position_intent": intent,
+                }
+                for symbol, side, intent in legs
+            ],
+        }
 
-            return True
+    @staticmethod
+    def _close_payload(trade: Dict[str, Any], close_debit: Decimal) -> Dict[str, Any]:
+        short_call, long_call, short_put, long_put = trade["symbols"]
+        legs = [
+            (short_call, "buy", "buy_to_close"),
+            (long_call, "sell", "sell_to_close"),
+            (short_put, "buy", "buy_to_close"),
+            (long_put, "sell", "sell_to_close"),
+        ]
+        return {
+            "order_class": "mleg",
+            "qty": str(trade["contracts"]),
+            "type": "limit",
+            "limit_price": str(money(close_debit)),
+            "time_in_force": "day",
+            "client_order_id": f"ic-exit-{trade['underlying']}-{int(datetime.now().timestamp())}",
+            "legs": [
+                {
+                    "symbol": symbol,
+                    "ratio_qty": "1",
+                    "side": side,
+                    "position_intent": intent,
+                }
+                for symbol, side, intent in legs
+            ],
+        }
 
-        except Exception as e:
-            log.error(f"[CLOSE] Error closing {symbol}: {e}")
-            return False
+    def _has_open_trade(self, underlying: str) -> bool:
+        return any(
+            trade["underlying"] == underlying
+            and trade["status"] in {"entry_pending", "active", "exit_pending"}
+            for trade in self.state["trades"]
+        )
 
-    def run_morning_check(self) -> None:
-        """Morning pre-market check and entry candidate evaluation"""
-        now = self.get_market_time()
-        log.info(f"\n{'='*80}")
-        log.info(f"[MORNING] Alpaca Iron Condor Bot - {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-        log.info(f"{'='*80}")
+    def place_entry_order(self, candidate: IronCondorCandidate) -> str:
+        account = self._validate_account()
+        contracts = int(ENTRY_RULES["position_size"])
+        risk = money(
+            (ENTRY_RULES["spread_width"] - candidate.limit_credit)
+            * Decimal("100")
+            * contracts
+        )
+        equity = Decimal(str(account["equity"]))
+        options_buying_power = Decimal(str(account.get("options_buying_power") or 0))
+        if risk > equity * ENTRY_RULES["max_risk_pct"]:
+            raise ValueError(f"Max loss ${risk} exceeds the 2% account risk limit")
+        if risk > options_buying_power:
+            raise ValueError(f"Max loss ${risk} exceeds options buying power")
+        if self._has_open_trade(candidate.underlying):
+            raise ValueError(f"Open iron condor already exists for {candidate.underlying}")
 
-        account = self.client.get_account()
-        log.info(f"[ACCOUNT] Equity: ${account.equity:.2f} | "
-                 f"Buying Power: ${account.buying_power:.2f}")
-
-        if not self.is_market_hours():
-            log.info("[MARKET] Market not open yet")
-            return
-
-        log.info("[MARKET] Market is open")
-
-        # Check for new entry opportunities
-        for underlying in ENTRY_RULES["underlyings"]:
-            log.info(f"\n[CANDIDATE] {underlying}")
-            options_chain = self.get_options_chain(
-                underlying,
-                ENTRY_RULES["dte_min"],
-                ENTRY_RULES["dte_max"]
-            )
-
-            if not options_chain:
-                log.info(f"[CANDIDATE] No options data available for {underlying}")
-                continue
-
-            # In production: analyze chain, select strikes, place order
-            log.info(f"[CANDIDATE] {underlying} ready for entry evaluation")
-
-    def run_afternoon_check(self) -> None:
-        """Afternoon exit check (2:00 PM ET)"""
-        now = self.get_market_time()
-        log.info(f"\n{'='*80}")
-        log.info(f"[AFTERNOON] Exit Check - {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-        log.info(f"{'='*80}")
-
-        self.check_exit_conditions()
-
-    def run_daily_cycle(self) -> None:
-        """Run full daily cycle: morning check + exit check"""
-        self.run_morning_check()
-        self.run_afternoon_check()
-
-    def save_trade_log(self, filepath: str = "trades_log.json") -> None:
-        """Save trade log to file"""
-        try:
-            with open(filepath, 'w') as f:
-                json.dump(self.trades_log, f, indent=2)
-            log.info(f"[LOG] Saved {len(self.trades_log)} trades to {filepath}")
-        except Exception as e:
-            log.error(f"[LOG] Error saving trades: {e}")
-
-    def generate_daily_report(self) -> Dict:
-        """Generate daily performance report"""
-        try:
-            account = self.client.get_account()
-            positions = self.client.get_all_positions()
-
-            total_pl = 0.0
-            winning_positions = 0
-            losing_positions = 0
-
-            for position in positions:
-                pl = float(position.unrealized_pl)
-                total_pl += pl
-                if pl > 0:
-                    winning_positions += 1
-                else:
-                    losing_positions += 1
-
-            report = {
-                "timestamp": datetime.utcnow().isoformat(),
-                "account_equity": float(account.equity),
-                "buying_power": float(account.buying_power),
-                "total_unrealized_pl": total_pl,
-                "open_positions": len(positions),
-                "winning_positions": winning_positions,
-                "losing_positions": losing_positions,
-                "trades_logged": len(self.trades_log),
+        payload = self._entry_payload(candidate, contracts)
+        order = self.api.post("/v2/orders", payload)
+        order_id = order.get("id")
+        if not order_id:
+            raise AlpacaAPIError("Entry order response did not contain an order ID")
+        self.state["trades"].append(
+            {
+                "underlying": candidate.underlying,
+                "expiration": candidate.expiration.isoformat(),
+                "symbols": candidate.symbols,
+                "contracts": contracts,
+                "entry_credit": str(candidate.limit_credit),
+                "max_loss": str(risk),
+                "entry_order_id": order_id,
+                "exit_order_id": None,
+                "status": "entry_pending",
+                "created_at": eastern_now().isoformat(),
             }
+        )
+        self._save_state()
+        log.info(
+            "[ENTRY] Submitted %s iron condor for $%s credit: %s",
+            candidate.underlying,
+            candidate.limit_credit,
+            order_id,
+        )
+        return order_id
 
-            log.info(f"\n[DAILY REPORT]")
-            log.info(f"  Equity: ${report['account_equity']:.2f}")
-            log.info(f"  Unrealized P&L: ${report['total_unrealized_pl']:.2f}")
-            log.info(f"  Open Positions: {report['open_positions']}")
-            log.info(f"  Winning: {winning_positions} | Losing: {losing_positions}")
+    def _reconcile_orders(self) -> None:
+        changed = False
+        for trade in self.state["trades"]:
+            if trade["status"] == "entry_pending":
+                order = self.api.get(f"/v2/orders/{trade['entry_order_id']}")
+                if order.get("status") == "filled":
+                    trade["status"] = "active"
+                    trade["filled_at"] = order.get("filled_at")
+                    changed = True
+                elif order.get("status") in FINAL_ORDER_STATUSES:
+                    trade["status"] = f"entry_{order['status']}"
+                    changed = True
+            elif trade["status"] == "exit_pending":
+                order = self.api.get(f"/v2/orders/{trade['exit_order_id']}")
+                if order.get("status") == "filled":
+                    trade["status"] = "closed"
+                    trade["closed_at"] = order.get("filled_at")
+                    changed = True
+                elif order.get("status") in FINAL_ORDER_STATUSES:
+                    trade["status"] = "active"
+                    trade["exit_order_id"] = None
+                    changed = True
+        if changed:
+            self._save_state()
 
-            return report
+    def _closing_debit(self, trade: Dict[str, Any]) -> Decimal:
+        chain = self.get_options_chain(
+            trade["underlying"], date.fromisoformat(trade["expiration"])
+        )
+        quotes = {quote.symbol: quote for quote in chain}
+        missing = set(trade["symbols"]) - quotes.keys()
+        if missing:
+            raise ValueError(f"Missing current quotes for: {', '.join(sorted(missing))}")
+        short_call, long_call, short_put, long_put = (
+            quotes[symbol] for symbol in trade["symbols"]
+        )
+        return money(
+            short_call.ask + short_put.ask - long_call.bid - long_put.bid
+        )
 
-        except Exception as e:
-            log.error(f"[REPORT] Error generating report: {e}")
-            return {}
+    def check_exit_conditions(self) -> None:
+        self._reconcile_orders()
+        for trade in self.state["trades"]:
+            if trade["status"] != "active":
+                continue
+            entry_credit = Decimal(trade["entry_credit"])
+            close_debit = self._closing_debit(trade)
+            days_to_expiry = (
+                date.fromisoformat(trade["expiration"]) - self.get_market_time().date()
+            ).days
+            profit = entry_credit - close_debit
+            reason: Optional[str] = None
+            if profit >= entry_credit * EXIT_RULES["profit_target_pct"]:
+                reason = "profit_target"
+            elif -profit >= entry_credit * EXIT_RULES["stop_loss_pct"]:
+                reason = "stop_loss"
+            elif days_to_expiry <= EXIT_RULES["days_to_expiry_exit"]:
+                reason = "expiration"
+
+            log.info(
+                "[EXIT] %s entry=$%s close=$%s P&L=$%s DTE=%d",
+                trade["underlying"],
+                entry_credit,
+                close_debit,
+                money(profit * Decimal("100") * trade["contracts"]),
+                days_to_expiry,
+            )
+            if not reason:
+                continue
+            order = self.api.post("/v2/orders", self._close_payload(trade, close_debit))
+            if not order.get("id"):
+                raise AlpacaAPIError("Exit order response did not contain an order ID")
+            trade["exit_order_id"] = order["id"]
+            trade["exit_reason"] = reason
+            trade["status"] = "exit_pending"
+            self._save_state()
+            log.info("[EXIT] Submitted %s close order: %s", reason, order["id"])
+
+    def scan_for_entry(self) -> Optional[str]:
+        self._reconcile_orders()
+        for underlying in ENTRY_RULES["underlyings"]:
+            if self._has_open_trade(underlying):
+                continue
+            candidate = self.select_candidate(underlying, self.get_options_chain(underlying))
+            if candidate:
+                return self.place_entry_order(candidate)
+            log.info("[SCAN] No rule-compliant candidate for %s", underlying)
+        return None
+
+    def run_daily_cycle(self, force_entry: bool = False, force_exit: bool = False) -> None:
+        self._reconcile_orders()
+        if force_entry or self.is_entry_window():
+            self.scan_for_entry()
+        if force_exit or self.is_exit_window():
+            self.check_exit_conditions()
+
+    def generate_daily_report(self) -> Dict[str, Any]:
+        account = self._validate_account()
+        statuses: Dict[str, int] = {}
+        for trade in self.state["trades"]:
+            statuses[trade["status"]] = statuses.get(trade["status"], 0) + 1
+        report = {
+            "timestamp": eastern_now().isoformat(),
+            "account_equity": float(account["equity"]),
+            "options_buying_power": float(account.get("options_buying_power") or 0),
+            "trade_statuses": statuses,
+        }
+        log.info("[REPORT] %s", json.dumps(report, sort_keys=True))
+        return report
 
 
-# =====================================================================
-# MAIN EXECUTION
-# =====================================================================
-
-if __name__ == "__main__":
-    log.info("\n" + "="*80)
-    log.info("ALPACA IRON CONDOR BOT - AUTOMATED PAPER TRADING")
-    log.info("="*80)
-
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--force-entry", action="store_true", help="scan outside entry window")
+    parser.add_argument("--force-exit", action="store_true", help="check exits outside exit window")
+    arguments = parser.parse_args()
     try:
         bot = IronCondorBot()
-
-        # Run daily cycle for testing
-        log.info("\n[BOT] Starting daily cycle...")
-        bot.run_daily_cycle()
-
-        # Generate report
+        bot.run_daily_cycle(arguments.force_entry, arguments.force_exit)
         bot.generate_daily_report()
+        return 0
+    except Exception:
+        log.exception("[BOT] Fatal error")
+        return 1
 
-        # Save trade log
-        bot.save_trade_log()
 
-        log.info("\n[BOT] Daily cycle complete")
-
-    except Exception as e:
-        log.error(f"[BOT] Fatal error: {e}", exc_info=True)
-        exit(1)
+if __name__ == "__main__":
+    raise SystemExit(main())
