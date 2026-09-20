@@ -5652,7 +5652,7 @@ async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/api/trading-dashboard/logs")
+@router.get("/logs")
 async def get_trading_logs(limit: int = 50, event_type: str = None):
     """
     Get recent trading activity logs with optional filtering.
@@ -5683,7 +5683,7 @@ async def get_trading_logs(limit: int = 50, event_type: str = None):
         }
 
 
-@router.get("/api/trading-dashboard/bot-activity")
+@router.get("/bot-activity")
 async def get_bot_activity():
     """
     Get real-time bot activity metrics:
@@ -5713,7 +5713,7 @@ async def get_bot_activity():
         }
 
 
-@router.get("/api/trading-dashboard/profit-locks")
+@router.get("/profit-locks")
 async def get_profit_locks():
     """
     Get all profit-lock events from today and this week.
@@ -6172,3 +6172,31 @@ async def close_all_grid_slices_endpoint():
     result = await crypto_grid_bot_module.close_all_grid_slices()
     log.info(f"[dashboard] 🔒 Close-all triggered: {result['branches_closed']} branches, {result['slices_closed']} real slices, ${result['total_realized_pnl']:.2f} total realized")
     return result
+
+
+@router.get("/scalper-status")
+async def get_scalper_status():
+    """Live view of crypto_scalper_bot's most recent cycle.
+
+    Reports mode honestly: `live` false means every signal below was
+    computed against real market data but NO order was placed. The panel
+    labels itself PAPER in that state so a screenshot of it can never be
+    mistaken for realised P&L.
+
+    break_even_win_rate_pct is recomputed from the live TAKER_FEE_RATE on
+    every cycle rather than stored, so it cannot go stale.
+    """
+    try:
+        from crypto_scalper_bot import LAST_CYCLE, ENABLED, LIVE
+        payload = dict(LAST_CYCLE)
+        payload["enabled"] = ENABLED
+        payload["live"] = LIVE
+        if not ENABLED:
+            payload["message"] = "Scalper is disabled (SCALPER_ENABLED is not true)."
+        elif payload.get("ran_at") is None:
+            payload["message"] = "Scalper is enabled but has not completed a cycle yet."
+        return payload
+    except Exception as e:
+        # Never 500 the dashboard over one panel.
+        return {"enabled": False, "live": False, "signals": [], "positions": [],
+                "ran_at": None, "error": f"scalper unavailable: {e}"}

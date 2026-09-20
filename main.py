@@ -1214,6 +1214,22 @@ async def lifespan(app: FastAPI):
     # Crypto trading belongs on Coinbase (crypto_coinbase_bot.py) - Alpaca
     # is for stocks only.
 
+    # crypto_scalper_bot.py revives that bot on Coinbase, with DB-backed
+    # state and its own capital envelope - the three fixable reasons above.
+    # Two switches, both defaulting off: SCALPER_ENABLED starts it at all,
+    # SCALPER_LIVE lets it place orders. Enabled-but-not-live computes every
+    # signal against real market data and places nothing, which is how a
+    # backtest claim gets tested forward without risking money.
+    try:
+        from crypto_scalper_bot import run_forever as _scalper_run, ENABLED as _scalper_on
+        if _scalper_on:
+            asyncio.create_task(_scalper_run())
+            log.info("⚡ Crypto scalper started (SCALPER_LIVE decides paper vs live)")
+        else:
+            log.info("⚡ Crypto scalper disabled (SCALPER_ENABLED not true)")
+    except Exception as e:
+        log.error(f"🛑 Crypto scalper startup failed: {e}")
+
     try:
         from stripe_subscriptions import setup_stripe_products
         if setup_stripe_products():
