@@ -1381,6 +1381,23 @@ try:
 except Exception as e:
     log.warning(f"Failed to load crypto analytics router: {e}")
 
+# Crypto trading API (BTC withdrawal, order placement, account management)
+try:
+    from routers import crypto_trading
+    app.include_router(crypto_trading.router, tags=["Crypto Trading"])
+    log.info("✅ Router loaded: /api/crypto (withdraw, orders, accounts)")
+except Exception as e:
+    log.warning(f"Failed to load crypto trading router: {e}")
+
+
+@app.get("/crypto-dashboard")
+async def serve_crypto_dashboard():
+    """Serve the crypto trading dashboard HTML"""
+    dashboard_path = os.path.join(os.path.dirname(__file__), "static/crypto_dashboard.html")
+    if not os.path.exists(dashboard_path):
+        raise HTTPException(status_code=404, detail="Crypto dashboard not found")
+    return FileResponse(dashboard_path, media_type="text/html")
+
 
 @app.get("/dashboard")
 async def serve_dashboard():
