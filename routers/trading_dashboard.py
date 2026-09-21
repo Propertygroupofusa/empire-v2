@@ -801,7 +801,7 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
                 price, _atr_pct = await engine.get_price_and_volatility(session, pos.symbol)
                 if price is not None:
                     current_price_by_bot[bot_name] = price
-            real_balance, _err = await engine.get_usd_balance(session)
+            real_balance, balance_err = await engine.get_usd_balance(session)
             # Real, read-only visibility into a confirmed-live confusion:
             # get_usd_balance() (and therefore spendable_for_spawn below)
             # only ever sees the literal USD account - a real balance
@@ -816,6 +816,11 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
             # back to USD by hand. This is purely so that choice can be
             # made with the real number in front of them.
             real_usdc_balance, _usdc_err = await engine.get_usdc_balance(session)
+
+            if real_balance is None and balance_err:
+                log.warning(f"[dashboard] Coinbase USD balance fetch failed: {balance_err}")
+                if "401" in str(balance_err):
+                    log.error("[dashboard] HTTP 401: Coinbase API credentials may not be set in Railway. Check COINBASE_API_KEY and COINBASE_API_PRIVATE_KEY environment variables.")
 
     # Fetch real Alpaca equity for the dashboard header
     alpaca_equity = None
