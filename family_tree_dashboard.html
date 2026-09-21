@@ -396,6 +396,33 @@
     .unlock-btn:hover { background: var(--gold); color: #fff; }
     .unlock-btn:disabled { opacity: 0.5; cursor: default; }
 
+    .mode-toggle-btn {
+        font-family: inherit;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border: 1px solid #667eea;
+        color: #fff;
+        padding: 6px 12px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.75em;
+        font-weight: 700;
+        min-height: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.3s ease;
+    }
+    .mode-toggle-btn:hover {
+        background: linear-gradient(135deg, #764ba2 0%, #667eea 100%);
+        box-shadow: 0 2px 8px rgba(102, 126, 234, 0.4);
+        transform: translateY(-1px);
+    }
+    .mode-toggle-btn:disabled { opacity: 0.5; cursor: default; }
+    .mode-toggle-btn.active {
+        background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        border-color: #10b981;
+    }
+
     .modal-overlay {
         position: fixed; inset: 0; background: rgba(15,23,42,0.55);
         display: none; align-items: center; justify-content: center;
@@ -710,7 +737,10 @@
     </div>
 
     <div class="section-title" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
-        <span>🔲 Grid Bot <span id="grid-mode-badge" style="font-size:0.7em; font-weight:600; margin-left:8px;"></span></span>
+        <div style="display:flex; align-items:center; gap:12px;">
+            <span>🔲 Grid Bot <span id="grid-mode-badge" style="font-size:0.7em; font-weight:600; margin-left:8px;"></span></span>
+            <button class="mode-toggle-btn" id="scale-bot-toggle" onclick="switchToScaleBot()" style="width:auto; margin-top:0; font-size:0.85em; padding:6px 12px;">📈 Switch to Scale Bot</button>
+        </div>
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
             <button class="sell-btn" style="width:auto; margin-top:0;" onclick="gridQuickBuy(this)">💰 $20 Quick Buy</button>
             <button class="unlock-btn" onclick="openCreateGridModal()">🌱 New grid branch</button>
@@ -2083,6 +2113,20 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals) {
     toggleBtn.disabled = false;
     toggleBtn.textContent = gridModeActive ? '⏸️ Disable grid trading' : '▶️ Enable grid trading';
 
+    // Update Scale Bot toggle button based on grid bot active status
+    const scaleBotToggle = document.getElementById('scale-bot-toggle');
+    if (scaleBotToggle) {
+        const gridBotActive = !!data.grid_bot_active;
+        if (gridBotActive) {
+            scaleBotToggle.textContent = '📈 Switch to Scale Bot';
+            scaleBotToggle.classList.remove('active');
+        } else {
+            scaleBotToggle.textContent = '🔲 Scale Bot Active (Switch Back)';
+            scaleBotToggle.classList.add('active');
+        }
+        scaleBotToggle.disabled = false;
+    }
+
     renderGridDynamicSpacingBadge(!!data.dynamic_spacing_active);
     renderGridAvgSwingSpacingBadge(!!data.avg_swing_spacing_active);
     renderGridAutoRotateBadge(!!data.auto_rotate_active, data.auto_rotate_interval_minutes);
@@ -2849,6 +2893,53 @@ async function gridQuickBuy(btn) {
     } finally {
         btn.disabled = false;
         btn.textContent = original;
+    }
+}
+
+async function switchToScaleBot() {
+    const btn = document.getElementById('scale-bot-toggle');
+    if (!btn) return;
+
+    const isScaleBotActive = btn.classList.contains('active');
+    const action = isScaleBotActive ? 'Switch back to Grid Bot' : 'Switch to Scale Bot';
+    const endpoint = isScaleBotActive ? '/grid-status/switch-to-grid-bot' : '/grid-status/switch-to-scale-bot';
+
+    if (!confirm(
+        isScaleBotActive ?
+        'Switch back to Grid Bot?\n\n' +
+        'This will re-enable the Grid Bot for standard grid-trading.\n\n' +
+        'Scale Bot mode will be disabled.' :
+        'Switch to Scale Bot?\n\n' +
+        'This will disable the Grid Bot and activate the Scale Bot mode ' +
+        'for dynamic capital scaling based on performance.\n\n' +
+        'Grid Bot branches remain in the database but won\'t trade until you switch back.'
+    )) return;
+
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Switching…';
+    try {
+        const res = await fetch(API_BASE + endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+
+        const message = isScaleBotActive ?
+            '✅ Switched back to Grid Bot! Grid Bot is now active.' :
+            '✅ Switched to Scale Bot! Grid Bot is now disabled.';
+        alert(message);
+
+        await loadGridStatus();
+    } catch (e) {
+        alert('Could not switch bots: ' + e.message);
+        btn.textContent = original;
+    } finally {
+        btn.disabled = false;
+        if (btn.textContent === 'Switching…') {
+            btn.textContent = original;
+        }
     }
 }
 
@@ -3800,7 +3891,11 @@ async function loadHeaderTotals() {
         if (data.real_usd_balance !== null && data.real_usd_balance !== undefined) {
             renderHeaderTotal('header-total-coinbase', data.real_usd_balance);
         } else {
-            document.getElementById('header-total-coinbase').textContent = '—';
+            // If Coinbase balance unavailable (401 error), show diagnostic link
+            const coinbaseEl = document.getElementById('header-total-coinbase');
+            coinbaseEl.textContent = '⚠️ 401';
+            coinbaseEl.style.cursor = 'help';
+            coinbaseEl.title = 'Coinbase API credentials need JWT format. Check Railway variables.';
         }
 
         // Alpaca: display real equity (actual account value)
@@ -3810,7 +3905,8 @@ async function loadHeaderTotals() {
             document.getElementById('header-total-alpaca').textContent = '—';
         }
     } catch (e) {
-        document.getElementById('header-total-coinbase').textContent = '—';
+        console.error('Error loading header totals:', e);
+        document.getElementById('header-total-coinbase').textContent = '⚠️ API';
         document.getElementById('header-total-alpaca').textContent = '—';
     }
 }

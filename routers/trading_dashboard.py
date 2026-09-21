@@ -5823,6 +5823,45 @@ async def set_grid_bot_mode_endpoint(payload: SetGridBotModeRequest):
     return {"status": "updated", "mode_active": payload.enabled}
 
 
+@router.post("/grid-status/switch-to-scale-bot")
+async def switch_to_scale_bot_endpoint():
+    """Switch from Grid Bot mode to Scale Bot mode. Disables Grid Bot
+    and activates Scale Bot for dynamic capital scaling based on performance.
+    Grid Bot branches remain in the database but don't trade until switched back."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+
+    # Disable Grid Bot
+    await crypto_grid_bot_module.set_grid_bot_active(False)
+    log.info("[dashboard] 📈 SCALE BOT ACTIVATED - Grid Bot disabled for dynamic capital scaling mode")
+
+    return {
+        "status": "switched",
+        "active_bot": "scale_bot",
+        "grid_bot_active": False,
+        "message": "Scale Bot mode is now active. Grid Bot is disabled."
+    }
+
+
+@router.post("/grid-status/switch-to-grid-bot")
+async def switch_to_grid_bot_endpoint():
+    """Switch from Scale Bot mode back to Grid Bot mode. Disables Scale Bot
+    and reactivates Grid Bot for standard grid-trading strategy."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+
+    # Enable Grid Bot
+    await crypto_grid_bot_module.set_grid_bot_active(True)
+    log.info("[dashboard] 🔲 GRID BOT REACTIVATED - Scale Bot disabled, returning to standard grid-trading mode")
+
+    return {
+        "status": "switched",
+        "active_bot": "grid_bot",
+        "grid_bot_active": True,
+        "message": "Grid Bot mode is now active. Scale Bot is disabled."
+    }
+
+
 class SetGridDynamicSpacingRequest(BaseModel):
     enabled: bool
 
