@@ -3743,19 +3743,25 @@ function renderHeaderTotal(elId, total) {
 }
 
 async function loadHeaderTotals() {
-    // Coinbase total reuses the same two client-side accumulators the
-    // Total Profit KPI card already computes (lastRealizedProfit/
-    // lastUnrealizedProfit, populated earlier in this same refresh()) -
-    // one real number, shown in two places, not a second definition of
-    // "total profit."
-    if (lastRealizedProfit !== null || lastUnrealizedProfit !== null) {
-        renderHeaderTotal('header-total-coinbase', (lastRealizedProfit || 0) + (lastUnrealizedProfit || 0));
-    }
+    // Fetch real account balances from /family-tree-status
     try {
-        const alpacaData = await apiGet('/alpaca-overview');
-        const alpacaTotal = (alpacaData.bots || []).reduce((sum, b) => sum + b.pl, 0);
-        renderHeaderTotal('header-total-alpaca', alpacaTotal);
+        const data = await apiGet('/family-tree-status');
+
+        // Coinbase: display real USD balance (actual cash + holdings in Coinbase)
+        if (data.real_usd_balance !== null && data.real_usd_balance !== undefined) {
+            renderHeaderTotal('header-total-coinbase', data.real_usd_balance);
+        } else {
+            document.getElementById('header-total-coinbase').textContent = '—';
+        }
+
+        // Alpaca: display real equity (actual account value)
+        if (data.alpaca_equity !== null && data.alpaca_equity !== undefined) {
+            renderHeaderTotal('header-total-alpaca', data.alpaca_equity);
+        } else {
+            document.getElementById('header-total-alpaca').textContent = '—';
+        }
     } catch (e) {
+        document.getElementById('header-total-coinbase').textContent = '—';
         document.getElementById('header-total-alpaca').textContent = '—';
     }
 }

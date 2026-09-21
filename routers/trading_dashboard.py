@@ -817,6 +817,22 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
             # made with the real number in front of them.
             real_usdc_balance, _usdc_err = await engine.get_usdc_balance(session)
 
+    # Fetch real Alpaca equity for the dashboard header
+    alpaca_equity = None
+    if ALPACA_KEY and ALPACA_SECRET:
+        try:
+            async with aiohttp.ClientSession() as alpaca_session:
+                async with alpaca_session.get(
+                    f"{ALPACA_BASE_URL}/v2/account",
+                    headers=ALPACA_HEADERS,
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    if resp.status == 200:
+                        alpaca_data = await resp.json()
+                        alpaca_equity = float(alpaca_data.get('equity', 0))
+        except Exception as e:
+            log.warning(f"[dashboard] Alpaca equity fetch failed: {e}")
+
     # Fetched ONCE per request (a real DB read), not per-branch inside the
     # loop below - the same real, live, dashboard-switchable trailing-stop
     # width run_branch_cycle() itself reads every cycle, so compute_sell_advice()
@@ -1042,6 +1058,7 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         "reversal_trade_active": reversal_trade_active,
         "real_usd_balance": round(real_balance, 2) if real_balance is not None else None,
         "real_usdc_balance": round(real_usdc_balance, 2) if real_usdc_balance is not None else None,
+        "alpaca_equity": round(alpaca_equity, 2) if alpaca_equity is not None else None,
     }
 
 
