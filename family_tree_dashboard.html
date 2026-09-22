@@ -196,6 +196,9 @@
     .coin-history-empty { font-size: 0.85em; color: var(--text-dim); padding: 8px 0; }
 
     @keyframes activity-pulse { 0% { box-shadow: 0 0 0 0 rgba(16,185,129,0.6); } 70% { box-shadow: 0 0 0 6px rgba(16,185,129,0); } 100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); } }
+    @keyframes scan-sweep { 0% { transform: translateX(-100%); } 50% { transform: translateX(100%); } 100% { transform: translateX(100%); } }
+    .scale-bot-scanning { position: relative; overflow: hidden; border-radius: 6px; }
+    .scale-bot-scanning::before { content: ''; position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: linear-gradient(90deg, transparent, rgba(102, 126, 234, 0.3), transparent); animation: scan-sweep 2s infinite; z-index: 1; }
     .activity-feed { display: flex; flex-direction: column; gap: 6px; max-height: 340px; overflow-y: auto; }
     .activity-row { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border-radius: 8px; background: var(--bg); font-size: 0.85em; line-height: 1.4; animation: activity-row-in 0.4s ease; }
     .activity-row.is-new { background: rgba(16,185,129,0.08); }
@@ -777,6 +780,57 @@
             <div id="grid-total-allocated" style="font-size:0.85em; color:var(--text-dim);"></div>
         </div>
         <div id="grid-content" class="empty">Loading…</div>
+    </div>
+
+    <!-- Scale Bot Status Panel -->
+    <div class="panel" id="scale-bot-panel" style="display:none; border-left:4px solid #667eea;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:1.2em;">📈</span>
+                <span style="font-weight:700; color:var(--navy);">Scale Bot Active</span>
+            </div>
+            <button id="scale-bot-toggle-btn" class="mode-toggle-btn active" onclick="switchToGridBot()" style="padding:6px 12px;">🔲 Switch to Grid Bot</button>
+        </div>
+        <div class="panel-sub" style="margin-bottom:12px;">
+            Dynamic capital scaling based on performance. Capital increases as profitability improves, decreases if edge degrades. Real-time tier tracking and growth metrics below.
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px; margin-bottom:12px;">
+            <div style="padding:12px; background:var(--surface-alt); border-radius:6px; border-left:3px solid #10b981;">
+                <div style="font-size:0.75em; color:var(--text-dim); margin-bottom:4px;">Current Tier</div>
+                <div id="scale-current-tier" style="font-weight:700; font-size:1.3em; color:#10b981;">Tier 1</div>
+            </div>
+            <div style="padding:12px; background:var(--surface-alt); border-radius:6px; border-left:3px solid #667eea;">
+                <div style="font-size:0.75em; color:var(--text-dim); margin-bottom:4px;">Total Capital Allocated</div>
+                <div id="scale-total-capital" style="font-weight:700; font-size:1.3em; color:#667eea;">$0.00</div>
+            </div>
+            <div style="padding:12px; background:var(--surface-alt); border-radius:6px; border-left:3px solid #f59e0b;">
+                <div style="font-size:0.75em; color:var(--text-dim); margin-bottom:4px;">Growth Rate</div>
+                <div id="scale-growth-rate" style="font-weight:700; font-size:1.3em; color:#f59e0b;">0%</div>
+            </div>
+            <div style="padding:12px; background:var(--surface-alt); border-radius:6px; border-left:3px solid #ef4444;">
+                <div style="font-size:0.75em; color:var(--text-dim); margin-bottom:4px;">Drawdown</div>
+                <div id="scale-drawdown" style="font-weight:700; font-size:1.3em; color:#ef4444;">0%</div>
+            </div>
+        </div>
+        <div style="padding:12px; background:var(--surface-subtle); border-radius:6px; border:1px dashed var(--border);">
+            <div style="font-size:0.85em; font-weight:600; margin-bottom:8px;">📊 Performance Tracking</div>
+            <div id="scale-performance-details" style="font-size:0.8em; color:var(--text-dim); line-height:1.6;">
+                <div>Win Rate: <span id="scale-win-rate" style="color:var(--text);">—</span></div>
+                <div>Profit Factor: <span id="scale-profit-factor" style="color:var(--text);">—</span></div>
+                <div>Expectancy: <span id="scale-expectancy" style="color:var(--text);">—</span></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scale Bot Scanning Indicator -->
+    <div id="scale-bot-scanning-indicator" style="display:none; margin-bottom:12px; padding:10px 12px; background:var(--surface-subtle); border-radius:6px; border:1px dashed #667eea; font-size:0.85em; color:#667eea; font-weight:600;">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+            <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#667eea; animation:activity-pulse 1.5s infinite;"></span>
+            Scale Bot actively scanning for scaling opportunities...
+        </div>
+        <div id="scale-bot-scan-progress" style="width:100%; height:6px; background:rgba(102,126,234,0.1); border-radius:3px; overflow:hidden;">
+            <div class="scale-bot-scanning" style="width:100%; height:100%; background:linear-gradient(90deg, transparent, #667eea, transparent);"></div>
+        </div>
     </div>
 
     <div class="two-col-grid">
@@ -2237,6 +2291,43 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals) {
 // ever traded (including one since paused/withdrawn/deleted) - plus a
 // combined grand total of the two, so there's one real number that
 // answers "what has this whole section actually made me, total."
+
+function renderScaleBotStatus(data) {
+    const panel = document.getElementById('scale-bot-panel');
+    const scanIndicator = document.getElementById('scale-bot-scanning-indicator');
+    const gridActive = !!data.grid_bot_active;
+
+    // Show Scale Bot panel only when grid bot is inactive (Scale Bot is active)
+    panel.style.display = gridActive ? 'none' : 'block';
+
+    // Show scanning indicator when Scale Bot is active
+    scanIndicator.style.display = gridActive ? 'none' : 'block';
+
+    if (!gridActive && data.scale_bot_metrics) {
+        const metrics = data.scale_bot_metrics;
+
+        // Update tier
+        document.getElementById('scale-current-tier').textContent = `Tier ${metrics.current_tier || 1}`;
+
+        // Update capital
+        document.getElementById('scale-total-capital').textContent =
+            `$${(metrics.total_capital || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+
+        // Update growth rate
+        const growthRate = metrics.growth_rate_pct || 0;
+        document.getElementById('scale-growth-rate').textContent = `${growthRate > 0 ? '+' : ''}${growthRate.toFixed(1)}%`;
+
+        // Update drawdown
+        const drawdown = metrics.drawdown_pct || 0;
+        document.getElementById('scale-drawdown').textContent = `${drawdown.toFixed(1)}%`;
+
+        // Update performance metrics
+        document.getElementById('scale-win-rate').textContent = `${(metrics.win_rate || 0).toFixed(1)}%`;
+        document.getElementById('scale-profit-factor').textContent = `${(metrics.profit_factor || 0).toFixed(2)}x`;
+        document.getElementById('scale-expectancy').textContent = `$${(metrics.expectancy_per_trade || 0).toFixed(2)}/trade`;
+    }
+}
+
 function renderGridRealizedTotalBanner(historyTotals, statusData) {
     const h = historyTotals || {};
     const realizedKnown = h.total_realized_pnl !== null && h.total_realized_pnl !== undefined;
@@ -2724,6 +2815,7 @@ async function loadGridStatus() {
         const tradeHistoryByBot = {};
         (history.branches || []).forEach(function (h) { tradeHistoryByBot[h.bot_name] = h; });
         renderGridStatus(data, tradeHistoryByBot, history);
+        renderScaleBotStatus(data);
     } catch (e) {
         document.getElementById('grid-content').innerHTML = `<div class="empty">Could not load: ${e.message}</div>`;
     }
@@ -2931,6 +3023,39 @@ async function switchToScaleBot() {
             '✅ Switched to Scale Bot! Grid Bot is now disabled.';
         alert(message);
 
+        await loadGridStatus();
+    } catch (e) {
+        alert('Could not switch bots: ' + e.message);
+        btn.textContent = original;
+    } finally {
+        btn.disabled = false;
+        if (btn.textContent === 'Switching…') {
+            btn.textContent = original;
+        }
+    }
+}
+
+async function switchToGridBot() {
+    const btn = document.getElementById('scale-bot-toggle-btn');
+    if (!btn) return;
+
+    if (!confirm(
+        'Switch back to Grid Bot?\n\n' +
+        'This will re-enable the Grid Bot for standard grid-trading.\n\n' +
+        'Scale Bot mode will be disabled.'
+    )) return;
+
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Switching…';
+    try {
+        const res = await fetch(API_BASE + '/grid-status/switch-to-grid-bot', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        alert('✅ Switched back to Grid Bot! Grid Bot is now active.');
         await loadGridStatus();
     } catch (e) {
         alert('Could not switch bots: ' + e.message);
