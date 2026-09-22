@@ -3,7 +3,7 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.pool import NullPool
-from sqlalchemy import event
+from sqlalchemy import event, inspect, text
 import os
 import traceback
 import logging
@@ -92,6 +92,45 @@ async def init_db():
     except Exception as e:
         print(f"[DB] ⚠️  Base.metadata.create_all() failed (non-critical): {e}")
         # Don't crash on DB failure - trading can run without persistent storage
+
+
+async def ensure_grid_status_schema():
+    """Add columns required by the read-only Grid status path first.
+
+    The full model-registry migration can exceed the startup timeout on
+    production Postgres. These columns must exist before a full ORM select of
+    Grid branches or slices can report live unrealized P&L.
+    """
+    import models  # noqa: F401  (registers model classes on Base.metadata)
+
+    required_columns = {
+        "crypto_grid_branches": ("self_tuned_multiplier",),
+        "crypto_grid_slices": ("entry_fee_rate",),
+    }
+    db_engine = get_engine()
+
+    for table_name, column_names in required_columns.items():
+        table = Base.metadata.tables[table_name]
+        async with db_engine.begin() as conn:
+            table_names = await conn.run_sync(lambda sync_conn: inspect(sync_conn).get_table_names())
+            if table_name not in table_names:
+                continue
+
+            existing_columns = {
+                column["name"]
+                for column in await conn.run_sync(
+                    lambda sync_conn, name=table_name: inspect(sync_conn).get_columns(name)
+                )
+            }
+            for column_name in column_names:
+                if column_name in existing_columns:
+                    continue
+                column = table.c[column_name]
+                ddl_type = column.type.compile(dialect=conn.dialect)
+                await conn.execute(text(
+                    f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {ddl_type}'
+                ))
+                log.info("Priority migration OK: %s.%s", table_name, column_name)
 
 async def get_db():
     """Get database session"""

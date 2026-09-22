@@ -38,10 +38,11 @@ except (ImportError, AssertionError) as e:
 
 # Import database module with graceful fallback
 try:
-    from database import init_db, engine
+    from database import init_db, ensure_grid_status_schema, engine
 except Exception as e:
     logging.warning(f"⚠️  Database import failed (non-critical): {e}")
     init_db = None
+    ensure_grid_status_schema = None
     engine = None
 
 try:
@@ -991,6 +992,9 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(init_db(), timeout=30.0)
             print("[LIFESPAN] ✓ Database initialized", flush=True)
             log.info("Database initialized")
+            if ensure_grid_status_schema is not None:
+                await asyncio.wait_for(ensure_grid_status_schema(), timeout=15.0)
+                log.info("Grid status schema ready")
         else:
             print("[LIFESPAN] ⚠️  Database module not available - skipping init", flush=True)
     except asyncio.TimeoutError:
