@@ -376,28 +376,34 @@
     .unlock-btn {
         font-family: inherit;
         margin-top: 8px;
-        background: #fff;
-        border: 1px solid var(--gold);
-        color: var(--gold);
-        padding: 5px 10px;
-        border-radius: 6px;
+        background: linear-gradient(135deg, #9333ea 0%, #ec4899 100%);
+        border: 2px solid #9333ea;
+        color: #fff;
+        padding: 8px 16px;
+        border-radius: 8px;
         cursor: pointer;
-        font-size: 0.76em;
+        font-size: 0.85em;
         font-weight: 700;
-        min-height: 36px;
+        min-height: 40px;
         display: flex;
         align-items: center;
         justify-content: center;
+        box-shadow: 0 4px 15px rgba(147, 51, 234, 0.4);
+        transition: all 0.3s ease;
     }
     @media (max-width: 640px) {
         .unlock-btn {
-            min-height: 44px;
-            padding: 8px 12px;
-            font-size: 0.8em;
+            min-height: 48px;
+            padding: 10px 16px;
+            font-size: 0.9em;
         }
     }
-    .unlock-btn:hover { background: var(--gold); color: #fff; }
-    .unlock-btn:disabled { opacity: 0.5; cursor: default; }
+    .unlock-btn:hover {
+        background: linear-gradient(135deg, #a855f7 0%, #f43f5e 100%);
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(147, 51, 234, 0.6);
+    }
+    .unlock-btn:disabled { opacity: 0.5; cursor: default; transform: none; }
 
     .mode-toggle-btn {
         font-family: inherit;
