@@ -1035,27 +1035,52 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     reversal_trade_active = await crypto_family_tree_bot_module.get_reversal_trade_active() if crypto_family_tree_bot_module else False
 
     # Calculate scale bot metrics for tier visualization
+    # Compute aggregate metrics from all branches
+    total_trades = sum(len(b.get("trades", [])) for b in out)
+    total_wins = sum(1 for b in out for t in b.get("trades", []) if t.get("realized_pnl", 0) > 0)
+    total_losses = sum(1 for b in out for t in b.get("trades", []) if t.get("realized_pnl", 0) <= 0)
+    total_realized = sum(t.get("realized_pnl", 0) for b in out for t in b.get("trades", []))
+    total_unrealized = sum(b.get("unrealized_pnl", 0) for b in out)
+
+    win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
+
+    # Calculate profit factor (sum of winners / abs(sum of losers))
+    total_positive = sum(t.get("realized_pnl", 0) for b in out for t in b.get("trades", []) if t.get("realized_pnl", 0) > 0)
+    total_negative_abs = abs(sum(t.get("realized_pnl", 0) for b in out for t in b.get("trades", []) if t.get("realized_pnl", 0) < 0))
+    profit_factor = (total_positive / total_negative_abs) if total_negative_abs > 0 else 1.0
+
+    # Calculate net P&L and drawdown
+    net_pnl = total_realized + total_unrealized
+    drawdown_pct = 0.0
+    if real_crypto_net_worth_usd and real_crypto_net_worth_usd > 0:
+        # Use current unrealized P&L as proxy for drawdown
+        if net_pnl < 0:
+            drawdown_pct = abs(net_pnl) / real_crypto_net_worth_usd * 100
+
     scale_bot_metrics = {
         "total_capital": round(real_crypto_net_worth_usd or 0, 2),
-        "tier_current": 1,  # Tier 1 = $0-1k, Tier 2 = $1k-10k, Tier 3 = $10k+
+        "current_tier": 1,  # Tier 1 = $0-1k, Tier 2 = $1k-10k, Tier 3 = $10k+
         "tier_threshold_lower": 0,
         "tier_threshold_upper": 1000,
         "capital_at_tier_start": 0,
         "capital_allocated_pct": round((real_balance or 0) / (real_crypto_net_worth_usd or 1) * 100, 1) if real_crypto_net_worth_usd else 0,
-        "profitability_score": 0,
-        "expectancy_per_trade": rolling_expectancy or 0,
+        "growth_rate_pct": round(((net_pnl / real_crypto_net_worth_usd * 100) if real_crypto_net_worth_usd else 0), 2),
+        "drawdown_pct": round(drawdown_pct, 2),
+        "win_rate": round(win_rate, 1),
+        "profit_factor": round(profit_factor, 2),
+        "expectancy_per_trade": round(rolling_expectancy or 0, 2),
         "branch_count": len(out),
         "locked_usd": locked_usd,
     }
 
     # Determine tier based on total capital
     if (real_crypto_net_worth_usd or 0) >= 10000:
-        scale_bot_metrics["tier_current"] = 3
+        scale_bot_metrics["current_tier"] = 3
         scale_bot_metrics["tier_threshold_lower"] = 10000
         scale_bot_metrics["tier_threshold_upper"] = 50000
         scale_bot_metrics["capital_at_tier_start"] = 10000
     elif (real_crypto_net_worth_usd or 0) >= 1000:
-        scale_bot_metrics["tier_current"] = 2
+        scale_bot_metrics["current_tier"] = 2
         scale_bot_metrics["tier_threshold_lower"] = 1000
         scale_bot_metrics["tier_threshold_upper"] = 10000
         scale_bot_metrics["capital_at_tier_start"] = 1000
