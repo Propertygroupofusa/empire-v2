@@ -1034,6 +1034,35 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     trailing_stop_pct = await crypto_family_tree_bot_module.get_live_trailing_stop_pct() if crypto_family_tree_bot_module else None
     reversal_trade_active = await crypto_family_tree_bot_module.get_reversal_trade_active() if crypto_family_tree_bot_module else False
 
+    # Calculate scale bot metrics for tier visualization
+    scale_bot_metrics = {
+        "total_capital": round(real_crypto_net_worth_usd or 0, 2),
+        "tier_current": 1,  # Tier 1 = $0-1k, Tier 2 = $1k-10k, Tier 3 = $10k+
+        "tier_threshold_lower": 0,
+        "tier_threshold_upper": 1000,
+        "capital_at_tier_start": 0,
+        "capital_allocated_pct": round((real_balance or 0) / (real_crypto_net_worth_usd or 1) * 100, 1) if real_crypto_net_worth_usd else 0,
+        "profitability_score": 0,
+        "expectancy_per_trade": rolling_expectancy or 0,
+        "branch_count": len(out),
+        "locked_usd": locked_usd,
+    }
+
+    # Determine tier based on total capital
+    if (real_crypto_net_worth_usd or 0) >= 10000:
+        scale_bot_metrics["tier_current"] = 3
+        scale_bot_metrics["tier_threshold_lower"] = 10000
+        scale_bot_metrics["tier_threshold_upper"] = 50000
+        scale_bot_metrics["capital_at_tier_start"] = 10000
+    elif (real_crypto_net_worth_usd or 0) >= 1000:
+        scale_bot_metrics["tier_current"] = 2
+        scale_bot_metrics["tier_threshold_lower"] = 1000
+        scale_bot_metrics["tier_threshold_upper"] = 10000
+        scale_bot_metrics["capital_at_tier_start"] = 1000
+
+    # Get actual grid bot active state
+    grid_bot_active = await crypto_grid_bot_module.is_grid_bot_active() if crypto_grid_bot_module else True
+
     return {
         "branches": out,
         "branch_count": len(out),
@@ -1064,6 +1093,8 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         "real_usd_balance": round(real_balance, 2) if real_balance is not None else None,
         "real_usdc_balance": round(real_usdc_balance, 2) if real_usdc_balance is not None else None,
         "alpaca_equity": round(alpaca_equity, 2) if alpaca_equity is not None else None,
+        "scale_bot_metrics": scale_bot_metrics,
+        "grid_bot_active": grid_bot_active,
     }
 
 
