@@ -24,6 +24,7 @@ import logging
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
+from crypto_strategy_config import get_crypto_strategy_mode
 
 # Load .env file to make credentials available to background bots
 load_dotenv(override=True)
@@ -200,22 +201,14 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import status_snapshot: {e}")
 
-crypto_grid_bot_module = None
-try:
-    import crypto_grid_bot
-    crypto_grid_bot_module = crypto_grid_bot
-except Exception as e:
-    logging.warning(f"Failed to import crypto_grid_bot: {e}")
-
 # Which Coinbase strategy actually runs - "family_tree" (multiple branches,
 # each the same single-position adaptive-target engine, growing one new
 # coin at a time as branches cross $1,000), "btc_compound" (that same
-# engine, BTC-only, no branching), or "multi_pair" (crypto_coinbase_bot.py's
-# original 28-pair RSI strategy). Only one runs at a time; all three share
-# the same real Coinbase account/balance, so running more than one together
-# would have them fight over the same funds. Revert to either earlier mode
-# by setting this Railway variable and redeploying - no code change needed.
-CRYPTO_STRATEGY_MODE = os.getenv("CRYPTO_STRATEGY_MODE", "btc_compound")
+# engine, BTC-only, no branching), "multi_pair" (crypto_coinbase_bot.py's
+# original 28-pair RSI strategy), or "grid_fleet" (owned by the dedicated
+# crypto-trading service). Only one runs at a time because all modes share
+# the same real Coinbase account and balance.
+CRYPTO_STRATEGY_MODE = get_crypto_strategy_mode()
 # Real production bug found live: Railway's raw env-var editor will happily
 # store literal quote characters if they're pasted as part of the value
 # (e.g. entering `"family_tree"` instead of `family_tree`) - os.getenv()
@@ -228,8 +221,6 @@ CRYPTO_STRATEGY_MODE = os.getenv("CRYPTO_STRATEGY_MODE", "btc_compound")
 # lines above never fired, proving this was a value-mismatch, not a real
 # import failure. Stripped here so a quoted value in the dashboard can't
 # silently disable the whole coordinator thread again.
-CRYPTO_STRATEGY_MODE = CRYPTO_STRATEGY_MODE.strip().strip('"').strip("'").strip()
-
 alpaca_swing_bot_module = None
 try:
     import alpaca_swing_bot
@@ -1043,49 +1034,6 @@ async def lifespan(app: FastAPI):
         print(f"[LIFESPAN] ✗ Foreign key validation failed: {e}", flush=True)
         log.warning(f"Foreign key validation failed: {e}")
 
-    print("[LIFESPAN] Enabling grid bot...", flush=True)
-    try:
-        if crypto_grid_bot_module is not None:
-            await asyncio.wait_for(crypto_grid_bot_module.set_grid_bot_active(True), timeout=10.0)
-            print("[LIFESPAN] ✓ Grid bot enabled in database", flush=True)
-            log.info("🔲 Grid bot ENABLED - 9-coin scalping fleet activated")
-        else:
-            print("[LIFESPAN] ⚠️  Grid bot module not loaded - cannot enable", flush=True)
-    except asyncio.TimeoutError:
-        print(f"[LIFESPAN] ✗ Grid bot enable TIMEOUT (10s) - continuing startup", flush=True)
-        log.warning(f"Grid bot enable timed out")
-    except Exception as e:
-        print(f"[LIFESPAN] ✗ Grid bot enable failed: {e}", flush=True)
-        log.warning(f"Grid bot enable failed: {e}")
-
-    print("[LIFESPAN] Initializing grid branches for 9-coin fleet...", flush=True)
-    try:
-        if crypto_grid_bot_module is not None:
-            # Create grid branches for each of the 9 coins
-            nine_coins = {
-                "BTC-USD": 138.49, "ETH-USD": 138.49, "SOL-USD": 138.49, "ADA-USD": 138.49,
-                "DOGE-USD": 138.49, "XRP-USD": 138.49, "LINK-USD": 138.49, "AVAX-USD": 138.49, "DOT-USD": 138.49
-            }
-            for coin, capital in nine_coins.items():
-                try:
-                    await asyncio.wait_for(
-                        crypto_grid_bot_module.create_grid_branch(coin, capital, skip_free_cash_check=True),
-                        timeout=5.0
-                    )
-                except asyncio.TimeoutError:
-                    log.warning(f"Grid branch create for {coin} timed out (may already exist)")
-                except Exception as e:
-                    # Expected if branches already exist - silent on duplicate
-                    if "unique constraint" not in str(e).lower():
-                        log.debug(f"Grid branch for {coin}: {type(e).__name__}")
-            print("[LIFESPAN] ✓ Grid branches initialized", flush=True)
-            log.info("✓ Grid branches created for 9-coin fleet")
-        else:
-            print("[LIFESPAN] ⚠️  Grid bot module not loaded - skipping branch initialization", flush=True)
-    except Exception as e:
-        print(f"[LIFESPAN] ✗ Grid branch initialization failed: {e}", flush=True)
-        log.warning(f"Grid branch initialization failed (non-critical): {e}")
-
     print("[LIFESPAN] Initializing bot worker...", flush=True)
     try:
         await asyncio.wait_for(initialize_bot(), timeout=30.0)
@@ -1206,6 +1154,8 @@ async def lifespan(app: FastAPI):
             print("[LIFESPAN] ✓ Crypto bot thread started", flush=True)
             log.info("✓ Crypto (Coinbase) bot thread started | 28 pairs × 12 positions | 24/7 trading | Capital: $700 USD")
             log.info("💰 Strategy: 24/7 crypto + market hours stock scalping = constant opportunities and taking profits")
+        elif CRYPTO_STRATEGY_MODE == "grid_fleet":
+            log.info("🔲 Grid Fleet selected; execution is delegated to the dedicated crypto-trading service")
         else:
             # Deliberately NOT worded "failed to import" - the real 2026-08-24
             # incident this covers was a mode-string mismatch (a stray quoted
@@ -1215,7 +1165,7 @@ async def lifespan(app: FastAPI):
             # round of guessing between "bad env value" and "bad import".
             log.warning(
                 f"⚠️ CRYPTO_STRATEGY_MODE={CRYPTO_STRATEGY_MODE!r} did not match any known "
-                f"mode ('family_tree'/'btc_compound'/'multi_pair') - bot will not run | "
+                f"mode ('family_tree'/'btc_compound'/'multi_pair'/'grid_fleet') - bot will not run | "
                 f"family_tree module loaded: {crypto_family_tree_bot_module is not None} | "
                 f"btc_compound module loaded: {crypto_btc_compound_bot_module is not None} | "
                 f"multi_pair module loaded: {crypto_coinbase_bot_module is not None}"
@@ -1230,25 +1180,6 @@ async def lifespan(app: FastAPI):
             log.info("📄 Status snapshot thread started (periodic real-status report to a git branch)")
     except Exception as e:
         log.warning(f"Status snapshot thread failed to start: {e}")
-
-    try:
-        if crypto_grid_bot_module is not None:
-            import threading
-            threading.Thread(target=crypto_grid_bot_module.run, daemon=True).start()
-            log.info("🔲 Crypto grid bot thread started (real, opt-in grid-trading branches - see is_grid_bot_active)")
-    except Exception as e:
-        log.warning(f"Crypto grid bot thread failed to start: {e}")
-
-    try:
-        import adaptive_fleet_orchestrator
-        import threading
-        threading.Thread(target=adaptive_fleet_orchestrator.monitor_fleet, daemon=True).start()
-        log.info("🚀 Adaptive Capital Fleet Orchestrator started")
-        log.info("   9 Coins: BTC → ETH → SOL → ADA → DOGE → XRP → LINK → AVAX → DOT")
-        log.info("   Auto-unlocks coins at profit milestones")
-        log.info("   Freezes underperformers automatically")
-    except Exception as e:
-        log.warning(f"Adaptive Fleet Orchestrator failed to start: {e}")
 
     print(f"[LIFESPAN] About to check alpaca_swing_bot_module: {alpaca_swing_bot_module is not None}", flush=True)
     try:

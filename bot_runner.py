@@ -2,7 +2,8 @@
 """
 TRADING BOT RUNNER - Entry point for Railway deployment
 
-This script starts the crypto grid bot which orchestrates:
+This script owns the crypto grid fleet when CRYPTO_STRATEGY_MODE=grid_fleet.
+It orchestrates:
 - Grid trading bot (multiple branches: DOGE, STX, ETH, BTC, AAVE)
 - Mean reversion bot (integrated)
 - Shadow learning integration (Delfina learning engine)
@@ -15,7 +16,10 @@ This prevents "Semaphore is bound to a different event loop" errors.
 
 import asyncio
 import logging
-import sys
+import os
+import time
+
+from crypto_strategy_config import get_crypto_strategy_mode
 
 # Setup logging for Railway
 logging.basicConfig(
@@ -24,10 +28,47 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+def run_with_supervision(run_bot, sleep=time.sleep, max_backoff_seconds=60):
+    backoff_seconds = 5
+
+    while True:
+        try:
+            run_bot()
+            log.error("Grid Fleet stopped unexpectedly; restarting in %s seconds", backoff_seconds)
+        except Exception:
+            log.exception("Grid Fleet crashed; restarting in %s seconds", backoff_seconds)
+
+        sleep(backoff_seconds)
+        backoff_seconds = min(backoff_seconds * 2, max_backoff_seconds)
+
+
+def _load_and_run_grid_bot():
+    import crypto_grid_bot
+
+    log.info("✓ Crypto grid bot module loaded")
+    crypto_grid_bot.run()
+
+
 def main():
     log.info("=" * 70)
-    log.info("TRADING BOT RUNNER - Starting crypto grid + mean reversion bots")
+    log.info("TRADING BOT RUNNER - Dedicated crypto strategy service")
     log.info("=" * 70)
+
+    strategy_mode = get_crypto_strategy_mode()
+    if strategy_mode != "grid_fleet":
+        log.info(
+            "CRYPTO_STRATEGY_MODE=%r is owned by the web service; dedicated runner exiting",
+            strategy_mode,
+        )
+        return
+
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        log.warning("STOP_TRADING=true; Grid Fleet will remain stopped")
+        return
+
+    if not os.getenv("COINBASE_API_KEY_NAME") or not os.getenv("COINBASE_API_PRIVATE_KEY"):
+        log.error("Coinbase API credentials are not set; Grid Fleet will remain stopped")
+        return
 
     try:
         # CRITICAL FIX: Create and set event loop BEFORE importing modules
@@ -37,31 +78,15 @@ def main():
         asyncio.set_event_loop(loop)
         log.info("✓ Event loop initialized (before module imports)")
 
-        # NOW import modules (they will use the event loop we just set)
-        import crypto_grid_bot
-        log.info("✓ Crypto grid bot module loaded")
-
-        # Verify Coinbase credentials are set
-        import crypto_btc_compound_bot as engine
-        if not engine.COINBASE_API_KEY_NAME or not engine.COINBASE_API_PRIVATE_KEY:
-            log.error("✗ Coinbase API credentials not set in environment")
-            log.error("  Required: COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY")
-            sys.exit(1)
-
         log.info("✓ Coinbase credentials verified")
-        log.info("Starting bot loop...")
+        log.info("Starting supervised Grid Fleet loop...")
 
-        # Start the grid bot (includes mean reversion engine)
-        # Note: crypto_grid_bot.run() creates its own loop, but that's okay
-        # since we've already set the event loop policy correctly
-        crypto_grid_bot.run()
+        run_with_supervision(_load_and_run_grid_bot)
 
     except KeyboardInterrupt:
         log.info("\nBot stopped by user")
-        sys.exit(0)
     except Exception as e:
         log.error(f"✗ Fatal error: {e}", exc_info=True)
-        sys.exit(1)
 
 if __name__ == "__main__":
     main()
