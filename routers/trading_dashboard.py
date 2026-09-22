@@ -88,6 +88,12 @@ except Exception as e:
     log.warning(f"crypto_grid_bot not importable, /grid-status will report unavailable: {e}")
     crypto_grid_bot_module = None
 
+try:
+    import scaling_coordinator as scaling_coordinator_module
+except Exception as e:
+    log.warning(f"scaling_coordinator not importable, /fleet-status will report unavailable: {e}")
+    scaling_coordinator_module = None
+
 ALPACA_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
@@ -6306,3 +6312,14 @@ async def close_all_grid_slices_endpoint():
     result = await crypto_grid_bot_module.close_all_grid_slices()
     log.info(f"[dashboard] 🔒 Close-all triggered: {result['branches_closed']} branches, {result['slices_closed']} real slices, ${result['total_realized_pnl']:.2f} total realized")
     return result
+
+
+@router.get("/fleet-status")
+async def get_fleet_status():
+    """Get Scaling Coordinator fleet status - active instances, profit, and scaling progress"""
+    if scaling_coordinator_module is None:
+        raise HTTPException(status_code=500, detail="scaling_coordinator module not available")
+
+    status = await scaling_coordinator_module.get_fleet_status()
+    log.info(f"[dashboard] 📊 Fleet status: Primary profit ${status['primary_bot_profit']:,.2f}, Fleet total ${status['fleet_total_profit']:,.2f}, Clones: {status['clones_created']}")
+    return status

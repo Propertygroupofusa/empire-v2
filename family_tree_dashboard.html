@@ -831,6 +831,32 @@
             <div style="font-size:0.85em; font-weight:600; margin-bottom:8px;">📈 Tier Progression & Capital Growth</div>
             <div id="scale-bot-chart" style="font-size:0.8em; color:var(--text-dim);">Loading chart...</div>
         </div>
+        <!-- Scaling Coordinator Fleet Status -->
+        <div id="fleet-status-section" style="display:none; margin-top:12px; padding:12px; background:var(--surface-subtle); border-radius:6px; border:1px dashed var(--border);">
+            <div style="font-size:0.85em; font-weight:600; margin-bottom:8px;">🚀 Scaling Coordinator Fleet</div>
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:10px; font-size:0.85em;">
+                <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 8px; background:rgba(0,0,0,0.05); border-radius:4px;">
+                    <span style="color:var(--text-dim);">Active Instances:</span>
+                    <span id="fleet-active-instances" style="font-weight:600; color:#667eea;">—</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 8px; background:rgba(0,0,0,0.05); border-radius:4px;">
+                    <span style="color:var(--text-dim);">Clones Created:</span>
+                    <span id="fleet-clones-created" style="font-weight:600; color:#667eea;">—</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 8px; background:rgba(0,0,0,0.05); border-radius:4px;">
+                    <span style="color:var(--text-dim);">Primary Profit:</span>
+                    <span id="fleet-primary-profit" style="font-weight:600; color:#10b981;">—</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 8px; background:rgba(0,0,0,0.05); border-radius:4px;">
+                    <span style="color:var(--text-dim);">Fleet Total Profit:</span>
+                    <span id="fleet-total-profit" style="font-weight:600; color:#10b981;">—</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 8px; background:rgba(0,0,0,0.05); border-radius:4px;">
+                    <span style="color:var(--text-dim);">Next Threshold:</span>
+                    <span id="fleet-next-threshold" style="font-weight:600; color:#f59e0b;">—</span>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Scale Bot Scanning Indicator -->
@@ -2409,7 +2435,7 @@ function renderScaleBotChart(metrics) {
     `;
 }
 
-function renderScaleBotStatus(data) {
+async function renderScaleBotStatus(data) {
     const panel = document.getElementById('scale-bot-panel');
     const scanIndicator = document.getElementById('scale-bot-scanning-indicator');
     const gridActive = !!data.grid_bot_active;
@@ -2448,6 +2474,46 @@ function renderScaleBotStatus(data) {
         if (chartContainer) {
             chartContainer.innerHTML = renderScaleBotChart(metrics);
         }
+    }
+
+    // Fetch and display fleet status from Scaling Coordinator
+    if (!gridActive) {
+        try {
+            const fleetRes = await fetch(API_BASE + '/fleet-status');
+            if (fleetRes.ok) {
+                const fleetData = await fleetRes.json();
+                renderFleetStatus(fleetData);
+            }
+        } catch (e) {
+            console.warn('[renderScaleBotStatus] Could not fetch /fleet-status:', e.message);
+        }
+    }
+}
+
+function renderFleetStatus(fleetData) {
+    const fleetSection = document.getElementById('fleet-status-section');
+
+    // Show fleet status section when Scale Bot is active
+    if (fleetSection) {
+        fleetSection.style.display = 'block';
+    }
+
+    // Update fleet metrics
+    const activeInstances = fleetData.active_instances || 1;
+    const clonesCreated = fleetData.clones_created || 0;
+    const primaryProfit = fleetData.primary_bot_profit || 0;
+    const fleetTotalProfit = fleetData.fleet_total_profit || 0;
+    const nextThreshold = fleetData.next_threshold;
+
+    document.getElementById('fleet-active-instances').textContent = `${activeInstances}`;
+    document.getElementById('fleet-clones-created').textContent = `${clonesCreated}`;
+    document.getElementById('fleet-primary-profit').textContent = `$${primaryProfit.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+    document.getElementById('fleet-total-profit').textContent = `$${fleetTotalProfit.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+
+    if (nextThreshold !== null && nextThreshold !== undefined) {
+        document.getElementById('fleet-next-threshold').textContent = `$${nextThreshold.toLocaleString('en-US', {minimumFractionDigits: 0, maximumFractionDigits: 0})}`;
+    } else {
+        document.getElementById('fleet-next-threshold').textContent = '—';
     }
 }
 
@@ -2938,7 +3004,7 @@ async function loadGridStatus() {
         const tradeHistoryByBot = {};
         (history.branches || []).forEach(function (h) { tradeHistoryByBot[h.bot_name] = h; });
         renderGridStatus(data, tradeHistoryByBot, history);
-        renderScaleBotStatus(data);
+        await renderScaleBotStatus(data);
     } catch (e) {
         document.getElementById('grid-content').innerHTML = `<div class="empty">Could not load: ${e.message}</div>`;
     }
