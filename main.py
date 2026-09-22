@@ -1058,6 +1058,34 @@ async def lifespan(app: FastAPI):
         print(f"[LIFESPAN] ✗ Grid bot enable failed: {e}", flush=True)
         log.warning(f"Grid bot enable failed: {e}")
 
+    print("[LIFESPAN] Initializing grid branches for 9-coin fleet...", flush=True)
+    try:
+        if crypto_grid_bot_module is not None:
+            # Create grid branches for each of the 9 coins
+            nine_coins = {
+                "BTC-USD": 138.49, "ETH-USD": 138.49, "SOL-USD": 138.49, "ADA-USD": 138.49,
+                "DOGE-USD": 138.49, "XRP-USD": 138.49, "LINK-USD": 138.49, "AVAX-USD": 138.49, "DOT-USD": 138.49
+            }
+            for coin, capital in nine_coins.items():
+                try:
+                    await asyncio.wait_for(
+                        crypto_grid_bot_module.create_grid_branch(coin, capital, skip_free_cash_check=True),
+                        timeout=5.0
+                    )
+                except asyncio.TimeoutError:
+                    log.warning(f"Grid branch create for {coin} timed out (may already exist)")
+                except Exception as e:
+                    # Expected if branches already exist - silent on duplicate
+                    if "unique constraint" not in str(e).lower():
+                        log.debug(f"Grid branch for {coin}: {type(e).__name__}")
+            print("[LIFESPAN] ✓ Grid branches initialized", flush=True)
+            log.info("✓ Grid branches created for 9-coin fleet")
+        else:
+            print("[LIFESPAN] ⚠️  Grid bot module not loaded - skipping branch initialization", flush=True)
+    except Exception as e:
+        print(f"[LIFESPAN] ✗ Grid branch initialization failed: {e}", flush=True)
+        log.warning(f"Grid branch initialization failed (non-critical): {e}")
+
     print("[LIFESPAN] Initializing bot worker...", flush=True)
     try:
         await asyncio.wait_for(initialize_bot(), timeout=30.0)
