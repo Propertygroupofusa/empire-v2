@@ -1180,6 +1180,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Crypto grid bot thread failed to start: {e}")
 
+    try:
+        import scaling_coordinator
+        import threading
+        threading.Thread(target=scaling_coordinator.monitor_fleet, daemon=True).start()
+        log.info("📈 Scaling Coordinator started (monitors primary bot profit and auto-clones instances at thresholds: $50K, $100K, $150K, $200K)")
+    except Exception as e:
+        log.warning(f"Scaling Coordinator failed to start: {e}")
+
     print(f"[LIFESPAN] About to check alpaca_swing_bot_module: {alpaca_swing_bot_module is not None}", flush=True)
     try:
         if alpaca_swing_bot_module is not None:
