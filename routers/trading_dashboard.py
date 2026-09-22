@@ -773,8 +773,17 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     to read here - each branch runs as its own independent thread, so the
     CryptoTreeBranch/BotPosition rows in the database are the only place a
     branch's live state actually exists. Backs family_tree_dashboard.html."""
-    branches_result = await db.execute(select(CryptoTreeBranch).order_by(CryptoTreeBranch.created_at))
-    branches = list(branches_result.scalars().all())
+    try:
+        branches_result = await db.execute(select(CryptoTreeBranch).order_by(CryptoTreeBranch.created_at))
+        branches = list(branches_result.scalars().all())
+    except Exception as e:
+        log.error(f"[dashboard] Failed to fetch branches: {e}")
+        return {
+            "error": "Database unavailable",
+            "status": "degraded",
+            "branches": [],
+            "message": f"Could not fetch trading branches from database: {str(e)}"
+        }
 
     positions_by_bot = {}
     if branches:
@@ -801,32 +810,35 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     real_balance = None
     real_usdc_balance = None
     if crypto_family_tree_bot_module is not None:
-        engine = crypto_family_tree_bot_module.engine
-        async with engine.aiohttp.ClientSession() as session:
-            for bot_name, pos in positions_by_bot.items():
-                price, _atr_pct = await engine.get_price_and_volatility(session, pos.symbol)
-                if price is not None:
-                    current_price_by_bot[bot_name] = price
-            real_balance, balance_err = await engine.get_usd_balance(session)
-            # Real, read-only visibility into a confirmed-live confusion:
-            # get_usd_balance() (and therefore spendable_for_spawn below)
-            # only ever sees the literal USD account - a real balance
-            # sitting in USDC (Coinbase's own "Earn APY by converting USD
-            # to USDC" feature can put it there) is invisible to it and
-            # can make a genuinely healthy account look like it has $0 or
-            # negative real spendable cash. Never folded into
-            # spendable_for_spawn or any order-execution path - whether a
-            # BTC-USD order can be funded directly from USDC is
-            # unconfirmed from this sandbox, and the account owner's own
-            # documented choice for this exact scenario is to convert it
-            # back to USD by hand. This is purely so that choice can be
-            # made with the real number in front of them.
-            real_usdc_balance, _usdc_err = await engine.get_usdc_balance(session)
+        try:
+            engine = crypto_family_tree_bot_module.engine
+            async with engine.aiohttp.ClientSession() as session:
+                for bot_name, pos in positions_by_bot.items():
+                    price, _atr_pct = await engine.get_price_and_volatility(session, pos.symbol)
+                    if price is not None:
+                        current_price_by_bot[bot_name] = price
+                real_balance, balance_err = await engine.get_usd_balance(session)
+                # Real, read-only visibility into a confirmed-live confusion:
+                # get_usd_balance() (and therefore spendable_for_spawn below)
+                # only ever sees the literal USD account - a real balance
+                # sitting in USDC (Coinbase's own "Earn APY by converting USD
+                # to USDC" feature can put it there) is invisible to it and
+                # can make a genuinely healthy account look like it has $0 or
+                # negative real spendable cash. Never folded into
+                # spendable_for_spawn or any order-execution path - whether a
+                # BTC-USD order can be funded directly from USDC is
+                # unconfirmed from this sandbox, and the account owner's own
+                # documented choice for this exact scenario is to convert it
+                # back to USD by hand. This is purely so that choice can be
+                # made with the real number in front of them.
+                real_usdc_balance, _usdc_err = await engine.get_usdc_balance(session)
 
-            if real_balance is None and balance_err:
-                log.warning(f"[dashboard] Coinbase USD balance fetch failed: {balance_err}")
-                if "401" in str(balance_err):
-                    log.error("[dashboard] HTTP 401: Coinbase API credentials may not be set in Railway. Check COINBASE_API_KEY and COINBASE_API_PRIVATE_KEY environment variables.")
+                if real_balance is None and balance_err:
+                    log.warning(f"[dashboard] Coinbase USD balance fetch failed: {balance_err}")
+                    if "401" in str(balance_err):
+                        log.error("[dashboard] HTTP 401: Coinbase API credentials may not be set in Railway. Check COINBASE_API_KEY and COINBASE_API_PRIVATE_KEY environment variables.")
+        except Exception as e:
+            log.warning(f"[dashboard] Coinbase API call failed (prices/balances unavailable): {e}")
 
     # Fetch real Alpaca equity for the dashboard header
     alpaca_equity = None
@@ -2922,8 +2934,25 @@ async def family_tree_reconciliation():
     crypto_family_tree_bot.get_reconciliation_report() for the full
     reasoning. Read-only, never places an order."""
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
-    return await crypto_family_tree_bot_module.get_reconciliation_report()
+        log.warning("[dashboard] crypto_family_tree_bot module not available - Coinbase credentials may not be set in Railway")
+        return {
+            "error": "Coinbase API unavailable",
+            "status": "unavailable",
+            "message": "crypto_family_tree_bot module not loaded - check that COINBASE_API_KEY and related credentials are set in Railway environment",
+            "branches_reconciled": [],
+            "assets_reconciled": []
+        }
+    try:
+        return await crypto_family_tree_bot_module.get_reconciliation_report()
+    except Exception as e:
+        log.error(f"[dashboard] Reconciliation failed: {e}")
+        return {
+            "error": "Reconciliation failed",
+            "status": "error",
+            "message": f"Failed to reconcile DB against Coinbase: {str(e)}",
+            "branches_reconciled": [],
+            "assets_reconciled": []
+        }
 
 
 @router.post("/crypto-selection-backtest")
