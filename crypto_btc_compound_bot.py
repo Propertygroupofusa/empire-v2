@@ -34,6 +34,8 @@ that module's own in-memory state or its RSI/tiered-exit logic - the two
 strategies are meant to be swapped, not blended.
 """
 import base64
+import hashlib
+import hmac
 import math
 import os
 import asyncio
@@ -74,27 +76,34 @@ def _safe_int_env(name: str, default: str) -> int:
         return int(default)
 
 
-# Support both suffixed (_BOT) and non-suffixed variable names for flexibility
-COINBASE_API_KEY_NAME = os.getenv("COINBASE_API_KEY") or os.getenv("COINBASE_API_KEY_BOT") or ""
+# Dual-auth support: CDP JWT (new) or HMAC/Basic Auth (legacy)
+COINBASE_API_KEY_NAME = os.getenv("COINBASE_API_KEY_NAME") or os.getenv("COINBASE_API_KEY_NAME_BOT") or ""
 COINBASE_API_PRIVATE_KEY = (os.getenv("COINBASE_API_PRIVATE_KEY") or os.getenv("COINBASE_API_PRIVATE_KEY_BOT") or "").replace("\\n", "\n")
+COINBASE_API_KEY = os.getenv("COINBASE_API_KEY") or os.getenv("COINBASE_API_KEY_BOT") or ""
+COINBASE_SECRET_KEY = os.getenv("COINBASE_SECRET_KEY") or os.getenv("COINBASE_SECRET_KEY_BOT") or ""
+COINBASE_PASSPHRASE = os.getenv("COINBASE_PASSPHRASE") or os.getenv("COINBASE_PASSPHRASE_BOT") or ""
 COINBASE_HOST = "api.coinbase.com"
 COINBASE_BASE_URL = f"https://{COINBASE_HOST}"
 PRODUCT_ID = "BTC-USD"
 SYMBOL = "BTC/USD"
 BOT_NAME = "crypto_btc_compound"
 
-# Startup validation
-if not COINBASE_API_KEY_NAME:
-    log.warning("⚠️  COINBASE_API_KEY env var is NOT SET - Coinbase API calls will fail with HTTP 401")
-else:
-    log.info(f"✓ COINBASE_API_KEY is set: {COINBASE_API_KEY_NAME[:15]}...")
+# Startup validation - check for both auth methods
+cdp_configured = bool(COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY)
+hmac_configured = bool(COINBASE_API_KEY and COINBASE_SECRET_KEY and COINBASE_PASSPHRASE)
 
-if not COINBASE_API_PRIVATE_KEY:
-    log.warning("⚠️  COINBASE_API_PRIVATE_KEY env var is NOT SET - Coinbase API calls will fail with HTTP 401")
-elif COINBASE_API_PRIVATE_KEY.startswith("-----BEGIN"):
-    log.info(f"✓ COINBASE_API_PRIVATE_KEY is set (PEM format, {len(COINBASE_API_PRIVATE_KEY)} chars)")
-else:
-    log.info(f"✓ COINBASE_API_PRIVATE_KEY is set (base64 format, {len(COINBASE_API_PRIVATE_KEY)} chars)")
+if cdp_configured:
+    log.info(f"✓ CDP Auth configured: COINBASE_API_KEY_NAME={COINBASE_API_KEY_NAME[:15]}...")
+    if COINBASE_API_PRIVATE_KEY.startswith("-----BEGIN"):
+        log.info(f"  └─ Private key format: PEM (ECDSA, {len(COINBASE_API_PRIVATE_KEY)} chars)")
+    else:
+        log.info(f"  └─ Private key format: base64 (Ed25519, {len(COINBASE_API_PRIVATE_KEY)} chars)")
+
+if hmac_configured:
+    log.info(f"✓ HMAC Auth configured: COINBASE_API_KEY={COINBASE_API_KEY[:15]}...")
+
+if not (cdp_configured or hmac_configured):
+    log.error("⚠️  No Coinbase API credentials configured - bot will fail to start")
 
 CYCLE_SECONDS = _safe_int_env("BTC_COMPOUND_CYCLE_SECONDS", "30")
 MIN_TRADE_USD = _safe_float_env("BTC_COMPOUND_MIN_TRADE_USD", "5.00")
@@ -253,8 +262,42 @@ def _build_jwt(method: str, path: str) -> str:
     return jwt_token
 
 
-def _auth_headers(method: str, path: str) -> dict:
-    return {"Authorization": f"Bearer {_build_jwt(method, path)}", "Content-Type": "application/json"}
+def _build_hmac_signature(method: str, path: str, body: str = "") -> tuple:
+    """Coinbase HMAC/Basic Auth signature (legacy method)."""
+    timestamp = str(time.time())
+    message = timestamp + method + path + body
+    signature = base64.b64encode(
+        hmac.new(
+            COINBASE_SECRET_KEY.encode(),
+            message.encode(),
+            hashlib.sha256
+        ).digest()
+    ).decode()
+    return signature, timestamp
+
+
+def _auth_headers(method: str, path: str, body: str = "") -> dict:
+    """Return auth headers - try CDP JWT first, fall back to HMAC if JWT unavailable."""
+    # Try CDP JWT authentication first (new method)
+    if COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY:
+        try:
+            return {"Authorization": f"Bearer {_build_jwt(method, path)}", "Content-Type": "application/json"}
+        except Exception as e:
+            log.warning(f"CDP JWT auth failed, trying HMAC: {e}")
+
+    # Fall back to HMAC/Basic Auth (legacy method)
+    if COINBASE_API_KEY and COINBASE_SECRET_KEY and COINBASE_PASSPHRASE:
+        signature, timestamp = _build_hmac_signature(method, path, body)
+        return {
+            "CB-ACCESS-KEY": COINBASE_API_KEY,
+            "CB-ACCESS-SIGN": signature,
+            "CB-ACCESS-TIMESTAMP": timestamp,
+            "CB-ACCESS-PASSPHRASE": COINBASE_PASSPHRASE,
+            "Content-Type": "application/json"
+        }
+
+    # No credentials available - error
+    raise ValueError("No Coinbase API credentials configured. Set either CDP (COINBASE_API_KEY_NAME + COINBASE_API_PRIVATE_KEY) or HMAC (COINBASE_API_KEY + COINBASE_SECRET_KEY + COINBASE_PASSPHRASE)")
 
 
 async def get_asset_balance(session, currency: str) -> tuple:

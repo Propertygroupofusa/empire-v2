@@ -41,6 +41,8 @@ Both are handled here (see _load_signing_key) since which one gets
 issued isn't something this code controls.
 """
 import base64
+import hashlib
+import hmac
 import os
 import asyncio
 import json
@@ -102,8 +104,12 @@ except ImportError:
 PRICE_CACHE = {}  # {symbol: {"price": float, "rsi": float, "atr": float, "timestamp": datetime}}
 CACHE_TTL_SECONDS = 1800  # 30 minutes
 
+# Dual-auth support: CDP JWT (new) or HMAC/Basic Auth (legacy)
 COINBASE_API_KEY_NAME = os.getenv("COINBASE_API_KEY_NAME") or os.getenv("COINBASE_API_KEY_NAME_BOT") or ""
 COINBASE_API_PRIVATE_KEY = (os.getenv("COINBASE_API_PRIVATE_KEY") or os.getenv("COINBASE_API_PRIVATE_KEY_BOT") or "").replace("\\n", "\n")
+COINBASE_API_KEY = os.getenv("COINBASE_API_KEY") or os.getenv("COINBASE_API_KEY_BOT") or ""
+COINBASE_SECRET_KEY = os.getenv("COINBASE_SECRET_KEY") or os.getenv("COINBASE_SECRET_KEY_BOT") or ""
+COINBASE_PASSPHRASE = os.getenv("COINBASE_PASSPHRASE") or os.getenv("COINBASE_PASSPHRASE_BOT") or ""
 COINBASE_HOST = "api.coinbase.com"
 COINBASE_BASE_URL = f"https://{COINBASE_HOST}"
 FMP_API_KEY = os.getenv("FMP_API_KEY", "")
@@ -174,8 +180,43 @@ def _build_jwt(method: str, path: str) -> str:
     return pyjwt.encode(payload, private_key, algorithm=algorithm, headers=headers)
 
 
-def _auth_headers(method: str, path: str) -> dict:
-    return {"Authorization": f"Bearer {_build_jwt(method, path)}", "Content-Type": "application/json"}
+def _build_hmac_signature(method: str, path: str, body: str = "") -> str:
+    """Coinbase HMAC/Basic Auth signature (legacy method). Creates a signature
+    for Coinbase Advanced Trade API using HMAC-SHA256."""
+    timestamp = str(time.time())
+    message = timestamp + method + path + body
+    signature = base64.b64encode(
+        hmac.new(
+            COINBASE_SECRET_KEY.encode(),
+            message.encode(),
+            hashlib.sha256
+        ).digest()
+    ).decode()
+    return signature, timestamp
+
+
+def _auth_headers(method: str, path: str, body: str = "") -> dict:
+    """Return auth headers - try CDP JWT first, fall back to HMAC if JWT unavailable."""
+    # Try CDP JWT authentication first (new method)
+    if COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY:
+        try:
+            return {"Authorization": f"Bearer {_build_jwt(method, path)}", "Content-Type": "application/json"}
+        except Exception as e:
+            log.warning(f"CDP JWT auth failed, trying HMAC: {e}")
+
+    # Fall back to HMAC/Basic Auth (legacy method)
+    if COINBASE_API_KEY and COINBASE_SECRET_KEY and COINBASE_PASSPHRASE:
+        signature, timestamp = _build_hmac_signature(method, path, body)
+        return {
+            "CB-ACCESS-KEY": COINBASE_API_KEY,
+            "CB-ACCESS-SIGN": signature,
+            "CB-ACCESS-TIMESTAMP": timestamp,
+            "CB-ACCESS-PASSPHRASE": COINBASE_PASSPHRASE,
+            "Content-Type": "application/json"
+        }
+
+    # No credentials available - error
+    raise ValueError("No Coinbase API credentials configured. Set either CDP (COINBASE_API_KEY_NAME + COINBASE_API_PRIVATE_KEY) or HMAC (COINBASE_API_KEY + COINBASE_SECRET_KEY + COINBASE_PASSPHRASE)")
 
 
 # STATE-BASED RSI ENTRY SYSTEM for profit-only trading
@@ -1986,16 +2027,24 @@ def run():
     log.info("🔴 LIVE TRADING - Coinbase has no free paper-trading sandbox for Advanced Trade")
     log.info("=" * 80)
 
-    # Diagnostic: check credential availability
-    key_name_present = bool(COINBASE_API_KEY_NAME)
-    key_secret_present = bool(COINBASE_API_PRIVATE_KEY)
-    log.info(f"[STARTUP] COINBASE_API_KEY_NAME: {'✓ configured' if key_name_present else '❌ MISSING'}")
-    log.info(f"[STARTUP] COINBASE_API_PRIVATE_KEY: {'✓ configured' if key_secret_present else '❌ MISSING'}")
+    # Diagnostic: check credential availability (supports both CDP JWT and HMAC/Basic Auth)
+    cdp_configured = bool(COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY)
+    hmac_configured = bool(COINBASE_API_KEY and COINBASE_SECRET_KEY and COINBASE_PASSPHRASE)
 
-    if not (COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY):
-        log.error("🛑 CRYPTO BOT STARTUP FAILED: Missing Coinbase API credentials (COINBASE_API_KEY_NAME and/or COINBASE_API_PRIVATE_KEY)")
-        log.error("   Set these environment variables in Railway to enable crypto trading bot")
+    log.info(f"[STARTUP] CDP Auth (COINBASE_API_KEY_NAME + COINBASE_API_PRIVATE_KEY): {'✓ configured' if cdp_configured else '❌ not set'}")
+    log.info(f"[STARTUP] HMAC Auth (COINBASE_API_KEY + COINBASE_SECRET_KEY + COINBASE_PASSPHRASE): {'✓ configured' if hmac_configured else '❌ not set'}")
+
+    if not (cdp_configured or hmac_configured):
+        log.error("🛑 CRYPTO BOT STARTUP FAILED: No Coinbase API credentials configured")
+        log.error("   Set EITHER CDP auth (COINBASE_API_KEY_NAME + COINBASE_API_PRIVATE_KEY)")
+        log.error("   OR HMAC auth (COINBASE_API_KEY + COINBASE_SECRET_KEY + COINBASE_PASSPHRASE)")
+        log.error("   in Railway Variables to enable crypto trading bot")
         return
+
+    if cdp_configured:
+        log.info("   → Using CDP JWT authentication method")
+    elif hmac_configured:
+        log.info("   → Using HMAC/Basic Auth authentication method")
 
     # Run pre-flight connectivity test
     loop = asyncio.new_event_loop()
