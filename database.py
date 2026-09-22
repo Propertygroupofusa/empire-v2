@@ -97,6 +97,6 @@ async def get_db():
     """Get database session"""
     factory = get_session_factory()
     if factory is None:
-        return None
+        return
     async with factory() as session:
         yield session
