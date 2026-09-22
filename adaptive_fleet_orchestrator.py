@@ -31,17 +31,28 @@ NINE_COINS = [
     "DOT-USD",   # Established
 ]
 
-# Coin unlock thresholds (profit milestones at which new coins activate)
+# Scalping Grid Strategy Configuration
+SCALPING_GRID_CONFIG = {
+    "levels": 6,
+    "spacing_percent": 0.5,
+    "exit_target_percent": 0.75,
+    "hold_time_seconds": "180-300",
+    "stop_loss_percent": -0.5,
+    "cycles_per_day": 10,
+    "redeployment": "immediate"
+}
+
+# All coins now active (no unlock thresholds - scalping mode)
 COIN_UNLOCK_THRESHOLDS = {
-    "BTC-USD": 0,        # Always active (primary)
-    "ETH-USD": 5000,     # Unlock at $5K profit
-    "SOL-USD": 10000,    # Unlock at $10K profit
-    "ADA-USD": 15000,    # Unlock at $15K profit
-    "DOGE-USD": 20000,   # Unlock at $20K profit
-    "XRP-USD": 30000,    # Unlock at $30K profit
-    "LINK-USD": 40000,   # Unlock at $40K profit
-    "AVAX-USD": 50000,   # Unlock at $50K profit
-    "DOT-USD": 60000,    # Unlock at $60K profit
+    "BTC-USD": 0,
+    "ETH-USD": 0,
+    "SOL-USD": 0,
+    "ADA-USD": 0,
+    "DOGE-USD": 0,
+    "XRP-USD": 0,
+    "LINK-USD": 0,
+    "AVAX-USD": 0,
+    "DOT-USD": 0,
 }
 
 # Performance thresholds for freezing underperformers
@@ -212,44 +223,49 @@ async def get_fleet_status() -> Dict:
     active_coins = [c for c in NINE_COINS if registry['coins'][c]['active']]
     frozen_coins = [c for c in NINE_COINS if registry['coins'][c]['frozen']]
 
-    # Calculate next unlock
-    next_unlock = None
-    for coin in NINE_COINS:
-        if not registry['coins'][coin]['active']:
-            threshold = COIN_UNLOCK_THRESHOLDS[coin]
-            if primary_profit < threshold:
-                next_unlock = threshold
-                break
+    # Scalping Grid Metrics
+    total_daily_target = 0
+    for coin in active_coins:
+        coin_data = registry['coins'][coin]
+        daily_target = coin_data.get('daily_target_profit', 0)
+        total_daily_target += daily_target
 
     return {
-        "fleet_type": "Adaptive Capital Fleet",
+        "fleet_type": "Scalping Grid Fleet (9-Coin)",
+        "strategy_mode": "scalping_grid_6level",
         "primary_coin": "BTC-USD",
         "primary_profit": round(primary_profit, 2),
         "fleet_total_profit": round(fleet_profit, 2),
         "active_coins": active_coins,
         "active_coins_count": len(active_coins),
-        "unlocked_coins_count": registry['coins_unlocked'],
         "frozen_coins": frozen_coins,
         "frozen_coins_count": len(frozen_coins),
-        "coin_unlock_thresholds": COIN_UNLOCK_THRESHOLDS,
-        "next_unlock_threshold": next_unlock,
-        "next_unlock_coin": next((c for c in NINE_COINS
-                                   if not registry['coins'][c]['active']
-                                   and primary_profit < COIN_UNLOCK_THRESHOLDS[c]), None),
         "total_capital_deployed": registry['total_capital_deployed'],
+        "capital_per_coin": round(registry['total_capital_deployed'] / 9, 2),
+        "grid_config": {
+            "levels": 6,
+            "spacing_percent": 0.5,
+            "exit_target_percent": 0.75,
+            "hold_time_seconds": "180-300",
+            "cycles_per_day": 10
+        },
+        "expected_daily_profit": round(total_daily_target, 2),
+        "expected_monthly_profit": round(total_daily_target * 30, 2),
         "coins_status": registry['coins'],
         "registry": registry
     }
 
 
 def monitor_fleet() -> None:
-    """Main monitoring loop — 30s cycle, checks profit and unlocks coins"""
+    """Main monitoring loop — 30s cycle, scalping grid execution"""
     log.info("\n" + "="*70)
-    log.info("🚀 ADAPTIVE CAPITAL FLEET ORCHESTRATOR STARTED")
+    log.info("🚀 SCALPING GRID FLEET ORCHESTRATOR STARTED")
     log.info("="*70)
-    log.info("   9 Coins: BTC → ETH → SOL → ADA → DOGE → XRP → LINK → AVAX → DOT")
-    log.info("   Auto-unlocks at profit milestones")
-    log.info("   Freezes underperformers automatically")
+    log.info("   Strategy: 6-Level Scalping Grid (0.5% spacing)")
+    log.info("   9 Coins Active: BTC → ETH → SOL → ADA → DOGE → XRP → LINK → AVAX → DOT")
+    log.info("   Capital: $5,000 ($555.56/coin)")
+    log.info("   Target: $375/day ($41.67/coin)")
+    log.info("   Monthly Target: $11,250")
     log.info("="*70)
 
     registry = get_or_create_fleet_registry()
