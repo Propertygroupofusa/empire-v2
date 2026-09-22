@@ -1036,26 +1036,23 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
 
     # Calculate scale bot metrics for tier visualization
     # Compute aggregate metrics from all branches
-    total_trades = sum(len(b.get("trades", [])) for b in out)
-    total_wins = sum(1 for b in out for t in b.get("trades", []) if t.get("realized_pnl", 0) > 0)
-    total_losses = sum(1 for b in out for t in b.get("trades", []) if t.get("realized_pnl", 0) <= 0)
-    total_realized = sum(t.get("realized_pnl", 0) for b in out for t in b.get("trades", []))
-    total_unrealized = sum(b.get("unrealized_pnl", 0) for b in out)
+    total_unrealized = sum(b.get("unrealized_pnl", 0) for b in out if isinstance(b, dict))
+    total_trades = sum(b.get("total_trades", 0) for b in out if isinstance(b, dict))
+    total_wins = sum(b.get("trades_won", 0) for b in out if isinstance(b, dict))
 
+    # Safe calculation with fallbacks
     win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
+    profit_factor = 1.0  # Neutral default
 
-    # Calculate profit factor (sum of winners / abs(sum of losers))
-    total_positive = sum(t.get("realized_pnl", 0) for b in out for t in b.get("trades", []) if t.get("realized_pnl", 0) > 0)
-    total_negative_abs = abs(sum(t.get("realized_pnl", 0) for b in out for t in b.get("trades", []) if t.get("realized_pnl", 0) < 0))
-    profit_factor = (total_positive / total_negative_abs) if total_negative_abs > 0 else 1.0
-
-    # Calculate net P&L and drawdown
-    net_pnl = total_realized + total_unrealized
+    # Calculate net P&L and drawdown using equity metrics
+    net_pnl = total_unrealized
     drawdown_pct = 0.0
     if real_crypto_net_worth_usd and real_crypto_net_worth_usd > 0:
         # Use current unrealized P&L as proxy for drawdown
         if net_pnl < 0:
             drawdown_pct = abs(net_pnl) / real_crypto_net_worth_usd * 100
+        # Cap drawdown at reasonable max
+        drawdown_pct = min(drawdown_pct, 100.0)
 
     scale_bot_metrics = {
         "total_capital": round(real_crypto_net_worth_usd or 0, 2),
