@@ -925,4 +925,4 @@ async def get_coinbase_usd_balance():
 
     except Exception as e:
         log.error(f"Coinbase USD balance fetch failed: {e}")
-        return {"usd_balance": 0, "status": "error", "detail": str(e)}
+        return {"usd_balance": 0, "status": "error", "detail": "balance fetch failed"}

@@ -33,7 +33,7 @@ async def get_live_positions(db: AsyncSession = Depends(get_db)):
     """Get all active positions across all trading modes"""
     try:
         result = await db.execute(
-            select(BotPosition).where(BotPosition.status == "open")
+            select(BotPosition)
         )
         positions = result.scalars().all()
 
@@ -44,13 +44,14 @@ async def get_live_positions(db: AsyncSession = Depends(get_db)):
                     "id": p.id,
                     "symbol": p.symbol,
                     "side": p.side,
-                    "quantity": float(p.quantity),
+                    "quantity": float(p.qty) if p.qty is not None else 0.0,
                     "entry_price": float(p.entry_price),
-                    "current_price": float(p.current_price) if p.current_price else None,
-                    "pnl": float(p.pnl) if p.pnl else 0,
-                    "pnl_pct": float(p.pnl_pct) if p.pnl_pct else 0,
-                    "entered_at": p.entered_at.isoformat() if p.entered_at else None,
-                    "mode": p.mode,  # "crypto", "futures", "options"
+                    # Current model stores open positions and entry context only.
+                    "current_price": None,
+                    "pnl": 0.0,
+                    "pnl_pct": 0.0,
+                    "entered_at": p.opened_at.isoformat() if p.opened_at else None,
+                    "mode": p.bot,  # e.g. "crypto_coinbase" / "prop_apex"
                 }
                 for p in positions
             ]
@@ -65,6 +66,7 @@ async def get_recent_trades(limit: int = 10, db: AsyncSession = Depends(get_db))
     try:
         result = await db.execute(
             select(CryptoTradeLog)
+            .where(CryptoTradeLog.event_type == "EXIT")
             .order_by(desc(CryptoTradeLog.timestamp))
             .limit(limit)
         )
@@ -78,13 +80,13 @@ async def get_recent_trades(limit: int = 10, db: AsyncSession = Depends(get_db))
                     "symbol": t.symbol,
                     "entry_price": float(t.entry_price) if t.entry_price else None,
                     "exit_price": float(t.exit_price) if t.exit_price else None,
-                    "quantity": float(t.quantity) if t.quantity else None,
-                    "pnl": float(t.pnl) if t.pnl else 0,
-                    "pnl_pct": float(t.pnl_pct) if t.pnl_pct else 0,
-                    "side": t.side,
-                    "status": t.status,
-                    "timestamp": t.timestamp.isoformat() if t.timestamp else None,
-                    "strategy": t.strategy,
+                    "quantity": float(t.position_size) if t.position_size else None,
+                    "pnl": float(t.net_pnl) if t.net_pnl else 0.0,
+                    "pnl_pct": float(t.net_pnl_pct) if t.net_pnl_pct else 0.0,
+                    "side": "long",
+                    "status": "closed",
+                    "timestamp": (t.exit_at or t.timestamp).isoformat() if (t.exit_at or t.timestamp) else None,
+                    "strategy": t.strategy_version,
                 }
                 for t in trades
             ]
@@ -97,13 +99,13 @@ async def get_recent_trades(limit: int = 10, db: AsyncSession = Depends(get_db))
 async def get_bot_status(db: AsyncSession = Depends(get_db)):
     """Get current bot status and metrics"""
     try:
-        # Get bot state
-        result = await db.execute(select(TradingBotState).limit(1))
-        bot_state = result.scalar_one_or_none()
+        # Get bot state (bucket model: one row per bot bucket)
+        result = await db.execute(select(TradingBotState))
+        bot_states = result.scalars().all()
 
         # Get open positions count
         pos_result = await db.execute(
-            select(func.count(BotPosition.id)).where(BotPosition.status == "open")
+            select(func.count(BotPosition.id))
         )
         open_positions = pos_result.scalar() or 0
 
@@ -116,23 +118,28 @@ async def get_bot_status(db: AsyncSession = Depends(get_db)):
         )
         trades_today = trades_result.scalar() or 0
 
-        # Calculate daily P&L
+        # Calculate daily P&L from EXIT events
         pnl_result = await db.execute(
-            select(func.sum(CryptoTradeLog.pnl)).where(
-                func.date(CryptoTradeLog.timestamp) == today
+            select(func.sum(CryptoTradeLog.net_pnl)).where(
+                (func.date(CryptoTradeLog.timestamp) == today) &
+                (CryptoTradeLog.event_type == "EXIT")
             )
         )
         daily_pnl = pnl_result.scalar() or 0
 
+        equity = sum(float(s.base_capital or 0) for s in bot_states)
+        last_update = max((s.updated_at for s in bot_states if s.updated_at), default=None)
+        status = "active" if open_positions > 0 else "idle"
+
         return {
-            "status": bot_state.status if bot_state else "unknown",
-            "mode": bot_state.mode if bot_state else "idle",
-            "last_update": bot_state.last_update.isoformat() if bot_state and bot_state.last_update else None,
+            "status": status,
+            "mode": "multi_bot",
+            "last_update": last_update.isoformat() if last_update else None,
             "open_positions": open_positions,
             "trades_today": trades_today,
             "daily_pnl": float(daily_pnl),
-            "equity": float(bot_state.equity) if bot_state and bot_state.equity else 0,
-            "cash": float(bot_state.cash) if bot_state and bot_state.cash else 0,
+            "equity": round(equity, 2),
+            "cash": 0.0,
         }
     except Exception as e:
         log.error(f"Error fetching bot status: {e}")
@@ -151,24 +158,25 @@ async def get_trading_summary(db: AsyncSession = Depends(get_db)):
     try:
         # Positions
         pos_result = await db.execute(
-            select(BotPosition).where(BotPosition.status == "open")
+            select(BotPosition)
         )
         positions = pos_result.scalars().all()
-        total_position_value = sum(float(p.quantity * p.entry_price) for p in positions if p.quantity and p.entry_price)
-        total_pnl = sum(float(p.pnl) for p in positions if p.pnl)
+        total_position_value = sum(float((p.qty or 0) * (p.entry_price or 0)) for p in positions)
+        total_pnl = 0.0
 
         # Today's stats
         today = datetime.now(ET).date()
         trades_result = await db.execute(
             select(CryptoTradeLog).where(
-                func.date(CryptoTradeLog.timestamp) == today
+                (func.date(CryptoTradeLog.timestamp) == today) &
+                (CryptoTradeLog.event_type == "EXIT")
             )
         )
         today_trades = trades_result.scalars().all()
 
-        wins = len([t for t in today_trades if t.pnl and float(t.pnl) > 0])
-        losses = len([t for t in today_trades if t.pnl and float(t.pnl) < 0])
-        daily_pnl = sum(float(t.pnl) for t in today_trades if t.pnl)
+        wins = len([t for t in today_trades if t.net_pnl and float(t.net_pnl) > 0])
+        losses = len([t for t in today_trades if t.net_pnl and float(t.net_pnl) < 0])
+        daily_pnl = sum(float(t.net_pnl) for t in today_trades if t.net_pnl)
 
         return {
             "positions": {

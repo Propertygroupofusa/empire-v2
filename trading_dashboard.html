@@ -814,6 +814,20 @@
             return res.json();
         }
 
+        async function apiFetchAbsolute(url, options = {}) {
+            ensureAdminKey();
+            const headers = Object.assign(
+                { 'X-Admin-Key': adminKey, 'Content-Type': 'application/json' },
+                options.headers || {}
+            );
+            const res = await fetch(url, Object.assign({}, options, { headers }));
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || ('Request failed: ' + res.status));
+            }
+            return res.json();
+        }
+
         function logEvent(message, cls) {
             const logContainer = document.getElementById('logContainer');
             const entry = document.createElement('div');
@@ -1429,7 +1443,7 @@
         // Refresh measurements dashboard - edge validation metrics
         async function refreshMeasurements() {
             try {
-                const summary = await apiFetch('/trading-hub/api/measurements/summary');
+                const summary = await apiFetchAbsolute('https://empire-v2-production.up.railway.app/trading-hub/api/measurements/summary');
                 document.getElementById('measurementsTotalTrades').textContent = summary.total_trades || 0;
 
                 const statusMsg = summary.total_trades === 0
@@ -1438,7 +1452,7 @@
                 document.getElementById('measurementsStatus').textContent = statusMsg;
 
                 // Get strategies for detailed view
-                const strategies = await apiFetch('/trading-hub/api/measurements/strategies');
+                const strategies = await apiFetchAbsolute('https://empire-v2-production.up.railway.app/trading-hub/api/measurements/strategies');
                 const container = document.getElementById('strategiesContainer');
                 container.innerHTML = '';
 
