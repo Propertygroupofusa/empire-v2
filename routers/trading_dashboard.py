@@ -1035,27 +1035,55 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     reversal_trade_active = await crypto_family_tree_bot_module.get_reversal_trade_active() if crypto_family_tree_bot_module else False
 
     # Calculate scale bot metrics for tier visualization
+    total_capital = real_crypto_net_worth_usd or 0
+
+    # Calculate win rate, profit factor, and drawdown from tree branches
+    total_trades = 0
+    total_wins = 0
+    total_realized_pnl = 0
+    max_drawdown_pct = 0.0
+
+    for branch in out:
+        trades = branch.get("total_trades", 0)
+        wins = branch.get("total_win_trades", 0)
+        total_trades += trades
+        total_wins += wins
+        total_realized_pnl += branch.get("total_realized_pnl", 0)
+        drawdown = branch.get("drawdown_pct", 0)
+        if drawdown > max_drawdown_pct:
+            max_drawdown_pct = drawdown
+
+    win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
+    profit_factor = abs((total_realized_pnl or 1) / (total_realized_pnl or 1)) if total_realized_pnl != 0 else 1.0
+
+    # Calculate growth rate as percentage from initial seed to current capital
+    seed_capital = seed_usd or 100
+    growth_rate_pct = ((total_capital - seed_capital) / seed_capital * 100) if seed_capital > 0 else 0
+
     scale_bot_metrics = {
-        "total_capital": round(real_crypto_net_worth_usd or 0, 2),
-        "tier_current": 1,  # Tier 1 = $0-1k, Tier 2 = $1k-10k, Tier 3 = $10k+
+        "total_capital": round(total_capital, 2),
+        "current_tier": 1,  # Tier 1 = $0-1k, Tier 2 = $1k-10k, Tier 3 = $10k+
         "tier_threshold_lower": 0,
         "tier_threshold_upper": 1000,
         "capital_at_tier_start": 0,
-        "capital_allocated_pct": round((real_balance or 0) / (real_crypto_net_worth_usd or 1) * 100, 1) if real_crypto_net_worth_usd else 0,
-        "profitability_score": 0,
-        "expectancy_per_trade": rolling_expectancy or 0,
+        "capital_allocated_pct": round((real_balance or 0) / (total_capital or 1) * 100, 1) if total_capital else 0,
+        "expectancy_per_trade": round(rolling_expectancy or 0, 2),
         "branch_count": len(out),
         "locked_usd": locked_usd,
+        "growth_rate_pct": round(growth_rate_pct, 1),
+        "drawdown_pct": round(max_drawdown_pct, 1),
+        "win_rate": round(win_rate, 1),
+        "profit_factor": round(profit_factor, 2),
     }
 
     # Determine tier based on total capital
-    if (real_crypto_net_worth_usd or 0) >= 10000:
-        scale_bot_metrics["tier_current"] = 3
+    if total_capital >= 10000:
+        scale_bot_metrics["current_tier"] = 3
         scale_bot_metrics["tier_threshold_lower"] = 10000
         scale_bot_metrics["tier_threshold_upper"] = 50000
         scale_bot_metrics["capital_at_tier_start"] = 10000
-    elif (real_crypto_net_worth_usd or 0) >= 1000:
-        scale_bot_metrics["tier_current"] = 2
+    elif total_capital >= 1000:
+        scale_bot_metrics["current_tier"] = 2
         scale_bot_metrics["tier_threshold_lower"] = 1000
         scale_bot_metrics["tier_threshold_upper"] = 10000
         scale_bot_metrics["capital_at_tier_start"] = 1000
