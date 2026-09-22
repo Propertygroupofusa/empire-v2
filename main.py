@@ -33,11 +33,21 @@ try:
     import greenlet
     assert greenlet.__version__, "greenlet module loaded"
 except (ImportError, AssertionError) as e:
-    logging.error(f"FATAL: greenlet not available - async database will fail: {e}")
-    raise
+    logging.warning(f"⚠️  greenlet not available - will use thread executor mode: {e}")
 
-from database import init_db, engine
-from initialize_bot_worker import initialize_bot_worker
+# Import database module with graceful fallback
+try:
+    from database import init_db, engine
+except Exception as e:
+    logging.warning(f"⚠️  Database import failed (non-critical): {e}")
+    init_db = None
+    engine = None
+
+try:
+    from initialize_bot_worker import initialize_bot_worker
+except Exception as e:
+    logging.warning(f"⚠️  Bot worker import failed: {e}")
+    initialize_bot_worker = None
 
 
 # Pydantic request models for Hermes Phase 1 endpoints
@@ -986,9 +996,12 @@ async def lifespan(app: FastAPI):
     log.info("PGUSA Platform starting...")
     print("[LIFESPAN] Initializing database...", flush=True)
     try:
-        await asyncio.wait_for(init_db(), timeout=30.0)
-        print("[LIFESPAN] ✓ Database initialized", flush=True)
-        log.info("Database initialized")
+        if init_db is not None:
+            await asyncio.wait_for(init_db(), timeout=30.0)
+            print("[LIFESPAN] ✓ Database initialized", flush=True)
+            log.info("Database initialized")
+        else:
+            print("[LIFESPAN] ⚠️  Database module not available - skipping init", flush=True)
     except asyncio.TimeoutError:
         print(f"[LIFESPAN] ✗ Database init TIMEOUT (30s) - continuing startup", flush=True)
         log.warning(f"Database init timed out - app will start but DB features may be unavailable")
@@ -1050,8 +1063,11 @@ async def lifespan(app: FastAPI):
                   f"[{type(e).__name__}] {e}", exc_info=True)
 
     try:
-        await asyncio.wait_for(initialize_bot_worker(), timeout=30.0)
-        log.info("✅ Earnings bot worker initialized (for /payments/bot/earnings)")
+        if initialize_bot_worker is not None:
+            await asyncio.wait_for(initialize_bot_worker(), timeout=30.0)
+            log.info("✅ Earnings bot worker initialized (for /payments/bot/earnings)")
+        else:
+            log.warning("Earnings bot worker not available - skipping initialization")
     except asyncio.TimeoutError:
         log.warning(f"Earnings bot worker initialization TIMEOUT")
     except Exception as e:

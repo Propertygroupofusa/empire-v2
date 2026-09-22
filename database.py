@@ -54,15 +54,27 @@ if not _HAS_GREENLET:
 if DATABASE_URL.startswith("postgresql+asyncpg://"):
     _engine_kwargs["connect_args"] = {"timeout": 10}
 
-engine = create_async_engine(DATABASE_URL, **_engine_kwargs)
-
-# Create session factory
-AsyncSessionLocal = sessionmaker(
-    engine, class_=AsyncSession, expire_on_commit=False
-)
-
-# Declarative base for all models (models.py imports this)
+# Lazy initialization: don't connect until first use
+# This prevents Railway app from crashing on startup if DB is unavailable
+engine = None
+AsyncSessionLocal = None
 Base = declarative_base()
+
+def get_engine():
+    """Lazy engine initialization - connect only when needed"""
+    global engine
+    if engine is None:
+        engine = create_async_engine(DATABASE_URL, **_engine_kwargs)
+    return engine
+
+def get_session_factory():
+    """Lazy session factory initialization"""
+    global AsyncSessionLocal
+    if AsyncSessionLocal is None:
+        AsyncSessionLocal = sessionmaker(
+            get_engine(), class_=AsyncSession, expire_on_commit=False
+        )
+    return AsyncSessionLocal
 
 async def init_db():
     """Initialize database - create tables if needed"""
@@ -72,16 +84,19 @@ async def init_db():
         print("[DB] Starting database initialization...")
         print("[DB] Calling Base.metadata.create_all()...")
 
-        async with engine.begin() as conn:
+        db_engine = get_engine()
+        async with db_engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
         print("[DB] ✅ Base.metadata.create_all() completed successfully")
     except Exception as e:
-        print(f"[DB] ❌ Base.metadata.create_all() failed: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"[DB] ⚠️  Base.metadata.create_all() failed (non-critical): {e}")
+        # Don't crash on DB failure - trading can run without persistent storage
 
 async def get_db():
     """Get database session"""
-    async with AsyncSessionLocal() as session:
+    factory = get_session_factory()
+    if factory is None:
+        return None
+    async with factory() as session:
         yield session
