@@ -88,11 +88,22 @@ RISK_PER_TRADE_PCT = 0.015      # 1.5% risk = $600 per trade
 MAX_CONCURRENT_SWING = 3
 MAX_CONCURRENT_INTRADAY = 5
 MIN_EQUITY = 5000.0
+POSITION_SIZE_BASE = 100.0
 
 # Position sizing for $40k account
 RISK_PER_TRADE = ACCOUNT_SIZE * RISK_PER_TRADE_PCT  # $600
 WIN_AVG = 225.0  # Average win size
 LOSS_AVG = 75.0  # Average loss size (stops at 0.5-0.75%)
+
+
+def fmt_money(value):
+    """Safe currency formatter for logs."""
+    try:
+        if value is None:
+            return "unknown"
+        return f"{float(value):.2f}"
+    except Exception:
+        return "unknown"
 
 
 async def get_intraday_rsi(session, symbol, timeframe="15Min"):
@@ -291,10 +302,11 @@ async def run_intraday_check():
 
             await asyncio.sleep(0.3)
 
+        open_positions = await get_open_positions(session)
+
         # Enter positions for intraday trades
         if intraday_setups:
             intraday_setups.sort(reverse=True)
-            open_positions = await get_open_positions(session)
             intraday_count = sum(1 for s in open_positions.keys() if s in SWING_SYMBOLS)
             slots = MAX_CONCURRENT_INTRADAY - intraday_count
 
@@ -374,10 +386,10 @@ async def run_swing_check():
     # Get account status
     async with aiohttp.ClientSession() as session:
         equity, buying_power = await get_account_balance(session)
-        log.info(f"Equity: ${equity:.2f if equity else 'unknown'} | Buying Power: ${buying_power:.2f if buying_power else 'unknown'}")
+        log.info(f"Equity: ${fmt_money(equity)} | Buying Power: ${fmt_money(buying_power)}")
 
         if not equity or equity < MIN_EQUITY:
-            log.warning(f"⚠️  Equity ${equity:.2f} below minimum ${MIN_EQUITY}")
+            log.warning(f"⚠️  Equity ${fmt_money(equity)} below minimum ${MIN_EQUITY:.2f}")
             return
 
         # Scan all symbols for swing setups
@@ -404,15 +416,15 @@ async def run_swing_check():
 
             await asyncio.sleep(0.5)  # Rate limit
 
+        open_positions = await get_open_positions(session)
+
         # Open positions with highest confidence
         if setups:
             setups.sort(reverse=True)  # Sort by confidence (descending)
-
-            open_positions = await get_open_positions(session)
             current_count = len(open_positions)
-            slots_available = MAX_CONCURRENT - current_count
+            slots_available = MAX_CONCURRENT_SWING - current_count
 
-            log.info(f"\n📈 Open positions: {current_count}/{MAX_CONCURRENT}")
+            log.info(f"\n📈 Open positions: {current_count}/{MAX_CONCURRENT_SWING}")
 
             for confidence, symbol, config, rsi, price in setups[:slots_available]:
                 if symbol in open_positions:
