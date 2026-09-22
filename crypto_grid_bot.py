@@ -47,7 +47,7 @@ from sqlalchemy import select, func, case, desc
 
 import crypto_btc_compound_bot as engine
 import crypto_mean_reversion_bot as mean_reversion_engine
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import CryptoGridBranch, CryptoGridSlice, CryptoGridTradeHistory, TradingBotState, CryptoTreeBranch, BotPosition
 
 # ── SHADOW MODE INTEGRATION ────────────────────────────────────────────────
@@ -360,7 +360,7 @@ async def refresh_real_fee_rate(session) -> float:
             f"{engine.ROUND_TRIP_FEE_RATE*100:.3f}%)"
         )
         try:
-            async with AsyncSessionLocal() as db:
+            async with get_session_factory()() as db:
                 result = await db.execute(
                     select(TradingBotState).where(TradingBotState.bot_name == REAL_FEE_RATE_STATE_KEY)
                 )
@@ -386,7 +386,7 @@ async def get_effective_round_trip_fee_rate() -> float:
     if _cached_real_round_trip_fee_rate is not None:
         return _cached_real_round_trip_fee_rate
     try:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             result = await db.execute(
                 select(TradingBotState).where(TradingBotState.bot_name == REAL_FEE_RATE_STATE_KEY)
             )
@@ -428,7 +428,7 @@ async def is_maker_orders_active() -> bool:
     real ORDER-EXECUTION path that has never touched the live account, and
     the arithmetic in its favour (see above) is not the same thing as having
     watched it fill. The account owner turns it on from the dashboard."""
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == MAKER_ORDERS_MODE_KEY))
         row = result.scalar_one_or_none()
         if row is None:
@@ -437,7 +437,7 @@ async def is_maker_orders_active() -> bool:
 
 
 async def set_maker_orders_active(enabled: bool):
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == MAKER_ORDERS_MODE_KEY))
         row = result.scalar_one_or_none()
         if row is None:
@@ -535,7 +535,7 @@ async def is_grid_bot_active() -> bool:
     an explicit False from a future dashboard toggle always wins over
     this default. Even while True, nothing trades until at least one
     real grid branch actually exists (see create_grid_branch)."""
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == GRID_BOT_MODE_KEY))
         row = result.scalar_one_or_none()
         if row is None:
@@ -544,7 +544,7 @@ async def is_grid_bot_active() -> bool:
 
 
 async def set_grid_bot_active(enabled: bool):
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == GRID_BOT_MODE_KEY))
         row = result.scalar_one_or_none()
         if row is None:
@@ -572,7 +572,7 @@ async def is_dynamic_spacing_active() -> bool:
     sandbox" precedent already used elsewhere in this codebase - an
     explicit dashboard toggle click still wins over this default in
     either direction afterward."""
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == DYNAMIC_SPACING_MODE_KEY))
         row = result.scalar_one_or_none()
         if row is None:
@@ -581,7 +581,7 @@ async def is_dynamic_spacing_active() -> bool:
 
 
 async def set_dynamic_spacing_active(enabled: bool):
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == DYNAMIC_SPACING_MODE_KEY))
         row = result.scalar_one_or_none()
         if row is None:
@@ -598,7 +598,7 @@ async def is_grid_auto_rotate_active() -> bool:
     reuses the exact same real coin-ranking signal already live via the
     $20 Quick Buy button, not a new, unvalidated strategy needing a
     shadow-mode period first."""
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == GRID_AUTO_ROTATE_MODE_KEY))
         row = result.scalar_one_or_none()
         if row is None:
@@ -607,7 +607,7 @@ async def is_grid_auto_rotate_active() -> bool:
 
 
 async def set_grid_auto_rotate_active(enabled: bool):
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == GRID_AUTO_ROTATE_MODE_KEY))
         row = result.scalar_one_or_none()
         if row is None:
@@ -653,7 +653,7 @@ async def is_avg_swing_spacing_active() -> bool:
     sandbox" precedent used elsewhere in this codebase - an explicit
     dashboard toggle click still wins over this default in either
     direction afterward."""
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == AVG_SWING_SPACING_MODE_KEY))
         row = result.scalar_one_or_none()
         if row is None:
@@ -662,7 +662,7 @@ async def is_avg_swing_spacing_active() -> bool:
 
 
 async def set_avg_swing_spacing_active(enabled: bool):
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == AVG_SWING_SPACING_MODE_KEY))
         row = result.scalar_one_or_none()
         if row is None:
@@ -728,7 +728,7 @@ async def compute_avg_swing_grid_pct(session, product_id: str, multiplier: float
 
 
 async def get_grid_branches() -> list:
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(CryptoGridBranch).order_by(CryptoGridBranch.bot_name))
         return list(result.scalars().all())
 
@@ -737,7 +737,7 @@ async def get_grid_branch_claimed_coins() -> set:
     """Real coins currently claimed by an ACTIVE grid branch - a disabled
     branch (active=False) releases its claim, same convention every
     other claimed-contract/coin check in this codebase already uses."""
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(CryptoGridBranch.product_id).where(CryptoGridBranch.active == True))
         return {row[0] for row in result.all()}
 
@@ -756,7 +756,7 @@ async def get_grid_allocated_total() -> float:
     (get_real_free_cash_usd here, spendable_for_spawn in
     routers/trading_dashboard.py) use get_grid_undeployed_reserve_total()
     instead. Kept for reporting/analytics only."""
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(CryptoGridBranch))
         return sum(b.allocated_usd for b in result.scalars().all())
 
@@ -795,7 +795,7 @@ async def get_grid_undeployed_reserve_total() -> float:
     every unfilled level stays fully reserved here, and
     engine.place_market_buy() still clamps any real order to the live
     wallet balance immediately before submitting."""
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         branches = (await db.execute(select(CryptoGridBranch))).scalars().all()
         slices = (await db.execute(select(CryptoGridSlice))).scalars().all()
 
@@ -887,7 +887,7 @@ async def get_real_free_cash_usd():
     import crypto_family_tree_bot as tree  # lazy - avoids a circular import at module load, same pattern as _log_activity_safe below
     locked_usd = await tree.get_locked_usd()
 
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         tree_result = await db.execute(select(CryptoTreeBranch))
         tree_branches = tree_result.scalars().all()
         open_bots_result = await db.execute(select(BotPosition.bot))
@@ -974,7 +974,7 @@ async def get_live_grid_spacing_override() -> str:
     "live_default" on any stale/out-of-range stored value (e.g.
     GRID_LEVEL_SPACING_CANDIDATES gets revised later) - there's currently
     nothing else it could correctly mean."""
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == GRID_SPACING_OVERRIDE_KEY))
         row = result.scalar_one_or_none()
         if row is None or row.base_capital is None:
@@ -996,7 +996,7 @@ async def set_live_grid_spacing_override(label: str):
             f"{list(GRID_LEVEL_SPACING_CANDIDATES.keys())} (only a real, backtested config can go live)"
         )
     level = float(GRID_SPACING_OVERRIDE_LEVELS.index(label))
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == GRID_SPACING_OVERRIDE_KEY))
         row = result.scalar_one_or_none()
         if row is None:
@@ -1071,7 +1071,7 @@ async def create_grid_branch(product_id: str, allocated_usd: float, skip_free_ca
 
     num_levels = await _effective_num_levels(allocated_usd)
 
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(CryptoGridBranch))
         existing = list(result.scalars().all())
         used_nums = {
@@ -1108,7 +1108,7 @@ async def add_cash_to_grid_branch(bot_name: str, amount: float) -> CryptoGridBra
     forward. Refuses a non-positive amount or an unknown bot_name."""
     if amount <= 0:
         raise ValueError("amount must be positive")
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == bot_name))
         branch = result.scalar_one_or_none()
         if branch is None:
@@ -1162,7 +1162,7 @@ async def withdraw_from_grid_branch(bot_name: str, amount: float) -> dict:
     still clear the real minimum trade size, not just its past ones)."""
     if amount <= 0:
         raise ValueError("amount must be positive")
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == bot_name))
         branch = result.scalar_one_or_none()
         if branch is None:
@@ -1211,7 +1211,7 @@ async def set_grid_branch_locked(bot_name: str, locked: bool) -> dict:
     branch's own NORMAL grid trading - buying real dips, selling real
     rises on its existing/future slices - is completely unaffected; this
     only ever blocks cash-REMOVAL, never the branch's real trading."""
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == bot_name))
         branch = result.scalar_one_or_none()
         if branch is None:
@@ -1270,7 +1270,7 @@ async def move_cash_between_grid_branches(from_bot_name: str, amount: float, to_
     if to_bot_name and to_bot_name == from_bot_name:
         raise ValueError("source and destination can't be the same branch")
 
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == from_bot_name))
         source = result.scalar_one_or_none()
         if source is None:
@@ -1346,7 +1346,7 @@ async def fund_grid_from_tree_branch(from_bot_name: str, amount: float, product_
     if amount <= 0:
         raise ValueError("amount must be positive")
 
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == from_bot_name))
         source = result.scalar_one_or_none()
         if source is None:
@@ -1365,7 +1365,7 @@ async def fund_grid_from_tree_branch(from_bot_name: str, amount: float, product_
         destination = await create_grid_branch(target_coin, amount, skip_free_cash_check=True)
         action = "new_branch"
 
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(CryptoTreeBranch).where(CryptoTreeBranch.bot_name == from_bot_name))
         fresh_source = result.scalar_one_or_none()
         if fresh_source is None:
@@ -1584,13 +1584,13 @@ async def _best_available_coin_and_roi(exclude_bot_name: str = None) -> tuple:
     excluded = await tree.get_effective_excluded_coins()
     claimed = await get_grid_branch_claimed_coins()
     if exclude_bot_name:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             result = await db.execute(select(CryptoGridBranch.product_id).where(CryptoGridBranch.bot_name == exclude_bot_name))
             own_coin = result.scalar_one_or_none()
         if own_coin:
             claimed = claimed - {own_coin}
 
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(
             select(CryptoBacktestRun).order_by(CryptoBacktestRun.product_id, desc(CryptoBacktestRun.run_at))
         )
@@ -1643,7 +1643,7 @@ async def get_grid_cash_move_candidates(from_bot_name: str) -> dict:
     import crypto_family_tree_bot as tree  # lazy - avoids a circular import at module load, same pattern as get_real_free_cash_usd above
     from models import CryptoBacktestRun
 
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == from_bot_name))
         source = result.scalar_one_or_none()
         if source is None:
@@ -1897,7 +1897,7 @@ async def create_multiple_grid_branches(count: int, amount_per_branch: float) ->
 async def get_grid_slices(bot_name: str) -> list:
     """Every real currently-open slice for one branch, oldest first -
     the exact FIFO order a real sell always consumes from."""
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(
             select(CryptoGridSlice).where(CryptoGridSlice.bot_name == bot_name).order_by(CryptoGridSlice.opened_at.asc())
         )
@@ -2050,7 +2050,7 @@ async def _grid_branch_recent_trades(bot_name: str, limit: int) -> list:
     the real judge _maybe_self_tune_branch_spacing() uses to decide
     whether this specific branch has genuinely been struggling or doing
     well lately."""
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(
             select(CryptoGridTradeHistory)
             .where(CryptoGridTradeHistory.bot_name == bot_name)
@@ -2103,7 +2103,7 @@ async def _maybe_self_tune_branch_spacing(branch: CryptoGridBranch):
     if reason is None or abs(new_multiplier - current) < 1e-9:
         return  # no real change to make this hour
 
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
         row = result.scalar_one_or_none()
         if not row:
@@ -2170,7 +2170,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     if equity > stored_peak_equity:
         stored_peak_equity = equity
     if stored_peak_equity != branch.peak_equity:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
             row = result.scalar_one_or_none()
             if row:
@@ -2195,7 +2195,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     if override_cfg is not None:
         real_effective_levels = max(1, min(_safe_num_levels_for_allocation(branch.allocated_usd), override_cfg["num_levels"]))
         if real_effective_levels != branch.num_levels:
-            async with AsyncSessionLocal() as db:
+            async with get_session_factory()() as db:
                 result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
                 row = result.scalar_one_or_none()
                 if row:
@@ -2239,7 +2239,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
         )
 
     if new_grid_pct is not None and abs(new_grid_pct - branch.grid_pct) > 1e-9:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
             row = result.scalar_one_or_none()
             if row:
@@ -2287,7 +2287,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
             except Exception as e:
                 log.warning(f"[SHADOW] Failed to log order (non-blocking): {e}")
 
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             # entry_fee_rate records the rate this leg REALLY paid (maker or
             # taker), so this slice can be priced honestly when it later sells.
             db.add(CryptoGridSlice(bot_name=branch.bot_name, product_id=branch.product_id,
@@ -2368,7 +2368,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
             except Exception as e:
                 log.warning(f"[SHADOW] Failed to log position close (non-blocking): {e}")
 
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             slice_result = await db.execute(select(CryptoGridSlice).where(CryptoGridSlice.id == oldest.id))
             slice_row = slice_result.scalar_one_or_none()
             if slice_row:
@@ -2398,7 +2398,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
         # already completed above.
         if len(slices) == 1:
             try:
-                async with AsyncSessionLocal() as db:
+                async with get_session_factory()() as db:
                     fresh_result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
                     fresh_branch = fresh_result.scalar_one_or_none()
                 if fresh_branch and fresh_branch.active:
@@ -2526,7 +2526,7 @@ async def run_grid_branches_cycle():
     if now_mr - _last_mean_reversion_at >= MEAN_REVERSION_CYCLE_SECONDS:
         _last_mean_reversion_at = now_mr
         try:
-            async with AsyncSessionLocal() as db:
+            async with get_session_factory()() as db:
                 mr_engine = mean_reversion_engine.get_mean_reversion_engine()
                 await mr_engine.run_cycle(db)
         except Exception as e:
@@ -2743,7 +2743,7 @@ async def close_all_grid_slices() -> dict:
                 continue
             filled_qty, filled_price = fill
             branch_pnl = 0.0
-            async with AsyncSessionLocal() as db:
+            async with get_session_factory()() as db:
                 for s in slices:
                     # Deliberately a MARKET sell above: "close everything" must
                     # actually fill, so this leg genuinely pays the taker rate
@@ -2789,7 +2789,7 @@ async def get_grid_trade_history(limit_recent: int = 50) -> dict:
     """Real, per-branch trade-history aggregation - the direct grid-side
     counterpart to crypto_family_tree_bot.get_coin_trade_history() /
     prop_bot.get_alpaca_branch_trade_history(). Read-only."""
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         agg_result = await db.execute(
             select(
                 CryptoGridTradeHistory.bot_name,
@@ -2863,7 +2863,7 @@ async def scale_grid_bot_capital(scale_factor: float = 1.25, dry_run: bool = Fal
     if scale_factor <= 1.0:
         return {"error": "scale_factor must be > 1.0", "status": "failed"}
 
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         # Query only active branches - never modify disabled ones
         result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.active == True))
         branches = result.scalars().all()

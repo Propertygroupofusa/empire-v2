@@ -51,7 +51,7 @@ import jwt as pyjwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import BotPosition
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -1143,7 +1143,7 @@ async def load_equity_floor():
     global equity_floor
     try:
         from models import TradingBotState
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == EQUITY_FLOOR_STATE_KEY))
             row = result.scalar_one_or_none()
             if row and row.base_capital is not None:
@@ -1157,7 +1157,7 @@ async def save_equity_floor(new_floor: float):
     """Persist a raised equity floor so it survives restarts."""
     try:
         from models import TradingBotState
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == EQUITY_FLOOR_STATE_KEY))
             row = result.scalar_one_or_none()
             if row:
@@ -1170,13 +1170,13 @@ async def save_equity_floor(new_floor: float):
 
 
 async def load_position():
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         result = await session.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
         return result.scalar_one_or_none()
 
 
 async def save_position(entry_price: float, qty: float, target_price: float, stop_price: float):
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         session.add(BotPosition(
             bot=BOT_NAME, symbol=SYMBOL, side="long",
             entry_price=entry_price, qty=qty,
@@ -1189,7 +1189,7 @@ async def save_position(entry_price: float, qty: float, target_price: float, sto
 async def _raise_stop_to_breakeven(entry_price: float):
     """Only ever moves the open position's stop UP to its own entry price -
     never down, never past entry. See BREAKEVEN_TRIGGER_PCT."""
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         result = await session.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
         pos = result.scalar_one_or_none()
         if pos and pos.stop_price is not None and pos.stop_price < entry_price:
@@ -1198,7 +1198,7 @@ async def _raise_stop_to_breakeven(entry_price: float):
 
 
 async def clear_position():
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         result = await session.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
         pos = result.scalar_one_or_none()
         if pos:
