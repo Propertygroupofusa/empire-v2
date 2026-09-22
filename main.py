@@ -215,7 +215,7 @@ except Exception as e:
 # the same real Coinbase account/balance, so running more than one together
 # would have them fight over the same funds. Revert to either earlier mode
 # by setting this Railway variable and redeploying - no code change needed.
-CRYPTO_STRATEGY_MODE = os.getenv("CRYPTO_STRATEGY_MODE", "grid_bot")
+CRYPTO_STRATEGY_MODE = os.getenv("CRYPTO_STRATEGY_MODE", "btc_compound")
 # Real production bug found live: Railway's raw env-var editor will happily
 # store literal quote characters if they're pasted as part of the value
 # (e.g. entering `"family_tree"` instead of `family_tree`) - os.getenv()
