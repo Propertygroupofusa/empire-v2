@@ -1,127 +1,76 @@
 #!/bin/bash
-# Force redeploy
-# Empire v2 Server Watchdog - Keeps the FastAPI server running 24/7
-# Auto-restarts on crash, logs all activity, prevents duplicate processes
-# chmod +x run_server.sh (execute permission restored)
+# Railway Coinbase Credentials Setup Script
+# This script sets your Coinbase API credentials in Railway via CLI
 
-set -u
+set -e
 
-SERVER_PID_FILE="/tmp/empire_server.pid"
-SERVER_LOG="/tmp/empire_server.log"
-ERROR_LOG="/tmp/empire_server_errors.log"
-RESTART_DELAY=5
-MAX_RESTARTS_PER_HOUR=10
-RESTART_WINDOW=3600
+echo "============================================================"
+echo "RAILWAY COINBASE CREDENTIALS SETUP"
+echo "============================================================"
+echo ""
+echo "This script sets your Coinbase API credentials in Railway."
+echo "You'll need the Railway CLI installed: npm install -g @railway/cli"
+echo ""
 
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$SERVER_LOG"
-}
+# Check if railway CLI is installed
+if ! command -v railway &> /dev/null; then
+    echo "❌ Railway CLI not found. Install it first:"
+    echo "   npm install -g @railway/cli"
+    echo "   Then run: railway login"
+    exit 1
+fi
 
-error() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1" | tee -a "$ERROR_LOG"
-}
+# Prompt for credentials
+echo "Enter your Coinbase credentials:"
+echo ""
 
-cleanup() {
-    log "Shutdown signal received. Stopping server..."
-    if [ -f "$SERVER_PID_FILE" ]; then
-        PID=$(cat "$SERVER_PID_FILE")
-        if kill -0 "$PID" 2>/dev/null; then
-            kill "$PID" 2>/dev/null || true
-            sleep 2
-            kill -9 "$PID" 2>/dev/null || true
-        fi
-        rm -f "$SERVER_PID_FILE"
-    fi
-    log "Server stopped."
-    exit 0
-}
+read -p "COINBASE_API_KEY (Organization ID): " API_KEY
+read -sp "COINBASE_SECRET_KEY (Private Key - will be hidden): " SECRET_KEY
+echo ""
+read -p "COINBASE_PASSPHRASE (any string, e.g., MyGridBot#2026): " PASSPHRASE
 
-trap cleanup SIGINT SIGTERM
+if [ -z "$API_KEY" ] || [ -z "$SECRET_KEY" ] || [ -z "$PASSPHRASE" ]; then
+    echo "❌ All fields are required"
+    exit 1
+fi
 
-check_process_health() {
-    if [ -f "$SERVER_PID_FILE" ]; then
-        PID=$(cat "$SERVER_PID_FILE")
-        if ! kill -0 "$PID" 2>/dev/null; then
-            return 1  # Process dead
-        fi
-    else
-        return 1  # No PID file
-    fi
+echo ""
+echo "============================================================"
+echo "Setting variables in Railway..."
+echo "============================================================"
+echo ""
 
-    # Check if HTTP health endpoint responds
-    if curl -s http://localhost:8000/health >/dev/null 2>&1; then
-        return 0  # Healthy
-    else
-        return 1  # Unhealthy
-    fi
-}
+# Set variables in Railway
+railway variable set COINBASE_API_KEY "$API_KEY" || { echo "❌ Failed to set COINBASE_API_KEY"; exit 1; }
+railway variable set COINBASE_SECRET_KEY "$SECRET_KEY" || { echo "❌ Failed to set COINBASE_SECRET_KEY"; exit 1; }
+railway variable set COINBASE_PASSPHRASE "$PASSPHRASE" || { echo "❌ Failed to set COINBASE_PASSPHRASE"; exit 1; }
 
-start_server() {
-    log "Starting FastAPI server..."
-    cd /app
+echo "✅ COINBASE_API_KEY set"
+echo "✅ COINBASE_SECRET_KEY set"
+echo "✅ COINBASE_PASSPHRASE set"
+echo ""
 
-    # Start server in background, write PID
-    python3 main.py >> "$SERVER_LOG" 2>&1 &
-    echo $! > "$SERVER_PID_FILE"
+echo "============================================================"
+echo "Triggering redeploy..."
+echo "============================================================"
+echo ""
 
-    # Wait for startup
-    sleep 3
+# Redeploy by pushing an empty commit
+git commit --allow-empty -m "🚀 Trigger redeploy - Coinbase credentials configured"
+git push origin main
 
-    # Verify startup (allow 180 seconds for bot initialization)
-    local retries=0
-    while [ $retries -lt 90 ]; do
-        if curl -s http://localhost:8000/health >/dev/null 2>&1; then
-            log "✅ Server started successfully (PID: $(cat $SERVER_PID_FILE))"
-            return 0
-        fi
-        sleep 2
-        retries=$((retries + 1))
-    done
-
-    error "Server failed to start after 180 seconds"
-    return 1
-}
-
-main() {
-    log "Empire v2 Server Watchdog starting..."
-    log "Logs: $SERVER_LOG"
-    log "Errors: $ERROR_LOG"
-
-    declare -A restart_times
-
-    while true; do
-        if ! check_process_health; then
-            # Server is down or unhealthy
-            error "Server health check failed. Restarting..."
-
-            # Rate limit restarts (max $MAX_RESTARTS_PER_HOUR per hour)
-            current_hour=$(date +%s)
-            restart_times[$current_hour]=$((${restart_times[$current_hour]:-0} + 1))
-
-            # Clean old restart counts
-            for hour in "${!restart_times[@]}"; do
-                if [ $((current_hour - hour)) -gt $RESTART_WINDOW ]; then
-                    unset restart_times[$hour]
-                fi
-            done
-
-            if [ ${restart_times[$current_hour]} -gt $MAX_RESTARTS_PER_HOUR ]; then
-                error "Too many restarts ($MAX_RESTARTS_PER_HOUR+) in the last hour. Stopping watchdog to prevent restart loop."
-                exit 1
-            fi
-
-            # Kill old process if still exists
-            if [ -f "$SERVER_PID_FILE" ]; then
-                kill -9 $(cat "$SERVER_PID_FILE") 2>/dev/null || true
-            fi
-
-            sleep $RESTART_DELAY
-            start_server || error "Failed to start server"
-        fi
-
-        # Check every 30 seconds
-        sleep 30
-    done
-}
-
-main
+echo ""
+echo "✅ Redeploy triggered!"
+echo ""
+echo "============================================================"
+echo "NEXT STEPS:"
+echo "============================================================"
+echo ""
+echo "1. Go to Railway Dashboard: https://railway.app"
+echo "2. Select your project"
+echo "3. Wait for redeploy to complete (watch the Deployments tab)"
+echo "4. Once green, check your dashboard:"
+echo "   - Coinbase USD balance should show real value"
+echo "   - Grid Bot chart should populate with real data"
+echo "   - Scale Bot chart should show tier progression"
+echo ""
