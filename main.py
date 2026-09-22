@@ -1043,6 +1043,21 @@ async def lifespan(app: FastAPI):
         print(f"[LIFESPAN] ✗ Foreign key validation failed: {e}", flush=True)
         log.warning(f"Foreign key validation failed: {e}")
 
+    print("[LIFESPAN] Enabling grid bot...", flush=True)
+    try:
+        if crypto_grid_bot_module is not None:
+            await asyncio.wait_for(crypto_grid_bot_module.set_grid_bot_active(True), timeout=10.0)
+            print("[LIFESPAN] ✓ Grid bot enabled in database", flush=True)
+            log.info("🔲 Grid bot ENABLED - 9-coin scalping fleet activated")
+        else:
+            print("[LIFESPAN] ⚠️  Grid bot module not loaded - cannot enable", flush=True)
+    except asyncio.TimeoutError:
+        print(f"[LIFESPAN] ✗ Grid bot enable TIMEOUT (10s) - continuing startup", flush=True)
+        log.warning(f"Grid bot enable timed out")
+    except Exception as e:
+        print(f"[LIFESPAN] ✗ Grid bot enable failed: {e}", flush=True)
+        log.warning(f"Grid bot enable failed: {e}")
+
     print("[LIFESPAN] Initializing bot worker...", flush=True)
     try:
         await asyncio.wait_for(initialize_bot(), timeout=30.0)
