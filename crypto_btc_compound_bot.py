@@ -74,9 +74,9 @@ def _safe_int_env(name: str, default: str) -> int:
         return int(default)
 
 
-# Use COINBASE_API_KEY (the actual Railway variable name, not COINBASE_API_KEY_NAME)
-COINBASE_API_KEY_NAME = os.getenv("COINBASE_API_KEY", "")
-COINBASE_API_PRIVATE_KEY = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\n", "\n")
+# Support both suffixed (_BOT) and non-suffixed variable names for flexibility
+COINBASE_API_KEY_NAME = os.getenv("COINBASE_API_KEY") or os.getenv("COINBASE_API_KEY_BOT") or ""
+COINBASE_API_PRIVATE_KEY = (os.getenv("COINBASE_API_PRIVATE_KEY") or os.getenv("COINBASE_API_PRIVATE_KEY_BOT") or "").replace("\\n", "\n")
 COINBASE_HOST = "api.coinbase.com"
 COINBASE_BASE_URL = f"https://{COINBASE_HOST}"
 PRODUCT_ID = "BTC-USD"

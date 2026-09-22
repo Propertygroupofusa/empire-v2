@@ -21,9 +21,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/crypto", tags=["crypto"])
 
 # Coinbase API Configuration
-COINBASE_API_KEY = os.getenv("COINBASE_API_KEY")
-COINBASE_SECRET_KEY = os.getenv("COINBASE_SECRET_KEY")
-COINBASE_PASSPHRASE = os.getenv("COINBASE_PASSPHRASE")
+# Support both suffixed (_BOT) and non-suffixed variable names for flexibility
+COINBASE_API_KEY = os.getenv("COINBASE_API_KEY") or os.getenv("COINBASE_API_KEY_BOT")
+COINBASE_SECRET_KEY = os.getenv("COINBASE_SECRET_KEY") or os.getenv("COINBASE_SECRET_KEY_BOT")
+COINBASE_PASSPHRASE = os.getenv("COINBASE_PASSPHRASE") or os.getenv("COINBASE_PASSPHRASE_BOT")
 
 COINBASE_API_URL = "https://api.coinbase.com"
 
