@@ -1133,7 +1133,48 @@ async def _place_and_confirm(session, path: str, order: dict):
                     return filled_size, filled_value / filled_size
         except Exception:
             continue
-    log.warning(f"[BTC-COMPOUND] Order {order_id} placed but fill not confirmed within 10s")
+
+    # An accepted market order can execute even when the order-detail endpoint
+    # is briefly stale or unavailable. Reconcile by order ID before reporting
+    # failure so callers never submit a duplicate order or leave a real fill
+    # open in local state.
+    fills_path = f"/api/v3/brokerage/orders/historical/fills?order_id={order_id}"
+    try:
+        async with session.get(
+            COINBASE_BASE_URL + fills_path,
+            headers=_auth_headers("GET", fills_path),
+            timeout=15,
+        ) as r:
+            if r.status == 200:
+                fills = (await r.json()).get("fills", [])
+                matching_fills = [
+                    fill for fill in fills
+                    if str(fill.get("order_id", order_id)) == str(order_id)
+                ]
+                filled_size = sum(float(fill.get("size", 0) or 0) for fill in matching_fills)
+                filled_value = sum(
+                    float(fill.get("size", 0) or 0) * float(fill.get("price", 0) or 0)
+                    for fill in matching_fills
+                )
+                if filled_size > 0:
+                    if product_id:
+                        _last_order_error.pop(product_id, None)
+                    log.info(
+                        "[BTC-COMPOUND] Reconciled accepted order %s from fill history",
+                        order_id,
+                    )
+                    return filled_size, filled_value / filled_size
+    except Exception as e:
+        log.warning(
+            "[BTC-COMPOUND] Fill-history reconciliation failed for order %s: %s",
+            order_id,
+            e,
+        )
+
+    reason = f"accepted order {order_id} not confirmed by order detail or fill history"
+    if product_id:
+        _last_order_error[product_id] = reason
+    log.warning(f"[BTC-COMPOUND] {reason}")
     return None
 
 
