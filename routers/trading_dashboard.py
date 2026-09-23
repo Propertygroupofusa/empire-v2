@@ -5863,6 +5863,7 @@ async def get_profit_locks():
 # comparison showed Grid Bot as the clear best real performer.
 # ============================================================================
 
+@router.get("/adaptive-capital-fleet-status")
 @router.get("/capital-fleet-status")
 @router.get("/grid-status")
 async def get_grid_status_endpoint():

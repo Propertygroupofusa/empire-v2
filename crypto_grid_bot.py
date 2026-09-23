@@ -2750,7 +2750,7 @@ async def get_grid_status() -> dict:
     )
 
     return {
-        "fleet_name": "Capital Fleet",
+        "fleet_name": "Adaptive Capital Fleet",
         "mode_active": mode_active,
         "dynamic_spacing_active": await is_dynamic_spacing_active(),
         "avg_swing_spacing_active": await is_avg_swing_spacing_active(),
