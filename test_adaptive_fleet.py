@@ -2,7 +2,8 @@ import unittest
 import json
 import os
 import tempfile
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import adaptive_fleet_orchestrator as orchestrator
 import crypto_grid_bot as bot
@@ -31,7 +32,7 @@ class AdaptiveFleetEvaluationTests(unittest.TestCase):
         self.assertEqual(evaluation["stages"][1]["state"], "active")
         self.assertEqual(evaluation["stages"][2]["state"], "eligible")
 
-    def test_candidate_failures_are_skipped_but_only_one_candidate_is_eligible(self):
+    def test_all_qualified_candidates_are_eligible_in_sequence(self):
         evaluation = bot.evaluate_adaptive_fleet_stages(
             realized_pnl=3000.0,
             claimed=set(),
@@ -44,11 +45,12 @@ class AdaptiveFleetEvaluationTests(unittest.TestCase):
         )
 
         self.assertEqual(evaluation["next_product_id"], "SOL-USD")
+        self.assertEqual(evaluation["eligible_product_ids"], ["SOL-USD", "ADA-USD"])
         states = {stage["product_id"]: stage["state"] for stage in evaluation["stages"]}
         self.assertEqual(states["BTC-USD"], "blocked_by_exclusion")
         self.assertEqual(states["ETH-USD"], "below_minimum_edge")
         self.assertEqual(states["SOL-USD"], "eligible")
-        self.assertEqual(states["ADA-USD"], "waiting_for_prior_stage")
+        self.assertEqual(states["ADA-USD"], "eligible")
 
     def test_unmet_realized_profit_gate_still_blocks_later_candidates(self):
         evaluation = bot.evaluate_adaptive_fleet_stages(
@@ -62,6 +64,7 @@ class AdaptiveFleetEvaluationTests(unittest.TestCase):
         )
 
         self.assertIsNone(evaluation["next_product_id"])
+        self.assertEqual(evaluation["eligible_product_ids"], [])
         states = {stage["product_id"]: stage["state"] for stage in evaluation["stages"]}
         self.assertEqual(states["SOL-USD"], "waiting_for_realized_profit")
         self.assertEqual(states["DOGE-USD"], "waiting_for_prior_stage")
@@ -79,6 +82,37 @@ class AdaptiveFleetRegistryTests(unittest.TestCase):
 
         self.assertEqual(set(registry["coins"]), set(orchestrator.NINE_COINS))
         self.assertEqual(orchestrator.get_fleet_profit(registry), 0.0)
+
+
+class AdaptiveFleetDeploymentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_deploys_multiple_qualified_coins_with_available_capital(self):
+        statuses = [
+            {"next_product_id": "SOL-USD"},
+            {"next_product_id": "ADA-USD"},
+            {"next_product_id": None},
+        ]
+        create_branch = AsyncMock(side_effect=[
+            SimpleNamespace(bot_name="crypto_grid_5", product_id="SOL-USD"),
+            SimpleNamespace(bot_name="crypto_grid_6", product_id="ADA-USD"),
+        ])
+
+        with (
+            patch.object(bot, "GRID_ADAPTIVE_FLEET_ENABLED", True),
+            patch.object(bot, "GRID_AUTO_DEPLOY_MAX_NEW_BRANCHES_PER_SWEEP", 3),
+            patch.object(bot, "get_real_free_cash_usd", AsyncMock(return_value=500.0)),
+            patch.object(bot, "get_adaptive_fleet_status", AsyncMock(side_effect=statuses)),
+            patch.object(bot, "create_grid_branch", create_branch),
+            patch.object(bot, "_log_activity_safe", AsyncMock()),
+        ):
+            await bot._auto_deploy_idle_free_cash()
+
+        self.assertEqual(
+            [call.args for call in create_branch.await_args_list],
+            [
+                ("SOL-USD", bot.GRID_AUTO_DEPLOY_AMOUNT_USD),
+                ("ADA-USD", bot.GRID_AUTO_DEPLOY_AMOUNT_USD),
+            ],
+        )
 
 
 if __name__ == "__main__":

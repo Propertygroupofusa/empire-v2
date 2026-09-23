@@ -1762,7 +1762,7 @@ async def _maybe_rotate_one_grid_branch(branch: CryptoGridBranch, after_sale: bo
 def evaluate_adaptive_fleet_stages(realized_pnl: float, claimed: set, excluded: set, roi_by_coin: dict) -> dict:
     """Evaluate the fixed fleet sequence without performing I/O or trading."""
     stages = []
-    next_product_id = None
+    eligible_product_ids = []
     sequence_blocked = False
     for product_id, required_realized_pnl in ADAPTIVE_FLEET_STAGES:
         active = product_id in claimed
@@ -1782,8 +1782,7 @@ def evaluate_adaptive_fleet_stages(realized_pnl: float, claimed: set, excluded: 
             state = "below_minimum_edge"
         else:
             state = "eligible"
-            next_product_id = product_id
-            sequence_blocked = True
+            eligible_product_ids.append(product_id)
         stages.append({
             "product_id": product_id,
             "required_realized_pnl": required_realized_pnl,
@@ -1791,7 +1790,11 @@ def evaluate_adaptive_fleet_stages(realized_pnl: float, claimed: set, excluded: 
             "backtested_roi_pct": roi_pct,
             "state": state,
         })
-    return {"next_product_id": next_product_id, "stages": stages}
+    return {
+        "next_product_id": eligible_product_ids[0] if eligible_product_ids else None,
+        "eligible_product_ids": eligible_product_ids,
+        "stages": stages,
+    }
 
 
 async def get_adaptive_fleet_status() -> dict:
@@ -1869,8 +1872,6 @@ async def _auto_deploy_idle_free_cash():
             f"[GRID] 🌱🔁 auto-deployed ${GRID_AUTO_DEPLOY_AMOUNT_USD:.2f} of real free cash into "
             f"{branch.bot_name} ({branch.product_id}) - {selection_reason}"
         )
-        if GRID_ADAPTIVE_FLEET_ENABLED:
-            return
 
 
 async def run_grid_auto_rotate_sweep():
