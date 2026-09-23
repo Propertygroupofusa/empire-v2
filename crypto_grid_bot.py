@@ -939,6 +939,20 @@ def _safe_num_levels_for_allocation(allocated_usd: float) -> int:
     return max(1, min(DEFAULT_GRID_LEVELS, max_levels_by_min_trade))
 
 
+def _split_usd_evenly(amount: float, count: int) -> list[float]:
+    """Split a cent-precision amount without creating or losing a cent."""
+    if count <= 0:
+        raise ValueError("count must be positive")
+    amount_cents = round(amount * 100)
+    if amount_cents <= 0 or abs(amount * 100 - amount_cents) > 1e-6:
+        raise ValueError("amount must be a positive value with at most two decimal places")
+    base_cents, extra_cents = divmod(amount_cents, count)
+    return [
+        (base_cents + (1 if index < extra_cents else 0)) / 100
+        for index in range(count)
+    ]
+
+
 # ============================================================
 # Real, live "promote a backtested candidate" mechanism for the Grid
 # Level/Spacing Comparison (crypto_selection_backtest.py's
@@ -1326,6 +1340,142 @@ async def move_cash_between_grid_branches(from_bot_name: str, amount: float, to_
         "amount": amount, "action": action, "destination_allocated_usd": round(destination.allocated_usd, 2),
         "source_branch_deleted": withdraw_result["branch_deleted"],
         "source_remaining_allocated_usd": withdraw_result["remaining_allocated_usd"],
+    }
+
+
+async def reallocate_grid_cash_across_adaptive_fleet(from_bot_name: str, amount: float) -> dict:
+    """Move one flat branch reservation across all nine fleet products atomically.
+
+    This is an explicit manual allocation override, not adaptive-stage
+    qualification and not a market order. All missing-product prices are
+    fetched before mutation; the source debit and every destination credit
+    then commit in one database transaction.
+    """
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        raise ValueError("STOP_TRADING is set - new capital deployment is paused")
+
+    fleet_products = [product_id for product_id, _gate in ADAPTIVE_FLEET_STAGES]
+    allocations = _split_usd_evenly(amount, len(fleet_products))
+    if min(allocations) < MIN_TRADE_USD:
+        raise ValueError(
+            f"${amount:.2f} is too small to split across {len(fleet_products)} products "
+            f"at the ${MIN_TRADE_USD:.2f} live order minimum"
+        )
+
+    async with get_session_factory()() as db:
+        result = await db.execute(select(CryptoGridBranch))
+        preflight_branches = list(result.scalars().all())
+    preflight_by_product = {branch.product_id: branch for branch in preflight_branches}
+    missing_products = [product_id for product_id in fleet_products if product_id not in preflight_by_product]
+
+    reference_prices = {}
+    async with engine.aiohttp.ClientSession() as session:
+        for product_id in missing_products:
+            price, _atr = await engine.get_price_and_volatility(session, product_id)
+            if price is None:
+                raise ValueError(f"could not fetch a real live price for {product_id} right now - no capital was moved")
+            reference_prices[product_id] = price
+
+    override_label = await get_live_grid_spacing_override()
+
+    def levels_for(allocation: float) -> int:
+        levels = _safe_num_levels_for_allocation(allocation)
+        if override_label != "live_default":
+            levels = min(levels, GRID_LEVEL_SPACING_CANDIDATES[override_label]["num_levels"])
+        return max(1, levels)
+
+    allocation_by_product = dict(zip(fleet_products, allocations))
+    destination_rows = []
+    async with get_session_factory()() as db:
+        async with db.begin():
+            result = await db.execute(select(CryptoGridBranch).with_for_update())
+            branches = list(result.scalars().all())
+            source = next((branch for branch in branches if branch.bot_name == from_bot_name), None)
+            if source is None:
+                raise ValueError(f"no grid branch named {from_bot_name}")
+            if source.product_id in allocation_by_product:
+                raise ValueError("source branch cannot also be one of the nine fleet destinations")
+            if source.locked:
+                raise ValueError(f"{from_bot_name} is locked - unlock it first before moving real cash out of it")
+            slices_result = await db.execute(
+                select(CryptoGridSlice.id).where(CryptoGridSlice.bot_name == from_bot_name).limit(1)
+            )
+            if slices_result.first() is not None:
+                raise ValueError(f"{from_bot_name} has real open slices - can only move cash from a FLAT branch")
+            if round(amount * 100) > round((source.allocated_usd or 0.0) * 100):
+                raise ValueError(
+                    f"{from_bot_name} only has ${source.allocated_usd:.2f} real allocated - can't move ${amount:.2f}"
+                )
+
+            by_product = {}
+            for branch in branches:
+                if branch.product_id in by_product:
+                    raise ValueError(f"multiple grid branches already exist for {branch.product_id} - no capital was moved")
+                by_product[branch.product_id] = branch
+
+            used_nums = {
+                int(branch.bot_name.rsplit("_", 1)[-1])
+                for branch in branches if branch.bot_name.rsplit("_", 1)[-1].isdigit()
+            }
+            next_num = 1
+            for product_id in fleet_products:
+                allocation = allocation_by_product[product_id]
+                destination = by_product.get(product_id)
+                if destination is None:
+                    if product_id not in reference_prices:
+                        raise ValueError(f"fleet changed during preflight for {product_id} - no capital was moved")
+                    while next_num in used_nums:
+                        next_num += 1
+                    destination = CryptoGridBranch(
+                        bot_name=f"crypto_grid_{next_num}",
+                        product_id=product_id,
+                        allocated_usd=allocation,
+                        active=True,
+                        grid_pct=DEFAULT_GRID_PCT,
+                        num_levels=levels_for(allocation),
+                        reference_price=reference_prices[product_id],
+                    )
+                    db.add(destination)
+                    used_nums.add(next_num)
+                    next_num += 1
+                else:
+                    destination.allocated_usd = round((destination.allocated_usd or 0.0) + allocation, 2)
+                    destination.active = True
+                    destination.num_levels = levels_for(destination.allocated_usd)
+                destination_rows.append((destination, allocation))
+
+            source.allocated_usd = round(source.allocated_usd - amount, 2)
+            source.num_levels = levels_for(source.allocated_usd)
+            await db.flush()
+            source_remaining = source.allocated_usd
+            source_product_id = source.product_id
+            result_rows = [
+                {
+                    "bot_name": destination.bot_name,
+                    "product_id": destination.product_id,
+                    "amount": allocation,
+                    "destination_allocated_usd": round(destination.allocated_usd, 2),
+                }
+                for destination, allocation in destination_rows
+            ]
+
+    for row in result_rows:
+        await _log_activity_safe(
+            row["bot_name"], row["product_id"], "REALLOCATE",
+            f"Received ${row['amount']:.2f} from {from_bot_name} in an explicit nine-coin fleet allocation",
+        )
+    await _log_activity_safe(
+        from_bot_name, source_product_id, "REALLOCATE",
+        f"Moved ${amount:.2f} of idle reserved cash across the nine-coin fleet by explicit manual override",
+    )
+    log.info(f"[GRID] Moved ${amount:.2f} atomically from {from_bot_name} across all nine adaptive-fleet products")
+    return {
+        "from_bot_name": from_bot_name,
+        "amount": round(amount, 2),
+        "source_remaining_allocated_usd": round(source_remaining, 2),
+        "manual_override": True,
+        "orders_placed": False,
+        "allocations": result_rows,
     }
 
 

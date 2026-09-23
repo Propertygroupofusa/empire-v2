@@ -5,11 +5,23 @@ import tempfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
+
 import adaptive_fleet_orchestrator as orchestrator
 import crypto_grid_bot as bot
+from models import CryptoGridBranch, CryptoGridSlice
 
 
 class AdaptiveFleetEvaluationTests(unittest.TestCase):
+    def test_splits_150_across_nine_products_without_losing_a_cent(self):
+        allocations = bot._split_usd_evenly(150.0, 9)
+
+        self.assertEqual(allocations, [16.67] * 6 + [16.66] * 3)
+        self.assertEqual(round(sum(allocations), 2), 150.0)
+        self.assertEqual([bot._safe_num_levels_for_allocation(value) for value in allocations], [3] * 9)
+
     def test_uses_established_nine_coin_universe(self):
         self.assertEqual(
             [product_id for product_id, _ in bot.ADAPTIVE_FLEET_STAGES],
@@ -85,6 +97,99 @@ class AdaptiveFleetRegistryTests(unittest.TestCase):
 
 
 class AdaptiveFleetDeploymentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reallocates_150_atomically_without_changing_total_reservations(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database_path = os.path.join(temporary_directory, "fleet.db").replace("\\", "/")
+            database_engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+            session_factory = sessionmaker(database_engine, class_=AsyncSession, expire_on_commit=False)
+            async with database_engine.begin() as connection:
+                await connection.run_sync(CryptoGridBranch.__table__.create)
+                await connection.run_sync(CryptoGridSlice.__table__.create)
+            async with session_factory() as database:
+                database.add_all([
+                    CryptoGridBranch(
+                        bot_name="crypto_grid_2", product_id="ETH-USD", allocated_usd=100.0,
+                        active=True, grid_pct=0.01, num_levels=10, reference_price=3000.0,
+                    ),
+                    CryptoGridBranch(
+                        bot_name="crypto_grid_4", product_id="ARB-USD", allocated_usd=816.96,
+                        active=True, grid_pct=0.01, num_levels=10, reference_price=0.45, locked=False,
+                    ),
+                ])
+                await database.commit()
+
+            class FakeClientSession:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, traceback):
+                    return False
+
+            with (
+                patch.object(bot, "get_session_factory", return_value=session_factory),
+                patch.object(bot.engine.aiohttp, "ClientSession", return_value=FakeClientSession()),
+                patch.object(bot.engine, "get_price_and_volatility", AsyncMock(return_value=(100.0, 1.0))),
+                patch.object(bot, "get_live_grid_spacing_override", AsyncMock(return_value="live_default")),
+                patch.object(bot, "_log_activity_safe", AsyncMock()),
+            ):
+                result = await bot.reallocate_grid_cash_across_adaptive_fleet("crypto_grid_4", 150.0)
+
+            async with session_factory() as database:
+                rows = list((await database.execute(select(CryptoGridBranch))).scalars().all())
+            await database_engine.dispose()
+
+        by_product = {row.product_id: row for row in rows}
+        fleet_products = [product_id for product_id, _ in bot.ADAPTIVE_FLEET_STAGES]
+        self.assertEqual(set(fleet_products), set(by_product) - {"ARB-USD"})
+        self.assertAlmostEqual(by_product["ARB-USD"].allocated_usd, 666.96)
+        self.assertAlmostEqual(by_product["ETH-USD"].allocated_usd, 116.67)
+        self.assertEqual(len(rows), 10)
+        self.assertEqual([item["amount"] for item in result["allocations"]], [16.67] * 6 + [16.66] * 3)
+        self.assertAlmostEqual(sum(row.allocated_usd for row in rows), 916.96)
+        self.assertFalse(result["orders_placed"])
+
+    async def test_open_source_slice_rolls_back_the_entire_reallocation(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database_path = os.path.join(temporary_directory, "fleet.db").replace("\\", "/")
+            database_engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+            session_factory = sessionmaker(database_engine, class_=AsyncSession, expire_on_commit=False)
+            async with database_engine.begin() as connection:
+                await connection.run_sync(CryptoGridBranch.__table__.create)
+                await connection.run_sync(CryptoGridSlice.__table__.create)
+            async with session_factory() as database:
+                database.add(CryptoGridBranch(
+                    bot_name="crypto_grid_4", product_id="ARB-USD", allocated_usd=816.96,
+                    active=True, grid_pct=0.01, num_levels=10, reference_price=0.45, locked=False,
+                ))
+                database.add(CryptoGridSlice(
+                    bot_name="crypto_grid_4", product_id="ARB-USD", entry_price=0.45, qty=10.0,
+                ))
+                await database.commit()
+
+            class FakeClientSession:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, traceback):
+                    return False
+
+            with (
+                patch.object(bot, "get_session_factory", return_value=session_factory),
+                patch.object(bot.engine.aiohttp, "ClientSession", return_value=FakeClientSession()),
+                patch.object(bot.engine, "get_price_and_volatility", AsyncMock(return_value=(100.0, 1.0))),
+                patch.object(bot, "get_live_grid_spacing_override", AsyncMock(return_value="live_default")),
+            ):
+                with self.assertRaisesRegex(ValueError, "real open slices"):
+                    await bot.reallocate_grid_cash_across_adaptive_fleet("crypto_grid_4", 150.0)
+
+            async with session_factory() as database:
+                rows = list((await database.execute(select(CryptoGridBranch))).scalars().all())
+            await database_engine.dispose()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].product_id, "ARB-USD")
+        self.assertAlmostEqual(rows[0].allocated_usd, 816.96)
+
     async def test_deploys_multiple_qualified_coins_with_available_capital(self):
         statuses = [
             {"next_product_id": "SOL-USD"},

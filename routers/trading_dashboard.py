@@ -6172,6 +6172,24 @@ class MoveCashBetweenGridBranchesRequest(BaseModel):
     product_id: str | None = None
 
 
+class ReallocateAdaptiveFleetRequest(BaseModel):
+    from_bot_name: str
+    amount: float
+
+
+@router.post("/grid-status/reallocate-adaptive-fleet")
+async def reallocate_adaptive_fleet_endpoint(payload: ReallocateAdaptiveFleetRequest):
+    """Atomically split one flat branch reservation across the nine-coin fleet."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    try:
+        return await crypto_grid_bot_module.reallocate_grid_cash_across_adaptive_fleet(
+            payload.from_bot_name, payload.amount,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("/grid-status/move-cash")
 async def move_cash_between_grid_branches_endpoint(payload: MoveCashBetweenGridBranchesRequest):
     """One-step real grid-to-grid cash move - per the account owner's
