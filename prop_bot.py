@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 import uuid
 from sqlalchemy import select, desc, func, case
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import BotPosition, Payment, AlpacaBacktestRun, TradingBotState, AlpacaBranch, AlpacaBranchTradeHistory
 import bot_mandates
 from bot_mandates import APEX_MANDATE, validate_entry, MOMENTUM_ENTRY, MEAN_REVERSION_ENTRY
@@ -43,6 +43,7 @@ ET = ZoneInfo("America/New_York")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("prop_bot")
+AsyncSessionLocal = get_session_factory()
 
 def _safe_float_env(name: str, default: str) -> float:
     """Parse a Railway env var as float, falling back to the numeric default
@@ -3436,7 +3437,14 @@ def run():
             log.warning("STOP_TRADING=true — prop bot paused")
             time.sleep(60)
             continue
-        if loop.run_until_complete(is_alpaca_passive_mode()):
+        try:
+            passive_mode = loop.run_until_complete(is_alpaca_passive_mode())
+        except Exception as e:
+            log.error(f"[APEX_589296] Passive-mode check failed; skipping this cycle: {e}")
+            log.error(f"Traceback: {traceback.format_exc()}")
+            time.sleep(60)
+            continue
+        if passive_mode:
             log.info("Alpaca passive mode active - active trading retired, holding a real buy-and-hold SPY position only")
             time.sleep(300)
             continue
