@@ -264,6 +264,18 @@ GRID_AUTO_DEPLOY_AMOUNT_USD = float(os.getenv("GRID_AUTO_DEPLOY_AMOUNT_USD", "50
 # this cap just gets picked up on the next sweep instead.
 GRID_AUTO_DEPLOY_MAX_NEW_BRANCHES_PER_SWEEP = int(os.getenv("GRID_AUTO_DEPLOY_MAX_NEW_BRANCHES_PER_SWEEP", "3"))
 
+# Opt-in staged capital fleet. These are activation gates from the
+# operator's proposed sequence, not projected or guaranteed returns.
+# Only permanently booked Grid trade P&L counts. Disabled by default
+# because enabling it can earmark real Coinbase cash for new branches.
+GRID_ADAPTIVE_FLEET_ENABLED = os.getenv("GRID_ADAPTIVE_FLEET_ENABLED", "false").lower() == "true"
+ADAPTIVE_FLEET_STAGES = (
+    ("BTC-USD", 0.0),
+    ("ETH-USD", 0.0),
+    ("SOL-USD", 688.0),
+    ("ADA-USD", 2106.0),
+)
+
 # The real, fixed net-margin target this feature holds constant as the
 # account's real Coinbase fee tier changes - deliberately DERIVED from
 # today's live values so a branch trading at the base fee tier behaves
@@ -1742,6 +1754,78 @@ async def _maybe_rotate_one_grid_branch(branch: CryptoGridBranch, after_sale: bo
     )
 
 
+def evaluate_adaptive_fleet_stages(realized_pnl: float, claimed: set, excluded: set, roi_by_coin: dict) -> dict:
+    """Evaluate the fixed fleet sequence without performing I/O or trading."""
+    stages = []
+    next_product_id = None
+    sequence_blocked = False
+    for product_id, required_realized_pnl in ADAPTIVE_FLEET_STAGES:
+        active = product_id in claimed
+        roi_pct = roi_by_coin.get(product_id)
+        if active:
+            state = "active"
+        elif sequence_blocked:
+            state = "waiting_for_prior_stage"
+        elif realized_pnl < required_realized_pnl:
+            state = "waiting_for_realized_profit"
+            sequence_blocked = True
+        elif product_id in excluded:
+            state = "blocked_by_exclusion"
+            sequence_blocked = True
+        elif roi_pct is None:
+            state = "waiting_for_backtest"
+            sequence_blocked = True
+        elif roi_pct < MIN_REQUIRED_ROI_PCT:
+            state = "below_minimum_edge"
+            sequence_blocked = True
+        else:
+            state = "eligible"
+            next_product_id = product_id
+            sequence_blocked = True
+        stages.append({
+            "product_id": product_id,
+            "required_realized_pnl": required_realized_pnl,
+            "realized_pnl": round(realized_pnl, 2),
+            "backtested_roi_pct": roi_pct,
+            "state": state,
+        })
+    return {"next_product_id": next_product_id, "stages": stages}
+
+
+async def get_adaptive_fleet_status() -> dict:
+    """Read-only, evidence-backed progress for the staged fleet."""
+    import crypto_family_tree_bot as tree
+    from models import CryptoBacktestRun
+
+    async with get_session_factory()() as db:
+        realized_result = await db.execute(select(func.sum(CryptoGridTradeHistory.pnl)))
+        realized_pnl = float(realized_result.scalar_one_or_none() or 0.0)
+        backtest_result = await db.execute(
+            select(CryptoBacktestRun).where(
+                CryptoBacktestRun.product_id.in_([stage[0] for stage in ADAPTIVE_FLEET_STAGES])
+            ).order_by(CryptoBacktestRun.product_id, desc(CryptoBacktestRun.run_at))
+        )
+        backtests = backtest_result.scalars().all()
+
+    roi_by_coin = {}
+    for row in backtests:
+        if row.product_id not in roi_by_coin:
+            roi_by_coin[row.product_id] = row.roi_pct_of_spend
+
+    evaluation = evaluate_adaptive_fleet_stages(
+        realized_pnl,
+        await get_grid_branch_claimed_coins(),
+        await tree.get_effective_excluded_coins(),
+        roi_by_coin,
+    )
+    return {
+        "enabled": GRID_ADAPTIVE_FLEET_ENABLED,
+        "activation_amount_usd": GRID_AUTO_DEPLOY_AMOUNT_USD,
+        "realized_grid_pnl": round(realized_pnl, 2),
+        **evaluation,
+    }
+
+
 async def _auto_deploy_idle_free_cash():
     """Real, automatic new-branch creation from genuinely UNALLOCATED
     real free cash - the other half of run_grid_auto_rotate_sweep()
@@ -1761,18 +1845,30 @@ async def _auto_deploy_idle_free_cash():
         if real_free_cash is None or real_free_cash < GRID_AUTO_DEPLOY_AMOUNT_USD:
             return
         try:
-            product_id = await pick_best_ranked_coin_for_grid()
+            if GRID_ADAPTIVE_FLEET_ENABLED:
+                fleet_status = await get_adaptive_fleet_status()
+                product_id = fleet_status["next_product_id"]
+                if product_id is None:
+                    return
+            else:
+                product_id = await pick_best_ranked_coin_for_grid()
             branch = await create_grid_branch(product_id, GRID_AUTO_DEPLOY_AMOUNT_USD)
         except Exception as e:
             log.info(f"[GRID] auto-deploy stopped for this sweep - {e}")
             return
         created += 1
+        selection_reason = "next eligible Adaptive Fleet stage" if GRID_ADAPTIVE_FLEET_ENABLED else "real best-ranked coin available right now"
         await _log_activity_safe(
             branch.bot_name, branch.product_id, "SPAWN",
             f"🌱🔁 Auto-deployed ${GRID_AUTO_DEPLOY_AMOUNT_USD:.2f} of real unallocated free cash into a brand-new "
-            f"grid branch on {branch.product_id} - real best-ranked coin available right now",
+            f"grid branch on {branch.product_id} - {selection_reason}",
         )
-        log.info(f"[GRID] 🌱🔁 auto-deployed ${GRID_AUTO_DEPLOY_AMOUNT_USD:.2f} of real free cash into {branch.bot_name} ({branch.product_id})")
+        log.info(
+            f"[GRID] 🌱🔁 auto-deployed ${GRID_AUTO_DEPLOY_AMOUNT_USD:.2f} of real free cash into "
+            f"{branch.bot_name} ({branch.product_id}) - {selection_reason}"
+        )
+        if GRID_ADAPTIVE_FLEET_ENABLED:
+            return
 
 
 async def run_grid_auto_rotate_sweep():
@@ -2661,6 +2757,7 @@ async def get_grid_status() -> dict:
         "grid_spacing_override_candidates": GRID_LEVEL_SPACING_CANDIDATES,
         "auto_rotate_active": await is_grid_auto_rotate_active(),
         "auto_rotate_interval_minutes": GRID_AUTO_ROTATE_INTERVAL_SECONDS // 60,
+        "adaptive_fleet": await get_adaptive_fleet_status(),
         "drawdown_breaker_pct": GRID_DRAWDOWN_BREAKER_PCT,
         "branch_count": len(branches),
         "branches_with_open_slices": len(branches_with_slices),
