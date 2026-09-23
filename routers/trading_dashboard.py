@@ -6190,6 +6190,14 @@ async def reallocate_adaptive_fleet_endpoint(payload: ReallocateAdaptiveFleetReq
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.post("/grid-status/rebalance-flat-branches")
+async def rebalance_flat_grid_branches_endpoint():
+    """Retire or rotate flat branches using the live minimum-edge rule."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    return await crypto_grid_bot_module.rebalance_flat_grid_branches_now()
+
+
 @router.post("/grid-status/move-cash")
 async def move_cash_between_grid_branches_endpoint(payload: MoveCashBetweenGridBranchesRequest):
     """One-step real grid-to-grid cash move - per the account owner's

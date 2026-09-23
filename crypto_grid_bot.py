@@ -1784,6 +1784,20 @@ async def _best_available_coin_and_roi(exclude_bot_name: str = None) -> tuple:
     return best_pid, best_roi
 
 
+async def _latest_backtested_roi(product_id: str):
+    """Return the latest recorded ROI for one coin, or None when untested."""
+    from models import CryptoBacktestRun
+
+    async with get_session_factory()() as db:
+        result = await db.execute(
+            select(CryptoBacktestRun.roi_pct_of_spend)
+            .where(CryptoBacktestRun.product_id == product_id)
+            .order_by(desc(CryptoBacktestRun.run_at))
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+
 async def get_grid_cash_move_candidates(from_bot_name: str) -> dict:
     """Real "would moving cash here actually help" preview for the Move
     Cash Between Grid Branches modal - per the account owner's direct
@@ -1899,14 +1913,65 @@ async def _maybe_rotate_one_grid_branch(branch: CryptoGridBranch, after_sale: bo
     if branch.allocated_usd < GRID_AUTO_ROTATE_MIN_USD:
         return
     best_pid, _best_roi = await _best_available_coin_and_roi(exclude_bot_name=branch.bot_name)
-    if best_pid is None or best_pid == branch.product_id:
-        return  # already the real best available coin, or nothing real to compare against - no pointless real trade
+    if best_pid is None:
+        current_roi = await _latest_backtested_roi(branch.product_id)
+        if current_roi is None or current_roi >= MIN_REQUIRED_ROI_PCT:
+            return
+        amount = branch.allocated_usd
+        result = await withdraw_from_grid_branch(branch.bot_name, amount)
+        log.info(
+            f"[GRID] Retired ${amount:.2f} of idle cash from {branch.bot_name} ({branch.product_id}) "
+            f"at {current_roi:.1f}% backtested ROI because no coin clears the "
+            f"{MIN_REQUIRED_ROI_PCT:.0f}% edge floor"
+        )
+        await _log_activity_safe(
+            branch.bot_name, branch.product_id, "REALLOCATE",
+            f"Retired ${amount:.2f} to unallocated USD cash: latest backtest {current_roi:.1f}% "
+            f"is below the {MIN_REQUIRED_ROI_PCT:.0f}% edge floor and no qualified replacement exists",
+        )
+        return {
+            "action": "retired_to_cash",
+            "bot_name": branch.bot_name,
+            "product_id": branch.product_id,
+            "amount": round(amount, 2),
+            "backtested_roi_pct": current_roi,
+            "orders_placed": False,
+            **result,
+        }
+    if best_pid == branch.product_id:
+        return  # already the real best available coin - no pointless move
     amount = branch.allocated_usd
     result = await move_cash_between_grid_branches(branch.bot_name, amount, product_id=best_pid)
     log.info(
         f"[GRID] 🔁 auto-rotated ${amount:.2f} of real idle cash from {branch.bot_name} ({branch.product_id}) "
         f"into {result['to_bot_name']} ({best_pid}) - real best-ranked coin available right now"
     )
+    return {"action": "rotated", "orders_placed": False, **result}
+
+
+async def rebalance_flat_grid_branches_now() -> dict:
+    """Apply the live edge rule immediately to every movable flat branch."""
+    actions = []
+    skipped_errors = []
+    for branch in await get_grid_branches():
+        if not branch.active:
+            continue
+        try:
+            result = await _maybe_rotate_one_grid_branch(branch, after_sale=True)
+            if result is not None:
+                actions.append(result)
+        except Exception as exc:
+            skipped_errors.append({"bot_name": branch.bot_name, "error": str(exc)})
+            log.warning(f"[GRID] immediate edge rebalance skipped {branch.bot_name}: {exc}")
+    return {
+        "actions": actions,
+        "action_count": len(actions),
+        "released_to_cash_usd": round(sum(
+            action["amount"] for action in actions if action["action"] == "retired_to_cash"
+        ), 2),
+        "orders_placed": False,
+        "skipped_errors": skipped_errors,
+    }
 
 
 def evaluate_adaptive_fleet_stages(realized_pnl: float, claimed: set, excluded: set, roi_by_coin: dict) -> dict:

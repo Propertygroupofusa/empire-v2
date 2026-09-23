@@ -97,6 +97,47 @@ class AdaptiveFleetRegistryTests(unittest.TestCase):
 
 
 class AdaptiveFleetDeploymentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retires_flat_below_edge_branch_when_no_replacement_qualifies(self):
+        branch = SimpleNamespace(
+            bot_name="crypto_grid_2", product_id="STX-USD", allocated_usd=292.83,
+            active=True, locked=False, created_at=None,
+        )
+        withdraw_result = {
+            "bot_name": branch.bot_name, "product_id": branch.product_id, "amount": branch.allocated_usd,
+            "remaining_allocated_usd": 0.0, "branch_deleted": True,
+        }
+
+        with (
+            patch.object(bot, "get_grid_slices", AsyncMock(return_value=[])),
+            patch.object(bot, "_best_available_coin_and_roi", AsyncMock(return_value=(None, None))),
+            patch.object(bot, "_latest_backtested_roi", AsyncMock(return_value=-12.5)),
+            patch.object(bot, "withdraw_from_grid_branch", AsyncMock(return_value=withdraw_result)) as withdraw,
+            patch.object(bot, "_log_activity_safe", AsyncMock()),
+        ):
+            result = await bot._maybe_rotate_one_grid_branch(branch, after_sale=True)
+
+        withdraw.assert_awaited_once_with(branch.bot_name, branch.allocated_usd)
+        self.assertEqual(result["action"], "retired_to_cash")
+        self.assertEqual(result["amount"], 292.83)
+        self.assertFalse(result["orders_placed"])
+
+    async def test_missing_backtest_does_not_retire_flat_branch(self):
+        branch = SimpleNamespace(
+            bot_name="crypto_grid_1", product_id="BTC-USD", allocated_usd=50.0,
+            active=True, locked=False, created_at=None,
+        )
+
+        with (
+            patch.object(bot, "get_grid_slices", AsyncMock(return_value=[])),
+            patch.object(bot, "_best_available_coin_and_roi", AsyncMock(return_value=(None, None))),
+            patch.object(bot, "_latest_backtested_roi", AsyncMock(return_value=None)),
+            patch.object(bot, "withdraw_from_grid_branch", AsyncMock()) as withdraw,
+        ):
+            result = await bot._maybe_rotate_one_grid_branch(branch, after_sale=True)
+
+        withdraw.assert_not_awaited()
+        self.assertIsNone(result)
+
     async def test_reallocates_150_atomically_without_changing_total_reservations(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             database_path = os.path.join(temporary_directory, "fleet.db").replace("\\", "/")
