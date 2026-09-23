@@ -274,6 +274,11 @@ ADAPTIVE_FLEET_STAGES = (
     ("ETH-USD", 0.0),
     ("SOL-USD", 688.0),
     ("ADA-USD", 2106.0),
+    ("DOGE-USD", 0.0),
+    ("XRP-USD", 0.0),
+    ("LINK-USD", 0.0),
+    ("AVAX-USD", 0.0),
+    ("DOT-USD", 0.0),
 )
 
 # The real, fixed net-margin target this feature holds constant as the
@@ -1771,13 +1776,10 @@ def evaluate_adaptive_fleet_stages(realized_pnl: float, claimed: set, excluded: 
             sequence_blocked = True
         elif product_id in excluded:
             state = "blocked_by_exclusion"
-            sequence_blocked = True
         elif roi_pct is None:
             state = "waiting_for_backtest"
-            sequence_blocked = True
         elif roi_pct < MIN_REQUIRED_ROI_PCT:
             state = "below_minimum_edge"
-            sequence_blocked = True
         else:
             state = "eligible"
             next_product_id = product_id

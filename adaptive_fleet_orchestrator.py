@@ -15,7 +15,7 @@ from typing import Dict, List, Tuple
 log = logging.getLogger("adaptive_fleet_orchestrator")
 log.setLevel(logging.INFO)
 
-BASE_DIR = "/home/user/empire-v2"
+BASE_DIR = os.getenv("EMPIRE_BASE_DIR", os.path.dirname(os.path.abspath(__file__)))
 FLEET_REGISTRY = f"{BASE_DIR}/instances/fleet_registry.json"
 
 # Nine coins: proven BTC first, then by established trading volume
@@ -60,25 +60,42 @@ FREEZE_THRESHOLD_PF = 0.95  # Freeze if profit factor drops below 0.95
 FREEZE_THRESHOLD_DAYS = 7   # After 7 days of underperformance
 
 
+def _default_coin_state(coin: str) -> Dict:
+    return {
+        'active': coin == "BTC-USD",
+        'locked': False,
+        'enabled_at_profit': COIN_UNLOCK_THRESHOLDS[coin],
+        'created_at': None,
+        'capital_allocated': 0,
+        'pnl': 0,
+        'profit_factor': 1.0,
+        'trade_count': 0,
+        'frozen': False,
+        'freeze_reason': None,
+    }
+
+
 def get_or_create_fleet_registry() -> Dict:
     """Get or create fleet registry with coin state"""
     if os.path.exists(FLEET_REGISTRY):
         with open(FLEET_REGISTRY, 'r') as f:
-            return json.load(f)
+            registry = json.load(f)
+        coins = registry.setdefault('coins', {})
+        for coin in NINE_COINS:
+            coin_state = coins.setdefault(coin, _default_coin_state(coin))
+            for key, value in _default_coin_state(coin).items():
+                coin_state.setdefault(key, value)
+        registry.setdefault('total_capital_deployed', 0)
+        registry.setdefault('total_fleet_profit', 0)
+        registry['coins_active_count'] = sum(1 for coin in NINE_COINS if coins[coin]['active'])
+        registry['coins_unlocked'] = sum(
+            1 for coin in NINE_COINS if coins[coin]['active'] or coins[coin]['created_at']
+        )
+        registry.setdefault('last_update', datetime.now().isoformat())
+        return registry
     else:
         return {
-            'coins': {coin: {
-                'active': coin == "BTC-USD",
-                'locked': False,
-                'enabled_at_profit': COIN_UNLOCK_THRESHOLDS[coin],
-                'created_at': None,
-                'capital_allocated': 0,
-                'pnl': 0,
-                'profit_factor': 1.0,
-                'trade_count': 0,
-                'frozen': False,
-                'freeze_reason': None
-            } for coin in NINE_COINS},
+            'coins': {coin: _default_coin_state(coin) for coin in NINE_COINS},
             'total_capital_deployed': 0,
             'total_fleet_profit': 0,
             'coins_active_count': 1,
