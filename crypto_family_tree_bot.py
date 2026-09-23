@@ -83,10 +83,14 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select, text, desc
 from sqlalchemy.exc import IntegrityError
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import BotPosition, CryptoTreeBranch, TradingBotState, CryptoBacktestRun, CryptoCoinTradeHistory, CryptoActivityEvent, CryptoManualCoinOverride
 
 import crypto_btc_compound_bot as engine
+
+
+def AsyncSessionLocal():
+    return get_session_factory()()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("crypto_family_tree_bot")

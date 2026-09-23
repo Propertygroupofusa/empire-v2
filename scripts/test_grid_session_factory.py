@@ -17,6 +17,7 @@ def main():
         os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{database_path.as_posix()}"
 
         import database
+        import crypto_family_tree_bot
         import crypto_grid_bot
         from models import CryptoGridBranch, CryptoGridSlice
 
