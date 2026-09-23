@@ -97,6 +97,38 @@ class AdaptiveFleetRegistryTests(unittest.TestCase):
 
 
 class AdaptiveFleetDeploymentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_partial_flat_withdrawal_rebases_drawdown_peak(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database_path = os.path.join(temporary_directory, "withdraw.db").replace("\\", "/")
+            database_engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+            session_factory = sessionmaker(database_engine, class_=AsyncSession, expire_on_commit=False)
+            async with database_engine.begin() as connection:
+                await connection.run_sync(CryptoGridBranch.__table__.create)
+                await connection.run_sync(CryptoGridSlice.__table__.create)
+            async with session_factory() as database:
+                database.add(CryptoGridBranch(
+                    bot_name="crypto_grid_4", product_id="ARB-USD", allocated_usd=666.96,
+                    active=True, grid_pct=0.025, num_levels=3, reference_price=0.22001,
+                    peak_equity=848.71,
+                ))
+                await database.commit()
+
+            with (
+                patch.object(bot, "get_session_factory", return_value=session_factory),
+                patch.object(bot, "_effective_num_levels", AsyncMock(return_value=3)),
+            ):
+                result = await bot.withdraw_from_grid_branch("crypto_grid_4", 88.35)
+
+            async with session_factory() as database:
+                branch = (await database.execute(
+                    select(CryptoGridBranch).where(CryptoGridBranch.bot_name == "crypto_grid_4")
+                )).scalar_one()
+            await database_engine.dispose()
+
+        self.assertEqual(result["remaining_allocated_usd"], 578.61)
+        self.assertAlmostEqual(branch.allocated_usd, 578.61)
+        self.assertAlmostEqual(branch.peak_equity, 578.61)
+
     async def test_retires_flat_below_edge_branch_when_no_replacement_qualifies(self):
         branch = SimpleNamespace(
             bot_name="crypto_grid_2", product_id="STX-USD", allocated_usd=292.83,

@@ -1216,6 +1216,7 @@ async def withdraw_from_grid_branch(bot_name: str, amount: float) -> dict:
             return {"bot_name": bot_name, "product_id": product_id, "amount": amount, "remaining_allocated_usd": 0.0, "branch_deleted": True}
 
         branch.num_levels = await _effective_num_levels(branch.allocated_usd)
+        branch.peak_equity = branch.allocated_usd
         await db.commit()
         await db.refresh(branch)
     log.info(f"[GRID] 💵 Withdrew ${amount:.2f} from {bot_name} - now ${branch.allocated_usd:.2f} ({branch.num_levels} real levels), freed back to real spendable cash")
