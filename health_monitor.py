@@ -7,6 +7,7 @@ All data persisted to database for complete audit trail
 import asyncio
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Any
 import os
 import sys
@@ -196,12 +197,20 @@ class ComprehensiveHealthMonitor:
         return results
 
     async def _check_routers(self) -> Dict[str, Dict[str, Any]]:
-        """Check if all routers can be imported"""
-        routers = [
-            'workers', 'clients', 'jobs', 'bookings', 'payments',
-            'admin', 'whitelabel', 'auth', 'partners', 'labeling',
-            'revenue_automation', 'social_dashboard'
-        ]
+        """Check that every router module on disk can be imported.
+
+        This used to be a hardcoded list, which drifted: it still named
+        workers, jobs and bookings long after those modules were deleted,
+        so every cycle logged three severity-high "No module named
+        routers.X" errors for routers main.py no longer mounts. Reading
+        the directory keeps the check honest as routers come and go.
+        """
+        router_dir = Path(__file__).parent / "routers"
+        routers = sorted(
+            path.stem
+            for path in router_dir.glob("*.py")
+            if not path.stem.startswith("_")
+        )
         
         results = {}
         for router_name in routers:

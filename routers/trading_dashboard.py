@@ -1085,7 +1085,18 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         "drawdown_pct": round(drawdown_pct, 2),
         "win_rate": round(win_rate, 1),
         "profit_factor": round(profit_factor, 2),
-        "expectancy_per_trade": round(rolling_expectancy or 0, 2),
+        # get_rolling_expectancy() returns a DICT (expectancy, num_trades,
+        # win_count, ...), not a bare number - see the "rolling_expectancy"
+        # passthrough below, whose consumer reads sub-keys off it. round() on
+        # a dict raises TypeError, and a non-empty dict is truthy so "or 0"
+        # never caught it. Both of that function's return shapes are
+        # non-empty dicts, so this 500'd /family-tree-status on every single
+        # request whenever the bot module was loaded at all - with or
+        # without trades - taking the whole Coinbase Trading page down with
+        # it. Read the per-trade average off its own key; "expectancy" is
+        # None until ROLLING_EXPECTANCY_MIN_TRADES real trades exist, which
+        # "or 0" does handle correctly.
+        "expectancy_per_trade": round((rolling_expectancy or {}).get("expectancy") or 0, 2),
         "branch_count": len(out),
         "locked_usd": locked_usd,
     }

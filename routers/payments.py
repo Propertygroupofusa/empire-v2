@@ -40,7 +40,29 @@ PAYPAL_AVAILABLE = bool(PAYPAL_CLIENT_ID and PAYPAL_SECRET and PAYPAL_RECIPIENT_
 if PAYPAL_AVAILABLE:
     log.info("PayPal payout system configured")
 else:
-    log.warning("PayPal credentials not configured - paypal payouts disabled")
+    # Three variables are needed, so "some but not all" is easy to land in
+    # and used to be indistinguishable from "none of them": both printed
+    # the same "credentials not configured". Setting two of three and being
+    # told nothing was configured is how you end up re-entering values that
+    # were already right. Name the ones actually missing.
+    _missing = [name for name, value in (
+        ("PAYPAL_CLIENT_ID", PAYPAL_CLIENT_ID),
+        ("PAYPAL_SECRET", PAYPAL_SECRET),
+        ("PAYPAL_RECIPIENT_EMAIL", PAYPAL_RECIPIENT_EMAIL),
+    ) if not value]
+    if len(_missing) < 3:
+        log.warning(f"PayPal payouts are half-configured: {', '.join(_missing)} "
+                    f"still empty. Payouts stay OFF until all three are set.")
+    else:
+        # Nothing set: an optional integration nobody turned on.
+        # /process-paypal-payouts is the only endpoint that touches PayPal and
+        # it is gated twice - on PAYOUTS_ENABLED and again on PAYPAL_AVAILABLE
+        # - returning {"status": "disabled"} rather than failing, so nothing
+        # is broken here and a boot-time WARNING only buries the real ones.
+        log.info("PayPal payouts are off (optional). Set PAYPAL_CLIENT_ID, "
+                 "PAYPAL_SECRET and PAYPAL_RECIPIENT_EMAIL to enable them; "
+                 "PAYOUTS_ENABLED=true is additionally required to arm them, "
+                 "since this path pays out against live api.paypal.com.")
 
 
 @router.get("/bot/earnings", summary="Bot worker earnings dashboard")
