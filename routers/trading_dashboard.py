@@ -1033,20 +1033,56 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     # piece is missing this poll; the caller treats that as "this side
     # is unavailable right now", exactly like a hard failure.
     real_crypto_net_worth_usd = None
-    if real_balance is not None and tree_holdings_complete:
-        grid_holdings_value, grid_holdings_complete = 0.0, True
-        if crypto_grid_bot_module is not None:
-            try:
-                grid_holdings_value, grid_holdings_complete = (
-                    await crypto_grid_bot_module.get_grid_holdings_market_value()
-                )
-            except Exception as exc:
-                grid_holdings_complete = False
-                log.warning(f"[dashboard] grid holdings market value unavailable this poll: {exc}")
-        if grid_holdings_complete:
-            real_crypto_net_worth_usd = round(
-                real_balance + tree_holdings_market_value + grid_holdings_value, 2
+    grid_holdings_value, grid_holdings_complete = 0.0, True
+    if crypto_grid_bot_module is not None:
+        try:
+            grid_holdings_value, grid_holdings_complete = (
+                await crypto_grid_bot_module.get_grid_holdings_market_value()
             )
+        except Exception as exc:
+            grid_holdings_complete = False
+            log.warning(f"[dashboard] grid holdings market value unavailable this poll: {exc}")
+    if real_balance is not None and tree_holdings_complete and grid_holdings_complete:
+        real_crypto_net_worth_usd = round(
+            real_balance + tree_holdings_market_value + grid_holdings_value, 2
+        )
+
+    # The TOTAL above stays all-or-nothing: a partial total is a wrong
+    # number, and this codebase does not ship wrong numbers.
+    #
+    # But a lone blank where a figure should be tells the operator only
+    # that SOMETHING is wrong, never WHICH something - which is exactly
+    # the complaint this breakdown answers ("why is this not showing how
+    # much Coinbase is"). Each of the three inputs now reports itself, so
+    # one unreadable piece names itself instead of silently erasing the
+    # two that read fine. Every component is a real number or null with
+    # available:false - never a zero standing in for unknown.
+    #
+    # Note the restructure above: the grid lookup used to sit INSIDE the
+    # `real_balance is not None and tree_holdings_complete` branch, so
+    # whenever an earlier piece failed the grid value was never even
+    # fetched and could not report on itself. It is now gathered
+    # unconditionally, and only the total is gated.
+    real_crypto_net_worth_breakdown = {
+        "usd_wallet": {
+            "usd": round(real_balance, 2) if real_balance is not None else None,
+            "available": real_balance is not None,
+            "label": "Coinbase USD wallet",
+        },
+        "tree_coin": {
+            "usd": round(tree_holdings_market_value, 2) if tree_holdings_complete else None,
+            "available": bool(tree_holdings_complete),
+            "label": "Coin held by tree branches",
+        },
+        "grid_coin": {
+            "usd": round(grid_holdings_value, 2) if grid_holdings_complete else None,
+            "available": bool(grid_holdings_complete),
+            "label": "Coin held by grid branches",
+        },
+    }
+    real_crypto_net_worth_missing = [
+        v["label"] for v in real_crypto_net_worth_breakdown.values() if not v["available"]
+    ]
 
     crypto_passive_mode = await crypto_family_tree_bot_module.is_crypto_passive_mode() if crypto_family_tree_bot_module else False
     rolling_expectancy = await crypto_family_tree_bot_module.get_rolling_expectancy() if crypto_family_tree_bot_module else None
@@ -1134,11 +1170,29 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         # tree AND Grid Bot) - see the block above. This, NOT
         # total_equity_usd, is what the combined $1M tracker uses.
         "real_crypto_net_worth_usd": real_crypto_net_worth_usd,
+        # Present whether or not the total resolved, so a blank total can
+        # always be explained rather than just observed.
+        "real_crypto_net_worth_breakdown": real_crypto_net_worth_breakdown,
+        "real_crypto_net_worth_missing": real_crypto_net_worth_missing,
         "locked_usd": locked_usd,
         "spendable_for_spawn": spendable_for_spawn,
         "seed_usd": seed_usd,
         "can_spawn": can_spawn,
         "crypto_passive_mode": crypto_passive_mode,
+        # Which Coinbase loop this deploy actually starts, and therefore
+        # which half of the tree screen is live.
+        #
+        # main.py starts the family-tree loop ONLY when CRYPTO_STRATEGY_MODE
+        # is "family_tree"; under "grid_fleet" it logs that execution is
+        # delegated to the crypto-trading service and starts nothing here.
+        # The tree's own balances, positions and reconciliation stay real
+        # either way - it still HOLDS coin - but its trading controls
+        # (spawn, exit mode, reversal, trailing stop) drive a loop that is
+        # not running, and a control that silently does nothing is worse
+        # than one that is plainly labelled inert. Surfaced so the page can
+        # say so instead of the operator finding out by pressing it.
+        "crypto_strategy_mode": os.getenv("CRYPTO_STRATEGY_MODE", "") or "(unset)",
+        "family_tree_loop_running": os.getenv("CRYPTO_STRATEGY_MODE", "") == "family_tree",
         "rolling_expectancy": rolling_expectancy,
         "exit_mode": exit_mode,
         "trailing_stop_pct": trailing_stop_pct,
@@ -6514,6 +6568,70 @@ async def _live_ops_gate_feed(limit: int = 40):
     }
 
 
+async def _live_ops_runner():
+    """Is the thing that trades actually alive and permitted to trade?
+
+    Every panel below this one shows what the bot DID. This one answers
+    whether it can do anything at all, and it is deliberately first:
+    a fleet of healthy-looking branch cards above a runner that exited at
+    boot is the exact failure this page was built to make impossible.
+
+    Each gate is a real precondition read from the running process, not a
+    guess - bot_runner.py exits immediately unless CRYPTO_STRATEGY_MODE is
+    grid_fleet, refuses to trade while STOP_TRADING is set, and cannot
+    place an order without Coinbase credentials. Credentials are reported
+    as present/absent ONLY. No value, prefix or length is ever returned.
+    """
+    from models import CryptoActivityEvent
+
+    mode = (os.getenv("CRYPTO_STRATEGY_MODE") or "").strip()
+    halted = os.getenv("STOP_TRADING", "false").strip().lower() == "true"
+
+    # Read the ENGINE'S OWN verdict rather than re-testing env var names
+    # here. The engine resolves its key from COINBASE_API_KEY_NAME with a
+    # _BOT fallback, and its secret from COINBASE_API_PRIVATE_KEY - a
+    # hand-written check here guessed the wrong secret name and would have
+    # reported "missing" on a perfectly configured account, which is worse
+    # than no check at all. Asking the module that actually authenticates
+    # cannot drift from what actually authenticates.
+    try:
+        import crypto_btc_compound_bot as _engine
+        has_creds = bool(getattr(_engine, "cdp_configured", False))
+    except Exception:
+        has_creds = False
+
+    # Any activity row at all proves the bot process is running and writing,
+    # even in a stretch where no dip reached the gate. Gate verdicts alone
+    # cannot distinguish "quiet market" from "process dead".
+    async with get_session_factory()() as db:
+        result = await db.execute(
+            select(CryptoActivityEvent.created_at)
+            .order_by(CryptoActivityEvent.created_at.desc()).limit(1)
+        )
+        last_any = result.scalar_one_or_none()
+    last_activity_age = (
+        max(0.0, (datetime.utcnow() - last_any).total_seconds()) if last_any else None
+    )
+
+    gates = [
+        {"name": "Strategy mode is grid_fleet", "ok": mode == "grid_fleet",
+         "detail": mode or "(unset)",
+         "fix": "set CRYPTO_STRATEGY_MODE=grid_fleet - bot_runner exits at boot without it"},
+        {"name": "Trading not halted", "ok": not halted,
+         "detail": "STOP_TRADING is set" if halted else "running",
+         "fix": "unset STOP_TRADING"},
+        {"name": "Coinbase credentials present", "ok": has_creds,
+         "detail": "present" if has_creds else "missing",
+         "fix": "set COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY on the bot service"},
+    ]
+    return {
+        "gates": gates,
+        "all_clear": all(g["ok"] for g in gates),
+        "last_activity_at": last_any.isoformat() if last_any else None,
+        "last_activity_age_seconds": last_activity_age,
+    }
+
+
 @router.get("/live-ops")
 async def get_live_ops():
     """Everything needed to see the system working, in one poll.
@@ -6542,9 +6660,16 @@ async def get_live_ops():
         import capital_census
         return await asyncio.to_thread(capital_census.collect)
 
+    async def _trades():
+        if crypto_grid_bot_module is None:
+            raise RuntimeError("crypto_grid_bot module not available in this process")
+        return await crypto_grid_bot_module.get_grid_trade_history(limit_recent=15)
+
     results = dict(await asyncio.gather(
+        _section("runner", _live_ops_runner()),
         _section("gate", _live_ops_gate_feed()),
         _section("grid", _grid()),
+        _section("trades", _trades()),
         _section("reconciliation", _recon()),
         _section("capital", _census()),
     ))

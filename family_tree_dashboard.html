@@ -692,6 +692,7 @@
 
     <div id="exit-mode-badge" style="display:none; font-size:0.8em; color: var(--text-dim); margin-bottom: 8px;"></div>
     <div id="reversal-trade-badge" style="display:none; font-size:0.8em; color: var(--text-dim); margin-bottom: 8px;"></div>
+    <div id="tree-loop-banner"></div>
     <div id="crypto-passive-mode-banner" style="display:none;"></div>
     <div id="rolling-expectancy-banner" style="display:none;"></div>
     <div id="usdc-blindspot-banner" style="display:none;"></div>
@@ -3759,6 +3760,7 @@ async function refresh() {
         updateSpawnButtonState(data);
         updateUnlockButtonState(data);
         cryptoPassiveModeActive = !!data.crypto_passive_mode;
+        renderTreeLoopBanner(data);
         renderCryptoPassiveModeBanner(data);
         renderTreeSectionHeader(data);
         renderRollingExpectancyBanner(data);
@@ -4001,6 +4003,35 @@ async function toggleReversalTrade(enable) {
     } catch (e) {
         alert('Error: ' + e.message);
     }
+}
+
+// Which half of this screen is actually live.
+//
+// main.py starts the family-tree loop ONLY when CRYPTO_STRATEGY_MODE is
+// "family_tree". Under "grid_fleet" - what this account runs - it starts
+// nothing here and delegates execution to the crypto-trading service. The
+// tree's balances, positions and reconciliation stay real (it still HOLDS
+// coin), but its trading controls drive a loop that is not running, and a
+// control that silently does nothing is worse than one labelled inert.
+//
+// Driven entirely by live data.family_tree_loop_running - never hardcoded,
+// so switching the mode back flips this off on the very same refresh.
+function renderTreeLoopBanner(data) {
+    const el = document.getElementById('tree-loop-banner');
+    if (!el) return;
+    if (data.family_tree_loop_running !== false) { el.innerHTML = ''; return; }
+    const mode = String(data.crypto_strategy_mode || '(unset)')
+        .replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    el.innerHTML = `<div class="panel" style="background:#fff4e8; border:1px solid #f3d9b3;
+        padding:14px 18px; margin-bottom:16px;">
+        <strong>⚙️ Tree trading controls are inert right now.</strong>
+        This deploy runs <code>${mode}</code>, so the family-tree loop is never started —
+        execution is delegated to the crypto-trading service. Balances, positions and
+        reconciliation below are still real and worth reading. The tree's <em>trading</em>
+        buttons (spawn, exit mode, reversal, trailing stop) will not do anything until the
+        mode is <code>family_tree</code>.
+        For what is actually trading, see <a href="/live-ops">Live Ops</a>.
+    </div>`;
 }
 
 function renderCryptoPassiveModeBanner(data) {

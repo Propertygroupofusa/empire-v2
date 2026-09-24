@@ -79,6 +79,29 @@
   .badge{font-size:0.68rem;padding:2px 6px;border-radius:4px;background:var(--panel-2);
          border:1px solid var(--line);color:var(--ink-dim);margin-left:6px}
 
+  /* Pipeline: one row per stage, so it reads top-to-bottom on a phone
+     instead of squeezing five boxes across 360px. */
+  .pipe{display:flex;flex-direction:column;gap:0}
+  .stage{display:grid;grid-template-columns:26px 1fr auto;gap:10px;align-items:center;
+         padding:9px 0}
+  .stage + .stage{border-top:1px solid var(--line)}
+  .stage .n{width:22px;height:22px;border-radius:50%;background:var(--panel-2);
+            border:1px solid var(--line);color:var(--ink-dim);font-size:0.72rem;
+            display:flex;align-items:center;justify-content:center;font-family:var(--mono)}
+  .stage.on .n{background:#12331f;border-color:#1d5233;color:var(--ok)}
+  .stage.blocked .n{background:#331414;border-color:#5a2020;color:var(--bad)}
+  .stage .nm{font-size:0.9rem}
+  .stage .nm small{display:block;color:var(--ink-faint);font-size:0.76rem}
+  .stage .ct{font-family:var(--mono);font-size:0.95rem;white-space:nowrap}
+  .pipe-note{margin-top:10px;font-size:0.8rem;color:var(--ink-faint);
+             border-top:1px solid var(--line);padding-top:9px}
+
+  .gate-row{display:grid;grid-template-columns:auto 1fr;gap:9px;align-items:start;padding:7px 0}
+  .gate-row + .gate-row{border-top:1px solid var(--line)}
+  .gate-row .mk{font-size:0.95rem;line-height:1.2}
+  .gate-row .nm{font-size:0.88rem}
+  .gate-row .nm small{display:block;color:var(--ink-faint);font-size:0.76rem}
+
   .empty{color:var(--ink-faint);font-size:0.86rem;padding:8px 0}
   .errmsg{color:var(--bad);font-family:var(--mono);font-size:0.8rem;overflow-wrap:anywhere}
   .foot{color:var(--ink-faint);font-size:0.76rem;text-align:center;margin-top:18px}
@@ -96,6 +119,23 @@
   <div class="beat" id="beat">
     <span><span class="dot"></span><span class="state" id="beat-state">Connecting…</span></span>
     <span class="sub" id="beat-sub"></span>
+  </div>
+
+  <div class="panel" id="p-runner">
+    <h2>Can it trade at all?</h2>
+    <div id="runner"></div>
+  </div>
+
+  <div class="panel" id="p-pipe">
+    <h2>The mechanism, stage by stage</h2>
+    <div class="pipe" id="pipe"></div>
+    <div class="pipe-note" id="pipe-note"></div>
+  </div>
+
+  <div class="panel" id="p-money">
+    <h2>Has it made money?</h2>
+    <div class="kv" id="money-kv"></div>
+    <div id="recent-trades"></div>
   </div>
 
   <div class="panel" id="p-gate">
@@ -242,6 +282,119 @@ function renderGate(gate){
   }).join('');
 }
 
+function renderRunner(run){
+  const el = document.getElementById('runner');
+  if (!run.ok){ el.innerHTML = panelError('p-runner', run.error); return; }
+  const d = run.data || {};
+  const gates = d.gates || [];
+  const head = d.all_clear
+    ? `<div class="empty" style="color:var(--ok)">✅ Every precondition met — the bot is allowed to trade.</div>`
+    : `<div class="errmsg" style="margin-bottom:6px">⛔ The bot cannot trade until the failing
+       item below is fixed. Nothing under this panel will move while it fails.</div>`;
+  const rows = gates.map(g => `
+    <div class="gate-row">
+      <span class="mk">${g.ok ? '✅' : '⛔'}</span>
+      <div class="nm">${esc(g.name)} — <span class="${g.ok?'pos':'neg'}">${esc(g.detail)}</span>
+        ${g.ok ? '' : `<small>Fix: ${esc(g.fix)}</small>`}</div>
+    </div>`).join('');
+  const heard = d.last_activity_age_seconds;
+  const beat = `<div class="pipe-note">Bot process last wrote to the activity log
+     ${heard == null ? '<span class="none">never</span>' : esc(ago(heard))}.
+     ${heard == null
+        ? 'Nothing has been recorded yet — expected on a fresh deploy, a problem if it stays this way.'
+        : 'This ticks even in a quiet market, so it separates “nothing to do” from “process dead”.'}</div>`;
+  el.innerHTML = head + rows + beat;
+}
+
+function renderPipeline(d){
+  const el = document.getElementById('pipe');
+  const note = document.getElementById('pipe-note');
+  const runner = d.runner, grid = d.grid, gate = d.gate, trades = d.trades;
+
+  // Each stage reports a real count or an honest dash. A stage whose
+  // source failed says so rather than showing 0, because 0 here would read
+  // as "the bot considered nothing", which is a different fact entirely.
+  const num = (sec, fn) => {
+    if (!sec || !sec.ok) return null;
+    try { const v = fn(sec.data); return (v === null || v === undefined) ? null : v; }
+    catch(e){ return null; }
+  };
+  const t24 = num(gate, g => g.tally_24h) || {};
+  const considered = (gate && gate.ok)
+    ? (t24.GATE_PASS||0)+(t24.GATE_BLOCK||0)+(t24.GATE_OBSERVE||0)+(t24.GATE_ERROR||0) : null;
+
+  const stages = [
+    {n:'1', nm:'Runner permitted',  sub:'strategy mode, halt flag, credentials',
+     val: runner && runner.ok ? (runner.data.all_clear ? 'clear' : 'BLOCKED') : null,
+     state: runner && runner.ok ? (runner.data.all_clear ? 'on' : 'blocked') : ''},
+    {n:'2', nm:'Branches watching', sub:'one per coin the fleet is on',
+     val: num(grid, g => g.branch_count), state: (num(grid, g=>g.branch_count)||0) > 0 ? 'on' : ''},
+    {n:'3', nm:'Dips considered',   sub:'last 24h — each one reached the gate',
+     val: considered, state: (considered||0) > 0 ? 'on' : ''},
+    {n:'4', nm:'Buys allowed',      sub:'cleared fees, spread, depth and net edge',
+     val: (gate && gate.ok) ? (t24.GATE_PASS||0) : null, state: (t24.GATE_PASS||0) > 0 ? 'on' : ''},
+    {n:'5', nm:'Slices held now',   sub:'open positions the grid is working',
+     val: num(grid, g => g.branches_with_open_slices), state: (num(grid, g=>g.branches_with_open_slices)||0) > 0 ? 'on' : ''},
+    {n:'6', nm:'Round trips closed',sub:'all time — the only number that is real money',
+     val: num(trades, t => t.total_trade_count), state: (num(trades, t=>t.total_trade_count)||0) > 0 ? 'on' : ''},
+  ];
+
+  el.innerHTML = stages.map(s => `
+    <div class="stage ${s.state}">
+      <span class="n">${s.n}</span>
+      <span class="nm">${esc(s.nm)}<small>${esc(s.sub)}</small></span>
+      <span class="ct">${s.val === null ? '<span class="none">—</span>' : esc(String(s.val))}</span>
+    </div>`).join('');
+
+  // Name the first stage that is stopping the flow, instead of leaving the
+  // reader to infer it from six numbers.
+  let stall = null;
+  if (runner && runner.ok && !runner.data.all_clear) stall = 'the runner is blocked — see the panel above';
+  else if ((num(grid, g=>g.branch_count)||0) === 0) stall = 'no branches exist, so nothing is being watched';
+  else if (considered === 0) stall = 'branches are watching but no coin has dipped far enough to be considered';
+  else if (considered > 0 && (t24.GATE_PASS||0) === 0) stall = 'every dip considered was rejected on cost — the gate is doing its job, the market is not offering an edge';
+  note.textContent = stall ? ('Flow stops at: ' + stall + '.')
+                           : 'Every stage is moving. A dash means that stage could not be read this poll.';
+}
+
+function renderMoney(trades){
+  const kv = document.getElementById('money-kv');
+  const rec = document.getElementById('recent-trades');
+  if (!trades.ok){ kv.innerHTML = panelError('p-money', trades.error); rec.innerHTML=''; return; }
+  const d = trades.data || {};
+  kv.innerHTML = `
+    <div class="k">Realized P&amp;L, all time<small>closed round trips only — not paper gains</small></div>
+    <div class="v">${signed(d.total_realized_pnl)}</div>
+    <div class="k">Round trips closed</div><div class="v">${d.total_trade_count ?? '—'}</div>
+    <div class="k">Win rate</div>
+    <div class="v">${d.overall_win_rate == null ? '<span class="none">—</span>' : Number(d.overall_win_rate).toFixed(1)+'%'}</div>`;
+
+  const coins = (d.coins || []).slice(0, 6);
+  const recent = (d.recent_trades || []).slice(0, 8);
+  let html = '';
+  if (coins.length){
+    html += `<div style="margin-top:12px"><h2>By coin</h2>` + coins.map(c => `
+      <div class="branch">
+        <div class="top"><span class="coin">${esc(c.product_id)}</span>
+          <span>${signed(c.total_pnl)}</span></div>
+        <div class="meta">${c.trade_count} trades · ${Number(c.win_rate).toFixed(0)}% won</div>
+      </div>`).join('') + `</div>`;
+  }
+  if (recent.length){
+    html += `<div style="margin-top:12px"><h2>Most recent closes</h2>` + recent.map(t => `
+      <div class="branch">
+        <div class="top"><span class="coin">${esc(t.product_id||'')}</span>
+          <span>${signed(t.pnl)}</span></div>
+        <div class="meta">${esc(when(t.closed_at))}</div>
+      </div>`).join('') + `</div>`;
+  }
+  if (!coins.length && !recent.length){
+    html = `<div class="empty">No round trip has closed yet. This fills in the first time a
+      slice is bought and sold back — that is the first real money this bot makes.</div>`;
+  }
+  rec.innerHTML = html;
+}
+
 function renderConfig(cfg){
   const el = document.getElementById('config-kv');
   if (!cfg.ok){ el.innerHTML = panelError('p-config', cfg.error); return; }
@@ -363,9 +516,12 @@ async function tick(){
     const res = await fetch(API + '?t=' + Date.now(), {cache:'no-store'});
     if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + res.statusText);
     const d = await res.json();
-    ['p-gate','p-config','p-branches','p-capital','p-recon']
+    ['p-runner','p-pipe','p-money','p-gate','p-config','p-branches','p-capital','p-recon']
       .forEach(id => document.getElementById(id).classList.remove('err'));
     renderBeat(d.gate);
+    renderRunner(d.runner);
+    renderPipeline(d);
+    renderMoney(d.trades);
     renderGate(d.gate);
     renderConfig(d.config);
     renderBranches(d.grid);

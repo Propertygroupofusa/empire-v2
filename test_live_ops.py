@@ -132,7 +132,7 @@ ok("the endpoint stamps when it was served", '"served_at"' in router_src)
 page = open(PAGE).read()
 
 # Top-level keys the page reads off the response.
-for key in ["gate", "config", "grid", "capital", "reconciliation"]:
+for key in ["runner", "gate", "config", "grid", "trades", "capital", "reconciliation"]:
     ok(f"endpoint serves the '{key}' section the page renders",
        f'_section("{key}"' in router_src or f'results["{key}"]' in router_src)
     ok(f"page reads the '{key}' section", f"d.{key}" in page)
@@ -150,6 +150,49 @@ for ev in ["GATE_PASS", "GATE_BLOCK", "GATE_OBSERVE", "GATE_ERROR"]:
 ok("gate telemetry can never raise into a trade",
    "async def _record_gate_decision" in grid_src
    and "non-fatal, trading unaffected" in grid_src)
+
+
+# --- runner / pipeline / money contracts ----------------------------------
+ok("runner section is gathered before anything that depends on it",
+   router_src.index('_section("runner"') < router_src.index('_section("gate"'))
+ok("runner reads the engine's own credential verdict, not guessed env names",
+   'getattr(_engine, "cdp_configured", False)' in router_src)
+ok("runner never reads a credential VALUE",
+   'os.getenv("COINBASE_API_PRIVATE_KEY")' not in router_src)
+ok("every runner gate ships a concrete fix", router_src.count('"fix":') >= 3)
+ok("runner tracks any activity, not only gate verdicts",
+   "last_activity_age_seconds" in router_src and "last_activity_age_seconds" in page)
+ok("the page renders the runner gates", "renderRunner" in page)
+ok("the page renders the pipeline", "renderPipeline" in page)
+ok("the pipeline names where flow stops", "Flow stops at" in page)
+ok("the pipeline separates 'no branches' from 'no dips'",
+   "no branches exist" in page and "no coin has dipped" in page)
+ok("the pipeline explains an all-rejected cycle as the gate working",
+   "doing its job" in page)
+ok("the page renders realized money", "renderMoney" in page and "total_realized_pnl" in page)
+ok("realized P&L is labelled as closed round trips, not paper gains",
+   "not paper gains" in page)
+
+# --- the Coinbase total can explain its own blank --------------------------
+ok("the total stays all-or-nothing",
+   "real_balance is not None and tree_holdings_complete and grid_holdings_complete" in router_src)
+ok("but a breakdown ships alongside it",
+   '"real_crypto_net_worth_breakdown"' in router_src)
+ok("and names which piece was unreadable",
+   '"real_crypto_net_worth_missing"' in router_src)
+ok("each component carries an availability flag", router_src.count('"available":') >= 3)
+
+# --- inert tree controls are labelled, not left to be discovered by pressing
+tree = open(os.path.join(HERE, "family_tree_dashboard.html")).read()
+ok("the server says which crypto loop actually runs",
+   '"family_tree_loop_running"' in router_src and '"crypto_strategy_mode"' in router_src)
+ok("the tree page warns when its trading controls are inert",
+   "renderTreeLoopBanner" in tree and "inert right now" in tree)
+ok("the warning is data-driven, never hardcoded",
+   "data.family_tree_loop_running !== false" in tree)
+ok("and it fails safe on an older server that omits the field",
+   "!== false" in tree)
+ok("the tree page points at the page that IS live", '"/live-ops"' in tree or "/live-ops" in tree)
 
 
 # --- the page must not fabricate -------------------------------------------
