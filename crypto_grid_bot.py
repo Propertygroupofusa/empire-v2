@@ -1799,16 +1799,32 @@ async def spread_capital_evenly(target_branches: int = 7, dry_run: bool = True) 
     held_branches = [b for b in branches if b.bot_name not in flat_by_name]
     pool = round(free_cash + flat_total, 2)
 
+    # Hold back the same reserve auto-deploy holds back.
+    #
+    # The first version of this divided the WHOLE pool across the branches
+    # and left free cash at exactly $0.00, which breaks two things. Fees
+    # settle out of the USD balance, and an account with nothing spare
+    # cannot pay one - a rejected fee is a stuck position. And
+    # create_grid_branch runs its own free-cash check, so the last branch
+    # in the run asks for its full share against a balance the previous
+    # branches just emptied and is refused: the fleet ends one branch
+    # short with a confusing "only $0.00 in real free spendable cash"
+    # error, having already moved the money.
+    reserve = max(0.0, GRID_CASH_RESERVE_USD)
+    distributable = round(max(0.0, pool - reserve), 2)
+
     target_branches = max(1, int(target_branches))
-    per_branch = round(pool / target_branches, 2)
+    per_branch = round(distributable / target_branches, 2)
 
     if per_branch < MIN_TRADE_USD * 2:
         return {
             "status": "too_thin", "changed": False,
-            "detail": (f"${pool:,.2f} across {target_branches} branches is ${per_branch:,.2f} each, "
-                       f"which cannot carry slices above the ${MIN_TRADE_USD:,.2f} minimum. "
-                       f"Use fewer branches."),
-            "pool_usd": pool, "per_branch_usd": per_branch,
+            "detail": (f"${pool:,.2f} less a ${reserve:,.2f} reserve leaves ${distributable:,.2f}, "
+                       f"which is ${per_branch:,.2f} across {target_branches} branches - too thin "
+                       f"to carry slices above the ${MIN_TRADE_USD:,.2f} minimum. Use fewer "
+                       f"branches."),
+            "pool_usd": pool, "reserve_usd": reserve,
+            "distributable_usd": distributable, "per_branch_usd": per_branch,
         }
 
     plan = {"withdrawals": [], "top_ups": [], "new_branches": [], "untouched_holding": [
@@ -1831,6 +1847,8 @@ async def spread_capital_evenly(target_branches: int = 7, dry_run: bool = True) 
     slots = target_branches - len(flat_by_name)
     plan["new_branch_slots"] = max(0, slots)
     plan["pool_usd"] = pool
+    plan["reserve_usd"] = reserve
+    plan["distributable_usd"] = distributable
     plan["per_branch_usd"] = per_branch
     plan["free_cash_before"] = round(free_cash, 2)
 
