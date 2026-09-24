@@ -160,6 +160,18 @@ ok("runner reads the engine's own credential verdict, not guessed env names",
 ok("runner never reads a credential VALUE",
    'os.getenv("COINBASE_API_PRIVATE_KEY")' not in router_src)
 ok("every runner gate ships a concrete fix", router_src.count('"fix":') >= 3)
+# Match the CODE, not the prose - the comment above the fix quotes the old
+# expression to explain it, and a substring test flagged that as the bug.
+ok("the runner does NOT hardcode grid_fleet as the only valid mode",
+   '"ok": mode == "grid_fleet"' not in router_src)
+ok("it accepts every supported mode", '"ok": mode in known' in router_src)
+ok("it names which service runs the mode in effect", '"mode_owner"' in router_src)
+ok("it knows both services want opposite values",
+   "bot_runner.py) exits unless" in router_src and "family_tree" in router_src)
+ok("a retired tree is surfaced, since the loop would run and do nothing",
+   '"tree_retired"' in router_src and "is_crypto_passive_mode" in router_src)
+ok("and the retire flag is described as not cleared by this repo",
+   "nothing in this repo clears it" in router_src)
 ok("runner tracks any activity, not only gate verdicts",
    "last_activity_age_seconds" in router_src and "last_activity_age_seconds" in page)
 ok("the page renders the runner gates", "renderRunner" in page)

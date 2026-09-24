@@ -6613,10 +6613,35 @@ async def _live_ops_runner():
         max(0.0, (datetime.utcnow() - last_any).total_seconds()) if last_any else None
     )
 
+    # CRYPTO_STRATEGY_MODE is read by TWO services that want OPPOSITE
+    # values, and this panel has to reflect that rather than treat one of
+    # them as the only right answer:
+    #
+    #   crypto-trading service (bot_runner.py) exits unless it reads
+    #                          "grid_fleet"
+    #   web service (main.py)  starts the family-tree loop ONLY when it
+    #                          reads "family_tree"
+    #
+    # Railway scopes variables per service, so both loops can run at once
+    # with a different value set on each. The value below is whatever THIS
+    # process reads, which is why the panel names the loop that value
+    # starts instead of asserting a single correct mode. An earlier version
+    # hardcoded `mode == "grid_fleet"` and would have reported a healthy
+    # family-tree deploy as BLOCKED - a status panel confidently wrong
+    # about the one thing it exists to report.
+    known = {"grid_fleet", "family_tree", "btc_compound", "multi_pair"}
+    owner = {
+        "grid_fleet": "the dedicated crypto-trading service (grid fleet)",
+        "family_tree": "this web service (family tree)",
+        "btc_compound": "this web service (BTC compound)",
+        "multi_pair": "this web service (multi-pair RSI)",
+    }.get(mode)
     gates = [
-        {"name": "Strategy mode is grid_fleet", "ok": mode == "grid_fleet",
-         "detail": mode or "(unset)",
-         "fix": "set CRYPTO_STRATEGY_MODE=grid_fleet - bot_runner exits at boot without it"},
+        {"name": "A crypto loop owns execution", "ok": mode in known,
+         "detail": f"{mode or '(unset)'} - run by {owner}" if owner
+                   else f"{mode or '(unset)'} - matches no known mode",
+         "fix": "set CRYPTO_STRATEGY_MODE per service: grid_fleet on the "
+                "crypto-trading service, family_tree on the web service"},
         {"name": "Trading not halted", "ok": not halted,
          "detail": "STOP_TRADING is set" if halted else "running",
          "fix": "unset STOP_TRADING"},
@@ -6624,9 +6649,33 @@ async def _live_ops_runner():
          "detail": "present" if has_creds else "missing",
          "fix": "set COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY on the bot service"},
     ]
+
+    # A retired tree starts its threads and then does nothing at all, for
+    # ever: is_crypto_passive_mode() is checked at the top of every branch
+    # cycle and no code path in this repo ever clears it. So under
+    # family_tree this is the difference between "the loop is running" and
+    # "the loop is running and will trade", and it has to be visible -
+    # otherwise flipping the mode looks successful and changes nothing.
+    passive = None
+    if crypto_family_tree_bot_module is not None:
+        try:
+            passive = await crypto_family_tree_bot_module.is_crypto_passive_mode()
+        except Exception:
+            passive = None
+    if mode == "family_tree" and passive:
+        gates.append({
+            "name": "Family tree is not retired", "ok": False,
+            "detail": "retired - every branch cycle exits immediately",
+            "fix": "the retire flag is DB-persisted and nothing in this repo clears it; "
+                   "it must be cleared deliberately before the tree can trade again",
+        })
+
     return {
         "gates": gates,
         "all_clear": all(g["ok"] for g in gates),
+        "strategy_mode": mode or "(unset)",
+        "mode_owner": owner,
+        "tree_retired": passive,
         "last_activity_at": last_any.isoformat() if last_any else None,
         "last_activity_age_seconds": last_activity_age,
     }
