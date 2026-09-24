@@ -196,7 +196,22 @@ GRID_AUTO_ROTATE_MODE_KEY = "crypto_grid_auto_rotate_active"
 # fee-cost-vs-idle-time tradeoff directly: more frequent means real cash
 # rotates faster but pays more real trading fees moving small amounts
 # around; less frequent means fewer fees but longer real idle stretches).
-GRID_AUTO_ROTATE_INTERVAL_SECONDS = int(os.getenv("GRID_AUTO_ROTATE_INTERVAL_SECONDS", str(30 * 60)))
+# 30 min -> 5 min, per the account owner: cash freed by an exit should go
+# back to work on the next opportunity rather than sitting out the rest of
+# a half-hour window.
+#
+# Safe to shorten because the two things this sweep does have different
+# risk profiles, and only one of them is fee-sensitive. Auto-DEPLOY of
+# unallocated cash places one fresh buy and cannot oscillate, so checking
+# it more often is pure latency reduction. ROTATION between branches is
+# the fee-sensitive half, and its frequency is bounded by
+# GRID_ROTATION_COOLDOWN_SECONDS (2 hours per branch), not by this
+# interval - so a branch still cannot move more than once every two hours
+# however often the sweep runs. Shortening this only cuts how long an
+# already-eligible move waits to be noticed, from up to 30 minutes to up
+# to 5. The confirmed-live oscillation bug that cooldown was written for
+# stays fixed.
+GRID_AUTO_ROTATE_INTERVAL_SECONDS = int(os.getenv("GRID_AUTO_ROTATE_INTERVAL_SECONDS", str(5 * 60)))
 # Below this, a real Coinbase round-trip (sell nothing / just a fresh
 # buy into the new branch) isn't worth the real trading fee it costs to
 # move - matches the same order-of-magnitude reasoning as MIN_TRADE_USD,
@@ -257,12 +272,42 @@ GRID_ROTATION_COOLDOWN_SECONDS = int(os.getenv("GRID_ROTATION_COOLDOWN_SECONDS",
 # creation path (create_grid_branch) the manual "New branch"/"Add 3
 # branches" buttons already use - this is that same real action, just
 # fired on its own instead of waiting for a tap.
-GRID_AUTO_DEPLOY_AMOUNT_USD = float(os.getenv("GRID_AUTO_DEPLOY_AMOUNT_USD", "50.0"))
+# Sized for the seven coins whose ADAPTIVE_FLEET_STAGES gate is $0.00 -
+# BTC, ETH, DOGE, XRP, LINK, AVAX, DOT - against the ~$578 of real crypto
+# capital this account holds. 7 x $70 = $490 deployed, $88 left as cash.
+#
+# $70 rather than $50 because levels are capped at allocated_usd //
+# MIN_TRADE_USD: a $50 branch gets 10 levels of exactly $5.00, sitting
+# precisely ON the minimum order size with no room for a price move to
+# push a slice under it. $70 gives the same 10 levels at $7.00 each, far
+# enough clear that a slice cannot round below the floor and stall.
+GRID_AUTO_DEPLOY_AMOUNT_USD = float(os.getenv("GRID_AUTO_DEPLOY_AMOUNT_USD", "70.0"))
+
+# Real cash the auto-deployer must always leave behind, never spending the
+# account down to its last dollar.
+#
+# This did not exist before. Auto-deploy's only floor was "free cash >=
+# one branch", so with enough eligible coins it would keep opening
+# branches until under $70 remained - fine while exactly seven coins were
+# eligible and it ran out of coins first, and not fine the moment SOL
+# ($688 realized) or ADA ($2,106) unlock and there are nine. A reserve
+# that exists only because the system ran out of things to buy is not a
+# reserve. $88 is what seven full branches leave of $578, so today this
+# changes nothing and simply stops being luck.
+GRID_CASH_RESERVE_USD = float(os.getenv("GRID_CASH_RESERVE_USD", "88.0"))
+
 # Caps how many NEW branches one single sweep can create - real,
 # deliberate friction against a large, sudden cash windfall (or a bug)
 # spinning up dozens of tiny branches in one shot. A real surplus above
 # this cap just gets picked up on the next sweep instead.
-GRID_AUTO_DEPLOY_MAX_NEW_BRANCHES_PER_SWEEP = int(os.getenv("GRID_AUTO_DEPLOY_MAX_NEW_BRANCHES_PER_SWEEP", "3"))
+#
+# Raised 3 -> 7 so a full fleet fills in ONE sweep rather than three, per
+# the account owner: capital should go to work the moment it is free, not
+# wait out two more 30-minute cycles while opportunities pass. Still real
+# friction - it is exactly the number of currently-eligible coins, and
+# each branch claims its own coin, so this cannot run away into dozens of
+# tiny branches however much cash appears at once.
+GRID_AUTO_DEPLOY_MAX_NEW_BRANCHES_PER_SWEEP = int(os.getenv("GRID_AUTO_DEPLOY_MAX_NEW_BRANCHES_PER_SWEEP", "7"))
 
 # Opt-in staged capital fleet. These are activation gates from the
 # operator's proposed sequence, not projected or guaranteed returns.
@@ -2063,7 +2108,22 @@ async def _auto_deploy_idle_free_cash():
     created = 0
     while created < GRID_AUTO_DEPLOY_MAX_NEW_BRANCHES_PER_SWEEP:
         real_free_cash = await get_real_free_cash_usd()
-        if real_free_cash is None or real_free_cash < GRID_AUTO_DEPLOY_AMOUNT_USD:
+        # None means the real balance could not be read. Unknown cash is
+        # never a reason to deploy - the same fail-closed rule the rest of
+        # this file uses.
+        if real_free_cash is None:
+            return
+        # Spend only what sits ABOVE the reserve. Checked inside the loop,
+        # against a freshly read balance, so the reserve holds on the
+        # seventh branch of a sweep exactly as it does on the first.
+        deployable = real_free_cash - GRID_CASH_RESERVE_USD
+        if deployable < GRID_AUTO_DEPLOY_AMOUNT_USD:
+            if created == 0 and real_free_cash >= GRID_AUTO_DEPLOY_AMOUNT_USD:
+                log.info(
+                    f"[GRID] auto-deploy holding: ${real_free_cash:,.2f} free cash less the "
+                    f"${GRID_CASH_RESERVE_USD:,.2f} reserve leaves ${max(0.0, deployable):,.2f}, "
+                    f"under one ${GRID_AUTO_DEPLOY_AMOUNT_USD:,.2f} branch"
+                )
             return
         try:
             if GRID_ADAPTIVE_FLEET_ENABLED:
