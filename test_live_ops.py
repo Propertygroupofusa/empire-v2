@@ -132,7 +132,7 @@ ok("the endpoint stamps when it was served", '"served_at"' in router_src)
 page = open(PAGE).read()
 
 # Top-level keys the page reads off the response.
-for key in ["runner", "gate", "config", "grid", "trades", "capital", "reconciliation"]:
+for key in ["runner", "gate", "config", "grid", "trades", "cash", "capital", "reconciliation"]:
     ok(f"endpoint serves the '{key}' section the page renders",
        f'_section("{key}"' in router_src or f'results["{key}"]' in router_src)
     ok(f"page reads the '{key}' section", f"d.{key}" in page)
@@ -236,6 +236,47 @@ ok("the un-retire asks once - it sells nothing, so a second prompt is ceremony",
    tree.count("if (!confirm(") >= 1)
 ok("Live Ops points at the fix instead of calling it impossible",
    "resume-active-trading" in router_src and "nothing in this repo clears it" not in router_src)
+
+
+# --- the cash ceiling ------------------------------------------------------
+#
+# Two loops, one Coinbase wallet, no coordination: whichever looked first
+# took everything. Observed live 2026-09-24 - btc_compound converted a
+# ~$577 account into BTC and the healthy grid fleet ran against $0.29.
+grid_bot = open(os.path.join(HERE, "crypto_grid_bot.py")).read()
+fam = open(os.path.join(HERE, "crypto_family_tree_bot.py")).read()
+ok("an allocator module exists",
+   os.path.exists(os.path.join(HERE, "crypto_cash_allocator.py")))
+ok("the grid sweep is bounded by its share, not just by free cash",
+   "get_grid_spend_ceiling_usd()" in grid_bot
+   and "min(real_free_cash - GRID_CASH_RESERVE_USD, ceiling)" in grid_bot)
+ok("the grid says so when the SHARE is what held it, not the wallet",
+   "auto-deploy holding on its cash share" in grid_bot)
+ok("the tree's buy is bounded by its share too",
+   "allocator.spend_ceiling(allocator.TREE" in fam
+   and "min(spend_cap, spendable, ceiling)" in fam)
+ok("the tree names which cap bound it", "bound by {bound_by}" in fam)
+ok("both fail closed when the ceiling cannot be computed",
+   grid_bot.count("if ceiling is None:") >= 1 and fam.count("if ceiling is None:") >= 1)
+ok("the endpoint serves every bot's ceiling", '_section("cash"' in router_src)
+ok("the page renders it", "renderCash" in page and "Who may spend the wallet" in page)
+ok("the page explains an unspent share instead of showing it as a bug",
+   "stays unspent by design" in page)
+
+# --- closing the position that caused it -----------------------------------
+ok("an endpoint exists to close btc_compound's position",
+   '@router.post("/btc-compound/close-position")' in router_src)
+ok("it is imported, not just referenced",
+   "import crypto_btc_compound_bot as crypto_btc_compound_bot_module" in router_src)
+ok("it defaults to a dry run", "dry_run: bool = True" in router_src)
+ok("it uses the bot's OWN exit path so the bot's state stays true",
+   "_sell_and_settle(" in router_src)
+ok("a sell that does not fill is an error, not a silent success",
+   "The market sell did not fill" in router_src)
+ok("the button shows real figures before asking",
+   "confirmCloseBtcCompound" in tree and "estimated_gross_pnl_usd" in tree)
+ok("and dry-runs before it ever sells",
+   "dry_run=true" in tree and "dry_run=false" in tree)
 
 
 # --- the page must not fabricate -------------------------------------------

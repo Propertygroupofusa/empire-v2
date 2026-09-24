@@ -3920,9 +3920,26 @@ async def _attempt_stop_hit_reversal_buy(session, bot_name: str, product_id: str
         return False
     locked_usd = await get_locked_usd()
     spendable = max(0.0, real_balance - locked_usd)
-    spend = min(spend_cap, spendable)
+
+    # The tree's share of a SHARED wallet. The grid fleet spends the same
+    # real Coinbase USD, and without this the first loop to look takes all
+    # of it - see crypto_cash_allocator for the live case that forced this.
+    # A ceiling of None means the allocator could not price the wallet, and
+    # unknown cash is never a reason to buy.
+    import crypto_cash_allocator as allocator
+    ceiling, ceiling_reason = allocator.spend_ceiling(allocator.TREE, spendable)
+    if ceiling is None:
+        log.info(f"[TREE] {bot_name}: {ceiling_reason} - skipping the reversal buy on {product_id}")
+        return False
+
+    spend = min(spend_cap, spendable, ceiling)
     if spend < MIN_TRADE_USD:
-        log.info(f"[TREE] {bot_name}: only ${spend:.2f} real spendable - below the ${MIN_TRADE_USD:.2f} minimum, skipping the reversal buy on {product_id}")
+        # Name WHICH cap bound. "only $X spendable" when the wallet visibly
+        # holds more reads as a bug rather than a budget.
+        bound_by = "its cash share" if ceiling <= min(spend_cap, spendable) else "available cash"
+        log.info(f"[TREE] {bot_name}: only ${spend:.2f} deployable (bound by {bound_by}) - "
+                 f"below the ${MIN_TRADE_USD:.2f} minimum, skipping the reversal buy on "
+                 f"{product_id} | {ceiling_reason}")
         return False
 
     fill = await engine.place_market_buy(session, spend, product_id)

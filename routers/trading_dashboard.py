@@ -96,6 +96,13 @@ except Exception as e:
     log.warning(f"scaling_coordinator not importable, /fleet-status will report unavailable: {e}")
     scaling_coordinator_module = None
 
+try:
+    import crypto_btc_compound_bot as crypto_btc_compound_bot_module
+except Exception as e:
+    log.warning(f"crypto_btc_compound_bot not importable, /btc-compound/close-position will "
+                f"report unavailable: {e}")
+    crypto_btc_compound_bot_module = None
+
 ALPACA_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
@@ -2505,6 +2512,71 @@ async def consolidate_family_tree_branches(dry_run: bool = True):
     if crypto_family_tree_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
     return await crypto_family_tree_bot_module.consolidate_branches_by_coin(dry_run=dry_run)
+
+
+@router.post("/btc-compound/close-position")
+async def close_btc_compound_position(dry_run: bool = True):
+    """Sell btc_compound's real BTC position at market, freeing the cash.
+
+    Built for a concrete situation on 2026-09-24: CRYPTO_STRATEGY_MODE was
+    set to an unrecognised value, crypto_strategy_config fell back to
+    btc_compound so the account would not sit idle, and that loop then
+    converted essentially the whole balance into BTC - $576.77 of equity
+    against $0.29 of USD. The grid fleet, deployed and healthy, had nothing
+    to trade with. Nothing in the dashboard could close that position,
+    because /coinbase/sell reads crypto_coinbase_bot's in-memory dict and
+    btc_compound tracks its position in the database instead.
+
+    Uses btc_compound's OWN _sell_and_settle(), not a hand-rolled sell, so
+    the fill, the realized P&L, the profit skim and the position clear all
+    happen exactly as they would on a normal target exit. A separate sell
+    path here would leave the bot still believing it holds BTC.
+
+    dry_run=true (the default) reports what would be sold and at what
+    current price, touching nothing. Only dry_run=false places the order.
+    """
+    if crypto_btc_compound_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_btc_compound_bot module not available")
+    engine = crypto_btc_compound_bot_module
+
+    position = await engine.load_position()
+    if position is None:
+        return {"status": "no_position", "detail": "btc_compound holds no position right now.",
+                "sold": False}
+
+    async with engine.aiohttp.ClientSession() as session:
+        price, _atr = await engine.get_price_and_volatility(session, engine.PRODUCT_ID)
+        est_value = round(price * position.qty, 2) if price is not None else None
+        est_pnl = (round((price - position.entry_price) * position.qty, 2)
+                   if price is not None else None)
+
+        plan = {
+            "product_id": engine.PRODUCT_ID,
+            "qty": position.qty,
+            "entry_price": position.entry_price,
+            "current_price": price,
+            "estimated_value_usd": est_value,
+            "estimated_gross_pnl_usd": est_pnl,
+        }
+        if dry_run:
+            return {"status": "dry_run", "sold": False, "plan": plan,
+                    "note": ("Nothing was sold. Call again with dry_run=false to place the "
+                             "real market sell. Estimated figures use the live price and "
+                             "exclude fees; the real fill decides the actual P&L.")}
+
+        sold = await engine._sell_and_settle(session, position, "manual close from dashboard")
+
+    if not sold:
+        raise HTTPException(
+            status_code=502,
+            detail="The market sell did not fill. Nothing was changed - the position is still "
+                   "open and btc_compound will keep managing it. Retry in a moment.",
+        )
+    log.info(f"[dashboard] 💵 Closed btc_compound's BTC position manually | plan={plan}")
+    return {"status": "sold", "sold": True, "plan": plan,
+            "note": ("The freed USD is now shared wallet cash. What each bot may deploy from it "
+                     "is bounded by crypto_cash_allocator - see the 'Who may spend the wallet' "
+                     "panel on Live Ops.")}
 
 
 @router.post("/family-tree-status/resume-active-trading")
@@ -6791,11 +6863,22 @@ async def get_live_ops():
             raise RuntimeError("crypto_grid_bot module not available in this process")
         return await crypto_grid_bot_module.get_grid_trade_history(limit_recent=15)
 
+    async def _cash():
+        # Every bot's ceiling on the shared wallet. The point is to make a
+        # starved bot visible BEFORE it starves, rather than inferred later
+        # from an absence of trades.
+        import crypto_cash_allocator as allocator
+        if crypto_grid_bot_module is None:
+            raise RuntimeError("crypto_grid_bot module not available in this process")
+        free_cash = await crypto_grid_bot_module.get_real_free_cash_usd()
+        return allocator.allocation_report(free_cash)
+
     results = dict(await asyncio.gather(
         _section("runner", _live_ops_runner()),
         _section("gate", _live_ops_gate_feed()),
         _section("grid", _grid()),
         _section("trades", _trades()),
+        _section("cash", _cash()),
         _section("reconciliation", _recon()),
         _section("capital", _census()),
     ))

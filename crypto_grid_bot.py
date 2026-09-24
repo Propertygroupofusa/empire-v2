@@ -968,6 +968,26 @@ async def get_real_free_cash_usd():
     return round(real_balance - locked_usd - tree_flat_allocated - grid_reserve_total, 2)
 
 
+async def get_grid_spend_ceiling_usd():
+    """How much the GRID may deploy right now. Returns (ceiling, reason).
+
+    get_real_free_cash_usd() above answers "how much cash exists"; this
+    answers "how much of it is mine". They were the same number until two
+    loops started sharing one wallet, at which point the first one to look
+    could take everything and the other would find nothing - observed live
+    on 2026-09-24, when the fallback btc_compound loop had converted the
+    whole balance into BTC and the freshly-deployed grid fleet ran a clean,
+    healthy, entirely idle loop against $0.29.
+
+    See crypto_cash_allocator for the rule. Returns (None, reason) when the
+    balance could not be read, which callers must treat as "do not deploy",
+    distinct from a real $0.00.
+    """
+    import crypto_cash_allocator as allocator
+    free_cash = await get_real_free_cash_usd()
+    return allocator.spend_ceiling(allocator.GRID, free_cash)
+
+
 def _safe_num_levels_for_allocation(allocated_usd: float) -> int:
     """A small real branch (e.g. a $20 quick-buy) would silently never
     trade under the fixed DEFAULT_GRID_LEVELS - splitting $20 across 10
@@ -2113,10 +2133,27 @@ async def _auto_deploy_idle_free_cash():
         # this file uses.
         if real_free_cash is None:
             return
-        # Spend only what sits ABOVE the reserve. Checked inside the loop,
-        # against a freshly read balance, so the reserve holds on the
+        # The fleet's share of a SHARED wallet, not the whole wallet.
+        #
+        # The family tree spends the same real Coinbase USD, and until this
+        # existed the first loop to look could take all of it. Re-read each
+        # iteration against a fresh balance, so the ceiling binds on the
         # seventh branch of a sweep exactly as it does on the first.
-        deployable = real_free_cash - GRID_CASH_RESERVE_USD
+        ceiling, ceiling_reason = await get_grid_spend_ceiling_usd()
+        if ceiling is None:
+            return
+        # Spend only what sits ABOVE the reserve, and never above the
+        # fleet's own share. Two independent caps: GRID_CASH_RESERVE_USD
+        # protects the fleet's own future levels, the allocator ceiling
+        # protects the OTHER bots from this one.
+        deployable = min(real_free_cash - GRID_CASH_RESERVE_USD, ceiling)
+        if (deployable < GRID_AUTO_DEPLOY_AMOUNT_USD
+                and real_free_cash - GRID_CASH_RESERVE_USD >= GRID_AUTO_DEPLOY_AMOUNT_USD):
+            # Cash exists above the reserve but the SHARE is what stops
+            # this. Said plainly, because "auto-deploy holding" with money
+            # visibly free in the wallet is otherwise unexplainable.
+            log.info(f"[GRID] auto-deploy holding on its cash share - {ceiling_reason}")
+            return
         if deployable < GRID_AUTO_DEPLOY_AMOUNT_USD:
             if created == 0 and real_free_cash >= GRID_AUTO_DEPLOY_AMOUNT_USD:
                 log.info(

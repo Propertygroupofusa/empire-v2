@@ -132,6 +132,12 @@
     <div class="pipe-note" id="pipe-note"></div>
   </div>
 
+  <div class="panel" id="p-cash">
+    <h2>Who may spend the wallet</h2>
+    <div class="kv" id="cash-kv"></div>
+    <div id="cash-bots"></div>
+  </div>
+
   <div class="panel" id="p-money">
     <h2>Has it made money?</h2>
     <div class="kv" id="money-kv"></div>
@@ -357,6 +363,40 @@ function renderPipeline(d){
                            : 'Every stage is moving. A dash means that stage could not be read this poll.';
 }
 
+function renderCash(cash){
+  const kv = document.getElementById('cash-kv');
+  const list = document.getElementById('cash-bots');
+  if (!cash.ok){ kv.innerHTML = panelError('p-cash', cash.error); list.innerHTML=''; return; }
+  const d = cash.data || {};
+  kv.innerHTML = `
+    <div class="k">Free cash in the shared wallet</div><div class="v">${money(d.free_cash_usd)}</div>
+    <div class="k">Held back<small>never drained to zero — a fee still has to settle</small></div>
+    <div class="v">${money(d.global_reserve_usd)}</div>
+    <div class="k">Allocatable</div><div class="v">${money(d.allocatable_usd)}</div>`;
+
+  const bots = d.bots || [];
+  list.innerHTML = bots.map(b => {
+    // A bot at $0 is the thing this panel exists to show. Its own reason
+    // says whether that is an empty wallet or a 0% share - different
+    // problems with different fixes.
+    const starved = b.ceiling_usd === 0;
+    return `<div class="branch">
+      <div class="top">
+        <span class="coin">${esc(b.bot)}<span class="badge">${b.share_pct}% share</span></span>
+        <span class="${starved ? 'neg' : ''}">${money(b.ceiling_usd)}</span>
+      </div>
+      <div class="meta">${esc(b.reason)}</div>
+    </div>`;
+  }).join('') || '<div class="empty">No bots configured.</div>';
+
+  if (d.shares_sum_pct != null && d.shares_sum_pct < 100){
+    list.innerHTML += `<div class="pipe-note">Shares total ${d.shares_sum_pct}% — the remaining
+      ${(100 - d.shares_sum_pct).toFixed(1)}% stays unspent by design. An idle bot's share is
+      not handed to a busy one on purpose: that is exactly how one bot drains the wallet and
+      starves the other. Set a share to 0 to release it.</div>`;
+  }
+}
+
 function renderMoney(trades){
   const kv = document.getElementById('money-kv');
   const rec = document.getElementById('recent-trades');
@@ -516,11 +556,12 @@ async function tick(){
     const res = await fetch(API + '?t=' + Date.now(), {cache:'no-store'});
     if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + res.statusText);
     const d = await res.json();
-    ['p-runner','p-pipe','p-money','p-gate','p-config','p-branches','p-capital','p-recon']
+    ['p-runner','p-pipe','p-cash','p-money','p-gate','p-config','p-branches','p-capital','p-recon']
       .forEach(id => document.getElementById(id).classList.remove('err'));
     renderBeat(d.gate);
     renderRunner(d.runner);
     renderPipeline(d);
+    renderCash(d.cash);
     renderMoney(d.trades);
     renderGate(d.gate);
     renderConfig(d.config);

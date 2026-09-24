@@ -693,6 +693,15 @@
     <div id="exit-mode-badge" style="display:none; font-size:0.8em; color: var(--text-dim); margin-bottom: 8px;"></div>
     <div id="reversal-trade-badge" style="display:none; font-size:0.8em; color: var(--text-dim); margin-bottom: 8px;"></div>
     <div id="tree-loop-banner"></div>
+    <div class="panel" style="padding:14px 18px; margin-bottom:16px;">
+        <button class="unlock-btn" onclick="confirmCloseBtcCompound()">💵 Close btc_compound's BTC &amp; free the cash</button>
+        <div style="font-size:0.8em; color: var(--text-dim); margin-top:6px;">
+            Sells the BTC position the <code>btc_compound</code> loop is holding, at market, using that
+            bot's own exit path (real P&amp;L recorded, profit skim applied, position cleared). Shows you
+            the plan first and asks before placing anything. The freed USD becomes shared wallet cash —
+            how much each bot may then deploy is bounded by its cash share.
+        </div>
+    </div>
     <div id="crypto-passive-mode-banner" style="display:none;"></div>
     <div id="rolling-expectancy-banner" style="display:none;"></div>
     <div id="usdc-blindspot-banner" style="display:none;"></div>
@@ -4173,6 +4182,53 @@ function renderRollingExpectancyBanner(data) {
 // would be misleading: whether the flag actually changed (pressing it
 // twice must not read like it worked twice), whether the loop that would
 // act on it is even running, and what resuming does NOT restore.
+// Closes the btc_compound BTC position so the shared wallet has cash again.
+//
+// Two steps on purpose: a dry run that shows the real quantity, live price
+// and estimated P&L, then a confirm against those exact numbers. This sells
+// real money at market, and "are you sure?" with no figures attached is not
+// informed consent.
+async function confirmCloseBtcCompound() {
+    let plan;
+    try {
+        const res = await fetch(API_BASE + '/btc-compound/close-position?dry_run=true', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        if (data.status === 'no_position') { alert(data.detail); return; }
+        plan = data.plan;
+    } catch (e) {
+        alert('Could not read the position: ' + e.message);
+        return;
+    }
+
+    const pnl = plan.estimated_gross_pnl_usd;
+    if (!confirm(
+        'Sell this position at market now?\n\n' +
+        `${plan.qty} ${plan.product_id}\n` +
+        `entry ${fmtUsd(plan.entry_price)}  ->  now ${plan.current_price == null ? 'unknown' : fmtUsd(plan.current_price)}\n` +
+        `value ~${plan.estimated_value_usd == null ? 'unknown' : fmtUsd(plan.estimated_value_usd)}\n` +
+        `estimated P&L ~${pnl == null ? 'unknown' : (pnl >= 0 ? '+' : '-') + fmtUsd(Math.abs(pnl))} before fees\n\n` +
+        'This is a real market sell. The real fill decides the actual P&L.'
+    )) return;
+
+    try {
+        const res = await fetch(API_BASE + '/btc-compound/close-position?dry_run=false', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        alert(data.sold
+            ? 'Sold. The cash is free.\n\n' + (data.note || '')
+            : 'Nothing was sold. ' + (data.detail || ''));
+    } catch (e) {
+        alert('Sell failed: ' + e.message);
+    } finally {
+        await refresh();
+    }
+}
+
 async function confirmResumeCryptoTrading() {
     if (!confirm(
         'Let the family tree trade again?\n\n' +
