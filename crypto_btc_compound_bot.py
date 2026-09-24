@@ -107,6 +107,27 @@ if not (cdp_configured or hmac_configured):
 
 CYCLE_SECONDS = _safe_int_env("BTC_COMPOUND_CYCLE_SECONDS", "30")
 MIN_TRADE_USD = _safe_float_env("BTC_COMPOUND_MIN_TRADE_USD", "5.00")
+
+# Ceiling on how much of the USD balance a single entry may use. The bot
+# otherwise deploys 100% of available cash every time, so money moved into
+# the account for any other purpose - a reserve held back while a strategy
+# is still being measured, proceeds from liquidating other coins - gets
+# swept into the next buy automatically.
+#
+# 0 means no cap, which is the historical behaviour and stays the default:
+# setting this is opt-in and nothing changes for anyone who does not.
+# Capital above the cap simply stays as cash; it is not reserved, tracked
+# or spent, and it still counts toward equity for the floor ratchet, which
+# is correct - it is real money at risk of nothing.
+MAX_DEPLOY_USD = _safe_float_env("BTC_COMPOUND_MAX_DEPLOY_USD", "0")
+
+
+def deployable_usd(balance: float) -> float:
+    """How much of `balance` this entry may use. No cap when MAX_DEPLOY_USD
+    is 0 or negative."""
+    if MAX_DEPLOY_USD <= 0:
+        return balance
+    return min(balance, MAX_DEPLOY_USD)
 STOP_LOSS_PCT = _safe_float_env("BTC_COMPOUND_STOP_LOSS_PCT", "0.02")  # -2% default
 
 # Breakeven stop ratchet, per the account owner: a fresh position keeps the
@@ -1410,8 +1431,22 @@ async def run_cycle():
                 log.warning("[BTC-COMPOUND] Could not fetch BTC price/volatility - skipping this cycle")
                 return
 
-            target_pct = max(pick_target_pct(atr_pct), min_profit_target_pct(balance, atr_pct))
-            fill = await place_market_buy(session, balance)
+            # Everything from here sizes off `deploy`, not `balance`. Anything
+            # above the cap stays as cash and is deliberately left alone.
+            deploy = deployable_usd(balance)
+            if deploy < MIN_TRADE_USD:
+                log.warning(
+                    f"[BTC-COMPOUND] MAX_DEPLOY_USD=${MAX_DEPLOY_USD:,.2f} is below the "
+                    f"${MIN_TRADE_USD:.2f} minimum trade size - no entry can ever be "
+                    f"placed. Raise it or the bot will sit idle with ${balance:,.2f} available."
+                )
+                return
+            if deploy < balance:
+                log.info(f"[BTC-COMPOUND] Deploying ${deploy:,.2f} of ${balance:,.2f} available "
+                         f"(cap ${MAX_DEPLOY_USD:,.2f}); ${balance - deploy:,.2f} held back as cash")
+
+            target_pct = max(pick_target_pct(atr_pct), min_profit_target_pct(deploy, atr_pct))
+            fill = await place_market_buy(session, deploy)
             if not fill:
                 log.warning("[BTC-COMPOUND] Buy did not fill - will retry next cycle")
                 return
@@ -1420,7 +1455,8 @@ async def run_cycle():
             stop_price = filled_price * (1 - STOP_LOSS_PCT)
             await save_position(filled_price, filled_qty, target_price, stop_price)
             log.info(
-                f"[BTC-COMPOUND] BOUGHT {filled_qty:.8f} BTC @ ${filled_price:,.2f} (${balance:.2f} deployed) | "
+                f"[BTC-COMPOUND] BOUGHT {filled_qty:.8f} BTC @ ${filled_price:,.2f} (${deploy:.2f} deployed"
+                f"{f' of ${balance:.2f}' if deploy < balance else ''}) | "
                 f"ATR volatility: {atr_pct*100:.2f}% -> target +{target_pct*100:.2f}% (${target_price:,.2f}, min ${pick_min_profit_usd(atr_pct):.2f} net) | "
                 f"stop -{STOP_LOSS_PCT*100:.2f}% (${stop_price:,.2f}) | floor ${equity_floor:,.2f}"
             )
