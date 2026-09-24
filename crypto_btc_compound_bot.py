@@ -217,6 +217,40 @@ def min_profit_target_pct(spend_usd: float, atr_pct: float) -> float:
 # make each individual trade risk-free.
 EQUITY_FLOOR_TIER = _safe_float_env("BTC_COMPOUND_EQUITY_FLOOR_TIER", "50")
 EQUITY_FLOOR_BASE = _safe_float_env("BTC_COMPOUND_EQUITY_FLOOR_BASE", "0")
+
+# A fixed $50 tier does not scale, and at a small account it strangles the
+# strategy it is meant to protect. On $582 the floor lands at $550, leaving
+# $32 of room - three stop-outs. Worse, two winning trades ratchet it to
+# $600 against equity of $602, leaving $2.31: the very next loss breaches
+# and halts the bot. The same $50 on a $10,000 account is 0.5% and barely
+# felt. The tier was sized for the larger account.
+#
+# So the floor never sits closer to equity than EQUITY_FLOOR_MIN_HEADROOM_PCT
+# of it. Below that the tier is widened proportionally, which keeps roughly
+# the same number of stop-outs of room at every account size instead of
+# tightening as the account grows. The ratchet is unchanged: it is still
+# computed from real equity and still only ever moves up.
+EQUITY_FLOOR_MIN_HEADROOM_PCT = _safe_float_env(
+    "BTC_COMPOUND_EQUITY_FLOOR_MIN_HEADROOM_PCT", "0.10")
+
+
+def compute_equity_floor(equity: float) -> float:
+    """Floor a fixed percentage below equity, rounded down to a tier.
+
+    Taking the headroom first and rounding second is what guarantees the
+    room actually exists. The old form rounded equity down to a $50 tier and
+    took whatever was left, which is zero whenever equity lands on a clean
+    multiple - at exactly $650, $1,000 or $10,000 the floor equalled equity
+    and the next tick of any size halted the bot.
+
+    Rounding to EQUITY_FLOOR_TIER afterwards keeps the floor a tidy number
+    to read in the logs, and only ever adds headroom, never removes it.
+    Returns a candidate; the caller still only ever raises the stored floor.
+    """
+    if equity <= 0:
+        return 0.0
+    target = equity * (1.0 - EQUITY_FLOOR_MIN_HEADROOM_PCT)
+    return max(0.0, math.floor(target / EQUITY_FLOOR_TIER) * EQUITY_FLOOR_TIER)
 EQUITY_FLOOR_STATE_KEY = "crypto_btc_compound_equity_floor"
 equity_floor = EQUITY_FLOOR_BASE
 
@@ -1342,7 +1376,7 @@ async def run_cycle():
             equity = balance + (position.qty * price if position is not None and price is not None else 0.0)
 
         if equity is not None and equity >= EQUITY_FLOOR_TIER:
-            candidate_floor = math.floor(equity / EQUITY_FLOOR_TIER) * EQUITY_FLOOR_TIER
+            candidate_floor = compute_equity_floor(equity)
             if candidate_floor > equity_floor:
                 equity_floor = candidate_floor
                 await save_equity_floor(equity_floor)
