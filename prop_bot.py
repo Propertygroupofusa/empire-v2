@@ -1281,10 +1281,18 @@ MIN_POSITION_NOTIONAL = _safe_float_env("PROP_MIN_POSITION_NOTIONAL", "50")  # R
 # This is still conservative (don't deploy 100%), but allows actual trading
 MIN_BUYING_POWER_BUFFER = _safe_float_env("PROP_MIN_BUYING_POWER_BUFFER", "150")
 
-# Maximum percentage of account equity that can be at risk in open positions
-# Lowered from 50% to 20% for micro-account safety - 50% risk-at-once was
-# sized for a much larger evaluation account, not a ~$1K live account.
-MAX_RISK_PERCENT = _safe_float_env("PROP_MAX_RISK_PERCENT", "0.20")  # 20% max
+# Maximum percentage of account equity that can be at risk in open positions.
+#
+# 2026-09-24: raised 20% -> 50% at the operator's instruction, to put idle
+# cash to work. This is the TOTAL budget shared with alpaca_swing_bot.py -
+# both bots trade the same real Alpaca account, and this check sums EVERY
+# open position, not just this bot's. Keep the two in step: the swing bot
+# reads this same PROP_MAX_RISK_PERCENT env var.
+#
+# It was lowered to 20% earlier for micro-account safety (50% risk-at-once
+# was sized for a much larger evaluation account, not a ~$1K live account),
+# so 50% is the aggressive end of the range this account has run at.
+MAX_RISK_PERCENT = _safe_float_env("PROP_MAX_RISK_PERCENT", "0.50")  # 50% max
 
 # Buying power threshold to STOP opening new positions (emergency brake)
 CRITICAL_BUYING_POWER_THRESHOLD = _safe_float_env("PROP_CRITICAL_BP_THRESHOLD", "100")
