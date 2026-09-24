@@ -123,6 +123,11 @@ INTRADAY_STOP_LOSS = 0.005      # -0.5% stop loss (tighter for day trades)
 DAILY_PROFIT_TARGET = 225.0     # $225/day target
 
 # ========== POSITION MANAGEMENT ==========
+# Identity in the closed_trades ledger. Distinct from prop_bot's
+# "prop_apex" because the governor judges THIS strategy on its own record;
+# pooling two strategies' trades would let one bankroll the other's slots.
+BOT_NAME = "alpaca_swing"
+
 ACCOUNT_SIZE = 980.0
 RISK_PER_TRADE_PCT = 0.015      # 1.5% risk = $14.70 per trade (for $980 account)
 MAX_CONCURRENT_SWING = 1         # Conservative: 1 swing position at a time for micro account
@@ -172,7 +177,152 @@ def _safe_float_env(name: str, default: float) -> float:
 # Env-configurable so it can be tuned from Railway without a code deploy.
 # 0 stops new intraday entries entirely while exits keep running, which is
 # a kill switch this previously had no way to express.
-MAX_CONCURRENT_INTRADAY = _safe_int_env("ALPACA_MAX_CONCURRENT_INTRADAY", 4)
+#
+# This is a CEILING, not the number of slots actually used. The governor
+# below decides how many of them this strategy's own live record has
+# earned, and the smaller of the two wins. Set to 2 rather than 4 because
+# 4 was chosen from "signals are being rejected" alone, which is an
+# argument for capacity, not for expectancy - and Alpaca's own records put
+# this account at profit factor 0.866 over 15 round trips. Under 1.00 the
+# governor allows one slot regardless of what is set here.
+INTRADAY_SLOT_CEILING = _safe_int_env("ALPACA_MAX_CONCURRENT_INTRADAY", 2)
+
+# --- Position governor -----------------------------------------------
+#
+# More positions is more exposure to whatever edge exists; it does not
+# create one. So slots are earned from realized results rather than
+# assumed, on this ladder:
+#
+#     profit factor < 1.00            -> 1 slot
+#     profit factor 1.00 .. 1.10      -> 2 slots
+#     profit factor >= 1.10           -> 3 slots
+#
+# Every rung additionally requires GOVERNOR_MIN_TRADES closed trades and a
+# realized drawdown inside GOVERNOR_MAX_DRAWDOWN_PCT. Fewer trades than
+# that is not a weak signal, it is no signal: profit factor over five
+# trades is noise, and acting on it is how a lucky streak becomes size.
+#
+# Fails CLOSED to one slot on an unreadable ledger, a database error, or
+# no history at all - the states where the strategy has proven nothing are
+# exactly the states where it should risk least.
+GOVERNOR_MIN_TRADES = _safe_int_env("ALPACA_GOVERNOR_MIN_TRADES", 20)
+GOVERNOR_MAX_DRAWDOWN_PCT = _safe_float_env("ALPACA_GOVERNOR_MAX_DD_PCT", 0.15)
+GOVERNOR_LADDER = ((1.10, 3), (1.00, 2))   # (profit factor at least, slots)
+GOVERNOR_FLOOR_SLOTS = 1
+
+
+def _governor_slots(pnls, equity: float) -> tuple:
+    """Slots earned by a sequence of realized P&Ls, and why.
+
+    Pure and synchronous so the ladder can be tested directly without a
+    database. `pnls` is oldest-first; order only matters for drawdown.
+
+    `equity` is what drawdown is measured against, and it has to be the
+    account rather than the cumulative-P&L peak. Measured against the P&L
+    curve's own peak, a $1.50 loss following a $1.00 win reads as a 150%
+    drawdown and the gate rejects every profitable strategy that has ever
+    given something back - caught in testing, where a PF 1.50 sequence was
+    refused for a "66.7% drawdown" that was $2 on a $980 account. What the
+    gate is meant to ask is how much of the ACCOUNT a losing streak cost.
+    """
+    n = len(pnls)
+    if n < GOVERNOR_MIN_TRADES:
+        return GOVERNOR_FLOOR_SLOTS, (
+            f"{n} closed trades, needs {GOVERNOR_MIN_TRADES} before more than "
+            f"{GOVERNOR_FLOOR_SLOTS} slot is earned")
+
+    wins = sum(p for p in pnls if p > 0)
+    losses = -sum(p for p in pnls if p < 0)
+    if losses <= 0:
+        # No losing trade yet. Profit factor is infinite, which reads as a
+        # spectacular edge and is really just a sample that has not met a
+        # loss - the exact artifact that made an earlier crypto sweep
+        # report PF=inf on 14 configs. Treated as unproven, not perfect.
+        return GOVERNOR_FLOOR_SLOTS, (
+            f"{n} closed trades with no losing trade - profit factor undefined, "
+            f"holding at {GOVERNOR_FLOOR_SLOTS}")
+    # Rounded before the comparison so a rung's boundary is decided by the
+    # number that gets logged, not by float representation. Unrounded, ten
+    # wins of 1.10 against ten losses of 1.00 sum to 10.999999999999998 and
+    # a strategy at exactly PF 1.10 is denied the 1.10 rung.
+    pf = round(wins / losses, 6)
+
+    # Realized drawdown: worst peak-to-trough of the cumulative P&L curve
+    # in DOLLARS, then expressed against the account. A profit factor above
+    # 1.0 reached through a losing streak that would have ended the account
+    # is not a passing grade.
+    cum = peak = 0.0
+    max_dd_usd = 0.0
+    for p in pnls:
+        cum += p
+        peak = max(peak, cum)
+        max_dd_usd = max(max_dd_usd, peak - cum)
+    max_dd = (max_dd_usd / equity) if equity > 0 else 1.0
+    if max_dd > GOVERNOR_MAX_DRAWDOWN_PCT:
+        return GOVERNOR_FLOOR_SLOTS, (
+            f"profit factor {pf:.3f} over {n} trades, but realized drawdown "
+            f"{max_dd:.1%} exceeds {GOVERNOR_MAX_DRAWDOWN_PCT:.0%}")
+
+    for min_pf, slots in GOVERNOR_LADDER:
+        if pf >= min_pf:
+            return slots, (f"profit factor {pf:.3f} over {n} trades, "
+                           f"drawdown {max_dd:.1%} - earned {slots} slots")
+    return GOVERNOR_FLOOR_SLOTS, (
+        f"profit factor {pf:.3f} over {n} trades is below 1.00 - "
+        f"strategy is not yet profitable, holding at {GOVERNOR_FLOOR_SLOTS}")
+
+
+async def _record_closed_trade(symbol, entry_price, exit_price, qty, pnl, pnl_pct, reason):
+    """Append one finished round trip to the closed_trades ledger.
+
+    Without this the governor above has nothing to read: closed_trades was
+    written only by prop_bot, so this strategy's own results existed
+    nowhere durable and its slot allowance could never rise above the
+    floor no matter how it performed.
+
+    exit_price is the quote the exit decision was made on, not a confirmed
+    fill, because place_order returns an accepted order rather than a
+    filled one. Slippage therefore lands in the recorded P&L. It moves
+    magnitude, rarely sign, which is what the profit-factor ladder turns
+    on - and the broker's own FIFO record (scripts/live_performance_report.py)
+    stays the authority for what actually happened. Approximate history the
+    governor can read beats exact history that is thrown away.
+
+    Never raises: a ledger write failing must not break the exit loop for
+    every other position. A dropped row costs one sample.
+    """
+    try:
+        from models import ClosedTrade
+        async with AsyncSessionLocal() as db:
+            db.add(ClosedTrade(
+                bot=BOT_NAME, symbol=symbol, side="long",
+                entry_price=entry_price, exit_price=exit_price, qty=qty,
+                pnl=pnl, pnl_pct=pnl_pct, exit_reason=reason,
+                closed_at=datetime.now(timezone.utc),
+            ))
+            await db.commit()
+        log.info(f"     📒 ledger: {symbol} ${pnl:+.2f} ({pnl_pct:+.2f}%) - {reason}")
+    except Exception as e:
+        log.warning(f"     ledger write failed for {symbol} ({type(e).__name__}: {e}) - "
+                    f"trade happened, sample lost")
+
+
+async def intraday_slots_allowed(equity: float) -> tuple:
+    """The governor's verdict, read from this bot's own realized trades."""
+    try:
+        from models import ClosedTrade
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(ClosedTrade.pnl)
+                .where(ClosedTrade.bot == BOT_NAME, ClosedTrade.pnl.isnot(None))
+                .order_by(ClosedTrade.closed_at.asc())
+            )
+            pnls = [float(r[0]) for r in result.all()]
+    except Exception as e:
+        log.warning(f"Governor could not read closed trades ({type(e).__name__}: {e}) - "
+                    f"holding at {GOVERNOR_FLOOR_SLOTS} slot")
+        return GOVERNOR_FLOOR_SLOTS, f"ledger unreadable: {type(e).__name__}"
+    return _governor_slots(pnls, equity)
 
 # Account-wide ceiling on TOTAL open notional, as a fraction of real equity.
 #
@@ -435,7 +585,14 @@ async def run_intraday_check():
             # Real positions are keyed by the real ticker (proxy), never
             # the internal SWING_SYMBOLS key - see PROXY_TO_KEY.
             intraday_count = sum(1 for s in open_positions.keys() if s in PROXY_TO_KEY)
-            slots = MAX_CONCURRENT_INTRADAY - intraday_count
+            # The ceiling is what is configured; the allowance is what the
+            # live record has earned. The smaller one applies, so raising
+            # the env var can never outvote a losing strategy.
+            earned, governor_reason = await intraday_slots_allowed(equity)
+            max_intraday = min(INTRADAY_SLOT_CEILING, earned)
+            log.info(f"🎛️  Governor: {governor_reason} | ceiling {INTRADAY_SLOT_CEILING} "
+                     f"-> {max_intraday} slot(s) in force")
+            slots = max_intraday - intraday_count
 
             # Real notional already committed across EVERY open position on
             # this account, this bot's and prop_bot's alike, since they draw
@@ -450,7 +607,7 @@ async def run_intraday_check():
             # MIN_EQUITY` guard above returns before this point otherwise.
             notional_budget = equity * MAX_TOTAL_NOTIONAL_PCT_OF_EQUITY
 
-            log.info(f"\n📈 Intraday positions: {intraday_count}/{MAX_CONCURRENT_INTRADAY}"
+            log.info(f"\n📈 Intraday positions: {intraday_count}/{max_intraday}"
                      f" | notional ${open_notional:,.2f} of ${notional_budget:,.2f} budget")
 
             for strength, symbol, config, rsi, price in intraday_setups[:slots]:
@@ -494,7 +651,7 @@ async def run_intraday_check():
                 # one position, same as one slot. Dividing the budget is
                 # the difference between a cap that is raised on paper and
                 # one that is raised in effect.
-                per_slot = notional_budget / max(1, MAX_CONCURRENT_INTRADAY)
+                per_slot = notional_budget / max(1, max_intraday)
                 max_notional = min(
                     equity * MAX_POSITION_PCT_OF_EQUITY,  # per-position ceiling
                     budget_room,                          # what is left overall
@@ -576,6 +733,12 @@ async def run_intraday_check():
                 order = await place_order(session, proxy, qty, "sell")
                 if order:
                     log.info(f"     Order: {order.get('id', 'N/A')}")
+                    await _record_closed_trade(
+                        symbol=proxy, entry_price=entry_price,
+                        exit_price=current_price, qty=qty,
+                        pnl=(current_price - entry_price) * qty,
+                        pnl_pct=pnl_pct, reason=reason,
+                    )
 
             await asyncio.sleep(0.3)
 
@@ -864,7 +1027,7 @@ def run():
     log.info(f"Stops: HARD STOP-LOSS ENABLED ({STOP_LOSS_PCT*100:.1f}%)")
     log.info(f"")
     log.info(f"SWING: RSI < {WEEKLY_RSI_BUY} entry, max {MAX_CONCURRENT_SWING} positions, {STOP_LOSS_PCT*100:.1f}% hard stop")
-    log.info(f"DAY: RSI < {INTRADAY_RSI_BUY} intraday entry, max {MAX_CONCURRENT_INTRADAY} positions, {INTRADAY_STOP_LOSS*100:.1f}% hard stop")
+    log.info(f"DAY: RSI < {INTRADAY_RSI_BUY} intraday entry, max {INTRADAY_SLOT_CEILING} positions (governor may lower), {INTRADAY_STOP_LOSS*100:.1f}% hard stop")
     log.info("=" * 70)
 
     # One persistent event loop for this thread's entire life, not a fresh
