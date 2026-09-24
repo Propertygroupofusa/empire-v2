@@ -126,7 +126,70 @@ DAILY_PROFIT_TARGET = 225.0     # $225/day target
 ACCOUNT_SIZE = 980.0
 RISK_PER_TRADE_PCT = 0.015      # 1.5% risk = $14.70 per trade (for $980 account)
 MAX_CONCURRENT_SWING = 1         # Conservative: 1 swing position at a time for micro account
-MAX_CONCURRENT_INTRADAY = 1      # Conservative: 1 intraday position at a time for micro account
+
+
+def _safe_int_env(name: str, default: int) -> int:
+    """Non-negative int from the environment, or the default on anything else."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(float(raw.strip()))
+    except (TypeError, ValueError):
+        log.warning("%s=%r is not a number - using %d", name, raw, default)
+        return default
+    if value < 0:
+        log.warning("%s=%r is negative - using %d", name, raw, default)
+        return default
+    return value
+
+
+def _safe_float_env(name: str, default: float) -> float:
+    """Positive float from the environment, or the default on anything else."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw.strip())
+    except (TypeError, ValueError):
+        log.warning("%s=%r is not a number - using %s", name, raw, default)
+        return default
+    if value <= 0:
+        log.warning("%s=%r is not positive - using %s", name, raw, default)
+        return default
+    return value
+
+
+# How many intraday positions may be open at once.
+#
+# Was a hardcoded 1. Confirmed live 2026-09-24: the scan found real setups
+# it then had to discard - "INTRADAY SETUP: SH oversold (RSI 28.6)" and
+# "PSQ oversold (RSI 34.8)" logged in the same session as "Intraday
+# positions: 1/1" - while only $69.90 of a $201.18 account-wide risk
+# budget was deployed. The cap, not the signal and not the profit target,
+# is what stopped those entries.
+#
+# Env-configurable so it can be tuned from Railway without a code deploy.
+# 0 stops new intraday entries entirely while exits keep running, which is
+# a kill switch this previously had no way to express.
+MAX_CONCURRENT_INTRADAY = _safe_int_env("ALPACA_MAX_CONCURRENT_INTRADAY", 4)
+
+# Account-wide ceiling on TOTAL open notional, as a fraction of real equity.
+#
+# This is what makes raising the slot count safe, and it has to exist
+# before that cap moves. MAX_POSITION_PCT_OF_EQUITY below bounds each
+# position on its own at 20%; at one slot those were the same number, so
+# the per-position ceiling doubled as the portfolio ceiling by accident.
+# At four slots it does not - four positions each individually "within"
+# 20% come to 80% of the account.
+#
+# Matches prop_bot.MAX_RISK_PERCENT because both bots trade the SAME real
+# Alpaca account, and that is the budget its check_margin_safety()
+# enforces. Summed over EVERY open position rather than just this bot's,
+# since prop_bot's positions spend the same budget - the 2026-09-05 GLD
+# incident recorded below is this same conflict seen from the other side.
+MAX_TOTAL_NOTIONAL_PCT_OF_EQUITY = _safe_float_env("ALPACA_MAX_TOTAL_NOTIONAL_PCT", 0.20)
+
 MIN_EQUITY = 500.0               # Allow trading down to $500 (survival level on micro account)
 
 # Position sizing for $980 account
@@ -374,7 +437,21 @@ async def run_intraday_check():
             intraday_count = sum(1 for s in open_positions.keys() if s in PROXY_TO_KEY)
             slots = MAX_CONCURRENT_INTRADAY - intraday_count
 
-            log.info(f"\n📈 Intraday positions: {intraday_count}/{MAX_CONCURRENT_INTRADAY}")
+            # Real notional already committed across EVERY open position on
+            # this account, this bot's and prop_bot's alike, since they draw
+            # on one shared budget. Tracked as a running total through the
+            # loop below: without it each entry would be measured against an
+            # empty account and the slots would collectively overspend by
+            # exactly the factor they were raised.
+            open_notional = sum(
+                abs(float(p.get("market_value") or 0)) for p in open_positions.values()
+            )
+            # equity is a positive float here - the `not equity or equity <
+            # MIN_EQUITY` guard above returns before this point otherwise.
+            notional_budget = equity * MAX_TOTAL_NOTIONAL_PCT_OF_EQUITY
+
+            log.info(f"\n📈 Intraday positions: {intraday_count}/{MAX_CONCURRENT_INTRADAY}"
+                     f" | notional ${open_notional:,.2f} of ${notional_budget:,.2f} budget")
 
             for strength, symbol, config, rsi, price in intraday_setups[:slots]:
                 proxy = config["proxy"]
@@ -396,8 +473,33 @@ async def run_intraday_check():
                 # Risk-based sizing alone is unbounded in NOTIONAL terms: a
                 # 0.5% stop turns $14.70 of risk into a ~$2,900 position,
                 # which is nearly 3x this whole account. Clamp to the same
-                # account-wide ceiling the swing path uses.
-                max_notional = equity * MAX_POSITION_PCT_OF_EQUITY
+                # account-wide ceiling the swing path uses - and to whatever
+                # is left of the shared budget, whichever binds first. The
+                # second clamp is the one that keeps N slots from spending
+                # N times the account's total risk allowance.
+                budget_room = notional_budget - open_notional
+                if budget_room <= 0:
+                    log.info(
+                        f"  ⏭️  {symbol} ({proxy}) intraday skipped: account-wide notional "
+                        f"${open_notional:,.2f} already at the ${notional_budget:,.2f} budget "
+                        f"({MAX_TOTAL_NOTIONAL_PCT_OF_EQUITY:.0%} of ${equity:,.2f} equity)"
+                    )
+                    break
+                # Each slot gets its own share of the budget, and this is
+                # what makes raising the slot count mean anything. Measured
+                # before it was added: risk-based sizing turns $14.70 of
+                # risk at a 0.5% stop into ~$198 of notional, so the FIRST
+                # entry took 98% of a $201 budget and every later slot was
+                # skipped for lack of room - four slots produced exactly
+                # one position, same as one slot. Dividing the budget is
+                # the difference between a cap that is raised on paper and
+                # one that is raised in effect.
+                per_slot = notional_budget / max(1, MAX_CONCURRENT_INTRADAY)
+                max_notional = min(
+                    equity * MAX_POSITION_PCT_OF_EQUITY,  # per-position ceiling
+                    budget_room,                          # what is left overall
+                    per_slot,                             # this slot's share
+                )
                 risk_qty = int(RISK_PER_TRADE / stop_distance)
                 qty = min(risk_qty, int(max_notional / price))
                 notional = qty * price
@@ -421,7 +523,18 @@ async def run_intraday_check():
 
                 order = await place_order(session, proxy, qty, "buy")
                 if order and order.get("id"):
-                    log.info(f"     ✅ Order confirmed: {order.get('id')}")
+                    # Charge it against the shared budget straight away.
+                    # open_positions was read once before this loop, so a
+                    # position opened on this pass is invisible there - only
+                    # this running total stops the next iteration sizing
+                    # itself as though the account were still empty.
+                    # Deliberately on accepted rather than filled: an
+                    # accepted order can still fill, and briefly
+                    # over-reserving the budget costs one skipped entry,
+                    # while under-reserving it overspends real money.
+                    open_notional += notional
+                    log.info(f"     ✅ Order confirmed: {order.get('id')} | "
+                             f"notional now ${open_notional:,.2f} of ${notional_budget:,.2f}")
                 else:
                     log.error(f"     ❌ Order FAILED")
 
