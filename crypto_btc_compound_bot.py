@@ -136,13 +136,18 @@ def deployable_usd(balance: float) -> float:
 # losing trade. It does not make the account profitable - nothing does -
 # it only stops profit that was genuinely made from being re-risked.
 #
-# Default 0.0, matching crypto_family_tree_bot.PROFIT_SKIM_PCT, which was
-# set to 0.0 on the account owner's explicit instruction: "take away the
-# lock profit, I don't want that anymore for any of my stuff, I want all
-# my money to be making money." The mechanism is built and real; enabling
-# it is a deliberate choice via BTC_COMPOUND_PROFIT_SKIM_PCT, not a
-# default that silently reverses that instruction.
-PROFIT_SKIM_PCT = _safe_float_env("BTC_COMPOUND_PROFIT_SKIM_PCT", "0.0")
+# Default 10%, set on the account owner's explicit instruction ("set the
+# skim to 10%"), given after the request that realized profit must stop
+# being handed back by later losing trades.
+#
+# This deliberately reverses an earlier instruction from the same owner,
+# recorded at crypto_family_tree_bot.PROFIT_SKIM_PCT: "take away the lock
+# profit, I don't want that anymore for any of my stuff, I want all my
+# money to be making money." That one still governs the family tree, which
+# remains at 0.0 and is untouched here. Only this bot skims. The two
+# settings disagreeing is intentional, not drift - if the tree should skim
+# too, TREE_PROFIT_SKIM_PCT is its own switch.
+PROFIT_SKIM_PCT = _safe_float_env("BTC_COMPOUND_PROFIT_SKIM_PCT", "0.10")
 LOCKED_PROFIT_STATE_KEY = "crypto_btc_compound_locked_usd"
 
 
