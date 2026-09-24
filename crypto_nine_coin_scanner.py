@@ -68,11 +68,17 @@ except Exception:  # pragma: no cover - import shape varies by entrypoint
         "XRP-USD", "LINK-USD", "AVAX-USD", "DOT-USD",
     ]
 
-# Real observed tier for this account, not the code's stale 0.6% default:
-# taker 0.40% and maker 0.25% PER SIDE, measured 2026-08-01. Round trips,
-# because a position costs a fee going in and another coming out.
-DEFAULT_TAKER_ROUND_TRIP = 0.008
-DEFAULT_MAKER_ROUND_TRIP = 0.005
+# This account's real tier, as the live dashboard reads it back from
+# Coinbase: 1.00% round trip on market orders, with branch spacing floored
+# at 1.20% - "the smallest move that can actually clear that fee".
+#
+# Corrected from 0.008/0.005, which came from a 2026-08-01 measurement of
+# 0.40%/0.25% per side. Those were 20bp optimistic on every break-even
+# figure derived from them. A cost model that flatters itself turns
+# refusals into approvals, which is the one direction this file must never
+# err in - so it tracks the number the account actually pays.
+DEFAULT_TAKER_ROUND_TRIP = 0.010
+DEFAULT_MAKER_ROUND_TRIP = 0.006
 
 # Charged on entry AND exit. Market orders cross the spread both ways; this
 # is the cost the backtests omit and the live-vs-backtest gap is made of.
