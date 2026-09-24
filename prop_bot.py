@@ -1426,6 +1426,44 @@ async def broadcast_signal_to_subscribers(session, contract, action, price, rsi,
         return False
 
 
+def format_order_qty(qty):
+    """Alpaca-safe quantity string. Returns (qty_str, is_fractional).
+
+    Returns (None, False) for anything unusable, so a caller never posts a
+    quantity the API will reject or, worse, misread.
+
+    Three things str(qty) gets wrong on this account's real numbers:
+
+      * Scientific notation. str(1e-05) is "1e-05", which Alpaca rejects.
+        Dollar-based sizing on a high-priced ticker produces exactly this.
+      * Excess precision. Fractional equity quantities are limited to 9
+        decimal places; a float like 12.3456789012 is over it.
+      * Whole numbers wearing a decimal point. str(3.0) is "3.0", which
+        reads as fractional and therefore drags the DAY-only restriction
+        onto an order that did not need it.
+
+    is_fractional is derived from the SAME normalised value that gets
+    sent, deliberately. Deciding time-in-force from the raw float while
+    sending a rounded string is how the two drift apart and the rejection
+    comes back.
+    """
+    try:
+        value = float(qty)
+    except (TypeError, ValueError):
+        return None, False
+    if value <= 0 or value != value or value in (float("inf"), float("-inf")):
+        return None, False
+
+    # 9 dp is Alpaca's limit for fractional equities.
+    rounded = round(value, 9)
+    if rounded <= 0:
+        return None, False
+    if rounded == int(rounded):
+        return str(int(rounded)), False
+    # Fixed-point, never scientific, with trailing zeros trimmed.
+    return f"{rounded:.9f}".rstrip("0").rstrip("."), True
+
+
 async def execute_futures_trade(session, contract, action, qty, price, rsi, trend, stop_loss=None, target=None):
     """Place a real order via Alpaca. `action` is the literal order side
     ("BUY" or "SELL") - what that *means* (open a long, open a short, close
@@ -1438,13 +1476,39 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
     symbol = FUTURES[contract]["symbol"]
     side = "buy" if action == "BUY" else "sell"
 
-    # Use GTC (Good Till Canceled) for profit-taking sells to let orders persist until profit target hits
-    # Use DAY for entry buys to avoid holding stale orders overnight
-    time_in_force = "gtc" if action == "SELL" else "day"
+    qty_str, is_fractional = format_order_qty(qty)
+    if qty_str is None:
+        log.error(f"❌ Refusing to order {qty!r} of {contract} ({symbol}) - not a usable "
+                  f"quantity. No order was placed.")
+        return False
+
+    # DAY, always.
+    #
+    # This line used to read `"gtc" if action == "SELL" else "day"`, and
+    # it broke every exit this bot tried to make. Alpaca rejects a
+    # FRACTIONAL quantity with anything but DAY - "fractional orders must
+    # be DAY orders" - and this bot sizes positions in dollars, so its
+    # quantities are fractional nearly always. Every SELL therefore
+    # failed: target exits, stop exits and max-hold exits alike, retried
+    # forever, which is what the RECOVERY loop detector was reacting to.
+    # Confirmed live on 2026-09-24: "SH: Max hold time exceeded: 90505s
+    # >= 86400s" followed immediately by the rejection, leaving a position
+    # open more than a day past its own exit rule.
+    #
+    # The GTC it replaced was justified as letting a sell "persist until
+    # profit target hits", which a MARKET order does not do - a market
+    # order executes at the next opportunity regardless of
+    # time-in-force. So nothing is lost by dropping it, and DAY is what
+    # every other live Alpaca path in this repo already sends.
+    #
+    # is_fractional is unused in the decision now, and kept because it
+    # makes the constraint visible: any future limit or GTC path here has
+    # to reckon with it rather than rediscover it in production.
+    time_in_force = "day"
 
     order = {
         "symbol": symbol,
-        "qty": str(qty),
+        "qty": qty_str,
         "side": side,
         "type": "market",
         "time_in_force": time_in_force,
@@ -1460,7 +1524,17 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
                 await broadcast_signal_to_subscribers(session, contract, action, price, rsi, trend, stop_loss, target)
                 return True
             else:
-                log.error(f"❌ Futures order failed: {result.get('message', result)}")
+                # Name the order alongside the rejection. The bare message
+                # on its own ("fractional orders must be DAY orders") gave
+                # no way to tell WHICH order, which side, or what quantity
+                # provoked it, and that rejection sat in the logs for over
+                # a day next to an exit that never happened.
+                log.error(
+                    f"❌ Futures order REJECTED (HTTP {r.status}): "
+                    f"{result.get('message', result)} | {action} {qty_str} {contract} "
+                    f"({symbol}) type=market tif={time_in_force} "
+                    f"fractional={is_fractional} | nothing was filled"
+                )
                 return False
     except Exception as e:
         log.error(f"Futures trade error: {e}")
