@@ -6860,6 +6860,111 @@ async def _live_ops_runner():
     }
 
 
+@router.get("/live-ops/metrics")
+async def get_fleet_metrics(window_days: float = 1.0):
+    """Per-branch and fleet-wide measurement, for judging the 2.5% config.
+
+    Deliberately separate from /live-ops: that page answers "is it
+    working", this one answers "is it worth keeping". It is heavier (a
+    live price and volatility read per branch) so it is not on the 10s
+    refresh.
+
+    Reports NET P&L, CAPITAL VELOCITY and per-branch edge together,
+    because any one alone misleads. Utilization can read 85% while
+    velocity reads 0.00, which means every dollar is committed and none of
+    it is moving - the exact state a fleet sits in when the grid step is
+    too wide for the coins it holds.
+
+    Metrics this repo cannot compute are listed under `not_captured` with
+    the reason, rather than estimated. Slippage in particular needs the
+    expected price at order time stored next to the fill, and only the
+    fill is stored.
+    """
+    import crypto_fleet_metrics as metrics
+    from models import CryptoGridTradeHistory, CryptoActivityEvent
+
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    engine = crypto_grid_bot_module.engine
+
+    grid = await crypto_grid_bot_module.get_grid_status()
+    branches = grid.get("branches") or []
+
+    window_days = max(0.01, float(window_days))
+    since = datetime.utcnow() - timedelta(days=window_days)
+
+    async with get_session_factory()() as db:
+        rows = (await db.execute(
+            select(CryptoGridTradeHistory).where(CryptoGridTradeHistory.closed_at >= since)
+        )).scalars().all()
+        trades = [{"product_id": r.product_id, "entry_price": r.entry_price,
+                   "exit_price": r.exit_price, "qty": r.qty, "pnl": r.pnl,
+                   "opened_at": r.opened_at, "closed_at": r.closed_at} for r in rows]
+
+        # Each branch's most recent gate verdict, so the reason a coin is
+        # not trading sits on the same row as the coin.
+        gate_by_product = {}
+        gate_rows = (await db.execute(
+            select(CryptoActivityEvent)
+            .where(CryptoActivityEvent.event_type.in_(LIVE_OPS_GATE_EVENTS))
+            .order_by(CryptoActivityEvent.created_at.desc()).limit(200)
+        )).scalars().all()
+        for ev in gate_rows:
+            gate_by_product.setdefault(ev.product_id, ev.to_dict())
+
+        tally = {k: v for k, v in (await db.execute(
+            select(CryptoActivityEvent.event_type, func.count())
+            .where(CryptoActivityEvent.event_type.in_(LIVE_OPS_GATE_EVENTS))
+            .where(CryptoActivityEvent.created_at >= since)
+            .group_by(CryptoActivityEvent.event_type))).all()}
+
+    realized_by_product = {}
+    for t in trades:
+        slot = realized_by_product.setdefault(t["product_id"], {"total_pnl": 0.0, "trade_count": 0})
+        slot["total_pnl"] += t["pnl"] or 0.0
+        slot["trade_count"] += 1
+
+    # The live fee tier the account really pays - the largest single term
+    # in every edge figure below, so a stale default would skew all of them.
+    fee_round_trip = 0.010
+    try:
+        async with engine.aiohttp.ClientSession() as session:
+            _m, taker, _t, _e = await engine.get_real_fee_tier(session)
+            if taker:
+                fee_round_trip = taker * 2
+            rows_out = []
+            for b in branches:
+                swing = None
+                try:
+                    swing = await engine.get_average_hourly_swing_pct(session, b["product_id"])
+                except Exception:
+                    swing = None
+                rows_out.append(metrics.branch_row(
+                    b, swing_pct=swing, gate=gate_by_product.get(b["product_id"]),
+                    fee_round_trip=fee_round_trip,
+                    realized=realized_by_product.get(b["product_id"])))
+    except Exception as e:
+        # A venue failure must not blank the measurement - the P&L half is
+        # read from the database and does not need the network at all.
+        rows_out = [metrics.branch_row(b, gate=gate_by_product.get(b["product_id"]),
+                                       fee_round_trip=fee_round_trip,
+                                       realized=realized_by_product.get(b["product_id"]))
+                    for b in branches]
+        log.warning(f"[dashboard] fleet metrics: live edge inputs unavailable ({e})")
+
+    stats = metrics.round_trip_stats(trades)
+    deployed = grid.get("total_allocated_usd")
+    free_cash = grid.get("real_free_cash_usd")
+    equity = (None if deployed is None or free_cash is None else deployed + free_cash)
+    capital = metrics.capital_stats(equity, free_cash, deployed, stats, window_days)
+
+    report = metrics.fleet_report(rows_out, stats, capital, tally)
+    report["fee_round_trip_pct"] = round(fee_round_trip * 100, 3)
+    report["window_days"] = window_days
+    report["served_at"] = datetime.utcnow().isoformat() + "Z"
+    return report
+
+
 @router.get("/live-ops")
 async def get_live_ops():
     """Everything needed to see the system working, in one poll.

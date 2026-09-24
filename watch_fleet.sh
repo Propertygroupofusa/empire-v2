@@ -146,6 +146,27 @@ else:
         print(f"  {D}no decisions recorded yet - one is written every time a coin{R}")
         print(f"  {D}dips far enough for the gate to rule on it{R}")
 
+# ---- measurement --------------------------------------------------------
+mt = d.get("_metrics") or {}
+if mt:
+    pnl = mt.get("pnl") or {}
+    cap = mt.get("capital") or {}
+    print()
+    print(f"{B}MEASURED{R}  {D}last {mt.get('window_days')}d · fee {mt.get('fee_round_trip_pct')}% round trip{R}")
+    print(f"  gross {signed(pnl.get('gross_pnl'))}   fees {signed(-(pnl.get('fees') or 0)) if pnl.get('fees') is not None else money(None)}"
+          f"   net {signed(pnl.get('net_pnl'))}")
+    pf = pnl.get("profit_factor")
+    pf_s = f"{pf:.2f}" if pf is not None else f"{D}undefined{R}"
+    print(f"  round trips {pnl.get('round_trips')}   win {pnl.get('win_rate_pct') if pnl.get('win_rate_pct') is not None else '--'}%"
+          f"   profit factor {pf_s}   avg/trade {signed(pnl.get('avg_net_per_trade'))}")
+    print(f"  utilization {cap.get('utilization_pct') if cap.get('utilization_pct') is not None else '--'}%"
+          f"   velocity {cap.get('velocity_per_day') if cap.get('velocity_per_day') is not None else '--'}x/day"
+          f"   {D}{cap.get('reading','')}{R}")
+    if pnl.get("note"):
+        print(f"  {YEL}{pnl['note']}{R}")
+    if pnl.get("profit_factor_note"):
+        print(f"  {D}profit factor {pnl['profit_factor_note']}{R}")
+
 # ---- cash ceilings ------------------------------------------------------
 ok, ca, err = sec("cash")
 if ok and ca:
@@ -164,6 +185,21 @@ trap 'printf "\033[?25h"; rm -rf "$STATE_DIR"; printf "\n"; exit 0' INT TERM
 while true; do
   body_file="$STATE_DIR/body.json"
   if curl -sS --max-time 25 -o "$body_file" "$URL" 2>"$STATE_DIR/err"; then
+    # The measurement endpoint reads a live price per branch, so it is
+    # fetched on a slower beat than the status view and merged in. A
+    # failure here costs the MEASURED block, never the whole screen.
+    if curl -sS --max-time 30 -o "$STATE_DIR/metrics.json" \
+         "$BASE/api/trading-dashboard/live-ops/metrics?window_days=1" 2>/dev/null; then
+      python3 - "$body_file" "$STATE_DIR/metrics.json" <<'MERGE' 2>/dev/null || true
+import json, sys
+try:
+    body = json.load(open(sys.argv[1])); m = json.load(open(sys.argv[2]))
+    body["_metrics"] = m
+    json.dump(body, open(sys.argv[1], "w"))
+except Exception:
+    pass
+MERGE
+    fi
     clear
     render "$body_file"
   else
