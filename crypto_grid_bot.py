@@ -2493,7 +2493,8 @@ async def get_grid_slices(bot_name: str) -> list:
         return list(result.scalars().all())
 
 
-async def _log_grid_trade(bot_name, product_id, entry_price, exit_price, qty, pnl, opened_at):
+async def _log_grid_trade(bot_name, product_id, entry_price, exit_price, qty, pnl, opened_at,
+                          entry_expected_price=None, exit_expected_price=None):
     """Real, persisted record of one completed real grid-slice round
     trip. Best-effort, deliberately never allowed to raise - a logging
     failure here must never affect the real trade or the real
@@ -2505,6 +2506,8 @@ async def _log_grid_trade(bot_name, product_id, entry_price, exit_price, qty, pn
             db.add(CryptoGridTradeHistory(
                 bot_name=bot_name, product_id=product_id, entry_price=entry_price,
                 exit_price=exit_price, qty=qty, pnl=round(pnl, 2), opened_at=opened_at,
+                entry_expected_price=entry_expected_price,
+                exit_expected_price=exit_expected_price,
             ))
             await db.commit()
     except Exception as e:
@@ -3027,7 +3030,14 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
 
         fill = await grid_buy(session, spend, branch.product_id)
         if not fill:
+            reason = engine._last_order_error.get(branch.product_id, "no reason reported")
             log.warning(f"[GRID] {branch.bot_name}: real grid buy into {branch.product_id} did not fill - will retry next cycle")
+            # Durable, so rejections can be COUNTED. They were only ever
+            # logged before, which meant "orders rejected" could not be
+            # reported at all and an execution problem could hide behind a
+            # normal-looking gate pass rate.
+            await _record_gate_decision(branch.bot_name, branch.product_id, "ORDER_REJECTED",
+                                        f"buy ${spend:,.2f} did not fill - {reason}")
             return
         filled_qty, filled_price, buy_leg_fee = fill
 
@@ -3050,7 +3060,14 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
             # taker), so this slice can be priced honestly when it later sells.
             db.add(CryptoGridSlice(bot_name=branch.bot_name, product_id=branch.product_id,
                                    entry_price=filled_price, qty=filled_qty,
-                                   entry_fee_rate=buy_leg_fee))
+                                   entry_fee_rate=buy_leg_fee,
+                                   # `price` is the live price this cycle read
+                                   # BEFORE deciding to buy - what the bot
+                                   # believed it would pay. Stored beside what
+                                   # it actually paid so the gap is measurable
+                                   # later; it cannot be recovered from the
+                                   # fill alone.
+                                   entry_expected_price=price))
             result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
             fresh = result.scalar_one_or_none()
             if fresh:
@@ -3138,7 +3155,10 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                 fresh.reference_price = filled_price
                 new_balance = fresh.allocated_usd
             await db.commit()
-        await _log_grid_trade(branch.bot_name, branch.product_id, oldest.entry_price, filled_price, filled_qty, pnl, oldest.opened_at)
+        await _log_grid_trade(branch.bot_name, branch.product_id, oldest.entry_price,
+                              filled_price, filled_qty, pnl, oldest.opened_at,
+                              entry_expected_price=oldest.entry_expected_price,
+                              exit_expected_price=price)
         is_true_oldest = slices[0].id == oldest.id
         msg = (
             f"{'📈' if pnl >= 0 else '📉'} {branch.bot_name} GRID SELL: sold "

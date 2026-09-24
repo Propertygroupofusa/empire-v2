@@ -162,6 +162,25 @@ if mt:
     print(f"  utilization {cap.get('utilization_pct') if cap.get('utilization_pct') is not None else '--'}%"
           f"   velocity {cap.get('velocity_per_day') if cap.get('velocity_per_day') is not None else '--'}x/day"
           f"   {D}{cap.get('reading','')}{R}")
+    dd = mt.get("drawdown") or {}
+    sl = mt.get("slippage") or {}
+    od = mt.get("orders") or {}
+    if dd.get("max_drawdown_usd") is not None:
+        pct = dd.get("max_drawdown_pct_of_equity")
+        print(f"  worst drawdown {signed(-dd['max_drawdown_usd'])}"
+              + (f" ({pct:.2f}% of equity)" if pct is not None else "")
+              + f"   worst trade {signed(dd.get('worst_trade_usd'))}"
+              + f"   {D}losing streak {dd.get('longest_losing_streak')}{R}")
+    if sl.get("total_slippage_usd") is not None:
+        print(f"  slippage {signed(sl['total_slippage_usd'])} over "
+              f"{sl.get('measured_round_trips')} measured"
+              + (f" {D}({sl['unmeasurable_round_trips']} too old to measure){R}"
+                 if sl.get("unmeasurable_round_trips") else ""))
+    if od:
+        fr = od.get("fill_rate_pct")
+        print(f"  orders {od.get('submitted')} submitted · {od.get('filled')} filled · "
+              f"{RED if od.get('rejected') else D}{od.get('rejected')} rejected{R}"
+              + (f"   fill rate {fr:.0f}%" if fr is not None else ""))
     if pnl.get("note"):
         print(f"  {YEL}{pnl['note']}{R}")
     if pnl.get("profit_factor_note"):

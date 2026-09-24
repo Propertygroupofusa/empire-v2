@@ -50,10 +50,6 @@ from datetime import datetime, timedelta
 MIN_TRADES_FOR_CONFIDENCE = 30
 
 NOT_CAPTURED = {
-    "slippage_usd": "not captured - needs the expected price at order time, only the fill is stored",
-    "orders_submitted": "not captured - submissions are logged but never counted",
-    "orders_rejected": "not captured - rejections are logged but never counted",
-    "orders_filled": "not captured - see orders_submitted",
     "time_to_fill_seconds": "not meaningful for market orders; they fill on submission",
 }
 
@@ -118,6 +114,115 @@ def round_trip_stats(trades):
         "note": (None if n >= MIN_TRADES_FOR_CONFIDENCE else
                  f"{n} round trip(s) is too few to separate edge from luck - "
                  f"{MIN_TRADES_FOR_CONFIDENCE} is the point where these figures start to mean something."),
+    }
+
+
+def slippage_stats(trades):
+    """How far fills landed from the price the bot decided on.
+
+    Slippage here is fill minus decision price, signed so that NEGATIVE is
+    money lost: paying above the price that triggered the buy, or selling
+    below the price that triggered the sell. It therefore includes half the
+    spread and any movement between the decision and the fill, which is
+    what actually costs the account - not the narrower "vs the touch"
+    definition an exchange would use. Named precisely so it is not read as
+    pure execution slippage.
+
+    Rows from before the decision price was recorded are counted as
+    unmeasurable rather than dropped silently, so the coverage is visible
+    and a small measured sample cannot masquerade as the whole picture.
+    """
+    measured, unmeasurable = [], 0
+    for t in trades or []:
+        try:
+            qty = float(t["qty"])
+            entry_exp, exit_exp = t.get("entry_expected_price"), t.get("exit_expected_price")
+            if entry_exp is None or exit_exp is None:
+                unmeasurable += 1
+                continue
+            entry, exit_ = float(t["entry_price"]), float(t["exit_price"])
+            # Buying above the decision price costs; selling below it costs.
+            measured.append({
+                "entry_usd": -(entry - float(entry_exp)) * qty,
+                "exit_usd": (exit_ - float(exit_exp)) * qty,
+                "notional": float(entry_exp) * qty,
+            })
+        except (KeyError, TypeError, ValueError):
+            unmeasurable += 1
+
+    n = len(measured)
+    if n == 0:
+        return {"measured_round_trips": 0, "unmeasurable_round_trips": unmeasurable,
+                "entry_slippage_usd": None, "exit_slippage_usd": None,
+                "total_slippage_usd": None, "slippage_pct_of_notional": None,
+                "note": ("No round trip carries a decision price yet. Slippage becomes "
+                         "measurable from the first trip opened after this shipped.")}
+
+    entry_sum = sum(m["entry_usd"] for m in measured)
+    exit_sum = sum(m["exit_usd"] for m in measured)
+    notional = sum(m["notional"] for m in measured)
+    total = entry_sum + exit_sum
+    return {
+        "measured_round_trips": n,
+        "unmeasurable_round_trips": unmeasurable,
+        "entry_slippage_usd": round(entry_sum, 4),
+        "exit_slippage_usd": round(exit_sum, 4),
+        "total_slippage_usd": round(total, 4),
+        "avg_slippage_per_trade_usd": round(total / n, 4),
+        "slippage_pct_of_notional": (None if not notional else round(total / notional * 100, 4)),
+        "note": (None if unmeasurable == 0 else
+                 f"{unmeasurable} older round trip(s) predate the decision price and are "
+                 f"excluded rather than guessed."),
+    }
+
+
+def drawdown_stats(trades, equity_usd=None):
+    """The risk leg: how far the realized curve fell from its own peak.
+
+    Measured in DOLLARS first, and as a percentage OF EQUITY, never as a
+    percentage of cumulative P&L. That distinction is not pedantic - a
+    $1.50 loss after a $1.00 win is a 150% drawdown of cumulative P&L and
+    a 0.25% drawdown of a $600 account, and the first framing has already
+    caused a profitable configuration to be refused in this codebase.
+
+    Trades are ordered by close time, because a drawdown computed over an
+    arbitrary ordering is not a drawdown of anything.
+    """
+    rows = []
+    for t in trades or []:
+        try:
+            rows.append((t.get("closed_at"), float(t["pnl"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    rows.sort(key=lambda r: (r[0] is None, str(r[0])))
+
+    if not rows:
+        return {"max_drawdown_usd": None, "max_drawdown_pct_of_equity": None,
+                "current_drawdown_usd": None, "worst_trade_usd": None,
+                "longest_losing_streak": 0,
+                "note": "No closed round trips, so there is no realized curve to draw down."}
+
+    cum = peak = 0.0
+    max_dd = cur_dd = 0.0
+    streak = worst_streak = 0
+    for _, pnl in rows:
+        cum += pnl
+        peak = max(peak, cum)
+        cur_dd = peak - cum
+        max_dd = max(max_dd, cur_dd)
+        streak = streak + 1 if pnl < 0 else 0
+        worst_streak = max(worst_streak, streak)
+
+    return {
+        "max_drawdown_usd": round(max_dd, 4),
+        "max_drawdown_pct_of_equity": (None if not equity_usd else round(max_dd / equity_usd * 100, 3)),
+        "current_drawdown_usd": round(cur_dd, 4),
+        "worst_trade_usd": round(min(p for _, p in rows), 4),
+        "longest_losing_streak": worst_streak,
+        "equity_usd": _round(equity_usd),
+        "note": (None if equity_usd else
+                 "Equity unavailable, so drawdown is shown in dollars only - a percentage "
+                 "without the account behind it is the misleading version."),
     }
 
 
@@ -222,11 +327,19 @@ def branch_row(branch, swing_pct=None, gate=None, live_price=None, fee_round_tri
     }
 
 
-def fleet_report(branch_rows, stats, capital, gate_tally):
-    """The aggregate, with the uncapturable fields named rather than faked."""
+def fleet_report(branch_rows, stats, capital, gate_tally, slippage=None, drawdown=None,
+                 orders=None):
+    """The aggregate: P&L, velocity and RISK together, plus execution quality.
+
+    All three legs, because the first two alone flatter a system that is
+    making money by taking a risk nobody measured.
+    """
     evaluated = sum((gate_tally or {}).values())
     return {
         "branches": branch_rows,
+        "slippage": slippage,
+        "drawdown": drawdown,
+        "orders": orders,
         "signals": {
             "dips_considered": evaluated,
             "gate_passes": (gate_tally or {}).get("GATE_PASS", 0),
@@ -322,11 +435,67 @@ def _self_test():
     ok("a missing volatility leaves edge None, not optimistic",
        thin["expected_net_edge_pct"] is None and thin["target_swings_away"] is None)
 
-    rep = fleet_report([row], mixed, busy, {"GATE_PASS": 4, "GATE_BLOCK": 11})
+    # --- slippage ---------------------------------------------------------
+    def st(entry_exp, entry, exit_exp, exit_, qty=100.0, net=0.0):
+        return {"entry_expected_price": entry_exp, "entry_price": entry,
+                "exit_expected_price": exit_exp, "exit_price": exit_,
+                "qty": qty, "pnl": net}
+
+    sl = slippage_stats([])
+    ok("no trades leaves slippage unmeasured, not zero", sl["total_slippage_usd"] is None)
+    ok("and says when it becomes measurable", "first trip opened after this shipped" in sl["note"])
+
+    # Paid 0.01 above the decision price, sold 0.01 below it: both cost.
+    sl = slippage_stats([st(1.00, 1.01, 1.05, 1.04)])
+    ok("paying above the decision price reads as a loss", sl["entry_slippage_usd"] == -1.0)
+    ok("selling below the decision price reads as a loss", sl["exit_slippage_usd"] == -1.0)
+    ok("and they sum", sl["total_slippage_usd"] == -2.0)
+    ok("expressed against the notional it was measured on",
+       abs(sl["slippage_pct_of_notional"] - (-2.0 / 100.0 * 100)) < 1e-6)
+
+    sl = slippage_stats([st(1.00, 0.99, 1.05, 1.06)])
+    ok("a favourable fill reads positive, not as an error", sl["total_slippage_usd"] == 2.0)
+
+    sl = slippage_stats([st(1.0, 1.01, 1.05, 1.04),
+                         {"entry_price": 1.0, "exit_price": 1.05, "qty": 10, "pnl": 0.1}])
+    ok("rows without a decision price are counted as unmeasurable",
+       sl["measured_round_trips"] == 1 and sl["unmeasurable_round_trips"] == 1)
+    ok("and the exclusion is stated, not silent", "excluded rather than guessed" in sl["note"])
+
+    # --- drawdown ---------------------------------------------------------
+    def dt(when, pnl):
+        return {"closed_at": when, "pnl": pnl, "entry_price": 1.0, "exit_price": 1.0, "qty": 1.0}
+
+    dd = drawdown_stats([])
+    ok("no trades means no drawdown curve", dd["max_drawdown_usd"] is None)
+
+    seq = [dt("2026-09-24T10:00", 1.00), dt("2026-09-24T11:00", -1.50),
+           dt("2026-09-24T12:00", 0.20), dt("2026-09-24T13:00", -0.40)]
+    dd = drawdown_stats(seq, equity_usd=595.29)
+    ok("drawdown is peak-to-trough on the realized curve", dd["max_drawdown_usd"] == 1.70)
+    ok("expressed against EQUITY, not against cumulative P&L",
+       abs(dd["max_drawdown_pct_of_equity"] - (1.70 / 595.29 * 100)) < 1e-3)
+    ok("that percentage stays small and honest", dd["max_drawdown_pct_of_equity"] < 1.0)
+    ok("the worst single trade is reported", dd["worst_trade_usd"] == -1.50)
+    ok("and the longest losing streak", dd["longest_losing_streak"] == 1)
+
+    dd2 = drawdown_stats(seq)
+    ok("without equity it gives dollars only, never a fake percentage",
+       dd2["max_drawdown_pct_of_equity"] is None and dd2["max_drawdown_usd"] == 1.70)
+    ok("and explains why", "misleading version" in dd2["note"])
+
+    ok("trades are ordered by close time before the curve is drawn",
+       drawdown_stats(list(reversed(seq)), 595.29)["max_drawdown_usd"] == 1.70)
+
+    rep = fleet_report([row], mixed, busy, {"GATE_PASS": 4, "GATE_BLOCK": 11},
+                       slippage=sl, drawdown=dd,
+                       orders={"submitted": 6, "filled": 4, "rejected": 2})
+    ok("the report carries the risk leg", rep["drawdown"]["max_drawdown_usd"] == 1.70)
+    ok("and execution quality", rep["slippage"] is not None and rep["orders"]["rejected"] == 2)
     ok("the fleet report totals every verdict as signals evaluated",
        rep["signals"]["dips_considered"] == 15)
-    ok("uncapturable metrics are named, not omitted and not faked",
-       "slippage_usd" in rep["not_captured"] and "not captured" in rep["not_captured"]["slippage_usd"])
+    ok("only genuinely uncapturable metrics remain listed",
+       "time_to_fill_seconds" in rep["not_captured"] and "slippage_usd" not in rep["not_captured"])
 
     width = max(len(l) for l, _ in checks)
     for label, passed in checks:

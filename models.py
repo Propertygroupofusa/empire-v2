@@ -1070,6 +1070,13 @@ class CryptoGridSlice(Base):
     # assuming both legs paid the same thing. NULL on rows created before
     # this column existed - callers fall back to the current expected rate.
     entry_fee_rate = Column(Float, nullable=True)
+    # The price the bot SAW when it decided to buy, recorded next to the
+    # price it actually got. Slippage is the gap between them, and it
+    # cannot be reconstructed later from the fill alone - which is why
+    # every earlier attempt to measure it came up empty. Nullable because
+    # every slice opened before this column existed genuinely has no
+    # decision price, and a backfilled guess would be worse than a gap.
+    entry_expected_price = Column(Float, nullable=True)
 
 
 class CryptoGridTradeHistory(Base):
@@ -1089,6 +1096,12 @@ class CryptoGridTradeHistory(Base):
     pnl = Column(Float)
     opened_at = Column(DateTime, nullable=True)
     closed_at = Column(DateTime, default=datetime.utcnow)
+    # Decision prices for both legs, carried over from the slice at close
+    # so a completed round trip can be measured without joining back to a
+    # row that has since been deleted. Nullable for the same reason as
+    # CryptoGridSlice.entry_expected_price.
+    entry_expected_price = Column(Float, nullable=True)
+    exit_expected_price = Column(Float, nullable=True)
 
     def to_dict(self):
         return {
@@ -1101,6 +1114,8 @@ class CryptoGridTradeHistory(Base):
             "pnl": self.pnl,
             "opened_at": (self.opened_at.isoformat() + "Z") if self.opened_at else None,
             "closed_at": (self.closed_at.isoformat() + "Z") if self.closed_at else None,
+            "entry_expected_price": self.entry_expected_price,
+            "exit_expected_price": self.exit_expected_price,
         }
 
 

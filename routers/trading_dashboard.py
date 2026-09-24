@@ -6657,6 +6657,11 @@ async def get_capital_census(json: bool = False):
 #      moment for this page is exactly when something IS broken.
 
 LIVE_OPS_GATE_EVENTS = ("GATE_PASS", "GATE_BLOCK", "GATE_OBSERVE", "GATE_ERROR")
+# Execution outcomes, counted separately from gate decisions: a gate pass
+# says the bot WANTED to buy, these say whether the exchange let it. Kept
+# apart because a healthy pass rate with a rising rejection count is a
+# specific, findable problem that one merged number would hide.
+LIVE_OPS_ORDER_EVENTS = ("ORDER_REJECTED",)
 
 
 def _live_ops_config():
@@ -6899,7 +6904,9 @@ async def get_fleet_metrics(window_days: float = 1.0):
         )).scalars().all()
         trades = [{"product_id": r.product_id, "entry_price": r.entry_price,
                    "exit_price": r.exit_price, "qty": r.qty, "pnl": r.pnl,
-                   "opened_at": r.opened_at, "closed_at": r.closed_at} for r in rows]
+                   "opened_at": r.opened_at, "closed_at": r.closed_at,
+                   "entry_expected_price": r.entry_expected_price,
+                   "exit_expected_price": r.exit_expected_price} for r in rows]
 
         # Each branch's most recent gate verdict, so the reason a coin is
         # not trading sits on the same row as the coin.
@@ -6952,13 +6959,35 @@ async def get_fleet_metrics(window_days: float = 1.0):
                     for b in branches]
         log.warning(f"[dashboard] fleet metrics: live edge inputs unavailable ({e})")
 
+    # Execution counts. A buy is submitted once the gate passes, so
+    # submitted = passes, and filled is what is left after rejections.
+    async with get_session_factory()() as db:
+        rejected = (await db.execute(
+            select(func.count(CryptoActivityEvent.id))
+            .where(CryptoActivityEvent.event_type.in_(LIVE_OPS_ORDER_EVENTS))
+            .where(CryptoActivityEvent.created_at >= since))).scalar() or 0
+    submitted = tally.get("GATE_PASS", 0)
+    orders = {
+        "submitted": submitted,
+        "rejected": rejected,
+        "filled": max(0, submitted - rejected),
+        "fill_rate_pct": (None if not submitted
+                          else round(max(0, submitted - rejected) / submitted * 100, 1)),
+        "note": ("Submitted is counted as gate passes, since a pass is immediately "
+                 "followed by an order. Rejections are recorded at the point the fill "
+                 "comes back empty."),
+    }
+
     stats = metrics.round_trip_stats(trades)
+    slippage = metrics.slippage_stats(trades)
     deployed = grid.get("total_allocated_usd")
     free_cash = grid.get("real_free_cash_usd")
     equity = (None if deployed is None or free_cash is None else deployed + free_cash)
     capital = metrics.capital_stats(equity, free_cash, deployed, stats, window_days)
 
-    report = metrics.fleet_report(rows_out, stats, capital, tally)
+    drawdown = metrics.drawdown_stats(trades, equity_usd=equity)
+    report = metrics.fleet_report(rows_out, stats, capital, tally,
+                                  slippage=slippage, drawdown=drawdown, orders=orders)
     report["fee_round_trip_pct"] = round(fee_round_trip * 100, 3)
     report["window_days"] = window_days
     report["served_at"] = datetime.utcnow().isoformat() + "Z"
