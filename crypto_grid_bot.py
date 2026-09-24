@@ -2514,11 +2514,16 @@ async def run_grid_self_tuning_sweep():
 
 NET_EDGE_GATE_ENABLED = os.getenv("GRID_NET_EDGE_GATE_ENABLED", "true").lower() == "true"
 
+# The microstructure veto rides on the same gate but answers a different
+# question - the priced gates ask whether the STEP is worth taking, this
+# asks whether NOW is the moment to take it - so it gets its own switch.
+MICROSTRUCTURE_VETO_ENABLED = os.getenv("GRID_MICROSTRUCTURE_VETO_ENABLED", "true").lower() == "true"
+
 
 async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd: float):
     """Should this dip actually be bought? Returns (ok, reason).
 
-    Three costs the dip trigger alone cannot see, checked against the real
+    Four things the dip trigger alone cannot see, checked against the real
     book right before the order rather than against a config value:
 
       spread    paid the instant the order crosses, before the trade has
@@ -2528,6 +2533,14 @@ async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd
                 finds nothing to sell into
       net edge  one completed step must clear the real round trip plus
                 adverse selection, priced off the coin's own volatility
+      pressure  a book stacked with sellers and a tape printing sells is
+                the same step at a worse moment - the cost model prices
+                the trade, this prices the timing
+
+    The first three are PRICED gates and fail closed. The fourth is a
+    VETO ONLY, and it can only subtract: a friendly book never widens the
+    expected move here. Crediting a tight spread on the revenue side would
+    double-count it, since spread is already a subtracted cost above.
 
     FAILS CLOSED, but only for this cycle. A book that cannot be read is
     not a book that is fine, so the buy is skipped - and the branch
@@ -2558,7 +2571,25 @@ async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd
             bid_depth_usd=bid_depth, ask_depth_usd=ask_depth,
             slice_usd=slice_usd, fee_round_trip=fee_round_trip,
         )
-        return ok, reason
+        if not ok:
+            return False, reason
+
+        # Only now, once the economics have passed, is the timing worth an
+        # extra API call. Ordering it this way also keeps the call budget
+        # on the coins that could actually trade.
+        if MICROSTRUCTURE_VETO_ENABLED:
+            imbalance = scanner.book_imbalance(bid_depth, ask_depth)
+            trades = await engine.get_recent_market_trades(session, product_id)
+            aggression = scanner.trade_aggression(trades)
+            # "long" always: this is spot, and a hostile book means hold
+            # cash for 30 seconds, never sell something the bot cannot
+            # short.
+            micro_ok, micro_reason = scanner.microstructure_veto(
+                "long", imbalance, aggression)
+            if not micro_ok:
+                return False, micro_reason
+            reason = f"{reason}; {micro_reason}"
+        return True, reason
     except Exception as e:
         # An error evaluating the gate is not permission to skip it.
         return False, f"gate could not be evaluated ({type(e).__name__}: {e}) - not buying blind"

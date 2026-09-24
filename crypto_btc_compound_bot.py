@@ -1149,6 +1149,31 @@ async def get_book_top_and_depth(session, product_id: str = PRODUCT_ID, levels: 
         return None, None, None, None
 
 
+async def get_recent_market_trades(session, product_id: str = PRODUCT_ID, limit: int = 50):
+    """The last `limit` REAL trades printed on this product, newest first.
+
+    The book says what is WAITING; this says what actually traded, and each
+    print carries the side that crossed the spread. That is the difference
+    between resting intent - which can be pulled the instant an order comes
+    for it - and committed flow, which cannot.
+
+    Returns a list of trade dicts, or None on any failure. None rather than
+    [] deliberately: an empty tape and an unreachable endpoint mean
+    opposite things to a caller weighing pressure, and [] would quietly
+    report the market as balanced.
+    """
+    path = f"/api/v3/brokerage/products/{product_id}/ticker?limit={max(1, limit)}"
+    try:
+        async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path), timeout=15) as r:
+            if r.status != 200:
+                return None
+            trades = (await r.json()).get("trades")
+            return trades if isinstance(trades, list) else None
+    except Exception as e:
+        log.warning(f"[BTC-COMPOUND] {product_id}: real market trades fetch failed: {type(e).__name__}: {e}")
+        return None
+
+
 async def cancel_order(session, order_id: str) -> bool:
     """Cancel a real resting order. Returns True if Coinbase accepted the
     cancel. Used when a maker order hasn't filled inside its wait window -

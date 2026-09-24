@@ -133,6 +133,25 @@ DEFAULT_MAX_TARGET_SWING_MULTIPLE = 3.0
 # btc_compound's MAX_BREAKEVEN_WIN_RATE.
 DEFAULT_MAX_BREAKEVEN_WIN_RATE = 0.55
 
+# --- microstructure veto thresholds ---------------------------------------
+#
+# Every gate above prices the trade. These two ask a different question:
+# not "is this step worth taking" but "is the book currently leaning
+# against the side I am about to take". A buy into a book where sellers
+# are stacked and the tape is printing sells is the same trade at a worse
+# moment, and nothing in the cost model can see it.
+#
+# Both are VETOES ONLY. A friendly book does NOT widen the expected move,
+# and that asymmetry is deliberate: the reference implementation these
+# came from multiplied the expected move by 1.08 for a tight spread and a
+# further 1.12 for aligned pressure, which manufactures up to 21% of edge
+# that no market paid. Worse, the spread term double-counts - spread is
+# already a subtracted COST in total_cost_pct(), so crediting it again on
+# the revenue side books the same tick twice, in the direction that makes
+# marginal trades pass. Pressure can only take an entry away here.
+DEFAULT_MAX_ADVERSE_IMBALANCE = 0.25
+DEFAULT_MAX_ADVERSE_AGGRESSION = 0.30
+
 
 def adverse_selection_pct(amplitude_pct,
                           min_adverse=DEFAULT_MIN_ADVERSE_SELECTION,
@@ -174,6 +193,104 @@ def breakeven_win_rate(target_pct, stop_pct, amplitude_pct,
     if net_win <= 0:
         return 1.0
     return net_loss / (net_win + net_loss)
+
+
+def book_imbalance(bid_depth_usd, ask_depth_usd):
+    """Which side of the book is heavier, as -1.0 (all ask) to +1.0 (all bid).
+
+    Computed from CUMULATIVE depth over the levels the caller fetched, not
+    from top-of-book size. Top-of-book size is one number that any single
+    resting order can set, and it is the cheapest thing in the whole book
+    to spoof; the sum over several levels is what an order actually has to
+    trade through. get_book_top_and_depth() already returns exactly this,
+    so the signal costs no extra API call.
+
+    Returns None when the book could not be measured - the caller must
+    decide what that means, because it is not the same as balanced.
+    """
+    if bid_depth_usd is None or ask_depth_usd is None:
+        return None
+    total = bid_depth_usd + ask_depth_usd
+    if total <= 0:
+        return None
+    return (bid_depth_usd - ask_depth_usd) / total
+
+
+def trade_aggression(recent_trades):
+    """Which side the TAPE is leaning, as -1.0 (all sells) to +1.0 (all buys).
+
+    Coinbase reports each market trade's `side` as the TAKER's side - the
+    side that crossed the spread - which is what makes this a pressure
+    measure rather than a restatement of volume.
+
+    Two shapes of input are tolerated because the field names differ
+    between endpoints and a mismatch here is silent: the sum would come to
+    zero, this would return 0.0, and 0.0 is a legitimate reading meaning
+    'balanced tape'. A misread tape that reports 'balanced' would disable
+    this veto without ever logging that it had - so `side` is matched
+    case-insensitively (the API sends "BUY"/"SELL", the reference
+    implementation compared against lowercase "buy" and would have matched
+    nothing), and size is read from `size` or `base_size`.
+
+    Returns None when there is no usable tape, never 0.0 - the caller can
+    then tell 'no data' from 'balanced', which the veto depends on.
+    """
+    if not recent_trades:
+        return None
+    buy_vol = sell_vol = 0.0
+    for t in recent_trades:
+        try:
+            side = str(t.get("side", "")).strip().lower()
+            raw = t.get("size", t.get("base_size"))
+            size = abs(float(raw))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if side == "buy":
+            buy_vol += size
+        elif side == "sell":
+            sell_vol += size
+    total = buy_vol + sell_vol
+    if total <= 0:
+        return None
+    return (buy_vol - sell_vol) / total
+
+
+def microstructure_veto(direction, imbalance, aggression,
+                        max_adverse_imbalance=DEFAULT_MAX_ADVERSE_IMBALANCE,
+                        max_adverse_aggression=DEFAULT_MAX_ADVERSE_AGGRESSION):
+    """Is the book leaning hard against the side about to be taken?
+
+    Returns (ok, reason). A veto is a REFUSAL TO ACT, not a signal to act
+    the other way - this codebase's crypto side is long-only spot, so a
+    hostile book means hold cash, never sell short.
+
+    An unmeasurable term cannot veto. This is the one place in the net-edge
+    stack that fails OPEN, and the reason is narrow: the priced gates fail
+    closed because without them the bot would be trading blind on
+    economics, whereas these two sit ON TOP of a full cost check that has
+    already passed. Losing an additional veto returns the decision to the
+    gate that ran a moment ago; treating a missing tape as hostile would
+    instead let one flaky endpoint halt a bot whose economics were sound.
+    """
+    if direction not in ("long", "short"):
+        return True, f"unknown direction {direction!r} - no veto"
+    sign = 1.0 if direction == "long" else -1.0
+    parts = []
+    if imbalance is not None:
+        # For a long, a negative imbalance is ask-heavy and therefore
+        # adverse; for a short the sign flips. One expression, both sides.
+        if sign * imbalance < -max_adverse_imbalance:
+            return False, (f"book leans against this {direction}: imbalance "
+                           f"{imbalance:+.2f} past {max_adverse_imbalance:.2f}")
+        parts.append(f"imbalance {imbalance:+.2f}")
+    if aggression is not None:
+        if sign * aggression < -max_adverse_aggression:
+            return False, (f"tape leans against this {direction}: aggression "
+                           f"{aggression:+.2f} past {max_adverse_aggression:.2f}")
+        parts.append(f"aggression {aggression:+.2f}")
+    if not parts:
+        return True, "no microstructure data - veto not applicable"
+    return True, "book neutral or favourable (" + ", ".join(parts) + ")"
 
 
 def evaluate_coin(product_id, target_pct, stop_pct, hourly_swing_pct,
@@ -464,6 +581,52 @@ def _self_test():
     ok("a cycle with no qualified coin is not an error", q3 == [] and len(s3) == 1)
     ok("the report says so in words", "holding cash" in scan_report(q3, s3))
     ok("all nine coins are covered", len(NINE_COINS) == 9)
+
+    # --- microstructure veto ---------------------------------------------
+    ok("balanced book reads as zero imbalance",
+       book_imbalance(5000.0, 5000.0) == 0.0)
+    ok("bid-heavy book reads positive", book_imbalance(7500.0, 2500.0) == 0.5)
+    ok("ask-heavy book reads negative", book_imbalance(2500.0, 7500.0) == -0.5)
+    ok("an unreadable book is None, not balanced",
+       book_imbalance(None, 5000.0) is None and book_imbalance(0.0, 0.0) is None)
+
+    TAPE_SELLING = [{"side": "SELL", "size": "0.9"}, {"side": "BUY", "size": "0.1"}]
+    TAPE_BUYING = [{"side": "BUY", "size": 0.9}, {"side": "SELL", "size": 0.1}]
+    ok("a selling tape reads negative", trade_aggression(TAPE_SELLING) == -0.8)
+    ok("a buying tape reads positive",
+       abs(trade_aggression(TAPE_BUYING) - 0.8) < 1e-12)
+    ok("Coinbase's UPPERCASE side is matched",
+       trade_aggression([{"side": "BUY", "size": 1.0}]) == 1.0)
+    ok("base_size is accepted as well as size",
+       trade_aggression([{"side": "sell", "base_size": "2.0"}]) == -1.0)
+    ok("no tape is None, not balanced",
+       trade_aggression([]) is None and trade_aggression(None) is None)
+    ok("an all-garbage tape is None, not balanced",
+       trade_aggression([{"side": "BUY", "size": "n/a"}]) is None)
+    ok("one malformed print does not discard the rest",
+       trade_aggression([{"side": "BUY", "size": "n/a"},
+                         {"side": "SELL", "size": 1.0}]) == -1.0)
+
+    veto_ok, veto_why = microstructure_veto("long", -0.60, 0.0)
+    ok("a long into a stacked ask book is vetoed", not veto_ok)
+    ok("the veto says which way the book leaned", "leans against this long" in veto_why)
+    ok("a long into a selling tape is vetoed",
+       not microstructure_veto("long", 0.0, -0.80)[0])
+    ok("a long into a neutral book is allowed",
+       microstructure_veto("long", 0.0, 0.0)[0])
+    ok("a long into a favourable book is allowed",
+       microstructure_veto("long", 0.60, 0.80)[0])
+    ok("the same book that vetoes a long allows a short",
+       microstructure_veto("short", -0.60, -0.80)[0])
+    ok("exactly at the threshold is allowed, not vetoed",
+       microstructure_veto("long", -DEFAULT_MAX_ADVERSE_IMBALANCE, None)[0])
+    ok("a missing term cannot veto",
+       microstructure_veto("long", None, None)[0]
+       and microstructure_veto("long", None, -0.99)[0] is False)
+    ok("no data at all is stated as such, not passed off as neutral",
+       "not applicable" in microstructure_veto("long", None, None)[1])
+    ok("pressure can only subtract - there is no favourable-book bonus",
+       "net_edge" not in microstructure_veto("long", 0.9, 0.9)[1])
 
     width = max(len(label) for label, _ in checks)
     for label, passed in checks:

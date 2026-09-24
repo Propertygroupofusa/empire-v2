@@ -339,15 +339,19 @@ async def intraday_slots_allowed(equity: float) -> tuple:
 # since prop_bot's positions spend the same budget - the 2026-09-05 GLD
 # incident recorded below is this same conflict seen from the other side.
 # 2026-09-24: raised 20% -> 50% at the operator's instruction, together
-# with prop_bot.MAX_RISK_PERCENT. The two MUST move together, so this now
-# reads prop_bot's OWN env var first - one setting controls both bots and
-# they cannot drift apart at runtime. ALPACA_MAX_TOTAL_NOTIONAL_PCT still
-# overrides when explicitly set, for the case where this bot needs to be
-# held tighter than the shared budget on purpose.
-MAX_TOTAL_NOTIONAL_PCT_OF_EQUITY = _safe_float_env(
-    "ALPACA_MAX_TOTAL_NOTIONAL_PCT",
-    _safe_float_env("PROP_MAX_RISK_PERCENT", 0.50),
-)
+# with prop_bot.MAX_RISK_PERCENT.
+#
+# This reads PROP_MAX_RISK_PERCENT - prop_bot's OWN variable - and nothing
+# else. There is deliberately no ALPACA_MAX_TOTAL_NOTIONAL_PCT override
+# any more: a second knob for one shared budget is a trap. The tighter of
+# the two silently governs BOTH bots (prop_bot's check_margin_safety()
+# sums every open position, including this bot's), so a stale
+# ALPACA_MAX_TOTAL_NOTIONAL_PCT left set to an old value in the deploy
+# environment would quietly hold the whole account at that old number
+# while the operator reads 50% in prop_bot's config and sees no reason
+# why. One variable, one budget, no way for them to disagree. Any value
+# still set for ALPACA_MAX_TOTAL_NOTIONAL_PCT is now inert.
+MAX_TOTAL_NOTIONAL_PCT_OF_EQUITY = _safe_float_env("PROP_MAX_RISK_PERCENT", 0.50)
 
 MIN_EQUITY = 500.0               # Allow trading down to $500 (survival level on micro account)
 
