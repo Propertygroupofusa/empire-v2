@@ -19,7 +19,7 @@ def main():
         import database
         import crypto_family_tree_bot
         import crypto_grid_bot
-        from models import CryptoGridBranch, CryptoGridSlice
+        from models import CryptoGridBranch, CryptoGridSlice, CryptoGridTradeHistory
 
         assert database.AsyncSessionLocal is None
 
@@ -56,6 +56,12 @@ def main():
                     qty=0.1,
                     entry_fee_rate=0.001,
                 ))
+                session.add_all([
+                    CryptoGridTradeHistory(bot_name="crypto_grid_1", product_id="DOGE-USD", pnl=1.0),
+                    CryptoGridTradeHistory(bot_name="crypto_grid_1", product_id="DOGE-USD", pnl=-0.5),
+                    CryptoGridTradeHistory(bot_name="crypto_grid_1", product_id="ETH-USD", pnl=0.25),
+                    CryptoGridTradeHistory(bot_name="crypto_grid_1", product_id="ETH-USD", pnl=0.75),
+                ])
                 await session.commit()
 
             async def constant(value):
@@ -96,7 +102,29 @@ def main():
             }
             connection.close()
 
-            assert history["total_trade_count"] == 0
+            assert history["total_trade_count"] == 4
+            assert history["total_realized_pnl"] == 1.5
+            assert len(history["recent_trades"]) == 1
+            assert sum(coin["trade_count"] for coin in history["coins"]) == 4
+            assert sum(coin["total_pnl"] for coin in history["coins"]) == 1.5
+            assert history["coins"] == [
+                {
+                    "product_id": "ETH-USD",
+                    "trade_count": 2,
+                    "total_pnl": 1.0,
+                    "avg_pnl": 0.5,
+                    "wins": 2,
+                    "win_rate": 100.0,
+                },
+                {
+                    "product_id": "DOGE-USD",
+                    "trade_count": 2,
+                    "total_pnl": 0.5,
+                    "avg_pnl": 0.25,
+                    "wins": 1,
+                    "win_rate": 50.0,
+                },
+            ]
             assert len(branches) == 1
             assert "self_tuned_multiplier" in branch_columns
             assert "entry_fee_rate" in slice_columns

@@ -3139,6 +3139,27 @@ async def get_grid_trade_history(limit_recent: int = 50) -> dict:
             total_wins += wins or 0
         branches.sort(key=lambda b: b["total_pnl"], reverse=True)
 
+        coin_result = await db.execute(
+            select(
+                CryptoGridTradeHistory.product_id,
+                func.count(CryptoGridTradeHistory.id).label("trade_count"),
+                func.sum(CryptoGridTradeHistory.pnl).label("total_pnl"),
+                func.avg(CryptoGridTradeHistory.pnl).label("avg_pnl"),
+                func.sum(case((CryptoGridTradeHistory.pnl > 0, 1), else_=0)).label("wins"),
+            ).group_by(CryptoGridTradeHistory.product_id)
+        )
+        coins = []
+        for product_id, trade_count, total_pnl, avg_pnl, wins in coin_result.all():
+            coins.append({
+                "product_id": product_id,
+                "trade_count": trade_count,
+                "total_pnl": round(total_pnl, 2) if total_pnl is not None else 0.0,
+                "avg_pnl": round(avg_pnl, 2) if avg_pnl is not None else 0.0,
+                "wins": wins or 0,
+                "win_rate": round(wins / trade_count * 100, 1) if trade_count else 0.0,
+            })
+        coins.sort(key=lambda coin: coin["total_pnl"], reverse=True)
+
         recent_result = await db.execute(
             select(CryptoGridTradeHistory).order_by(desc(CryptoGridTradeHistory.closed_at)).limit(limit_recent)
         )
@@ -3156,6 +3177,7 @@ async def get_grid_trade_history(limit_recent: int = 50) -> dict:
 
     return {
         "branches": branches,
+        "coins": coins,
         "recent_trades": recent_trades,
         "total_trade_count": total_trade_count,
         "total_realized_pnl": round(total_realized_pnl, 2),
