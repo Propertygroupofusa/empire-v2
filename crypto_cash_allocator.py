@@ -36,9 +36,18 @@ divide the whole wallet.
 
 Configure with CRYPTO_CASH_SHARE_GRID / _TREE / _COMPOUND (fractions) and
 CRYPTO_GLOBAL_CASH_RESERVE_USD. Defaults favour the grid fleet because it
-is the only component with a positive measured track record (+$19.55 over
-82 trades at a 76% win rate); the tree is unproven and btc_compound is a
-fallback that should not normally be running at all.
+is the only component with a positive realized record; the tree is
+unproven and btc_compound is a fallback that should not normally be
+running at all.
+
+Deliberately no figure quoted here. An earlier version of this comment
+cited "+$19.55 over 82 trades at a 76% win rate" as though it were a
+standing measurement. It came from a single dashboard reading, was never
+reproducible from anything in this repo, and a later screenshot of the
+same dashboard showed 22 trades and +$12.94 across the two live branches.
+A number that cannot be reproduced does not belong in a comment that
+justifies how capital is split - read the live per-branch figures
+instead.
 """
 
 import logging

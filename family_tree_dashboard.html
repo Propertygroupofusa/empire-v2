@@ -2287,8 +2287,18 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals) {
                         resultsStr = '<span style="color:var(--text-dim);">No closed trades yet</span>';
                     } else {
                         const pnlColor = hist.total_pnl >= 0 ? 'var(--green)' : 'var(--red)';
-                        const returnPct = b.allocated_usd ? (hist.total_pnl / b.allocated_usd) * 100 : 0;
-                        resultsStr = `<span style="color:${pnlColor}; font-weight:600;">${hist.total_pnl >= 0 ? '+' : ''}${fmtUsd(hist.total_pnl)} (${returnPct >= 0 ? '+' : ''}${returnPct.toFixed(1)}%)</span>`
+                        // No percentage here, deliberately.
+                        //
+                        // This used to print (total_pnl / allocated_usd) * 100 and call it a
+                        // return. Those are two unrelated numbers: total_pnl is LIFETIME
+                        // realized profit, allocated_usd is what the branch holds RIGHT NOW.
+                        // Withdraw from a branch and the percentage inflates without a single
+                        // extra dollar being earned - a branch showing +$12.80 on $16.67 read
+                        // as "+76.8%" purely because its capital had been moved out. Return on
+                        // capital needs the capital that actually earned it, which is not
+                        // tracked, so the honest move is to show the dollars and the trade
+                        // count and let those speak.
+                        resultsStr = `<span style="color:${pnlColor}; font-weight:600;">${hist.total_pnl >= 0 ? '+' : ''}${fmtUsd(hist.total_pnl)}</span>`
                             + `<div style="font-size:0.8em; color:var(--text-dim); margin-top:2px;">${hist.trade_count} trade${hist.trade_count === 1 ? '' : 's'} · ${hist.win_rate.toFixed(0)}% win</div>`;
                     }
                     const statusStr = (b.drawdown_breached

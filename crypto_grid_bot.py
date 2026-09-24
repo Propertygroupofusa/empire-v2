@@ -2588,7 +2588,7 @@ NET_EDGE_GATE_ENABLED = os.getenv("GRID_NET_EDGE_GATE_ENABLED", "true").lower() 
 #
 # And the only thing it can ever do is remove trades from the grid bot,
 # which at the time this was written was the sole profitable component in
-# the system: +$19.55 over 82 trades at a 76% win rate. An unmeasured
+# the system, by its own live per-branch realized figures. An unmeasured
 # filter in front of the one thing that works is the highest-regret
 # change available, and "it is probably right" is not evidence.
 #
