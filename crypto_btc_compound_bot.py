@@ -271,11 +271,41 @@ ENTRY_MAX_RSI = _safe_float_env("BTC_COMPOUND_ENTRY_MAX_RSI", "65")
 #   ATR% >= VOL_HIGH_THRESHOLD         -> TARGET_HIGH_PCT  (volatile)
 VOL_LOW_THRESHOLD = _safe_float_env("BTC_COMPOUND_VOL_LOW_THRESHOLD", "0.01")   # 1% ATR
 VOL_HIGH_THRESHOLD = _safe_float_env("BTC_COMPOUND_VOL_HIGH_THRESHOLD", "0.02")  # 2% ATR
-TARGET_LOW_PCT = _safe_float_env("BTC_COMPOUND_TARGET_LOW_PCT", "0.015")   # 1.5%
+# TARGET_LOW_PCT was 1.5% against a 2% stop - the quiet-market tier risked
+# more than it stood to make, before fees. Observed live on 2026-09-24:
+# entry $84,455.82, target $85,722.66 (+1.5%), stop $82,766.70 (-2%), which
+# needs an 80% win rate to break even once the ~0.8% round trip is paid.
+# Raised so a target is never smaller than the stop it is paired with. It
+# stays the SMALLEST of the three tiers - a quiet market really does offer
+# less - and when even this tier cannot clear the bar below, the honest
+# answer is not to trade at all, which is what the entry gate enforces.
+TARGET_LOW_PCT = _safe_float_env("BTC_COMPOUND_TARGET_LOW_PCT", "0.021")   # 2.1%
 TARGET_MED_PCT = _safe_float_env("BTC_COMPOUND_TARGET_MED_PCT", "0.025")   # 2.5%
 TARGET_HIGH_PCT = _safe_float_env("BTC_COMPOUND_TARGET_HIGH_PCT", "0.04")  # 4%
 
 ROUND_TRIP_FEE_RATE = _safe_float_env("BTC_COMPOUND_ROUND_TRIP_FEE_RATE", "0.008")  # ~0.4% each way, taker
+
+# The most an entry is allowed to demand of the win rate before this bot
+# refuses to place it.
+#
+# There is no target/stop pair that cannot lose, and it is worth being
+# exact about why, because the intuition that a bigger target or a tighter
+# stop fixes this is wrong. For a bracket order on a driftless price, the
+# chance of touching +T before -S is S/(T+S), so the expectancy works out
+# to exactly -fee for EVERY choice of T and S - the wider target pays more
+# per win and is hit proportionally less often, and the two cancel with
+# nothing left over. Target and stop do not create edge; they only decide
+# how an edge, or the absence of one, gets expressed. What they CAN do is
+# be arithmetically self-defeating, which is what a target below its own
+# stop is.
+#
+# So the enforceable version of "don't take losing trades" is not a magic
+# ratio - it is declining the entries whose own arithmetic needs a win
+# rate nobody here has produced. At the default 0.8% taker round trip that
+# admits only the volatile tier; switching to maker orders halves the fee
+# and admits the normal tier too, which is the real lever and the reason
+# the fee rate is a variable rather than a constant.
+MAX_BREAKEVEN_WIN_RATE = _safe_float_env("BTC_COMPOUND_MAX_BREAKEVEN_WIN_RATE", "0.55")
 
 # Per the account owner: a percentage-only target can "hit" on a small
 # position and still barely clear the real sell-side fee, or lose to it
@@ -919,6 +949,29 @@ def pick_target_pct(atr_pct: float) -> float:
     if atr_pct < VOL_HIGH_THRESHOLD:
         return TARGET_MED_PCT
     return TARGET_HIGH_PCT
+
+
+def breakeven_win_rate(target_pct: float, stop_pct: float = None,
+                       fee_rate: float = None) -> float:
+    """The win rate this target/stop/fee combination needs just to break even.
+
+    A win nets target minus the round trip; a loss costs the stop PLUS the
+    same round trip, because the fee is paid either way. Solving
+    p*net_win == (1-p)*net_loss gives the rate below which the setup loses
+    money however well it is executed.
+
+    Returns 1.0 - unachievable, refuse it - when the target does not clear
+    the fee at all. That case is not a near miss: a "winning" trade that
+    nets zero or less has no win rate that rescues it, and expressing it as
+    a ratio would understate it.
+    """
+    stop = STOP_LOSS_PCT if stop_pct is None else stop_pct
+    fee = ROUND_TRIP_FEE_RATE if fee_rate is None else fee_rate
+    net_win = target_pct - fee
+    net_loss = stop + fee
+    if net_win <= 0:
+        return 1.0
+    return net_loss / (net_win + net_loss)
 
 
 async def place_market_buy(session, usd_amount: float, product_id: str = PRODUCT_ID):
@@ -1575,6 +1628,30 @@ async def run_cycle():
                          + " held back")
 
             target_pct = max(pick_target_pct(atr_pct), min_profit_target_pct(deploy, atr_pct))
+
+            # Refuse an entry whose own arithmetic needs a win rate this
+            # account has never produced. Checked against the real target
+            # actually about to be used - not the tier constant - because
+            # min_profit_target_pct() can raise it, and a gate that judges
+            # a number the order will not use is decoration.
+            #
+            # Deliberately placed BEFORE place_market_buy: once filled,
+            # the money is committed and the only ways out are the target,
+            # the stop or a manual sale. Refusing costs one idle cycle and
+            # the bot re-checks on the next one, when volatility - and so
+            # the tier, and so the arithmetic - may well have changed.
+            needed = breakeven_win_rate(target_pct)
+            if needed > MAX_BREAKEVEN_WIN_RATE:
+                log.warning(
+                    f"[BTC-COMPOUND] NO ENTRY: +{target_pct*100:.2f}% target against a "
+                    f"-{STOP_LOSS_PCT*100:.2f}% stop needs a {needed*100:.1f}% win rate to break "
+                    f"even after the {ROUND_TRIP_FEE_RATE*100:.2f}% round trip, over the "
+                    f"{MAX_BREAKEVEN_WIN_RATE*100:.1f}% limit. ATR {atr_pct*100:.2f}%. Holding cash - "
+                    f"this trade loses money on average. Maker orders would halve the fee and "
+                    f"may clear it; otherwise wait for volatility to widen the target."
+                )
+                return
+
             fill = await place_market_buy(session, deploy)
             if not fill:
                 log.warning("[BTC-COMPOUND] Buy did not fill - will retry next cycle")
