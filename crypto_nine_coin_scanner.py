@@ -80,27 +80,87 @@ except Exception:  # pragma: no cover - import shape varies by entrypoint
 DEFAULT_TAKER_ROUND_TRIP = 0.010
 DEFAULT_MAKER_ROUND_TRIP = 0.006
 
-# Charged on entry AND exit. Market orders cross the spread both ways; this
-# is the cost the backtests omit and the live-vs-backtest gap is made of.
-DEFAULT_SLIPPAGE_PER_SIDE = 0.001
+# Adverse selection, charged once per round trip, replacing a flat
+# slippage term.
+#
+# A resting limit order fills when the market comes to it, which means it
+# fills on momentum pressing against the order - a maker buy fills because
+# sellers are hitting the bid. That cost is not constant: it scales with
+# how fast the market is moving. Modelled as a fraction of the coin's own
+# volatility with an absolute floor, so a quiet book still pays something
+# and a fast one pays proportionally.
+#
+# This SUBSUMES the flat 0.10%-per-side slippage this file used before -
+# charging both would count the same friction twice. At a 0.75% hourly
+# swing the two come to the same 0.15%; above that this one grows and the
+# flat term would have under-charged.
+DEFAULT_MIN_ADVERSE_SELECTION = 0.0015
+DEFAULT_ADVERSE_SELECTION_VOL_FRACTION = 0.20
 
-# A target beyond this many 5-minute ATRs is treated as unreachable.
-DEFAULT_MAX_TARGET_ATR_MULTIPLE = 3.0
+# Reject a coin whose top-of-book spread is wider than this. Crossing a
+# wide spread is a cost paid before the trade has done anything, and on a
+# $70 slice it is not recoverable inside a grid step.
+DEFAULT_MAX_SPREAD_PCT = 0.0015
+
+# The book must hold this multiple of the intended position on BOTH sides
+# before entering. A $70 slice into a book showing $70 of depth IS the
+# book - it moves the price it is trying to trade at, and the exit finds
+# nothing to sell into. 4x is the smallest ratio where the order is a
+# participant rather than the event.
+DEFAULT_MIN_DEPTH_RATIO = 4.0
+DEFAULT_BRANCH_SIZE_USD = 70.0
+
+# A target beyond this many AVERAGE HOURLY SWINGS is unreachable.
+#
+# Changed from a 5-minute ATR, which was the wrong clock. A grid round
+# trip does not need one 5-minute candle to cover the whole target - it
+# needs price to travel that far over the holding period, which is hours.
+# Judged against a 5-minute bar, a 1.45% hurdle demanded a 1.50% 5-minute
+# ATR, which is crash-level volatility: BTC sits near 0.60%, so the gate
+# rejected every coin in every normal market and passed only an alt
+# mid-spike.
+#
+# The hourly window is also what the account already trades on:
+# get_average_hourly_swing_pct() over 120 hours is the same measure the
+# live average-swing spacing uses, and 1.5x that swing is the multiple its
+# 30-day/8-coin backtest validated ($5.79 vs $1.02 against a flat 1%).
+# Allowing up to 3x gives a target roughly two hours of typical movement
+# away - twice the validated spacing, and a real ceiling rather than a
+# permanent veto.
+DEFAULT_MAX_TARGET_SWING_MULTIPLE = 3.0
 
 # The most an entry may demand of the win rate. Same value and reasoning as
 # btc_compound's MAX_BREAKEVEN_WIN_RATE.
 DEFAULT_MAX_BREAKEVEN_WIN_RATE = 0.55
 
 
-def net_edge_pct(target_pct, fee_round_trip=DEFAULT_TAKER_ROUND_TRIP,
-                 slippage_per_side=DEFAULT_SLIPPAGE_PER_SIDE):
-    """What a winning trade actually keeps, after costs on both legs."""
-    return target_pct - fee_round_trip - (2 * slippage_per_side)
+def adverse_selection_pct(amplitude_pct,
+                          min_adverse=DEFAULT_MIN_ADVERSE_SELECTION,
+                          vol_fraction=DEFAULT_ADVERSE_SELECTION_VOL_FRACTION):
+    """Cost of filling on the wrong side of momentum, scaled by volatility."""
+    return max(min_adverse, vol_fraction * (amplitude_pct or 0.0))
 
 
-def breakeven_win_rate(target_pct, stop_pct,
+def total_cost_pct(amplitude_pct, fee_round_trip=DEFAULT_TAKER_ROUND_TRIP,
+                   min_adverse=DEFAULT_MIN_ADVERSE_SELECTION,
+                   vol_fraction=DEFAULT_ADVERSE_SELECTION_VOL_FRACTION):
+    """Everything a completed round trip pays: fees plus adverse selection."""
+    return fee_round_trip + adverse_selection_pct(amplitude_pct, min_adverse, vol_fraction)
+
+
+def net_edge_pct(target_pct, amplitude_pct,
+                 fee_round_trip=DEFAULT_TAKER_ROUND_TRIP,
+                 min_adverse=DEFAULT_MIN_ADVERSE_SELECTION,
+                 vol_fraction=DEFAULT_ADVERSE_SELECTION_VOL_FRACTION):
+    """What a winning trade actually keeps, after every cost on both legs."""
+    return target_pct - total_cost_pct(amplitude_pct, fee_round_trip,
+                                       min_adverse, vol_fraction)
+
+
+def breakeven_win_rate(target_pct, stop_pct, amplitude_pct,
                        fee_round_trip=DEFAULT_TAKER_ROUND_TRIP,
-                       slippage_per_side=DEFAULT_SLIPPAGE_PER_SIDE):
+                       min_adverse=DEFAULT_MIN_ADVERSE_SELECTION,
+                       vol_fraction=DEFAULT_ADVERSE_SELECTION_VOL_FRACTION):
     """Win rate this target/stop/cost triple needs just to break even.
 
     Costs are paid on winners and losers alike, so they are subtracted from
@@ -108,7 +168,7 @@ def breakeven_win_rate(target_pct, stop_pct,
     nets nothing, rather than a ratio that would make a hopeless setup look
     merely demanding.
     """
-    costs = fee_round_trip + (2 * slippage_per_side)
+    costs = total_cost_pct(amplitude_pct, fee_round_trip, min_adverse, vol_fraction)
     net_win = target_pct - costs
     net_loss = stop_pct + costs
     if net_win <= 0:
@@ -116,32 +176,47 @@ def breakeven_win_rate(target_pct, stop_pct,
     return net_loss / (net_win + net_loss)
 
 
-def evaluate_coin(product_id, target_pct, stop_pct, atr_pct,
+def evaluate_coin(product_id, target_pct, stop_pct, hourly_swing_pct,
+                  best_bid=None, best_ask=None,
+                  bid_depth_usd=None, ask_depth_usd=None,
+                  branch_size_usd=DEFAULT_BRANCH_SIZE_USD,
                   fee_round_trip=DEFAULT_TAKER_ROUND_TRIP,
-                  slippage_per_side=DEFAULT_SLIPPAGE_PER_SIDE,
-                  max_target_atr_multiple=DEFAULT_MAX_TARGET_ATR_MULTIPLE,
+                  min_adverse=DEFAULT_MIN_ADVERSE_SELECTION,
+                  vol_fraction=DEFAULT_ADVERSE_SELECTION_VOL_FRACTION,
+                  max_spread_pct=DEFAULT_MAX_SPREAD_PCT,
+                  min_depth_ratio=DEFAULT_MIN_DEPTH_RATIO,
+                  max_target_swing_multiple=DEFAULT_MAX_TARGET_SWING_MULTIPLE,
                   max_breakeven_win_rate=DEFAULT_MAX_BREAKEVEN_WIN_RATE):
-    """One coin against all three gates. Never raises; bad input is a skip.
+    """One coin against every gate. Never raises; bad input is a skip.
 
-    Returns a dict that always carries `qualified` and `reason`, so a
-    caller can log exactly why a coin was passed over.
+    `hourly_swing_pct` is the coin's average hourly swing - the same
+    measure crypto_btc_compound_bot.get_average_hourly_swing_pct() returns
+    and the live average-swing spacing already trades on.
+
+    Order-book fields are optional ONLY in the sense that omitting them is
+    a skip, not a pass. A scanner that cannot see the book cannot know
+    whether a $70 order is a participant or the whole bid side, and
+    "unknown liquidity" has never been a reason to trade.
     """
     row = {
         "product_id": product_id,
         "target_pct": target_pct,
         "stop_pct": stop_pct,
-        "atr_pct": atr_pct,
+        "hourly_swing_pct": hourly_swing_pct,
+        "spread_pct": None,
         "net_edge_pct": None,
+        "adverse_selection_pct": None,
         "breakeven_win_rate": None,
-        "target_atr_multiple": None,
+        "target_swing_multiple": None,
         "qualified": False,
         "reason": "",
     }
 
     # Missing or nonsensical inputs are an unknown, and an unknown is never
-    # a reason to trade. A zero ATR means volatility could not be computed,
-    # not that the coin is calm.
-    for name, value in (("target", target_pct), ("stop", stop_pct), ("atr", atr_pct)):
+    # a reason to trade. A zero swing means volatility could not be
+    # computed, not that the coin is calm.
+    for name, value in (("target", target_pct), ("stop", stop_pct),
+                        ("hourly swing", hourly_swing_pct)):
         if value is None:
             row["reason"] = f"{name} unavailable - cannot evaluate"
             return row
@@ -149,22 +224,53 @@ def evaluate_coin(product_id, target_pct, stop_pct, atr_pct,
             row["reason"] = f"{name} is {value} - not a usable number"
             return row
 
-    edge = net_edge_pct(target_pct, fee_round_trip, slippage_per_side)
+    # --- liquidity, before economics -------------------------------------
+    # Checked first because a book this order cannot trade in makes every
+    # figure below hypothetical.
+    if best_bid is None or best_ask is None or best_bid <= 0 or best_ask <= 0:
+        row["reason"] = "order book unavailable - cannot price the spread"
+        return row
+    spread = (best_ask - best_bid) / best_bid
+    row["spread_pct"] = spread
+    if spread > max_spread_pct:
+        row["reason"] = (f"spread {spread * 100:.3f}% is over the "
+                         f"{max_spread_pct * 100:.2f}% limit - paid before the trade "
+                         f"does anything")
+        return row
+
+    if bid_depth_usd is None or ask_depth_usd is None:
+        row["reason"] = "book depth unavailable - cannot size safely"
+        return row
+    required_depth = branch_size_usd * min_depth_ratio
+    if bid_depth_usd < required_depth or ask_depth_usd < required_depth:
+        row["reason"] = (f"thin book - bid ${bid_depth_usd:,.0f} / ask ${ask_depth_usd:,.0f} "
+                         f"against ${required_depth:,.0f} needed for a "
+                         f"${branch_size_usd:,.0f} slice")
+        return row
+
+    # --- economics --------------------------------------------------------
+    adverse = adverse_selection_pct(hourly_swing_pct, min_adverse, vol_fraction)
+    row["adverse_selection_pct"] = adverse
+    costs = total_cost_pct(hourly_swing_pct, fee_round_trip, min_adverse, vol_fraction)
+    edge = net_edge_pct(target_pct, hourly_swing_pct, fee_round_trip,
+                        min_adverse, vol_fraction)
     row["net_edge_pct"] = edge
-    costs = fee_round_trip + (2 * slippage_per_side)
     if edge <= 0:
         row["reason"] = (f"net edge {edge * 100:+.3f}% - a {target_pct * 100:.2f}% target "
-                         f"does not clear {costs * 100:.2f}% of costs")
+                         f"does not clear {costs * 100:.2f}% of costs "
+                         f"({fee_round_trip * 100:.2f}% fees + {adverse * 100:.2f}% adverse)")
         return row
 
-    multiple = target_pct / atr_pct
-    row["target_atr_multiple"] = multiple
-    if multiple > max_target_atr_multiple:
-        row["reason"] = (f"target is {multiple:.1f}x the 5-min ATR of {atr_pct * 100:.2f}%, "
-                         f"over the {max_target_atr_multiple:.1f}x limit - would sit unfilled")
+    multiple = target_pct / hourly_swing_pct
+    row["target_swing_multiple"] = multiple
+    if multiple > max_target_swing_multiple:
+        row["reason"] = (f"target is {multiple:.1f}x the {hourly_swing_pct * 100:.2f}% "
+                         f"hourly swing, over the {max_target_swing_multiple:.1f}x limit "
+                         f"- would sit unfilled")
         return row
 
-    needed = breakeven_win_rate(target_pct, stop_pct, fee_round_trip, slippage_per_side)
+    needed = breakeven_win_rate(target_pct, stop_pct, hourly_swing_pct,
+                                fee_round_trip, min_adverse, vol_fraction)
     row["breakeven_win_rate"] = needed
     if needed > max_breakeven_win_rate:
         row["reason"] = (f"needs a {needed * 100:.1f}% win rate to break even, "
@@ -172,7 +278,7 @@ def evaluate_coin(product_id, target_pct, stop_pct, atr_pct,
         return row
 
     row["qualified"] = True
-    row["reason"] = (f"net edge {edge * 100:+.3f}%, target {multiple:.1f}x ATR, "
+    row["reason"] = (f"net edge {edge * 100:+.3f}%, target {multiple:.1f}x swing, "
                      f"break-even {needed * 100:.1f}%")
     return row
 
@@ -215,69 +321,90 @@ def _self_test():
     def ok(label, cond):
         checks.append((label, bool(cond)))
 
+    # A healthy book, so liquidity never silently decides an economics test.
+    BOOK = dict(best_bid=100.0, best_ask=100.10, bid_depth_usd=5000.0, ask_depth_usd=5000.0)
+
+    def ev(pid, target, stop, swing, **kw):
+        return evaluate_coin(pid, target, stop, swing, **{**BOOK, **kw})
+
     # The real live position from 2026-09-24: +1.5% target, -2% stop.
-    live = evaluate_coin("BTC-USD", 0.015, 0.02, 0.006)
+    live = ev("BTC-USD", 0.015, 0.02, 0.006)
     ok("live 1.5%/2.0% BTC position is refused", not live["qualified"])
-    ok("refused on break-even win rate", "win rate" in live["reason"])
     ok("its break-even is above 80%", live["breakeven_win_rate"] > 0.80)
 
     # A target that cannot clear costs at all.
-    poor = evaluate_coin("ADA-USD", 0.008, 0.02, 0.01)
-    ok("target equal to costs is refused", not poor["qualified"])
+    poor = ev("ADA-USD", 0.008, 0.02, 0.010)
+    ok("target under total cost is refused", not poor["qualified"])
     ok("refused on net edge", "net edge" in poor["reason"])
-    ok("net edge is not positive", poor["net_edge_pct"] <= 0)
 
-    # A big target on a quiet coin: pays if hit, but will not be hit.
-    far = evaluate_coin("XRP-USD", 0.05, 0.02, 0.002)
-    ok("unreachable target is refused", not far["qualified"])
-    ok("refused on reachability", "ATR" in far["reason"])
+    # Reachable on the HOURLY clock, which the 5-minute ATR version vetoed.
+    # This is the change: a 2.5% target against a 1.0% hourly swing is 2.5
+    # hours of typical movement - ordinary. Judged against a 5-min ATR it
+    # needed a 1.50% five-minute bar and was rejected in every normal market.
+    hourly = ev("SOL-USD", 0.028, 0.007, 0.010)
+    ok("a 2.8x-hourly-swing target is reachable", hourly["target_swing_multiple"] <= 3.0)
+    ok("and it qualifies", hourly["qualified"])
+
+    far = ev("XRP-USD", 0.050, 0.020, 0.002)
+    ok("target far past the hourly swing is refused", not far["qualified"])
+    ok("refused on reachability", "hourly swing" in far["reason"])
     ok("net edge alone would have passed it", far["net_edge_pct"] > 0)
 
-    # A setup that clears all three. Note how narrow this window is: at a
-    # 0.8% round trip plus 0.2% slippage, a 3.0% target against a 1.5%
-    # stop still needs 55.6% and is refused. Clearing every gate takes a
-    # target roughly 2.7x the stop, which is the honest cost of trading
-    # through a 1% round trip on a small account.
-    good = evaluate_coin("SOL-USD", 0.04, 0.015, 0.015)
-    ok("good setup qualifies", good["qualified"])
-    ok("its break-even is under the limit", good["breakeven_win_rate"] <= 0.55)
-    ok("its target is within the ATR limit", good["target_atr_multiple"] <= 3.0)
+    # --- the three additions --------------------------------------------
+    wide = ev("DOGE-USD", 0.040, 0.015, 0.015, best_bid=100.0, best_ask=100.30)
+    ok("wide spread is refused", not wide["qualified"])
+    ok("refused on spread", "spread" in wide["reason"])
 
-    # Maker fees change the verdict, which is the whole point of the fee
-    # rate being an input rather than a constant.
-    borderline_taker = evaluate_coin("ETH-USD", 0.025, 0.015, 0.01)
-    borderline_maker = evaluate_coin("ETH-USD", 0.025, 0.015, 0.01,
-                                     fee_round_trip=DEFAULT_MAKER_ROUND_TRIP)
-    ok("lower fees never reduce net edge",
-       borderline_maker["net_edge_pct"] > borderline_taker["net_edge_pct"])
+    thin = ev("DOT-USD", 0.040, 0.015, 0.015, bid_depth_usd=100.0, ask_depth_usd=5000.0)
+    ok("thin bid side is refused", not thin["qualified"])
+    ok("refused on depth", "thin book" in thin["reason"])
+    thin_ask = ev("DOT-USD", 0.040, 0.015, 0.015, bid_depth_usd=5000.0, ask_depth_usd=100.0)
+    ok("thin ask side is refused too", not thin_ask["qualified"])
+    ok("exactly 4x depth passes", ev("DOT-USD", 0.040, 0.015, 0.015,
+                                     bid_depth_usd=280.0, ask_depth_usd=280.0)["qualified"])
+
+    no_book = evaluate_coin("ETH-USD", 0.040, 0.015, 0.015)
+    ok("missing order book is a skip, not a pass", not no_book["qualified"])
+    ok("and says so", "order book unavailable" in no_book["reason"])
+    no_depth = evaluate_coin("ETH-USD", 0.040, 0.015, 0.015,
+                             best_bid=100.0, best_ask=100.10)
+    ok("missing depth is a skip", not no_depth["qualified"])
+
+    # Adverse selection scales with volatility, with a floor.
+    ok("adverse selection floors at 0.15%", adverse_selection_pct(0.001) == 0.0015)
+    ok("and scales above it", adverse_selection_pct(0.030) == 0.006)
+    quiet, fast = ev("LINK-USD", 0.040, 0.015, 0.005), ev("LINK-USD", 0.040, 0.015, 0.020)
+    ok("a faster coin is charged more", fast["adverse_selection_pct"] > quiet["adverse_selection_pct"])
+    ok("and therefore keeps less", fast["net_edge_pct"] < quiet["net_edge_pct"])
+
+    # Cost monotonicity.
+    maker = ev("AVAX-USD", 0.040, 0.015, 0.015, fee_round_trip=DEFAULT_MAKER_ROUND_TRIP)
+    taker = ev("AVAX-USD", 0.040, 0.015, 0.015)
+    ok("lower fees never reduce net edge", maker["net_edge_pct"] > taker["net_edge_pct"])
     ok("lower fees never raise the required win rate",
-       borderline_maker["breakeven_win_rate"] <= borderline_taker["breakeven_win_rate"])
+       maker["breakeven_win_rate"] <= taker["breakeven_win_rate"])
 
     # Unknowns are skips, never trades.
     for bad, label in ((None, "None"), (0, "zero"), (-0.01, "negative")):
-        ok(f"{label} ATR is a skip", not evaluate_coin("DOT-USD", 0.03, 0.015, bad)["qualified"])
-        ok(f"{label} target is a skip", not evaluate_coin("DOT-USD", bad, 0.015, 0.01)["qualified"])
+        ok(f"{label} swing is a skip", not ev("DOT-USD", 0.04, 0.015, bad)["qualified"])
+        ok(f"{label} target is a skip", not ev("DOT-USD", bad, 0.015, 0.015)["qualified"])
 
-    # Ranking: risk-adjusted, deterministic, and qualified-only.
-    rows = [
-        evaluate_coin("SOL-USD", 0.040, 0.015, 0.015),   # edge 0.030 / risk 0.015 = 2.00
-        evaluate_coin("AVAX-USD", 0.045, 0.025, 0.018),  # edge 0.035 / risk 0.025 = 1.40
-        evaluate_coin("BTC-USD", 0.015, 0.020, 0.006),   # refused
-    ]
+    # Ranking: risk-adjusted, deterministic, qualified-only.
+    rows = [ev("SOL-USD", 0.040, 0.015, 0.015),
+            ev("AVAX-USD", 0.048, 0.025, 0.018),
+            ev("BTC-USD", 0.015, 0.020, 0.006)]
     q, s = rank_opportunities(rows)
     ok("only qualified coins are ranked", len(q) == 2 and len(s) == 1)
-    ok("ranked by edge per unit of risk, not raw edge", q[0]["product_id"] == "SOL-USD")
+    ok("ranked by edge per unit of risk", q[0]["product_id"] == "SOL-USD")
     ok("raw edge alone would have ranked AVAX first",
        rows[1]["net_edge_pct"] > rows[0]["net_edge_pct"])
     q2, _ = rank_opportunities(list(reversed(rows)))
-    ok("ranking is order-independent", [r["product_id"] for r in q] ==
-       [r["product_id"] for r in q2])
+    ok("ranking is order-independent",
+       [r["product_id"] for r in q] == [r["product_id"] for r in q2])
 
-    # An empty scan is a valid, expected outcome.
-    q3, s3 = rank_opportunities([evaluate_coin("BTC-USD", 0.015, 0.02, 0.006)])
+    q3, s3 = rank_opportunities([ev("BTC-USD", 0.015, 0.020, 0.006)])
     ok("a cycle with no qualified coin is not an error", q3 == [] and len(s3) == 1)
     ok("the report says so in words", "holding cash" in scan_report(q3, s3))
-
     ok("all nine coins are covered", len(NINE_COINS) == 9)
 
     width = max(len(label) for label, _ in checks)
@@ -297,17 +424,20 @@ if __name__ == "__main__":
     print("\n" + "=" * 72)
     print("  EXAMPLE SCAN (illustrative inputs, not live market data)")
     print("=" * 72)
+    # (product, target, stop, hourly_swing, bid, ask, bid_depth, ask_depth)
     sample = [
-        ("BTC-USD", 0.015, 0.020, 0.006),
-        ("ETH-USD", 0.025, 0.015, 0.010),
-        ("SOL-USD", 0.040, 0.015, 0.015),
-        ("ADA-USD", 0.008, 0.020, 0.010),
-        ("DOGE-USD", 0.045, 0.020, 0.018),
-        ("XRP-USD", 0.050, 0.020, 0.002),
-        ("LINK-USD", 0.028, 0.018, 0.011),
-        ("AVAX-USD", 0.045, 0.025, 0.018),
-        ("DOT-USD", 0.022, 0.015, 0.009),
+        ("BTC-USD",  0.015, 0.020, 0.006, 100.0, 100.05, 9000.0, 9000.0),
+        ("ETH-USD",  0.025, 0.015, 0.010, 100.0, 100.05, 8000.0, 8000.0),
+        ("SOL-USD",  0.040, 0.015, 0.015, 100.0, 100.08, 6000.0, 6000.0),
+        ("ADA-USD",  0.008, 0.020, 0.010, 100.0, 100.05, 4000.0, 4000.0),
+        ("DOGE-USD", 0.045, 0.020, 0.018, 100.0, 100.30, 3000.0, 3000.0),
+        ("XRP-USD",  0.050, 0.020, 0.002, 100.0, 100.05, 5000.0, 5000.0),
+        ("LINK-USD", 0.028, 0.018, 0.011, 100.0, 100.10, 1000.0,  150.0),
+        ("AVAX-USD", 0.048, 0.025, 0.018, 100.0, 100.10, 2000.0, 2000.0),
+        ("DOT-USD",  0.022, 0.015, 0.009, 100.0, 100.10, 2000.0, 2000.0),
     ]
-    rows = [evaluate_coin(p, t, s, a) for p, t, s, a in sample]
+    rows = [evaluate_coin(p, t, s, sw, best_bid=b, best_ask=a,
+                          bid_depth_usd=bd, ask_depth_usd=ad)
+            for p, t, s, sw, b, a, bd, ad in sample]
     print(scan_report(*rank_opportunities(rows)))
     sys.exit(rc)
