@@ -119,7 +119,20 @@ MIN_TRADE_USD = _safe_float_env("BTC_COMPOUND_MIN_TRADE_USD", "5.00")
 # Capital above the cap simply stays as cash; it is not reserved, tracked
 # or spent, and it still counts toward equity for the floor ratchet, which
 # is correct - it is real money at risk of nothing.
-MAX_DEPLOY_USD = _safe_float_env("BTC_COMPOUND_MAX_DEPLOY_USD", "0")
+#
+# Set to 582.34 on the account owner's instruction, to trade only the USD
+# that was already cash and leave the proceeds of liquidating other coins
+# untouched.
+#
+# NOTE, because this interacts badly with the point of this bot: the cap is
+# a FIXED dollar amount, so once the balance exceeds it the position size
+# stops growing. A win takes the balance to $592 but the next entry still
+# deploys $582.34, and the profit accumulates as idle cash instead of
+# compounding. That is the opposite of what this strategy is for. If the
+# intent is "hold back a reserve and compound the rest", a reserve floor
+# is the right shape rather than a ceiling - see the note in the commit
+# that introduced this value.
+MAX_DEPLOY_USD = _safe_float_env("BTC_COMPOUND_MAX_DEPLOY_USD", "582.34")
 
 
 def deployable_usd(balance: float) -> float:
