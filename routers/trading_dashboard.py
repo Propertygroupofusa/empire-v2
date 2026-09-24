@@ -6342,3 +6342,49 @@ async def get_fleet_status():
     status = await scaling_coordinator_module.get_fleet_status()
     log.info(f"[dashboard] 📊 Fleet status: Primary profit ${status['primary_bot_profit']:,.2f}, Fleet total ${status['fleet_total_profit']:,.2f}, Clones: {status['clones_created']}")
     return status
+
+
+@router.get("/capital-census")
+async def get_capital_census(json: bool = False):
+    """The capital census, readable in a browser instead of a shell.
+
+    Exactly what `python capital_census.py` prints on this machine, from
+    that module's own code path - it is imported and called here, never
+    reimplemented, so the page and the console can never drift into
+    reporting two different "real" balances.
+
+    Why an endpoint at all: the census only produces real numbers where
+    the Coinbase and Alpaca keys actually live, which is this process.
+    Reaching it previously meant a Railway shell, which is close to
+    unusable from a phone - the device this account is actually operated
+    from. A number nobody can get to is not a number.
+
+    Exposes no data the rest of this router does not already serve
+    unauthenticated (/family-tree-status returns the same real Coinbase
+    balance), and no credential: the census reports which env var each
+    figure came from, never the value.
+
+    The census makes blocking urllib calls, so it runs in a worker thread
+    rather than stalling the event loop for every other dashboard poller
+    while it waits on two venues.
+    """
+    try:
+        import capital_census
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"capital_census module not available: {e}")
+
+    data = await asyncio.to_thread(capital_census.collect)
+    unknown = data["venues_unknown"]
+    if unknown:
+        log.warning(f"[dashboard] capital census INCOMPLETE - no answer from: {', '.join(unknown)}")
+    else:
+        log.info(f"[dashboard] capital census: ${data['verified_usd_cash']:,.2f} verified USD cash, every venue answered")
+
+    if json:
+        return data
+    # Plain text, so a phone browser renders the report as written
+    # rather than as one unreadable line of collapsed whitespace.
+    return Response(
+        content=await asyncio.to_thread(capital_census.build_report, data),
+        media_type="text/plain; charset=utf-8",
+    )

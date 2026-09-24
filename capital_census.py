@@ -216,80 +216,102 @@ def find_phantom_capital():
 # --- Report ---------------------------------------------------------------
 
 
+def collect():
+    """Every venue's live answer plus the phantom-constant scan, as data.
+
+    Split out of main() so an HTTP caller and the command line report the
+    same numbers from the same code path. A separately maintained second
+    copy of this logic sitting behind an endpoint is precisely how two
+    "real" figures start quietly disagreeing, which is the failure this
+    whole file exists to prevent.
+    """
+    venues = [coinbase_holdings(), alpaca_account()]
+    unknown = [v for v in venues if v["status"] == "UNKNOWN"]
+    return {
+        "venues": venues,
+        "phantom_capital": find_phantom_capital(),
+        "verified_usd_cash": round(
+            sum(v.get("usd_cash", 0.0) for v in venues if v["status"] == "OK"), 2),
+        "venues_unknown": [v["venue"] for v in unknown],
+    }
+
+
+def build_report(data) -> str:
+    """The census as plain text - character for character what the CLI prints."""
+    out = []
+    p = out.append
+    venues = data["venues"]
+    phantom = data["phantom_capital"]
+    verified = data["verified_usd_cash"]
+    unknown = [v for v in venues if v["status"] == "UNKNOWN"]
+
+    p("=" * 72)
+    p("CAPITAL CENSUS - only what the venues themselves reported")
+    p("=" * 72)
+    for v in venues:
+        p(f"\n{v['venue']}: {v['status']}")
+        if v["status"] == "UNKNOWN":
+            p(f"    {v['reason']}")
+            continue
+        if "equity" in v:
+            p(f"    equity        ${v['equity']:>12,.2f}")
+        if "usd_cash" in v:
+            p(f"    USD cash      ${v['usd_cash']:>12,.2f}")
+        if v.get("buying_power") is not None and "buying_power" in v:
+            p(f"    buying power  ${v['buying_power']:>12,.2f}")
+        if v.get("coin_balances"):
+            p(f"    coins held    ${v.get('coin_usd', 0.0):>12,.2f}")
+            for cur, d in sorted(v["coin_balances"].items(),
+                                 key=lambda kv: -(kv[1].get("usd") or 0)):
+                if d.get("usd") is None:
+                    p(f"      {cur:<8}{d['units']:>16,.8f}   (no price - not counted)")
+                else:
+                    p(f"      {cur:<8}{d['units']:>16,.8f}   @ ${d['price']:>12,.4f}"
+                      f"  = ${d['usd']:>10,.2f}")
+        if "coin_usd" in v:
+            p(f"    ---")
+            p(f"    venue total   ${v['usd_cash'] + v['coin_usd']:>12,.2f}"
+              f"   (cash + coins)")
+        for k in ("source", "endpoint"):
+            if v.get(k):
+                p(f"    {k:<13} {v[k]}")
+        if v.get("note"):
+            p(f"    NOTE: {v['note']}")
+        if v.get("reason"):
+            p(f"    {v['reason']}")
+
+    p("\n" + "-" * 72)
+    p(f"VERIFIED USD CASH: ${verified:,.2f}")
+    if unknown:
+        p(f"INCOMPLETE - could not read: {', '.join(v['venue'] for v in unknown)}")
+        p("The total above is a floor, not the answer. A venue that did not")
+        p("answer is not the same as a venue holding zero.")
+    else:
+        p("Every venue answered. This is the whole picture.")
+
+    if phantom:
+        p("\n" + "-" * 72)
+        p("NOT REAL MONEY - hardcoded constants that read like capital:")
+        for ph in phantom:
+            p(f"    ${ph['value']:>10,.2f}  {ph['file']}")
+            p(f"    {'':>12}  {ph['what_it_is']}")
+        total_phantom = sum(ph["value"] for ph in phantom)
+        p(f"\n    These sum to ${total_phantom:,.2f} and none of it exists.")
+        p("    They are settings. Adding them to the figure above, or")
+        p("    subtracting one from a balance to compute 'profit', is how")
+        p("    this project produced P&L on zero trades.")
+
+    return "\n".join(out)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
-    venues = [coinbase_holdings(), alpaca_account()]
-    phantom = find_phantom_capital()
-
-    verified = sum(v.get("usd_cash", 0.0) for v in venues if v["status"] == "OK")
-    unknown = [v for v in venues if v["status"] == "UNKNOWN"]
-
-    if args.json:
-        print(json.dumps({"venues": venues, "phantom_capital": phantom,
-                          "verified_usd_cash": round(verified, 2),
-                          "venues_unknown": [v["venue"] for v in unknown]}, indent=2))
-        return 1 if unknown else 0
-
-    print("=" * 72)
-    print("CAPITAL CENSUS - only what the venues themselves reported")
-    print("=" * 72)
-    for v in venues:
-        print(f"\n{v['venue']}: {v['status']}")
-        if v["status"] == "UNKNOWN":
-            print(f"    {v['reason']}")
-            continue
-        if "equity" in v:
-            print(f"    equity        ${v['equity']:>12,.2f}")
-        if "usd_cash" in v:
-            print(f"    USD cash      ${v['usd_cash']:>12,.2f}")
-        if v.get("buying_power") is not None and "buying_power" in v:
-            print(f"    buying power  ${v['buying_power']:>12,.2f}")
-        if v.get("coin_balances"):
-            print(f"    coins held    ${v.get('coin_usd', 0.0):>12,.2f}")
-            for cur, d in sorted(v["coin_balances"].items(),
-                                 key=lambda kv: -(kv[1].get("usd") or 0)):
-                if d.get("usd") is None:
-                    print(f"      {cur:<8}{d['units']:>16,.8f}   (no price - not counted)")
-                else:
-                    print(f"      {cur:<8}{d['units']:>16,.8f}   @ ${d['price']:>12,.4f}"
-                          f"  = ${d['usd']:>10,.2f}")
-        if "coin_usd" in v:
-            print(f"    ---")
-            print(f"    venue total   ${v['usd_cash'] + v['coin_usd']:>12,.2f}"
-                  f"   (cash + coins)")
-        for k in ("source", "endpoint"):
-            if v.get(k):
-                print(f"    {k:<13} {v[k]}")
-        if v.get("note"):
-            print(f"    NOTE: {v['note']}")
-        if v.get("reason"):
-            print(f"    {v['reason']}")
-
-    print("\n" + "-" * 72)
-    print(f"VERIFIED USD CASH: ${verified:,.2f}")
-    if unknown:
-        print(f"INCOMPLETE - could not read: {', '.join(v['venue'] for v in unknown)}")
-        print("The total above is a floor, not the answer. A venue that did not")
-        print("answer is not the same as a venue holding zero.")
-    else:
-        print("Every venue answered. This is the whole picture.")
-
-    if phantom:
-        print("\n" + "-" * 72)
-        print("NOT REAL MONEY - hardcoded constants that read like capital:")
-        for p in phantom:
-            print(f"    ${p['value']:>10,.2f}  {p['file']}")
-            print(f"    {'':>12}  {p['what_it_is']}")
-        total_phantom = sum(p["value"] for p in phantom)
-        print(f"\n    These sum to ${total_phantom:,.2f} and none of it exists.")
-        print("    They are settings. Adding them to the figure above, or")
-        print("    subtracting one from a balance to compute 'profit', is how")
-        print("    this project produced P&L on zero trades.")
-
-    return 1 if unknown else 0
+    data = collect()
+    print(json.dumps(data, indent=2) if args.json else build_report(data))
+    return 1 if data["venues_unknown"] else 0
 
 
 if __name__ == "__main__":
