@@ -1105,6 +1105,50 @@ async def get_best_bid_ask(session, product_id: str = PRODUCT_ID):
         return None, None
 
 
+async def get_book_top_and_depth(session, product_id: str = PRODUCT_ID, levels: int = 5):
+    """Top of book plus cumulative USD depth on each side.
+
+    get_best_bid_ask() above fetches limit=1, which answers "what price"
+    but not "how much is there" - and those are different questions. An
+    order sized at or above the visible depth does not trade AT the top of
+    book, it trades THROUGH it, and its exit then finds nothing to sell
+    into. Sizing needs the second number.
+
+    Depth is summed as price x size over the first `levels` entries on each
+    side, which is the quantity a marketable order would actually consume.
+
+    Returns (bid, ask, bid_depth_usd, ask_depth_usd), any element None on a
+    real failure - never a fabricated number, so a caller can fail closed
+    on a book it could not read rather than sizing against a guess.
+    """
+    path = f"/api/v3/brokerage/product_book?product_id={product_id}&limit={max(1, levels)}"
+    try:
+        async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path), timeout=15) as r:
+            if r.status != 200:
+                return None, None, None, None
+            book = (await r.json()).get("pricebook", {})
+            bids, asks = book.get("bids") or [], book.get("asks") or []
+
+            def _depth(side):
+                total = 0.0
+                for entry in side[:levels]:
+                    try:
+                        total += float(entry["price"]) * float(entry["size"])
+                    except (KeyError, TypeError, ValueError):
+                        # One malformed level is not a reason to discard the
+                        # rest; it just does not count toward the total,
+                        # which errs toward reporting LESS depth than exists.
+                        continue
+                return total
+
+            bid = float(bids[0]["price"]) if bids else None
+            ask = float(asks[0]["price"]) if asks else None
+            return bid, ask, (_depth(bids) if bids else None), (_depth(asks) if asks else None)
+    except Exception as e:
+        log.warning(f"[BTC-COMPOUND] {product_id}: real book depth fetch failed: {type(e).__name__}: {e}")
+        return None, None, None, None
+
+
 async def cancel_order(session, order_id: str) -> bool:
     """Cancel a real resting order. Returns True if Coinbase accepted the
     cancel. Used when a maker order hasn't filled inside its wait window -

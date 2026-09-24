@@ -283,6 +283,64 @@ def evaluate_coin(product_id, target_pct, stop_pct, hourly_swing_pct,
     return row
 
 
+def evaluate_grid_step(product_id, grid_pct, hourly_swing_pct,
+                       best_bid=None, best_ask=None,
+                       bid_depth_usd=None, ask_depth_usd=None,
+                       slice_usd=DEFAULT_BRANCH_SIZE_USD,
+                       fee_round_trip=DEFAULT_TAKER_ROUND_TRIP,
+                       min_adverse=DEFAULT_MIN_ADVERSE_SELECTION,
+                       vol_fraction=DEFAULT_ADVERSE_SELECTION_VOL_FRACTION,
+                       max_spread_pct=DEFAULT_MAX_SPREAD_PCT,
+                       min_depth_ratio=DEFAULT_MIN_DEPTH_RATIO,
+                       max_target_swing_multiple=DEFAULT_MAX_TARGET_SWING_MULTIPLE):
+    """The same gates, shaped for one grid slice rather than a bracket trade.
+
+    A grid slice has no stop of its own - it buys a step below the
+    reference and sells a step above, and an underwater slice stays open
+    until it recovers rather than being stopped out. So the
+    break-even-win-rate gate, which needs a stop distance to divide by,
+    does not apply here and is deliberately neutralised. Applying it anyway
+    would mean inventing a stop to reject trades with, which is a worse
+    error than omitting the check.
+
+    What carries over is everything true of any order: the spread is paid
+    before the trade does anything, the book has to absorb the slice, and
+    one completed step has to clear the round trip plus adverse selection.
+    `grid_pct` is the step - this strategy's equivalent of a target.
+
+    Returns (ok, reason, detail). Never raises.
+    """
+    row = evaluate_coin(
+        product_id, grid_pct, grid_pct, hourly_swing_pct,
+        best_bid=best_bid, best_ask=best_ask,
+        bid_depth_usd=bid_depth_usd, ask_depth_usd=ask_depth_usd,
+        branch_size_usd=slice_usd,
+        fee_round_trip=fee_round_trip, min_adverse=min_adverse,
+        vol_fraction=vol_fraction, max_spread_pct=max_spread_pct,
+        min_depth_ratio=min_depth_ratio,
+        max_target_swing_multiple=max_target_swing_multiple,
+        # Neutralised rather than deleted: evaluate_coin runs the win-rate
+        # gate last, so a limit of 1.0 lets every earlier gate report its
+        # own verdict while this one can never be the reason. Passing the
+        # step as both target and stop keeps that ratio well-defined.
+        max_breakeven_win_rate=1.0,
+    )
+    if row["qualified"]:
+        # evaluate_coin's pass message quotes a break-even win rate, which
+        # is real for a bracket trade and meaningless here - it is computed
+        # from the stop, and the "stop" passed above is the step itself,
+        # only so the ratio stays defined. Left in the log it reads as a
+        # hurdle this slice must clear, which it is not. Restated in the
+        # terms that do apply to a grid step.
+        row["reason"] = (
+            f"net edge {row['net_edge_pct'] * 100:+.3f}% on a "
+            f"{grid_pct * 100:.2f}% step ({row['target_swing_multiple']:.1f}x the "
+            f"{hourly_swing_pct * 100:.2f}% hourly swing), spread "
+            f"{row['spread_pct'] * 100:.3f}%"
+        )
+    return row["qualified"], row["reason"], row
+
+
 def rank_opportunities(rows):
     """Qualified coins best-first, plus everything skipped and why.
 

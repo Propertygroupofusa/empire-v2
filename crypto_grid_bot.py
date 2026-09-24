@@ -2512,6 +2512,58 @@ async def run_grid_self_tuning_sweep():
             log.warning(f"[GRID] self-tuning failed for {branch.bot_name} (non-fatal): {e}")
 
 
+NET_EDGE_GATE_ENABLED = os.getenv("GRID_NET_EDGE_GATE_ENABLED", "true").lower() == "true"
+
+
+async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd: float):
+    """Should this dip actually be bought? Returns (ok, reason).
+
+    Three costs the dip trigger alone cannot see, checked against the real
+    book right before the order rather than against a config value:
+
+      spread    paid the instant the order crosses, before the trade has
+                done anything, and unrecoverable inside one grid step
+      depth     a slice at or above the visible depth does not trade AT
+                the top of book, it trades THROUGH it, and its exit then
+                finds nothing to sell into
+      net edge  one completed step must clear the real round trip plus
+                adverse selection, priced off the coin's own volatility
+
+    FAILS CLOSED, but only for this cycle. A book that cannot be read is
+    not a book that is fine, so the buy is skipped - and the branch
+    re-checks on its next cycle 30 seconds later, so a transient fetch
+    failure costs one dip, never the branch. That is the opposite of this
+    codebase's usual fail-open rule for missing data, and deliberately so:
+    those gates fail open because blocking on missing data would stop a
+    KNOWN-GOOD action, while this one exists precisely to decide whether
+    the action is good at all.
+
+    Disable with GRID_NET_EDGE_GATE_ENABLED=false to restore the previous
+    buy-every-dip behaviour exactly.
+    """
+    if not NET_EDGE_GATE_ENABLED:
+        return True, "gate disabled"
+    try:
+        import crypto_nine_coin_scanner as scanner
+        bid, ask, bid_depth, ask_depth = await engine.get_book_top_and_depth(session, product_id)
+        swing = await engine.get_average_hourly_swing_pct(session, product_id)
+        # The live fee tier the account really pays, not the code default -
+        # it is the largest term in the net-edge sum, so a stale value is
+        # the one input most likely to flip a verdict.
+        _maker, taker, _tier, _err = await engine.get_real_fee_tier(session)
+        fee_round_trip = (taker * 2) if taker else scanner.DEFAULT_TAKER_ROUND_TRIP
+        ok, reason, _detail = scanner.evaluate_grid_step(
+            product_id, grid_pct, swing,
+            best_bid=bid, best_ask=ask,
+            bid_depth_usd=bid_depth, ask_depth_usd=ask_depth,
+            slice_usd=slice_usd, fee_round_trip=fee_round_trip,
+        )
+        return ok, reason
+    except Exception as e:
+        # An error evaluating the gate is not permission to skip it.
+        return False, f"gate could not be evaluated ({type(e).__name__}: {e}) - not buying blind"
+
+
 async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     """One real cycle for one real grid branch - the live counterpart to
     crypto_selection_backtest.py's _replay_grid_bot(), same real
@@ -2642,6 +2694,13 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
         if spend < MIN_TRADE_USD:
             log.info(f"[GRID] {branch.bot_name}: only ${spend:.2f} real spendable for a new slice (below ${MIN_TRADE_USD:.2f} minimum) - waiting")
             return
+
+        gate_ok, gate_reason = await _net_edge_gate_ok(
+            session, branch.product_id, grid_pct, spend)
+        if not gate_ok:
+            log.info(f"[GRID] {branch.bot_name}: ⛔ net-edge gate - {gate_reason}")
+            return
+
         fill = await grid_buy(session, spend, branch.product_id)
         if not fill:
             log.warning(f"[GRID] {branch.bot_name}: real grid buy into {branch.product_id} did not fill - will retry next cycle")
