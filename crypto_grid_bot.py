@@ -2517,7 +2517,40 @@ NET_EDGE_GATE_ENABLED = os.getenv("GRID_NET_EDGE_GATE_ENABLED", "true").lower() 
 # The microstructure veto rides on the same gate but answers a different
 # question - the priced gates ask whether the STEP is worth taking, this
 # asks whether NOW is the moment to take it - so it gets its own switch.
-MICROSTRUCTURE_VETO_ENABLED = os.getenv("GRID_MICROSTRUCTURE_VETO_ENABLED", "true").lower() == "true"
+#
+#   observe   compute it, log every buy it WOULD have blocked, block
+#             nothing. The default.
+#   enforce   block those buys for real.
+#   off       do not compute it at all - saves the API call.
+#
+# It defaults to OBSERVE, and that default is the whole point.
+#
+# The gates beside it are derived: spread, fees and depth are costs this
+# account provably pays, and a step that does not clear them provably
+# loses. Nothing had to be measured for those to be true. This one is
+# different in kind - it is an EMPIRICAL claim, that a buy into a book
+# leaning the other way performs worse than one into a neutral book, at
+# thresholds (0.25 / 0.30) that arrived as constants in a code sample
+# with no measurement behind them on this exchange, these nine coins, or
+# this account's holding period.
+#
+# And the only thing it can ever do is remove trades from the grid bot,
+# which at the time this was written was the sole profitable component in
+# the system: +$19.55 over 82 trades at a 76% win rate. An unmeasured
+# filter in front of the one thing that works is the highest-regret
+# change available, and "it is probably right" is not evidence.
+#
+# So it runs, logs, and blocks nothing until the log says otherwise.
+# Flip to enforce when the MICRO-OBSERVE lines show a population worth
+# removing - and by then that is a measurement, not a guess.
+_VETO_MODES = ("observe", "enforce", "off")
+MICROSTRUCTURE_VETO_MODE = os.getenv("GRID_MICROSTRUCTURE_VETO_MODE", "observe").strip().lower()
+if MICROSTRUCTURE_VETO_MODE not in _VETO_MODES:
+    # An unreadable mode resolves to the harmless one. A typo in a deploy
+    # variable must never be the reason live buys start getting blocked.
+    log.warning(f"[GRID] GRID_MICROSTRUCTURE_VETO_MODE={MICROSTRUCTURE_VETO_MODE!r} "
+                f"is not one of {_VETO_MODES} - falling back to 'observe'")
+    MICROSTRUCTURE_VETO_MODE = "observe"
 
 
 async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd: float):
@@ -2537,10 +2570,16 @@ async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd
                 the same step at a worse moment - the cost model prices
                 the trade, this prices the timing
 
-    The first three are PRICED gates and fail closed. The fourth is a
-    VETO ONLY, and it can only subtract: a friendly book never widens the
-    expected move here. Crediting a tight spread on the revenue side would
-    double-count it, since spread is already a subtracted cost above.
+    The first three are PRICED gates: derived from costs this account
+    provably pays, they decide buys for real and fail closed.
+
+    The fourth is different in kind and is treated differently. It is an
+    empirical claim rather than a derived one, so it runs in OBSERVE mode
+    by default - it logs every buy it would have blocked and blocks none
+    of them, until those logs justify enforcing it. It is also a VETO
+    ONLY, never a bonus: a friendly book does not widen the expected move
+    here, because crediting a tight spread on the revenue side would
+    double-count it against the spread already subtracted above.
 
     FAILS CLOSED, but only for this cycle. A book that cannot be read is
     not a book that is fine, so the buy is skipped - and the branch
@@ -2577,7 +2616,7 @@ async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd
         # Only now, once the economics have passed, is the timing worth an
         # extra API call. Ordering it this way also keeps the call budget
         # on the coins that could actually trade.
-        if MICROSTRUCTURE_VETO_ENABLED:
+        if MICROSTRUCTURE_VETO_MODE != "off":
             imbalance = scanner.book_imbalance(bid_depth, ask_depth)
             trades = await engine.get_recent_market_trades(session, product_id)
             aggression = scanner.trade_aggression(trades)
@@ -2587,8 +2626,17 @@ async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd
             micro_ok, micro_reason = scanner.microstructure_veto(
                 "long", imbalance, aggression)
             if not micro_ok:
-                return False, micro_reason
-            reason = f"{reason}; {micro_reason}"
+                if MICROSTRUCTURE_VETO_MODE == "enforce":
+                    return False, micro_reason
+                # Observe mode: the buy proceeds. This line is the whole
+                # experiment - one per buy the veto would have taken away,
+                # tagged so it can be counted out of the logs and read
+                # against what those same buys went on to do.
+                log.info(f"[GRID] MICRO-OBSERVE {product_id}: would have blocked this "
+                         f"buy - {micro_reason} (observe mode, buy NOT blocked)")
+                reason = f"{reason}; WOULD-HAVE-VETOED: {micro_reason}"
+            else:
+                reason = f"{reason}; {micro_reason}"
         return True, reason
     except Exception as e:
         # An error evaluating the gate is not permission to skip it.
