@@ -128,6 +128,27 @@ def deployable_usd(balance: float) -> float:
     if MAX_DEPLOY_USD <= 0:
         return balance
     return min(balance, MAX_DEPLOY_USD)
+
+
+def tracked_equity(balance: float, position_value):
+    """The capital the equity floor should watch: what is actually at risk.
+
+    Without a cap this is the whole account, unchanged. With a cap, money
+    the cap holds back is not trading and must not drag the floor up behind
+    it - otherwise a reserve makes the floor rise while the traded capital
+    stays the same size, and a drawdown that only ever touched the traded
+    portion trips a floor set against money that never moved.
+
+    Flat, the trading pool is whatever the cap allows. Holding a position,
+    every deployable dollar is already in it, so the idle cash IS the
+    reserve and the position's own market value is the pool.
+    """
+    pos = position_value or 0.0
+    if MAX_DEPLOY_USD <= 0:
+        return balance + pos
+    if position_value is not None:
+        return pos
+    return min(balance, MAX_DEPLOY_USD)
 STOP_LOSS_PCT = _safe_float_env("BTC_COMPOUND_STOP_LOSS_PCT", "0.02")  # -2% default
 
 # Breakeven stop ratchet, per the account owner: a fresh position keeps the
@@ -1394,7 +1415,10 @@ async def run_cycle():
         # next cycle when both are available again.
         equity = None
         if balance is not None:
-            equity = balance + (position.qty * price if position is not None and price is not None else 0.0)
+            equity = tracked_equity(
+                balance,
+                position.qty * price if position is not None and price is not None else None,
+            )
 
         if equity is not None and equity >= EQUITY_FLOOR_TIER:
             candidate_floor = compute_equity_floor(equity)
