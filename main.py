@@ -1458,6 +1458,28 @@ async def serve_family_tree_dashboard():
     return FileResponse(dashboard_path, media_type="text/html")
 
 
+@app.get("/live-ops")
+async def serve_live_ops_dashboard():
+    """Serve the Live Ops page - one screen answering "is it working right
+    now", as opposed to the other dashboards, which answer "what does the
+    account hold".
+
+    The difference matters most right after a deploy. Balances look
+    identical whether the bot is running or has crashed; only its
+    DECISIONS separate the two. So this page leads with a heartbeat driven
+    by real gate verdicts, and shows the settings the process is actually
+    using - which is also the quickest confirmation that the build now
+    serving is the new one.
+
+    Reads /api/trading-dashboard/live-ops, which serves every panel in a
+    single poll with each section carrying its own error, so one venue
+    being unreachable degrades a panel instead of blanking the page."""
+    dashboard_path = os.path.join(os.path.dirname(__file__), "live_ops_dashboard.html")
+    if not os.path.exists(dashboard_path):
+        raise HTTPException(status_code=404, detail="Live Ops dashboard not found")
+    return FileResponse(dashboard_path, media_type="text/html")
+
+
 @app.get("/crypto-selection-backtest-view")
 async def serve_crypto_selection_backtest():
     """Serve the shadow-mode coin-selection backtest page - a read-only

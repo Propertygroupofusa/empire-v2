@@ -2553,7 +2553,32 @@ if MICROSTRUCTURE_VETO_MODE not in _VETO_MODES:
     MICROSTRUCTURE_VETO_MODE = "observe"
 
 
-async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd: float):
+async def _record_gate_decision(bot_name: str, product_id: str, verdict: str, reason: str):
+    """Write one gate verdict to the shared activity feed the dashboard reads.
+
+    The gate already logs to Railway, but Railway logs are not a dashboard
+    and the account owner cannot watch them from a phone. Every verdict -
+    pass, block, and the observe-mode counterfactual - lands here so the
+    Live Ops page can show the gate deciding in real time. That is the
+    difference between "the deploy succeeded" and "I can see it working".
+
+    Reuses crypto_family_tree_bot._log_activity, which is already
+    append-only, self-trimming and contractually unable to raise. Imported
+    lazily because these two modules import each other's world at startup
+    and a top-level import here would close the cycle.
+
+    Never allowed to raise, for the same reason _log_activity is not:
+    telemetry that can break a trade is worse than no telemetry.
+    """
+    try:
+        import crypto_family_tree_bot as tree
+        await tree._log_activity(bot_name, product_id, verdict, reason)
+    except Exception as e:
+        log.warning(f"[GRID] gate telemetry write failed (non-fatal, trading unaffected): {e}")
+
+
+async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd: float,
+                            bot_name: str = "grid"):
     """Should this dip actually be bought? Returns (ok, reason).
 
     Four things the dip trigger alone cannot see, checked against the real
@@ -2611,6 +2636,7 @@ async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd
             slice_usd=slice_usd, fee_round_trip=fee_round_trip,
         )
         if not ok:
+            await _record_gate_decision(bot_name, product_id, "GATE_BLOCK", reason)
             return False, reason
 
         # Only now, once the economics have passed, is the timing worth an
@@ -2627,20 +2653,25 @@ async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd
                 "long", imbalance, aggression)
             if not micro_ok:
                 if MICROSTRUCTURE_VETO_MODE == "enforce":
+                    await _record_gate_decision(bot_name, product_id, "GATE_BLOCK", micro_reason)
                     return False, micro_reason
-                # Observe mode: the buy proceeds. This line is the whole
+                # Observe mode: the buy proceeds. This record is the whole
                 # experiment - one per buy the veto would have taken away,
-                # tagged so it can be counted out of the logs and read
-                # against what those same buys went on to do.
+                # tagged so it can be counted and read against what those
+                # same buys went on to do.
                 log.info(f"[GRID] MICRO-OBSERVE {product_id}: would have blocked this "
                          f"buy - {micro_reason} (observe mode, buy NOT blocked)")
                 reason = f"{reason}; WOULD-HAVE-VETOED: {micro_reason}"
-            else:
-                reason = f"{reason}; {micro_reason}"
+                await _record_gate_decision(bot_name, product_id, "GATE_OBSERVE", reason)
+                return True, reason
+            reason = f"{reason}; {micro_reason}"
+        await _record_gate_decision(bot_name, product_id, "GATE_PASS", reason)
         return True, reason
     except Exception as e:
         # An error evaluating the gate is not permission to skip it.
-        return False, f"gate could not be evaluated ({type(e).__name__}: {e}) - not buying blind"
+        reason = f"gate could not be evaluated ({type(e).__name__}: {e}) - not buying blind"
+        await _record_gate_decision(bot_name, product_id, "GATE_ERROR", reason)
+        return False, reason
 
 
 async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
@@ -2775,7 +2806,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
             return
 
         gate_ok, gate_reason = await _net_edge_gate_ok(
-            session, branch.product_id, grid_pct, spend)
+            session, branch.product_id, grid_pct, spend, bot_name=branch.bot_name)
         if not gate_ok:
             log.info(f"[GRID] {branch.bot_name}: ⛔ net-edge gate - {gate_reason}")
             return

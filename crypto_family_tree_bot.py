@@ -2340,6 +2340,30 @@ async def get_live_coin_snapshot():
     return {"btc_return_25h": btc_return, "coins": snapshot}
 
 
+def base_currency(symbol: str) -> str:
+    """The base asset of a stored position symbol: "BTC" from any of
+    "BTC-USD", "BTC/USD" or "BTC".
+
+    bot_positions is shared across every bot in this codebase and they do
+    not agree on a separator - the tree's own rows were found holding
+    "BTC/USD" while the product ids passed to Coinbase use "BTC-USD". Code
+    that split on "-" alone left "BTC/USD" completely intact and then used
+    it as a currency, which broke three things at once on 2026-09-24:
+
+      - the reconciliation panel printed the asset as "BTC/USD"
+      - its Reconcile link posted to /reconcile-asset/BTC%2FUSD, which the
+        server decodes back into a "/" and therefore into an extra path
+        segment that matches no route - the live "Error: Not Found"
+      - reconcile_asset_to_real_balance() filtered positions on the same
+        broken split, so even reached directly it would have found no
+        branch tracking "BTC" and reported a healthy "ok"
+
+    Splitting on both separators is the whole fix. Kept as one function so
+    the next caller cannot reintroduce half of it.
+    """
+    return (symbol or "").replace("/", "-").split("-")[0].strip().upper()
+
+
 async def get_reconciliation_report():
     """Real DB-vs-Coinbase reconciliation, built directly off the phantom-
     position self-heal fix above: the dashboard showing "22 branches
@@ -2408,7 +2432,7 @@ async def get_reconciliation_report():
     tracked_by_currency = {}
     branch_count_by_currency = {}
     for pos in positions:
-        currency = pos.symbol.split("-")[0]
+        currency = base_currency(pos.symbol)
         tracked_by_currency[currency] = tracked_by_currency.get(currency, 0.0) + pos.qty
         branch_count_by_currency[currency] = branch_count_by_currency.get(currency, 0) + 1
 
@@ -3166,11 +3190,17 @@ async def reconcile_asset_to_real_balance(currency: str, dry_run: bool = True) -
     branch's BotPosition.qty is corrected in place (keeping its own real
     entry_price/target_price/stop_price untouched) and a real RECONCILE
     activity event is logged naming the exact real correction."""
+    # Normalised ONCE, at the top, before anything uses it. `currency`
+    # arrives from a URL path segment and every later use - the position
+    # filter, the Coinbase balance lookup, the returned payload - needs
+    # the bare base asset. Normalising at each use site instead is how
+    # one of them gets missed.
+    currency = base_currency(currency)
     async with AsyncSessionLocal() as db:
         branch_result = await db.execute(select(CryptoTreeBranch.bot_name))
         tree_bot_names = {row[0] for row in branch_result.all()}
         result = await db.execute(select(BotPosition).where(BotPosition.bot.in_(tree_bot_names)))
-        positions = [p for p in result.scalars().all() if p.symbol.split("-")[0] == currency]
+        positions = [p for p in result.scalars().all() if base_currency(p.symbol) == currency]
 
     if not positions:
         return {"status": "ok", "currency": currency, "detail": "no real branch currently tracks this currency"}

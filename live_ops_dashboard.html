@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Live Ops</title>
+<style>
+  /* Phone-first. This page is read on a phone, standing up, right after a
+     deploy - so every panel has to be legible in one column at 360px and
+     nothing may scroll sideways. */
+  :root{
+    --bg:#0b0f14; --panel:#131a23; --panel-2:#0f151d; --line:#1f2a36;
+    --ink:#e8eef5; --ink-dim:#8fa3b8; --ink-faint:#5e7085;
+    --ok:#2fbf71; --warn:#e0a33a; --bad:#e35d5d; --info:#4a9fe0; --idle:#6b7d92;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+       font-size:15px;line-height:1.45;
+       padding:env(safe-area-inset-top,0px) 0 calc(env(safe-area-inset-bottom,0px) + 40px)}
+  .wrap{max-width:900px;margin:0 auto;padding:16px}
+  h1{font-size:1.25rem;margin:0;letter-spacing:-0.01em}
+  h2{font-size:0.82rem;margin:0 0 10px;text-transform:uppercase;letter-spacing:0.09em;
+     color:var(--ink-dim);font-weight:600}
+
+  /* Heartbeat bar - the single most important thing on the page. */
+  .beat{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;
+        background:var(--panel);border:1px solid var(--line);border-radius:12px;
+        padding:12px 14px;margin-bottom:14px;display:flex;flex-wrap:wrap;
+        gap:6px 14px;align-items:baseline}
+  .beat .dot{width:10px;height:10px;border-radius:50%;background:var(--idle);
+             display:inline-block;margin-right:7px;flex:none}
+  .beat.live .dot{background:var(--ok);animation:pulse 2s ease-in-out infinite}
+  .beat.stale .dot{background:var(--warn)}
+  .beat.down .dot{background:var(--bad)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  @media (prefers-reduced-motion:reduce){.beat.live .dot{animation:none}}
+  .beat .state{font-weight:650}
+  .beat .sub{color:var(--ink-dim);font-size:0.84rem}
+
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+         padding:14px;margin-bottom:14px}
+  .panel.err{border-color:#4a2626;background:#1a1010}
+
+  .kv{display:grid;grid-template-columns:1fr auto;gap:7px 12px;align-items:baseline}
+  .kv .k{color:var(--ink-dim);font-size:0.88rem;min-width:0}
+  .kv .k small{display:block;color:var(--ink-faint);font-size:0.76rem;line-height:1.3}
+  .kv .v{font-family:var(--mono);font-size:0.94rem;text-align:right;white-space:nowrap}
+  .src{font-size:0.7rem;color:var(--ink-faint);font-family:var(--sans)}
+
+  .tally{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+  .chip{border:1px solid var(--line);border-radius:999px;padding:5px 11px;
+        font-size:0.8rem;background:var(--panel-2);white-space:nowrap}
+  .chip b{font-family:var(--mono);margin-left:5px}
+  .chip.pass b{color:var(--ok)} .chip.block b{color:var(--bad)}
+  .chip.obs b{color:var(--info)} .chip.errc b{color:var(--warn)}
+
+  .ev{border-top:1px solid var(--line);padding:9px 0;display:grid;
+      grid-template-columns:auto 1fr;gap:10px;align-items:start}
+  .ev:first-child{border-top:0}
+  .tag{font-size:0.66rem;font-weight:700;letter-spacing:.05em;padding:3px 7px;
+       border-radius:5px;white-space:nowrap;font-family:var(--sans)}
+  .tag.pass{background:#12331f;color:var(--ok)}
+  .tag.block{background:#331414;color:var(--bad)}
+  .tag.obs{background:#0f2536;color:var(--info)}
+  .tag.err{background:#33260f;color:var(--warn)}
+  .ev .body{min-width:0}
+  .ev .who{font-family:var(--mono);font-size:0.82rem;color:var(--ink)}
+  .ev .why{font-size:0.83rem;color:var(--ink-dim);overflow-wrap:anywhere}
+  .ev .when{font-size:0.72rem;color:var(--ink-faint);font-family:var(--mono)}
+
+  .branch{border-top:1px solid var(--line);padding:11px 0}
+  .branch:first-child{border-top:0}
+  .branch .top{display:flex;justify-content:space-between;gap:10px;align-items:baseline}
+  .branch .coin{font-family:var(--mono);font-weight:650}
+  .branch .meta{font-size:0.8rem;color:var(--ink-dim);margin-top:3px}
+  .pos{color:var(--ok)} .neg{color:var(--bad)} .none{color:var(--ink-faint)}
+  .badge{font-size:0.68rem;padding:2px 6px;border-radius:4px;background:var(--panel-2);
+         border:1px solid var(--line);color:var(--ink-dim);margin-left:6px}
+
+  .empty{color:var(--ink-faint);font-size:0.86rem;padding:8px 0}
+  .errmsg{color:var(--bad);font-family:var(--mono);font-size:0.8rem;overflow-wrap:anywhere}
+  .foot{color:var(--ink-faint);font-size:0.76rem;text-align:center;margin-top:18px}
+  a{color:var(--info)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px">
+    <h1>Live Ops</h1>
+    <span class="src" id="clock">—</span>
+  </div>
+
+  <div class="beat" id="beat">
+    <span><span class="dot"></span><span class="state" id="beat-state">Connecting…</span></span>
+    <span class="sub" id="beat-sub"></span>
+  </div>
+
+  <div class="panel" id="p-gate">
+    <h2>Gate decisions — the bot deciding, live</h2>
+    <div class="tally" id="gate-tally"></div>
+    <div id="gate-events"><div class="empty">Loading…</div></div>
+  </div>
+
+  <div class="panel" id="p-config">
+    <h2>Settings actually in effect</h2>
+    <div class="kv" id="config-kv"></div>
+  </div>
+
+  <div class="panel" id="p-branches">
+    <h2>Grid branches</h2>
+    <div id="branches"><div class="empty">Loading…</div></div>
+  </div>
+
+  <div class="panel" id="p-capital">
+    <h2>Capital</h2>
+    <div class="kv" id="capital-kv"></div>
+  </div>
+
+  <div class="panel" id="p-recon">
+    <h2>Reconciliation — DB vs. real balances</h2>
+    <div id="recon"><div class="empty">Loading…</div></div>
+  </div>
+
+  <div class="foot" id="foot">Auto-refreshes every 10s.</div>
+</div>
+
+<script>
+const API = '/api/trading-dashboard/live-ops';
+const REFRESH_MS = 10000;
+
+// A decision older than this means dips are not reaching the gate. It is
+// not necessarily broken - a quiet market produces no dips - so it reads
+// as "quiet", never as "healthy" and never as "dead".
+const STALE_S = 30 * 60;
+
+const esc = s => String(s == null ? '' : s)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  .replace(/"/g,'&quot;');
+
+function ago(sec){
+  if (sec == null) return 'never';
+  if (sec < 60) return Math.round(sec) + 's ago';
+  if (sec < 3600) return Math.round(sec/60) + 'm ago';
+  if (sec < 86400) return (sec/3600).toFixed(1) + 'h ago';
+  return (sec/86400).toFixed(1) + 'd ago';
+}
+function when(iso){
+  if (!iso) return '';
+  const d = new Date(iso.endsWith('Z') ? iso : iso + 'Z');
+  return isNaN(d) ? '' : d.toLocaleTimeString();
+}
+// A real number or an explicit dash. Never 0 standing in for "unknown".
+function money(v, dp=2){
+  return (v === null || v === undefined || isNaN(v))
+    ? '<span class="none">—</span>'
+    : '$' + Number(v).toLocaleString(undefined,{minimumFractionDigits:dp, maximumFractionDigits:dp});
+}
+function signed(v){
+  if (v === null || v === undefined || isNaN(v)) return '<span class="none">—</span>';
+  const n = Number(v);
+  const cls = n > 0 ? 'pos' : n < 0 ? 'neg' : '';
+  // Sign OUTSIDE the currency symbol. toFixed() on a negative returns
+  // "-1.25", so the naive concatenation produces "$-1.25" - which reads as
+  // a typo at a glance and is the one number on this page nobody can
+  // afford to misread.
+  const sign = n > 0 ? '+' : n < 0 ? '-' : '';
+  return `<span class="${cls}">${sign}$${Math.abs(n).toFixed(2)}</span>`;
+}
+function panelError(id, msg){
+  const el = document.getElementById(id);
+  el.classList.add('err');
+  return `<div class="errmsg">${esc(msg)}</div>`;
+}
+
+const TAGS = {
+  GATE_PASS:   ['pass',  'BOUGHT'],
+  GATE_BLOCK:  ['block', 'BLOCKED'],
+  GATE_OBSERVE:['obs',   'WOULD BLOCK'],
+  GATE_ERROR:  ['err',   'ERROR'],
+};
+
+function renderBeat(gate){
+  const beat = document.getElementById('beat');
+  const state = document.getElementById('beat-state');
+  const sub = document.getElementById('beat-sub');
+  beat.className = 'beat';
+
+  if (!gate.ok){
+    beat.classList.add('down');
+    state.textContent = 'Cannot read decisions';
+    sub.textContent = gate.error || '';
+    return;
+  }
+  const age = gate.data.last_decision_age_seconds;
+  if (age === null || age === undefined){
+    beat.classList.add('stale');
+    state.textContent = 'No decisions recorded yet';
+    sub.textContent = 'Nothing has reached the gate since this shipped.';
+  } else if (age <= STALE_S){
+    beat.classList.add('live');
+    state.textContent = 'Bot is deciding';
+    sub.textContent = 'Last gate decision ' + ago(age) + '.';
+  } else {
+    beat.classList.add('stale');
+    state.textContent = 'Quiet — no recent decisions';
+    sub.textContent = 'Last gate decision ' + ago(age) + '. No dip has triggered since.';
+  }
+}
+
+function renderGate(gate){
+  const tallyEl = document.getElementById('gate-tally');
+  const evEl = document.getElementById('gate-events');
+  if (!gate.ok){ tallyEl.innerHTML=''; evEl.innerHTML = panelError('p-gate', gate.error); return; }
+
+  const t = gate.data.tally_24h || {};
+  tallyEl.innerHTML = `
+    <span class="chip pass">bought <b>${t.GATE_PASS||0}</b></span>
+    <span class="chip block">blocked <b>${t.GATE_BLOCK||0}</b></span>
+    <span class="chip obs">would block <b>${t.GATE_OBSERVE||0}</b></span>
+    <span class="chip errc">errors <b>${t.GATE_ERROR||0}</b></span>
+    <span class="chip">last 24h</span>`;
+
+  const evs = gate.data.events || [];
+  if (!evs.length){
+    evEl.innerHTML = `<div class="empty">No gate decisions recorded yet. One is written every
+      time a dip triggers and the gate rules on it — so this fills in as soon as a coin dips
+      far enough to be considered.</div>`;
+    return;
+  }
+  evEl.innerHTML = evs.map(e => {
+    const [cls, label] = TAGS[e.event_type] || ['err', e.event_type];
+    return `<div class="ev">
+      <span class="tag ${cls}">${esc(label)}</span>
+      <div class="body">
+        <div class="who">${esc(e.product_id||'')} <span class="when">${esc(when(e.created_at))}</span></div>
+        <div class="why">${esc(e.message||'')}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderConfig(cfg){
+  const el = document.getElementById('config-kv');
+  if (!cfg.ok){ el.innerHTML = panelError('p-config', cfg.error); return; }
+  el.innerHTML = (cfg.data||[]).map(r => `
+    <div class="k">${esc(r.key)}${r.note ? `<small>${esc(r.note)}</small>` : ''}</div>
+    <div class="v">${esc(r.value)}<div class="src">${esc(r.source)}</div></div>`).join('');
+}
+
+function renderBranches(grid){
+  const el = document.getElementById('branches');
+  if (!grid.ok){ el.innerHTML = panelError('p-branches', grid.error); return; }
+  const d = grid.data || {};
+  const bs = d.branches || [];
+
+  const head = `<div class="kv" style="margin-bottom:10px">
+      <div class="k">Branches</div><div class="v">${bs.length}</div>
+      <div class="k">Holding right now</div><div class="v">${d.branches_with_open_slices ?? '—'}</div>
+      <div class="k">Allocated</div><div class="v">${money(d.total_allocated_usd)}</div>
+      <div class="k">Unrealized if sold now</div><div class="v">${signed(d.total_unrealized_net_usd)}</div>
+      <div class="k">Free cash</div><div class="v">${money(d.real_free_cash_usd)}</div>
+    </div>`;
+
+  if (!bs.length){ el.innerHTML = head + '<div class="empty">No branches exist yet.</div>'; return; }
+
+  el.innerHTML = head + bs.map(b => `
+    <div class="branch">
+      <div class="top">
+        <span class="coin">${esc(b.product_id)}
+          ${b.active ? '' : '<span class="badge">paused</span>'}
+          ${b.locked ? '<span class="badge">locked</span>' : ''}
+          ${b.drawdown_breached ? '<span class="badge">breaker tripped</span>' : ''}
+        </span>
+        <span>${signed(b.total_unrealized_net_usd)}</span>
+      </div>
+      <div class="meta">
+        ${money(b.allocated_usd)} allocated ·
+        ${b.open_slices}/${b.num_levels} slices open ·
+        step ${(b.grid_pct*100).toFixed(2)}%
+        ${b.current_price != null ? ' · at ' + money(b.current_price, 4) : ''}
+      </div>
+    </div>`).join('');
+}
+
+function renderCapital(cap){
+  const el = document.getElementById('capital-kv');
+  if (!cap.ok){ el.innerHTML = panelError('p-capital', cap.error); return; }
+  const d = cap.data || {};
+  // capital_census.collect() returns `venues` as a LIST of per-venue dicts,
+  // each carrying its own status - not a map. A venue whose status is
+  // UNKNOWN could not be read, and is shown that way with the census's own
+  // reason attached. It is never rendered as $0: a reading that failed and
+  // a balance of zero are different facts, and this page exists precisely
+  // for the moments when telling them apart matters.
+  const venues = Array.isArray(d.venues) ? d.venues : [];
+  const rows = [];
+
+  for (const v of venues){
+    const name = v.venue || 'venue';
+    if (v.status !== 'OK'){
+      rows.push([name, '<span class="none">unreadable</span>', v.reason || 'no reason given']);
+      continue;
+    }
+    if (v.equity !== undefined){                       // Alpaca
+      rows.push([name + ' equity', money(v.equity),
+                 (v.is_live_money === false ? 'paper account' : '') ]);
+      rows.push([name + ' cash', money(v.usd_cash), '']);
+      if (v.buying_power !== undefined) rows.push([name + ' buying power', money(v.buying_power), '']);
+    } else {                                           // Coinbase
+      rows.push([name + ' USD', money(v.usd_cash), '']);
+      if (v.coin_usd !== undefined){
+        rows.push([name + ' coins', money(v.coin_usd),
+                   (v.unpriced && v.unpriced.length)
+                     ? 'excludes ' + v.unpriced.join(', ') + ' — could not be priced'
+                     : '']);
+      }
+    }
+  }
+
+  // Only meaningful once at least one venue reported. With no venues at
+  // all, a "verified cash: $0.00" line would be a fabricated total
+  // wearing the word "verified" - exactly the thing this panel must not do.
+  if (venues.length && d.verified_usd_cash !== undefined){
+    rows.push(['Verified cash across readable venues', money(d.verified_usd_cash),
+               (d.venues_unknown && d.venues_unknown.length)
+                 ? 'excludes ' + d.venues_unknown.join(', ') + ' — not readable right now'
+                 : 'every venue read successfully']);
+  }
+
+  el.innerHTML = rows.length
+    ? rows.map(([k, v, note]) =>
+        `<div class="k">${esc(k)}${note ? `<small>${esc(note)}</small>` : ''}</div>
+         <div class="v">${v}</div>`).join('')
+    : `<div class="k">No venue figures returned</div><div class="v"><span class="none">—</span></div>`;
+}
+
+function renderRecon(rec){
+  const el = document.getElementById('recon');
+  if (!rec.ok){ el.innerHTML = panelError('p-recon', rec.error); return; }
+  const d = rec.data || {};
+  const assets = d.assets || [];
+  if (!assets.length){ el.innerHTML = '<div class="empty">No tracked positions to reconcile.</div>'; return; }
+  const banner = d.shortfall_count > 0
+    ? `<div class="errmsg" style="margin-bottom:8px">⚠️ ${d.shortfall_count} asset(s) where the
+       real balance is short of what the DB tracks.</div>`
+    : `<div class="empty" style="color:var(--ok)">✅ Every tracked asset is covered.</div>`;
+  el.innerHTML = banner + assets.map(a => `
+    <div class="branch">
+      <div class="top">
+        <span class="coin">${esc(a.currency)}</span>
+        <span class="${a.status === 'SHORTFALL' ? 'neg' : a.status === 'ok' ? 'pos' : 'none'}">${esc(a.status)}</span>
+      </div>
+      <div class="meta">tracked ${Number(a.tracked_qty).toFixed(8)} ·
+        real ${a.real_balance === null ? '—' : Number(a.real_balance).toFixed(8)}</div>
+    </div>`).join('');
+}
+
+async function tick(){
+  try{
+    const res = await fetch(API + '?t=' + Date.now(), {cache:'no-store'});
+    if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + res.statusText);
+    const d = await res.json();
+    ['p-gate','p-config','p-branches','p-capital','p-recon']
+      .forEach(id => document.getElementById(id).classList.remove('err'));
+    renderBeat(d.gate);
+    renderGate(d.gate);
+    renderConfig(d.config);
+    renderBranches(d.grid);
+    renderCapital(d.capital);
+    renderRecon(d.reconciliation);
+    document.getElementById('clock').textContent = 'updated ' + new Date().toLocaleTimeString();
+    document.getElementById('foot').textContent = 'Auto-refreshes every 10s.';
+  } catch(e){
+    // A failed poll must say so. Leaving the last good numbers on screen
+    // with no warning is how a dead page passes for a live one.
+    const beat = document.getElementById('beat');
+    beat.className = 'beat down';
+    document.getElementById('beat-state').textContent = 'Dashboard cannot reach the server';
+    document.getElementById('beat-sub').textContent = String(e.message || e);
+    document.getElementById('foot').textContent =
+      'Last successful update: ' + (document.getElementById('clock').textContent || 'none this session');
+  }
+}
+tick();
+setInterval(tick, REFRESH_MS);
+</script>
+</body>
+</html>

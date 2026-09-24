@@ -2453,7 +2453,7 @@ async def consolidate_family_tree_branches(dry_run: bool = True):
     return await crypto_family_tree_bot_module.consolidate_branches_by_coin(dry_run=dry_run)
 
 
-@router.post("/family-tree-status/reconcile-asset/{currency}")
+@router.post("/family-tree-status/reconcile-asset/{currency:path}")
 async def reconcile_asset(currency: str, dry_run: bool = True):
     """Corrects a real SHORTFALL the Reconciliation panel flags - every
     real branch's tracked qty for this currency, summed, exceeds what
@@ -2467,10 +2467,22 @@ async def reconcile_asset(currency: str, dry_run: bool = True):
     dry_run=true (the default - always call this way first) computes and
     returns the real plan without touching the database. Only call with
     dry_run=false once you've reviewed it and want to actually apply the
-    correction."""
+    correction.
+
+    `{currency:path}` rather than `{currency}` deliberately. A caller that
+    sends "BTC/USD" encodes it as BTC%2FUSD, which the server decodes back
+    into a real "/" BEFORE routing - so a plain segment matcher sees an
+    extra path segment, matches no route, and returns a bare 404 "Not
+    Found" with nothing to say which asset failed or why. That is exactly
+    what the live dashboard's Reconcile link hit on 2026-09-24. The bare
+    asset is parsed out below, so both "BTC" and "BTC/USD" now reach the
+    handler and get the same answer. Belt and braces with the
+    base_currency() fix at the source: this one keeps ANY caller - an old
+    cached page, a curl from a phone - from getting a 404 that explains
+    nothing."""
     if crypto_family_tree_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
-    return await crypto_family_tree_bot_module.reconcile_asset_to_real_balance(currency.upper(), dry_run=dry_run)
+    return await crypto_family_tree_bot_module.reconcile_asset_to_real_balance(currency, dry_run=dry_run)
 
 
 @router.post("/family-tree-status/liquidate-and-buy-btc")
@@ -6388,3 +6400,154 @@ async def get_capital_census(json: bool = False):
         content=await asyncio.to_thread(capital_census.build_report, data),
         media_type="text/plain; charset=utf-8",
     )
+
+
+# ---------------------------------------------------------------------------
+# Live Ops - one endpoint behind the /live-ops page
+# ---------------------------------------------------------------------------
+#
+# Built to answer one question the account owner asked directly: after a
+# deploy, "is it actually working?" Every other panel in this codebase
+# shows BALANCES - what the account holds. None of them show the bot
+# DECIDING, which is the part that tells you the code that just shipped is
+# running at all.
+#
+# Three design rules, because a status page that lies is worse than none:
+#
+#   1. Nothing is ever fabricated. Every venue figure is either a real
+#      reading or an explicit null with the reason attached. A number that
+#      could not be fetched must never render as 0.
+#   2. Every section reports its own freshness. A stale panel next to a
+#      live one, with nothing to tell them apart, is how a dead bot looks
+#      healthy for a week.
+#   3. One section failing never blanks the page. Each is gathered
+#      independently and carries its own error, because the most useful
+#      moment for this page is exactly when something IS broken.
+
+LIVE_OPS_GATE_EVENTS = ("GATE_PASS", "GATE_BLOCK", "GATE_OBSERVE", "GATE_ERROR")
+
+
+def _live_ops_config():
+    """The settings ACTUALLY in effect in this process, read at call time.
+
+    Deliberately re-read from the environment on every request rather than
+    reported from the module constants: the point of this panel is to show
+    what the running deploy is really using, and a constant captured at
+    import time cannot show a variable that was changed afterwards. It is
+    also the fastest way to confirm a deploy landed - if the risk cap here
+    still reads the old number, the new build is not the one serving.
+    """
+    def _f(name, default):
+        raw = os.getenv(name)
+        if raw is None or not str(raw).strip():
+            return default, "default"
+        try:
+            return float(str(raw).strip()), "env"
+        except (TypeError, ValueError):
+            return default, f"unparseable ({raw!r}) - using default"
+
+    risk, risk_src = _f("PROP_MAX_RISK_PERCENT", 0.50)
+    deploy, deploy_src = _f("GRID_AUTO_DEPLOY_AMOUNT_USD", 70.0)
+    reserve, reserve_src = _f("GRID_CASH_RESERVE_USD", 88.0)
+    veto_mode = (os.getenv("GRID_MICROSTRUCTURE_VETO_MODE") or "observe").strip().lower()
+    if veto_mode not in ("observe", "enforce", "off"):
+        veto_mode = "observe (fallback - value not recognised)"
+    return [
+        {"key": "Max risk (both Alpaca bots)", "value": f"{risk * 100:.0f}%",
+         "source": risk_src, "note": "one shared budget - prop_bot and alpaca_swing_bot"},
+        {"key": "Net-edge gate", "source": "default" if os.getenv("GRID_NET_EDGE_GATE_ENABLED") is None else "env",
+         "value": "ON" if (os.getenv("GRID_NET_EDGE_GATE_ENABLED", "true").lower() == "true") else "OFF",
+         "note": "blocks dip-buys that cannot clear fees, spread and depth"},
+        {"key": "Microstructure veto", "value": veto_mode,
+         "source": "default" if os.getenv("GRID_MICROSTRUCTURE_VETO_MODE") is None else "env",
+         "note": "observe = logs what it would block, blocks nothing"},
+        {"key": "Grid strategy mode", "value": os.getenv("CRYPTO_STRATEGY_MODE", "(unset)"),
+         "source": "env" if os.getenv("CRYPTO_STRATEGY_MODE") else "unset",
+         "note": "bot_runner exits unless this is grid_fleet"},
+        {"key": "Per-branch deploy", "value": f"${deploy:,.2f}", "source": deploy_src, "note": ""},
+        {"key": "Cash reserve", "value": f"${reserve:,.2f}", "source": reserve_src, "note": ""},
+        {"key": "Trading halted", "source": "env" if os.getenv("STOP_TRADING") else "default",
+         "value": "YES - STOP_TRADING is set" if os.getenv("STOP_TRADING", "false").lower() == "true" else "no",
+         "note": ""},
+    ]
+
+
+async def _live_ops_gate_feed(limit: int = 40):
+    """Recent gate verdicts, newest first, plus a rolling tally.
+
+    This is the proof-of-life panel. A gate verdict is only written when a
+    dip actually triggered, so these rows are the bot reaching a real
+    decision point - not a heartbeat that ticks whether or not anything is
+    happening.
+    """
+    from models import CryptoActivityEvent
+    async with get_session_factory()() as db:
+        result = await db.execute(
+            select(CryptoActivityEvent)
+            .where(CryptoActivityEvent.event_type.in_(LIVE_OPS_GATE_EVENTS))
+            .order_by(CryptoActivityEvent.created_at.desc())
+            .limit(limit)
+        )
+        rows = [r.to_dict() for r in result.scalars().all()]
+
+        since = datetime.utcnow() - timedelta(hours=24)
+        tally_result = await db.execute(
+            select(CryptoActivityEvent.event_type, func.count())
+            .where(CryptoActivityEvent.event_type.in_(LIVE_OPS_GATE_EVENTS))
+            .where(CryptoActivityEvent.created_at >= since)
+            .group_by(CryptoActivityEvent.event_type)
+        )
+        tally = {k: v for k, v in tally_result.all()}
+
+    last_at = rows[0]["created_at"] if rows else None
+    age_seconds = None
+    if last_at:
+        try:
+            age_seconds = max(0.0, (datetime.utcnow() - datetime.fromisoformat(last_at)).total_seconds())
+        except (TypeError, ValueError):
+            age_seconds = None
+    return {
+        "events": rows,
+        "tally_24h": {k: tally.get(k, 0) for k in LIVE_OPS_GATE_EVENTS},
+        "last_decision_at": last_at,
+        "last_decision_age_seconds": age_seconds,
+    }
+
+
+@router.get("/live-ops")
+async def get_live_ops():
+    """Everything needed to see the system working, in one poll.
+
+    Sections are gathered concurrently and each carries its own error, so
+    a venue being down degrades one panel instead of the page. See the
+    block comment above this endpoint for why that matters.
+    """
+    async def _section(name, coro):
+        try:
+            return name, {"ok": True, "data": await coro, "error": None}
+        except Exception as e:
+            return name, {"ok": False, "data": None, "error": f"{type(e).__name__}: {e}"}
+
+    async def _grid():
+        if crypto_grid_bot_module is None:
+            raise RuntimeError("crypto_grid_bot module not available in this process")
+        return await crypto_grid_bot_module.get_grid_status()
+
+    async def _recon():
+        if crypto_family_tree_bot_module is None:
+            raise RuntimeError("crypto_family_tree_bot module not available in this process")
+        return await crypto_family_tree_bot_module.get_reconciliation_report()
+
+    async def _census():
+        import capital_census
+        return await asyncio.to_thread(capital_census.collect)
+
+    results = dict(await asyncio.gather(
+        _section("gate", _live_ops_gate_feed()),
+        _section("grid", _grid()),
+        _section("reconciliation", _recon()),
+        _section("capital", _census()),
+    ))
+    results["config"] = {"ok": True, "data": _live_ops_config(), "error": None}
+    results["served_at"] = datetime.utcnow().isoformat() + "Z"
+    return results
