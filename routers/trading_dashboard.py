@@ -6415,6 +6415,36 @@ async def reallocate_adaptive_fleet_endpoint(payload: ReallocateAdaptiveFleetReq
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.post("/grid-status/spread-evenly")
+async def spread_grid_capital_evenly(target_branches: int = 7, dry_run: bool = True):
+    """Level the fleet so capital is not stranded in one branch.
+
+    Capital inside a branch's allocated_usd is NOT free cash, and
+    auto-deploy only ever builds new branches from free cash. A fleet with
+    one branch holding nearly everything therefore cannot expand on its
+    own - it has nothing to expand with. Live on 2026-09-24: $578.61 of a
+    $595.28 account sat in a single flat ARB-USD branch while the other
+    six coins had nothing, and no amount of waiting would have changed it.
+
+    Doing this by hand is one withdraw plus six separate branch creations,
+    which is a lot of taps on a phone and easy to half-finish.
+
+    This does not raise expected profit - see spread_capital_evenly's
+    docstring for why splitting fixed capital is roughly profit-neutral.
+    It stops one coin's trend stranding the whole account, and it produces
+    per-coin evidence sooner.
+
+    dry_run=true (the default) returns the exact plan and changes nothing.
+    Only FLAT branches are ever touched; nothing is sold."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    try:
+        return await crypto_grid_bot_module.spread_capital_evenly(
+            target_branches=target_branches, dry_run=dry_run)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("/grid-status/rebalance-flat-branches")
 async def rebalance_flat_grid_branches_endpoint():
     """Retire or rotate flat branches using the live minimum-edge rule."""

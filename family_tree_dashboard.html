@@ -752,6 +752,12 @@
         <div id="consolidate-status" style="margin-top:8px; font-size:0.85em; color: var(--text-dim);"></div>
         <div id="consolidate-plan-wrap"></div>
         <button id="reallocate-btn" class="unlock-btn" style="margin-top:12px;" onclick="openReallocateModal()">🔀 Move cash between branches</button>
+        <button class="unlock-btn" style="margin-top:12px;" onclick="confirmSpreadEvenly()">⚖️ Spread capital evenly across 7 coins</button>
+        <div style="font-size:0.8em; color: var(--text-dim); margin-top:6px;">
+            Pulls cash out of over-funded FLAT branches and opens branches on unclaimed coins until
+            every branch holds a roughly equal share. Shows the exact plan first. Nothing is sold,
+            and a branch holding open slices is never touched.
+        </div>
         <div style="margin-top:6px; font-size:0.78em; color:var(--text-dim);">Pulls real reserved cash from a FLAT branch (holding nothing right now) and deploys it into another branch's coin - for when a branch's own allocated_usd is sitting idle instead of working.</div>
     </div>
 
@@ -4198,6 +4204,69 @@ function renderRollingExpectancyBanner(data) {
 // and estimated P&L, then a confirm against those exact numbers. This sells
 // real money at market, and "are you sure?" with no figures attached is not
 // informed consent.
+// Levels the fleet so one branch cannot hold nearly all the capital.
+//
+// Two steps, same discipline as the close-BTC control: a dry run that
+// returns the real plan, then a confirm against those exact figures. This
+// moves real money between branches; a bare "are you sure?" is not
+// informed consent.
+async function confirmSpreadEvenly() {
+    let plan;
+    try {
+        const res = await fetch(API_BASE + '/grid-status/spread-evenly?target_branches=7&dry_run=true', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+        });
+        plan = await res.json();
+        if (!res.ok) throw new Error(plan.detail || `HTTP ${res.status}`);
+    } catch (e) {
+        alert('Could not read the plan: ' + e.message);
+        return;
+    }
+
+    if (plan.status === 'unavailable' || plan.status === 'too_thin') {
+        alert(plan.detail);
+        return;
+    }
+
+    const w = (plan.withdrawals || []).map(x =>
+        `  pull ${fmtUsd(x.release_usd)} out of ${x.product_id} (${fmtUsd(x.from_usd)} -> ${fmtUsd(x.to_usd)})`);
+    const t = (plan.top_ups || []).map(x =>
+        `  add ${fmtUsd(x.add_usd)} to ${x.product_id} (${fmtUsd(x.from_usd)} -> ${fmtUsd(x.to_usd)})`);
+    const held = (plan.untouched_holding || []).map(x =>
+        `  leave ${x.product_id} alone - ${x.reason}`);
+
+    if (!confirm(
+        'Spread the capital evenly?\n\n' +
+        `Pool: ${fmtUsd(plan.pool_usd)}  ->  ${fmtUsd(plan.per_branch_usd)} per branch\n\n` +
+        (w.length ? w.join('\n') + '\n' : '') +
+        (t.length ? t.join('\n') + '\n' : '') +
+        (plan.new_branch_slots ? `  open ${plan.new_branch_slots} new branch(es) at ${fmtUsd(plan.per_branch_usd)} each\n` : '') +
+        (held.length ? held.join('\n') + '\n' : '') +
+        '\nNothing is sold. Coins for new branches are picked from the live ranking.'
+    )) return;
+
+    try {
+        const res = await fetch(API_BASE + '/grid-status/spread-evenly?target_branches=7&dry_run=false', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+        });
+        const done = await res.json();
+        if (!res.ok) throw new Error(done.detail || `HTTP ${res.status}`);
+        const made = (done.new_branches || []);
+        const ok = made.filter(b => b.bot_name);
+        const skipped = made.filter(b => b.skipped);
+        alert(
+            `Done. ${fmtUsd(done.per_branch_usd)} per branch.\n\n` +
+            `Opened ${ok.length} new branch(es)${ok.length ? ': ' + ok.map(b => b.product_id).join(', ') : ''}.` +
+            (skipped.length ? `\n\nNot opened: ` + skipped.map(b => b.skipped).join('; ') : '') +
+            `\n\nFree cash now: ${done.free_cash_after == null ? 'unknown' : fmtUsd(done.free_cash_after)}`
+        );
+    } catch (e) {
+        alert('Spread failed: ' + e.message);
+    } finally {
+        await refresh();
+    }
+}
+
 async function confirmCloseBtcCompound() {
     let plan;
     try {

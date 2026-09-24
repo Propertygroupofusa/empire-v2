@@ -1740,6 +1740,150 @@ async def _first_ranked_coin_beating_btc(ranked_product_ids: list) -> str:
 MIN_REQUIRED_ROI_PCT = float(os.getenv("GRID_MIN_REQUIRED_ROI_PCT", "20.0"))
 
 
+async def spread_capital_evenly(target_branches: int = 7, dry_run: bool = True) -> dict:
+    """Level the fleet: pull cash out of over-funded FLAT branches and put
+    it into new branches on unclaimed coins, until capital sits in roughly
+    equal slices across `target_branches` coins.
+
+    WHY THIS EXISTS
+
+    Capital inside a branch's allocated_usd is not free cash - auto-deploy
+    only ever builds from free cash. So a fleet that ends up with one
+    branch holding nearly everything can never expand on its own: it has
+    nothing to expand WITH. Observed live on 2026-09-24 with $578.61 of a
+    $595.28 account sitting in one flat ARB-USD branch while the other six
+    coins had nothing.
+
+    WHAT LEVELLING IS AND IS NOT WORTH
+
+    It does not raise expected profit. With capital fixed, splitting it
+    trades bigger-but-rarer round trips for smaller-but-more-frequent ones
+    and the two cancel almost exactly: at this account's 2.5% spacing and
+    1.0% round trip, one coin and seven coins both model to the same
+    dollars per day.
+
+    What it buys is not being stranded. One coin holding everything fills
+    all its levels on a single trend against it and then sits underwater
+    with nothing left to trade. Seven coins cannot all trend against you
+    at once. It also produces per-coin evidence far sooner, which is the
+    only way to learn which coins are worth more capital later.
+
+    SAFETY
+
+    Only FLAT branches are touched - a branch holding open slices
+    represents crypto already bought, not idle cash, and withdraw_from_
+    grid_branch refuses it anyway. Nothing is sold and no order is placed;
+    this is pure bookkeeping plus one live price fetch per new branch.
+
+    dry_run=True (the default) returns the exact plan and changes nothing.
+    """
+    branches = await get_grid_branches()
+    flat_by_name = {}
+    async with get_session_factory()() as db:
+        for b in branches:
+            result = await db.execute(
+                select(func.count(CryptoGridSlice.id)).where(CryptoGridSlice.bot_name == b.bot_name))
+            if (result.scalar() or 0) == 0:
+                flat_by_name[b.bot_name] = b
+
+    free_cash = await get_real_free_cash_usd()
+    if free_cash is None:
+        return {"status": "unavailable", "detail": "Real free cash could not be read - "
+                                                   "refusing to plan against an unknown balance.",
+                "changed": False}
+
+    # Everything that COULD be redistributed: cash already free, plus what
+    # sits idle in flat branches. A branch holding slices is excluded
+    # entirely - its allocation is not cash.
+    flat_total = sum(b.allocated_usd for b in flat_by_name.values())
+    held_branches = [b for b in branches if b.bot_name not in flat_by_name]
+    pool = round(free_cash + flat_total, 2)
+
+    target_branches = max(1, int(target_branches))
+    per_branch = round(pool / target_branches, 2)
+
+    if per_branch < MIN_TRADE_USD * 2:
+        return {
+            "status": "too_thin", "changed": False,
+            "detail": (f"${pool:,.2f} across {target_branches} branches is ${per_branch:,.2f} each, "
+                       f"which cannot carry slices above the ${MIN_TRADE_USD:,.2f} minimum. "
+                       f"Use fewer branches."),
+            "pool_usd": pool, "per_branch_usd": per_branch,
+        }
+
+    plan = {"withdrawals": [], "top_ups": [], "new_branches": [], "untouched_holding": [
+        {"bot_name": b.bot_name, "product_id": b.product_id,
+         "allocated_usd": round(b.allocated_usd, 2),
+         "reason": "holding open slices - not idle cash"} for b in held_branches]}
+
+    # Level the flat branches that already exist, in either direction.
+    for b in flat_by_name.values():
+        delta = round(b.allocated_usd - per_branch, 2)
+        if delta > 0.01:
+            plan["withdrawals"].append({"bot_name": b.bot_name, "product_id": b.product_id,
+                                        "from_usd": round(b.allocated_usd, 2),
+                                        "to_usd": per_branch, "release_usd": delta})
+        elif delta < -0.01:
+            plan["top_ups"].append({"bot_name": b.bot_name, "product_id": b.product_id,
+                                    "from_usd": round(b.allocated_usd, 2),
+                                    "to_usd": per_branch, "add_usd": round(-delta, 2)})
+
+    slots = target_branches - len(flat_by_name)
+    plan["new_branch_slots"] = max(0, slots)
+    plan["pool_usd"] = pool
+    plan["per_branch_usd"] = per_branch
+    plan["free_cash_before"] = round(free_cash, 2)
+
+    if dry_run:
+        plan["status"] = "dry_run"
+        plan["changed"] = False
+        plan["note"] = ("Nothing was changed. Coins for the new branches are chosen at "
+                        "execution time from the live ranking, so they are not listed here.")
+        return plan
+
+    # --- execute -----------------------------------------------------------
+    # Withdrawals first: they are what makes the cash available for
+    # everything after them. A failure here stops the whole run rather than
+    # leaving the fleet half-levelled with no record of why.
+    for w in plan["withdrawals"]:
+        await withdraw_from_grid_branch(w["bot_name"], w["release_usd"])
+        log.info(f"[GRID] spread: pulled ${w['release_usd']:,.2f} out of {w['bot_name']} "
+                 f"({w['product_id']}) - now ${w['to_usd']:,.2f}")
+
+    for t in plan["top_ups"]:
+        try:
+            await add_cash_to_grid_branch(t["bot_name"], t["add_usd"])
+            log.info(f"[GRID] spread: added ${t['add_usd']:,.2f} to {t['bot_name']}")
+        except Exception as e:
+            t["skipped"] = f"{type(e).__name__}: {e}"
+            log.warning(f"[GRID] spread: could not top up {t['bot_name']}: {e}")
+
+    for _ in range(max(0, slots)):
+        try:
+            product_id = await pick_best_ranked_coin_for_grid()
+        except Exception as e:
+            plan["new_branches"].append({"skipped": f"no eligible coin left: {e}"})
+            break
+        if not product_id:
+            plan["new_branches"].append({"skipped": "no eligible unclaimed coin left"})
+            break
+        try:
+            branch = await create_grid_branch(product_id, per_branch)
+            plan["new_branches"].append({"bot_name": branch.bot_name, "product_id": product_id,
+                                         "allocated_usd": per_branch})
+            log.info(f"[GRID] spread: created {branch.bot_name} on {product_id} "
+                     f"with ${per_branch:,.2f}")
+        except Exception as e:
+            plan["new_branches"].append({"product_id": product_id, "skipped": f"{type(e).__name__}: {e}"})
+            log.warning(f"[GRID] spread: could not create a branch on {product_id}: {e}")
+            break
+
+    plan["status"] = "spread"
+    plan["changed"] = True
+    plan["free_cash_after"] = await get_real_free_cash_usd()
+    return plan
+
+
 async def pick_best_ranked_coin_for_grid() -> str:
     """Real coin auto-pick for the $20 Quick Buy button - the single best
     real backtested-ROI coin (from CryptoBacktestRun, the same real
