@@ -130,6 +130,66 @@ def deployable_usd(balance: float) -> float:
     return min(balance, MAX_DEPLOY_USD)
 
 
+# Profit skim. On a winning exit, this fraction of the REALIZED net profit
+# is moved into a locked ledger and permanently excluded from deployment,
+# so a gain that has already been banked cannot be handed back by a later
+# losing trade. It does not make the account profitable - nothing does -
+# it only stops profit that was genuinely made from being re-risked.
+#
+# Default 0.0, matching crypto_family_tree_bot.PROFIT_SKIM_PCT, which was
+# set to 0.0 on the account owner's explicit instruction: "take away the
+# lock profit, I don't want that anymore for any of my stuff, I want all
+# my money to be making money." The mechanism is built and real; enabling
+# it is a deliberate choice via BTC_COMPOUND_PROFIT_SKIM_PCT, not a
+# default that silently reverses that instruction.
+PROFIT_SKIM_PCT = _safe_float_env("BTC_COMPOUND_PROFIT_SKIM_PCT", "0.0")
+LOCKED_PROFIT_STATE_KEY = "crypto_btc_compound_locked_usd"
+
+
+async def get_locked_usd() -> float:
+    """Profit already skimmed out of the compounding loop. 0.0 if unreadable
+    - a DB hiccup must not make locked money look spendable, but it also
+    must not stop the bot, so the conservative read is combined with the
+    caller only ever SUBTRACTING this from what it may deploy."""
+    try:
+        from models import TradingBotState
+        async with get_session_factory()() as db:
+            result = await db.execute(
+                select(TradingBotState).where(
+                    TradingBotState.bot_name == LOCKED_PROFIT_STATE_KEY))
+            row = result.scalar_one_or_none()
+            return float(row.base_capital) if row and row.base_capital else 0.0
+    except Exception as e:
+        log.warning(f"[BTC-COMPOUND] Could not read locked profit ({e}) - treating as $0")
+        return 0.0
+
+
+async def add_locked_usd(amount: float) -> None:
+    """Move realized profit permanently out of the compounding loop.
+
+    Only ever called with a positive amount after a winning exit. There is
+    no automatic path back: releasing locked profit is a deliberate manual
+    action, the same convention the family tree uses.
+    """
+    if amount <= 0:
+        return
+    try:
+        from models import TradingBotState
+        async with get_session_factory()() as db:
+            result = await db.execute(
+                select(TradingBotState).where(
+                    TradingBotState.bot_name == LOCKED_PROFIT_STATE_KEY))
+            row = result.scalar_one_or_none()
+            if row:
+                row.base_capital = (row.base_capital or 0.0) + amount
+            else:
+                db.add(TradingBotState(bot_name=LOCKED_PROFIT_STATE_KEY,
+                                       base_capital=amount, starting_capital=0.0))
+            await db.commit()
+    except Exception as e:
+        log.error(f"[BTC-COMPOUND] Failed to lock ${amount:.2f} of profit: {e}")
+
+
 def tracked_equity(balance: float, position_value):
     """The capital the equity floor should watch: what is actually at risk.
 
@@ -1339,10 +1399,19 @@ async def _sell_and_settle(session, position, reason: str):
     net_pnl = gross_pnl - fees
     daily_pnl += net_pnl
     await clear_position()
+
+    # Skim only on a genuine win, and only from the realized net figure -
+    # never from gross, which would lock money the fees already consumed.
+    skim = round(net_pnl * PROFIT_SKIM_PCT, 2) if net_pnl > 0 else 0.0
+    if skim > 0:
+        await add_locked_usd(skim)
+
     log.info(
         f"[BTC-COMPOUND] SOLD {filled_qty:.8f} BTC @ ${filled_price:,.2f} ({reason}) | "
         f"entry ${position.entry_price:,.2f} -> exit ${filled_price:,.2f} | "
         f"P&L: {'+' if net_pnl >= 0 else ''}${net_pnl:.2f} after est. fees"
+        + (f" | locked ${skim:.2f} ({PROFIT_SKIM_PCT*100:.0f}%) out of the "
+           f"compounding loop" if skim > 0 else "")
     )
     return True
 
@@ -1457,7 +1526,14 @@ async def run_cycle():
 
             # Everything from here sizes off `deploy`, not `balance`. Anything
             # above the cap stays as cash and is deliberately left alone.
-            deploy = deployable_usd(balance)
+            # Locked profit is real USD sitting in the same account, so it
+            # has to be subtracted before sizing or the skim would be
+            # re-risked on the very next entry and lock nothing at all.
+            locked = await get_locked_usd()
+            deploy = deployable_usd(max(0.0, balance - locked))
+            if locked > 0:
+                log.info(f"[BTC-COMPOUND] ${locked:,.2f} of banked profit is locked and "
+                         f"excluded from this entry")
             if deploy < MIN_TRADE_USD:
                 log.warning(
                     f"[BTC-COMPOUND] MAX_DEPLOY_USD=${MAX_DEPLOY_USD:,.2f} is below the "
