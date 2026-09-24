@@ -1271,6 +1271,54 @@ async def _sell_and_settle(session, position, reason: str):
     return True
 
 
+# Waiting for capital is a normal operating state, not an incident - the
+# loop never stops over it, it simply has nothing to deploy yet. Logging
+# that every cycle would print 2,880 identical lines a day at a 30s cycle
+# and bury the messages that do matter, so the state is announced on entry,
+# repeated sparingly while it lasts, and announced again the moment capital
+# returns. Nothing about the retry behaviour changes; only how loudly.
+WAITING_LOG_INTERVAL_SECONDS = _safe_float_env(
+    "BTC_COMPOUND_WAITING_LOG_INTERVAL_SECONDS", "900")
+_waiting_for_capital_since = None
+_waiting_last_logged_at = 0.0
+
+
+def _note_waiting_for_capital(balance):
+    """Entering or continuing the wait. Keeps cycling either way."""
+    global _waiting_for_capital_since, _waiting_last_logged_at
+    now = time.time()
+    if _waiting_for_capital_since is None:
+        _waiting_for_capital_since = now
+        _waiting_last_logged_at = now
+        log.info(
+            f"[BTC-COMPOUND] Balance ${balance:.2f} is below the ${MIN_TRADE_USD:.2f} "
+            f"minimum trade size - waiting for capital. Still checking every "
+            f"{CYCLE_SECONDS}s; this will not stop the bot or need a restart."
+        )
+    elif now - _waiting_last_logged_at >= WAITING_LOG_INTERVAL_SECONDS:
+        _waiting_last_logged_at = now
+        waited = now - _waiting_for_capital_since
+        log.info(
+            f"[BTC-COMPOUND] Still waiting for capital after "
+            f"{waited/60:.0f} min - balance ${balance:.2f}, need "
+            f"${MIN_TRADE_USD:.2f}. Checking every {CYCLE_SECONDS}s."
+        )
+
+
+def _note_capital_available(balance):
+    """Capital came back. Announced once, so the wait has a visible end."""
+    global _waiting_for_capital_since, _waiting_last_logged_at
+    if _waiting_for_capital_since is None:
+        return
+    waited = time.time() - _waiting_for_capital_since
+    log.info(
+        f"[BTC-COMPOUND] Capital available again: ${balance:.2f} after waiting "
+        f"{waited/60:.0f} min - resuming entries."
+    )
+    _waiting_for_capital_since = None
+    _waiting_last_logged_at = 0.0
+
+
 async def run_cycle():
     global last_cycle_at, equity_floor
     last_cycle_at = datetime.now(timezone.utc)
@@ -1321,8 +1369,9 @@ async def run_cycle():
                 log.warning(f"[BTC-COMPOUND] Balance unavailable ({balance_err}) - skipping this cycle")
                 return
             if balance < MIN_TRADE_USD:
-                log.info(f"[BTC-COMPOUND] Balance ${balance:.2f} below minimum trade size ${MIN_TRADE_USD:.2f} - waiting")
+                _note_waiting_for_capital(balance)
                 return
+            _note_capital_available(balance)
             if price is None:
                 log.warning("[BTC-COMPOUND] Could not fetch BTC price/volatility - skipping this cycle")
                 return
