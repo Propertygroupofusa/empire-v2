@@ -119,28 +119,35 @@ MIN_TRADE_USD = _safe_float_env("BTC_COMPOUND_MIN_TRADE_USD", "5.00")
 # Capital above the cap simply stays as cash; it is not reserved, tracked
 # or spent, and it still counts toward equity for the floor ratchet, which
 # is correct - it is real money at risk of nothing.
+# Money held out of every entry. The bot deploys the whole balance above
+# this line and never touches the line itself.
 #
-# Set to 582.34 on the account owner's instruction, to trade only the USD
-# that was already cash and leave the proceeds of liquidating other coins
-# untouched.
-#
-# NOTE, because this interacts badly with the point of this bot: the cap is
-# a FIXED dollar amount, so once the balance exceeds it the position size
-# stops growing. A win takes the balance to $592 but the next entry still
-# deploys $582.34, and the profit accumulates as idle cash instead of
-# compounding. That is the opposite of what this strategy is for. If the
-# intent is "hold back a reserve and compound the rest", a reserve floor
-# is the right shape rather than a ceiling - see the note in the commit
-# that introduced this value.
-MAX_DEPLOY_USD = _safe_float_env("BTC_COMPOUND_MAX_DEPLOY_USD", "582.34")
+# This replaced a ceiling (BTC_COMPOUND_MAX_DEPLOY_USD, "deploy at most
+# $X"), which protected the same dollars but froze position size: once the
+# balance passed the cap every win landed in idle cash and the next entry
+# still deployed the cap, so a compounding bot stopped compounding. A floor
+# protects the same amount and lets everything above it grow - $500 held
+# back either way, but the traded pool goes $582 -> $681 over ten wins
+# instead of staying at $582 while $589 sits dead.
+RESERVE_USD = _safe_float_env("BTC_COMPOUND_RESERVE_USD", "500.00")
+
+# The retired ceiling. Reading it only to say it is being ignored, because
+# an env var that silently stops applying is worse than one that never
+# existed.
+if os.getenv("BTC_COMPOUND_MAX_DEPLOY_USD"):
+    log.warning(
+        "BTC_COMPOUND_MAX_DEPLOY_USD is set but no longer used - it was a "
+        "deploy CEILING and froze position size. Use BTC_COMPOUND_RESERVE_USD "
+        "(currently $%.2f held back) instead, and remove the old variable.",
+        RESERVE_USD,
+    )
 
 
 def deployable_usd(balance: float) -> float:
-    """How much of `balance` this entry may use. No cap when MAX_DEPLOY_USD
-    is 0 or negative."""
-    if MAX_DEPLOY_USD <= 0:
+    """Everything above the reserve. Grows with the account, unlike a cap."""
+    if RESERVE_USD <= 0:
         return balance
-    return min(balance, MAX_DEPLOY_USD)
+    return max(0.0, balance - RESERVE_USD)
 
 
 # Profit skim. On a winning exit, this fraction of the REALIZED net profit
@@ -211,22 +218,22 @@ async def add_locked_usd(amount: float) -> None:
 def tracked_equity(balance: float, position_value):
     """The capital the equity floor should watch: what is actually at risk.
 
-    Without a cap this is the whole account, unchanged. With a cap, money
-    the cap holds back is not trading and must not drag the floor up behind
-    it - otherwise a reserve makes the floor rise while the traded capital
-    stays the same size, and a drawdown that only ever touched the traded
-    portion trips a floor set against money that never moved.
+    Without a reserve this is the whole account, unchanged. With one, money
+    the reserve holds back is not trading and must not drag the floor up
+    behind it - otherwise a reserve makes the floor rise while the traded
+    capital stays the same size, and a drawdown that only ever touched the
+    traded portion trips a floor set against money that never moved.
 
-    Flat, the trading pool is whatever the cap allows. Holding a position,
-    every deployable dollar is already in it, so the idle cash IS the
-    reserve and the position's own market value is the pool.
+    Flat, the trading pool is everything above the reserve. Holding a
+    position, every deployable dollar is already in it, so the idle cash IS
+    the reserve and the position's own market value is the pool.
     """
     pos = position_value or 0.0
-    if MAX_DEPLOY_USD <= 0:
+    if RESERVE_USD <= 0:
         return balance + pos
     if position_value is not None:
         return pos
-    return min(balance, MAX_DEPLOY_USD)
+    return max(0.0, balance - RESERVE_USD)
 STOP_LOSS_PCT = _safe_float_env("BTC_COMPOUND_STOP_LOSS_PCT", "0.02")  # -2% default
 
 # Breakeven stop ratchet, per the account owner: a fresh position keeps the
@@ -1554,14 +1561,18 @@ async def run_cycle():
                          f"excluded from this entry")
             if deploy < MIN_TRADE_USD:
                 log.warning(
-                    f"[BTC-COMPOUND] MAX_DEPLOY_USD=${MAX_DEPLOY_USD:,.2f} is below the "
-                    f"${MIN_TRADE_USD:.2f} minimum trade size - no entry can ever be "
-                    f"placed. Raise it or the bot will sit idle with ${balance:,.2f} available."
+                    f"[BTC-COMPOUND] Only ${deploy:,.2f} is deployable (${balance:,.2f} "
+                    f"balance less ${RESERVE_USD:,.2f} reserve"
+                    + (f" and ${locked:,.2f} locked profit" if locked > 0 else "")
+                    + f"), below the ${MIN_TRADE_USD:.2f} minimum trade size - no entry "
+                    f"can be placed. Lower BTC_COMPOUND_RESERVE_USD or add funds."
                 )
                 return
             if deploy < balance:
-                log.info(f"[BTC-COMPOUND] Deploying ${deploy:,.2f} of ${balance:,.2f} available "
-                         f"(cap ${MAX_DEPLOY_USD:,.2f}); ${balance - deploy:,.2f} held back as cash")
+                log.info(f"[BTC-COMPOUND] Deploying ${deploy:,.2f} of ${balance:,.2f} available; "
+                         f"${RESERVE_USD:,.2f} reserve"
+                         + (f" + ${locked:,.2f} locked profit" if locked > 0 else "")
+                         + " held back")
 
             target_pct = max(pick_target_pct(atr_pct), min_profit_target_pct(deploy, atr_pct))
             fill = await place_market_buy(session, deploy)
