@@ -1153,6 +1153,21 @@ async def create_grid_branch(product_id: str, allocated_usd: float, skip_free_ca
     if product_id in claimed:
         raise ValueError(f"{product_id} is already claimed by an active grid branch")
 
+    # The same check across the OTHER system. get_grid_branch_claimed_coins
+    # above only knows about grid branches, so until this existed a grid
+    # branch could be created on a coin a family-tree branch was already
+    # holding - two systems tracking their own qty against one pooled
+    # Coinbase balance, which is the structural gap behind this repo's
+    # phantom positions and DB-vs-Coinbase SHORTFALLs.
+    import crypto_coin_claims as claims
+    tree_claimed = await claims.claimed_by_other(claims.GRID)
+    if claims.normalize_product(product_id) in tree_claimed:
+        raise ValueError(
+            f"{product_id} is already held by a family-tree branch. Both systems share one "
+            f"Coinbase balance for a coin, so two branches on it would each track their own "
+            f"qty against the same tokens. Pick another coin, or close the tree branch first."
+        )
+
     if not skip_free_cash_check:
         real_spendable = await get_real_free_cash_usd()
         if real_spendable is not None and allocated_usd > real_spendable + 0.01:

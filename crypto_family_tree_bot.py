@@ -2170,10 +2170,32 @@ async def find_most_volatile_unclaimed_coin(session):
     while it worked through the whole list) - running them all at once
     caps the whole search at whatever the single slowest request takes."""
     excluded = await get_effective_excluded_coins()
+
+    # Coins the GRID FLEET is running are off limits.
+    #
+    # Both systems hold positions in one Coinbase account, where the
+    # balance for a coin is POOLED. Two branches on the same coin each
+    # track their own qty against that single balance and the arithmetic
+    # stops meaning anything - the exact structural gap behind this repo's
+    # phantom-position self-heal, its DB-vs-Coinbase SHORTFALLs, and the
+    # consolidate-branches feature built after 15 branches piled onto
+    # POL-USD. This module never referenced CryptoGridBranch at all, so
+    # the tree could pick a coin the fleet was actively gridding and
+    # neither would notice. That was harmless only while one of the two
+    # was not running; both went live together on 2026-09-24.
+    import crypto_coin_claims as claims
+    grid_claimed = await claims.claimed_by_other(claims.TREE)
+
     candidates = [
         p for p in COIN_FAMILY_TREE
-        if p not in excluded and not _coin_sale_cooldown_active(p)
+        if p not in excluded
+        and not _coin_sale_cooldown_active(p)
+        and claims.normalize_product(p) not in grid_claimed
     ]
+    if grid_claimed:
+        log.info(f"[TREE] coin search: skipping {len(grid_claimed)} coin(s) the grid fleet "
+                 f"owns ({', '.join(sorted(grid_claimed))}) - one pooled Coinbase balance "
+                 f"cannot be tracked by two systems at once")
 
     # BTC-USD's own return over the identical ~25h window is fetched once,
     # concurrently with every candidate, and compared against each
