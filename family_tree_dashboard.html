@@ -2204,10 +2204,23 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals) {
     toggleBtn.disabled = false;
     toggleBtn.textContent = gridModeActive ? '⏸️ Disable grid trading' : '▶️ Enable grid trading';
 
-    // Update Scale Bot toggle button based on grid bot active status
+    // Update Scale Bot toggle button based on grid bot active status.
+    //
+    // `data` is the /grid-status payload, which carries mode_active and has
+    // never carried grid_bot_active - that field exists only in
+    // /family-tree-status. Reading it here was always undefined, so
+    // !!undefined pinned this button to "Scale Bot Active (Switch Back)"
+    // whatever the real state, while the badge a few lines above read
+    // mode_active and correctly said "grid trading ON". One switch, two
+    // labels, permanently contradicting each other on screen.
+    //
+    // Both fields are the same value at source - routers/trading_dashboard.py
+    // and crypto_grid_bot.py each call is_grid_bot_active() - so the fix is
+    // to read the field this payload actually has, rather than copying the
+    // duplicate into a second endpoint and keeping two names for one switch.
     const scaleBotToggle = document.getElementById('scale-bot-toggle');
     if (scaleBotToggle) {
-        const gridBotActive = !!data.grid_bot_active;
+        const gridBotActive = !!data.mode_active;
         if (gridBotActive) {
             scaleBotToggle.textContent = '📈 Switch to Scale Bot';
             scaleBotToggle.classList.remove('active');
@@ -2438,7 +2451,12 @@ function renderScaleBotChart(metrics) {
 async function renderScaleBotStatus(data) {
     const panel = document.getElementById('scale-bot-panel');
     const scanIndicator = document.getElementById('scale-bot-scanning-indicator');
-    const gridActive = !!data.grid_bot_active;
+    // Same call site, same payload, same bug as the toggle above: this is
+    // fed loadGridStatus()'s /grid-status response, where grid_bot_active
+    // does not exist. Undefined read as false is why the Scale Bot panel
+    // was displayed - with Tier 1, $0.00 allocated and 0% everywhere -
+    // while the Grid Bot was in fact the system holding the capital.
+    const gridActive = !!data.mode_active;
 
     // Show Scale Bot panel only when grid bot is inactive (Scale Bot is active)
     panel.style.display = gridActive ? 'none' : 'block';
