@@ -2340,6 +2340,73 @@ async def get_live_coin_snapshot():
     return {"btc_return_25h": btc_return, "coins": snapshot}
 
 
+def tree_spend_ceiling(spendable_usd):
+    """The most the TREE may spend right now. Returns (ceiling, reason).
+
+    ONE chokepoint, on purpose. The cash ceiling was first wired into a
+    single buy site in this module and there turned out to be five - the
+    branch entry and the reinforcement buy, the two that actually spend
+    most of the money, were both uncapped, so the ceiling protected the
+    grid fleet from nothing. Patching call sites one at a time is how that
+    happened; every competitive buy now routes through here instead, and a
+    test asserts no raw engine.place_market_buy survives in this file
+    outside the documented exemption.
+
+    See crypto_cash_allocator for the rule and the live case behind it.
+    A ceiling of None means the allocator could not price the wallet -
+    callers must treat that as "do not buy", never as unlimited.
+    """
+    import crypto_cash_allocator as allocator
+    return allocator.spend_ceiling(allocator.TREE, spendable_usd)
+
+
+async def capped_market_buy(session, usd_amount: float, product_id: str,
+                            bot_name: str = "tree", free_cash_usd=None):
+    """engine.place_market_buy, bounded by the tree's share of the wallet.
+
+    free_cash_usd is the WALLET's free cash, which is what the share is a
+    share OF. Callers that already read it pass it in; the rest leave it
+    None and it is read here.
+
+    Getting that argument wrong is not a small error, and the first
+    version of this function did: it passed the REQUESTED amount as the
+    free cash, so the ceiling was computed against the request rather than
+    the wallet. A $50 ask came out as $10.50 and a $300 ask as $85.50 -
+    every tree buy silently strangled to a fraction of its size, with no
+    error anywhere. Caught by a test asserting a within-share ask passes
+    through untouched.
+
+    Returns the engine's own fill tuple, or None when the buy did not
+    happen - which callers already treat as "no fill this cycle" and retry.
+
+    An over-share ask is TRIMMED rather than refused, so a branch whose
+    allocation merely exceeds the current ceiling still trades, just
+    smaller. Below MIN_TRADE_USD it returns None instead of placing an
+    order the exchange would reject anyway.
+    """
+    if free_cash_usd is None:
+        real_balance, balance_err = await engine.get_usd_balance(session)
+        if real_balance is None:
+            log.info(f"[TREE] {bot_name}: real balance unavailable ({balance_err}) - "
+                     f"not buying {product_id} this cycle")
+            return None
+        free_cash_usd = max(0.0, real_balance - await get_locked_usd())
+
+    ceiling, reason = tree_spend_ceiling(free_cash_usd)
+    if ceiling is None:
+        log.info(f"[TREE] {bot_name}: {reason} - not buying {product_id} this cycle")
+        return None
+    spend = min(usd_amount, ceiling)
+    if spend < MIN_TRADE_USD:
+        log.info(f"[TREE] {bot_name}: cash share allows only ${spend:,.2f} for {product_id}, "
+                 f"under the ${MIN_TRADE_USD:.2f} minimum - skipping this cycle | {reason}")
+        return None
+    if spend < usd_amount - 0.005:
+        log.info(f"[TREE] {bot_name}: trimming {product_id} buy from ${usd_amount:,.2f} to "
+                 f"${spend:,.2f} - {reason}")
+    return await engine.place_market_buy(session, spend, product_id)
+
+
 def base_currency(symbol: str) -> str:
     """The base asset of a stored position symbol: "BTC" from any of
     "BTC-USD", "BTC/USD" or "BTC".
@@ -2966,7 +3033,7 @@ async def _deploy_seed_into_weakest_branch(session, target_bot_name: str, usd_am
         engine._last_order_error[target_branch.product_id] = "no live price/volatility data available right now"
         return False
 
-    fill = await engine.place_market_buy(session, usd_amount, target_branch.product_id)
+    fill = await capped_market_buy(session, usd_amount, target_branch.product_id, target_bot_name)
     if not fill:
         stuck_reason = engine._last_order_error.get(target_branch.product_id, "unknown reason")
         log.warning(f"[TREE] reinforcement: real buy into {target_bot_name} ({target_branch.product_id}) did not fill: {stuck_reason}")
@@ -3360,6 +3427,13 @@ async def liquidate_family_tree_and_buy_btc() -> dict:
                 "note": "Could not fetch a live BTC-USD price to size the buy. The tree is still retired - retry the buy manually or via this endpoint again.",
             }
 
+        # DELIBERATELY NOT capped_market_buy. This is the retirement
+        # conversion: every branch position has just been sold and the
+        # freed cash is being turned into one buy-and-hold BTC position.
+        # It is a one-shot exit, not a competitive trade, and nothing is
+        # left running to starve - applying the tree's 30% share here
+        # would silently leave 70% of the account in idle USD and quietly
+        # change what "retire the tree" means.
         fill = await engine.place_market_buy(session, spend, ROOT_PRODUCT_ID)
         if not fill:
             reason = engine._last_order_error.get(ROOT_PRODUCT_ID, "unknown reason")
@@ -3921,28 +3995,18 @@ async def _attempt_stop_hit_reversal_buy(session, bot_name: str, product_id: str
     locked_usd = await get_locked_usd()
     spendable = max(0.0, real_balance - locked_usd)
 
-    # The tree's share of a SHARED wallet. The grid fleet spends the same
-    # real Coinbase USD, and without this the first loop to look takes all
-    # of it - see crypto_cash_allocator for the live case that forced this.
-    # A ceiling of None means the allocator could not price the wallet, and
-    # unknown cash is never a reason to buy.
-    import crypto_cash_allocator as allocator
-    ceiling, ceiling_reason = allocator.spend_ceiling(allocator.TREE, spendable)
-    if ceiling is None:
-        log.info(f"[TREE] {bot_name}: {ceiling_reason} - skipping the reversal buy on {product_id}")
-        return False
-
-    spend = min(spend_cap, spendable, ceiling)
+    # No cash-share check here. capped_market_buy() below owns that rule
+    # for every competitive buy in this file, and duplicating it at a call
+    # site is exactly what let four of the five buy paths go uncapped in
+    # the first place - a second copy is a second thing to forget.
+    spend = min(spend_cap, spendable)
     if spend < MIN_TRADE_USD:
-        # Name WHICH cap bound. "only $X spendable" when the wallet visibly
-        # holds more reads as a bug rather than a budget.
-        bound_by = "its cash share" if ceiling <= min(spend_cap, spendable) else "available cash"
-        log.info(f"[TREE] {bot_name}: only ${spend:.2f} deployable (bound by {bound_by}) - "
-                 f"below the ${MIN_TRADE_USD:.2f} minimum, skipping the reversal buy on "
-                 f"{product_id} | {ceiling_reason}")
+        log.info(f"[TREE] {bot_name}: only ${spend:.2f} real spendable - below the "
+                 f"${MIN_TRADE_USD:.2f} minimum, skipping the reversal buy on {product_id}")
         return False
 
-    fill = await engine.place_market_buy(session, spend, product_id)
+    fill = await capped_market_buy(session, spend, product_id, bot_name,
+                                   free_cash_usd=spendable)
     if not fill:
         log.warning(f"[TREE] {bot_name}: real reversal buy into {product_id} did not fill")
         return False
@@ -4564,7 +4628,8 @@ async def run_branch_cycle(bot_name: str) -> bool:
                     return True
 
             target_pct = max(engine.pick_target_pct(atr_pct), engine.min_profit_target_pct(spend, atr_pct))
-            fill = await engine.place_market_buy(session, spend, branch.product_id)
+            fill = await capped_market_buy(session, spend, branch.product_id, bot_name,
+                                           free_cash_usd=spendable_balance)
             if not fill:
                 # A real, confirmed-live rejection (PERMISSION_DENIED on
                 # RNDR-USD, "Invalid product_id" on MATIC-USD/JUP-USD)

@@ -252,10 +252,19 @@ ok("the grid sweep is bounded by its share, not just by free cash",
    and "min(real_free_cash - GRID_CASH_RESERVE_USD, ceiling)" in grid_bot)
 ok("the grid says so when the SHARE is what held it, not the wallet",
    "auto-deploy holding on its cash share" in grid_bot)
-ok("the tree's buy is bounded by its share too",
-   "allocator.spend_ceiling(allocator.TREE" in fam
-   and "min(spend_cap, spendable, ceiling)" in fam)
-ok("the tree names which cap bound it", "bound by {bound_by}" in fam)
+# Was: assertions on an inline cap at ONE tree buy site. That shape was
+# the bug - there are five buy paths and four were uncapped. Replaced with
+# the stronger property: every competitive buy routes through one
+# chokepoint. test_tree_cash_ceiling.py enforces the full coverage guard.
+ok("the tree caps its buys at a single chokepoint, not per call site",
+   "async def capped_market_buy(" in fam
+   and fam.count("allocator.spend_ceiling(allocator.TREE") == 1)
+ok("the tree's main buy paths all route through it",
+   "capped_market_buy(session, spend, branch.product_id" in fam
+   and "capped_market_buy(session, usd_amount, target_branch.product_id" in fam
+   and "capped_market_buy(session, spend, product_id" in fam)
+ok("the ceiling is computed from the WALLET, never from the request",
+   "free_cash_usd" in fam and "tree_spend_ceiling(free_cash_usd)" in fam)
 ok("both fail closed when the ceiling cannot be computed",
    grid_bot.count("if ceiling is None:") >= 1 and fam.count("if ceiling is None:") >= 1)
 ok("the endpoint serves every bot's ceiling", '_section("cash"' in router_src)
