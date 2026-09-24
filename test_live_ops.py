@@ -170,8 +170,13 @@ ok("it knows both services want opposite values",
    "bot_runner.py) exits unless" in router_src and "family_tree" in router_src)
 ok("a retired tree is surfaced, since the loop would run and do nothing",
    '"tree_retired"' in router_src and "is_crypto_passive_mode" in router_src)
-ok("and the retire flag is described as not cleared by this repo",
-   "nothing in this repo clears it" in router_src)
+# Was: "the retire flag is described as not cleared by this repo". That was
+# true until the un-retire was built, and this check correctly failed the
+# moment it shipped. Replaced with what must be true now - the gate has to
+# hand the operator the fix, not a dead end.
+ok("a retired tree's gate points at the fix rather than a dead end",
+   "resume-active-trading" in router_src
+   and "nothing in this repo clears it" not in router_src)
 ok("runner tracks any activity, not only gate verdicts",
    "last_activity_age_seconds" in router_src and "last_activity_age_seconds" in page)
 ok("the page renders the runner gates", "renderRunner" in page)
@@ -205,6 +210,32 @@ ok("the warning is data-driven, never hardcoded",
 ok("and it fails safe on an older server that omits the field",
    "!== false" in tree)
 ok("the tree page points at the page that IS live", '"/live-ops"' in tree or "/live-ops" in tree)
+
+
+# --- the un-retire ---------------------------------------------------------
+#
+# Retirement was one-way: set_crypto_passive_mode(False) had no caller
+# anywhere, so a retired tree given a running loop still did nothing at
+# all, for ever. These pin the missing half of the switch.
+ok("an endpoint exists to clear the retire flag",
+   '@router.post("/family-tree-status/resume-active-trading")' in router_src)
+ok("it actually clears the flag", "set_crypto_passive_mode(False)" in router_src)
+ok("it READS THE FLAG BACK rather than trusting the write",
+   router_src.count("is_crypto_passive_mode()") >= 2 and "did not clear the flag" in router_src)
+ok("a failed clear is an error, not a success", "status_code=500" in router_src)
+ok("it reports whether anything actually changed", '"was_passive"' in router_src)
+ok("it says whether the loop that would act on it is even running",
+   '"family_tree_loop_running"' in router_src and '"next_step"' in router_src)
+ok("and names which service to change, and what not to break",
+   "on the WEB service" in router_src and "grid_fleet, or its runner exits" in router_src)
+ok("it states plainly that nothing sold is bought back",
+   "NOT restored" in router_src)
+ok("the retired banner offers the un-retire",
+   "confirmResumeCryptoTrading" in tree and "Let the tree trade again" in tree)
+ok("the un-retire asks once - it sells nothing, so a second prompt is ceremony",
+   tree.count("if (!confirm(") >= 1)
+ok("Live Ops points at the fix instead of calling it impossible",
+   "resume-active-trading" in router_src and "nothing in this repo clears it" not in router_src)
 
 
 # --- the page must not fabricate -------------------------------------------

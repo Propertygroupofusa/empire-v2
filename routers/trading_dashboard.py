@@ -2507,6 +2507,82 @@ async def consolidate_family_tree_branches(dry_run: bool = True):
     return await crypto_family_tree_bot_module.consolidate_branches_by_coin(dry_run=dry_run)
 
 
+@router.post("/family-tree-status/resume-active-trading")
+async def resume_crypto_active_trading():
+    """Clears is_crypto_passive_mode() so the family tree's branches can
+    trade again - the crypto counterpart to
+    /alpaca-overview/resume-active-trading, and the missing half of a
+    switch that until now only had an OFF position.
+
+    WHY THIS DID NOT EXIST: retirement was designed as one-way, and
+    set_crypto_passive_mode(False) had no caller anywhere in the repo. The
+    consequence was that a retired tree could be given a running loop and
+    would still do nothing at all, for ever - is_crypto_passive_mode() is
+    checked at the top of every branch cycle, so every thread, root
+    included, exits immediately. Built at the account owner's explicit
+    request to let the tree trade again.
+
+    WHAT IT DOES NOT DO, and this matters before pressing it:
+
+      * It does NOT undo the liquidation. Retiring sold every branch
+        position except root and bought BTC with the proceeds. Those
+        positions are gone; resuming does not buy them back. Each branch
+        resumes with whatever allocated_usd it currently has, which for a
+        branch liquidated at retirement is whatever was left behind.
+      * It does NOT touch the BTC bought at retirement. That position sits
+        exactly where it is, sellable by hand, same as while passive mode
+        was on.
+      * It does NOT start the loop. Under CRYPTO_STRATEGY_MODE=grid_fleet
+        (or anything but family_tree) main.py never starts the tree
+        threads, so clearing this flag changes nothing until the mode is
+        set. The response says which of the two is still missing, so
+        pressing this and seeing no trading is never a mystery.
+
+    Returns was_passive so a no-op call is distinguishable from a real
+    change - pressing it twice must not read like it worked twice."""
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+
+    was_passive = await crypto_family_tree_bot_module.is_crypto_passive_mode()
+    await crypto_family_tree_bot_module.set_crypto_passive_mode(False)
+
+    # Read it back rather than assuming the write landed. This flag is the
+    # difference between a tree that trades and one that silently does
+    # not, so "we called the setter" is not good enough evidence.
+    still_passive = await crypto_family_tree_bot_module.is_crypto_passive_mode()
+    if still_passive:
+        raise HTTPException(
+            status_code=500,
+            detail="set_crypto_passive_mode(False) did not clear the flag - the tree is still "
+                   "retired. Nothing was changed; check the database write path before retrying.",
+        )
+
+    mode = os.getenv("CRYPTO_STRATEGY_MODE", "") or "(unset)"
+    loop_running = mode == "family_tree"
+    log.info(
+        "[dashboard] 🔓🌳 Family tree active trading resumed (retire flag cleared) | "
+        f"was_passive={was_passive} | CRYPTO_STRATEGY_MODE={mode!r} | "
+        f"tree loop started by this service: {loop_running}"
+    )
+    return {
+        "status": "active_trading_resumed",
+        "was_passive": was_passive,
+        "passive_mode": False,
+        "crypto_strategy_mode": mode,
+        "family_tree_loop_running": loop_running,
+        "next_step": None if loop_running else (
+            f"The retire flag is cleared, but this service runs CRYPTO_STRATEGY_MODE={mode!r}, "
+            f"so the family-tree loop is never started and no branch will trade. Set "
+            f"CRYPTO_STRATEGY_MODE=family_tree on the WEB service to start it. Leave the "
+            f"crypto-trading service on grid_fleet, or its runner exits and the grid fleet stops."
+        ),
+        "note": (
+            "Positions sold at retirement are NOT restored, and the BTC bought at retirement is "
+            "untouched. Branches resume with whatever allocated_usd they currently hold."
+        ),
+    }
+
+
 @router.post("/family-tree-status/reconcile-asset/{currency:path}")
 async def reconcile_asset(currency: str, dry_run: bool = True):
     """Corrects a real SHORTFALL the Reconciliation panel flags - every
@@ -6666,8 +6742,9 @@ async def _live_ops_runner():
         gates.append({
             "name": "Family tree is not retired", "ok": False,
             "detail": "retired - every branch cycle exits immediately",
-            "fix": "the retire flag is DB-persisted and nothing in this repo clears it; "
-                   "it must be cleared deliberately before the tree can trade again",
+            "fix": "clear it with the 'Let the tree trade again' button on the family-tree "
+                   "dashboard (POST /family-tree-status/resume-active-trading). It does not "
+                   "buy back anything retirement sold.",
         })
 
     return {

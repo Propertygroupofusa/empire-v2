@@ -4041,6 +4041,14 @@ function renderCryptoPassiveModeBanner(data) {
         el.innerHTML = `<div class="panel" style="background: var(--green-bg); border: 1px solid var(--green); padding: 14px 18px; margin-bottom: 16px;">
             <strong>🔒📈 Family tree retired.</strong> This account now holds a real buy-and-hold BTC position only —
             no branch is trading anymore. See it on the root card below.
+            <div style="margin-top:12px;">
+                <button class="unlock-btn" onclick="confirmResumeCryptoTrading()">🔓🌳 Let the tree trade again</button>
+                <div style="font-size:0.8em; color: var(--text-dim); margin-top:6px;">
+                    Clears the retire flag so every branch cycle stops exiting immediately.
+                    It does <strong>not</strong> buy back what retirement sold, and does not touch the
+                    BTC bought at retirement — branches resume with whatever cash they currently hold.
+                </div>
+            </div>
         </div>`;
     } else {
         el.innerHTML = `<div class="panel" style="padding: 14px 18px; margin-bottom: 16px;">
@@ -4153,6 +4161,46 @@ function renderRollingExpectancyBanner(data) {
         so no branch will open a new position until this recovers. Existing open positions keep their own real
         target/stop/breakeven protection unaffected; this only pauses new money going in.${breakdownText}${reasonTable}
     </div>`;
+}
+
+// Clears the retire flag so branch cycles stop exiting immediately.
+//
+// One confirm, not two. Retiring gets two because it SELLS real positions
+// and cannot be undone; this one only flips a flag back and buys nothing,
+// so a second prompt would be ceremony rather than a safeguard.
+//
+// The result is reported honestly in three parts, because "resumed" alone
+// would be misleading: whether the flag actually changed (pressing it
+// twice must not read like it worked twice), whether the loop that would
+// act on it is even running, and what resuming does NOT restore.
+async function confirmResumeCryptoTrading() {
+    if (!confirm(
+        'Let the family tree trade again?\n\n' +
+        'This clears the retire flag so branches stop exiting immediately.\n\n' +
+        'It does NOT buy back anything retirement sold, and does not touch the BTC ' +
+        'bought at retirement. Branches resume with whatever cash they currently hold.'
+    )) return;
+    const banner = document.getElementById('crypto-passive-mode-banner');
+    banner.innerHTML = '<div class="panel" style="padding:14px 18px;">Clearing the retire flag…</div>';
+    try {
+        const res = await fetch(API_BASE + '/family-tree-status/resume-active-trading', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        let msg = data.was_passive
+            ? 'Retire flag cleared — branches can trade again.'
+            : 'The tree was already not retired; nothing changed.';
+        if (data.next_step) msg += '\n\n⚠️ ' + data.next_step;
+        else msg += '\n\nThe family-tree loop is running on this service, so branches resume on their next cycle.';
+        if (data.note) msg += '\n\n' + data.note;
+        alert(msg);
+    } catch (e) {
+        alert('Could not resume: ' + e.message);
+    } finally {
+        await refresh();
+    }
 }
 
 async function confirmLiquidateAndBuyBtc() {
