@@ -3126,6 +3126,30 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
             if taker_rate is not None else "real fee tier lookup failed - fell back to default"
         )
 
+    # THE FEE GUARANTEE, applied to whichever source won above.
+    #
+    # Per the account owner, 2026-09-25: fees are not to be a recurring
+    # conversation - the code must simply never let a target sit below what
+    # a round trip costs. That is enforced structurally here rather than
+    # left to whoever chooses a spacing.
+    #
+    # The avg-swing and fee-tier paths already floored themselves. The
+    # PROMOTED OVERRIDE did not, and it wins over both - so a promoted
+    # candidate tighter than the fee floor would have traded every cycle at
+    # a guaranteed loss, with no warning. Nothing live hit this (the
+    # promoted 3_levels_2.5pct is 2.5% against a ~1.2% floor), but "nothing
+    # has hit it yet" is not a guarantee. This makes it unreachable.
+    if new_grid_pct is not None:
+        floor = await fee_safe_floor_pct()
+        if new_grid_pct < floor:
+            log.warning(
+                f"[GRID] {branch.bot_name}: {spacing_log_note or 'spacing'} asked for "
+                f"{new_grid_pct*100:.3f}%, below the fee-safe floor {floor*100:.3f}% - "
+                f"a full round trip at that spacing loses money. Using the floor."
+            )
+            new_grid_pct = floor
+            spacing_log_note = f"{spacing_log_note or 'spacing'} (raised to fee-safe floor)"
+
     if new_grid_pct is not None and abs(new_grid_pct - branch.grid_pct) > 1e-9:
         async with get_session_factory()() as db:
             result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))

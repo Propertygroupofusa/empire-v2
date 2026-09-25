@@ -262,6 +262,43 @@ PROFIT_TARGET_DOLLARS_MILESTONES = [
 # first real week of trading should tune this, not another estimate.
 PROFIT_TARGET_DOLLARS_OVERRIDE = _safe_float_env("PROP_PROFIT_TARGET_DOLLARS", "0")
 
+# --- THE FEE GUARANTEE ----------------------------------------------------
+# Per the account owner, 2026-09-25: fees must never be a recurring
+# conversation. The code guarantees that whatever target is in force - a
+# tier, an override, anything chosen later - always clears the real cost of
+# a round trip with margin left over. A target that cannot beat its own
+# costs is unreachable BY CONSTRUCTION, not by remembering to check.
+#
+# crypto_grid_bot.fee_safe_floor_pct() is the Coinbase counterpart:
+#     max(MIN_DYNAMIC_GRID_PCT, TARGET_NET_MARGIN_PCT + leg_fee * 2)
+# This is the same guarantee in dollars rather than percent, because Alpaca
+# targets are dollar-denominated.
+#
+# Alpaca equity commissions are zero, so the real cost of a round trip here
+# is SPREAD and slippage, crossed twice. SPY's bid-ask is about a cent on a
+# ~$769 share (~0.0013%), but the wider names in alpaca_swing_bot's universe
+# (USO, SLV, the inverse ETFs) run meaningfully worse - so the default is
+# set to cover the whole universe rather than the best case in it.
+ALPACA_ROUND_TRIP_COST_PCT = _safe_float_env("PROP_ROUND_TRIP_COST_PCT", "0.0012")
+
+# The profit that must survive AFTER those costs - what makes a trade worth
+# doing at all rather than merely break-even.
+ALPACA_MIN_NET_MARGIN_PCT = _safe_float_env("PROP_MIN_NET_MARGIN_PCT", "0.004")
+
+
+def fee_safe_target_dollars(position_notional: float) -> float:
+    """Smallest dollar target on `position_notional` that still nets a profit.
+
+    cost_pct is DOUBLED: a round trip crosses the spread entering and again
+    exiting. Counting it once is the single most common way a "profitable"
+    strategy turns out to be a losing one - it is precisely what made the
+    pasted 64%-win-rate scalper read +352% on paper while losing 0.48% per
+    real trade.
+    """
+    if not position_notional or position_notional <= 0:
+        return 0.0
+    return position_notional * (ALPACA_ROUND_TRIP_COST_PCT * 2 + ALPACA_MIN_NET_MARGIN_PCT)
+
 # Crypto-specific LOWER profit targets for fast compounding & high frequency
 # Crypto trades faster, so close positions sooner to reinvest quicker
 # At $1K: aim for $2-3 per trade (1-1.5% on crypto)
@@ -290,17 +327,45 @@ TIER_LEVELS = [0.50, 1.00, 1.50]  # multipliers of profit target
 
 def get_profit_target_dollars(equity, is_crypto=False):
     """Get profit target based on account equity. Crypto uses lower targets for fast compounding."""
-    # An explicit override wins outright, including over the crypto tiers -
-    # a number the operator set by hand is a decision, not a suggestion.
+    # An explicit override wins over the tiers - a number the operator set
+    # by hand is a decision, not a suggestion. It does NOT win over the fee
+    # guarantee below, because no decision makes a losing trade profitable.
     if PROFIT_TARGET_DOLLARS_OVERRIDE > 0:
-        return PROFIT_TARGET_DOLLARS_OVERRIDE
-    milestones = CRYPTO_PROFIT_TARGET_MILESTONES if is_crypto else PROFIT_TARGET_DOLLARS_MILESTONES
-    if equity is None:
-        return milestones[0][1]
-    target = milestones[0][1]
-    for threshold, t in milestones:
-        if equity >= threshold:
-            target = t
+        target = PROFIT_TARGET_DOLLARS_OVERRIDE
+    else:
+        milestones = (CRYPTO_PROFIT_TARGET_MILESTONES if is_crypto
+                      else PROFIT_TARGET_DOLLARS_MILESTONES)
+        target = milestones[0][1]
+        if equity is not None:
+            for threshold, t in milestones:
+                if equity >= threshold:
+                    target = t
+
+    # THE FEE GUARANTEE. Whatever chose the number above - a tier, an
+    # override, something added later - it is raised here if it cannot clear
+    # a round trip with margin. This is why fees do not need to be discussed
+    # when tuning targets: a target too small to be profitable cannot take
+    # effect.
+    #
+    # Position size is derived the same way the sizer does it: total notional
+    # is capped at MAX_RISK_PERCENT of equity, spread over the slots
+    # available at this scale.
+    if equity is not None and equity > 0:
+        try:
+            slots = max(1, get_dynamic_max_positions(1.0))
+            position_notional = (equity * MAX_RISK_PERCENT) / slots
+            floor = fee_safe_target_dollars(position_notional)
+            if target < floor:
+                log.warning(
+                    f"Profit target ${target:.2f} is below the fee-safe floor "
+                    f"${floor:.2f} on a ~${position_notional:.2f} position - that round "
+                    f"trip cannot clear its own costs. Using the floor."
+                )
+                target = floor
+        except Exception as e:
+            # Never let the guard break target selection; a target that is
+            # merely too large only trades less, it does not lose money.
+            log.debug(f"fee-safe target floor skipped: {type(e).__name__}: {e}")
     return target
 
 # Track profitable days for APEX 7-day rule
