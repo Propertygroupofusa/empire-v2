@@ -2210,7 +2210,7 @@ let gridModeActive = false;
 // correctly enforced server-side; this just fixes what the label says.
 let cryptoPassiveModeActive = false;
 
-function renderGridStatus(data, tradeHistoryByBot, historyTotals) {
+function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryByBotCoin) {
     gridModeActive = !!data.mode_active;
     const badge = document.getElementById('grid-mode-badge');
     badge.textContent = gridModeActive ? '🟢 grid trading ON' : '⚪ grid trading off';
@@ -2265,6 +2265,7 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals) {
         return;
     }
     tradeHistoryByBot = tradeHistoryByBot || {};
+    tradeHistoryByBotCoin = tradeHistoryByBotCoin || {};
     content.innerHTML = `
         <table style="width:100%; border-collapse:collapse; font-size:0.9em;">
             <thead><tr style="text-align:left; border-bottom:1px solid var(--border);">
@@ -2287,12 +2288,50 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals) {
                     const slicesStr = b.open_slices > 0
                         ? `${b.open_slices} / ${b.num_levels} <span style="color:var(--text-dim);">(ref ${fmtUsd(b.reference_price)})</span>${selfTuneBadge}`
                         : `<span style="color:var(--text-dim);">flat (ref ${fmtUsd(b.reference_price)})</span>${selfTuneBadge}`;
+                    // The headline figure is for THIS BRANCH ON THIS COIN.
+                    //
+                    // It used to be the branch's lifetime total, printed in a row
+                    // whose neighbouring cell names the branch's CURRENT coin. A
+                    // branch outlives its coin: crypto_grid_1 earned all +$12.80
+                    // over 15 DOGE round trips and was later repointed at BTC-USD,
+                    // so the row read "BTC-USD ... +$12.80 · 15 trades" and the coin
+                    // breakdown on Live Ops attributed the identical figure to
+                    // DOGE. Both were computing correctly; the row was the one
+                    // telling the reader something false.
+                    //
+                    // So: the current coin's own result leads, and any P&L the
+                    // branch earned on coins it no longer holds is shown beneath it
+                    // with those coins NAMED - not folded in silently, and not
+                    // dropped, since it is real money this branch made.
                     const hist = tradeHistoryByBot[b.bot_name];
+                    const coinHist = tradeHistoryByBotCoin[b.bot_name + '|' + b.product_id];
+                    const lifetimePnl = hist ? hist.total_pnl : 0;
+                    const lifetimeTrades = hist ? hist.trade_count : 0;
+                    const coinPnl = coinHist ? coinHist.total_pnl : 0;
+                    const coinTrades = coinHist ? coinHist.trade_count : 0;
+                    const otherTrades = lifetimeTrades - coinTrades;
+                    const otherPnl = Math.round((lifetimePnl - coinPnl) * 100) / 100;
+
+                    // Which other coins this branch traded, named rather than summarised
+                    // as "other". Falls back to an unnamed count only if the per-coin
+                    // rows are missing (an older server that has not shipped them).
+                    const otherCoins = Object.keys(tradeHistoryByBotCoin)
+                        .filter(k => k.indexOf(b.bot_name + '|') === 0
+                                  && k !== (b.bot_name + '|' + b.product_id))
+                        .map(k => tradeHistoryByBotCoin[k].product_id);
+
                     let resultsStr;
-                    if (!hist || hist.trade_count === 0) {
+                    if (lifetimeTrades === 0) {
                         resultsStr = '<span style="color:var(--text-dim);">No closed trades yet</span>';
+                    } else if (coinTrades === 0) {
+                        // Every trade this branch ever closed was on a different coin.
+                        // Showing its lifetime total here would be the exact bug.
+                        resultsStr = `<span style="color:var(--text-dim);">No closed trades on ${b.product_id} yet</span>`
+                            + `<div style="font-size:0.8em; color:var(--text-dim); margin-top:2px;">`
+                            + `this branch earned ${otherPnl >= 0 ? '+' : ''}${fmtUsd(otherPnl)} over ${otherTrades} trade${otherTrades === 1 ? '' : 's'} `
+                            + `on ${otherCoins.length ? otherCoins.join(', ') : 'coins it no longer holds'} before it was moved here</div>`;
                     } else {
-                        const pnlColor = hist.total_pnl >= 0 ? 'var(--green)' : 'var(--red)';
+                        const pnlColor = coinPnl >= 0 ? 'var(--green)' : 'var(--red)';
                         // No percentage here, deliberately.
                         //
                         // This used to print (total_pnl / allocated_usd) * 100 and call it a
@@ -2304,8 +2343,13 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals) {
                         // capital needs the capital that actually earned it, which is not
                         // tracked, so the honest move is to show the dollars and the trade
                         // count and let those speak.
-                        resultsStr = `<span style="color:${pnlColor}; font-weight:600;">${hist.total_pnl >= 0 ? '+' : ''}${fmtUsd(hist.total_pnl)}</span>`
-                            + `<div style="font-size:0.8em; color:var(--text-dim); margin-top:2px;">${hist.trade_count} trade${hist.trade_count === 1 ? '' : 's'} · ${hist.win_rate.toFixed(0)}% win</div>`;
+                        resultsStr = `<span style="color:${pnlColor}; font-weight:600;">${coinPnl >= 0 ? '+' : ''}${fmtUsd(coinPnl)}</span>`
+                            + `<div style="font-size:0.8em; color:var(--text-dim); margin-top:2px;">on ${b.product_id} · ${coinTrades} trade${coinTrades === 1 ? '' : 's'} · ${coinHist.win_rate.toFixed(0)}% win</div>`;
+                        if (otherTrades > 0) {
+                            resultsStr += `<div style="font-size:0.78em; color:var(--text-dim); margin-top:3px;">`
+                                + `+ ${otherPnl >= 0 ? '+' : ''}${fmtUsd(otherPnl)} earlier on ${otherCoins.length ? otherCoins.join(', ') : 'other coins'} `
+                                + `· branch lifetime ${lifetimePnl >= 0 ? '+' : ''}${fmtUsd(lifetimePnl)} over ${lifetimeTrades} trades</div>`;
+                        }
                     }
                     const statusStr = (b.drawdown_breached
                         ? `🛑 <span style="color:var(--red);" title="Real equity is down ${((b.drawdown_pct || 0) * 100).toFixed(0)}% from its own $${(b.peak_equity || 0).toFixed(2)} peak - new buys paused, existing slices still sell normally">breach (${((b.drawdown_pct || 0) * 100).toFixed(0)}% down)</span>`
@@ -3067,7 +3111,14 @@ async function loadGridStatus() {
         ]);
         const tradeHistoryByBot = {};
         (history.branches || []).forEach(function (h) { tradeHistoryByBot[h.bot_name] = h; });
-        renderGridStatus(data, tradeHistoryByBot, history);
+        // Per branch AND coin. A branch outlives the coin it points at, so
+        // its lifetime P&L is not its current coin's P&L - see the "Real
+        // results" cell for what goes wrong when the two are conflated.
+        const tradeHistoryByBotCoin = {};
+        (history.branch_coins || []).forEach(function (h) {
+            tradeHistoryByBotCoin[h.bot_name + '|' + h.product_id] = h;
+        });
+        renderGridStatus(data, tradeHistoryByBot, history, tradeHistoryByBotCoin);
         await renderScaleBotStatus(data);
     } catch (e) {
         document.getElementById('grid-content').innerHTML = `<div class="empty">Could not load: ${e.message}</div>`;

@@ -3674,6 +3674,33 @@ async def get_grid_trade_history(limit_recent: int = 50) -> dict:
             total_wins += wins or 0
         branches.sort(key=lambda b: b["total_pnl"], reverse=True)
 
+        # Grouped by BRANCH *and* COIN, because a branch outlives the coin it
+        # is pointed at. crypto_grid_1 earned its whole +$12.80 over 15 DOGE
+        # round trips and was later repointed at BTC-USD; the branch-level
+        # figure above is correct as a branch lifetime, but printed next to
+        # the branch's CURRENT coin it reads as "BTC made $12.80", which is
+        # false. The UI needs both numbers to tell them apart, so it gets
+        # both rather than a relabelled guess.
+        branch_coin_result = await db.execute(
+            select(
+                CryptoGridTradeHistory.bot_name,
+                CryptoGridTradeHistory.product_id,
+                func.count(CryptoGridTradeHistory.id).label("trade_count"),
+                func.sum(CryptoGridTradeHistory.pnl).label("total_pnl"),
+                func.sum(case((CryptoGridTradeHistory.pnl > 0, 1), else_=0)).label("wins"),
+            ).group_by(CryptoGridTradeHistory.bot_name, CryptoGridTradeHistory.product_id)
+        )
+        branch_coins = []
+        for bot_name, product_id, trade_count, total_pnl, wins in branch_coin_result.all():
+            branch_coins.append({
+                "bot_name": bot_name,
+                "product_id": product_id,
+                "trade_count": trade_count,
+                "total_pnl": round(total_pnl, 2) if total_pnl is not None else 0.0,
+                "win_rate": round(wins / trade_count * 100, 1) if trade_count else 0.0,
+            })
+        branch_coins.sort(key=lambda r: -r["total_pnl"])
+
         coin_result = await db.execute(
             select(
                 CryptoGridTradeHistory.product_id,
@@ -3712,6 +3739,7 @@ async def get_grid_trade_history(limit_recent: int = 50) -> dict:
 
     return {
         "branches": branches,
+        "branch_coins": branch_coins,
         "coins": coins,
         "recent_trades": recent_trades,
         "total_trade_count": total_trade_count,
