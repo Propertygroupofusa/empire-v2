@@ -1399,11 +1399,67 @@ async def reconcile_positions_with_broker(session):
         await _db_save_open(contract, side, entry, abs(qty))
         log.warning(f"[APEX_589296] 🔧 Adopted orphaned {side} {contract} position found on Alpaca but not tracked (entry ${entry:.2f}, qty {abs(qty)}) - stop-loss/profit-target now apply to it")
 
+    # A just-opened position may not appear in /v2/positions yet. Never
+    # drop anything younger than this, or the bot can forget a real
+    # position it opened seconds ago and stop managing its stop-loss.
+    _grace = timedelta(minutes=5)
+    _now = datetime.now(timezone.utc)
+
+    def _too_new(pos):
+        t = pos.get("open_time")
+        if t is None:
+            return False
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return (_now - t) < _grace
+
     for contract in list(open_prop_positions.keys()):
-        if contract not in broker_by_contract:
+        if contract not in broker_by_contract and not _too_new(open_prop_positions[contract]):
             log.warning(f"[APEX_589296] 🔧 Tracked {contract} position no longer exists on Alpaca (closed outside the bot) - dropping from tracking")
             open_prop_positions.pop(contract, None)
             await _db_delete_open(contract)
+
+    # ── the two dicts nothing was reconciling ───────────────────────────
+    #
+    # check_margin_safety sums open_prop_positions PLUS
+    # _total_alpaca_branch_notional() PLUS _total_opening_bar_notional().
+    # Only the first was ever reconciled here. The other two are cleared
+    # exclusively inside `if filled:` after the bot's own sell, so a
+    # position closed any other way - manually, by a broker stop, by
+    # liquidation, or a sell that did not fill - stays in the dict
+    # forever and keeps counting against the risk cap.
+    #
+    # Live on 2026-09-25: the check reported "$630.09 > 50% of $1007.47
+    # equity" and blocked every META entry, on an account whose real
+    # positions were about $197 (equity $1,007.47 against $810.64 cash).
+    # Roughly $433 of the risk budget was phantom, and APEX could not open
+    # anything at all.
+    for contract in list(open_opening_bar_positions.keys()):
+        if contract not in broker_by_contract and not _too_new(open_opening_bar_positions[contract]):
+            log.warning(f"[OPENING-BAR] 🔧 Tracked {contract} no longer exists on Alpaca - dropping (it was still counting against the margin cap)")
+            open_opening_bar_positions.pop(contract, None)
+
+    if open_alpaca_branch_positions:
+        # This dict is keyed by BRANCH NAME and carries no contract, so
+        # the mapping has to come from the branch table.
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(AlpacaBranch.bot_name, AlpacaBranch.contract))
+                branch_contract = {row[0]: row[1] for row in result.all()}
+        except Exception as e:
+            log.warning(f"[ALPACA-BRANCH] could not read branch contracts for reconciliation: {e}")
+            branch_contract = {}
+        for bot_name in list(open_alpaca_branch_positions.keys()):
+            contract = branch_contract.get(bot_name)
+            if contract is None:
+                continue          # unknown mapping - never drop on a guess
+            if contract not in broker_by_contract and not _too_new(open_alpaca_branch_positions[bot_name]):
+                log.warning(f"[ALPACA-BRANCH] 🔧 {bot_name} ({contract}) no longer exists on Alpaca - dropping (it was still counting against the margin cap)")
+                open_alpaca_branch_positions.pop(bot_name, None)
+                try:
+                    await _db_delete_branch_open(bot_name, contract)
+                except Exception:
+                    pass
 
 
 # Floor on a single position's dollar size. Below this, a position is too
@@ -1529,9 +1585,22 @@ def check_margin_safety(buying_power, equity, open_positions_count, extra_open_n
         return False, f"CRITICAL: Buying power ${buying_power:.2f} near zero — halting new positions"
 
     # Total open position risk can't exceed max % of equity
-    total_open_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in open_prop_positions.values()) + extra_open_notional
+    prop_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in open_prop_positions.values())
+    total_open_notional = prop_notional + extra_open_notional
     if equity > 0 and total_open_notional > (equity * MAX_RISK_PERCENT):
-        return False, f"Risk limit exceeded: ${total_open_notional:.2f} > {MAX_RISK_PERCENT*100:.0f}% of ${equity:.2f} equity"
+        # Name where the notional came from. This block ran every cycle for
+        # hours on 2026-09-25 reporting "$630.09 > 50% of $1007.47" while
+        # the real account held about $197 (equity $1,007.47, cash
+        # $810.64) - roughly $433 of it phantom, left in dicts that only
+        # cleared on the bot's own sell and were never reconciled against
+        # the broker. The message said the limit was hit; it did not say
+        # the number was stale, so it read as correct risk management for
+        # as long as anyone cared to look.
+        return False, (f"Risk limit exceeded: ${total_open_notional:.2f} > "
+                       f"{MAX_RISK_PERCENT*100:.0f}% of ${equity:.2f} equity "
+                       f"(prop ${prop_notional:.2f} + other ${extra_open_notional:.2f}; "
+                       f"if this exceeds equity minus cash, tracking has drifted "
+                       f"from the broker)")
 
     return True, "OK"
 
