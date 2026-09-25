@@ -110,7 +110,15 @@ def load_env():
                     break
             v = "\n".join(block)
         ENV_KEYS_FOUND.append(k)
-        os.environ.setdefault(k, v)
+        # Blank values are ignored, and a later non-blank entry wins.
+        # setdefault did the opposite: a stray "COINBASE_API_KEY_NAME="
+        # earlier in the file silently blocked the correct value further
+        # down, and the bot reported "0 chars" with the name clearly
+        # present. Duplicated names in .env are common after a failed
+        # scripted append, so the file should not be booby-trapped by one.
+        if not v:
+            continue
+        os.environ[k] = v
 
 
 load_env()
