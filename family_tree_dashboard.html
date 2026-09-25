@@ -816,26 +816,36 @@
     </div>
     <p class="panel-sub" style="margin-bottom:10px;">
         <strong>This is the live crypto engine on this account</strong> - the only crypto system currently placing real
-        Coinbase orders. Real, genuinely separate grid-trading branches: buys a real slice when a coin closes one grid
-        step below its own reference price (up to 10 concurrent slices), then sells the oldest slice that is genuinely
-        net-profitable at the current price - never one that would realize a loss just because an unrelated, lower slice
-        moved the reference. Real fees included both ways. The grid step itself is per-coin and dynamic, not a fixed
-        percentage - see the spacing badges directly below. Built after Strategy Lab's real 30-day comparison showed Grid
-        Bot as the clear best performer against every other candidate on the same coins and window. Its own real capital,
-        its own real position tracking - never touches or shares state with the family tree branches below. Master switch
-        defaults ON; nothing trades until a real branch actually exists below.
-        Every branch also carries a real drawdown circuit breaker (pauses NEW buys only, once real equity drops 25% below
-        its own peak - existing slices keep selling normally) - it's the account-level protection Grid Bot never had
-        before. Real idle cash - whether it's sitting in a flat branch or was never allocated to one at all - also
-        auto-deploys toward whichever coin currently ranks best (see the toggle below), no manual click ever required.
+        Coinbase orders. Each branch buys a real slice when its coin closes one grid step below that branch's own
+        reference price, then sells the oldest slice that is genuinely net-profitable at the current price - never one
+        that would realize a loss just because an unrelated, lower slice moved the reference. Real fees both ways.
+        Its own capital and position tracking; it never shares state with the family tree below.
+        <br><br>
+        <strong>The step is chosen per coin from measured grid performance</strong>, not from how the coin trends -
+        a coin can be a poor hold and an excellent grid. Over 90 days of real candles a wider step beat a tighter one on
+        six of seven coins ($128.30 vs $23.24 at 1.70%), and it also produced <em>more</em> round trips, not fewer:
+        selling early resets the reference upward and costs the next entry. No step may ever sit below the fee floor
+        shown below.
+        <br><br>
+        <strong>Idle cash no longer moves on its own.</strong> Automatic rotation was removed on 2026-09-25 after it
+        retired four earning branches to cash on directional ROI - DOGE went out at -23.8% directional while measuring
+        +$22.81 on the grid, and 64% of the account sat idle until someone noticed. Cash now moves only when you move it.
+        Each branch still carries a drawdown circuit breaker at 25% (pauses NEW buys only; open slices keep selling), and
+        that breaker is honest about itself: on 90 days of these coins it never fired at any setting from 10% to 25%,
+        so treat it as untested insurance rather than proven protection.
     </p>
-    <div id="grid-dynamic-spacing-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
-    <div id="grid-avg-swing-spacing-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
-    <div id="grid-auto-rotate-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
-    <div id="grid-min-roi-floor-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
+    <!-- WHAT GOVERNS THIS FLEET. Replaced seven badges on 2026-09-25, four of
+         which were switches that could quietly lose money:
+           fee-tier spacing / average-swing spacing - either one silently
+             overrides per-coin measured spacing
+           auto-rotate - retired four earning branches on DIRECTIONAL ROI,
+             which is not how a grid earns
+           genuine-edge floor 20% - the rule auto-rotate judged them by
+         They are not on the page any more, so they cannot be flipped by
+         accident. Everything below is READ-ONLY and measured. -->
+    <div id="grid-governs-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
     <div id="grid-fee-rate-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-maker-orders-toggle" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
-    <div id="grid-spacing-override-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div class="panel" id="grid-panel">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:8px;">
             <button id="grid-mode-toggle-btn" class="unlock-btn" onclick="toggleGridMode()" disabled>Loading…</button>
@@ -2287,13 +2297,9 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
         scaleBotToggle.disabled = false;
     }
 
-    renderGridDynamicSpacingBadge(!!data.dynamic_spacing_active);
-    renderGridAvgSwingSpacingBadge(!!data.avg_swing_spacing_active);
-    renderGridAutoRotateBadge(!!data.auto_rotate_active, data.auto_rotate_interval_minutes);
-    renderGridMinRoiFloorBadge(data.min_required_roi_pct);
+    renderGridGovernsPanel(data);
     renderGridFeeRateBadge(data);
     renderGridMakerOrdersToggle(data);
-    renderGridSpacingOverrideBadge(data.grid_spacing_override);
 
     document.getElementById('grid-total-allocated').textContent =
         `${fmtUsd(data.total_allocated_usd)} total real capital across ${data.branch_count} grid branch${data.branch_count === 1 ? '' : 'es'}`;
@@ -2922,35 +2928,7 @@ function renderGridBranchChart(b) {
 // that should inform whether to turn this on - same "evidence before
 // any live change" discipline as every other real strategy toggle in
 // this codebase.
-function renderGridDynamicSpacingBadge(active) {
-    const el = document.getElementById('grid-dynamic-spacing-badge');
-    if (!el) return;
-    const label = active
-        ? '<strong style="color:var(--green);">ON</strong> - real spacing narrows as the account\'s real Coinbase fee tier improves'
-        : '<strong style="color:var(--text-dim);">OFF</strong> - fixed 1% spacing regardless of real fee tier';
-    el.innerHTML = `🎯 Fee-tier-aware dynamic spacing: ${label} — ` +
-        `<a href="javascript:void(0)" onclick="toggleGridDynamicSpacing(${!active})" style="color: var(--navy);">${active ? 'turn off' : 'turn on'}</a> ` +
-        `<span style="color:var(--text-dim);">(real evidence: <a href="/crypto-selection-backtest-view" style="color: var(--navy);">Grid Fee-Tier Spacing Backtest</a>)</span>`;
-}
 
-async function toggleGridDynamicSpacing(enable) {
-    const msg = enable
-        ? 'Turn ON fee-tier-aware dynamic spacing? Every real grid branch will start recomputing its own grid_pct from the account\'s real live Coinbase fee tier each cycle instead of a fixed 1% - narrower spacing (more, smaller real trades) once the account genuinely qualifies for a lower fee tier. Falls back to the fixed 1% default if the real fee-tier lookup ever fails.'
-        : 'Turn OFF dynamic spacing? Every real grid branch goes back to the fixed 1% spacing.';
-    if (!confirm(msg)) return;
-    try {
-        const res = await fetch(API_BASE + '/grid-status/dynamic-spacing', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enabled: enable }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
-        renderGridDynamicSpacingBadge(data.dynamic_spacing_active);
-    } catch (e) {
-        alert('Error: ' + e.message);
-    }
-}
 
 // Real, opt-in average-swing-based dynamic grid spacing toggle - the
 // evidence-backed follow-up to the fee-tier toggle above. Per the account
@@ -2959,35 +2937,7 @@ async function toggleGridDynamicSpacing(enable) {
 // +$5.79 total, 59.8% win rate vs the fixed 1% default's +$1.02, 56.1%).
 // ON by default - see crypto_grid_bot.is_avg_swing_spacing_active's own
 // docstring. Takes precedence over fee-tier spacing when both are active.
-function renderGridAvgSwingSpacingBadge(active) {
-    const el = document.getElementById('grid-avg-swing-spacing-badge');
-    if (!el) return;
-    const label = active
-        ? '<strong style="color:var(--green);">ON</strong> - each real branch spaces itself at 1.5x its own coin\'s real recent average swing'
-        : '<strong style="color:var(--text-dim);">OFF</strong> - fixed 1% (or fee-tier) spacing regardless of each coin\'s own real swing';
-    el.innerHTML = `📏 Average-swing dynamic spacing: ${label} — ` +
-        `<a href="javascript:void(0)" onclick="toggleGridAvgSwingSpacing(${!active})" style="color: var(--navy);">${active ? 'turn off' : 'turn on'}</a> ` +
-        `<span style="color:var(--text-dim);">(real evidence: <a href="/crypto-selection-backtest-view" style="color: var(--navy);">Grid Average-Swing Spacing Backtest</a>)</span>`;
-}
 
-async function toggleGridAvgSwingSpacing(enable) {
-    const msg = enable
-        ? 'Turn ON average-swing dynamic spacing? Every real grid branch will start recomputing its own grid_pct from that coin\'s real recent hourly swing each cycle (1.5x its real average True Range) instead of a fixed 1% - a calm coin gets a tighter grid, a choppy one gets a wider one. Falls back to the fixed default if the real swing lookup ever fails. Takes precedence over fee-tier spacing if both are on.'
-        : 'Turn OFF average-swing dynamic spacing? Every real grid branch goes back to fixed 1% spacing (or fee-tier spacing, if that\'s still on).';
-    if (!confirm(msg)) return;
-    try {
-        const res = await fetch(API_BASE + '/grid-status/avg-swing-spacing', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enabled: enable }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
-        renderGridAvgSwingSpacingBadge(data.avg_swing_spacing_active);
-    } catch (e) {
-        alert('Error: ' + e.message);
-    }
-}
 
 // Real automatic idle-cash rotation - per the account owner's explicit
 // request: real idle cash sitting in a FLAT grid branch should never
@@ -3006,13 +2956,6 @@ async function toggleGridAvgSwingSpacing(enable) {
 // functions, so this one number governs all of them. Read-only display
 // here (env-configured, not yet a dashboard toggle) - purely for
 // visibility, so it's never a silent, invisible rule.
-function renderGridMinRoiFloorBadge(minRoiPct) {
-    const el = document.getElementById('grid-min-roi-floor-badge');
-    if (!el || minRoiPct == null) return;
-    el.innerHTML = `🎯 Genuine-edge floor: a coin must show at least <strong>${minRoiPct.toFixed(0)}%</strong> real backtested ROI ` +
-        `before ANY automatic action (Quick Buy, auto-deploy, auto-rotate) will deploy real capital into it - ` +
-        `if nothing clears this bar, real cash stays unallocated rather than funding a mediocre pick.`;
-}
 
 // The REAL Coinbase fee every grid P&L figure is priced against. Made
 // visible after a real bug (2026-09-05): the P&L formula that decides
@@ -3021,6 +2964,87 @@ function renderGridMinRoiFloorBadge(minRoiPct) {
 // Understating it green-lights real losing sells as "wins", so the number
 // itself now has to be on screen, along with whether it was genuinely
 // observed from Coinbase or is still the conservative fallback.
+// REMOVED 2026-09-25: renderGridDynamicSpacingBadge / toggleGridDynamicSpacing,
+// renderGridAvgSwingSpacingBadge / toggleGridAvgSwingSpacing,
+// renderGridAutoRotateBadge / toggleGridAutoRotate,
+// renderGridMinRoiFloorBadge, renderGridSpacingOverrideBadge.
+//
+// Each was a switch on this page that could quietly lose money:
+//   fee-tier + average-swing spacing  either one silently overrides the
+//       per-coin measured step, and turning all three OFF put the fleet in
+//       the one state where the fee floor was never applied - five branches
+//       were created at 1.00% against a 1.70% floor as a result.
+//   auto-rotate                       retired four earning branches to idle
+//       cash on DIRECTIONAL ROI, which is not how a grid earns. DOGE went
+//       out at -23.8% directional while measuring +$22.81 on the grid.
+//   genuine-edge floor 20%            the rule auto-rotate judged them by.
+//
+// The server endpoints still exist, so any of these can be set deliberately
+// via the API. What is gone is the ability to flip them by accident from a
+// phone. renderGridGovernsPanel shows the measured state instead.
+function renderGridGovernsPanel(d) {
+    // Read-only by design. Every row here is a MEASURED fact about how the
+    // fleet is trading, not a switch. The switches this replaced each cost
+    // real money or real time on 2026-09-25 - see the comment on the
+    // container above.
+    const el = document.getElementById('grid-governs-panel');
+    if (!el) return;
+    try {
+        const floor = d.fee_safe_min_grid_pct;
+        const branches = d.branches || [];
+        const below = branches.filter(b => b.grid_pct < floor - 1e-9);
+        const steps = branches.map(b => b.grid_pct).filter(v => v != null);
+        const lo = steps.length ? Math.min(...steps) : null;
+        const hi = steps.length ? Math.max(...steps) : null;
+        const mix = d.fill_mix && d.fill_mix.overall;
+
+        const row = (icon, label, value, note) =>
+            `<div style="display:flex; gap:8px; padding:4px 0; align-items:baseline;">` +
+            `<span style="width:1.2em;">${icon}</span>` +
+            `<span style="min-width:9em; color:var(--text-dim);">${label}</span>` +
+            `<span><strong>${value}</strong>` +
+            (note ? ` <span style="color:var(--text-dim);">${note}</span>` : '') +
+            `</span></div>`;
+
+        let html = `<div class="panel" style="padding:10px 12px;">`;
+        html += `<div style="font-weight:600; margin-bottom:6px;">What governs this fleet</div>`;
+
+        html += row('💵', 'Fee floor', `${(floor * 100).toFixed(2)}%`,
+            `— the smallest step that clears a <em>taker</em> round trip. `
+            + `Nothing may trade below it.`);
+
+        html += row(below.length ? '🛑' : '✅', 'Every branch',
+            below.length
+                ? `${below.length} BELOW THE FLOOR: ${below.map(b => b.product_id).join(', ')}`
+                : `at or above the floor`,
+            below.length ? `— these lose money on every completed round trip` : '');
+
+        if (lo != null) {
+            html += row('📐', 'Step in force',
+                lo === hi ? `${(lo * 100).toFixed(2)}%`
+                          : `${(lo * 100).toFixed(2)}% – ${(hi * 100).toFixed(2)}%`,
+                `— measured per coin, widest net wins. Wider is usually better.`);
+        }
+
+        if (mix && mix.legs > 0) {
+            const rate = (mix.maker_rate * 100).toFixed(0);
+            html += row(mix.maker_rate >= 0.5 ? '✅' : '⚠️', 'Fills',
+                `${rate}% maker`,
+                `(${mix.maker_legs} maker / ${mix.taker_legs} taker) — real round trip `
+                + `${(mix.blended_round_trip_fee_rate * 100).toFixed(2)}%`);
+        } else {
+            html += row('⏳', 'Fills', 'not measured yet',
+                `— no legs filled since counting began`);
+        }
+
+        html += `</div>`;
+        el.innerHTML = html;
+    } catch (e) {
+        el.innerHTML = `<div class="panel" style="padding:10px 12px; color:var(--text-dim);">`
+            + `What governs this fleet: could not render (${e.message})</div>`;
+    }
+}
+
 function renderGridFeeRateBadge(data) {
     const el = document.getElementById('grid-fee-rate-badge');
     if (!el || data == null || data.real_round_trip_fee_rate == null) return;
@@ -3104,47 +3128,8 @@ async function toggleGridMakerOrders(enable) {
 // visibility here (the actual promote buttons live on the backtest page
 // itself, next to the real numbers that justify picking one) - so it's
 // never a silent override nobody can see is active from this dashboard.
-function renderGridSpacingOverrideBadge(overrideLabel) {
-    const el = document.getElementById('grid-spacing-override-badge');
-    if (!el) return;
-    const label = overrideLabel || 'live_default';
-    const isDefault = label === 'live_default';
-    const shown = isDefault
-        ? '<strong style="color:var(--text-dim);">none</strong> - today\'s real per-allocation levels + dynamic spacing, unchanged'
-        : `<strong style="color:var(--gold);">${label.replace(/_/g, ' ')}</strong> - overriding every real branch's own levels cap and spacing`;
-    el.innerHTML = `🎯 Grid level/spacing override: ${shown} — ` +
-        `<span style="color:var(--text-dim);">promote or revert a real candidate from the <a href="/crypto-selection-backtest-view" style="color: var(--navy);">Grid Level/Spacing Comparison</a> tool</span>`;
-}
 
-function renderGridAutoRotateBadge(active, intervalMinutes) {
-    const el = document.getElementById('grid-auto-rotate-badge');
-    if (!el) return;
-    const mins = intervalMinutes || 30;
-    const label = active
-        ? `<strong style="color:var(--green);">ON</strong> - real idle cash (in a flat branch, or never allocated at all) auto-moves/auto-deploys to the current best coin every ~${mins} min (and right after a slice sells) - no click needed`
-        : '<strong style="color:var(--text-dim);">OFF</strong> - real idle cash only moves when you move it yourself';
-    el.innerHTML = `🔁 Auto-rotate idle cash: ${label} — ` +
-        `<a href="javascript:void(0)" onclick="toggleGridAutoRotate(${!active})" style="color: var(--navy);">${active ? 'turn off' : 'turn on'}</a>`;
-}
 
-async function toggleGridAutoRotate(enable) {
-    const msg = enable
-        ? 'Turn ON automatic idle-cash rotation? Any FLAT grid branch with real idle cash will automatically move that cash into whichever real coin currently ranks best, and real unallocated free cash will automatically start brand-new branches the same way - roughly every 30 minutes (and immediately after a slice sells for profit), no manual click ever needed. This places real Coinbase orders on its own - a branch actively holding open slices is never touched, and new-branch creation stops on its own once real free cash runs low.'
-        : 'Turn OFF automatic idle-cash rotation? Real idle cash will only move (or deploy into a new branch) when you do it yourself.';
-    if (!confirm(msg)) return;
-    try {
-        const res = await fetch(API_BASE + '/grid-status/auto-rotate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enabled: enable }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
-        renderGridAutoRotateBadge(data.auto_rotate_active);
-    } catch (e) {
-        alert('Error: ' + e.message);
-    }
-}
 
 // The status strip: the three questions worth answering before anything
 // else. Reads only data loadGridStatus already fetched, so it costs no
