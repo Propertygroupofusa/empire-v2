@@ -117,6 +117,96 @@ def round_trip_stats(trades):
     }
 
 
+def per_coin_profile(trades, window_hours=None):
+    """Each coin's own trade profile, in the shape a target gets written in.
+
+    Per coin: completed round trips, winners, losers, gross won, gross
+    lost, fee drag, net, win rate, profit factor, and rate per hour. That
+    is the same table a target profile is stated as, so the target and the
+    result can be compared line for line instead of by impression.
+
+    Reported PER COIN because a fleet total hides the thing worth knowing.
+    Six coins doing nothing and one doing well average out to a mediocre
+    fleet, and the correct response to that is more capital on the one,
+    not a tweak to all seven.
+
+    Grids have a structural quirk this makes visible: a slice only sells
+    ABOVE its own entry, so closed round trips are winners by
+    construction and the losers column stays near zero while underwater
+    slices sit unclosed. A loser here means a forced exit - a drawdown
+    breaker or a manual close - not a normal grid cycle. An empty losers
+    column is therefore not evidence of a good strategy.
+    """
+    by_coin = {}
+    for t in trades or []:
+        try:
+            pid = t.get("product_id") or "?"
+            entry, exit_ = float(t["entry_price"]), float(t["exit_price"])
+            qty, net = float(t["qty"]), float(t["pnl"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        gross = (exit_ - entry) * qty
+        c = by_coin.setdefault(pid, {"product_id": pid, "round_trips": 0,
+                                     "winners": 0, "losers": 0,
+                                     "gross_won": 0.0, "gross_lost": 0.0,
+                                     "fees": 0.0, "net_pnl": 0.0, "notional": 0.0})
+        c["round_trips"] += 1
+        c["fees"] += gross - net
+        c["net_pnl"] += net
+        c["notional"] += entry * qty
+        if net > 0:
+            c["winners"] += 1; c["gross_won"] += net
+        elif net < 0:
+            c["losers"] += 1; c["gross_lost"] += abs(net)
+
+    out = []
+    for c in by_coin.values():
+        n = c["round_trips"]
+        out.append({
+            "product_id": c["product_id"],
+            "round_trips": n,
+            "winners": c["winners"], "losers": c["losers"],
+            "gross_won": round(c["gross_won"], 4),
+            "gross_lost": round(-c["gross_lost"], 4),
+            "fees": round(-c["fees"], 4),
+            "net_pnl": round(c["net_pnl"], 4),
+            "win_rate_pct": round(c["winners"] / n * 100, 1) if n else None,
+            "profit_factor": (round(c["gross_won"] / c["gross_lost"], 3)
+                              if c["gross_lost"] else None),
+            "avg_net_per_trade": round(c["net_pnl"] / n, 4) if n else None,
+            "trips_per_hour": (None if not window_hours else round(n / window_hours, 3)),
+            "net_per_hour": (None if not window_hours
+                             else round(c["net_pnl"] / window_hours, 4)),
+            "notional": round(c["notional"], 2),
+        })
+    out.sort(key=lambda r: -r["net_pnl"])
+    return out
+
+
+def compare_to_target(profile_rows, target, window_hours=None):
+    """Measured against a stated target, per coin, with the gap named.
+
+    Exists so a target is checked rather than believed. Every field the
+    target names is compared to what actually happened; anything the
+    target does not name is left out rather than invented.
+    """
+    want_trips = target.get("round_trips")
+    want_net = target.get("net")
+    rows = []
+    for r in profile_rows:
+        rows.append({
+            "product_id": r["product_id"],
+            "round_trips": {"target": want_trips, "actual": r["round_trips"],
+                            "ratio": (None if not want_trips else
+                                      round(r["round_trips"] / want_trips, 3))},
+            "net": {"target": want_net, "actual": r["net_pnl"],
+                    "ratio": (None if not want_net else round(r["net_pnl"] / want_net, 3))},
+            "win_rate_pct": {"target": target.get("win_rate_pct"),
+                             "actual": r["win_rate_pct"]},
+        })
+    return {"window_hours": window_hours, "target": target, "coins": rows}
+
+
 def slippage_stats(trades):
     """How far fills landed from the price the bot decided on.
 
@@ -486,6 +576,40 @@ def _self_test():
 
     ok("trades are ordered by close time before the curve is drawn",
        drawdown_stats(list(reversed(seq)), 595.29)["max_drawdown_usd"] == 1.70)
+
+    # --- per coin, in the shape a target is written in ----------------------
+    def ct(pid, entry, exit_, qty, net):
+        return {"product_id": pid, "entry_price": entry, "exit_price": exit_,
+                "qty": qty, "pnl": net,
+                "opened_at": datetime(2026, 9, 24, 10), "closed_at": datetime(2026, 9, 24, 11)}
+
+    prof = per_coin_profile([
+        ct("ARB-USD", 1.0, 1.025, 24.16, 0.36), ct("ARB-USD", 1.0, 1.025, 24.16, 0.36),
+        ct("ARB-USD", 1.0, 0.98, 24.16, -0.60),
+        ct("SOL-USD", 1.0, 1.025, 24.16, 0.36),
+    ], window_hours=1.0)
+    arb = next(r for r in prof if r["product_id"] == "ARB-USD")
+    ok("each coin gets its own row", len(prof) == 2)
+    ok("winners and losers are counted per coin", arb["winners"] == 2 and arb["losers"] == 1)
+    ok("gross won and lost are separated", arb["gross_won"] == 0.72 and arb["gross_lost"] == -0.6)
+    ok("net is their sum", abs(arb["net_pnl"] - 0.12) < 1e-9)
+    ok("win rate is per coin", arb["win_rate_pct"] == round(2/3*100, 1))
+    ok("profit factor is per coin", arb["profit_factor"] == round(0.72/0.6, 3))
+    ok("trips per hour is reported when a window is given", arb["trips_per_hour"] == 3.0)
+    ok("net per hour too", abs(arb["net_per_hour"] - 0.12) < 1e-9)
+    ok("coins are ranked by net, best first", prof[0]["net_pnl"] >= prof[-1]["net_pnl"])
+    ok("a coin with no losers has no profit factor, not infinity",
+       next(r for r in prof if r["product_id"] == "SOL-USD")["profit_factor"] is None)
+    ok("without a window the rate fields stay None, never assumed",
+       per_coin_profile([ct("X-USD", 1.0, 1.02, 10, 0.2)])[0]["trips_per_hour"] is None)
+    ok("fee drag is carried per coin and shown as a cost", arb["fees"] < 0)
+
+    cmp_ = compare_to_target(prof, {"round_trips": 12, "net": 1.40, "win_rate_pct": 75.0}, 1.0)
+    arb_c = next(c for c in cmp_["coins"] if c["product_id"] == "ARB-USD")
+    ok("the target is compared per coin, not fleet-wide", len(cmp_["coins"]) == 2)
+    ok("the trip gap is expressed as a ratio", arb_c["round_trips"]["ratio"] == round(3/12, 3))
+    ok("and the net gap too", arb_c["net"]["ratio"] == round(0.12/1.40, 3))
+    ok("the target is echoed beside the actual", arb_c["round_trips"]["target"] == 12)
 
     rep = fleet_report([row], mixed, busy, {"GATE_PASS": 4, "GATE_BLOCK": 11},
                        slippage=sl, drawdown=dd,

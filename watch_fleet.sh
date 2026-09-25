@@ -186,6 +186,29 @@ if mt:
     if pnl.get("profit_factor_note"):
         print(f"  {D}profit factor {pnl['profit_factor_note']}{R}")
 
+# ---- per coin -----------------------------------------------------------
+pc = (d.get("_metrics") or {}).get("per_coin") or []
+if pc:
+    print()
+    print(f"{B}PER COIN{R}  {D}round trips · winners/losers · net{R}")
+    print(f"  {'coin':<11}{'trips':>6}{'W/L':>8}{'won':>9}{'lost':>9}{'fees':>9}{'NET':>10}{'/hr':>7}")
+    for c in pc:
+        wl = f"{c['winners']}/{c['losers']}"
+        rate = c.get("trips_per_hour")
+        print(f"  {c['product_id']:<11}{c['round_trips']:>6}{wl:>8}"
+              f"{c['gross_won']:>9.2f}{c['gross_lost']:>9.2f}{c['fees']:>9.2f}"
+              f"{c['net_pnl']:>+10.2f}{(f'{rate:.2f}' if rate is not None else '--'):>7}")
+
+vt = (d.get("_metrics") or {}).get("vs_target")
+if vt:
+    t = vt.get("target") or {}
+    print(f"  {D}target: {t.get('round_trips')} trips, ${t.get('net')} net per coin "
+          f"per {vt.get('window_hours')}h{R}")
+    for c in vt.get("coins", []):
+        tr = c["round_trips"]["ratio"]; nr = c["net"]["ratio"]
+        print(f"    {c['product_id']:<11} trips {(f'{tr*100:.0f}%' if tr is not None else '--'):>6}"
+              f" of target   net {(f'{nr*100:.0f}%' if nr is not None else '--'):>6} of target")
+
 # ---- cash ceilings ------------------------------------------------------
 ok, ca, err = sec("cash")
 if ok and ca:
@@ -208,7 +231,7 @@ while true; do
     # fetched on a slower beat than the status view and merged in. A
     # failure here costs the MEASURED block, never the whole screen.
     if curl -sS --max-time 30 -o "$STATE_DIR/metrics.json" \
-         "$BASE/api/trading-dashboard/live-ops/metrics?window_days=1" 2>/dev/null; then
+         "$BASE/api/trading-dashboard/live-ops/metrics?window_days=1&target_round_trips=12&target_net=1.40&target_win_rate=75" 2>/dev/null; then
       python3 - "$body_file" "$STATE_DIR/metrics.json" <<'MERGE' 2>/dev/null || true
 import json, sys
 try:

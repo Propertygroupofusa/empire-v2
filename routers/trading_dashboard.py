@@ -6866,7 +6866,10 @@ async def _live_ops_runner():
 
 
 @router.get("/live-ops/metrics")
-async def get_fleet_metrics(window_days: float = 1.0):
+async def get_fleet_metrics(window_days: float = 1.0,
+                            target_round_trips: float = None,
+                            target_net: float = None,
+                            target_win_rate: float = None):
     """Per-branch and fleet-wide measurement, for judging the 2.5% config.
 
     Deliberately separate from /live-ops: that page answers "is it
@@ -6980,6 +6983,12 @@ async def get_fleet_metrics(window_days: float = 1.0):
 
     stats = metrics.round_trip_stats(trades)
     slippage = metrics.slippage_stats(trades)
+    # Per coin, in the same shape a target profile gets written in, so a
+    # target can be checked line for line instead of by impression. A
+    # fleet total hides the thing worth knowing: six coins doing nothing
+    # and one doing well average to a mediocre fleet, and the answer to
+    # that is more capital on the one, not a tweak to all seven.
+    per_coin = metrics.per_coin_profile(trades, window_hours=window_days * 24)
     deployed = grid.get("total_allocated_usd")
     free_cash = grid.get("real_free_cash_usd")
     equity = (None if deployed is None or free_cash is None else deployed + free_cash)
@@ -6988,6 +6997,13 @@ async def get_fleet_metrics(window_days: float = 1.0):
     drawdown = metrics.drawdown_stats(trades, equity_usd=equity)
     report = metrics.fleet_report(rows_out, stats, capital, tally,
                                   slippage=slippage, drawdown=drawdown, orders=orders)
+    report["per_coin"] = per_coin
+    if target_round_trips or target_net:
+        report["vs_target"] = metrics.compare_to_target(
+            per_coin,
+            {"round_trips": target_round_trips, "net": target_net,
+             "win_rate_pct": target_win_rate},
+            window_hours=window_days * 24)
     report["fee_round_trip_pct"] = round(fee_round_trip * 100, 3)
     report["window_days"] = window_days
     report["served_at"] = datetime.utcnow().isoformat() + "Z"
