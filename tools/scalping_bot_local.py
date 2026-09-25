@@ -66,7 +66,7 @@ except ImportError:
     sys.exit("Missing dependencies. Run:  pip install pyjwt cryptography")
 
 HERE = Path(__file__).resolve().parent
-STATE_FILE = HERE / "scalper_state.json"
+STATE_FILE = None  # set after LIVE is known - see below
 HOST = "api.coinbase.com"
 BASE = f"https://{HOST}"
 
@@ -90,6 +90,11 @@ KEY_NAME = os.getenv("COINBASE_API_KEY_NAME", "").strip()
 PRIVATE_KEY = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\n", "\n").strip()
 LIVE = os.getenv("SCALPER_LIVE", "false").strip().lower() == "true"
 CAPITAL_USD = float(os.getenv("SCALPER_CAPITAL_USD", "0") or 0)
+
+# Live and paper keep SEPARATE ledgers. Running both against one file
+# would have each overwrite the other's trade history every cycle, and the
+# whole point of the pair is that their records can be compared.
+STATE_FILE = HERE / (f"scalper_state_{'live' if LIVE else 'paper'}.json")
 
 COINS = ["BTC", "ETH", "SOL", "LINK", "DOGE", "ADA", "XRP"]
 
@@ -374,7 +379,8 @@ def main():
     print(f"   Coinbase USD balance: {'$%.2f' % bal if bal is not None else 'UNKNOWN (not read)'}")
     print(f"   Trading envelope:     ${CAPITAL_USD:.2f}")
     print(f"   Break-even win rate:  {break_even_win_rate():.1f}% at {TAKER_FEE_RATE*100:.2f}%/side")
-    print(f"   Coins: {', '.join(COINS)}\n")
+    print(f"   Coins: {', '.join(COINS)}")
+    print(f"   Ledger: {STATE_FILE.name}\n")
 
     state = load_state()
     try:
