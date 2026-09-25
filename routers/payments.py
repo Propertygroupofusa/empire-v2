@@ -532,9 +532,18 @@ async def get_crypto_account():
             "iss": "cdp",
             "nbf": now,
             "exp": now + 120,
-            "uri": "GET /api/v3/brokerage/accounts",
+            # Must be "METHOD host/path". The host was missing, so the
+            # signature never validated and this could only return 401.
+            "uri": "GET api.coinbase.com/api/v3/brokerage/accounts",
         }
-        jwt_token = jwt.encode(payload, private_key, algorithm=algorithm)
+        # CDP requires "kid" (the key name) and a per-request "nonce" in the
+        # JWT HEADER. Both were absent, which is a second, independent reason
+        # this call could never authenticate. crypto_btc_compound_bot._build_jwt
+        # is the reference implementation - it sets both and it works.
+        jwt_token = jwt.encode(
+            payload, private_key, algorithm=algorithm,
+            headers={"kid": coinbase_key_name, "nonce": os.urandom(16).hex()},
+        )
 
         headers = {
             "Authorization": f"Bearer {jwt_token}",

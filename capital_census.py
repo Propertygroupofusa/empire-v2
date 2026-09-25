@@ -87,20 +87,47 @@ def coinbase_holdings():
                 "reason": "pyjwt/cryptography not installed - pip install pyjwt cryptography"}
 
     priv = priv.replace("\\n", "\n")
-    host, path = "api.coinbase.com", "/api/v3/brokerage/accounts?limit=250"
-    try:
+    host = "api.coinbase.com"
+    # The JWT 'uri' claim must be "METHOD host/path" with NO query string.
+    # This signed "/api/v3/brokerage/accounts?limit=250" - query included -
+    # and every call returned HTTP 401 "credentials rejected".
+    #
+    # That 401 cost most of 2026-09-25, because it was read as the KEY being
+    # revoked. It was not. The same key traded and read balances all day
+    # through crypto_btc_compound_bot, which signs the BARE path and lets the
+    # query string be appended at request time (its _auth_headers/get_balance
+    # pair, around lines 497-510). A 401 says the signature did not validate;
+    # it does not say which half was wrong, and here it was ours.
+    SIGN_PATH = "/api/v3/brokerage/accounts"
+
+    def _fetch_page(cursor=None):
+        query = "?limit=250" + (f"&cursor={cursor}" if cursor else "")
         signing = serialization.load_pem_private_key(priv.encode(), password=None)
         now = int(time.time())
         token = pyjwt.encode(
             {"sub": key_name, "iss": "cdp", "nbf": now, "exp": now + 120,
-             "uri": f"GET {host}{path}"},
+             "uri": f"GET {host}{SIGN_PATH}"},
             signing, algorithm="ES256",
             headers={"kid": key_name, "nonce": os.urandom(16).hex()})
         req = urllib.request.Request(
-            f"https://{host}{path}",
+            f"https://{host}{SIGN_PATH}{query}",
             headers={"Authorization": f"Bearer {token}"}, method="GET")
         with urllib.request.urlopen(req, timeout=20) as r:
-            data = json.loads(r.read().decode())
+            return json.loads(r.read().decode())
+
+    # Follow pagination. A census that stops at page one is exactly the kind
+    # of quietly-incomplete number this file exists to refuse: a balance past
+    # the cursor is money the report would silently omit, and "where is the
+    # rest of it?" is the question this tool is for.
+    accounts, cursor, pages = [], None, 0
+    try:
+        while True:
+            page = _fetch_page(cursor)
+            accounts.extend(page.get("accounts", []))
+            pages += 1
+            cursor = page.get("cursor") or None
+            if not page.get("has_next") or not cursor or pages >= 20:
+                break
     except urllib.error.HTTPError as e:
         return {"venue": "Coinbase", "status": "UNKNOWN",
                 "reason": f"HTTP {e.code} - credentials rejected "
@@ -108,6 +135,7 @@ def coinbase_holdings():
     except Exception as e:
         return {"venue": "Coinbase", "status": "UNKNOWN",
                 "reason": f"{type(e).__name__}: {e}"}
+    data = {"accounts": accounts}
 
     usd, coins = 0.0, {}
     for acct in data.get("accounts", []):

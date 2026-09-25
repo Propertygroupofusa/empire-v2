@@ -5790,11 +5790,16 @@ async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
                 expiry = now + td_obj(minutes=1)
                 payload = {
                     "sub": key_name,
-                    "iss": "cdp_service",
+                    # "cdp", not "cdp_service" - the issuer is validated.
+                    "iss": "cdp",
                     "nbf": int(now.timestamp()),
                     "exp": int(expiry.timestamp()),
                     "iat": int(now.timestamp()),
-                    "uri": "/api/v3/brokerage/accounts"
+                    # Must be "METHOD host/path". This was the bare path with
+                    # no method and no host, so the signature never validated
+                    # and the call could only ever return 401. Matches the form
+                    # crypto_btc_compound_bot._build_jwt uses, which works.
+                    "uri": "GET api.coinbase.com/api/v3/brokerage/accounts",
                 }
 
                 try:
