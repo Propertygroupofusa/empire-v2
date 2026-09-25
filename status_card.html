@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Status Card</title>
+<style>
+  :root{
+    --bg:#0d1117; --card:#161b22; --line:#30363d;
+    --ink:#e6edf3; --dim:#8b949e;
+    --ok:#3fb950; --warn:#d29922; --bad:#f85149;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    padding:14px 14px calc(14px + env(safe-area-inset-bottom,0px));
+  }
+  h1{font-size:20px;margin:0 0 2px}
+  .stamp{color:var(--dim);font-size:13px;margin-bottom:12px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;
+        padding:12px 14px;margin-bottom:12px}
+  .card h2{font-size:12px;letter-spacing:.09em;text-transform:uppercase;
+           color:var(--dim);margin:0 0 10px;font-weight:600}
+  .big{font-size:30px;font-weight:700;line-height:1.15}
+  .row{display:flex;justify-content:space-between;gap:12px;padding:5px 0;
+       border-bottom:1px solid var(--line)}
+  .row:last-child{border-bottom:0}
+  .k{color:var(--dim)}
+  .v{font-weight:700;text-align:right;word-break:break-all}
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+  table{width:100%;border-collapse:collapse;font-size:15px}
+  th{text-align:left;color:var(--dim);font-weight:600;font-size:11px;
+     letter-spacing:.06em;text-transform:uppercase;padding:0 0 6px}
+  td{padding:7px 0;border-top:1px solid var(--line)}
+  td.n{text-align:right;font-variant-numeric:tabular-nums}
+  .pill{display:inline-block;padding:1px 7px;border-radius:999px;font-size:12px;font-weight:700}
+  .pill.on{background:rgba(63,185,80,.16);color:var(--ok)}
+  .pill.off{background:rgba(248,81,73,.16);color:var(--bad)}
+  pre{white-space:pre-wrap;word-break:break-word;font-size:13px;margin:0;color:var(--ink)}
+  .err{color:var(--bad);font-size:13px}
+</style>
+</head>
+<body>
+<h1>Grid Status Card</h1>
+<div class="stamp" id="stamp">loading…</div>
+
+<div class="card">
+  <h2>Is it running?</h2>
+  <div class="big" id="alive">…</div>
+  <div class="row"><span class="k">stage</span><span class="v" id="hb-stage">—</span></div>
+  <div class="row"><span class="k">last cycle</span><span class="v" id="hb-age">—</span></div>
+  <div class="row"><span class="k">commit</span><span class="v" id="commit">—</span></div>
+  <div class="row"><span class="k">mode / role</span><span class="v" id="mode">—</span></div>
+</div>
+
+<div class="card">
+  <h2>Money</h2>
+  <div class="row"><span class="k">free cash</span><span class="v" id="cash">—</span></div>
+  <div class="row"><span class="k">allocated</span><span class="v" id="alloc">—</span></div>
+  <div class="row"><span class="k">branches</span><span class="v" id="nbranch">—</span></div>
+  <div class="row"><span class="k">spacing override</span><span class="v" id="override">—</span></div>
+</div>
+
+<div class="card">
+  <h2>Branches</h2>
+  <table><thead><tr>
+    <th>branch</th><th>coin</th><th>on</th><th class="n">$</th><th class="n">step</th>
+  </tr></thead><tbody id="branches"><tr><td colspan="5">…</td></tr></tbody></table>
+</div>
+
+<div class="card">
+  <h2>Trades</h2>
+  <div class="row"><span class="k">realized</span><span class="v" id="realized">—</span></div>
+  <div class="row"><span class="k">count</span><span class="v" id="ntrades">—</span></div>
+  <div class="row"><span class="k">win rate</span><span class="v" id="winrate">—</span></div>
+  <div class="row"><span class="k">newest</span><span class="v" id="newest">—</span></div>
+</div>
+
+<div class="card">
+  <h2>Spread plan</h2>
+  <pre id="spread">…</pre>
+</div>
+
+<script>
+const API = "/api/trading-dashboard";
+const $ = id => document.getElementById(id);
+const money = v => (v === null || v === undefined || v === "") ? "—"
+  : (v < 0 ? "-$" + Math.abs(v).toFixed(2) : "$" + Number(v).toFixed(2));
+
+async function get(url){
+  try{
+    const r = await fetch(url, {cache:"no-store"});
+    if(!r.ok) return {__err:"HTTP " + r.status};
+    return await r.json();
+  }catch(e){ return {__err:String(e)}; }
+}
+
+function setPill(el, on, onText, offText){
+  el.innerHTML = '<span class="pill ' + (on ? "on" : "off") + '">' +
+                 (on ? onText : offText) + "</span>";
+}
+
+async function load(){
+  $("stamp").textContent = new Date().toLocaleString();
+
+  const [h, g, t, sp] = await Promise.all([
+    get("/health"), get(API + "/grid-status"),
+    get(API + "/grid-status/trade-history"), get(API + "/grid-status/spread-plan")
+  ]);
+
+  // --- liveness
+  const hb = (g && g.heartbeat) || {};
+  if(hb.seen){
+    const alive = !!hb.alive;
+    $("alive").innerHTML = alive
+      ? '<span class="ok">RUNNING</span>' : '<span class="bad">NOT RUNNING</span>';
+    $("hb-stage").textContent = hb.stage || "—";
+    $("hb-age").textContent = (hb.age_seconds !== null && hb.age_seconds !== undefined)
+      ? hb.age_seconds + "s ago" : "—";
+  } else {
+    $("alive").innerHTML = '<span class="warn">NO HEARTBEAT YET</span>';
+    $("hb-stage").textContent = hb.detail || "needs a newer deploy";
+  }
+  $("commit").textContent = (h && h.commit) || "—";
+  $("mode").textContent = ((h && h.crypto_strategy_mode) || "?") + " / " +
+                          ((h && h.service_role) || "?");
+
+  // --- money
+  $("cash").textContent = money(g && g.real_free_cash_usd);
+  $("alloc").textContent = money(g && g.total_allocated_usd);
+  $("nbranch").textContent = (g && g.branch_count !== undefined) ? g.branch_count : "—";
+  $("override").textContent = (g && g.grid_spacing_override) || "—";
+
+  // --- branches
+  const tb = $("branches");
+  if(g && Array.isArray(g.branches) && g.branches.length){
+    tb.innerHTML = g.branches.map(b =>
+      "<tr><td>" + (b.bot_name || "").replace("crypto_grid_", "grid ") +
+      "</td><td>" + (b.product_id || "").replace("-USD", "") +
+      '</td><td>' + (b.active
+        ? '<span class="ok">yes</span>' : '<span class="bad">NO</span>') +
+      '</td><td class="n">' + money(b.allocated_usd) +
+      '</td><td class="n">' + (b.grid_pct !== undefined && b.grid_pct !== null
+        ? (b.grid_pct * 100).toFixed(2) + "%" : "—") + "</td></tr>"
+    ).join("");
+  } else {
+    tb.innerHTML = '<tr><td colspan="5" class="err">' +
+      ((g && g.__err) || "no branches") + "</td></tr>";
+  }
+
+  // --- trades
+  $("realized").textContent = money(t && t.total_realized_pnl);
+  $("ntrades").textContent = (t && t.total_trade_count !== undefined)
+    ? t.total_trade_count : "—";
+  $("winrate").textContent = (t && t.overall_win_rate !== undefined && t.overall_win_rate !== null)
+    ? t.overall_win_rate + "%" : "—";
+  const newest = t && Array.isArray(t.recent_trades) && t.recent_trades[0];
+  if(newest){
+    const d = String(newest.closed_at || "").slice(0, 10);
+    const today = new Date().toISOString().slice(0, 10);
+    $("newest").innerHTML = '<span class="' + (d === today ? "ok" : "warn") + '">' +
+      d + " " + (newest.product_id || "").replace("-USD", "") + " " +
+      money(newest.pnl) + "</span>";
+  } else {
+    $("newest").textContent = "—";
+  }
+
+  // --- spread plan (the endpoint returns a plain string)
+  $("spread").textContent = (sp && sp.__err)
+    ? ("error: " + sp.__err)
+    : (typeof sp === "string" ? sp : JSON.stringify(sp, null, 1));
+}
+
+load();
+setInterval(load, 20000);
+</script>
+</body>
+</html>

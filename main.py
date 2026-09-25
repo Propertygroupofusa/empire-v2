@@ -1481,6 +1481,37 @@ async def serve_family_tree_dashboard():
     return FileResponse(dashboard_path, media_type="text/html")
 
 
+@app.get("/card")
+async def serve_status_card():
+    """One phone screen, built to be SCREENSHOTTED rather than read.
+
+    This exists because of a communication failure, not a missing feature.
+    Through 2026-09-25 every diagnostic went: Claude writes a PowerShell
+    command, the operator runs it on a phone, pastes the output back. That
+    path failed repeatedly and expensively - terminal tables wrap into mush
+    at phone width, pastes arrived truncated or empty, and several values
+    were read back as the opposite of what the terminal actually printed.
+    Hours were lost to "BTC flipped" / "mode is family_tree" / "no
+    position" when the output said otherwise.
+
+    Screenshots, meanwhile, came through perfectly every single time.
+
+    So this page answers every question that debugging session kept asking
+    - is the loop running, which commit is live, what do the branches hold,
+    has anything traded today, what does the spread plan say - in large
+    type, one column, no horizontal scroll, with the verdict at the top in
+    plain words. Screenshot it and the whole state transfers at once.
+
+    /live-ops is the richer operational dashboard and stays the better page
+    to actually work from. This is deliberately narrower: it is the page
+    you send someone.
+    """
+    path = os.path.join(os.path.dirname(__file__), "status_card.html")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Status card not found")
+    return FileResponse(path, media_type="text/html")
+
+
 @app.get("/live-ops")
 async def serve_live_ops_dashboard():
     """Serve the Live Ops page - one screen answering "is it working right
