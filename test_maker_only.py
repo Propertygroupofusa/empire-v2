@@ -188,6 +188,34 @@ ok("so a step at the bare 0.90% floor still does not clear ADVERSE selection, "
    "and the net-edge gate is still the thing that refuses it",
    clears(floor_for(MAKER_LEG), MAKER_LEG) < 0)
 
+# --- 7. the GATE must price the same leg as the floor ---------------------
+# The floor decides what spacing is allowed. The net-edge gate decides what
+# actually gets bought. Dropping the floor to 0.90% while the gate still
+# priced a 1.50% taker round trip would have made the whole switch a no-op:
+# the fleet would stay frozen, refusing every buy with "a 2.00% target does
+# not clear 2.17% of costs", and the only visible result of flipping it would
+# have been a number moving on a dashboard.
+gate = body_src("_net_edge_gate_ok")
+ok("the gate consults maker-only before pricing the round trip",
+   "is_maker_only_active" in gate)
+ok("it still reads the LIVE fee tier rather than a cached guess",
+   "get_real_fee_tier" in gate)
+ok("it requires a measured maker rate, never an assumed one",
+   "_maker and await is_maker_only_active" in gate or "_maker and" in gate)
+ok("and clamps to taker - no arrangement of makers costs more than takers",
+   "min(float(_maker), float(taker))" in gate)
+
+# The two must agree by construction, not by coincidence.
+def gate_cost(fee_rt): return fee_rt + ADVERSE
+ok("REGRESSION: with the fallback live, the gate refuses the 2.00% step",
+   gate_cost(TAKER_LEG * 2) > LIVE_STEP)
+ok("with the fallback gone, the gate passes it",
+   gate_cost(MAKER_LEG * 2) < LIVE_STEP)
+ok("gate and floor price the SAME leg in both modes - a floor that allows a "
+   "spacing the gate then refuses is a switch that changes nothing",
+   abs((floor_for(TAKER_LEG) - TARGET_MARGIN) / 2 - TAKER_LEG) < 1e-9
+   and abs((floor_for(MAKER_LEG) - TARGET_MARGIN) / 2 - MAKER_LEG) < 1e-9)
+
 width = max(len(l) for l, _ in checks)
 for label, passed in checks:
     print(f"  [{'PASS' if passed else 'FAIL'}] {label:<{width}}")

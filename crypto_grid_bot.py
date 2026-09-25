@@ -4051,7 +4051,30 @@ async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd
         # it is the largest term in the net-edge sum, so a stale value is
         # the one input most likely to flip a verdict.
         _maker, taker, _tier, _err = await engine.get_real_fee_tier(session)
-        fee_round_trip = (taker * 2) if taker else scanner.DEFAULT_TAKER_ROUND_TRIP
+        # WHICH LEG THIS ROUND TRIP WILL REALLY PAY.
+        #
+        # This priced taker unconditionally, and that was about to make the
+        # maker-only switch do nothing. The switch drops fee_safe_floor_pct()
+        # from 1.70% to 0.90%, but THIS is the gate that actually decides
+        # buys - and it would have kept refusing every one of them with
+        # "a 2.00% target does not clear 2.17% of costs", because it was
+        # still pricing a market fallback that no longer exists.
+        #
+        # Under maker-only, grid_buy()/grid_sell() have no market fallback:
+        # a leg that does not fill as a maker does not fill at all. So the
+        # taker leg is not a worse case this trade can reach, it is a path
+        # that was removed. Same rule and same guards as
+        # worst_case_leg_fee_rate(), deliberately, so the gate and the
+        # spacing floor can never disagree about what a round trip costs.
+        #
+        # Guards, in order: the maker rate must be MEASURED (it comes from
+        # the live fee tier right above), is_maker_only_active() fails
+        # closed, and the result is clamped to taker because no arrangement
+        # of maker orders costs more than paying taker twice.
+        leg = taker
+        if taker and _maker and await is_maker_only_active():
+            leg = min(float(_maker), float(taker))
+        fee_round_trip = (leg * 2) if leg else scanner.DEFAULT_TAKER_ROUND_TRIP
         ok, reason, _detail = scanner.evaluate_grid_step(
             product_id, grid_pct, swing,
             best_bid=bid, best_ask=ask,
