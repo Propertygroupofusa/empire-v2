@@ -7,7 +7,7 @@ Fix Two Issues:
 
 import os
 import asyncio
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import Payment, CryptoSupplementalCapital
 from sqlalchemy import select, func
 
@@ -20,7 +20,7 @@ async def diagnose_issues():
     print("\n📊 ISSUE 1: Cash Level ($845.12 → Target $1000+)")
     print("-" * 80)
 
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         # Get pending payments
         pending = await session.execute(
             select(func.sum(Payment.worker_amount)).where(

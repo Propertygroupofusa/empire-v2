@@ -34,7 +34,7 @@ SAFETY GUARANTEES:
 import asyncio
 import sys
 import logging
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import CryptoGridBranch
 from sqlalchemy import select
 import crypto_grid_bot

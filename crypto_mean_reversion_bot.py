@@ -26,7 +26,7 @@ from typing import Dict, Optional, Tuple
 
 from sqlalchemy import select
 import crypto_btc_compound_bot as engine
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import CryptoGridBranch, CryptoActivityEvent, TradingBotState
 
 log = logging.getLogger("crypto_mean_reversion_bot")

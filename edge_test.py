@@ -204,7 +204,7 @@ def evaluate(label: str, pnls: Sequence[float], min_trades: int = 20) -> EdgeRes
 
 async def load_pnls(table: str, fee_rate: float) -> Dict[str, List[float]]:
     """Real closed trades, grouped by branch. Raises with a plain reason."""
-    from database import AsyncSessionLocal
+    from database import get_session_factory
     from sqlalchemy import select
     if table == "grid":
         from models import CryptoGridTradeHistory as M
@@ -213,7 +213,7 @@ async def load_pnls(table: str, fee_rate: float) -> Dict[str, List[float]]:
     if AsyncSessionLocal is None:
         raise RuntimeError("database is not configured in this environment")
 
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         rows = (await db.execute(select(M))).scalars().all()
 
     out: Dict[str, List[float]] = defaultdict(list)

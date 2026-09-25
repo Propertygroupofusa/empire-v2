@@ -4,14 +4,14 @@
 import asyncio
 import uuid
 from datetime import datetime
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import Payment, Worker, Job
 from sqlalchemy import select
 
 async def create_test_payment():
     """Create test payment records in database"""
 
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         # Get or create bot worker
         result = await session.execute(select(Worker).where(Worker.email == "bot@pgusa.local"))
         bot_worker = result.scalar_one_or_none()

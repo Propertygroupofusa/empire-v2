@@ -7,7 +7,7 @@ Emails can be sent later when SMTP is available, or forwarded manually
 import asyncio
 import csv
 from datetime import datetime
-from database import AsyncSessionLocal, Base, engine
+from database import get_session_factory, Base, get_engine
 from models import Payment
 
 # Simple campaign tracking model

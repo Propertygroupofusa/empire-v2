@@ -10,7 +10,7 @@ from models import Lead, Outreach, Response, LeadStatus, OutreachType
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from database import AsyncSessionLocal
+from database import get_session_factory
 
 logger = logging.getLogger(__name__)
 
@@ -417,7 +417,7 @@ async def process_new_leads_bg(limit: int = 50):
     """
     Wrapper for BackgroundTasks - creates its own session
     """
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         await process_new_leads(db, limit)
 
 
@@ -425,7 +425,7 @@ async def process_followups_bg():
     """
     Wrapper for BackgroundTasks - creates its own session
     """
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         await process_followups(db)
 
 
@@ -449,7 +449,7 @@ async def run_periodic_processing():
     while True:
         await asyncio.sleep(PROCESSING_INTERVAL_SECONDS)
         try:
-            async with AsyncSessionLocal() as db:
+            async with get_session_factory()() as db:
                 await process_new_leads(db)
                 await process_followups(db)
         except Exception as e:

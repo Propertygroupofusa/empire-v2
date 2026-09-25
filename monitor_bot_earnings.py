@@ -6,7 +6,7 @@ Real-time bot earnings monitoring - tracks revenue from jobs, payments, and Stri
 import asyncio
 import logging
 from datetime import datetime
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import Payment, Job, Worker
 from sqlalchemy import select, func
 
@@ -19,7 +19,7 @@ log = logging.getLogger("earnings_monitor")
 async def monitor_bot_earnings():
     """Monitor bot earnings in real-time"""
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             # Get bot worker
             result = await session.execute(
                 select(Worker).where(Worker.email == "bot@pgusa.local")

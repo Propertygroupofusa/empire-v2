@@ -30,7 +30,7 @@ import asyncio
 import sys
 import logging
 from datetime import datetime
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import CryptoGridBranch, CryptoActivityEvent
 from sqlalchemy import select
 
@@ -65,7 +65,7 @@ async def main():
         }
     ]
 
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         # Get current branches
         result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.active == True))
         existing_branches = result.scalars().all()

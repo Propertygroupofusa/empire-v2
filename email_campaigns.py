@@ -13,7 +13,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from sqlalchemy import select
-from database import AsyncSessionLocal
+from database import get_session_factory
 # ReferralContact is declared in models.py, not here.
 #
 # This module previously declared its own class against the
@@ -108,7 +108,7 @@ async def add_customer_to_campaign(name: str, email: str, company: str):
         if not email:
             return
 
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             # Generate referral code
             referral_code = f"ref_{uuid.uuid4().hex[:8]}"
 
@@ -136,7 +136,7 @@ async def add_customer_to_campaign(name: str, email: str, company: str):
 async def send_referral_email(customer_email: str):
     """Send referral email to customer after video delivery."""
     try:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             result = await db.execute(
                 select(ReferralContact).where(
                     ReferralContact.customer_email == customer_email
@@ -188,7 +188,7 @@ async def send_referral_email(customer_email: str):
 async def send_campaign_batch(batch_size: int = 50):
     """Send referral emails to all customers in batch."""
     try:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             result = await db.execute(
                 select(ReferralContact).where(
                     ReferralContact.status == "new"

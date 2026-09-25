@@ -58,7 +58,7 @@ import jwt as pyjwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select, func
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import BotPosition, TradingBotState, CryptoRSIState, CryptoTradeLog, CryptoSupplementalCapital
 from bot_mandates import CRYPTO_MANDATE
 from network_config import get_cached_response, cache_response, NETWORK_ENV_CONFIG
@@ -341,7 +341,7 @@ TIER_STATE_KEY = "crypto_coinbase_tier_highwater"
 
 async def get_tier_highwater() -> float:
     try:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == TIER_STATE_KEY))
             row = result.scalar_one_or_none()
             return row.base_capital if row else 0.0
@@ -352,7 +352,7 @@ async def get_tier_highwater() -> float:
 
 async def set_tier_highwater(value: float):
     try:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == TIER_STATE_KEY))
             row = result.scalar_one_or_none()
             if row:
@@ -474,7 +474,7 @@ async def load_open_positions():
     while the positions are still open for real on Coinbase, and the bot
     can never take profit or cut losses on them again (see BotPosition)."""
     try:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME, BotPosition.side == "long"))
             rows = result.scalars().all()
             for row in rows:
@@ -495,7 +495,7 @@ async def load_all_rsi_states():
     on Coinbase API calls. Moving to startup + in-memory + batch-flush unblocks the event loop."""
     global RSI_STATE_CACHE
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             result = await session.execute(select(CryptoRSIState))
             states = result.scalars().all()
 
@@ -577,7 +577,7 @@ async def _retry_with_backoff(async_func, max_attempts: int = None):
 
 async def _db_save_open(symbol: str, side: str, entry: float, qty: float):
     try:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             db.add(BotPosition(bot=BOT_NAME, symbol=symbol, side=side, entry_price=entry, qty=qty))
             await db.commit()
     except Exception as e:
@@ -586,7 +586,7 @@ async def _db_save_open(symbol: str, side: str, entry: float, qty: float):
 
 async def _db_delete_open(symbol: str, side: str = None):
     try:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             query = select(BotPosition).where(BotPosition.bot == BOT_NAME, BotPosition.symbol == symbol)
             if side:
                 query = query.where(BotPosition.side == side)
@@ -639,7 +639,7 @@ async def get_supplemental_capital() -> float:
 
     Returns total allocated amount, or 0 on any error."""
     try:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             from sqlalchemy import func
             result = await db.execute(select(func.sum(CryptoSupplementalCapital.amount_usd)))
             total = result.scalar() or 0.0
@@ -1255,7 +1255,7 @@ async def log_trade_entry(symbol: str, entry_rsi: float, entry_price: float, qty
     try:
         trade_id = str(uuid.uuid4())[:8]  # Unique trade ID
 
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             trade = CryptoTradeLog(
                 symbol=symbol,
                 strategy_version="SMA200_RSI_CROSSOVER_SWING_V2",  # UPGRADED: 200-day SMA + RSI cross-above + swing-based stops
@@ -1305,7 +1305,7 @@ async def flush_rsi_state_cache():
     only in the in-memory cache now. But if the table doesn't exist, it gracefully skips."""
     global RSI_STATE_CACHE
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             changed_count = 0
             for symbol, cache_entry in RSI_STATE_CACHE.items():
                 if not cache_entry.get("changed", False):
@@ -1361,7 +1361,7 @@ async def log_trade_exit(symbol: str, exit_price: float, exit_reason: str, reali
                         partial_exit_count: int = 0, trailing_stop_triggered: bool = False):
     """Log when a trade exits (EXIT) and record to measurement system."""
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             # Find the most recent unclosed trade for this symbol
             stmt = select(CryptoTradeLog).where(
                 CryptoTradeLog.symbol == symbol,

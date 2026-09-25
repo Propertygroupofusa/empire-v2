@@ -37,7 +37,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 import uuid
 from sqlalchemy import select
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import BotPosition, Payment
 
 ET = ZoneInfo("America/New_York")
@@ -323,7 +323,7 @@ async def _record_closed_trade(symbol, entry_price, exit_price, qty, pnl, pnl_pc
     """
     try:
         from models import ClosedTrade
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             db.add(ClosedTrade(
                 bot=BOT_NAME, symbol=symbol, side="long",
                 entry_price=entry_price, exit_price=exit_price, qty=qty,
@@ -341,7 +341,7 @@ async def intraday_slots_allowed(equity: float) -> tuple:
     """The governor's verdict, read from this bot's own realized trades."""
     try:
         from models import ClosedTrade
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             result = await db.execute(
                 select(ClosedTrade.pnl)
                 .where(ClosedTrade.bot == BOT_NAME, ClosedTrade.pnl.isnot(None))
@@ -941,7 +941,7 @@ async def run_swing_check():
                             qty=qty,
                             opened_at=datetime.now(ET),
                         )
-                        async with AsyncSessionLocal() as db:
+                        async with get_session_factory()() as db:
                             db.add(position)
                             await db.commit()
                     except Exception as e:
@@ -1006,7 +1006,7 @@ async def run_swing_check():
                             platform_amount=pnl_usd * 0.10,
                             payout_status="pending" if pnl_usd > 0 else "completed"
                         )
-                        async with AsyncSessionLocal() as db:
+                        async with get_session_factory()() as db:
                             db.add(payment)
                             await db.commit()
                         log.info(f"     Earnings recorded: ${pnl_usd:.2f}")

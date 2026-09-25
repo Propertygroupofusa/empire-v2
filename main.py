@@ -61,7 +61,7 @@ except (ImportError, AssertionError) as e:
 
 # Import database module with graceful fallback
 try:
-    from database import init_db, ensure_grid_status_schema, engine
+    from database import init_db, ensure_grid_status_schema, get_engine
 except Exception as e:
     logging.warning(f"⚠️  Database import failed (non-critical): {e}")
     init_db = None
@@ -301,7 +301,7 @@ async def create_monitor_tables():
     # AUTOINCREMENT is SQLite-only syntax; Postgres needs SERIAL. Pick the
     # right primary-key clause for whichever DATABASE_URL is actually in use.
     pk = "SERIAL PRIMARY KEY" if engine.dialect.name == "postgresql" else "INTEGER PRIMARY KEY AUTOINCREMENT"
-    async with engine.begin() as conn:
+    async with get_engine().begin() as conn:
         try:
             await conn.execute(text(f"""
                 CREATE TABLE IF NOT EXISTS monitor_errors (
@@ -445,7 +445,7 @@ async def run_migrations():
     from database import Base
 
     # CRITICAL: Ensure crypto_rsi_state table exists for bot RSI state machine
-    async with engine.begin() as conn:
+    async with get_engine().begin() as conn:
         try:
             existing_tables = await conn.run_sync(lambda c: inspect(c).get_table_names())
             if "crypto_rsi_state" not in existing_tables:
@@ -513,7 +513,7 @@ async def run_migrations():
         # connection), checking and migrating 40+ tables can exceed that
         # 60s window. When the timeout cancels this coroutine mid-loop,
         # the cancellation propagates out through whatever `async with
-        # engine.begin()` block is currently open - and if that block
+        # get_engine().begin()` block is currently open - and if that block
         # wraps the ENTIRE loop, its __aexit__ sees the cancellation as an
         # exception and rolls back the WHOLE transaction, undoing every
         # table already migrated in this run, including ones that had
@@ -524,7 +524,7 @@ async def run_migrations():
         # the 60s timeout fired further down the loop. A transaction
         # scoped to one table can only ever lose THAT table's work to a
         # timeout, never anything already committed for tables before it.
-        async with engine.begin() as conn:
+        async with get_engine().begin() as conn:
             try:
                 raw_columns = await conn.run_sync(
                     lambda sync_conn, t=table_name: inspect(sync_conn).get_columns(t)
@@ -736,7 +736,7 @@ async def validate_foreign_keys():
     if engine.dialect.name != "postgresql":
         return  # Foreign key checks are for PostgreSQL only
 
-    async with engine.begin() as conn:
+    async with get_engine().begin() as conn:
         inspector = inspect.__call__(conn.sync_conn)
         existing_tables = {t.lower() for t in inspector.get_table_names()}
 
@@ -768,7 +768,7 @@ async def initialize_bot():
     Raises on failure. It used to swallow its own exceptions into a
     warning while the caller logged "Bot worker initialized" regardless,
     which is how the failure below survived unnoticed for months."""
-    from database import AsyncSessionLocal
+    from database import get_session_factory
     from models import Worker
     # bcrypt's own API, not passlib's CryptContext. passlib was never in
     # requirements.txt, so this import raised ModuleNotFoundError and took
@@ -804,7 +804,7 @@ async def initialize_bot():
     # than a fatal error, fixes both: idempotent regardless of why the
     # batch check missed a row, and one bot's conflict can't block another.
     created = 0
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         for i in range(1, 3):
             bot_email = f"bot{i if i > 1 else ''}@pgusa.local"
             result = await session.execute(select(Worker).where(Worker.email == bot_email))
@@ -853,7 +853,7 @@ async def process_payouts_periodically():
     before doing that."""
     try:
         import stripe
-        from database import AsyncSessionLocal
+        from database import get_session_factory
         from models import Payment, Worker
         from sqlalchemy import select, update as sa_update
 
@@ -896,7 +896,7 @@ async def process_payouts_periodically():
 
         while True:
             try:
-                async with AsyncSessionLocal() as session:
+                async with get_session_factory()() as session:
                     # stripe_transfer_id IS NULL is a second, independent
                     # guard against paying twice. The idempotency key below
                     # is the primary one, but Stripe expires keys after 24
@@ -2444,7 +2444,7 @@ async def telegram_send_test(message: str = "Test message from Hermes Agent 🤖
 async def record_bot_status(request: BotStatusRequest):
     """Record trading bot status (called by bots)"""
     from status_reporter import get_status_reporter
-    from database import AsyncSessionLocal
+    from database import get_session_factory
     from models import BotStatus as BotStatusModel
 
     reporter = get_status_reporter()
@@ -2465,7 +2465,7 @@ async def record_bot_status(request: BotStatusRequest):
         )
 
         # Also persist to database
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             db_status = BotStatusModel(
                 bot_name=request.bot_name,
                 timestamp=datetime.utcnow(),

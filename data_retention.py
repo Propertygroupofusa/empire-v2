@@ -93,8 +93,8 @@ class DataRetentionManager:
         BUT NEVER DELETE - just move to archive for performance
         """
         try:
-            from database import engine as db_engine
-            async with db_engine.begin() as conn:
+            from database import get_engine
+            async with get_engine().begin() as conn:
                 threshold_date = (datetime.now() - timedelta(days=days_threshold)).isoformat()
                 
                 # Archive old errors
@@ -189,8 +189,8 @@ class DataRetentionManager:
     async def get_total_data_stored(self, engine):
         """Get complete count of all data ever stored"""
         try:
-            from database import engine as db_engine
-            async with db_engine.begin() as conn:
+            from database import get_engine
+            async with get_engine().begin() as conn:
                 # Current tables
                 result = await conn.execute(text("SELECT COUNT(*) FROM monitor_errors"))
                 current_errors = result.scalar() or 0
@@ -234,8 +234,8 @@ class DataRetentionManager:
     async def get_retention_status(self, engine):
         """Get data retention and archival status"""
         try:
-            from database import engine as db_engine
-            async with db_engine.begin() as conn:
+            from database import get_engine
+            async with get_engine().begin() as conn:
                 result = await conn.execute(text("""
                     SELECT action, table_name, records_archived, timestamp
                     FROM data_retention_log

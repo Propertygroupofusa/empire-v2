@@ -6,7 +6,7 @@ Useful for testing revenue generation until Stripe keys are configured
 
 import asyncio
 from datetime import datetime
-from database import AsyncSessionLocal
+from database import get_session_factory
 from sqlalchemy import select
 from models import Payment, Worker
 import uuid
@@ -14,7 +14,7 @@ import uuid
 async def simulate_payout_processing():
     """Simulate processing pending payments as if Stripe payouts succeeded"""
 
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         # Get bot worker
         result = await session.execute(
             select(Worker).where(Worker.email == "bot@pgusa.local")

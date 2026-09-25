@@ -284,14 +284,14 @@ def walk_forward_backtest(trades: Sequence[Trade], pool_usd: float,
 async def load_from_db():
     """Real branches and their real closed trades. Returns (pnls, products,
     current_alloc, pool_usd) or raises with a plain explanation."""
-    from database import AsyncSessionLocal
+    from database import get_session_factory
     from models import CryptoGridBranch, CryptoGridTradeHistory
     from sqlalchemy import select
 
     if AsyncSessionLocal is None:
         raise RuntimeError("database is not configured in this environment")
 
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         branches = (await db.execute(select(CryptoGridBranch))).scalars().all()
         rows = (await db.execute(select(CryptoGridTradeHistory))).scalars().all()
 
@@ -315,11 +315,11 @@ async def load_from_db():
 
 
 async def load_trades_from_db() -> List[Trade]:
-    from database import AsyncSessionLocal
+    from database import get_session_factory
     from models import CryptoGridTradeHistory
     from sqlalchemy import select
 
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         rows = (await db.execute(select(CryptoGridTradeHistory))).scalars().all()
     return [Trade(r.bot_name, r.product_id, float(r.pnl), r.closed_at)
             for r in rows if r.pnl is not None and r.closed_at is not None]
@@ -327,12 +327,12 @@ async def load_trades_from_db() -> List[Trade]:
 
 async def apply_plan(plan: AllocationPlan) -> int:
     """Write the new allocated_usd values. Only called with --apply."""
-    from database import AsyncSessionLocal
+    from database import get_session_factory
     from models import CryptoGridBranch
     from sqlalchemy import select
 
     written = 0
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         for bot_name, target in plan.targets.items():
             if bot_name not in plan.moves:
                 continue

@@ -17,7 +17,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from urllib.parse import quote
 
-from database import get_db, AsyncSessionLocal
+from database import get_db, get_session_factory
 from admin_auth import require_admin_key
 from models import VideoQuoteOrder, User, Job, Payment, Worker, Client
 from payments_pause import payments_paused, PAUSE_MESSAGE
@@ -477,7 +477,7 @@ async def generate_video_for_order(order_id: int):
     own DB session rather than reusing a request-scoped one that would
     already be closed.
     """
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         order = await db.get(VideoQuoteOrder, order_id)
         if not order:
             log.error(f"generate_video_for_order: order {order_id} not found")
