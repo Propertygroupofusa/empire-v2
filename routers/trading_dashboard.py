@@ -6653,16 +6653,47 @@ async def grid_fee_reality_endpoint(limit: int = 250):
         data = await engine.get_recent_fills_summary(session, limit=limit)
 
     # Put the answer next to the rule it decides.
+    # A verdict here would move the fee floor, which decides whether every
+    # completed round trip nets a gain or a loss. So it is gated hard.
+    #
+    # The first version of this was not, and on its first real call it
+    # returned "maker is real - the floor can come down" off a computed
+    # 0.0002% leg fee - because 237 of 250 fills were Kalshi event
+    # contracts with no liquidity indicator, and three BTC fills reported
+    # size in quote currency, inflating notional to $48.8M on an account
+    # holding $572. Acting on that would have dropped the floor to 0.2%
+    # and made every trade a guaranteed loser.
     try:
         import fee_floor
         rt = data.get("real_round_trip_fee_rate")
+        maker_rate = data.get("maker_rate")
+        classified = data.get("classified_fills") or 0
+        data["current_floor_pct"] = await crypto_grid_bot_module.fee_safe_floor_pct()
         if rt:
             data["implied_fee_safe_floor_pct"] = round(fee_floor.fee_floor_pct(rt), 6)
-            data["current_floor_pct"] = await crypto_grid_bot_module.fee_safe_floor_pct()
+
+        if not data.get("enough_to_conclude"):
             data["verdict"] = (
-                "maker is real - the floor can come down"
-                if data["implied_fee_safe_floor_pct"] < data["current_floor_pct"] - 1e-9
-                else "taker is what is actually being paid - the floor stays where it is")
+                f"NOT ENOUGH EVIDENCE - only {classified} spot fills carry a "
+                f"maker/taker label. The floor stays at "
+                f"{data['current_floor_pct'] * 100:.2f}%.")
+        elif maker_rate is not None and maker_rate <= 0.0:
+            data["verdict"] = (
+                f"TAKER on every one of {classified} classified fills. The floor "
+                f"is priced correctly at {data['current_floor_pct'] * 100:.2f}% and "
+                f"must not come down.")
+        elif (data.get("implied_fee_safe_floor_pct") is not None
+              and data["implied_fee_safe_floor_pct"] < data["current_floor_pct"] - 1e-9):
+            data["verdict"] = (
+                f"{maker_rate * 100:.0f}% of {classified} fills were MAKER. The "
+                f"measured round trip implies a "
+                f"{data['implied_fee_safe_floor_pct'] * 100:.2f}% floor versus the "
+                f"{data['current_floor_pct'] * 100:.2f}% in force - worth review, "
+                f"never an automatic change.")
+        else:
+            data["verdict"] = (
+                f"The measured cost does not justify lowering the "
+                f"{data['current_floor_pct'] * 100:.2f}% floor.")
     except Exception as e:
         data["floor_comparison_error"] = str(e)
 

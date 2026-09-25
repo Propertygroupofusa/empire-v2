@@ -1518,13 +1518,31 @@ async def get_recent_fills_summary(session, limit: int = 250) -> dict:
     commission_total = 0.0
     notional_total = 0.0
     oldest = newest = None
+    skipped_non_spot = 0
 
     for f in fills:
+        pid_raw = f.get("product_id") or "?"
+        # This endpoint returns EVERY fill on the account, and this account
+        # also trades Kalshi event contracts (KXBTC15M-...-KALSHI). They are
+        # a different product class with a different fee schedule - observed
+        # here between 2.3% and 10.3% per leg - and they carry no
+        # liquidity_indicator at all. Averaged in, they made the "real" fee
+        # rate meaningless. Only spot crypto pairs answer the question this
+        # function exists to answer.
+        if not pid_raw.endswith("-USD") or "KALSHI" in pid_raw.upper():
+            skipped_non_spot += 1
+            continue
+
         liq = (f.get("liquidity_indicator") or "").upper()
         size = float(f.get("size") or 0)
         price = float(f.get("price") or 0)
         comm = float(f.get("commission") or 0)
-        notional = size * price
+        # size_in_quote means `size` is ALREADY the USD amount. Multiplying
+        # it by price again reported 3 BTC-USD fills as $48,816,593 of
+        # notional on an account holding $572, which dragged the computed
+        # fee rate to 0.0002% and produced a confident "the floor can come
+        # down" verdict from arithmetic that was pure nonsense.
+        notional = size if f.get("size_in_quote") else size * price
         ts = f.get("trade_time") or f.get("sequence_timestamp")
         if ts:
             oldest = ts if oldest is None or ts < oldest else oldest
@@ -1537,15 +1555,19 @@ async def get_recent_fills_summary(session, limit: int = 250) -> dict:
         else:
             unknown += 1
 
-        commission_total += comm
-        notional_total += notional
+        # Only a fill Coinbase actually labelled MAKER or TAKER can speak
+        # to what a round trip really costs.
+        if liq in ("MAKER", "TAKER"):
+            commission_total += comm
+            notional_total += notional
 
-        pid = f.get("product_id") or "?"
+        pid = pid_raw
         p = per_product.setdefault(pid, {"maker": 0, "taker": 0, "unknown": 0,
                                          "commission": 0.0, "notional": 0.0})
         p["maker" if liq == "MAKER" else ("taker" if liq == "TAKER" else "unknown")] += 1
-        p["commission"] += comm
-        p["notional"] += notional
+        if liq in ("MAKER", "TAKER"):
+            p["commission"] += comm
+            p["notional"] += notional
 
         side = (f.get("side") or "?").upper()
         b = by_side.setdefault(side, {"maker": 0, "taker": 0, "unknown": 0})
@@ -1563,7 +1585,9 @@ async def get_recent_fills_summary(session, limit: int = 250) -> dict:
         p["notional"] = round(p["notional"], 2)
 
     return {
-        "fills_examined": len(fills),
+        "fills_returned": len(fills),
+        "fills_examined": len(fills) - skipped_non_spot,
+        "non_spot_fills_skipped": skipped_non_spot,
         "maker_fills": maker,
         "taker_fills": taker,
         "unclassified_fills": unknown,
@@ -1576,6 +1600,8 @@ async def get_recent_fills_summary(session, limit: int = 250) -> dict:
         "per_product": per_product,
         "oldest_fill": oldest,
         "newest_fill": newest,
+        "classified_fills": classified,
+        "enough_to_conclude": classified >= 20,
         "note": ("liquidity_indicator and commission come from Coinbase, not from this "
                  "codebase's assumptions. real_round_trip_fee_rate is what an average round "
                  "trip ACTUALLY cost across these fills, and it is the number the spacing "
