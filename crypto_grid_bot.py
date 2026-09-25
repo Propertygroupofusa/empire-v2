@@ -600,13 +600,48 @@ GRID_MAKER_ONLY_SKIP_BUY_KEY = "grid_maker_only_skipped_buy"
 GRID_MAKER_ONLY_SKIP_SELL_KEY = "grid_maker_only_skipped_sell"
 
 
+# An escape hatch for the dashboard button, not a replacement for it.
+#
+# The button is the normal way in. But on 2026-09-25 the account owner
+# pressed it, reported it flipped, and the database still read False - and
+# nothing on the page could say whether the confirm dialog was dismissed, the
+# fetch hit a service mid-restart, or the write was refused. The control was
+# verified working end to end; the click still did not land, twice.
+#
+# This codebase has already paid for that exact situation once. When
+# CRYPTO_STRATEGY_MODE could not be corrected through the Railway UI at all,
+# the fix was a second variable with no deployment history to restore, and
+# get_crypto_strategy_mode() checks it FIRST. Same shape here: set
+# GRID_MAKER_ONLY=true on the crypto-trading service and the mode is on from
+# the next process start, with no button involved.
+#
+# Deliberately strict about what counts as on: only the explicit strings
+# below. A typo reads as "not set" and falls through to the database rather
+# than silently enabling a real-money mode, and only an explicit false
+# actively forces it OFF - so the variable can also be used to override a
+# stuck database row in either direction.
+MAKER_ONLY_ENV_VAR = "GRID_MAKER_ONLY"
+_TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off"}
+
+
+def maker_only_env_override():
+    """True/False from the environment, or None when it says nothing."""
+    raw = (os.getenv(MAKER_ONLY_ENV_VAR) or "").strip().strip('"').strip("'").lower()
+    if raw in _TRUE:
+        return True
+    if raw in _FALSE:
+        return False
+    return None
+
+
 async def is_maker_only_active() -> bool:
     """Whether the market fallback is genuinely switched off.
 
-    Two conditions, both required: the maker-only flag is set AND maker
-    orders are on at all. Maker-only without maker orders would mean "never
-    place a maker order, and never fall back either" - a bot that cannot
-    trade.
+    Checked in order: the environment override, then the database flag - and
+    either way maker orders must also be on, because maker-only without them
+    would mean "never place a maker order, and never fall back either", which
+    is a bot that cannot trade at all.
 
     FAILS CLOSED. Every consumer of this - above all
     worst_case_leg_fee_rate(), which is a safety floor rather than an
@@ -614,6 +649,24 @@ async def is_maker_only_active() -> bool:
     answers True. So an unreadable toggle reads as False and the floor
     stays priced against taker.
     """
+    env = maker_only_env_override()
+    if env is False:
+        return False
+    if env is True:
+        # Still requires maker orders, for the reason above - but turn them
+        # on rather than refusing, since the operator setting this variable
+        # has unambiguously asked for maker-only and a half-set pair would
+        # silently stop the fleet trading, which is the failure this whole
+        # escape hatch exists to end.
+        try:
+            if not await is_maker_orders_active():
+                await set_maker_orders_active(True)
+        except Exception as e:
+            log.warning(f"[GRID] {MAKER_ONLY_ENV_VAR}=true but maker orders could "
+                        f"not be enabled ({e}) - staying OFF rather than running "
+                        f"maker-only with market orders")
+            return False
+        return True
     try:
         async with get_session_factory()() as db:
             result = await db.execute(
@@ -5062,6 +5115,10 @@ async def get_grid_status() -> dict:
         # the taker leg, because it is the only thing that makes the taker
         # leg unreachable rather than merely unlikely.
         "maker_only_active": _maker_only,
+        # Which switch is actually deciding it. A mode that is on for a
+        # reason the page cannot name is a mode nobody can turn off again.
+        "maker_only_source": ("environment " + MAKER_ONLY_ENV_VAR
+                              if maker_only_env_override() is not None else "database toggle"),
         "maker_only_skipped_cycles": await get_maker_only_skips(),
         "floor_priced_against": ("maker (the market fallback is removed)"
                                  if _maker_only and _cached_real_maker_fee_rate is not None

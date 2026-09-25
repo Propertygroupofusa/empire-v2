@@ -3192,6 +3192,7 @@ function renderGridMakerOnlyToggle(data) {
     const on = !!data.maker_only_active;
     const floor = data.fee_safe_min_grid_pct;
     const skipped = (data.maker_only_skipped_cycles || {}).total;
+    const envRun = /^environment /.test(data.maker_only_source || '');
 
     // The two numbers that decide whether the fleet can trade: what a round
     // trip really costs, and what the step earns. Shown side by side because
@@ -3218,8 +3219,15 @@ function renderGridMakerOnlyToggle(data) {
                  ? ` <strong>${skipped}</strong> cycle${skipped === 1 ? '' : 's'} passed rather than pay the market fee — that is what this mode costs, counted rather than assumed.`
                  : '') + `</p>`
             : '') +
-        `<button class="mo-btn${on ? ' restore' : ''}" onclick="toggleGridMakerOnly(${!on})">` +
-        `${on ? 'Restore the market fallback' : 'Remove the market fallback — let the 2.00% step clear'}</button>`;
+        // When an environment variable is deciding this, the button cannot
+        // override it - and a button that silently does nothing is exactly
+        // the failure this whole control has already had once.
+        (envRun
+            ? `<p class="why" style="margin:0"><strong>Set by ${data.maker_only_source}.</strong> ` +
+              `The button below is disabled because the environment wins over the database toggle — ` +
+              `change it on the crypto-trading service, or remove the variable to hand control back to this page.</p>`
+            : `<button class="mo-btn${on ? ' restore' : ''}" onclick="toggleGridMakerOnly(${!on})">` +
+              `${on ? 'Restore the market fallback' : 'Remove the market fallback — let the 2.00% step clear'}</button>`);
 }
 
 async function toggleGridMakerOnly(enable) {

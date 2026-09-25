@@ -216,6 +216,63 @@ ok("gate and floor price the SAME leg in both modes - a floor that allows a "
    abs((floor_for(TAKER_LEG) - TARGET_MARGIN) / 2 - TAKER_LEG) < 1e-9
    and abs((floor_for(MAKER_LEG) - TARGET_MARGIN) / 2 - MAKER_LEG) < 1e-9)
 
+# --- 8. the escape hatch ---------------------------------------------------
+# The dashboard button is the normal way in. It was verified working end to
+# end and the click still did not land, twice, with nothing able to say why.
+# So there is a second way that needs no browser at all - the same shape this
+# codebase already used when CRYPTO_STRATEGY_MODE could not be corrected
+# through the Railway UI.
+ok("an environment override exists", fn("maker_only_env_override") is not None)
+ok("and it is named as a constant, not a bare string",
+   "MAKER_ONLY_ENV_VAR" in src)
+
+only = body_src("is_maker_only_active")
+ok("the override is consulted BEFORE the database",
+   "maker_only_env_override" in only
+   and only.index("maker_only_env_override") < only.index("MAKER_ONLY_MODE_KEY"))
+ok("an explicit false forces it OFF, so a stuck DB row can be overridden "
+   "in either direction",
+   "env is False" in only and "return False" in only)
+ok("it still refuses to run maker-only without maker orders",
+   "is_maker_orders_active" in only)
+
+env_fn = body_src("maker_only_env_override")
+ok("only explicit values count - a typo must not enable a real-money mode",
+   "_TRUE" in env_fn and "_FALSE" in env_fn and "return None" in env_fn)
+ok("REGRESSION: quotes are stripped, the exact way a pasted Railway value "
+   "has already broken this deployment once",
+   ".strip('\"')" in env_fn or '.strip(\'"\')' in env_fn or "strip('\"')" in env_fn)
+
+# Behaviour, not just shape.
+import importlib.util as _ilu
+_s2 = _ilu.spec_from_file_location("_g2", os.path.join(HERE, "crypto_grid_bot.py"))
+try:
+    _m2 = _ilu.module_from_spec(_s2)
+    _s2.loader.exec_module(_m2)
+    import os as _os
+    cases = {"true": True, "TRUE": True, "1": True, " yes ": True, '"true"': True,
+             "false": False, "0": False, "off": False,
+             "maybe": None, "": None}
+    bad = []
+    for raw, want in cases.items():
+        _os.environ[_m2.MAKER_ONLY_ENV_VAR] = raw
+        if _m2.maker_only_env_override() != want:
+            bad.append((raw, want, _m2.maker_only_env_override()))
+    _os.environ.pop(_m2.MAKER_ONLY_ENV_VAR, None)
+    ok("every accepted spelling maps correctly, and anything else says nothing",
+       not bad)
+    ok("unset means unset - it does not default the mode on",
+       _m2.maker_only_env_override() is None)
+except Exception as _e:                              # pragma: no cover
+    ok(f"the override could be exercised for real ({_e})", False)
+
+# The page must say which switch is deciding.
+page = open(os.path.join(HERE, "family_tree_dashboard.html"), encoding="utf-8").read()
+ok("grid status reports which switch decided it", "maker_only_source" in src)
+ok("and the card disables its button when the environment is in charge, "
+   "rather than offering one that cannot work",
+   "maker_only_source" in page and "environment wins over the database" in page)
+
 width = max(len(l) for l, _ in checks)
 for label, passed in checks:
     print(f"  [{'PASS' if passed else 'FAIL'}] {label:<{width}}")
