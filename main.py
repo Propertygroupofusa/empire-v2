@@ -233,6 +233,17 @@ except Exception as e:
 # crypto-trading service). Only one runs at a time because all modes share
 # the same real Coinbase account and balance.
 CRYPTO_STRATEGY_MODE = get_crypto_strategy_mode()
+
+# What this process ACTUALLY started in, once the DB override is applied.
+# CRYPTO_STRATEGY_MODE above is only the ENVIRONMENT's opinion, and the two
+# can legitimately differ: on 2026-09-25 the env var was stuck reading
+# 'delfina_scalping' through six correction attempts, so the real mode now
+# comes from the database instead. Reporting only the env value answers the
+# wrong question - which is exactly how a full day passed with the mode
+# looking broken while the actual fix was somewhere else entirely.
+# Assigned once, in lifespan(), after resolution.
+RESOLVED_CRYPTO_MODE = None
+
 # Real production bug found live: Railway's raw env-var editor will happily
 # store literal quote characters if they're pasted as part of the value
 # (e.g. entering `"family_tree"` instead of `family_tree`) - os.getenv()
@@ -1169,6 +1180,7 @@ async def lifespan(app: FastAPI):
     # commit at all. Shipped and caught in production within minutes on
     # 2026-09-25. Assigning to a global inside a function needs `global`, or
     # a different name - and a different name is the safer of the two.
+    global RESOLVED_CRYPTO_MODE   # assigning a module global REQUIRES this
     crypto_mode = CRYPTO_STRATEGY_MODE
     try:
         import crypto_grid_bot as _grid_cfg
@@ -1183,6 +1195,7 @@ async def lifespan(app: FastAPI):
             crypto_mode = _db_mode
     except Exception as e:
         log.debug(f"DB strategy override check skipped: {type(e).__name__}: {e}")
+    RESOLVED_CRYPTO_MODE = crypto_mode
 
     try:
         import threading
@@ -2101,7 +2114,12 @@ async def health():
         "service_role": os.getenv("SERVICE_ROLE") or "unset",
         "uptime_seconds": uptime,
         "uptime_human": f"{int(uptime // 3600)}h {int((uptime % 3600) // 60)}m",
+        # The ENVIRONMENT's opinion...
         "crypto_strategy_mode": os.getenv("CRYPTO_STRATEGY_MODE") or "(unset)",
+        # ...and what this process is ACTUALLY running, which is the one that
+        # matters and can differ (see RESOLVED_CRYPTO_MODE). None means the
+        # lifespan has not finished resolving it yet.
+        "crypto_strategy_mode_running": RESOLVED_CRYPTO_MODE or "(resolving)",
         "environment": os.getenv("RAILWAY_ENVIRONMENT_NAME") or "unknown",
         "project": os.getenv("RAILWAY_PROJECT_NAME") or "unknown",
         "strategy_env_keys": strategy_env_keys,
