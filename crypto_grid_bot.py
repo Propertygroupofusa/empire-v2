@@ -38,6 +38,7 @@ every real buy AND every real sell.
 import asyncio
 import logging
 import os
+import zlib
 import random
 import sys
 import time
@@ -3383,6 +3384,87 @@ async def check_shadow_mode_status():
 GRID_HEARTBEAT_KEY = "grid_bot_last_cycle_at"
 _HEARTBEAT_STAGES = {"entered": 1.0, "no_active_branches": 2.0, "cycled": 3.0}
 
+# --- THE OWNERSHIP LEASE --------------------------------------------------
+# Who is allowed to run the grid loop right now.
+#
+# The problem this solves, found live on 2026-09-25: the grid can only run
+# on the dedicated crypto-trading service, because main.py deliberately
+# delegates ("Grid Fleet selected; execution is delegated"). That delegation
+# is correct - two processes trading one Coinbase wallet would double-order.
+#
+# But it means one invisible service failing takes the entire system down
+# with NO fallback and no alarm. That is exactly what happened: the master
+# switch was off, the dedicated service was not running the loop, and the
+# heartbeat read "never recorded a cycle on this database" while $572 sat
+# idle and the operator was told repeatedly that things were fine.
+#
+# A lease makes a takeover safe instead of dangerous. Every process that
+# runs a cycle stamps its own identity. A process may run only if it
+# already holds the lease, or the lease has gone stale - meaning whoever
+# held it has stopped. The dedicated service, cycling every 30s, renews
+# constantly and keeps the lease forever; the web service can never steal
+# it from a healthy owner. If the dedicated service dies, the lease expires
+# and the web service picks the fleet up rather than leaving it dead.
+GRID_LEASE_KEY = "grid_bot_loop_owner"
+GRID_LEASE_STALE_SECONDS = int(os.getenv("GRID_LEASE_STALE_SECONDS", "180"))
+
+
+def _grid_owner_id() -> str:
+    """Stable identity for this process, as an owner of the loop."""
+    role = (os.getenv("SERVICE_ROLE") or "web").strip().lower() or "web"
+    return f"{role}:{os.getpid()}"
+
+
+def _owner_hash(owner: str) -> float:
+    """TradingBotState stores floats, so an owner is kept as a stable hash.
+
+    Only equality matters - "is the current holder me?" - never the value
+    itself, so a hash is enough and avoids a schema change for one string.
+    """
+    return float(zlib.crc32(owner.encode("utf-8")))
+
+
+async def acquire_grid_lease() -> tuple:
+    """Claim the right to run the grid loop. Returns (allowed, reason).
+
+    Allowed when nobody holds the lease, when this process already holds
+    it, or when the holder has gone silent for GRID_LEASE_STALE_SECONDS.
+    Refused while a DIFFERENT process is actively renewing - which is what
+    makes a fallback owner safe to enable at all.
+    """
+    me = _grid_owner_id()
+    mine = _owner_hash(me)
+    now = time.time()
+    try:
+        async with get_session_factory()() as db:
+            result = await db.execute(
+                select(TradingBotState).where(TradingBotState.bot_name == GRID_LEASE_KEY))
+            row = result.scalar_one_or_none()
+            if row is None:
+                db.add(TradingBotState(bot_name=GRID_LEASE_KEY,
+                                       base_capital=mine, starting_capital=now))
+                await db.commit()
+                return True, f"lease claimed by {me} (was unheld)"
+
+            held_by, last_seen = float(row.base_capital or 0.0), float(row.starting_capital or 0.0)
+            age = now - last_seen
+            if held_by == mine:
+                row.starting_capital = now
+                await db.commit()
+                return True, f"lease renewed by {me}"
+            if age > GRID_LEASE_STALE_SECONDS:
+                row.base_capital = mine
+                row.starting_capital = now
+                await db.commit()
+                return True, (f"lease TAKEN OVER by {me} - previous owner silent "
+                              f"for {age:.0f}s (limit {GRID_LEASE_STALE_SECONDS}s)")
+            return False, (f"another process holds the loop lease, last seen "
+                           f"{age:.0f}s ago - not running here")
+    except Exception as e:
+        # Fail CLOSED. An unreadable lease must never let a second process
+        # start trading the same wallet - the whole point of the lease.
+        return False, f"lease check failed ({type(e).__name__}: {e}) - not running"
+
 
 async def _record_grid_heartbeat(stage: str):
     """Stamp 'the grid loop reached here, at this moment'.
@@ -3461,6 +3543,17 @@ async def run_grid_branches_cycle():
     # running at all. See _record_grid_heartbeat for what conflating the
     # two cost.
     await _record_grid_heartbeat("entered")
+    # Exactly one process may trade this wallet - see acquire_grid_lease.
+    # Checked AFTER the heartbeat so a process that is alive but not the
+    # owner still proves it is alive, which is how a stalled owner is
+    # noticed at all.
+    allowed, why = await acquire_grid_lease()
+    if not allowed:
+        log.debug(f"[GRID] {why}")
+        return
+    if "TAKEN OVER" in why:
+        log.warning(f"[GRID] {why}")
+
     if not await is_grid_bot_active():
         return
     branches = [b for b in await get_grid_branches() if b.active]

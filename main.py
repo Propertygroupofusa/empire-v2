@@ -1182,7 +1182,29 @@ async def lifespan(app: FastAPI):
             log.info("✓ Crypto (Coinbase) bot thread started | 28 pairs × 12 positions | 24/7 trading | Capital: $700 USD")
             log.info("💰 Strategy: 24/7 crypto + market hours stock scalping = constant opportunities and taking profits")
         elif CRYPTO_STRATEGY_MODE == "grid_fleet":
-            log.info("🔲 Grid Fleet selected; execution is delegated to the dedicated crypto-trading service")
+            # Normally the dedicated crypto-trading service owns this loop,
+            # and it still does: crypto_grid_bot holds a LEASE, renewed every
+            # cycle, and this thread refuses to trade while that owner is
+            # alive. It only takes over once the lease goes stale, meaning
+            # the dedicated service has actually stopped.
+            #
+            # Before 2026-09-25 this branch only logged "execution is
+            # delegated" and started nothing. That delegation was correct -
+            # two processes on one Coinbase wallet would double-order - but
+            # it left NO fallback: when the dedicated service silently was
+            # not running the loop, the entire fleet was dead with no alarm,
+            # $572 sat idle, and the heartbeat read "never recorded a cycle
+            # on this database" while everything looked configured.
+            #
+            # The lease is what makes a standby safe rather than dangerous.
+            log.info("🔲 Grid Fleet selected; the dedicated crypto-trading service owns this "
+                     "loop. Starting a STANDBY thread that trades only if that owner's lease "
+                     "goes stale.")
+            import crypto_grid_bot as _grid
+            grid_thread = threading.Thread(target=_grid.run, daemon=True)
+            grid_thread.start()
+            log.info("✓ Grid Fleet standby thread started | will not trade while the dedicated "
+                     "service is renewing its lease")
         else:
             # Deliberately NOT worded "failed to import" - the real 2026-08-24
             # incident this covers was a mode-string mismatch (a stray quoted
