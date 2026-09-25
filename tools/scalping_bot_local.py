@@ -68,7 +68,7 @@ except ImportError:
 # Bump on every change. Printed by the banner and by --import-key so the
 # running copy identifies itself - two rounds were lost to a stale file on
 # disk looking identical to a fresh one.
-BOT_VERSION = "2026-09-25.7-jwt-uri-fix"
+BOT_VERSION = "2026-09-25.8-trailing-junk"
 
 HERE = Path(__file__).resolve().parent
 STATE_FILE = None  # set after LIVE is known - see below
@@ -449,9 +449,17 @@ def import_key(path=None):
             objects.append(obj)
             i = end
     except Exception as e:
-        print(f"  Could not parse as JSON: {type(e).__name__}: {e}")
-        print(f"  First 40 characters: {raw[:40]!r}")
-        return 1
+        # Trailing junk after a VALID object is not a reason to discard the
+        # object. The real file parses cleanly for 221 characters and then
+        # fails with "Expecting value" - one good key followed by something
+        # that is not JSON. Keeping what parsed is the whole point.
+        if objects:
+            print(f"  NOTE: {len(raw) - i} trailing characters after the last "
+                  f"valid object are not JSON ({type(e).__name__}). Ignoring them.")
+        else:
+            print(f"  Could not parse as JSON: {type(e).__name__}: {e}")
+            print(f"  First 40 characters: {raw[:40]!r}")
+            return 1
 
     if not objects:
         print("  File contained no JSON objects.")
