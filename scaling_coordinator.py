@@ -40,23 +40,45 @@ def update_registry(registry):
     with open(INSTANCE_REGISTRY, 'w') as f:
         json.dump(registry, f, indent=2)
 
-def get_primary_bot_profit():
-    """Get primary bot current profit from Grid Bot"""
-    try:
-        # Read from bot session data
-        session_file = f"{BASE_DIR}/bot_session.json"
-        if os.path.exists(session_file):
-            with open(session_file, 'r') as f:
-                session = json.load(f)
-            # Sum up realized P&L from all grid branches
-            return session.get('total_realized_pnl', 0)
-    except Exception as e:
-        log.error(f"Error reading primary bot profit: {e}")
-    return 0
+async def get_primary_bot_profit():
+    """The primary bot's REAL realized profit, from the database.
 
-def get_fleet_profit(registry):
-    """Get total profit across all instances"""
-    total_profit = get_primary_bot_profit()
+    This used to read `{BASE_DIR}/bot_session.json` and return 0 when the
+    file was missing. Three things were wrong with that at once, and
+    together they made the figure incapable of ever being right:
+
+      1. NOTHING IN THIS REPO WRITES bot_session.json. Three modules read
+         it; zero write it. The grid bot records every closed round trip
+         in CryptoGridTradeHistory, never in a JSON file.
+      2. BASE_DIR was the hardcoded developer path "/home/user/empire-v2",
+         which does not exist in the deployed container.
+      3. The missing file fell through to `return 0`, and the endpoint
+         logged that 0 as though it were a measurement.
+
+    So the dashboard reported "Primary profit $0.00" permanently, while
+    the account had really made +$19.55 over 82 closed round trips. A
+    fallback presented as a reading is worse than no reading, which is why
+    a real failure here now returns None and is rendered as "unavailable"
+    rather than as zero.
+    """
+    try:
+        import crypto_grid_bot
+        history = await crypto_grid_bot.get_grid_trade_history(limit_recent=0)
+        return history.get("total_realized_pnl")
+    except Exception as e:
+        log.error(f"Could not read real grid profit from the database: {e}")
+        return None
+
+def get_fleet_profit(registry, primary_profit):
+    """Primary profit plus every cloned instance's own profit.
+
+    Takes the primary figure rather than re-fetching it, so the two can
+    never disagree. An unreadable primary makes the fleet total unreadable
+    too - it is not silently treated as zero and added to.
+    """
+    if primary_profit is None:
+        return None
+    total_profit = primary_profit
 
     for instance in registry.get('instances', []):
         try:
@@ -117,15 +139,23 @@ def monitor_fleet():
         iteration += 1
 
         try:
-            current_profit = get_primary_bot_profit()
-            fleet_profit = get_fleet_profit(registry)
+            current_profit = asyncio.run(get_primary_bot_profit())
+            fleet_profit = get_fleet_profit(registry, current_profit)
 
             if iteration % 6 == 1:  # Log every 3 minutes (check every 30s)
+                def _money(v):
+                    return "unavailable" if v is None else f"${v:,.2f}"
                 log.info(f"\n[{datetime.now().strftime('%H:%M:%S')}] FLEET STATUS")
-                log.info(f"  Primary Bot Profit: ${current_profit:,.2f}")
-                log.info(f"  Fleet Total Profit: ${fleet_profit:,.2f}")
+                log.info(f"  Primary Bot Profit: {_money(current_profit)}")
+                log.info(f"  Fleet Total Profit: {_money(fleet_profit)}")
                 log.info(f"  Instances Active: {len(registry.get('instances', [])) + 1}")
                 log.info(f"  Clones Created: {registry.get('clones_created', 0)}")
+
+            # An unreadable profit must never be treated as "below every
+            # threshold" and silently skipped, nor as a reason to clone.
+            if current_profit is None:
+                time.sleep(30)
+                continue
 
             # Check if clone should be created
             should_scale, threshold, level = should_clone(current_profit, registry)
@@ -152,19 +182,29 @@ def monitor_fleet():
         time.sleep(30)  # Check every 30 seconds
 
 async def get_fleet_status():
-    """Get current fleet status for API endpoint"""
+    """Get current fleet status for API endpoint.
+
+    Every money figure is either a real number from the database or None.
+    None means "could not read", which the dashboard must render as
+    unavailable - never as $0.00. That distinction is the whole point of
+    this rewrite: the previous version could only ever return zero.
+    """
     registry = get_or_create_registry()
-    primary_profit = get_primary_bot_profit()
-    fleet_profit = get_fleet_profit(registry)
+    primary_profit = await get_primary_bot_profit()
+    fleet_profit = get_fleet_profit(registry, primary_profit)
 
     return {
-        "primary_bot_profit": round(primary_profit, 2),
-        "fleet_total_profit": round(fleet_profit, 2),
+        "primary_bot_profit": (None if primary_profit is None else round(primary_profit, 2)),
+        "fleet_total_profit": (None if fleet_profit is None else round(fleet_profit, 2)),
+        "profit_source": ("CryptoGridTradeHistory - every closed round trip"
+                          if primary_profit is not None else
+                          "unavailable - the database could not be read"),
         "active_instances": len(registry.get('instances', [])) + 1,
         "clones_created": registry.get('clones_created', 0),
         "total_capital_deployed": registry.get('total_capital_deployed', 0),
         "profit_thresholds": PROFIT_THRESHOLDS,
-        "next_threshold": next((t for t in PROFIT_THRESHOLDS if t > primary_profit), None),
+        "next_threshold": (None if primary_profit is None else
+                           next((t for t in PROFIT_THRESHOLDS if t > primary_profit), None)),
         "registry": registry
     }
 

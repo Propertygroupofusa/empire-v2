@@ -6635,7 +6635,15 @@ async def get_fleet_status():
         raise HTTPException(status_code=500, detail="scaling_coordinator module not available")
 
     status = await scaling_coordinator_module.get_fleet_status()
-    log.info(f"[dashboard] 📊 Fleet status: Primary profit ${status['primary_bot_profit']:,.2f}, Fleet total ${status['fleet_total_profit']:,.2f}, Clones: {status['clones_created']}")
+
+    # "unavailable" rather than "$0.00". This line logged a permanent
+    # $0.00 for months because get_primary_bot_profit() read a JSON file
+    # nothing in this repo writes and returned 0 when it was missing - see
+    # scaling_coordinator.get_primary_bot_profit for the full account.
+    def _money(v):
+        return "unavailable" if v is None else f"${v:,.2f}"
+    log.info(f"[dashboard] 📊 Fleet status: Primary profit {_money(status['primary_bot_profit'])}, "
+             f"Fleet total {_money(status['fleet_total_profit'])}, Clones: {status['clones_created']}")
     return status
 
 
@@ -6870,12 +6878,47 @@ async def _live_ops_runner():
         "btc_compound": "this web service (BTC compound)",
         "multi_pair": "this web service (multi-pair RSI)",
     }.get(mode)
+    # SERVICE_ROLE is the OTHER half, and leaving it out cost a live debugging
+    # session. railway.json starts every service with `python
+    # service_entrypoint.py`, which routes on SERVICE_ROLE alone:
+    #
+    #     SERVICE_ROLE == "crypto-trading"  ->  bot_runner.py  (grid fleet)
+    #     anything else                     ->  main.py        (web app)
+    #
+    # So a crypto-trading service with CRYPTO_STRATEGY_MODE=grid_fleet but no
+    # SERVICE_ROLE runs main.py, which under grid_fleet logs "execution is
+    # delegated to the dedicated crypto-trading service" and starts nothing.
+    # Both services then delegate to each other and NOTHING trades, with no
+    # error anywhere. This panel previously said only "set
+    # CRYPTO_STRATEGY_MODE per service" and sent the reader down a path that
+    # could not work.
+    #
+    # This process cannot read another service's variables, so the gate below
+    # reports what THIS process is, states the requirement for the other one,
+    # and leans on the shared activity heartbeat - which does cross services,
+    # via the database - as the only evidence available here about whether the
+    # grid runner is actually alive.
+    service_role = (os.getenv("SERVICE_ROLE") or "").strip().lower()
+    this_process = "bot_runner.py (grid fleet)" if service_role == "crypto-trading" else "main.py (web app)"
+
     gates = [
         {"name": "A crypto loop owns execution", "ok": mode in known,
          "detail": f"{mode or '(unset)'} - run by {owner}" if owner
                    else f"{mode or '(unset)'} - matches no known mode",
          "fix": "set CRYPTO_STRATEGY_MODE per service: grid_fleet on the "
                 "crypto-trading service, family_tree on the web service"},
+        {"name": "Grid runner service is wired up",
+         # Only THIS process can be checked here. On the web service the
+         # honest answer is "not me, and I cannot see the other one" - never
+         # a green tick implying the grid runner was verified.
+         "ok": service_role == "crypto-trading",
+         "detail": (f"SERVICE_ROLE={service_role or '(unset)'} - this process is {this_process}"
+                    + ("" if service_role == "crypto-trading"
+                       else "; the grid runner is a SEPARATE service whose variables this page cannot read")),
+         "fix": "on the crypto-trading service set BOTH: SERVICE_ROLE=crypto-trading "
+                "AND CRYPTO_STRATEGY_MODE=grid_fleet. Without SERVICE_ROLE, "
+                "service_entrypoint.py launches main.py instead of bot_runner.py "
+                "and the grid never starts"},
         {"name": "Trading not halted", "ok": not halted,
          "detail": "STOP_TRADING is set" if halted else "running",
          "fix": "unset STOP_TRADING"},
