@@ -154,7 +154,8 @@ GRANULARITY_SECONDS = 3600  # 1-hour candles
 ATR_WINDOW = 15  # matches _atr_pct_from_candles' 14-period + 1
 
 
-async def fetch_candles_window(session, product_id, start, end, min_candles=ATR_WINDOW + 5, last_error_out=None):
+async def fetch_candles_window(session, product_id, start, end, min_candles=ATR_WINDOW + 5,
+                               last_error_out=None, granularity=None):
     """Paginated pull of real Coinbase historical candles (public,
     unauthenticated endpoint - same one the live bot's own _fetch_candles
     uses) between two explicit real UTC datetimes. Factored out of
@@ -191,14 +192,20 @@ async def fetch_candles_window(session, product_id, start, end, min_candles=ATR_
     completely unaffected), so a future skip can say WHY instead of a
     blanket "not enough historical data" hiding a real rate-limit
     problem."""
+    # granularity defaults to this module's hourly constant, so every
+    # existing caller is byte-for-byte unaffected. It is a parameter now
+    # because the same window is worth pulling at two timeframes: a strategy
+    # that only works on one of them is a strategy that works on a sampling
+    # choice, and that is worth being able to see rather than assume.
+    gran = int(granularity or GRANULARITY_SECONDS)
     all_candles = []
     cursor = start
     last_error = None
     while cursor < end:
-        page_end = min(cursor + timedelta(seconds=GRANULARITY_SECONDS * 299), end)
+        page_end = min(cursor + timedelta(seconds=gran * 299), end)
         url = (
             f"https://api.exchange.coinbase.com/products/{product_id}/candles"
-            f"?granularity={GRANULARITY_SECONDS}&start={cursor.isoformat()}&end={page_end.isoformat()}"
+            f"?granularity={gran}&start={cursor.isoformat()}&end={page_end.isoformat()}"
         )
         page_data = None
         for attempt in range(5):

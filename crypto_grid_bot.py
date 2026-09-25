@@ -345,7 +345,39 @@ ADAPTIVE_FLEET_STAGES = (
 # anything for an account still at the base tier. See
 # compute_dynamic_grid_pct() for how this composes with the real live
 # fee rate.
-TARGET_NET_MARGIN_PCT = DEFAULT_GRID_PCT - engine.ROUND_TRIP_FEE_RATE
+# CORRECTED 2026-09-25, found live. This was:
+#
+#     TARGET_NET_MARGIN_PCT = DEFAULT_GRID_PCT - engine.ROUND_TRIP_FEE_RATE
+#
+# which reads as a margin but is a SUBTRACTION, and a subtraction can go
+# negative. It did. DEFAULT_GRID_PCT is 0.01 and engine.ROUND_TRIP_FEE_RATE
+# was raised from 0.008 to the account's real 0.015 - so this silently
+# became -0.005, and fee_safe_floor_pct() computed
+#
+#     max(0.003, -0.005 + 0.0075 * 2) = 0.010
+#
+# The live dashboard duly reported a 1.00% fee-safe floor against a 1.50%
+# round trip. Every spacing between 1.00% and 1.70% was being certified as
+# fee-safe while being a guaranteed loss - the exact failure
+# test_fee_floor_worst_case.py exists to prevent, reintroduced through a
+# DERIVED constant instead of through the function that file guards. The
+# test passed throughout, because it asserted the arithmetic against its own
+# hardcoded 0.002 rather than against the constant production actually uses.
+#
+# So this is now a margin in its own right: the profit a round trip must
+# clear ON TOP of its fees before a spacing is allowed. It cannot be
+# expressed as a difference between two other numbers, because that is what
+# let a fee increase quietly eat it.
+TARGET_NET_MARGIN_PCT = float(os.getenv("GRID_TARGET_NET_MARGIN_PCT", "0.002"))
+
+# A margin of zero or less is not a margin - it makes fee_safe_floor_pct()
+# certify a spacing that exactly pays its own fees and earns nothing, or
+# less. Refuse at import rather than trade on it.
+if TARGET_NET_MARGIN_PCT <= 0:
+    raise ValueError(
+        f"GRID_TARGET_NET_MARGIN_PCT must be positive, got {TARGET_NET_MARGIN_PCT}. "
+        f"It is the profit a round trip must clear ON TOP of fees; at zero or below, "
+        f"the fee-safe floor stops being a floor.")
 
 # A real floor under how tight dynamic spacing is ever allowed to go,
 # regardless of how favorable the real fee tier gets - protects against

@@ -1606,6 +1606,28 @@ async def serve_live_ops_dashboard():
     return FileResponse(dashboard_path, media_type="text/html")
 
 
+@app.get("/strategy-lab-view")
+async def serve_strategy_lab():
+    """Serve the 432-variant Strategy Lab sweep page.
+
+    SHADOW-MODE ONLY: reads public Coinbase candles, places no orders, and
+    promotes nothing. The sweep runs as a background job because thousands
+    of replays take minutes, and the page polls it so the ranking can be
+    read while it is still filling in.
+
+    The column that matters on that page is the last one. Ranking thousands
+    of variants by out-of-sample return and reading the top row is still
+    selection on out-of-sample: holding back 30% of the data protects one
+    hypothesis, not the best of thousands. So every row is marked against
+    the noise floor for the width of the search that produced it - "above
+    luck" or "within luck" - because a table sorted by return, without that,
+    reads as a recommendation."""
+    page_path = os.path.join(os.path.dirname(__file__), "strategy_lab.html")
+    if not os.path.exists(page_path):
+        raise HTTPException(status_code=404, detail="Strategy Lab page not found")
+    return FileResponse(page_path, media_type="text/html")
+
+
 @app.get("/crypto-selection-backtest-view")
 async def serve_crypto_selection_backtest():
     """Serve the shadow-mode coin-selection backtest page - a read-only

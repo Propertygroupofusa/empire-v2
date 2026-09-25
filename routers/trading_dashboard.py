@@ -23,6 +23,9 @@ from datetime import datetime, timezone, timedelta
 
 import json as json_module
 import aiohttp
+import strategy_batch
+import strategy_lab
+import strategy_pine_export
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -3515,6 +3518,131 @@ async def run_strategy_lab_backtest():
     if crypto_selection_backtest_module is None:
         raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
     return await crypto_selection_backtest_module.run_strategy_lab_comparison()
+
+
+# ── The 432-variant sweep, as a job you can watch ────────────────────────
+#
+# SHADOW-MODE ONLY. Reads public Coinbase candles, places no orders, and
+# changes no live setting. Nothing here can promote a strategy: the sweep
+# measures, and every promotion in this codebase is a separate, explicit act.
+
+class StrategyBatchRequest(BaseModel):
+    coins: list = None
+    days: int = 730
+    granularity: int = 86400      # 86400 = daily, 3600 = hourly
+    in_sample_frac: float = 0.7
+    control_draws: int = 10
+    fee_round_trip: float = None
+
+
+async def _default_sweep_coins():
+    """The coins actually being traded, not a hardcoded list.
+
+    A sweep over coins the fleet does not hold answers a question nobody
+    asked. Falls back to a fixed set only when the branch table cannot be
+    read, and says so rather than pretending the default was a choice.
+    """
+    from models import CryptoGridBranch
+    try:
+        async with get_session_factory()() as db:
+            result = await db.execute(select(CryptoGridBranch))
+            coins = [b.product_id for b in result.scalars().all() if b.product_id]
+        if coins:
+            return sorted(set(coins)), "live grid branches"
+    except Exception:
+        pass
+    return (["BTC-USD", "ETH-USD", "DOGE-USD", "LTC-USD"],
+            "fallback - the live branch table could not be read")
+
+
+@router.post("/strategy-lab/run-batch")
+async def strategy_lab_run_batch(payload: StrategyBatchRequest = None):
+    """Start the full sweep in the background and return immediately.
+
+    432 variants per coin across every coin is thousands of replays plus the
+    matched-control draws behind each one - minutes of work, which is longer
+    than a request survives. So it runs as a job and /strategy-lab/progress
+    reports how far it has got; the ranking can be read while it fills in.
+
+    Refuses to start a second sweep over a running one rather than
+    interleaving two sets of results into one table.
+    """
+    payload = payload or StrategyBatchRequest()
+    coins, source = (payload.coins, "requested") if payload.coins else await _default_sweep_coins()
+    out = await strategy_batch.start(
+        coins, days=payload.days, granularity=payload.granularity,
+        in_sample_frac=payload.in_sample_frac,
+        control_draws=payload.control_draws,
+        fee_round_trip=payload.fee_round_trip)
+    out["coin_source"] = source
+    return out
+
+
+@router.get("/strategy-lab/progress")
+async def strategy_lab_progress():
+    """How far the sweep has got. Poll this; it is cheap and safe mid-run."""
+    return strategy_batch.snapshot(include_results=False)
+
+
+@router.get("/strategy-lab/results")
+async def strategy_lab_results(coin: str = "", limit: int = 60, sort_by: str = "oos"):
+    """Every finished variant as one ranked table.
+
+    Ranked by out-of-sample, which is the only ranking worth reading - and
+    still a ranking over thousands of tests, so every row carries the noise
+    floor for the width of the search that produced it. A row above that
+    floor is a candidate to forward-test; a row below it is what luck
+    reaches at this width, however good the number looks.
+    """
+    out = strategy_batch.ranked_rows(coin_filter=coin, limit=limit, sort_by=sort_by)
+    out["job"] = strategy_batch.snapshot(include_results=False)
+    out["fleet_verdict"] = (strategy_batch._JOB.get("fleet") or {}).get("verdict")
+    return out
+
+
+@router.get("/strategy-lab/pine")
+async def strategy_lab_pine(strategy: str, coin: str = "", params: str = ""):
+    """The TradingView Pine for one variant, with its execution contract.
+
+    The script carries the fill rule, the fee split, this lab's own measured
+    figures and a list of the reasons TradingView will still print a
+    different number - candle source, per-side fee rounding, bar alignment.
+    That list is the point: a documented divergence read as a broken
+    strategy is how a working strategy gets thrown away.
+    """
+    import json as _json
+    try:
+        parsed = _json.loads(params) if params else {}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"params is not JSON: {e}")
+    if not strategy_pine_export.exportable(strategy):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{strategy} has no Pine body, so there is nothing honest to "
+                    f"export - an approximation under the same name would compare "
+                    f"two different strategies."))
+
+    measured = split = None
+    res = (strategy_batch._JOB.get("per_coin") or {}).get(coin)
+    if res:
+        split = res.get("split_label")
+        for r in res.get("ranked", []):
+            if r["strategy"] == strategy and r["params"] == parsed:
+                measured = r["out_of_sample"]
+                break
+    fee = (strategy_batch._JOB.get("params") or {}).get("fee_round_trip")
+    if fee is None:
+        fee = strategy_lab.BACKTEST_ROUND_TRIP_FEE_RATE
+    gran = (strategy_batch._JOB.get("params") or {}).get("granularity") or 86400
+    tf = {86400: "1D", 3600: "1H", 900: "15m", 300: "5m", 60: "1m"}.get(gran, f"{gran}s")
+
+    return {
+        "strategy": strategy, "params": parsed, "coin": coin,
+        "timeframe": tf,
+        "pine": strategy_pine_export.to_pine(
+            strategy, parsed, fee, coin=coin, timeframe=tf,
+            oos_split_label=split, measured=measured),
+    }
 
 
 @router.post("/crypto-selection-backtest/market-phase-breakdown")

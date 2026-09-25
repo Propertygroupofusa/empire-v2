@@ -115,7 +115,45 @@ ok("the maker attempt is conditional, so it can be skipped entirely",
    "is_maker_orders_active" in buy)
 
 # --- the arithmetic, stated as behaviour ----------------------------------
-MIN_DYNAMIC = 0.003
+# READ FROM THE MODULE, NOT RETYPED.
+#
+# This block used to hardcode MIN_DYNAMIC = 0.003 and LIVE_TARGET_MARGIN =
+# 0.002 and assert against those. Both were right when written and one of
+# them stopped being true in production without a single check failing:
+# TARGET_NET_MARGIN_PCT was DEFAULT_GRID_PCT - ROUND_TRIP_FEE_RATE, so when
+# the fee constant was corrected upward to the real 0.015 the margin went
+# NEGATIVE (-0.005) and the live floor dropped to 1.00% against a 1.50%
+# round trip - the precise bug this file exists to catch, sailing past it
+# because the file was checking its own arithmetic rather than the code's.
+#
+# A test that restates the constants cannot catch a constant changing. So
+# these come from the module now, and the properties below are asserted
+# about whatever it actually holds.
+import importlib.util
+_spec = importlib.util.spec_from_file_location(
+    "_gridmod", os.path.join(HERE, "crypto_grid_bot.py"))
+try:
+    _mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    MIN_DYNAMIC = _mod.MIN_DYNAMIC_GRID_PCT
+    LIVE_TARGET_MARGIN = _mod.TARGET_NET_MARGIN_PCT
+    _loaded = True
+except Exception as _e:                      # pragma: no cover - import-time deps
+    MIN_DYNAMIC, LIVE_TARGET_MARGIN, _loaded = 0.003, 0.002, False
+
+ok("the module's own constants were read, not assumed", _loaded)
+ok("REGRESSION: the target margin is POSITIVE - a margin that can go "
+   "negative silently un-floors the floor",
+   LIVE_TARGET_MARGIN > 0)
+# Executable code only. The old broken line is quoted verbatim in the
+# comment that replaced it - as the record of what went wrong - so a search
+# over raw source matches my own explanation and fails forever.
+_exec_only = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+ok("and it is not derived by subtracting a fee from a spacing, which is "
+   "what let a fee rise eat it",
+   "TARGET_NET_MARGIN_PCT = DEFAULT_GRID_PCT - " not in _exec_only)
+ok("a non-positive margin is refused at import rather than traded on",
+   "must be positive" in src and "raise ValueError" in src)
 
 
 def floor_for(round_trip, target_margin):
@@ -123,7 +161,6 @@ def floor_for(round_trip, target_margin):
 
 
 LIVE_TAKER_ROUND_TRIP = 0.015   # as the live account reported it
-LIVE_TARGET_MARGIN = 0.002
 
 f = floor_for(LIVE_TAKER_ROUND_TRIP, LIVE_TARGET_MARGIN)
 ok("on the live numbers the floor is now 1.70%, not 0.90%", abs(f - 0.017) < 1e-9)

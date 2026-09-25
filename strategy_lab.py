@@ -44,6 +44,7 @@ Nothing here is live. It places no orders and is imported by no bot.
 """
 
 import math
+import os
 import random
 import statistics
 
@@ -368,6 +369,13 @@ VARIANT_COUNT = sum(len(v[1]) for v in STRATEGIES.values())
 
 # ── the replay ──────────────────────────────────────────────────────────
 
+# What a result is expressed in. A percentage answers "did it work"; a
+# balance answers "on my money, what happened" - and the second is the
+# question actually being asked. Purely a display scale: every decision in
+# this file is made on percentages, so changing it cannot change a verdict.
+STARTING_BALANCE_USD = float(os.getenv("STRATEGY_LAB_STARTING_BALANCE_USD", "10000"))
+
+
 def replay_positions(closes, positions, fee_round_trip=None, start=0, end=None):
     """Turn a position series into real round trips, charged real fees.
 
@@ -393,14 +401,18 @@ def replay_positions(closes, positions, fee_round_trip=None, start=0, end=None):
 
     if not trades:
         return {"trades": 0, "total_return_pct": 0.0, "win_rate": 0.0,
-                "avg_trade_pct": 0.0, "max_drawdown_pct": 0.0, "equity_mult": 1.0}
+                "avg_trade_pct": 0.0, "max_drawdown_pct": 0.0, "equity_mult": 1.0,
+                "sharpe": None, "final_balance": float(STARTING_BALANCE_USD),
+                "equity_curve": [float(STARTING_BALANCE_USD)]}
 
     gross = [t + fee for t in trades]          # what the move was, before fees
     eq, peak, mdd = 1.0, 1.0, 0.0
+    curve = [float(STARTING_BALANCE_USD)]
     for t in trades:
         eq *= (1 + t)
         peak = max(peak, eq)
         mdd = max(mdd, (peak - eq) / peak if peak > 0 else 0.0)
+        curve.append(round(STARTING_BALANCE_USD * eq, 2))
     wins = sum(1 for t in trades if t > 0)
     return {
         "trades": len(trades),
@@ -414,6 +426,21 @@ def replay_positions(closes, positions, fee_round_trip=None, start=0, end=None):
         # A trade holding 20 bars captures a 20-bar move, so judging it
         # against a single bar dismisses every valid slow strategy.
         "median_gross_move_pct": round(statistics.median([abs(g) for g in gross]) * 100, 3),
+        # PER-TRADE Sharpe: mean trade return over the standard deviation of
+        # trade returns. Deliberately NOT annualised. Annualising needs a
+        # trades-per-year figure, and these strategies trade at wildly
+        # different frequencies over windows of different lengths - so an
+        # annualised number would mostly measure how often a strategy traded
+        # and would let a 3-trade variant print a spectacular ratio. This one
+        # answers the question actually being asked when strategies are
+        # compared: per unit of risk taken, how much did a trade return?
+        #
+        # None on fewer than two trades, because a standard deviation over
+        # one sample is not a measurement.
+        "sharpe": (round(statistics.mean(trades) / statistics.pstdev(trades), 3)
+                   if len(trades) > 1 and statistics.pstdev(trades) > 0 else None),
+        "final_balance": round(STARTING_BALANCE_USD * eq, 2),
+        "equity_curve": curve,
     }
 
 
