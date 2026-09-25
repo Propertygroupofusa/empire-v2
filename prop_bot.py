@@ -391,8 +391,45 @@ BOT_NAME = "prop_apex"
 # closes every open position immediately and halts new entries until equity
 # is back above it — same mechanism as the daily circuit breaker, just keyed
 # to the account's all-time high instead of today's start.
-EQUITY_FLOOR_TIER = _safe_float_env("PROP_EQUITY_FLOOR_TIER", "1000")
+# Tier reduced from $1,000 to $100 on 2026-09-25. The tier exists only to
+# make the floor a tidy number in the logs, but rounding DOWN to $1,000
+# swallows the floor entirely on a small account: at equity $1,007.74 the
+# headroom target is $906.97, which rounds to $0 - no protection at all.
+# $100 keeps the number readable and the floor real at every size.
+EQUITY_FLOOR_TIER = _safe_float_env("PROP_EQUITY_FLOOR_TIER", "100")
 EQUITY_FLOOR_BASE = _safe_float_env("PROP_EQUITY_FLOOR_BASE", "500")
+
+# A fixed $1,000 tier does not scale, and on this account it became a hair
+# trigger. Measured live 2026-09-25: equity $1,007.74, floor $1,000,
+# headroom $7.74 - 0.77%. Breaching it closes EVERY position and halts all
+# new entries until equity recovers, so one ordinary down day would have
+# stopped the account dead. The old form rounded equity DOWN to a tier and
+# took whatever was left, which is zero whenever equity lands just above a
+# clean multiple - and the ratchet guarantees equity lands there, because
+# crossing $1,000 is exactly what sets the floor to $1,000.
+#
+# So the floor never sits closer to equity than
+# EQUITY_FLOOR_MIN_HEADROOM_PCT of it. Headroom is taken FIRST and the tier
+# rounding applied second, which is what makes the room real rather than
+# incidental. The ratchet itself is unchanged: still computed from real
+# equity, still only ever moves up.
+#
+# Same fix, same reasoning as crypto_btc_compound_bot.compute_equity_floor.
+EQUITY_FLOOR_MIN_HEADROOM_PCT = _safe_float_env(
+    "PROP_EQUITY_FLOOR_MIN_HEADROOM_PCT", "0.10")
+
+
+def compute_equity_floor(equity: float) -> float:
+    """Floor a fixed percentage below equity, rounded down to a tier.
+
+    Taking the headroom first and rounding second guarantees the room
+    exists. Returns a CANDIDATE - the caller still only ever raises the
+    stored floor, never lowers it.
+    """
+    if equity is None or equity <= 0:
+        return 0.0
+    target = equity * (1.0 - EQUITY_FLOOR_MIN_HEADROOM_PCT)
+    return max(0.0, math.floor(target / EQUITY_FLOOR_TIER) * EQUITY_FLOOR_TIER)
 EQUITY_FLOOR_STATE_KEY = "prop_apex_equity_floor"
 equity_floor = EQUITY_FLOOR_BASE
 
@@ -2065,8 +2102,51 @@ async def run_prop_cycle():
         # as the new floor and can never go back down, even across restarts.
         global equity_floor
         if equity is not None and equity >= EQUITY_FLOOR_TIER:
-            candidate_floor = math.floor(equity / EQUITY_FLOOR_TIER) * EQUITY_FLOOR_TIER
-            if candidate_floor > equity_floor:
+            candidate_floor = compute_equity_floor(equity)
+
+            # ONE-WAY RATCHET, WITH ONE EXCEPTION: an unsafe stored floor.
+            #
+            # The ratchet only ever raises, which is right - a floor you can
+            # talk yourself out of is not a floor. But it produced a trap.
+            # Crossing $1,000 set the floor to $1,000, which is exactly when
+            # equity is barely above $1,000, and the floor then never moved.
+            # Measured live: equity $1,007.74, floor $1,000, headroom $7.74
+            # (0.77%). Breaching it closes EVERY position and halts all
+            # entries, so an ordinary down day would have stopped the
+            # account - and the ratchet guaranteed it stayed that way.
+            #
+            # A floor that halts on a 0.77% move is not protection, it is a
+            # scheduled outage. So when the STORED floor leaves less than
+            # half the minimum headroom, it is corrected DOWN to a safe
+            # level, once, loudly, and persisted. This is deliberately not
+            # silent and deliberately not gradual: it is a repair of a bad
+            # stored value, not a licence to drift the floor down over time.
+            # Raising remains the only other way it ever moves.
+            min_safe_headroom = equity * (EQUITY_FLOOR_MIN_HEADROOM_PCT / 2.0)
+            if equity_floor > 0 and (equity - equity_floor) < min_safe_headroom:
+                unsafe_floor = equity_floor
+                equity_floor = max(EQUITY_FLOOR_BASE, candidate_floor)
+                await save_equity_floor(equity_floor)
+                log.warning(
+                    f"[APEX_589296] 🪜 EQUITY FLOOR CORRECTED ${unsafe_floor:,.0f} -> "
+                    f"${equity_floor:,.0f}: it sat ${equity - unsafe_floor:,.2f} "
+                    f"({(equity - unsafe_floor) / equity * 100:.2f}%) below equity "
+                    f"${equity:,.2f}, which would halt the account on an ordinary move. "
+                    f"Minimum headroom is {EQUITY_FLOOR_MIN_HEADROOM_PCT * 100:.0f}%."
+                )
+                send_trade_alert(
+                    f"🪜 EQUITY FLOOR CORRECTED — ${equity_floor:,.0f}",
+                    f"The locked floor of ${unsafe_floor:,.0f} sat only "
+                    f"{(equity - unsafe_floor) / equity * 100:.2f}% below equity of "
+                    f"${equity:,.2f}.\n\n"
+                    f"At that distance any ordinary down move would breach it, closing "
+                    f"every position and halting all new entries.\n\n"
+                    f"Corrected to ${equity_floor:,.0f}, keeping "
+                    f"{EQUITY_FLOOR_MIN_HEADROOM_PCT * 100:.0f}% of room. The floor still "
+                    f"only ratchets UP from here.\n\n"
+                    f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
+                )
+            elif candidate_floor > equity_floor:
                 equity_floor = candidate_floor
                 await save_equity_floor(equity_floor)
                 log.info(f"[APEX_589296] 🪜 EQUITY FLOOR RAISED to ${equity_floor:,.0f} — will not trade below this again")
