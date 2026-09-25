@@ -1490,13 +1490,30 @@ except Exception as e:
     log.warning(f"Failed to load crypto trading router: {e}")
 
 
+# Every dashboard served below is a single HTML file that is REWRITTEN on each deploy,
+# and until 2026-09-25 they were served with no cache headers at all. Browsers
+# are free to reuse a no-header response, and one did: a new control shipped,
+# deployed and verified live was simply absent from the account owner's screen
+# for hours, because the page in front of them predated it. Nothing in the app
+# can tell you that is happening - the API answers correctly, the HTML on the
+# server is correct, and the only wrong copy is the one the person is looking at.
+#
+# These files are small and fetched once per visit, so there is nothing to gain
+# from caching them and a whole class of "I don't see it" to lose.
+_NO_STORE = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
 @app.get("/crypto-dashboard")
 async def serve_crypto_dashboard():
     """Serve the crypto trading dashboard HTML"""
     dashboard_path = os.path.join(os.path.dirname(__file__), "static/crypto_dashboard.html")
     if not os.path.exists(dashboard_path):
         raise HTTPException(status_code=404, detail="Crypto dashboard not found")
-    return FileResponse(dashboard_path, media_type="text/html")
+    return FileResponse(dashboard_path, media_type="text/html", headers=_NO_STORE)
 
 
 @app.get("/dashboard")
@@ -1505,7 +1522,7 @@ async def serve_dashboard():
     dashboard_path = os.path.join(os.path.dirname(__file__), "social_media_dashboard.html")
     if not os.path.exists(dashboard_path):
         raise HTTPException(status_code=404, detail="Dashboard not found")
-    return FileResponse(dashboard_path, media_type="text/html")
+    return FileResponse(dashboard_path, media_type="text/html", headers=_NO_STORE)
 
 
 @app.get("/signals")
@@ -1528,7 +1545,7 @@ async def serve_trading_dashboard():
     dashboard_path = os.path.join(os.path.dirname(__file__), "trading_dashboard.html")
     if not os.path.exists(dashboard_path):
         raise HTTPException(status_code=404, detail="Trading dashboard not found")
-    return FileResponse(dashboard_path, media_type="text/html")
+    return FileResponse(dashboard_path, media_type="text/html", headers=_NO_STORE)
 
 
 @app.get("/live-dashboard")
@@ -1537,7 +1554,7 @@ async def serve_live_dashboard():
     dashboard_path = os.path.join(os.path.dirname(__file__), "live_trading_dashboard.html")
     if not os.path.exists(dashboard_path):
         raise HTTPException(status_code=404, detail="Live dashboard not found")
-    return FileResponse(dashboard_path, media_type="text/html")
+    return FileResponse(dashboard_path, media_type="text/html", headers=_NO_STORE)
 
 
 @app.get("/family-tree-dashboard")
@@ -1550,7 +1567,7 @@ async def serve_family_tree_dashboard():
     dashboard_path = os.path.join(os.path.dirname(__file__), "family_tree_dashboard.html")
     if not os.path.exists(dashboard_path):
         raise HTTPException(status_code=404, detail="Family tree dashboard not found")
-    return FileResponse(dashboard_path, media_type="text/html")
+    return FileResponse(dashboard_path, media_type="text/html", headers=_NO_STORE)
 
 
 @app.get("/card")
@@ -1603,7 +1620,7 @@ async def serve_live_ops_dashboard():
     dashboard_path = os.path.join(os.path.dirname(__file__), "live_ops_dashboard.html")
     if not os.path.exists(dashboard_path):
         raise HTTPException(status_code=404, detail="Live Ops dashboard not found")
-    return FileResponse(dashboard_path, media_type="text/html")
+    return FileResponse(dashboard_path, media_type="text/html", headers=_NO_STORE)
 
 
 @app.get("/strategy-lab-view")
@@ -1625,7 +1642,7 @@ async def serve_strategy_lab():
     page_path = os.path.join(os.path.dirname(__file__), "strategy_lab.html")
     if not os.path.exists(page_path):
         raise HTTPException(status_code=404, detail="Strategy Lab page not found")
-    return FileResponse(page_path, media_type="text/html")
+    return FileResponse(page_path, media_type="text/html", headers=_NO_STORE)
 
 
 @app.get("/crypto-selection-backtest-view")
@@ -1638,7 +1655,7 @@ async def serve_crypto_selection_backtest():
     page_path = os.path.join(os.path.dirname(__file__), "crypto_selection_backtest.html")
     if not os.path.exists(page_path):
         raise HTTPException(status_code=404, detail="Backtest page not found")
-    return FileResponse(page_path, media_type="text/html")
+    return FileResponse(page_path, media_type="text/html", headers=_NO_STORE)
 
 
 @app.get("/alpaca-selection-backtest-view")
@@ -1653,7 +1670,7 @@ async def serve_alpaca_selection_backtest():
     page_path = os.path.join(os.path.dirname(__file__), "alpaca_selection_backtest.html")
     if not os.path.exists(page_path):
         raise HTTPException(status_code=404, detail="Backtest page not found")
-    return FileResponse(page_path, media_type="text/html")
+    return FileResponse(page_path, media_type="text/html", headers=_NO_STORE)
 
 
 @app.get("/alpaca-dashboard")
@@ -1666,7 +1683,7 @@ async def serve_alpaca_dashboard():
     dashboard_path = os.path.join(os.path.dirname(__file__), "alpaca_dashboard.html")
     if not os.path.exists(dashboard_path):
         raise HTTPException(status_code=404, detail="Alpaca dashboard not found")
-    return FileResponse(dashboard_path, media_type="text/html")
+    return FileResponse(dashboard_path, media_type="text/html", headers=_NO_STORE)
 
 
 @app.get("/api/orchestrator/stats")

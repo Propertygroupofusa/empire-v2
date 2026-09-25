@@ -462,6 +462,44 @@
     }
     .unlock-btn:disabled { opacity: 0.5; cursor: default; transform: none; }
 
+    /* The maker-only switch decides whether the fleet can trade at all at the
+       current step, so it gets a card and a real button. It spent a day as a
+       dim one-line text link inside a grey paragraph and the account owner
+       looked for it twice without finding it. An action worth money should
+       not be styled like a footnote. */
+    .maker-only-card {
+        border: 2px solid #f59e0b;
+        background: rgba(245, 158, 11, 0.08);
+        border-radius: 10px;
+        padding: 14px 16px;
+        margin-bottom: 12px;
+        font-size: 0.86em;
+        line-height: 1.5;
+    }
+    .maker-only-card.on { border-color: #10b981; background: rgba(16, 185, 129, 0.08); }
+    .maker-only-card h4 { margin: 0 0 6px; font-size: 1.05em; }
+    .maker-only-card .why { color: var(--text-dim); margin: 0 0 10px; }
+    .maker-only-card .mo-math {
+        display: flex; gap: 14px; flex-wrap: wrap;
+        margin: 0 0 12px; font-variant-numeric: tabular-nums;
+    }
+    .maker-only-card .mo-math div { font-size: 0.95em; }
+    .maker-only-card .mo-math b { display: block; font-size: 1.15em; }
+    .mo-btn {
+        font-family: inherit; width: 100%; max-width: 420px;
+        background: linear-gradient(135deg, #f59e0b 0%, #ef4444 100%);
+        border: 2px solid #f59e0b; color: #fff;
+        padding: 12px 18px; border-radius: 8px; cursor: pointer;
+        font-size: 0.95em; font-weight: 700; min-height: 48px;
+        box-shadow: 0 4px 15px rgba(245, 158, 11, 0.35);
+        transition: all 0.25s ease;
+    }
+    .mo-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(245, 158, 11, 0.5); }
+    .mo-btn.restore {
+        background: linear-gradient(135deg, #64748b 0%, #475569 100%);
+        border-color: #64748b; box-shadow: none;
+    }
+
     .mode-toggle-btn {
         font-family: inherit;
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -903,7 +941,7 @@
     <div id="grid-governs-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
     <div id="grid-fee-rate-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-maker-orders-toggle" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
-    <div id="grid-maker-only-toggle" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
+    <div id="grid-maker-only-toggle" class="maker-only-card"></div>
     <div class="panel" id="grid-panel">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:8px;">
             <button id="grid-mode-toggle-btn" class="unlock-btn" onclick="toggleGridMode()" disabled>Loading…</button>
@@ -3154,22 +3192,34 @@ function renderGridMakerOnlyToggle(data) {
     const on = !!data.maker_only_active;
     const floor = data.fee_safe_min_grid_pct;
     const skipped = (data.maker_only_skipped_cycles || {}).total;
-    const floorTxt = floor != null
-        ? ` Smallest spacing that can clear costs right now: <strong>${(floor * 100).toFixed(2)}%</strong>` +
-          (data.floor_priced_against ? ` — priced against ${data.floor_priced_against}.` : '.')
-        : '';
-    const skipTxt = (on && skipped != null)
-        ? ` <strong>${skipped}</strong> cycle${skipped === 1 ? '' : 's'} passed rather than paying the market fee` +
-          ` since this was switched on — that is what this mode costs, and it is counted rather than assumed.`
-        : '';
+
+    // The two numbers that decide whether the fleet can trade: what a round
+    // trip really costs, and what the step earns. Shown side by side because
+    // the whole argument is that one is bigger than the other.
+    const takerCost = 2.17, makerCost = 1.37, step = 2.00;
+    const cost = on ? makerCost : takerCost;
+    const net = step - cost;
+
+    el.className = 'maker-only-card' + (on ? ' on' : '');
     el.innerHTML =
-        `${on ? '🎯' : '🛟'} Market fallback: <strong>${on ? 'REMOVED (limit fills only)' : 'ACTIVE (a missed limit order becomes a market order)'}</strong>.` +
-        floorTxt + skipTxt +
-        ` ${on
-            ? 'A buy that does not fill just does not happen this cycle, and a sell only ever waits on a slice already certified profitable — so nothing is lost, only deferred. Emergency "sell everything" still sells at market.'
-            : 'Keeping this on means every trade is guaranteed to complete, but the spacing floor must assume the market fee on both legs.'} ` +
-        `<a href="#" onclick="toggleGridMakerOnly(${!on});return false;" style="color:var(--accent)">` +
-        `${on ? 'Restore the market fallback' : 'Remove the market fallback'}</a>`;
+        `<h4>${on ? '🎯 Market fallback REMOVED — limit fills only' : '🛟 Market fallback is ACTIVE'}</h4>` +
+        `<p class="why">${on
+            ? 'A limit order that does not fill is cancelled and the cycle simply passes — there is no market order behind it. That is what lets the spacing floor price the cheaper limit fee honestly.'
+            : 'A limit order that does not fill becomes a market order, so every round trip must still be priced as if both legs paid the market fee. That is why the floor sits high and the current step cannot clear it.'}</p>` +
+        `<div class="mo-math">` +
+          `<div><b>${step.toFixed(2)}%</b>what the step earns</div>` +
+          `<div><b>${cost.toFixed(2)}%</b>what a round trip costs</div>` +
+          `<div><b style="color:${net >= 0 ? '#10b981' : '#ef4444'}">${net >= 0 ? '+' : ''}${net.toFixed(2)}%</b>${net >= 0 ? 'it clears' : 'it loses — so nothing trades'}</div>` +
+        `</div>` +
+        (floor != null
+            ? `<p class="why" style="margin-bottom:10px">Fee floor now <strong>${(floor * 100).toFixed(2)}%</strong>` +
+              (data.floor_priced_against ? ` — priced against ${data.floor_priced_against}.` : '.') +
+              (on && skipped != null
+                 ? ` <strong>${skipped}</strong> cycle${skipped === 1 ? '' : 's'} passed rather than pay the market fee — that is what this mode costs, counted rather than assumed.`
+                 : '') + `</p>`
+            : '') +
+        `<button class="mo-btn${on ? ' restore' : ''}" onclick="toggleGridMakerOnly(${!on})">` +
+        `${on ? 'Restore the market fallback' : 'Remove the market fallback — let the 2.00% step clear'}</button>`;
 }
 
 async function toggleGridMakerOnly(enable) {
