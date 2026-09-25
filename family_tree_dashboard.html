@@ -2632,8 +2632,10 @@ function renderGridRealizedTotalBanner(historyTotals, statusData) {
         ? `<div style="margin-top:10px; padding:9px 11px; border:1px solid #5a4420; background:#241b0d;
                    border-radius:6px; font-size:0.8em; color:#f0c97a;">
                ⚠️ Closed trades show +${fmtUsd(realized)} while the account is -${fmtUsd(Math.abs(combined))}
-               overall. A grid slice only sells above its own entry, so realized P&L cannot go negative —
-               the loss is sitting in open slices, not in the trade log.
+               overall. A NORMAL grid exit only sells above its own entry, so most of the gap
+               is sitting in open slices rather than in the trade log — but a FORCED close
+               (emergency exit, retirement, branch liquidation) ignores that rule and books a
+               real loss, so check the trade log too rather than assuming it is all unrealized.
            </div>`
         : '';
     return `<div style="margin-top:14px; padding:14px; background:var(--bg); border-radius:8px; border:1px solid var(--border);">
@@ -2648,7 +2650,8 @@ function renderGridRealizedTotalBanner(historyTotals, statusData) {
         </div>
         <div style="font-size:0.8em; color:var(--text-dim); margin-top:2px;">
             ${tradeCount} real completed trade${tradeCount === 1 ? '' : 's'} across every Grid Bot branch ever run ·
-            ${winRate.toFixed(0)}% win rate — winners by construction, since a slice cannot sell below its own entry
+            ${winRate.toFixed(0)}% win rate — high by design, since a NORMAL exit only sells above its own entry.
+            A forced close (emergency exit, retirement, liquidation) ignores that and can book a real loss.
         </div>
         ${gapWarning}
     </div>`;

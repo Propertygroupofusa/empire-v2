@@ -480,7 +480,7 @@ function renderMoney(trades){
     <div class="k">Realized P&amp;L, all time<small>the "taken" half of the total above — closed round trips only</small></div>
     <div class="v">${signed(d.total_realized_pnl)}</div>
     <div class="k">Round trips closed</div><div class="v">${d.total_trade_count ?? '—'}</div>
-    <div class="k">Win rate<small>winners by construction — a slice cannot sell below its own entry</small></div>
+    <div class="k">Win rate<small>high by design — a normal exit only sells above entry. A FORCED close ignores that rule and can book a loss.</small></div>
     <div class="v">${d.overall_win_rate == null ? '<span class="none">—</span>' : Number(d.overall_win_rate).toFixed(1)+'%'}</div>`;
 
   const coins = (d.coins || []).slice(0, 6);

@@ -7235,9 +7235,17 @@ def _live_ops_headline(trades_section, grid_section):
     as the half that survived. A page that silently renders realized under
     a "total" label the moment a price fetch times out is worse than one
     that admits it does not know, because it fails in the flattering
-    direction: realized is positive by construction (a grid slice only
-    sells above its own entry) while the total is the only one of the two
-    that can go down.
+    direction: realized is positive nearly all of the time (a NORMAL grid
+    exit only sells above its own entry) while the total is the one that
+    reflects open slices too.
+
+    "Nearly all", not "by construction" - that overstatement was corrected
+    on 2026-09-25 against this account's own trade log. Trade id 80 closed
+    DOGE at -$2.27 (entry 0.09112, exit 0.08964) in the 2026-09-09 forced
+    liquidation. A FORCED close - emergency exit, retirement, branch
+    liquidation - ignores the sell-above-entry rule entirely, so realized
+    P&L CAN go negative and the trade log must actually be read rather
+    than assumed clean.
     """
     import crypto_fleet_metrics as metrics
 

@@ -189,9 +189,15 @@ ok("the pipeline explains an all-rejected cycle as the gate working",
 ok("the page renders realized money", "renderMoney" in page and "total_realized_pnl" in page)
 
 # --- the headline is TOTAL, not realized ----------------------------------
-# Realized cannot go negative - a grid slice only sells above its own entry -
-# so it can never warn about anything. These checks pin the ordering so it
-# cannot quietly invert back.
+# Realized is positive nearly all of the time - a NORMAL grid exit only sells
+# above its own entry - while the total also reflects open slices. These
+# checks pin the ordering so it cannot quietly invert back.
+#
+# "Nearly all", not "by construction". That overstatement was corrected on
+# 2026-09-25 against this account's own trade log: id 80 closed DOGE at -$2.27
+# (entry 0.09112, exit 0.08964) in the 2026-09-09 forced liquidation. A forced
+# close ignores the sell-above-entry rule, so realized CAN go negative and an
+# empty losers column must never be presented as a guarantee.
 ok("the page has a headline block", "renderHeadline" in page and 'id="p-headline"' in page)
 ok("the headline is fed by its own server section", "d.headline" in page)
 ok("the headline is labelled as taken plus still open",
@@ -207,8 +213,12 @@ ok("the total is never backfilled from the realized half",
 ok("realized is captioned as a component of the total, not the headline",
    'the &quot;taken&quot; half of the total above' in page
    or 'the "taken" half of the total above' in page)
-ok("the win rate carries the by-construction caption",
-   "winners by construction" in page)
+ok("the win rate caption explains WHY it is high, without overclaiming",
+   "high by design" in page)
+ok("and warns that a FORCED close can still book a loss",
+   "FORCED close" in page and "can book a loss" in page)
+ok("no page claims wins are guaranteed by construction",
+   "winners by construction" not in page)
 ok("the gap warning is rendered when the server flags one", "d.warning" in page)
 ok("a negative dollar figure never renders as '$-'",
    "(n < 0 ? '-$' : '$')" in page)
