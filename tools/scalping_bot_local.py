@@ -416,12 +416,34 @@ def import_key(path=None):
     if not src.exists():
         print("  NOT FOUND. Pass the path:  python scalping_bot.py --import-key \"C:\\path\\to\\key.json\"")
         return 1
+    raw = src.read_text(encoding="utf-8-sig")    # -sig strips a BOM
+    # Coinbase's portal appends to this file, so downloading a key twice
+    # leaves TWO concatenated objects and json.loads fails with
+    # "Extra data". raw_decode walks them one at a time instead.
+    objects, dec, i = [], json.JSONDecoder(), 0
     try:
-        data = json.loads(src.read_text(encoding="utf-8-sig"))   # -sig strips a BOM
+        while i < len(raw):
+            while i < len(raw) and raw[i].isspace():
+                i += 1
+            if i >= len(raw):
+                break
+            obj, end = dec.raw_decode(raw, i)
+            objects.append(obj)
+            i = end
     except Exception as e:
         print(f"  Could not parse as JSON: {type(e).__name__}: {e}")
-        print(f"  First 40 characters: {src.read_text(encoding='utf-8-sig', errors='replace')[:40]!r}")
+        print(f"  First 40 characters: {raw[:40]!r}")
         return 1
+
+    if not objects:
+        print("  File contained no JSON objects.")
+        return 1
+    if len(objects) > 1:
+        print(f"  NOTE: file holds {len(objects)} keys. Using the LAST one "
+              f"(most recently created).")
+        print("        If it fails to authenticate, the earlier one may be the "
+              "active key - tell me and I will switch to it.")
+    data = objects[-1]
 
     print(f"  fields: {', '.join(data.keys())}")
     for k, v in data.items():
