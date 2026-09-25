@@ -50,7 +50,45 @@ ok("and above every conditional banner",
 
 # --- liveness is MEASURED, from the heartbeat ----------------------------
 ok("liveness comes from the heartbeat", "d.heartbeat" in page or "(d && d.heartbeat)" in page)
-strip = page[page.index("function renderStatusStrip"):page.index("async function loadGridStatus")]
+def _fn_source(src, name):
+    """Exactly one function's body, by brace matching.
+
+    This used to slice from "function renderStatusStrip" to the next
+    known marker ("async function loadGridStatus") and treat everything
+    between as the strip. That held only while nothing was ever defined
+    between those two points - so when four live-grid render functions
+    were added there, their legitimate use of total_realized_pnl was
+    attributed to the status strip and failed the check below. Match the
+    function's own braces instead of trusting what happens to sit after
+    it.
+    """
+    m = re.search(r"^(?:async )?function %s\s*\(" % re.escape(name), src, re.M)
+    assert m, f"{name} not found"
+    i = src.index("{", m.end() - 1)
+    depth, j, in_s, esc, q = 0, i, False, False, ""
+    while j < len(src):
+        c = src[j]
+        if in_s:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == q:
+                in_s = False
+        else:
+            if c in "\"'`":
+                in_s, q = True, c
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return src[i:j + 1]
+        j += 1
+    raise AssertionError(f"unbalanced braces in {name}")
+
+
+strip = _fn_source(page, "renderStatusStrip")
 ok("it renders a RUNNING state", "RUNNING" in strip)
 ok("it distinguishes STALLED from never-started", "STALLED" in strip and "NOT RUNNING" in strip)
 ok("a missing heartbeat says the loop never ran, not 'no data'",

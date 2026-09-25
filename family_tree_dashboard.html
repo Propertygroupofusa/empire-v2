@@ -41,6 +41,43 @@
 
     .container { max-width: 1280px; margin: 0 auto; }
 
+    /* A wide table scrolls inside its own box; the page body never does. */
+    .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; }
+
+    /* One branch's distance-to-trigger row. */
+    .prox-row {
+        display: grid;
+        grid-template-columns: 4.6em 1fr 8.6em;
+        gap: 10px;
+        align-items: center;
+        padding: 7px 0;
+        border-bottom: 1px solid var(--border);
+    }
+    .prox-coin { font-weight: 700; font-size: 0.9em; }
+    .prox-open { display: block; font-weight: 400; font-size: 0.72em; color: var(--text-dim); }
+    .prox-track { position: relative; height: 16px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; }
+    .prox-ends {
+        font-size: 0.68em; color: var(--text-dim);
+        display: flex; justify-content: space-between; gap: 8px;
+        margin-top: 2px; font-variant-numeric: tabular-nums;
+    }
+    .prox-next { text-align: right; font-variant-numeric: tabular-nums; }
+    .prox-dist { font-weight: 700; font-size: 0.95em; }
+    .prox-at { font-size: 0.7em; color: var(--text-dim); }
+    @media (max-width: 560px) {
+        /* Coin and distance share the top line, the bar spans underneath -
+           a sub-cent price like $0.000003597 cannot fit beside the bar. */
+        .prox-row {
+            grid-template-columns: 1fr auto;
+            gap: 2px 10px;
+            padding: 9px 0;
+        }
+        .prox-bar { grid-column: 1 / -1; }
+        .prox-next { grid-column: 2; grid-row: 1; }
+        .prox-coin { grid-column: 1; grid-row: 1; }
+        .prox-open { display: inline; margin-left: 6px; }
+    }
+
     .header {
         display: flex;
         justify-content: space-between;
@@ -936,32 +973,26 @@
         </div>
     </div>
 
+    <div class="section-title">📍 Where every branch sits right now</div>
+    <div class="panel">
+        <div class="panel-sub">The dot is where price is now. The bar is this branch's own grid band - one step below its reference on the left, one step above on the right, reference in the middle. It buys when the dot reaches the left mark and sells an open slice when it reaches the green one, so the shaded stretch is the distance still to travel. Closest to acting is listed first.</div>
+        <div id="grid-proximity-wrap"><div class="coin-history-empty">Loading…</div></div>
+    </div>
+
     <div class="two-col-grid">
         <div class="panel">
-            <div class="panel-title">Branch Ranking by Next-Spawn Progress</div>
-            <div class="panel-sub">Real per-branch % toward its own next spawn tier, closest first - re-sorts live as each branch's real percentage moves, not just its balance</div>
-            <div id="branches-bar" class="bar-list"></div>
+            <div class="panel-title">Realized P&amp;L by coin</div>
+            <div class="panel-sub">Every completed grid round trip, grouped by coin. Real closed money only - nothing unrealized, nothing projected.</div>
+            <div id="grid-pnl-by-coin"><div class="coin-history-empty">Loading…</div></div>
         </div>
         <div class="panel">
-            <div class="panel-title">Branch Sizes at a Glance</div>
-            <div class="panel-sub">Same numbers as the ranking, area-proportional instead of length-proportional</div>
-            <div id="branches-treemap" class="treemap" style="height:220px;"></div>
+            <div class="panel-title">Realized P&amp;L, cumulative</div>
+            <div class="panel-sub">The running total of closed grid profit, trade by trade, oldest to newest.</div>
+            <div id="grid-pnl-curve"><div class="coin-history-empty">Loading…</div></div>
         </div>
     </div>
 
-    <div class="section-title" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
-        <span id="tree-section-title">🌳 Family Tree</span>
-        <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
-            <label style="display:flex; align-items:center; gap:6px; font-size:0.78em; font-weight:400; color:var(--text-dim); cursor:pointer;">
-                <input type="checkbox" id="hide-empty-branches-toggle" onchange="onHideEmptyBranchesToggle()">
-                🙈 Hide empty branches
-            </label>
-            <button id="spawn-branch-btn" class="sell-btn" style="width:auto; margin-top:0;" onclick="spawnBranch(this)" disabled title="Checking real free cash...">🌱 Start new $50 branch</button>
-        </div>
-    </div>
-    <div id="tree-section-note" style="font-size:0.8em; color:var(--text-dim); margin:-4px 0 10px; line-height:1.45;"></div>
-    <div id="hide-empty-branches-note" style="font-size:0.78em; color:var(--text-dim); margin:-4px 0 10px;"></div>
-    <div class="tree-canvas"><div class="tree-canvas-inner" id="tree"></div></div>
+    <div id="retired-tree-note"></div>
 
     <div class="section-title" style="display:flex; justify-content:space-between; align-items:center;">
         <span>📡 Live Activity</span>
@@ -972,46 +1003,15 @@
         <div id="activity-feed-wrap"><div class="coin-history-empty">Loading…</div></div>
     </div>
 
-    <div class="section-title" style="display:flex; justify-content:space-between; align-items:center;">
-        <span>📈 BTC Live Ticker</span>
-        <span id="btc-ticker-live-dot" style="width:9px; height:9px; border-radius:50%; background:var(--green); box-shadow:0 0 0 rgba(16,185,129,0.5); animation:activity-pulse 2s infinite;"></span>
-    </div>
+    <div class="section-title">📜 Grid Trade History <span style="font-size:0.62em; font-weight:600; color:var(--green); background:var(--green-bg); padding:2px 8px; border-radius:99px; vertical-align:middle;">LIVE</span></div>
     <div class="panel">
-        <div class="panel-sub">Real live BTC price and a countdown to the current 15-minute window's close - purely a display, same as the panel below. Refreshes every 10s.</div>
-        <div id="btc-ticker-wrap"><div class="coin-history-empty">Loading…</div></div>
+        <div class="panel-sub">Every completed round trip the <strong>live grid</strong> has closed - one row per coin, tap a coin for its individual trades. This is the ledger the numbers at the top of this page are built from.</div>
+        <div id="grid-history-wrap"><div class="coin-history-empty">Loading…</div></div>
     </div>
 
-    <div class="section-title" style="display:flex; justify-content:space-between; align-items:center;">
-        <span>🔮 BTC — Next 15 Minutes</span>
-        <button id="btc-projection-backtest-btn" class="unlock-btn" style="margin-top:0;" onclick="runBtcProjectionBacktest()">▶ Run accuracy check</button>
-    </div>
+    <div class="section-title">🗃️ Retired family tree <span style="font-size:0.62em; font-weight:600; color:var(--text-dim); background:var(--bg); border:1px solid var(--border); padding:2px 8px; border-radius:99px; vertical-align:middle;">CLOSED BOOK</span></div>
     <div class="panel">
-        <div class="panel-sub">A real, honest range based on how much BTC has actually been moving in the last hour - not a guess at an exact number. No honest system can predict the exact price; this shows the most likely price plus a real range, and how often that range has actually been right. Purely informational - never feeds into any trade. Updates every 30s.</div>
-        <div id="btc-projection-wrap"><div class="coin-history-empty">Loading…</div></div>
-        <div style="margin-top:16px; padding-top:14px; border-top:1px solid var(--border);">
-            <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:8px; flex-wrap:wrap; gap:6px;">
-                <div style="font-weight:700; color:var(--navy); font-size:0.9em;">Recent Predictions - did it actually hit?</div>
-                <div style="display:flex; align-items:baseline; gap:10px;">
-                    <div id="btc-pred-hitrate" style="font-size:0.8em; color:var(--text-dim);"></div>
-                    <button id="btc-pred-log-clear-btn" class="unlock-btn" style="margin-top:0; font-size:0.75em; padding:3px 10px;" onclick="clearBtcPredictionLog()">🗑️ Clear log</button>
-                </div>
-            </div>
-            <div id="btc-pred-log-wrap"><div class="coin-history-empty">Loading…</div></div>
-        </div>
-    </div>
-
-    <div class="section-title" style="display:flex; justify-content:space-between; align-items:center;">
-        <span>🧭 BTC Direction Signal Test</span>
-        <button id="btc-directional-backtest-btn" class="unlock-btn" style="margin-top:0;" onclick="runBtcDirectionalBacktest()">▶ Run signal test</button>
-    </div>
-    <div class="panel">
-        <div class="panel-sub">Shadow-mode only - never places a trade or feeds any bet. Real, honest test of whether a few simple signals (recent momentum, RSI mean-reversion, whether the prior window went up or down) actually predict BTC's real 15-minute DIRECTION better than a real 50/50 coin flip, on real historical Coinbase candles. A signal at or near 50% has no real edge, whatever it looks like on a single live window.</div>
-        <div id="btc-directional-wrap"><div class="coin-history-empty">Not yet run - tap "Run signal test" above.</div></div>
-    </div>
-
-    <div class="section-title">📜 Coin Trade History</div>
-    <div class="panel">
-        <div class="panel-sub">Real trade count and P&amp;L per coin, tracked across every branch and every time it's been bought and sold - buying a coin back after selling it picks up right where its history left off. Tap a coin to see its individual trades.</div>
+        <div class="panel-sub" id="retired-ledger-sub">A different system, no longer running. Kept because it is real history and it is why the grid is built the way it is - not because it is still trading. Nothing here is counted in any number above.</div>
         <div id="coin-history-wrap"><div class="coin-history-empty">Loading…</div></div>
     </div>
 </div>
@@ -1220,6 +1220,36 @@ function fmtUsd(n) {
     return '$' + display.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+// A COIN PRICE, not a dollar balance: keep enough significant digits
+// that a trigger level is actually readable at any scale the fleet
+// trades, from BTC at $83,966.54 to BONK at $0.00000368. fmtUsd is a
+// BALANCE formatter - always 2dp, which is right for dollars in a wallet
+// and wrong for a price. Drawing the proximity panel with it printed
+// BONK's real trigger as "$0.00", so four of the eight branches showed
+// "buy $0.00 / now $0.00" - a panel about precise trigger levels,
+// displaying none of them.
+function fmtCoinPrice(n) {
+    const num = Number(n);
+    if (!isFinite(num)) return '\u2014';
+    const a = Math.abs(num);
+    let dp;
+    if (a >= 1) dp = 2;
+    else if (a >= 0.01) dp = 4;
+    else if (a > 0) {
+        // Roughly four significant digits past the leading zeros, capped
+        // so a dust-priced coin cannot run off a phone screen.
+        dp = Math.min(10, Math.ceil(-Math.log10(a)) + 3);
+    } else dp = 2;
+    return '$' + num.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
+}
+
+// Signed money where the sign must read as a sign, not as part of the
+// number: "-$1.14", never "$-1.14".
+function fmtSignedUsd(n) {
+    const num = Number(n) || 0;
+    return (num < 0 ? '-' : '') + fmtUsd(Math.abs(num));
+}
+
 function spawnPctColor(pct) {
     // Interpolates from gold (low progress) to green (near/at 100%),
     // so a branch closing in on its next spawn stands out at a glance.
@@ -1228,33 +1258,6 @@ function spawnPctColor(pct) {
     const t = Math.max(0, Math.min(1, pct / 100));
     const rgb = gold.map((v, i) => Math.round(v + (green[i] - v) * t));
     return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
-}
-
-function renderBarList(containerId, items) {
-    const el = document.getElementById(containerId);
-    if (!items.length) { el.innerHTML = '<div class="empty">No branches yet</div>'; return; }
-    // When every item carries a real spawnPct (the "Next spawn" progress
-    // toward each branch's own next tier), rank and fill by THAT instead
-    // of raw dollar balance - per the account owner's explicit request,
-    // so the list re-sorts live on every refresh as a branch's own real
-    // percentage moves, not just when its dollar balance does. Falls back
-    // to dollar-value ranking (the original behavior) when spawnPct isn't
-    // provided, e.g. a future caller with no percentage of its own.
-    const byPct = items.every(i => i.spawnPct != null);
-    const max = Math.max(1, ...items.map(i => i.value));
-    const sorted = items.slice().sort((a, b) => byPct ? (b.spawnPct - a.spawnPct) : (b.value - a.value));
-    el.innerHTML = sorted.map(i => {
-        const spawnPct = i.spawnPct != null ? Math.round(Math.max(0, Math.min(100, i.spawnPct))) : null;
-        const pct = byPct ? Math.max(0, Math.min(100, i.spawnPct)) : (i.value / max) * 100;
-        const spawnBadge = spawnPct != null
-            ? `<span class="bar-spawn-pct" style="color:${spawnPctColor(spawnPct)}">${spawnPct}%</span>`
-            : '';
-        return `<div class="bar-row">
-            <span class="bar-label">${i.label}</span>
-            <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div>${spawnBadge}</div>
-            <span class="bar-value">${fmtUsd(i.value)}</span>
-        </div>`;
-    }).join('');
 }
 
 // Classic squarified treemap layout (Bruls/Huizing/van Wijk), area
@@ -1289,21 +1292,6 @@ function squarify(items, x, y, w, h, out) {
         squarify(group1, x, y, w, h1, out);
         squarify(group2, x, y + h1, w, h - h1, out);
     }
-}
-
-function renderTreemap(containerId, items) {
-    const el = document.getElementById(containerId);
-    const W = el.clientWidth || 500, H = el.clientHeight || 220;
-    const sorted = items.filter(i => i.value > 0).sort((a, b) => b.value - a.value);
-    if (!sorted.length) { el.innerHTML = '<div class="empty">No branches yet</div>'; return; }
-
-    const cells = [];
-    squarify(sorted, 0, 0, W, H, cells);
-    el.innerHTML = cells.map((c, i) => `
-        <div class="treemap-cell" style="left:${c.x}px; top:${c.y}px; width:${c.w}px; height:${c.h}px; background:${TREEMAP_COLORS[i % TREEMAP_COLORS.length]};">
-            <div class="tm-label">${c.item.label}</div>
-            <div class="tm-value">${fmtUsd(c.item.value)}</div>
-        </div>`).join('');
 }
 
 function renderNarrative(data) {
@@ -1695,53 +1683,6 @@ async function rootWithdrawAll(btn, currentBalanceUsd) {
     } finally {
         btn.disabled = false;
         btn.textContent = originalText;
-    }
-}
-
-// Real spendable-for-a-new-branch figure comes from /family-tree-status
-// (spendable_for_spawn / seed_usd / can_spawn) - only FLAT branches'
-// allocated_usd is subtracted from the real cash balance there, since a
-// branch holding an open position has already deployed its money into
-// crypto and isn't sitting in that cash figure. Grey the button out
-// proactively on every 15s refresh instead of letting it be clicked and
-// fail every time there isn't actually enough real free money.
-function updateSpawnButtonState(data) {
-    const btn = document.getElementById('spawn-branch-btn');
-    if (!btn) return;
-    const spendable = data.spendable_for_spawn;
-    const seedUsd = data.seed_usd;
-    if (spendable == null || seedUsd == null) {
-        btn.disabled = true;
-        btn.title = 'Could not confirm real free cash - try refreshing';
-        return;
-    }
-    if (data.can_spawn) {
-        btn.disabled = false;
-        btn.title = `${fmtUsd(spendable)} real free cash available`;
-    } else {
-        btn.disabled = true;
-        btn.title = `Not enough real free cash yet - only ${fmtUsd(spendable)} free, need ${fmtUsd(seedUsd)}`;
-    }
-}
-
-async function spawnBranch(btn) {
-    if (!confirm('Start a brand-new $50 branch right now, on demand? This is funded from real currently-unallocated cash only (never taken from an existing branch), and places a real trade once it buys in.')) return;
-    const originalText = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = 'Starting…';
-    try {
-        const res = await fetch(API_BASE + '/family-tree-status/spawn-branch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
-        alert(`New branch started: ${data.bot_name} on ${data.product_id}, seeded with ${fmtUsd(data.seed_usd)}. It'll appear in the tree within about 20 seconds once its thread starts.`);
-    } catch (e) {
-        alert('Could not start a new branch: ' + e.message);
-    } finally {
-        btn.textContent = originalText;
-        await refresh();
     }
 }
 
@@ -2312,8 +2253,33 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
     }
     tradeHistoryByBot = tradeHistoryByBot || {};
     tradeHistoryByBotCoin = tradeHistoryByBotCoin || {};
+
+    // The legend under this table used to hardcode "up-to-10 concurrent
+    // real positions", "its own 1% dip" and "a 1% bounce". None of the
+    // three was true: the fleet runs 3 levels at a 2.00% step above a
+    // 1.70% fee floor, and the step moves per coin whenever the tuner
+    // measures a better one. Derive both phrases from the live rows so
+    // the paragraph can never again describe a fleet that isn't there.
+    const stepValues = branches.map(b => b.grid_pct).filter(v => v != null);
+    const loStep = stepValues.length ? Math.min(...stepValues) : null;
+    const hiStep = stepValues.length ? Math.max(...stepValues) : null;
+    const stepPhrase = loStep == null
+        ? 'own'
+        : (loStep === hiStep
+            ? `${(loStep * 100).toFixed(2)}%`
+            : `${(loStep * 100).toFixed(2)}%\u2013${(hiStep * 100).toFixed(2)}%`);
+    const levelValues = branches.map(b => b.num_levels).filter(v => v != null);
+    const loLevels = levelValues.length ? Math.min(...levelValues) : null;
+    const hiLevels = levelValues.length ? Math.max(...levelValues) : null;
+    const levelsPhrase = loLevels == null
+        ? 'concurrent real positions'
+        : (loLevels === hiLevels
+            ? `up-to-${loLevels} concurrent real position${loLevels === 1 ? '' : 's'}`
+            : `up-to-${loLevels}\u2013${hiLevels} concurrent real positions`);
+
     content.innerHTML = `
-        <table style="width:100%; border-collapse:collapse; font-size:0.9em;">
+        <div class="table-scroll">
+        <table style="width:100%; min-width:620px; border-collapse:collapse; font-size:0.9em;">
             <thead><tr style="text-align:left; border-bottom:1px solid var(--border);">
                 <th style="padding:6px 8px;">Branch</th><th style="padding:6px 8px;">Coin</th>
                 <th style="padding:6px 8px;">Allocated</th><th style="padding:6px 8px;">Open slices</th>
@@ -2427,10 +2393,12 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
                 }).join('')}
             </tbody>
         </table>
+        </div>
         <p style="margin-top:10px; font-size:0.76em; color:var(--text-dim); line-height:1.5;">
-            "Open slices" is how many of this branch's up-to-10 concurrent real positions are currently open (each buys on
-            its own 1% dip, sells FIFO on a 1% bounce) - "ref" is the real reference price the next buy/sell is measured
-            against. Pausing a branch releases its coin so a new branch can claim it, but never force-closes a real open
+            "Open slices" is how many of this branch's ${levelsPhrase} are currently open (each buys on its own
+            ${stepPhrase} dip and sells FIFO on a ${stepPhrase} bounce) - "ref" is the real reference price the next
+            buy/sell is measured against. Those numbers are read live off the branches above, not written into this
+            paragraph, so they cannot drift away from what the fleet is actually doing. Pausing a branch releases its coin so a new branch can claim it, but never force-closes a real open
             slice - it just sits until price naturally reaches it, or you pause/resume again later. The chart below each
             branch shows real slice entries against the live price - a slice colored red is currently sitting at a real
             unrealized loss right now. Real fix, live: the bot never force-sells a slice at a real loss just because
@@ -2438,8 +2406,8 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
             genuinely profitable right now (marked "next to sell"), skipping any older, still-underwater slice, which
             stays open until it recovers on its own. If nothing open is profitable yet, nothing sells this cycle - no
             "next to sell" badge shows at all. A "📐 self-tuned" badge means this branch's own spacing has been
-            automatically nudged wider after a genuinely rough recent stretch (or eased back toward the validated
-            1.5x default after a strong one) - checked once an hour, per-branch, off that branch's own real closed
+            automatically nudged wider after a genuinely rough recent stretch (or eased back toward its validated
+            default after a strong one) - checked once an hour, per-branch, off that branch's own real closed
             trades only, never a backtest guess. It can only ever get MORE cautious than the validated default, and
             self-corrects back down the moment that branch's own results improve.
         </p>
@@ -2916,7 +2884,7 @@ function renderGridBranchChart(b) {
             <polygon points="${x(price) - 5},2 ${x(price) + 5},2 ${x(price)},9" fill="var(--navy)"/>
             ${sliceMarkers}
         </svg>
-        ${slices.length === 0 ? '<div style="font-size:0.78em; color:var(--text-dim); margin-top:4px;">No open slices yet - waiting for a real 1% dip below the reference price.</div>' : netSummary}`;
+        ${slices.length === 0 ? `<div style="font-size:0.78em; color:var(--text-dim); margin-top:4px;">No open slices yet - waiting for a real ${b.grid_pct != null ? (b.grid_pct * 100).toFixed(2) + '%' : ''} dip below the reference price.</div>` : netSummary}`;
 }
 
 // Real, opt-in fee-tier-aware dynamic grid spacing toggle - per the
@@ -3205,6 +3173,372 @@ function renderStatusStrip(d, history) {
     }
 }
 
+
+// ─────────────────────────────────────────────────────────────────────
+// WHAT IS ACTUALLY HAPPENING RIGHT NOW
+//
+// These four panels replaced the tree-era ones ("Branch Ranking by
+// Next-Spawn Progress", "Branch Sizes at a Glance") which ranked a tree
+// that holds $0.00 and whose loop is not running, and the three BTC
+// panels that each described themselves as never feeding a trade.
+//
+// Everything below is drawn from the two payloads loadGridStatus()
+// already fetches - /grid-status and /grid-status/trade-history - so a
+// number on screen cannot drift away from the number the fleet trades
+// on. Nothing here is a control; a wrong click cannot move money.
+// ─────────────────────────────────────────────────────────────────────
+
+// How far each branch is from doing something. A grid branch does
+// exactly two things: buy when price falls a step below its reference,
+// and sell the oldest net-profitable slice a step above. So "how far
+// from the nearest of those two" is the single most honest live answer
+// to "what is it doing?" - and it is the question the old tree panels
+// never answered.
+function renderGridProximity(d) {
+    const wrap = document.getElementById('grid-proximity-wrap');
+    if (!wrap) return;
+    try {
+        const branches = (d.branches || []).filter(b => b.current_price != null && b.reference_price);
+        if (branches.length === 0) {
+            wrap.innerHTML = '<div class="coin-history-empty">No live branch prices right now - this fills in on the next refresh.</div>';
+            return;
+        }
+
+        const rows = branches.map(b => {
+            const g = b.grid_pct;
+            const ref = b.reference_price;
+            const cur = b.current_price;
+            const buyAt = ref * (1 - g);
+            const bandTop = ref * (1 + g);
+            // How much price must MOVE from here, as a percentage of
+            // price now - not of the reference, which would quietly
+            // report a different number than the one a trader reads off
+            // a chart.
+            const buyMovePct = (cur - buyAt) / cur * 100;      // must fall this far
+            const slices = (b.slices || []).slice().sort((x, y) =>
+                new Date(x.opened_at || 0) - new Date(y.opened_at || 0));
+            const oldest = slices.length ? slices[0] : null;
+            const sellAt = oldest ? oldest.entry_price * (1 + g) : null;
+            const sellMovePct = sellAt != null ? (sellAt - cur) / cur * 100 : null;  // must rise this far
+
+            // The nearer of the two is what this branch will actually do
+            // next. A sell that is already in the money shows as 0.
+            const buyDist = Math.max(0, buyMovePct);
+            const sellDist = sellMovePct == null ? null : Math.max(0, sellMovePct);
+            let nextAction, nextDist, nextColor, nextAt;
+            if (sellDist != null && sellDist <= buyDist) {
+                nextAction = 'sell'; nextDist = sellDist; nextColor = 'var(--green)'; nextAt = sellAt;
+            } else {
+                nextAction = 'buy'; nextDist = buyDist; nextColor = 'var(--navy)'; nextAt = buyAt;
+            }
+
+            const pos = Math.max(0, Math.min(1, (cur - buyAt) / (bandTop - buyAt)));
+            return { b, g, ref, cur, buyAt, bandTop, sellAt, pos,
+                     nextAction, nextDist, nextColor, nextAt,
+                     openSlices: slices.length };
+        });
+
+        // Closest to acting, first. This is the running order of what is
+        // about to happen, which is the whole point of the panel.
+        rows.sort((a, z) => a.nextDist - z.nextDist);
+
+        const bar = r => {
+            const coin = r.b.product_id.replace('-USD', '');
+            const pct = (r.pos * 100).toFixed(1);
+            // The stretch price still has to travel before this branch
+            // acts, shaded in the colour of the action it is heading for.
+            // The bar then reads as a distance, not just two endpoints.
+            const targetPos = r.nextAction === 'sell' && r.sellAt != null
+                ? Math.max(0, Math.min(1, (r.sellAt - r.buyAt) / (r.bandTop - r.buyAt)))
+                : 0;
+            const lo = Math.min(r.pos, targetPos) * 100;
+            const hi = Math.max(r.pos, targetPos) * 100;
+            const gapFill = (hi - lo) > 0.4
+                ? `<div style="position:absolute; left:${lo.toFixed(2)}%; width:${(hi - lo).toFixed(2)}%; top:1px; bottom:1px; background:${r.nextColor}; opacity:0.13;"></div>`
+                : '';
+            const arrow = r.nextAction === 'sell' ? '↑' : '↓';
+            const verb = r.nextAction === 'sell' ? 'sells' : 'buys';
+            return `
+            <div class="prox-row">
+                <div class="prox-coin">${coin}${r.openSlices ? `<span class="prox-open">${r.openSlices} open</span>` : ''}</div>
+                <div class="prox-bar">
+                    <div class="prox-track">
+                        ${gapFill}
+                        <div title="Buy trigger ${fmtCoinPrice(r.buyAt)}" style="position:absolute; left:0; top:0; bottom:0; width:2px; background:var(--navy); border-radius:4px 0 0 4px;"></div>
+                        <div title="Reference ${fmtCoinPrice(r.ref)}" style="position:absolute; left:50%; top:2px; bottom:2px; width:1px; background:var(--text-dim); opacity:0.55;"></div>
+                        ${r.sellAt != null && r.sellAt >= r.buyAt && r.sellAt <= r.bandTop
+                            ? `<div title="Sell trigger ${fmtCoinPrice(r.sellAt)}" style="position:absolute; left:${((r.sellAt - r.buyAt) / (r.bandTop - r.buyAt) * 100).toFixed(2)}%; top:0; bottom:0; width:2px; background:var(--green);"></div>`
+                            : ''}
+                        <div title="Price now ${fmtCoinPrice(r.cur)}" style="position:absolute; left:${pct}%; top:50%; width:10px; height:10px; margin-left:-5px; margin-top:-5px; background:var(--text); border-radius:50%; box-shadow:0 0 0 2px var(--panel);"></div>
+                    </div>
+                    <div class="prox-ends">
+                        <span>buy ${fmtCoinPrice(r.buyAt)}</span>
+                        <span>now ${fmtCoinPrice(r.cur)}</span>
+                    </div>
+                </div>
+                <div class="prox-next">
+                    <div class="prox-dist" style="color:${r.nextColor};">${arrow} ${r.nextDist.toFixed(2)}%</div>
+                    <div class="prox-at">${verb} at ${fmtCoinPrice(r.nextAt)}</div>
+                </div>
+            </div>`;
+        };
+
+        const closest = rows[0];
+        const legend = `
+            <div style="display:flex; gap:16px; flex-wrap:wrap; font-size:0.72em; color:var(--text-dim); margin-bottom:8px;">
+                <span><span style="display:inline-block; width:10px; height:3px; background:var(--navy); vertical-align:middle;"></span> buy trigger</span>
+                <span><span style="display:inline-block; width:10px; height:3px; background:var(--green); vertical-align:middle;"></span> sell trigger (open slice)</span>
+                <span><span style="display:inline-block; width:10px; height:3px; background:var(--text-dim); opacity:0.55; vertical-align:middle;"></span> reference</span>
+                <span style="font-weight:600; color:var(--text);">Nearest: ${closest.b.product_id.replace('-USD', '')} needs ${closest.nextDist.toFixed(2)}% to ${closest.nextAction}</span>
+            </div>`;
+        wrap.innerHTML = legend + rows.map(bar).join('');
+    } catch (e) {
+        wrap.innerHTML = `<div class="coin-history-empty">Could not draw branch proximity (${e.message}).</div>`;
+    }
+}
+
+// Realized P&L per coin, live grid only. Diverging from a real zero
+// baseline in the middle, so a losing coin reads as a bar going the
+// other way rather than a shorter green one.
+function renderGridPnlByCoin(history) {
+    const wrap = document.getElementById('grid-pnl-by-coin');
+    if (!wrap) return;
+    try {
+        const coins = (history.coins || []).slice();
+        if (coins.length === 0) {
+            wrap.innerHTML = '<div class="coin-history-empty">No completed grid round trips yet.</div>';
+            return;
+        }
+        coins.sort((a, b) => b.total_pnl - a.total_pnl);
+        const wins = coins.filter(c => c.total_pnl > 0).length;
+        const losses = coins.filter(c => c.total_pnl < 0).length;
+
+        // Only spend half the width on a zero baseline in the middle when
+        // there is actually something on both sides of it. With every coin
+        // green - which is the current state - a diverging layout throws
+        // away the entire left half of the panel and squeezes the real
+        // values into the right. Anchor left instead, and switch to the
+        // diverging form the moment a coin goes red.
+        const diverging = losses > 0 && wins > 0;
+        const span = Math.max(...coins.map(c => Math.abs(c.total_pnl)), 0.01);
+
+        const row = c => {
+            const pos = c.total_pnl >= 0;
+            const colour = pos ? 'var(--green)' : 'var(--red)';
+            const frac = Math.abs(c.total_pnl) / span;
+            const mark = diverging
+                ? `<div style="position:absolute; left:50%; top:0; bottom:0; width:1px; background:var(--border);"></div>
+                   <div style="position:absolute; top:1px; bottom:1px; ${pos ? `left:50%; width:${(frac * 50).toFixed(2)}%; border-radius:0 4px 4px 0;` : `right:50%; width:${(frac * 50).toFixed(2)}%; border-radius:4px 0 0 4px;`} background:${colour};"></div>`
+                : `<div style="position:absolute; left:0; top:1px; bottom:1px; width:${Math.max(frac * 100, 1.2).toFixed(2)}%; border-radius:0 4px 4px 0; background:${colour};"></div>`;
+            return `
+            <div style="display:grid; grid-template-columns:5.2em 1fr 5.6em; gap:9px; align-items:center; padding:6px 0; border-bottom:1px solid var(--border);">
+                <div>
+                    <div style="font-size:0.86em; font-weight:700; line-height:1.2;">${c.product_id.replace('-USD', '')}</div>
+                    <div style="font-size:0.66em; color:var(--text-dim); font-variant-numeric:tabular-nums;">${c.trade_count} trade${c.trade_count === 1 ? '' : 's'} \u00b7 ${c.win_rate.toFixed(0)}%</div>
+                </div>
+                <div style="position:relative; height:13px;">${mark}</div>
+                <div style="text-align:right; font-size:0.82em; font-variant-numeric:tabular-nums; color:${colour}; font-weight:700;">${pos ? '+' : '-'}${fmtUsd(Math.abs(c.total_pnl))}</div>
+            </div>`;
+        };
+
+        wrap.innerHTML =
+            `<div style="font-size:0.72em; margin-bottom:6px;">`
+            + `<span style="color:var(--green); font-weight:700;">${wins} coin${wins === 1 ? '' : 's'} up</span>`
+            + `<span style="color:var(--text-dim);"> \u00b7 </span>`
+            + `<span style="color:${losses ? 'var(--red)' : 'var(--text-dim)'}; font-weight:700;">${losses} down</span>`
+            + (diverging ? '' : `<span style="color:var(--text-dim);"> \u00b7 bars start at $0 on the left</span>`)
+            + `</div>`
+            + coins.map(row).join('');
+    } catch (e) {
+        wrap.innerHTML = `<div class="coin-history-empty">Could not draw P&L by coin (${e.message}).</div>`;
+    }
+}
+
+// The running total of closed grid profit, trade by trade. Drawn from
+// recent_trades (the API returns the newest 50), so the curve is
+// deliberately started at the real total MINUS the trades shown - which
+// makes its right-hand end land exactly on the headline realized
+// figure, instead of on a number that only matches the window.
+function renderGridPnlCurve(history) {
+    const wrap = document.getElementById('grid-pnl-curve');
+    if (!wrap) return;
+    try {
+        const trades = (history.recent_trades || []).slice()
+            .filter(t => t.closed_at && t.pnl != null)
+            .sort((a, b) => new Date(a.closed_at) - new Date(b.closed_at));
+        if (trades.length < 2) {
+            wrap.innerHTML = '<div class="coin-history-empty">Not enough completed grid round trips to draw a curve yet.</div>';
+            return;
+        }
+        const shownSum = trades.reduce((s, t) => s + t.pnl, 0);
+        const total = history.total_realized_pnl != null ? history.total_realized_pnl : shownSum;
+        const startAt = total - shownSum;
+
+        let running = startAt;
+        const pts = [{ x: 0, y: running, t: null }];
+        trades.forEach((t, i) => {
+            running += t.pnl;
+            pts.push({ x: i + 1, y: running, t: t });
+        });
+
+        const W = 320, H = 150, padL = 40, padR = 10, padT = 10, padB = 20;
+        const ys = pts.map(p => p.y);
+        let lo = Math.min(...ys, 0), hi = Math.max(...ys, 0);
+        if (hi === lo) { hi = lo + 1; }
+        const pad = (hi - lo) * 0.1;
+        lo -= pad; hi += pad;
+        const X = i => padL + (i / (pts.length - 1)) * (W - padL - padR);
+        const Y = v => padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB);
+
+        const line = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${X(i).toFixed(1)},${Y(p.y).toFixed(1)}`).join(' ');
+        const area = line + ` L${X(pts.length - 1).toFixed(1)},${Y(Math.max(lo, 0)).toFixed(1)} L${X(0).toFixed(1)},${Y(Math.max(lo, 0)).toFixed(1)} Z`;
+        const endUp = pts[pts.length - 1].y >= pts[0].y;
+        const stroke = endUp ? 'var(--green)' : 'var(--red)';
+        const zeroY = (0 >= lo && 0 <= hi) ? Y(0) : null;
+
+        const first = trades[0].closed_at ? new Date(trades[0].closed_at).toLocaleDateString() : '';
+        const last = trades[trades.length - 1].closed_at ? new Date(trades[trades.length - 1].closed_at).toLocaleDateString() : '';
+
+        wrap.innerHTML = `
+            <svg viewBox="0 0 ${W} ${H}" style="width:100%; height:auto; max-width:100%; display:block;" role="img" aria-label="Cumulative realized grid profit">
+                ${zeroY != null ? `<line x1="${padL}" y1="${zeroY.toFixed(1)}" x2="${W - padR}" y2="${zeroY.toFixed(1)}" stroke="var(--border)" stroke-width="1"/>` : ''}
+                <path d="${area}" fill="${stroke}" opacity="0.10"/>
+                <path d="${line}" fill="none" stroke="${stroke}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+                <circle cx="${X(pts.length - 1).toFixed(1)}" cy="${Y(pts[pts.length - 1].y).toFixed(1)}" r="3.5" fill="${stroke}" stroke="var(--panel)" stroke-width="2"/>
+                <text x="${padL - 5}" y="${Y(hi - pad).toFixed(1)}" text-anchor="end" font-size="9" fill="var(--text-dim)">${fmtSignedUsd(hi - pad)}</text>
+                <text x="${padL - 5}" y="${Y(lo + pad).toFixed(1)}" text-anchor="end" font-size="9" fill="var(--text-dim)">${fmtSignedUsd(lo + pad)}</text>
+                <text x="${padL}" y="${H - 5}" font-size="9" fill="var(--text-dim)">${first}</text>
+                <text x="${W - padR}" y="${H - 5}" text-anchor="end" font-size="9" fill="var(--text-dim)">${last}</text>
+            </svg>
+            <div style="font-size:0.72em; color:var(--text-dim); margin-top:4px; font-variant-numeric:tabular-nums;">
+                Last ${trades.length} closed round trip${trades.length === 1 ? '' : 's'}, ending at
+                <strong style="color:${endUp ? 'var(--green)' : 'var(--red)'};">${total >= 0 ? '+' : '-'}${fmtUsd(Math.abs(total))}</strong>
+                all-time realized.
+            </div>`;
+    } catch (e) {
+        wrap.innerHTML = `<div class="coin-history-empty">Could not draw the P&L curve (${e.message}).</div>`;
+    }
+}
+
+// The LIVE grid's own per-coin ledger. Structurally the same table as
+// the retired tree's below it, deliberately - the difference between
+// them is which system's money it is, and that is now said out loud in
+// the section heading rather than left for the reader to infer from two
+// contradicting totals.
+function renderGridTradeHistory(history) {
+    const wrap = document.getElementById('grid-history-wrap');
+    if (!wrap) return;
+    try {
+        const coins = (history.coins || []).slice();
+        if (coins.length === 0) {
+            wrap.innerHTML = '<div class="coin-history-empty">No completed grid round trips yet - this fills in as branches sell.</div>';
+            return;
+        }
+        coins.sort((a, b) => b.total_pnl - a.total_pnl);
+        const byCoin = {};
+        (history.recent_trades || []).forEach(t => {
+            (byCoin[t.product_id] = byCoin[t.product_id] || []).push(t);
+        });
+
+        const rows = coins.map((c, i) => {
+            const pnlClass = c.total_pnl >= 0 ? 'pos' : 'neg';
+            const avg = c.avg_pnl != null ? c.avg_pnl : (c.total_pnl / (c.trade_count || 1));
+            const avgClass = avg >= 0 ? 'pos' : 'neg';
+            const trades = (byCoin[c.product_id] || []).slice()
+                .sort((a, b) => new Date(b.closed_at || 0) - new Date(a.closed_at || 0));
+            const tradeRows = trades.map(t => {
+                const tClass = t.pnl >= 0 ? 'pos' : 'neg';
+                const when = t.closed_at ? new Date(t.closed_at).toLocaleString() : '—';
+                return `<tr>
+                    <td>${when}</td>
+                    <td>${t.bot_name}</td>
+                    <td>${fmtUsd(t.entry_price)}</td>
+                    <td>${fmtUsd(t.exit_price)}</td>
+                    <td class="${tClass}">${t.pnl >= 0 ? '+' : ''}${fmtUsd(t.pnl)}</td>
+                </tr>`;
+            }).join('');
+            return `
+                <tr class="coin-row" onclick="toggleGridTrades(${i})">
+                    <td>${c.product_id.replace('-USD', '')}</td>
+                    <td>${c.trade_count}</td>
+                    <td>${c.win_rate.toFixed(0)}%</td>
+                    <td class="${avgClass}">${avg >= 0 ? '+' : ''}${fmtUsd(avg)}</td>
+                    <td class="${pnlClass}">${c.total_pnl >= 0 ? '+' : ''}${fmtUsd(c.total_pnl)}</td>
+                </tr>
+                <tr class="coin-trades-detail" id="grid-trades-${i}">
+                    <td colspan="5">
+                        <div class="coin-trades-inner">
+                            ${trades.length ? `<table>
+                                <thead><tr><th>Closed</th><th>Branch</th><th>Entry</th><th>Exit</th><th>P&amp;L</th></tr></thead>
+                                <tbody>${tradeRows}</tbody>
+                            </table>` : `<div style="font-size:0.8em; color:var(--text-dim); padding:6px 0;">Individual trades for this coin are older than the most recent ${(history.recent_trades || []).length} round trips the feed carries.</div>`}
+                        </div>
+                    </td>
+                </tr>`;
+        }).join('');
+
+        const total = history.total_realized_pnl || 0;
+        wrap.innerHTML = `
+            <div style="font-size:0.8em; margin-bottom:8px; font-variant-numeric:tabular-nums;">
+                <strong style="color:${total >= 0 ? 'var(--green)' : 'var(--red)'};">${total >= 0 ? '+' : '-'}${fmtUsd(Math.abs(total))}</strong>
+                realized across <strong>${history.total_trade_count || 0}</strong> completed round trips
+                · <strong>${(history.overall_win_rate || 0).toFixed(1)}%</strong> of them closed green.
+            </div>
+            <div class="table-scroll"><table class="coin-history-table">
+                <thead><tr><th>Coin</th><th>Trades</th><th>Win rate</th><th>Avg P&amp;L</th><th>Total P&amp;L</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table></div>`;
+    } catch (e) {
+        wrap.innerHTML = `<div class="coin-history-empty">Could not load grid trade history (${e.message}).</div>`;
+    }
+}
+
+function toggleGridTrades(i) {
+    const el = document.getElementById('grid-trades-' + i);
+    if (el) el.classList.toggle('open');
+}
+
+// What replaced the whole Family Tree section: a single line that says
+// what the tree is now. The section had a spawn button, a hide-empty
+// toggle, a tree canvas and two ranking charts, all acting on a system
+// reporting 2 branches, $0.00 allocated, no open positions and
+// family_tree_loop_running: false. Reading its state rather than
+// hardcoding "retired" means that if it is ever restarted, this line
+// says so instead of quietly lying in the other direction.
+function renderRetiredTreeNote(data) {
+    const el = document.getElementById('retired-tree-note');
+    if (!el) return;
+    try {
+        const branches = data.branches || [];
+        const allocated = data.total_allocated_usd || 0;
+        const holding = branches.filter(b => b.position).length;
+        const running = !!data.family_tree_loop_running;
+
+        if (running || allocated > 0 || holding > 0) {
+            el.innerHTML = `
+                <div class="panel" style="padding:10px 12px; border-left:3px solid var(--gold);">
+                    <strong>⚠️ The family tree is running again.</strong>
+                    <span style="color:var(--text-dim);">
+                        ${branches.length} branch${branches.length === 1 ? '' : 'es'},
+                        ${fmtUsd(allocated)} allocated, ${holding} holding a position,
+                        loop ${running ? 'running' : 'stopped'}. Its controls were removed from this
+                        page while it was dormant - if it is meant to be trading, they need to come back.
+                    </span>
+                </div>`;
+            return;
+        }
+        el.innerHTML = `
+            <div class="panel" style="padding:10px 12px; color:var(--text-dim); font-size:0.85em;">
+                🗃️ <strong style="color:var(--text);">Family tree: retired.</strong>
+                ${branches.length} branch${branches.length === 1 ? '' : 'es'} left, $0.00 allocated,
+                nothing held, loop not running. Its trading controls are gone from this page because
+                there is nothing here for them to act on. Its closed ledger is at the bottom.
+            </div>`;
+    } catch (e) {
+        el.innerHTML = '';
+    }
+}
+
 async function loadGridStatus() {
     try {
         const [data, history] = await Promise.all([
@@ -3222,6 +3556,16 @@ async function loadGridStatus() {
             tradeHistoryByBotCoin[h.bot_name + '|' + h.product_id] = h;
         });
         renderGridStatus(data, tradeHistoryByBot, history, tradeHistoryByBotCoin);
+        renderGridProximity(data);
+        renderGridPnlByCoin(history);
+        renderGridPnlCurve(history);
+        renderGridTradeHistory(history);
+        // The headline "Total Profit" card's REALIZED half is the live
+        // grid's ledger - see the comment where lastRealizedProfit is
+        // assigned for what it used to be.
+        lastRealizedProfit = history.total_realized_pnl != null ? history.total_realized_pnl : 0;
+        lastUnrealizedProfit = data.total_unrealized_net_usd != null ? data.total_unrealized_net_usd : 0;
+        renderTotalProfit();
         await renderScaleBotStatus(data);
     } catch (e) {
         document.getElementById('grid-content').innerHTML = `<div class="empty">Could not load: ${e.message}</div>`;
@@ -3599,7 +3943,7 @@ function openCreateMultipleGridModal() {
     document.getElementById('multi-grid-spendable-hint').textContent = 'Checking real available capital…';
     lastKnownMultiGridSpendableUsd = null;
     updateMultiGridTotalNote();
-    document.getElementById('create-multi-grid-modal-overlay').classList.add('open');
+    document.getElementById('create-multiple-grid-modal-overlay').classList.add('open');
     ['create-multi-grid-count', 'create-multi-grid-amount'].forEach(id => {
         document.getElementById(id).oninput = updateMultiGridTotalNote;
     });
@@ -3619,7 +3963,7 @@ function openCreateMultipleGridModal() {
 }
 
 function closeCreateMultipleGridModal() {
-    document.getElementById('create-multi-grid-modal-overlay').classList.remove('open');
+    document.getElementById('create-multiple-grid-modal-overlay').classList.remove('open');
 }
 
 async function confirmCreateMultipleGridBranches() {
@@ -3753,97 +4097,6 @@ function layoutTree(branches, heights) {
 // localStorage so it survives a reload, but never sent to the server.
 const HIDE_EMPTY_BRANCHES_KEY = 'familyTree.hideEmptyBranches';
 
-function initHideEmptyBranchesToggle() {
-    let stored = '0';
-    try { stored = localStorage.getItem(HIDE_EMPTY_BRANCHES_KEY) || '0'; } catch (e) {}
-    const toggle = document.getElementById('hide-empty-branches-toggle');
-    if (toggle) toggle.checked = stored === '1';
-}
-
-function onHideEmptyBranchesToggle() {
-    const toggle = document.getElementById('hide-empty-branches-toggle');
-    try { localStorage.setItem(HIDE_EMPTY_BRANCHES_KEY, toggle.checked ? '1' : '0'); } catch (e) {}
-    refresh();
-}
-
-// Per the account owner's explicit request, after seeing POL/SOL sitting
-// at real $0.00 cluttering the tree view while contributing nothing:
-// "why is the ones with zero on there if they are at zero they should
-// not be on there." A branch only counts as "empty" here when its real
-// allocated_usd rounds to $0.00 AND it isn't currently holding a
-// position AND no OTHER branch is parented under it - hiding a branch
-// with real children would orphan them in the tree's own parent/child
-// layout, so a branch still structurally holding the tree together stays
-// visible even at $0. Root (BTC) is never hidden regardless of balance -
-// same `bot_name === 'crypto_btc_compound'` check already used for the
-// ROOT badge elsewhere in this file.
-function filterBranchesForTree(branches) {
-    const toggle = document.getElementById('hide-empty-branches-toggle');
-    if (!toggle || !toggle.checked) return { visible: branches, hiddenCount: 0 };
-
-    const hasChildren = {};
-    branches.forEach(b => {
-        if (b.parent_bot_name) hasChildren[b.parent_bot_name] = true;
-    });
-
-    const visible = [];
-    let hiddenCount = 0;
-    branches.forEach(b => {
-        const isRoot = b.bot_name === 'crypto_btc_compound';
-        const isEmpty = Math.round((b.allocated_usd || 0) * 100) === 0 && !b.position && !hasChildren[b.bot_name];
-        if (isEmpty && !isRoot) {
-            hiddenCount++;
-        } else {
-            visible.push(b);
-        }
-    });
-    return { visible, hiddenCount };
-}
-
-function renderTree(branches) {
-    const container = document.getElementById('tree');
-    if (!branches.length) {
-        container.innerHTML = '<div class="empty">No branches yet — the root should appear within a minute of the bot starting.</div>';
-        return;
-    }
-
-    // Real measurement pass: render every card off-screen at its real
-    // fixed width (height:auto) to read its true rendered height before
-    // any position is computed - see the real overlap bug this replaces,
-    // documented above layoutTree.
-    const measureDiv = document.createElement('div');
-    measureDiv.style.cssText = `position:absolute; visibility:hidden; left:-9999px; top:0; width:${TREE_NODE_W}px;`;
-    document.body.appendChild(measureDiv);
-    const heights = {};
-    branches.forEach(b => {
-        measureDiv.innerHTML = branchCardHtml(b);
-        heights[b.bot_name] = Math.max(measureDiv.offsetHeight, 1);
-    });
-    document.body.removeChild(measureDiv);
-
-    const { positions, width, height, byParent } = layoutTree(branches, heights);
-
-    let lines = '';
-    Object.values(positions).forEach(({ x, y, h, node }) => {
-        (byParent[node.bot_name] || []).forEach(child => {
-            const c = positions[child.bot_name];
-            const px = x + TREE_NODE_W / 2, py = y + h;
-            const cx = c.x + TREE_NODE_W / 2, cy = c.y;
-            const my = (py + cy) / 2;
-            lines += `<path class="tree-line" d="M ${px} ${py} C ${px} ${my} ${cx} ${my} ${cx} ${cy}" />`;
-        });
-    });
-
-    const nodes = Object.values(positions).map(({ x, y, h, node }) =>
-        `<div class="tree-node" style="left:${x}px; top:${y}px; width:${TREE_NODE_W}px; height:${h}px;">${branchCardHtml(node)}</div>`
-    ).join('');
-
-    container.style.width = width + 'px';
-    container.style.height = height + 'px';
-    container.innerHTML =
-        `<svg class="tree-lines" width="${width}" height="${height}">${lines}</svg>` + nodes;
-}
-
 function renderCoinHistory(data) {
     const wrap = document.getElementById('coin-history-wrap');
     const coins = data.coins || [];
@@ -3888,10 +4141,10 @@ function renderCoinHistory(data) {
     }).join('');
 
     wrap.innerHTML = `
-        <table class="coin-history-table">
+        <div class="table-scroll"><table class="coin-history-table">
             <thead><tr><th>Coin</th><th>Trades</th><th>Win rate</th><th>Avg P&amp;L</th><th>Total P&amp;L</th></tr></thead>
             <tbody>${rows}</tbody>
-        </table>`;
+        </table></div>`;
 }
 
 function toggleCoinTrades(i) {
@@ -3911,13 +4164,18 @@ function renderTotalProfit() {
         valueEl.textContent = '—';
         return;
     }
-    // Real total profit = every dollar ever realized on a completed sell
-    // (CryptoCoinTradeHistory, across every coin and branch) plus
-    // whatever's unrealized right now on currently open positions - the
-    // same two lenses the rest of this dashboard already shows
-    // separately (Coin Trade History's Total P&L column, and each
-    // branch card's own live Profit row), just added together into one
-    // real top-line number.
+    // Real total profit for the LIVE GRID = every dollar realized on a
+    // completed grid round trip (CryptoGridTradeHistory, via
+    // /grid-status/trade-history) plus whatever is unrealized right now
+    // on currently open slices (/grid-status.total_unrealized_net_usd,
+    // already net of closing fees). Both halves are the same numbers the
+    // Grid Trade History panel and each branch card show separately.
+    //
+    // The retired family tree's own ledger (-$508.44 over 167 trades,
+    // last trade 2026-09-09) is deliberately NOT in this figure. It used
+    // to be, which is why this card once disagreed with every live panel
+    // on the page. It has its own clearly-labelled closed-book section at
+    // the bottom instead.
     const total = (lastUnrealizedProfit || 0) + (lastRealizedProfit || 0);
     const cls = total >= 0 ? 'pos' : 'neg';
     valueEl.className = 'value ' + cls;
@@ -3956,12 +4214,10 @@ async function refresh() {
         document.getElementById('stat-locked').textContent = fmtUsd(data.locked_usd || 0);
         lastLockedProfit = data.locked_usd || 0;
         document.getElementById('stat-refreshed').textContent = new Date().toLocaleTimeString();
-        updateSpawnButtonState(data);
         updateUnlockButtonState(data);
         cryptoPassiveModeActive = !!data.crypto_passive_mode;
         renderTreeLoopBanner(data);
         renderCryptoPassiveModeBanner(data);
-        renderTreeSectionHeader(data);
         renderRollingExpectancyBanner(data);
         renderUsdcBlindSpotBanner(data);
         renderExitModeBadge(data.exit_mode, data.trailing_stop_pct);
@@ -3969,28 +4225,15 @@ async function refresh() {
 
         const branches = data.branches || [];
         lastKnownBranches = branches;
-        lastUnrealizedProfit = branches.reduce((sum, b) => {
-            const p = b.position;
-            if (!p || p.current_price == null) return sum;
-            return sum + p.qty * (p.current_price - p.entry_price);
-        }, 0);
-        renderTotalProfit();
-
-        renderBarList('branches-bar', branches.map(b => ({
-            label: b.product_id.replace('-USD', ''),
-            value: b.allocated_usd,
-            spawnPct: b.next_unlock_tier > 0 ? Math.min(100, (b.allocated_usd / b.next_unlock_tier) * 100) : 0,
-        })));
-        renderTreemap('branches-treemap', branches.map(b => ({ label: b.product_id.replace('-USD', ''), value: b.allocated_usd })));
+        // Unrealized is the LIVE grid's own net figure (set in
+        // loadGridStatus from /grid-status.total_unrealized_net_usd,
+        // already net of the fees closing would pay). It used to be
+        // summed off these tree branch positions instead - and the tree
+        // holds no positions at all, so the card's unrealized half was
+        // structurally pinned to $0.00 no matter what the grid was
+        // actually carrying.
         renderNarrative(data);
-        const { visible: treeBranches, hiddenCount } = filterBranchesForTree(branches);
-        renderTree(treeBranches);
-        const hideNote = document.getElementById('hide-empty-branches-note');
-        if (hideNote) {
-            hideNote.textContent = hiddenCount > 0
-                ? `${hiddenCount} empty branch${hiddenCount === 1 ? '' : 'es'} hidden ($0.00, nothing deployed, no children) - uncheck "Hide empty branches" to see ${hiddenCount === 1 ? 'it' : 'them'}.`
-                : '';
-        }
+        renderRetiredTreeNote(data);
         statusEl.textContent = '';
         statusEl.className = '';
     } catch (e) {
@@ -4001,7 +4244,13 @@ async function refresh() {
     try {
         const coinData = await apiGet('/family-tree-status/coin-history');
         renderCoinHistory(coinData);
-        lastRealizedProfit = (coinData.coins || []).reduce((sum, c) => sum + c.total_pnl, 0);
+        // Deliberately NOT added to lastRealizedProfit. This payload is
+        // CryptoCoinTradeHistory, which only the retired family tree bot
+        // ever wrote - 167 trades, -$508.44, last one 2026-09-09. Summing
+        // it into the headline card put a dead system's realized loss on
+        // top of a page reporting the live grid, which is how the page
+        // came to show +$19.55 in one panel and every row red in another.
+        // The live grid's realized total is set in loadGridStatus().
         renderTotalProfit();
     } catch (e) {
         document.getElementById('coin-history-wrap').innerHTML = `<div class="coin-history-empty">Could not load coin history: ${e.message}</div>`;
@@ -4226,9 +4475,10 @@ function renderTreeLoopBanner(data) {
         <strong>⚙️ Tree trading controls are inert right now.</strong>
         This deploy runs <code>${mode}</code>, so the family-tree loop is never started —
         execution is delegated to the crypto-trading service. Balances, positions and
-        reconciliation below are still real and worth reading. The tree's <em>trading</em>
-        buttons (spawn, exit mode, reversal, trailing stop) will not do anything until the
-        mode is <code>family_tree</code>.
+        reconciliation below are still real and worth reading. Any remaining tree
+        <em>trading</em> control will not do anything until the mode is
+        <code>family_tree</code> - which is why the spawn button and the tree canvas were
+        removed from this page rather than left sitting there looking operable.
         For what is actually trading, see <a href="/live-ops">Live Ops</a>.
     </div>`;
 }
@@ -4250,6 +4500,21 @@ function renderCryptoPassiveModeBanner(data) {
             </div>
         </div>`;
     } else {
+        // "Retire the tree & buy real BTC" is a one-way action: it sells
+        // every branch position, permanently stops the tree trading, and
+        // converts the proceeds to BTC. Leaving it on the page for a tree
+        // that holds $0.00 across 2 branches with its loop stopped is all
+        // downside - there is nothing for it to sell, and the only thing
+        // it can still do is fire by accident. So it is shown only when
+        // the tree actually has something to retire.
+        const holding = (data.branches || []).filter(b => b.position).length;
+        const allocated = data.total_allocated_usd || 0;
+        const hasSomethingToRetire = holding > 0 || allocated > 0 || data.family_tree_loop_running;
+        if (!hasSomethingToRetire) {
+            el.style.display = 'none';
+            el.innerHTML = '';
+            return;
+        }
         el.innerHTML = `<div class="panel" style="padding: 14px 18px; margin-bottom: 16px;">
             <button class="unlock-btn" onclick="confirmLiquidateAndBuyBtc()">🔒📈 Retire the tree &amp; buy real BTC</button>
             <div style="font-size:0.8em; color: var(--text-dim); margin-top:6px;">
@@ -4258,38 +4523,6 @@ function renderCryptoPassiveModeBanner(data) {
                 A real, one-way action.
             </div>
         </div>`;
-    }
-}
-
-// The Tree section's own header + note, driven by the SAME real
-// data.crypto_passive_mode flag renderCryptoPassiveModeBanner() reads - never
-// hardcoded "retired" text, so if the tree is ever un-retired this section
-// stops calling itself retired on the very same refresh.
-//
-// Why this note exists at all: the family tree is retired and frozen, but its
-// MODULE is not dead code and must not be deleted - crypto_grid_bot.py imports
-// crypto_family_tree_bot in two real places (get_real_free_cash_usd, and the
-// coin-ranking path) for get_locked_usd() and shared coin-selection helpers,
-// routers/trading_dashboard.py references it in 75 places, and Grid Bot's own
-// entire UI lives on this same page. The page said none of that, so a retired
-// section sitting at the top of a page named after it read as the main event.
-function renderTreeSectionHeader(data) {
-    const titleEl = document.getElementById('tree-section-title');
-    const noteEl = document.getElementById('tree-section-note');
-    if (!titleEl || !noteEl) return;
-    if (data.crypto_passive_mode) {
-        titleEl.innerHTML = '🌳 Family Tree <span style="font-size:0.7em; font-weight:600; color:var(--text-dim);">· RETIRED</span>';
-        noteEl.innerHTML =
-            'Retired and frozen — no branch trades, places an order, or calls an API. ' +
-            'Its P&amp;L below is closed history and cannot move. ' +
-            '<strong>Kept, not deleted, on purpose:</strong> Grid Bot above imports this module for locked-profit ' +
-            'and coin-selection helpers, and runs on this same page — deleting it would break the one crypto ' +
-            'system that is actually trading.';
-    } else {
-        titleEl.textContent = '🌳 Family Tree';
-        noteEl.innerHTML =
-            'Live and trading, alongside Grid Bot above, on the same real Coinbase wallet. ' +
-            'Branches drawn as a real family tree, root at top.';
     }
 }
 
@@ -4673,153 +4906,6 @@ function fmtBtc(n) {
     return '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-function renderBtcProjection(data) {
-    const wrap = document.getElementById('btc-projection-wrap');
-    if (!data) {
-        wrap.innerHTML = '<div class="coin-history-empty">Could not load a live BTC price right now.</div>';
-        return;
-    }
-    const lo2 = data.band_2sigma_low, hi2 = data.band_2sigma_high;
-    const lo1 = data.band_1sigma_low, hi1 = data.band_1sigma_high;
-    const range = (hi2 - lo2) || 1;
-    const pct = (v) => Math.max(0, Math.min(100, ((v - lo2) / range) * 100));
-    const cal = data.calibration;
-    const calHtml = cal
-        ? `Last checked ${new Date(cal.run_at).toLocaleString()}: the real price landed inside the &plusmn;1&sigma; band <strong>${cal.pct_within_1sigma}%</strong> of ${cal.num_samples} real 15-minute windows over ${cal.window_days} real day(s) (&plusmn;2&sigma;: ${cal.pct_within_2sigma}%). Real error - naive ${cal.naive_mae_pct}% vs trend ${cal.trend_mae_pct}% - currently showing <strong>${data.method}</strong> as the headline number since it's the one real evidence favors.`
-        : `Not yet checked against real history - hit "Run accuracy check" above before trusting this range. Defaulting to the honest zero-drift (naive) estimate until a real backtest says otherwise.`;
-
-    wrap.innerHTML = `
-        <div style="display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:12px; margin-bottom:14px;">
-            <div>
-                <div style="font-size:0.78em; color:var(--text-dim);">Right now</div>
-                <div style="font-size:1.6em; font-weight:800; color:var(--navy);">${fmtBtc(data.current_price)}</div>
-            </div>
-            <div>
-                <div style="font-size:0.78em; color:var(--text-dim);">Most likely in 15 min (${data.method})</div>
-                <div style="font-size:1.6em; font-weight:800; color:var(--gold);">${fmtBtc(data.projected_price)}</div>
-            </div>
-        </div>
-        <div style="position:relative; height:26px; margin-top:22px; background:var(--red-bg); border-radius:8px; overflow:visible; margin-bottom:6px;">
-            <div style="position:absolute; left:${pct(lo1)}%; right:${(100 - pct(hi1))}%; top:0; bottom:0; background:var(--green-bg); border-radius:8px; overflow:hidden;"></div>
-            <div style="position:absolute; left:${pct(data.current_price)}%; top:0; bottom:0; width:2px; background:var(--navy);"></div>
-            <div style="position:absolute; left:${pct(data.current_price)}%; bottom:100%; transform:translateX(-50%); margin-bottom:3px; white-space:nowrap; font-size:0.78em; font-weight:800; color:var(--navy); background:#fff; padding:1px 6px; border-radius:5px; border:1px solid var(--navy);">${fmtBtc(data.current_price)}</div>
-        </div>
-        <div style="display:flex; justify-content:space-between; font-size:0.7em; color:var(--text-dim); margin-bottom:14px;">
-            <span>${fmtBtc(lo2)} (&minus;2&sigma;)</span><span>${fmtBtc(lo1)} (&minus;1&sigma;)</span><span>${fmtBtc(hi1)} (+1&sigma;)</span><span>${fmtBtc(hi2)} (+2&sigma;)</span>
-        </div>
-        <div style="font-size:0.85em; color:var(--text-dim);">${calHtml}</div>
-    `;
-}
-
-async function loadBtcProjection() {
-    try {
-        const data = await apiGet('/family-tree-status/btc-projection');
-        renderBtcProjection(data);
-    } catch (e) {
-        document.getElementById('btc-projection-wrap').innerHTML = `<div class="coin-history-empty">Could not load: ${e.message}</div>`;
-    }
-    // The live projection call above is what actually resolves any due
-    // real prediction and logs a new one server-side - load the log
-    // AFTER it so this always shows the freshest real state.
-    await loadBtcPredictionLog();
-}
-
-function renderBtcPredictionLog(data) {
-    const wrap = document.getElementById('btc-pred-log-wrap');
-    const hitRateEl = document.getElementById('btc-pred-hitrate');
-    const preds = data.predictions || [];
-    // Two real, honest widths side by side - not two different claims
-    // about the same thing. +/-1sigma is the tight, precise band (what
-    // "HIT/MISS" below grades against); +/-2sigma is the wider band
-    // already shown in the range bar above, real evidence that a bigger
-    // real window is genuinely hit far more often - never a relabeled or
-    // inflated number, both come from the same resolved real rows.
-    if (data.live_hit_rate_1sigma != null) {
-        hitRateEl.innerHTML = `&plusmn;1&sigma; hit rate: <strong>${data.live_hit_rate_1sigma}%</strong>`
-            + (data.live_hit_rate_2sigma != null ? ` &middot; &plusmn;2&sigma; hit rate: <strong>${data.live_hit_rate_2sigma}%</strong>` : '')
-            + ` <span style="color:var(--text-dim);">(${data.resolved_count} resolved)</span>`;
-    } else {
-        hitRateEl.textContent = 'No resolved predictions yet';
-    }
-    if (preds.length === 0) {
-        wrap.innerHTML = '<div class="coin-history-empty">No predictions logged yet - a real one gets recorded every 15 minutes while this dashboard stays open.</div>';
-        return;
-    }
-    const timeFmt = { hour: '2-digit', minute: '2-digit' };
-    wrap.innerHTML = preds.map(p => {
-        const madeAt = new Date(p.predicted_at).toLocaleTimeString([], timeFmt);
-        let statusHtml;
-        const targetColor = (p.resolved && p.hit_1sigma) ? 'var(--green)' : 'var(--text)';
-        if (!p.resolved) {
-            const resolveAt = new Date(p.resolve_at).toLocaleTimeString([], timeFmt);
-            statusHtml = `<strong>${madeAt}</strong> <span style="color:var(--text-dim);">&#8987; Pending (resolves ${resolveAt})</span>`;
-        } else if (p.hit_1sigma) {
-            statusHtml = `<strong>${madeAt}</strong> <span style="color:var(--green); font-weight:700;">&#9989; HIT (&plusmn;1&sigma;)</span> - <span style="color:#c99a00; font-weight:700;">actual ${fmtBtc(p.actual_price)}</span> (${p.abs_error_pct}% off)`;
-        } else if (p.hit_2sigma) {
-            statusHtml = `<strong>${madeAt}</strong> <span style="color:var(--gold); font-weight:700;">&#9888; MISS &plusmn;1&sigma; / HIT &plusmn;2&sigma;</span> - <span style="color:#c99a00; font-weight:700;">actual ${fmtBtc(p.actual_price)}</span> (${p.abs_error_pct}% off)`;
-        } else {
-            statusHtml = `<strong>${madeAt}</strong> <span style="color:var(--red); font-weight:700;">&#10060; MISS (both bands)</span> - <span style="color:#c99a00; font-weight:700;">actual ${fmtBtc(p.actual_price)}</span> (${p.abs_error_pct}% off)`;
-        }
-        return `<div style="display:flex; flex-direction:column; gap:2px; padding:7px 0; border-bottom:1px solid var(--border); font-size:0.82em;">
-            <div>${statusHtml}</div>
-            <div><strong style="color:#2563eb; font-size:1.15em;">predicted</strong> <strong style="color:${targetColor};">${fmtBtc(p.projected_price)}</strong> <span style="color:var(--text-dim);">(&plusmn;1&sigma; ${fmtBtc(p.band_1sigma_low)}&ndash;${fmtBtc(p.band_1sigma_high)})</span></div>
-        </div>`;
-    }).join('');
-}
-
-async function loadBtcPredictionLog() {
-    try {
-        const data = await apiGet('/family-tree-status/btc-projection/log?limit=15');
-        renderBtcPredictionLog(data);
-    } catch (e) {
-        document.getElementById('btc-pred-log-wrap').innerHTML = `<div class="coin-history-empty">Could not load: ${e.message}</div>`;
-    }
-}
-
-async function clearBtcPredictionLog() {
-    if (!confirm('Erase the entire Recent Predictions history? This deletes the real logged rows (including any duplicates) - a fresh prediction starts logging again on the very next poll. This never touches real trading data or money.')) return;
-    const btn = document.getElementById('btc-pred-log-clear-btn');
-    const original = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = 'Clearing...';
-    try {
-        const res = await fetch(API_BASE + '/family-tree-status/btc-projection/log/reset', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
-        await loadBtcPredictionLog();
-    } catch (e) {
-        alert('Could not clear the log: ' + e.message);
-    } finally {
-        btn.disabled = false;
-        btn.textContent = original;
-    }
-}
-
-async function runBtcProjectionBacktest() {
-    const btn = document.getElementById('btc-projection-backtest-btn');
-    const original = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = 'Running... (~10-40s)';
-    try {
-        const res = await fetch(API_BASE + '/family-tree-status/btc-projection/backtest', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
-        await loadBtcProjection();
-        alert(`Real backtest done: ${data.num_samples} real 15-minute windows over ${data.window_days} real day(s). The +/-1-sigma band captured the real price ${data.pct_within_1sigma}% of the time (naive error ${data.naive_mae_pct}% vs trend error ${data.trend_mae_pct}%).`);
-    } catch (e) {
-        alert('Could not run the accuracy check: ' + e.message);
-    } finally {
-        btn.disabled = false;
-        btn.textContent = original;
-    }
-}
-
 const DIRECTIONAL_SIGNAL_LABELS = {
     momentum_10min: 'Momentum (last 10 min)',
     momentum_25min: 'Momentum (last 25 min)',
@@ -4828,48 +4914,6 @@ const DIRECTIONAL_SIGNAL_LABELS = {
     prior_window_persistence: 'Prior window persistence',
     volume_weighted_momentum: 'Momentum confirmed by volume',
 };
-
-function renderBtcDirectionalResult(data) {
-    const wrap = document.getElementById('btc-directional-wrap');
-    const rows = Object.entries(data.signals).map(([name, s]) => {
-        const label = DIRECTIONAL_SIGNAL_LABELS[name] || name;
-        if (s.hit_rate_pct === null) {
-            return `<div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border);">
-                <span>${label}</span><span style="color:var(--text-dim);">no real samples yet</span></div>`;
-        }
-        const edge = s.hit_rate_pct - data.coin_flip_baseline_pct;
-        const color = edge > 3 ? 'var(--green)' : (edge < -3 ? 'var(--red)' : 'var(--text-dim)');
-        const edgeLabel = edge > 0 ? `+${edge.toFixed(1)}pp vs coin flip` : `${edge.toFixed(1)}pp vs coin flip`;
-        return `<div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border);">
-            <span>${label}</span>
-            <span><strong style="color:${color};">${s.hit_rate_pct}%</strong> <span style="color:var(--text-dim); font-size:0.85em;">(${s.num_predictions} real predictions, ${edgeLabel})</span></span>
-        </div>`;
-    }).join('');
-    wrap.innerHTML = `<div style="margin-bottom:8px; color:var(--text-dim); font-size:0.85em;">
-            ${data.num_windows} real non-overlapping 15-minute windows over ${data.window_days} real day(s) - coin-flip baseline is an honest 50%.
-        </div>${rows}`;
-}
-
-async function runBtcDirectionalBacktest() {
-    const btn = document.getElementById('btc-directional-backtest-btn');
-    const original = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = 'Running... (~10-40s)';
-    try {
-        const res = await fetch(API_BASE + '/family-tree-status/btc-projection/directional-backtest', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
-        renderBtcDirectionalResult(data);
-    } catch (e) {
-        document.getElementById('btc-directional-wrap').innerHTML = `<div class="coin-history-empty">Could not run: ${e.message}</div>`;
-    } finally {
-        btn.disabled = false;
-        btn.textContent = original;
-    }
-}
 
 let btcTickerResolveAtMs = null;
 let btcHourlyResolveAtMs = null;
@@ -4880,21 +4924,6 @@ function fmtCountdown(msRemaining) {
     const m = Math.floor(totalSec / 60);
     const s = totalSec % 60;
     return `${m}:${String(s).padStart(2, '0')}`;
-}
-
-function tickBtcCountdown() {
-    const el = document.getElementById('btc-tick-countdown');
-    if (el) {
-        const msRemaining = btcTickerResolveAtMs === null ? null : (btcTickerResolveAtMs - Date.now());
-        el.textContent = fmtCountdown(msRemaining);
-        el.classList.toggle('urgent', msRemaining !== null && msRemaining < 60000);
-    }
-    const hourlyEl = document.getElementById('btc-tick-hourly-countdown');
-    if (hourlyEl) {
-        const hourlyMsRemaining = btcHourlyResolveAtMs === null ? null : (btcHourlyResolveAtMs - Date.now());
-        hourlyEl.textContent = fmtCountdown(hourlyMsRemaining);
-        hourlyEl.classList.toggle('urgent', hourlyMsRemaining !== null && hourlyMsRemaining < 300000);
-    }
 }
 
 function buildBtcSparklineSvg(history, priceToBeat, isUp) {
@@ -4915,54 +4944,6 @@ function buildBtcSparklineSvg(history, priceToBeat, isUp) {
             <polyline points="${points}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
             <circle cx="${lastX}" cy="${lastY}" r="4.5" fill="${color}"/>
         </svg>`;
-}
-
-function renderBtcTicker(data) {
-    const wrap = document.getElementById('btc-ticker-wrap');
-    if (!data || !data.history || data.history.length < 2) {
-        wrap.innerHTML = '<div class="coin-history-empty">Could not load a live BTC price right now.</div>';
-        return;
-    }
-    const isUp = data.current_price >= data.price_to_beat;
-    const pctStr = (data.pct_change_vs_price_to_beat >= 0 ? '+' : '') + data.pct_change_vs_price_to_beat.toFixed(3) + '%';
-    btcTickerResolveAtMs = data.resolve_at ? new Date(data.resolve_at).getTime() : null;
-    btcHourlyResolveAtMs = data.hourly_resolve_at ? new Date(data.hourly_resolve_at).getTime() : null;
-
-    const hourlyHtml = data.hourly_price_to_beat != null ? `
-        <div class="btc-tick-top" style="margin-top:10px; padding-top:10px; border-top:1px dashed var(--border);">
-            <div class="btc-tick-sub" style="align-self:center;">⏱️ Hourly window</div>
-            <div class="btc-tick-beat">
-                <div class="lbl">Hourly price to beat</div>
-                <div class="val">${fmtBtc(data.hourly_price_to_beat)}</div>
-                <div id="btc-tick-hourly-countdown" class="btc-tick-countdown">--:--</div>
-            </div>
-        </div>` : '';
-
-    wrap.innerHTML = `
-        <div class="btc-tick-top">
-            <div>
-                <div class="btc-tick-price ${isUp ? 'pos' : 'neg'}">${fmtBtc(data.current_price)}</div>
-                <div class="btc-tick-sub">Current &middot; ${pctStr} vs price to beat</div>
-            </div>
-            <div class="btc-tick-beat">
-                <div class="lbl">Price to beat</div>
-                <div class="val">${fmtBtc(data.price_to_beat)}</div>
-                <div id="btc-tick-countdown" class="btc-tick-countdown">--:--</div>
-            </div>
-        </div>
-        ${hourlyHtml}
-        <div class="btc-tick-chart-wrap">${buildBtcSparklineSvg(data.history, data.price_to_beat, isUp)}</div>
-    `;
-    tickBtcCountdown();
-}
-
-async function loadBtcTicker() {
-    try {
-        const data = await apiGet('/family-tree-status/btc-projection/chart');
-        renderBtcTicker(data);
-    } catch (e) {
-        document.getElementById('btc-ticker-wrap').innerHTML = `<div class="coin-history-empty">Could not load: ${e.message}</div>`;
-    }
 }
 
 async function loadTicker() {
@@ -5152,19 +5133,13 @@ async function loadCombinedProgress(isRetry) {
     }
 }
 
-initHideEmptyBranchesToggle();
 refresh();
 loadTicker();
-loadBtcTicker();
-loadBtcProjection();
 loadActivityFeed();
 loadCombinedProgress();
 setInterval(refresh, 15000);
 setInterval(loadTicker, 30000);
 setInterval(loadActivityFeed, 5000);
-setInterval(loadBtcProjection, 30000);
-setInterval(loadBtcTicker, 10000);
-setInterval(tickBtcCountdown, 1000);
 setInterval(loadCombinedProgress, 60000);
 </script>
 </body>
