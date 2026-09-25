@@ -188,6 +188,11 @@ print()
 
 BOTS = [
     "crypto_grid_bot.py",
+    # Backtests decide what the live fleet is configured to do, so a
+    # session bug here is not "only a report" - it silently kills the
+    # queries a recommendation is built from.
+    "crypto_selection_backtest.py",
+    "alpaca_selection_backtest.py",
     "crypto_family_tree_bot.py",
     "crypto_mean_reversion_bot.py",
     "crypto_coinbase_bot.py",
@@ -210,6 +215,15 @@ print("-- the exact regression: the grid bot's session factory --")
 src = open("crypto_grid_bot.py", encoding="utf-8").read()
 ok("crypto_grid_bot.py no longer references AsyncSessionLocal at all",
    "AsyncSessionLocal" not in src)
+# The same stale-binding bug, in a second file. `from database import
+# AsyncSessionLocal` captures None at import time and never updates.
+for mod in ("crypto_selection_backtest.py", "alpaca_selection_backtest.py"):
+    try:
+        msrc = open(mod, encoding="utf-8").read()
+    except FileNotFoundError:
+        continue
+    ok(f"{mod} does not import the None-at-import AsyncSessionLocal",
+       "from database import AsyncSessionLocal" not in msrc)
 ok("crypto_grid_bot.py imports get_session_factory",
    "from database import get_session_factory" in src)
 ok("every session in the grid bot goes through the lazy factory",

@@ -52,11 +52,66 @@ from sqlalchemy import select
 import crypto_btc_compound_bot as engine
 import crypto_grid_bot as grid_engine  # only for its own real constants (TARGET_NET_MARGIN_PCT etc.) - no circular import, crypto_grid_bot never imports this module
 from crypto_family_tree_bot import COIN_FAMILY_TREE, BREAKEVEN_TRIGGER_PCT
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import CryptoTreeBranch, CryptoGridBranch, CryptoCoinTradeHistory
 
 SPEND = 150.0
 BACKTEST_DAYS = 30
+
+# ── WHAT A ROUND TRIP REALLY COSTS ──────────────────────────────────────
+#
+# Every backtest in this file used to charge BACKTEST_ROUND_TRIP_FEE_RATE,
+# which is 0.008 - "~0.4% each way, taker". That number is wrong, and it
+# was wrong in the direction that makes a strategy look profitable.
+#
+# Measured from Coinbase's own fill records on 2026-09-25: the real taker
+# leg is 0.75%, so a taker round trip is 1.50%. The maker leg is 0.35%,
+# so a maker round trip is 0.70%.
+#
+# WHAT THE OLD NUMBER COST
+#
+# A grid's entire edge is (step - fees). Understating fees by 0.70
+# percentage points overstates the edge on EVERY completed round trip:
+#
+#     step    backtest net    real taker net
+#     1.00%        +0.20%            -0.50%
+#     1.25%        +0.45%            -0.25%
+#     2.00%        +1.20%            +0.50%     (2.4x overstated)
+#
+# Every step between 0.80% and 1.50% backtested as profitable and loses
+# money live. That band contains the 0.5% spacing and 0.75% target the
+# retracted GRID_BOT_README recommended, and it is why tighter spacing
+# has always looked good on paper here.
+#
+# Default to TAKER, because that is what an unfilled post-only order
+# becomes, and a backtest must model the worst case it can actually hit -
+# the same rule fee_safe_floor_pct() applies live. Pass the maker rate
+# explicitly to model the maker path.
+REAL_TAKER_ROUND_TRIP_FEE_RATE = float(
+    os.getenv("BACKTEST_TAKER_ROUND_TRIP_FEE_RATE", "0.015"))
+REAL_MAKER_ROUND_TRIP_FEE_RATE = float(
+    os.getenv("BACKTEST_MAKER_ROUND_TRIP_FEE_RATE", "0.007"))
+BACKTEST_ROUND_TRIP_FEE_RATE = REAL_TAKER_ROUND_TRIP_FEE_RATE
+
+
+def fee_floor_for_backtest(round_trip_fee_rate: float = None) -> float:
+    """The smallest step that can clear fees, for whatever rate is in use.
+
+    A backtest that reports a step below this as profitable is reporting
+    an arithmetic impossibility, not a finding.
+    """
+    rate = BACKTEST_ROUND_TRIP_FEE_RATE if round_trip_fee_rate is None else round_trip_fee_rate
+    try:
+        import fee_floor
+        return fee_floor.fee_floor_pct(rate)
+    except Exception:
+        return rate + 0.002
+
+
+def clears_fees(step_pct: float, round_trip_fee_rate: float = None) -> bool:
+    """Whether a completed round trip at this step can net anything."""
+    return step_pct >= fee_floor_for_backtest(round_trip_fee_rate) - 1e-12
+
 # Real, global throttle on Coinbase's public candles endpoint - found from
 # a real, live 429 pileup the account owner hit directly: 15 of 33 coins
 # skipped on a real Strategy Lab run even after the per-page retry below
@@ -305,7 +360,7 @@ def backtest_one_coin(closes, highs, lows, entry_gate=None, spend=None, trail_pc
 
         if exit_reason:
             gross = position["qty"] * (price - position["entry"])
-            fee = position["qty"] * (position["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            fee = position["qty"] * (position["entry"] + price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
             net = gross - fee
             trades.append((exit_reason, net))
             position = None
@@ -421,7 +476,7 @@ def _replay_with_exit_mode(closes, highs, lows, mode, entry_gate=None, spend=Non
         exit_reason = None
         if mode == "quick_profit":
             gross = position["qty"] * (price - position["entry"])
-            fee = position["qty"] * (position["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            fee = position["qty"] * (position["entry"] + price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
             net = gross - fee
             if price <= position["stop"]:
                 exit_reason = "STOP"
@@ -440,7 +495,7 @@ def _replay_with_exit_mode(closes, highs, lows, mode, entry_gate=None, spend=Non
 
         if exit_reason:
             gross = position["qty"] * (price - position["entry"])
-            fee = position["qty"] * (position["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            fee = position["qty"] * (position["entry"] + price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
             net = gross - fee
             trades.append((exit_reason, net))
             position = None
@@ -682,7 +737,7 @@ def _replay_partial_then_trail(closes, highs, lows, spend=None, trail_pct=None, 
 
     def _net_leg(qty, entry, exit_price):
         gross = qty * (exit_price - entry)
-        fee = qty * (entry + exit_price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+        fee = qty * (entry + exit_price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
         return gross - fee
 
     while i < n:
@@ -1290,7 +1345,7 @@ def _replay_hourly_momentum(closes, highs, lows, spend=None,
 
         if exit_reason:
             gross = position["qty"] * (price - position["entry"])
-            fee = position["qty"] * (position["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            fee = position["qty"] * (position["entry"] + price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
             trades.append((exit_reason, gross - fee))
             position = None
         i += 1
@@ -1319,7 +1374,7 @@ def _replay_grid_bot(closes, highs, lows, spend=None,
     - The proposal claims a real grid bot pays only the lower 0.40% maker
       fee (limit orders resting in the book) rather than the 0.60% taker
       rate a market order pays - this simulation does NOT assume that
-      more favorable rate. It reuses the exact same engine.ROUND_TRIP_FEE_RATE
+      more favorable rate. It reuses the exact same BACKTEST_ROUND_TRIP_FEE_RATE
       every other strategy in this file uses, for one honest reason: this
       codebase's own live trading engine places MARKET orders everywhere
       (place_market_buy/place_market_sell), and there's no already-
@@ -1367,7 +1422,7 @@ def _replay_grid_bot(closes, highs, lows, spend=None,
         elif price >= reference * (1 + grid_pct) and open_slices:
             slot = open_slices.pop(0)
             gross = slot["qty"] * (price - slot["entry"])
-            fee = slot["qty"] * (slot["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            fee = slot["qty"] * (slot["entry"] + price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
             trades.append(("GRID_CYCLE", gross - fee))
             reference = price
         i += 1
@@ -1433,7 +1488,7 @@ def _replay_grid_bot_v2(closes, highs, lows, spend=None,
     buy_pct = buy_pct if buy_pct is not None else STRATEGY_LAB_GRID_PCT
     sell_pct = sell_pct if sell_pct is not None else buy_pct
     slice_usd = spend / num_levels
-    half_fee = engine.ROUND_TRIP_FEE_RATE / 2
+    half_fee = BACKTEST_ROUND_TRIP_FEE_RATE / 2
 
     n = len(closes)
     if n < 2:
@@ -1652,7 +1707,7 @@ def _replay_grid_bot_short(closes, highs, lows, spend=None,
             # DROP, so the sign is inverted against the long replay.
             slot = open_slices.pop(0)
             gross = slot["qty"] * (slot["entry"] - price)
-            fee = slot["qty"] * (slot["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            fee = slot["qty"] * (slot["entry"] + price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
             trades.append(("SHORT_GRID_CYCLE", gross - fee))
             reference = price
         i += 1
@@ -1724,7 +1779,7 @@ def _replay_swing_trading(closes, highs, lows, spend=None,
 
         if exit_reason:
             gross = position["qty"] * (price - position["entry"])
-            fee = position["qty"] * (position["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            fee = position["qty"] * (position["entry"] + price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
             trades.append((exit_reason, gross - fee))
             position = None
         i += 1
@@ -1970,7 +2025,7 @@ def _replay_grid_bot_with_drawdown_breaker(closes, highs, lows, spend=None,
         elif price >= reference * (1 + grid_pct) and open_slices:
             slot = open_slices.pop(0)
             gross = slot["qty"] * (price - slot["entry"])
-            fee = slot["qty"] * (slot["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            fee = slot["qty"] * (slot["entry"] + price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
             pnl = gross - fee
             trades.append(("GRID_CYCLE", pnl))
             allocated += pnl  # matches the live bot's own allocated_usd += pnl on every real sell
@@ -2079,7 +2134,7 @@ def _candidate_label(drawdown_pct):
 # 30-day trailing volume (base -> $10K -> $50K -> $100K -> $1M),
 # expressed as a RATIO against the base tier - deliberately not
 # hardcoded absolute fee percentages, so this backtest stays anchored to
-# this codebase's own existing engine.ROUND_TRIP_FEE_RATE assumption
+# this codebase's own existing BACKTEST_ROUND_TRIP_FEE_RATE assumption
 # (0.8% round trip / 0.4% each way) rather than silently introducing a
 # second, different fee number nothing else in this codebase uses. See
 # crypto_grid_bot.compute_dynamic_grid_pct's own docstring for why the
@@ -2119,7 +2174,7 @@ async def run_grid_fee_tier_spacing_comparison(coins=None, days=BACKTEST_DAYS, m
     coins = coins or COIN_FAMILY_TREE
     tier_grid_pcts = {}
     for tier_name, ratio in GRID_FEE_TIER_RATIOS.items():
-        round_trip = engine.ROUND_TRIP_FEE_RATE * ratio
+        round_trip = BACKTEST_ROUND_TRIP_FEE_RATE * ratio
         tier_grid_pcts[tier_name] = max(grid_engine.MIN_DYNAMIC_GRID_PCT, grid_engine.TARGET_NET_MARGIN_PCT + round_trip)
     semaphore = asyncio.Semaphore(max_concurrent)
 
@@ -2216,7 +2271,7 @@ def _live_matching_grid_pct(closes, highs, lows) -> float:
     check in this file (Strategy Lab's own Grid Bot entry,
     run_grid_level_spacing_comparison's live-default candidate) uses the
     identical real number, never two slightly different guesses at it."""
-    fee_safe_floor = max(grid_engine.MIN_DYNAMIC_GRID_PCT, grid_engine.TARGET_NET_MARGIN_PCT + engine.ROUND_TRIP_FEE_RATE)
+    fee_safe_floor = max(grid_engine.MIN_DYNAMIC_GRID_PCT, grid_engine.TARGET_NET_MARGIN_PCT + BACKTEST_ROUND_TRIP_FEE_RATE)
     avg_swing_pct = _average_hourly_swing_pct(closes, highs, lows)
     return max(fee_safe_floor, avg_swing_pct * grid_engine.AVG_SWING_SPACING_MULTIPLIER)
 
@@ -2595,7 +2650,7 @@ def _grid_step(price: float, reference: float, open_slices: list, slice_usd: flo
         slot = open_slices[0]
         remaining = open_slices[1:]
         gross = slot["qty"] * (price - slot["entry"])
-        fee = slot["qty"] * (slot["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+        fee = slot["qty"] * (slot["entry"] + price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
         return price, remaining, gross - fee
     return reference, open_slices, None
 
@@ -2979,7 +3034,7 @@ async def _get_real_branch_allocations() -> dict:
     through to the same $150 default every other unallocated coin
     already gets - matching this function's own documented contract."""
     allocations = {}
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         tree_result = await db.execute(select(CryptoTreeBranch.product_id, CryptoTreeBranch.allocated_usd))
         for product_id, allocated_usd in tree_result.all():
             allocations[product_id] = allocations.get(product_id, 0.0) + allocated_usd
@@ -3104,7 +3159,7 @@ async def _load_real_exit_events(exit_reasons, limit=STOP_HIT_REVERSAL_EVENT_LIM
     history yet is skipped rather than scored on a truncated window,
     which would understate its real forward return."""
     cutoff = datetime.utcnow() - timedelta(hours=hours_forward)
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(
             select(CryptoCoinTradeHistory)
             .where(CryptoCoinTradeHistory.exit_reason.in_(exit_reasons))
@@ -3128,7 +3183,7 @@ def _net_pnl_pct(entry_price, exit_price):
     return, overstating every hypothetical reversal trade's real result
     by the full real round-trip cost."""
     gross_pct = (exit_price - entry_price) / entry_price
-    fee_pct = (entry_price + exit_price) / entry_price * (engine.ROUND_TRIP_FEE_RATE / 2)
+    fee_pct = (entry_price + exit_price) / entry_price * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
     return gross_pct - fee_pct
 
 

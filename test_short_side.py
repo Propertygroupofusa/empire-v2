@@ -36,8 +36,15 @@ def ok(label, cond):
 
 
 src = open(os.path.join(HERE, "crypto_selection_backtest.py"), encoding="utf-8").read()
+# The replays used to charge engine.ROUND_TRIP_FEE_RATE and this file
+# stubbed it at 1.0%. Both were wrong: measured from Coinbase's own fill
+# records on 2026-09-25, a taker round trip is 1.50% and a maker round
+# trip 0.70%. The replays now take BACKTEST_ROUND_TRIP_FEE_RATE, so this
+# namespace supplies the real taker rate - the worst case an unfilled
+# post-only order actually lands on.
 engine = types.SimpleNamespace(ROUND_TRIP_FEE_RATE=0.010)
 ns = {"os": os, "engine": engine, "SPEND": 150.0,
+      "BACKTEST_ROUND_TRIP_FEE_RATE": 0.015,
       "STRATEGY_LAB_GRID_PCT": 0.01, "STRATEGY_LAB_GRID_LEVELS": 10}
 _i = src.index("def _summarize_strategy_trades")
 exec(src[_i:src.index("\n\n\n", _i)], ns)
