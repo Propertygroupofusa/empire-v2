@@ -1162,38 +1162,45 @@ async def lifespan(app: FastAPI):
     # the one control that could not be corrected through the UI, and it
     # stayed wrong through six attempts on 2026-09-25 while every
     # DB-persisted control flipped instantly.
-    CRYPTO_STRATEGY_MODE = _resolved_crypto_mode = CRYPTO_STRATEGY_MODE
+    # A DISTINCT local name, never a rebind of the module-level constant.
+    # Writing `CRYPTO_STRATEGY_MODE = ... = CRYPTO_STRATEGY_MODE` here made
+    # the name local for the whole function, so the right-hand read raised
+    # UnboundLocalError, the lifespan died, and the app returned 502 with no
+    # commit at all. Shipped and caught in production within minutes on
+    # 2026-09-25. Assigning to a global inside a function needs `global`, or
+    # a different name - and a different name is the safer of the two.
+    crypto_mode = CRYPTO_STRATEGY_MODE
     try:
         import crypto_grid_bot as _grid_cfg
         _db_mode = await _grid_cfg.get_db_strategy_override()
         if _db_mode:
             log.warning(
                 f"🗄️ DB strategy override active: {_db_mode!r} (environment says "
-                f"{CRYPTO_STRATEGY_MODE!r}). Clear it with POST "
+                f"{crypto_mode!r}). Clear it with POST "
                 f"/api/trading-dashboard/crypto-strategy-override once the "
                 f"environment variable is trustworthy again."
             )
-            CRYPTO_STRATEGY_MODE = _db_mode
+            crypto_mode = _db_mode
     except Exception as e:
         log.debug(f"DB strategy override check skipped: {type(e).__name__}: {e}")
 
     try:
         import threading
-        if CRYPTO_STRATEGY_MODE == "family_tree" and crypto_family_tree_bot_module is not None:
+        if crypto_mode == "family_tree" and crypto_family_tree_bot_module is not None:
             log.info("📡 Starting Crypto (Coinbase) bot daemon thread — family tree strategy (coordinator)...")
             print("[LIFESPAN] Starting crypto bot thread (family_tree)...", flush=True)
             bot_thread = threading.Thread(target=crypto_family_tree_bot_module.run, daemon=True)
             bot_thread.start()
             print("[LIFESPAN] ✓ Crypto bot thread started", flush=True)
             log.info("✓ Crypto (Coinbase) bot thread started | family tree coordinator | BTC root + branches spawn as they cross $1,000 | 24/7 trading")
-        elif CRYPTO_STRATEGY_MODE == "btc_compound" and crypto_btc_compound_bot_module is not None:
+        elif crypto_mode == "btc_compound" and crypto_btc_compound_bot_module is not None:
             log.info("📡 Starting Crypto (Coinbase) bot daemon thread — BTC compounding loop strategy...")
             print("[LIFESPAN] Starting crypto bot thread (btc_compound)...", flush=True)
             bot_thread = threading.Thread(target=crypto_btc_compound_bot_module.run, daemon=True)
             bot_thread.start()
             print("[LIFESPAN] ✓ Crypto bot thread started", flush=True)
             log.info("✓ Crypto (Coinbase) bot thread started | BTC-only | single position | adaptive profit target | 24/7 trading")
-        elif CRYPTO_STRATEGY_MODE == "multi_pair" and crypto_coinbase_bot_module is not None:
+        elif crypto_mode == "multi_pair" and crypto_coinbase_bot_module is not None:
             log.info("📡 Starting Crypto (Coinbase) bot daemon thread — multi-pair RSI strategy...")
             print("[LIFESPAN] Starting crypto bot thread (multi_pair)...", flush=True)
             bot_thread = threading.Thread(target=crypto_coinbase_bot_module.run, daemon=True)
@@ -1201,7 +1208,7 @@ async def lifespan(app: FastAPI):
             print("[LIFESPAN] ✓ Crypto bot thread started", flush=True)
             log.info("✓ Crypto (Coinbase) bot thread started | 28 pairs × 12 positions | 24/7 trading | Capital: $700 USD")
             log.info("💰 Strategy: 24/7 crypto + market hours stock scalping = constant opportunities and taking profits")
-        elif CRYPTO_STRATEGY_MODE == "grid_fleet":
+        elif crypto_mode == "grid_fleet":
             # Normally the dedicated crypto-trading service owns this loop,
             # and it still does: crypto_grid_bot holds a LEASE, renewed every
             # cycle, and this thread refuses to trade while that owner is
@@ -1233,7 +1240,7 @@ async def lifespan(app: FastAPI):
             # distinction immediately visible instead of requiring another
             # round of guessing between "bad env value" and "bad import".
             log.warning(
-                f"⚠️ CRYPTO_STRATEGY_MODE={CRYPTO_STRATEGY_MODE!r} did not match any known "
+                f"⚠️ crypto_mode={crypto_mode!r} did not match any known "
                 f"mode ('family_tree'/'btc_compound'/'multi_pair'/'grid_fleet') - bot will not run | "
                 f"family_tree module loaded: {crypto_family_tree_bot_module is not None} | "
                 f"btc_compound module loaded: {crypto_btc_compound_bot_module is not None} | "
