@@ -6627,6 +6627,50 @@ async def rebalance_flat_grid_branches_endpoint():
     return await crypto_grid_bot_module.rebalance_flat_grid_branches_now()
 
 
+@router.get("/grid-status/fee-reality")
+async def grid_fee_reality_endpoint(limit: int = 250):
+    """What Coinbase says the fills ACTUALLY cost - maker vs taker, and the
+    real commission charged.
+
+    This settles the one question that governs how fast this fleet can
+    trade. The spacing floor prices the TAKER round trip (1.50%) because a
+    post-only order that misses its wait becomes a market order, so the
+    floor is 1.70% and nothing tighter can profit. At maker (0.70%) the
+    floor is 0.90% and a 1.25% step nets +0.55% instead of -0.25% - the
+    difference between trading a few times a week and several times a day.
+
+    Every other local signal is inference: P&L booked against an assumed
+    leg rate, or a fill-mix counter that only started counting today.
+    Coinbase returns liquidity_indicator and the real commission per fill.
+
+    Read-only.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    engine = crypto_grid_bot_module.engine
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        data = await engine.get_recent_fills_summary(session, limit=limit)
+
+    # Put the answer next to the rule it decides.
+    try:
+        import fee_floor
+        rt = data.get("real_round_trip_fee_rate")
+        if rt:
+            data["implied_fee_safe_floor_pct"] = round(fee_floor.fee_floor_pct(rt), 6)
+            data["current_floor_pct"] = await crypto_grid_bot_module.fee_safe_floor_pct()
+            data["verdict"] = (
+                "maker is real - the floor can come down"
+                if data["implied_fee_safe_floor_pct"] < data["current_floor_pct"] - 1e-9
+                else "taker is what is actually being paid - the floor stays where it is")
+    except Exception as e:
+        data["floor_comparison_error"] = str(e)
+
+    return JSONResponse(content=data, headers={
+        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+        "Pragma": "no-cache", "Expires": "0"})
+
+
 @router.get("/grid-status/lessons")
 async def grid_lessons_endpoint():
     """Everything the fleet has learned about each coin, from its own

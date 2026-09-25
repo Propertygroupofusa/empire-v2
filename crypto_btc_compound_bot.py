@@ -1461,6 +1461,112 @@ async def _place_and_confirm(session, path: str, order: dict):
     return None
 
 
+async def get_recent_fills_summary(session, limit: int = 250) -> dict:
+    """What Coinbase itself says every recent fill actually cost.
+
+    Exists to settle one question with ground truth instead of inference:
+    is this account's grid getting MAKER fills or TAKER fills?
+
+    It matters more than any other single number here. The spacing floor
+    prices the taker round trip (1.50%), because a post-only order that
+    does not fill inside its wait becomes a market order - so the floor is
+    1.70% and no step below that can profit. At maker (0.70% round trip)
+    the floor is 0.90%, and a 1.25% step nets +0.55% instead of -0.25%.
+    That single fact is the difference between a fleet that trades a few
+    times a week and one that trades several times a day.
+
+    Everything else available locally is inference: P&L recorded against
+    an assumed leg rate, or a fill-mix counter that only began counting
+    today. Coinbase returns `liquidity_indicator` (MAKER/TAKER) and the
+    real `commission` charged on every fill. That is the actual answer.
+
+    Read-only. Returns {} on any failure rather than raising - a
+    diagnostic must never be able to disturb live trading.
+    """
+    path = f"/api/v3/brokerage/orders/historical/fills?limit={int(limit)}"
+    try:
+        async with session.get(
+            COINBASE_BASE_URL + path,
+            headers=_auth_headers("GET", path),
+            timeout=20,
+        ) as r:
+            if r.status != 200:
+                return {"error": f"HTTP {r.status}", "detail": (await r.text())[:300]}
+            fills = (await r.json()).get("fills", [])
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+    by_side = {}
+    per_product = {}
+    maker = taker = unknown = 0
+    commission_total = 0.0
+    notional_total = 0.0
+    oldest = newest = None
+
+    for f in fills:
+        liq = (f.get("liquidity_indicator") or "").upper()
+        size = float(f.get("size") or 0)
+        price = float(f.get("price") or 0)
+        comm = float(f.get("commission") or 0)
+        notional = size * price
+        ts = f.get("trade_time") or f.get("sequence_timestamp")
+        if ts:
+            oldest = ts if oldest is None or ts < oldest else oldest
+            newest = ts if newest is None or ts > newest else newest
+
+        if liq == "MAKER":
+            maker += 1
+        elif liq == "TAKER":
+            taker += 1
+        else:
+            unknown += 1
+
+        commission_total += comm
+        notional_total += notional
+
+        pid = f.get("product_id") or "?"
+        p = per_product.setdefault(pid, {"maker": 0, "taker": 0, "unknown": 0,
+                                         "commission": 0.0, "notional": 0.0})
+        p["maker" if liq == "MAKER" else ("taker" if liq == "TAKER" else "unknown")] += 1
+        p["commission"] += comm
+        p["notional"] += notional
+
+        side = (f.get("side") or "?").upper()
+        b = by_side.setdefault(side, {"maker": 0, "taker": 0, "unknown": 0})
+        b["maker" if liq == "MAKER" else ("taker" if liq == "TAKER" else "unknown")] += 1
+
+    classified = maker + taker
+    # The rate an average LEG really paid, straight from the commission
+    # Coinbase charged - not from any rate this codebase assumed.
+    real_leg_rate = (commission_total / notional_total) if notional_total > 0 else None
+
+    for pid, p in per_product.items():
+        p["maker_rate"] = round(p["maker"] / (p["maker"] + p["taker"]), 4) if (p["maker"] + p["taker"]) else None
+        p["real_leg_fee_rate"] = round(p["commission"] / p["notional"], 6) if p["notional"] > 0 else None
+        p["commission"] = round(p["commission"], 4)
+        p["notional"] = round(p["notional"], 2)
+
+    return {
+        "fills_examined": len(fills),
+        "maker_fills": maker,
+        "taker_fills": taker,
+        "unclassified_fills": unknown,
+        "maker_rate": round(maker / classified, 4) if classified else None,
+        "real_leg_fee_rate": round(real_leg_rate, 6) if real_leg_rate is not None else None,
+        "real_round_trip_fee_rate": round(real_leg_rate * 2, 6) if real_leg_rate is not None else None,
+        "total_commission_usd": round(commission_total, 4),
+        "total_notional_usd": round(notional_total, 2),
+        "by_side": by_side,
+        "per_product": per_product,
+        "oldest_fill": oldest,
+        "newest_fill": newest,
+        "note": ("liquidity_indicator and commission come from Coinbase, not from this "
+                 "codebase's assumptions. real_round_trip_fee_rate is what an average round "
+                 "trip ACTUALLY cost across these fills, and it is the number the spacing "
+                 "floor should be priced against."),
+    }
+
+
 async def load_equity_floor():
     """Reload the ratcheted equity floor from the DB at startup, so a
     Railway restart can't reset the ladder back down to the base level."""
