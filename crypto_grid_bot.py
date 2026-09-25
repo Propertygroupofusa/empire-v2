@@ -2217,7 +2217,7 @@ async def pick_best_ranked_coin_for_grid() -> str:
     excluded = await tree.get_effective_excluded_coins()
     claimed = await get_grid_branch_claimed_coins()
 
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(
             select(CryptoBacktestRun).order_by(CryptoBacktestRun.product_id, desc(CryptoBacktestRun.run_at))
         )
@@ -3104,7 +3104,7 @@ async def _log_grid_trade(bot_name, product_id, entry_price, exit_price, qty, pn
     defensive pattern every other trade-history logger in this codebase
     already uses."""
     try:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             db.add(CryptoGridTradeHistory(
                 bot_name=bot_name, product_id=product_id, entry_price=entry_price,
                 exit_price=exit_price, qty=qty, pnl=round(pnl, 2), opened_at=opened_at,
@@ -3113,7 +3113,20 @@ async def _log_grid_trade(bot_name, product_id, entry_price, exit_price, qty, pn
             ))
             await db.commit()
     except Exception as e:
-        log.warning(f"[GRID] trade-history log failed for {bot_name} (non-fatal, real trade unaffected): {e}")
+        # Deliberately still non-fatal - the real sale already happened and
+        # allocated_usd is already updated; raising here would not un-sell
+        # anything. But this is logged at ERROR, not warning, because a
+        # failure here means the round trip is MISSING from the ledger the
+        # dashboard computes realized P&L and win rate from. That is not a
+        # cosmetic loss: it silently biases the only record of whether this
+        # system makes money. When 28cc92c switched this module to the lazy
+        # session factory and missed this call site, the resulting NameError
+        # was swallowed by this handler and every completed grid round trip
+        # went unrecorded while the dashboard kept reporting a stale total
+        # as current fact.
+        log.error(f"[GRID] ❌ trade-history log FAILED for {bot_name} {product_id} "
+                  f"(pnl {pnl:+.2f}) - the real trade is unaffected, but this round trip is "
+                  f"MISSING from the realized-P&L ledger: {e}")
 
 
 async def _log_activity_safe(bot_name, product_id, event_type, message):
