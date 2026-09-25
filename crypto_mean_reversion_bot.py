@@ -35,6 +35,12 @@ log = logging.getLogger("crypto_mean_reversion_bot")
 MEAN_REVERSION_MODE_KEY = "crypto_mean_reversion_active"
 RSI_OVERSOLD_THRESHOLD = 30      # Buy when RSI drops below this AND rising
 RSI_OVERBOUGHT_THRESHOLD = 60    # Sell when RSI rises above this
+# The round trip this engine's fee floor prices against. The WORST case,
+# not the expected one: a maker order that does not fill becomes a market
+# order, so the optimistic rate is an estimate and the pessimistic one is
+# the guarantee. Matches crypto_grid_bot's own floor.
+FEE_FLOOR_ROUND_TRIP_PCT = float(os.getenv("CRYPTO_ROUND_TRIP_FEE_PCT", "0.015"))
+
 ATR_MULTIPLIER_STOP = 1.5        # Stop loss = Entry - (1.5 * ATR_14)
 ATR_MULTIPLIER_TARGET = 2.5      # Take profit = Entry + (2.5 * ATR_14)
 SLIPPAGE_COLLAR = 0.02           # 2% tolerance on protective limit order exit
@@ -65,6 +71,47 @@ class MeanReversionPosition:
         # Stop = Entry - (1.5 * ATR), Target = Entry + (2.5 * ATR)
         self.stop_loss_price = entry_price - (ATR_MULTIPLIER_STOP * atr_14)
         self.target_price = entry_price + (ATR_MULTIPLIER_TARGET * atr_14)
+
+        # THE FEE FLOOR, wired in 2026-09-25.
+        #
+        # An ATR-scaled target has no lower bound. On a quiet coin
+        # 2.5 x ATR_14 can be a fraction of a percent, and a target
+        # smaller than the round trip loses money even when the trade is
+        # RIGHT about direction - the one class of loss that is arithmetic
+        # rather than probability.
+        #
+        # Nothing here checked that. This engine was one of four with no
+        # fee protection of any kind on 2026-09-25, the same gap that let a
+        # 0.25% profit target reach a live-flagged config file.
+        #
+        # The target is RAISED to the floor rather than the position being
+        # refused: by the time this object exists the entry has already
+        # been decided, so refusing would strand a real position with no
+        # exit. Raising keeps the trade honest - it simply has to travel
+        # far enough to pay for itself. fee_floor_raised records that it
+        # happened, so it is measurable rather than invisible.
+        self.fee_floor_raised = False
+        try:
+            import fee_floor
+            floor_pct = fee_floor.fee_floor_pct(FEE_FLOOR_ROUND_TRIP_PCT)
+            min_target = entry_price * (1.0 + floor_pct)
+            if self.target_price < min_target:
+                log.warning(
+                    "%s: ATR target $%.6f is only %.3f%% above entry $%.6f - below the "
+                    "%.2f%% fee floor, so a WINNING trade would net %+.3f%%. Raising the "
+                    "target to $%.6f.",
+                    product_id, self.target_price,
+                    (self.target_price / entry_price - 1.0) * 100.0, entry_price,
+                    floor_pct * 100.0,
+                    fee_floor.net_per_win_pct(
+                        self.target_price / entry_price - 1.0,
+                        FEE_FLOOR_ROUND_TRIP_PCT) * 100.0,
+                    min_target,
+                )
+                self.target_price = min_target
+                self.fee_floor_raised = True
+        except Exception as e:  # a floor that breaks trading is worse than none
+            log.warning("%s: fee floor check skipped (%s)", product_id, e)
 
         # For protective limit order on exit (2% slippage collar)
         self.emergency_floor = self.stop_loss_price * (1 - SLIPPAGE_COLLAR)
