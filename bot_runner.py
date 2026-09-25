@@ -19,7 +19,7 @@ import logging
 import os
 import time
 
-from crypto_strategy_config import get_crypto_strategy_mode
+from crypto_strategy_config import UNCONFIGURED, get_crypto_strategy_mode
 
 # Setup logging for Railway
 logging.basicConfig(
@@ -55,6 +55,18 @@ def main():
     log.info("=" * 70)
 
     strategy_mode = get_crypto_strategy_mode()
+    if strategy_mode == UNCONFIGURED:
+        # NOT "owned by the web service" - owned by nobody. Saying otherwise
+        # sends the reader to check a service that is also doing nothing,
+        # which is exactly how the 'delfina_scalping' typo stayed alive for
+        # days while both services quietly deferred to each other.
+        log.error(
+            "CRYPTO_STRATEGY_MODE is missing or not a known strategy, so NO crypto "
+            "loop is running anywhere - not here, and not on the web service. Set "
+            "CRYPTO_STRATEGY_MODE=grid_fleet and SERVICE_ROLE=crypto-trading on THIS "
+            "service, and CRYPTO_STRATEGY_MODE=family_tree on the web service."
+        )
+        return
     if strategy_mode != "grid_fleet":
         log.info(
             "CRYPTO_STRATEGY_MODE=%r is owned by the web service; dedicated runner exiting",
