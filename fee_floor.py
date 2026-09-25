@@ -114,3 +114,73 @@ def require_clears_fees(target_pct, round_trip_fee_pct, context="",
             f"(fee + {min_net_margin_pct * 100:.2f}% margin)."
         )
     return target
+
+
+# ---------------------------------------------------------------------------
+# Dollar targets, and startup reporting
+#
+# Added 2026-09-25 while wiring this into the remaining engines. A target
+# expressed in DOLLARS hides the same defect a percentage shows plainly:
+# crypto_coinbase_bot closes on `dollar_profit >= TARGET_TRADE_PROFIT`
+# with TARGET_TRADE_PROFIT = $2.50. That is 5.0% on a $50 position and
+# 0.25% on a $1,000 one - the same number, fine at one size and a
+# guaranteed loss at another. Percentage floors cannot see it; this can.
+# ---------------------------------------------------------------------------
+
+
+def min_profit_usd(position_usd, round_trip_fee_pct,
+                   min_net_margin_pct=DEFAULT_MIN_NET_MARGIN_PCT):
+    """The smallest DOLLAR profit worth taking on a position of this size."""
+    return max(0.0, float(position_usd or 0.0)) * fee_floor_pct(
+        round_trip_fee_pct, min_net_margin_pct)
+
+
+def dollar_target_clears_fees(target_usd, position_usd, round_trip_fee_pct,
+                              min_net_margin_pct=DEFAULT_MIN_NET_MARGIN_PCT):
+    """True when a fixed dollar target still pays at this position size."""
+    return float(target_usd or 0.0) >= min_profit_usd(
+        position_usd, round_trip_fee_pct, min_net_margin_pct)
+
+
+def max_position_for_dollar_target(target_usd, round_trip_fee_pct,
+                                   min_net_margin_pct=DEFAULT_MIN_NET_MARGIN_PCT):
+    """The largest position a fixed dollar target still clears fees on.
+
+    Above this size the target is a smaller percentage than the fee, and a
+    'profitable' close is a real loss.
+    """
+    floor = fee_floor_pct(round_trip_fee_pct, min_net_margin_pct)
+    if floor <= 0:
+        return float("inf")
+    return max(0.0, float(target_usd or 0.0)) / floor
+
+
+def report(engine_name, targets, round_trip_fee_pct,
+           min_net_margin_pct=DEFAULT_MIN_NET_MARGIN_PCT):
+    """One line per target, for an engine to log at startup.
+
+    Says plainly which targets clear the fee and which cannot, so the state
+    is visible without reading code. `targets` maps a name to a fraction
+    (0.01 = 1%). Returns (lines, ok) - ok is False if ANY target fails.
+    """
+    floor = fee_floor_pct(round_trip_fee_pct, min_net_margin_pct)
+    lines = [
+        f"{engine_name}: fee floor {floor * 100:.2f}% "
+        f"(round trip {float(round_trip_fee_pct) * 100:.2f}% + "
+        f"{min_net_margin_pct * 100:.2f}% margin)"
+    ]
+    all_ok = True
+    for name, pct in targets.items():
+        if pct is None:
+            lines.append(f"  {name}: not set")
+            continue
+        net = net_per_win_pct(pct, round_trip_fee_pct)
+        if clears_fees(pct, round_trip_fee_pct, min_net_margin_pct):
+            lines.append(f"  OK   {name} {pct * 100:.3f}% -> a win nets {net * 100:+.3f}%")
+        else:
+            all_ok = False
+            lines.append(
+                f"  FAIL {name} {pct * 100:.3f}% is BELOW the floor -> "
+                f"a WINNING trade nets {net * 100:+.3f}%"
+            )
+    return lines, all_ok

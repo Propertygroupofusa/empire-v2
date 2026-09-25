@@ -409,6 +409,14 @@ TAKER_FEE_RATE = 0.006
 # Tier 2: Exit 1/3 at 6-10% (second profit zone, move stop to breakeven)
 # Tier 3: Remaining 1/3 trails at trailing stop (let winners run with protection)
 # This replaces the fixed 37% target which caused the bot to hold indefinitely
+# The round trip the FEE FLOOR prices against. Deliberately separate from
+# CRYPTO_ROUND_TRIP_FEE_RATE above, which defaults to 0.4% and is read by
+# other exit logic here. The account's real measured rate is 1.50% when
+# both legs fall back to market orders, and a floor must price the worst
+# case the trade can pay - an unfilled maker order becomes a market order.
+# Matches crypto_grid_bot and crypto_mean_reversion_bot.
+FEE_FLOOR_ROUND_TRIP_PCT = _safe_float_env("CRYPTO_ROUND_TRIP_FEE_PCT", "0.015")
+
 CRYPTO_TIER_LEVELS = [0.05, 0.08, 0.15]  # 3-tier exit: 5% (lock), 8%, 15% (trailing)
 CRYPTO_TIER_FRACTIONS = [1/3, 1/3, 1/3]   # Exit 1/3 of position at each tier
 CRYPTO_TRAILING_STOP_PCT = 0.05  # Trail final position by 5% from recent high (protection while letting winners run)
@@ -1679,9 +1687,36 @@ async def run_crypto_cycle():
             should_exit = False
             reason = None
 
-            # PROFIT TAKING: Close trades with $10+ profit when balance > $1,001
+            # PROFIT TAKING: close on a fixed DOLLAR gain when balance > $1,001.
+            #
+            # THE FEE FLOOR, wired 2026-09-25. A fixed dollar target hides
+            # the defect a percentage shows plainly: $2.50 is 5.00% on a $50
+            # position and 0.25% on a $1,000 one - the same number, fine at
+            # one size and a guaranteed loss at another. Against the real
+            # 1.50% round trip it only clears on positions up to $147.06.
+            # Above that, "taking profit" books a loss.
+            #
+            # 0.25% is also, exactly, the target on the retired
+            # bot_config.json scalper - reached here completely
+            # independently, which is why this needs a floor and not a
+            # bigger constant.
             dollar_profit = unrealized_pnl
-            profit_take_exit = should_take_profits and dollar_profit >= TARGET_TRADE_PROFIT
+            _min_profit = TARGET_TRADE_PROFIT
+            try:
+                import fee_floor
+                _position_usd = abs(qty * entry) if qty and entry else 0.0
+                # NOT CRYPTO_ROUND_TRIP_FEE_RATE - that defaults to 0.4%,
+                # while the account's real measured taker round trip is
+                # 1.50%. Flooring against a stale optimistic rate
+                # under-protects by nearly 4x, and other exit logic in this
+                # file reads that constant, so it is left alone.
+                _floor_usd = fee_floor.min_profit_usd(
+                    _position_usd, FEE_FLOOR_ROUND_TRIP_PCT)
+                if _floor_usd > _min_profit:
+                    _min_profit = _floor_usd
+            except Exception as _e:
+                logger.warning(f"fee floor check skipped for {product_id}: {_e}")
+            profit_take_exit = should_take_profits and dollar_profit >= _min_profit
 
             # PRIORITY 1: Hard stop loss (swing-based, professional risk management)
             if stop_hit:
