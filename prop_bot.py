@@ -556,7 +556,8 @@ async def get_price_rsi(session, symbol):
         # feed, Alpaca's default depends on the account's data
         # subscription tier, which previously made this endpoint
         # inconsistent with the (working) 1-hour trend check right below it.
-        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=5Min&limit=50&feed=iex"
+        start = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=5Min&start={start}&limit=50&feed=iex"
         async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
                 try:
@@ -813,7 +814,8 @@ async def get_price_momentum(session, symbol):
     unchanged. Reuses the same _price_rsi_last_failure dict for the same
     diagnosability the dashboard's error messages already rely on."""
     try:
-        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=15Min&limit=100&feed=iex"
+        start = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=15Min&start={start}&limit=100&feed=iex"
         async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
                 try:
@@ -901,7 +903,8 @@ async def get_higher_tf_trend(session, symbol):
     fetch failure so a data hiccup never blocks a trade outright, only
     a genuinely confirmed opposing trend does."""
     try:
-        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=1Hour&limit=50&feed=iex"
+        start = (datetime.now(timezone.utc) - timedelta(days=21)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=1Hour&start={start}&limit=50&feed=iex"
         async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
                 return "UNKNOWN"

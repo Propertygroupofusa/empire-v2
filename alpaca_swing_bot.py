@@ -159,7 +159,11 @@ async def get_intraday_rsi(session, symbol, timeframe="15Min"):
     Used for day trading entries/exits
     """
     try:
-        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe={timeframe}&limit=100"
+        # Without start=, Alpaca defaults to the beginning of the current
+        # day, so any call before the open returns bars: null. 30 days
+        # covers 100 bars at any intraday timeframe this is called with.
+        start = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe={timeframe}&start={start}&limit=100"
         async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
                 return None
@@ -194,7 +198,10 @@ async def get_weekly_rsi(session, symbol):
     """
     try:
         # Fetch last 52 weeks of daily data (use daily, aggregate to weekly)
-        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=1Day&limit=365"
+        # 365 daily bars is ~52 weeks of sessions; 600 calendar days covers
+        # that with weekends and holidays.
+        start = (datetime.now(timezone.utc) - timedelta(days=600)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=1Day&start={start}&limit=365"
         async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
                 log.warning(f"Weekly RSI fetch failed for {symbol}: HTTP {r.status}")
