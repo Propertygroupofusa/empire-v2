@@ -2536,22 +2536,46 @@ async def tune_spacing_per_coin(dry_run: bool = True, min_trips: int = 4,
             skipped.append({"product_id": b.product_id, "reason": f"backtest failed: {exc}"})
             continue
 
+        # run_grid_level_spacing_comparison returns {"comparison": [row, ...]},
+        # one row per coin, each candidate a key on that row carrying
+        # total_pnl / num_trades. Read it as it really is.
+        coin_row = next((r for r in (res or {}).get("comparison", [])
+                         if r.get("product_id") == b.product_id), None)
+        if coin_row is None:
+            # NOT thin evidence - the backtest returned nothing for this
+            # coin at all. Kept distinct on purpose: the first version of
+            # this function misread the result shape, found no rows, and
+            # every coin came back "no candidate cleared 4 trips", which
+            # reads like a careful verdict and was actually a parsing bug.
+            # A shape error must never be able to wear the evidence gate's
+            # clothes.
+            skipped.append({"product_id": b.product_id,
+                            "reason": "backtest returned no comparison row for this coin",
+                            "is_error": True,
+                            "skip_reasons": (res or {}).get("skipped")})
+            continue
+
         rows = []
         for label, cfg in GRID_LEVEL_SPACING_CANDIDATES.items():
-            entry = (res or {}).get(label) or {}
-            per_coin = (entry.get("per_coin") or {}).get(b.product_id) or entry
-            net = per_coin.get("net_usd", per_coin.get("net_pnl_usd"))
-            trips = per_coin.get("trips", per_coin.get("round_trips"))
+            entry = coin_row.get(label) or {}
+            net, trips = entry.get("total_pnl"), entry.get("num_trades")
             if net is None or trips is None:
                 continue
             rows.append({"label": label, "net_usd": float(net), "trips": int(trips),
                          "grid_pct": cfg["grid_pct"], "num_levels": cfg["num_levels"],
                          "below_floor": cfg["grid_pct"] < floor})
 
+        if not rows:
+            skipped.append({"product_id": b.product_id,
+                            "reason": "no candidate returned a usable result (shape or data error)",
+                            "is_error": True})
+            continue
+
         eligible = [r for r in rows if r["trips"] >= min_trips and not r["below_floor"]]
         if not eligible:
             skipped.append({"product_id": b.product_id,
                             "reason": f"no candidate cleared {min_trips} trips above the {floor*100:.2f}% floor",
+                            "is_error": False,
                             "candidates": rows})
             continue
 

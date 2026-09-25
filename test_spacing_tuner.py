@@ -85,6 +85,29 @@ ok("dry_run defaults to True",
 ok("writes happen only when dry_run is False", "if not dry_run:" in body)
 ok("every change is logged to the activity feed", "SPACING_TUNED" in body)
 
+# --- a shape error must never look like a careful verdict ----------------
+# The first version of the tuner guessed the backtest's result shape wrong,
+# found nothing, and reported "no candidate cleared 4 trips above the 1.70%
+# floor" for all seven coins. That reads like the evidence gate working. It
+# was a parsing bug wearing the gate's clothes, and only the uniformity of
+# the seven identical skips gave it away.
+ok("it reads the real result shape: comparison rows",
+   "'comparison'" in body or '"comparison"' in body)
+ok("it reads total_pnl, the key the backtest actually returns", "total_pnl" in body)
+ok("it reads num_trades, the key the backtest actually returns", "num_trades" in body)
+ok("REGRESSION: it no longer reads an invented per_coin sub-dict",
+   "get('per_coin')" not in body and 'get("per_coin")' not in body)
+ok("REGRESSION: it no longer reads an invented round_trips key",
+   "round_trips" not in body)
+ok("REGRESSION: it no longer reads an invented net_pnl_usd key",
+   "net_pnl_usd" not in body)
+ok("a missing comparison row is flagged as an ERROR, not thin evidence",
+   "no comparison row" in body and "is_error" in body)
+ok("an empty candidate set is flagged as an error too",
+   "shape or data error" in body)
+ok("genuine thin evidence is explicitly NOT an error",
+   "'is_error': False" in body or '"is_error": False' in body)
+
 router = open(os.path.join(HERE, "routers", "trading_dashboard.py"), encoding="utf-8").read()
 ok("an endpoint exposes it", "/grid-status/tune-spacing-per-coin" in router)
 ok("the endpoint defaults to dry_run", "dry_run: bool = True" in router)
