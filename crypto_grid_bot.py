@@ -2476,7 +2476,8 @@ async def _maybe_rotate_one_grid_branch(branch: CryptoGridBranch, after_sale: bo
 
 
 async def tune_spacing_per_coin(dry_run: bool = True, min_trips: int = 4,
-                                min_improvement_usd: float = 1.0) -> dict:
+                                min_improvement_usd: float = 1.0,
+                                days: int = 90) -> dict:
     """Pick each branch's grid step from MEASURED performance on its own coin.
 
     The account owner's ask: "learn as you go and change it to where it can
@@ -2531,7 +2532,13 @@ async def tune_spacing_per_coin(dry_run: bool = True, min_trips: int = 4,
     plans, skipped = [], []
     for b in branches:
         try:
-            res = await lab.run_grid_level_spacing_comparison(coins=[b.product_id])
+            # `days` widens the evidence base. At the 30-day default a
+            # coin can produce two or three round trips at 3.0% spacing,
+            # which is not a spacing verdict. A longer window is real
+            # historical data the system can already fetch - the cheapest
+            # honest way to get more trips before believing a candidate.
+            res = await lab.run_grid_level_spacing_comparison(
+                coins=[b.product_id], days=days)
         except Exception as exc:
             skipped.append({"product_id": b.product_id, "reason": f"backtest failed: {exc}"})
             continue
@@ -2631,6 +2638,7 @@ async def tune_spacing_per_coin(dry_run: bool = True, min_trips: int = 4,
         "global_override_blocks_per_coin": override_is_set,
         "plans": plans, "plan_count": len(plans),
         "applied": applied, "skipped": skipped,
+        "backtest_days": days,
         "rules": {"min_trips": min_trips, "min_improvement_usd": min_improvement_usd,
                   "floor_is_never_crossed": True,
                   "direction": "whichever the measurement points - not always tighter"},

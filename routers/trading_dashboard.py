@@ -6634,7 +6634,8 @@ async def get_grid_fill_mix_endpoint():
 
 @router.post("/grid-status/tune-spacing-per-coin")
 async def tune_spacing_per_coin_endpoint(dry_run: bool = True, min_trips: int = 4,
-                                         min_improvement_usd: float = 1.0):
+                                         min_improvement_usd: float = 1.0,
+                                         days: int = 90):
     """Pick each branch's step from measured performance on its OWN coin.
 
     Moves the step in whichever direction the measurement points, not
@@ -6646,7 +6647,8 @@ async def tune_spacing_per_coin_endpoint(dry_run: bool = True, min_trips: int = 
     if crypto_grid_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
     return await crypto_grid_bot_module.tune_spacing_per_coin(
-        dry_run=dry_run, min_trips=min_trips, min_improvement_usd=min_improvement_usd)
+        dry_run=dry_run, min_trips=min_trips,
+        min_improvement_usd=min_improvement_usd, days=days)
 
 
 @router.post("/grid-status/reanchor-flat-branches")
