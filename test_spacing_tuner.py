@@ -58,6 +58,21 @@ ok("it can move the step WIDER, not only tighter", "'wider'" in body or '"wider"
 ok("direction is derived from the comparison, not assumed",
    "to_grid_pct'] < b.grid_pct" in body or "best['grid_pct'] < b.grid_pct" in body)
 
+# --- a held position keeps the terms it was opened under -----------------
+# 2026-09-25: this guard was missing and the tuner widened NEAR-USD from
+# 2.00% to 3.00% with a real slice open, moving its sell trigger from
+# $5.0681 to $5.1178 - 1.24% away to 2.23% away - on committed money. It
+# happened to be favourable; on a falling coin the same move pushes an
+# exit out of reach. The backtest answers "best step for the NEXT trade",
+# never "what to do with a position already open".
+ok("REGRESSION: a branch holding a slice is never re-spaced",
+   "get_grid_slices" in body and "if held:" in body)
+ok("the skip names the real reason - the exit would move",
+   "move the exit" in body)
+ok("it is not an error, just a deferral", "will re-tune when flat" in body)
+ok("the guard runs BEFORE the backtest, so it cannot be overridden by a result",
+   body.index("if held:") < body.index("run_grid_level_spacing_comparison"))
+
 # --- evidence gates ------------------------------------------------------
 ok("a candidate must clear a minimum number of trips", "min_trips" in body)
 ok("thin-evidence candidates are excluded before choosing",

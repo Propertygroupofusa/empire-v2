@@ -2531,6 +2531,34 @@ async def tune_spacing_per_coin(dry_run: bool = True, min_trips: int = 4,
 
     plans, skipped = [], []
     for b in branches:
+        # NEVER re-space a branch that is holding a position.
+        #
+        # 2026-09-25: this guard did not exist, and the tuner widened
+        # NEAR-USD from 2.00% to 3.00% while a real slice was open. The
+        # same reference_price sets the SELL trigger
+        # (price >= reference * (1 + grid_pct)), so the exit moved from
+        # $5.0681 to $5.1178 - from 1.24% away to 2.23% away - on money
+        # already committed. That time it happened to be favourable (the
+        # trade is worth $0.43 instead of $0.20 if it lands), but that was
+        # luck, not design: on a falling coin the identical move pushes an
+        # exit out of reach.
+        #
+        # The backtest answers "what step is best for the NEXT trade". It
+        # does not answer "what should I do with a position already open",
+        # and those must not be confused. A held slice keeps the terms it
+        # was opened under; the branch is re-tuned once it is flat.
+        #
+        # reanchor_flat_grid_branches_now() has had this rule from the
+        # start. The tuner should have had it too.
+        held = await get_grid_slices(b.bot_name)
+        if held:
+            skipped.append({
+                "product_id": b.product_id,
+                "reason": (f"holds {len(held)} open slice(s) - re-spacing would move the exit "
+                           f"on a position already open; will re-tune when flat"),
+                "is_error": False,
+            })
+            continue
         try:
             # `days` widens the evidence base. At the 30-day default a
             # coin can produce two or three round trips at 3.0% spacing,
