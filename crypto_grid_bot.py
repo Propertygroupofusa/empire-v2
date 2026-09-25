@@ -225,6 +225,15 @@ GRID_AUTO_ROTATE_MIN_USD = float(os.getenv("GRID_AUTO_ROTATE_MIN_USD", "10.0"))
 # within one process's lifetime.
 _last_grid_auto_rotate_at = 0.0
 
+# How often the grid refreshes its OWN coin ranking. Default 1 hour, against
+# the 24 HOURS the tree's coordinator used - and that coordinator only ran on
+# the web service, only in family_tree mode, which is how the table came to be
+# frozen while the grid kept trying to rank coins from it. In-process throttle,
+# same pattern as every other periodic sweep in this file.
+GRID_BACKTEST_REFRESH_SECONDS = int(
+    os.getenv("GRID_BACKTEST_REFRESH_SECONDS", str(60 * 60)))
+_last_grid_backtest_refresh_at = 0.0
+
 # ── SHADOW MODE MONITORING THROTTLE ────────────────────────────────────────
 # Periodic check of shadow mode learning engine progress - logs status every
 # N seconds during the accumulation phase (30-50 trades). Useful for alerting
@@ -3461,6 +3470,46 @@ async def run_grid_branches_cycle():
     # exact cycle is already picked up by the immediate post-sale check
     # in run_grid_branch_cycle() - this periodic sweep exists for real
     # idle cash that's been sitting for a while, not freshly realized.
+    # The rotation sweep below ranks coins from CryptoBacktestRun. Refresh
+    # that table HERE, first, because of a structural dead-end found on
+    # 2026-09-25:
+    #
+    #   auto-rotate sweep   every 5 min, crypto-trading service
+    #     needs             a coin with >= GRID_MIN_REQUIRED_ROI_PCT ROI
+    #     reads             CryptoBacktestRun
+    #                         ^ written by exactly ONE function:
+    #   scheduled backtest  crypto_family_tree_bot._run_scheduled_backtest_
+    #                       and_update_exclusions(), called only from that
+    #                       module's run() coordinator - which main.py
+    #                       starts only when CRYPTO_STRATEGY_MODE ==
+    #                       "family_tree", on the WEB service.
+    #
+    # So the only system still placing orders depended, for the data
+    # driving every coin decision it makes, on a RETIRED bot being started
+    # on a DIFFERENT service by a variable that was wrong. When that
+    # variable broke, the table froze, every ROI check failed against
+    # stale or absent rows, and the spread plan reported "eligible coins:
+    # NONE" while 35 coins sat ranked and $259 waited to deploy.
+    #
+    # A system must own the data it depends on. The grid now refreshes its
+    # own ranking table on its own service, on its own schedule, and no
+    # longer cares whether the tree runs at all.
+    global _last_grid_backtest_refresh_at
+    now0 = time.time()
+    if now0 - _last_grid_backtest_refresh_at >= GRID_BACKTEST_REFRESH_SECONDS:
+        _last_grid_backtest_refresh_at = now0
+        try:
+            import crypto_selection_backtest as selection
+            log.info("[GRID] refreshing own coin ranking (CryptoBacktestRun)...")
+            res = await selection.run_full_backtest()
+            ranked = len((res or {}).get("ranked") or [])
+            log.info(f"[GRID] coin ranking refreshed - {ranked} coins ranked")
+        except Exception as e:
+            # Non-fatal: a stale ranking is worse than a fresh one, but far
+            # better than a stopped trading loop.
+            log.warning(f"[GRID] coin ranking refresh failed (non-fatal): "
+                        f"{type(e).__name__}: {e}")
+
     global _last_grid_auto_rotate_at
     now = time.time()
     if now - _last_grid_auto_rotate_at >= GRID_AUTO_ROTATE_INTERVAL_SECONDS:
