@@ -677,6 +677,25 @@ def run_fleet(series_by_coin, strategies=None, in_sample_frac=0.7,
                            "beats_buy_hold": oos["total_return_pct"] > bh["total_return_pct"]}
 
     profitable = [c for c, v in cross.items() if v["oos_pct"] > 0]
+    # Profitable is not the bar. BEATING DOING NOTHING is the bar.
+    #
+    # The 2026-09-25 hourly sweep found price_vs_sma(100, 0.02): +173.9% on
+    # ARB, above the fleet floor, beating its matched control 100% of the
+    # time, and profitable on 6 of 8 coins. It passed every gate here and
+    # was reported as surviving.
+    #
+    # It underperformed buy-and-hold on 8 of 8:
+    #     ARB  +173.9 vs +182.2      NEAR  +41.5 vs +198.2
+    #     BCH   +43.0 vs  +62.4      BONK  +31.9 vs  +54.2
+    #     ETC   +12.9 vs  +50.6      DOGE   +5.3 vs  +35.5
+    #     BTC    -3.5 vs  +25.7      FLOKI -16.8 vs   +5.5
+    #
+    # The window (May-Sep 2026) was a broad rally, and the strategy is
+    # "hold while price is above its own SMA" - so it captured most of the
+    # upside and paid fees for the privilege. run_strategy_lab already
+    # refuses that per coin; run_fleet did not, and handed back a false
+    # positive with a confident number attached.
+    beats_hold = [c for c, v in cross.items() if v["beats_buy_hold"]]
     verdict = "no variant anywhere cleared the minimum trade count"
     if best_row is not None:
         b = best_row["out_of_sample"]["total_return_pct"]
@@ -685,6 +704,12 @@ def run_fleet(series_by_coin, strategies=None, in_sample_frac=0.7,
                        f"({best_row['strategy']} on {best_coin}, {b:+.1f}%) is under the "
                        f"{fleet_floor['p95']:+.1f}% that the best of {true_width} zero-edge "
                        f"strategies reaches by luck at this search width.")
+        elif len(beats_hold) < max(2, len(cross) // 2):
+            verdict = (f"UNDERPERFORMS DOING NOTHING. {best_row['strategy']} "
+                       f"{best_row['params']} returned {b:+.1f}% on {best_coin}, but beats "
+                       f"buy-and-hold on only {len(beats_hold)}/{len(cross)} coins "
+                       f"({', '.join(sorted(beats_hold)) or 'none'}). A strategy that trades "
+                       f"all window and lands under holding has spent fees to underperform.")
         elif len(profitable) < max(2, len(cross) // 2):
             verdict = (f"DOES NOT GENERALISE. {best_row['strategy']} {best_row['params']} "
                        f"returned {b:+.1f}% on {best_coin} but is profitable on only "
@@ -709,6 +734,7 @@ def run_fleet(series_by_coin, strategies=None, in_sample_frac=0.7,
                  if best_row else None),
         "cross_coin": cross,
         "profitable_on": profitable,
+        "beats_buy_hold_on": beats_hold,
         "verdict": verdict,
         "per_coin_verdicts": {c: r["verdict"] for c, r in usable.items()},
     }

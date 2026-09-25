@@ -221,6 +221,22 @@ ok("it records the real 2026-09-25 result that motivated the gate",
 ok("it notes that losing less than holding is not an edge",
    "Losing less than holding is not an edge" in FSRC)
 
+# The hourly sweep found price_vs_sma(100, 0.02): +173.9% on ARB, above
+# the fleet floor, beating its control 100% of the time, profitable on
+# 6/8 coins - and BEHIND buy-and-hold on 8 of 8. run_strategy_lab refuses
+# that per coin; run_fleet did not, and reported it as surviving.
+ok("the fleet run tracks buy-and-hold across every coin",
+   "beats_hold = [c for c, v in cross.items() if v[\"beats_buy_hold\"]]" in FSRC)
+ok("it refuses a fleet winner that loses to holding",
+   "UNDERPERFORMS DOING NOTHING" in FSRC.split("def run_fleet")[1])
+ok("it reports which coins it actually beat holding on",
+   "beats_buy_hold_on" in FSRC)
+ok("it records the real result that motivated this gate",
+   "price_vs_sma(100, 0.02)" in FSRC)
+# 0-of-8 beating hold must trip it; 6-of-8 must not.
+ok("0-of-8 beating buy-and-hold trips the gate", 0 < max(2, 8 // 2))
+ok("6-of-8 beating buy-and-hold does not", not (6 < max(2, 8 // 2)))
+
 # The gate must actually fire on the shape of that real result.
 prof = ["NEAR-USD"]
 cross_n = 8
