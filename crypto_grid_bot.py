@@ -1002,6 +1002,104 @@ async def worst_case_leg_fee_rate() -> float:
     return min(float(_cached_real_maker_fee_rate), taker_leg)
 
 
+# ── THE DEADLOCK THIS RESOLVES ──────────────────────────────────────────
+#
+# Two cost models decide whether a branch trades, and until 2026-09-25 they
+# did not have to agree:
+#
+#   fee_safe_floor_pct()   step must clear FEES plus a margin        1.70%
+#   _net_edge_gate_ok()    step must clear fees + SPREAD + ADVERSE   2.16%
+#
+# A branch may therefore sit at a spacing the floor permits and the gate can
+# never pass. That is not a near miss that resolves itself - it is a
+# permanent deadlock, because nothing in the system moves the step.
+#
+# Live, on this account: NEAR-USD pinned at a 2.00% step, reaching its buy
+# trigger constantly, refused 171 times in a row with "net edge -0.164% - a
+# 2.00% target does not clear 2.16% of costs". Every refusal correct. The
+# branch needed a 2.36% step and had no way to get there, so the capital
+# behind it simply never traded.
+#
+# The fix is NOT to relax the gate. The gate is the only component in this
+# stack whose numbers have been right throughout. It is to make the SPACING
+# clear the bar the gate actually enforces, which is what the fee floor was
+# always trying to do and was only doing for one of the three costs.
+#
+# This is also what the evidence already says to do. Over 90 days of real
+# candles a wider step beat a tighter one on six of seven coins ($128.30 vs
+# $23.24 at 1.70%) AND produced more round trips, not fewer - selling early
+# resets the reference upward and costs the next entry.
+#
+# Strictly one-directional: it only ever WIDENS, never tightens, and it is
+# bounded, so a wild volatility reading cannot walk a branch out to an
+# absurd spacing. If the required step exceeds the bound the branch keeps
+# refusing, which is the correct outcome - some coins are too expensive to
+# grid at any sane spacing, and that is an answer, not a failure.
+GATE_CLEARING_MAX_PCT = float(os.getenv("GRID_GATE_CLEARING_MAX_PCT", "0.06"))
+AUTO_WIDEN_ENV_VAR = "GRID_AUTO_WIDEN"
+
+
+def auto_widen_enabled() -> bool:
+    """Whether spacing may widen to clear the gate. ON unless switched off.
+
+    Defaults ON because the alternative is the deadlock above: a branch that
+    refuses every buy forever at a spacing it cannot change. The gate is
+    untouched and still refuses anything that does not clear, so the worst
+    case here is a wider step, which is the direction the backtest evidence
+    already points.
+    """
+    raw = (os.getenv(AUTO_WIDEN_ENV_VAR) or "").strip().strip('"').strip("'").lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+async def gate_clearing_floor_pct(session, product_id: str, current_step: float,
+                                  slice_usd: float):
+    """The smallest step that would actually pass the net-edge gate.
+
+    Derived by asking the gate itself rather than re-deriving its internals:
+    net edge is (step - costs), so the step that clears is
+
+        current_step - net_edge + margin
+
+    That inverts the gate exactly, whatever it happens to be charging for
+    spread and adverse selection today, and cannot drift from it the way a
+    second copy of the formula would.
+
+    Returns (required_step, detail) or (None, reason) when it cannot be
+    computed - in which case the caller must leave the spacing alone, since
+    widening on a number nobody could produce is the same class of mistake
+    as the one this exists to fix.
+    """
+    try:
+        import crypto_nine_coin_scanner as scanner
+        bid, ask, bid_depth, ask_depth = await engine.get_book_top_and_depth(session, product_id)
+        if bid is None or ask is None:
+            return None, "order book unreadable"
+        swing = await engine.get_average_hourly_swing_pct(session, product_id)
+        fee_round_trip = (await worst_case_leg_fee_rate()) * 2
+        ok, reason, detail = scanner.evaluate_grid_step(
+            product_id, current_step, swing,
+            best_bid=bid, best_ask=ask,
+            bid_depth_usd=bid_depth, ask_depth_usd=ask_depth,
+            slice_usd=slice_usd, fee_round_trip=fee_round_trip,
+        )
+        edge = (detail or {}).get("net_edge_pct")
+        if edge is None:
+            # The gate refused for a reason that is not about the step at
+            # all - spread too wide, or the slice too big for the book.
+            # Widening cannot fix either, and would only mean losing more
+            # per trade on a book that still cannot absorb it.
+            return None, f"not a spacing problem: {reason}"
+        if ok:
+            return None, "already clears"
+        return current_step - edge + TARGET_NET_MARGIN_PCT, {
+            "net_edge_pct": edge, "reason": reason,
+            "spread_pct": (detail or {}).get("spread_pct"),
+        }
+    except Exception as e:
+        return None, f"could not compute: {type(e).__name__}: {e}"
+
+
 async def is_grid_bot_active() -> bool:
     """Master on/off switch for the whole grid-branch system - real,
     DB-persisted flag (same generic TradingBotState bucket pattern every
@@ -4326,6 +4424,42 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
             )
             new_grid_pct = floor
             spacing_log_note = f"{spacing_log_note or 'spacing'} (raised to fee-safe floor)"
+
+    # THE GATE-CLEARING FLOOR.
+    #
+    # Everything above guarantees the step clears FEES. The net-edge gate
+    # additionally charges spread and adverse selection, so a step can clear
+    # every check here and still be refused on every single buy - which is
+    # exactly what happened to NEAR-USD: 171 consecutive refusals at a 2.00%
+    # step that needed 2.36%, with nothing in the system able to move it.
+    #
+    # Applied last, so it can only ever raise what the other sources chose,
+    # and only when the gate is actually the thing doing the refusing.
+    if auto_widen_enabled():
+        _probe_step = new_grid_pct if new_grid_pct is not None else branch.grid_pct
+        _slice = (branch.allocated_usd or 0.0) / max(1, branch.num_levels or 10)
+        _needed, _why = await gate_clearing_floor_pct(
+            session, branch.product_id, _probe_step, _slice)
+        if _needed is not None and _needed > _probe_step + 1e-9:
+            if _needed <= GATE_CLEARING_MAX_PCT:
+                log.warning(
+                    f"[GRID] {branch.bot_name}: {branch.product_id} at "
+                    f"{_probe_step*100:.2f}% cannot clear its own net-edge gate "
+                    f"({_why['reason'] if isinstance(_why, dict) else _why}). "
+                    f"Widening to {_needed*100:.2f}% - the gate is not relaxed, the "
+                    f"step is moved to where it passes."
+                )
+                new_grid_pct = _needed
+                spacing_log_note = (f"{spacing_log_note or 'spacing'} "
+                                    f"(widened to clear the net-edge gate)")
+            else:
+                log.warning(
+                    f"[GRID] {branch.bot_name}: {branch.product_id} would need a "
+                    f"{_needed*100:.2f}% step to clear its gate, over the "
+                    f"{GATE_CLEARING_MAX_PCT*100:.2f}% bound. Leaving the spacing alone "
+                    f"and letting the gate keep refusing - this coin is too expensive "
+                    f"to grid right now, which is an answer, not a failure."
+                )
 
     if new_grid_pct is not None and abs(new_grid_pct - branch.grid_pct) > 1e-9:
         async with get_session_factory()() as db:
