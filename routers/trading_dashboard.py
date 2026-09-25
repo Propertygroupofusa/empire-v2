@@ -3533,6 +3533,12 @@ class StrategyBatchRequest(BaseModel):
     in_sample_frac: float = 0.7
     control_draws: int = 10
     fee_round_trip: float = None
+    # full | fixed_fraction | vol_target. Defaults to full so a sweep run
+    # without thinking about sizing produces the same numbers it always did.
+    sizing: str = "full"
+    fraction: float = 0.25
+    target_vol: float = 0.02
+    vol_window: int = 20
 
 
 async def _default_sweep_coins():
@@ -3568,12 +3574,18 @@ async def strategy_lab_run_batch(payload: StrategyBatchRequest = None):
     interleaving two sets of results into one table.
     """
     payload = payload or StrategyBatchRequest()
+    if payload.sizing not in strategy_lab.SIZING_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"sizing must be one of {list(strategy_lab.SIZING_MODES)}")
     coins, source = (payload.coins, "requested") if payload.coins else await _default_sweep_coins()
     out = await strategy_batch.start(
         coins, days=payload.days, granularity=payload.granularity,
         in_sample_frac=payload.in_sample_frac,
         control_draws=payload.control_draws,
-        fee_round_trip=payload.fee_round_trip)
+        fee_round_trip=payload.fee_round_trip,
+        sizing=payload.sizing, fraction=payload.fraction,
+        target_vol=payload.target_vol, vol_window=payload.vol_window)
     out["coin_source"] = source
     return out
 
@@ -3598,6 +3610,46 @@ async def strategy_lab_results(coin: str = "", limit: int = 60, sort_by: str = "
     out["job"] = strategy_batch.snapshot(include_results=False)
     out["fleet_verdict"] = (strategy_batch._JOB.get("fleet") or {}).get("verdict")
     return out
+
+
+@router.get("/strategy-lab/results.csv")
+async def strategy_lab_results_csv(coin: str = "", limit: int = 2000, sort_by: str = "oos"):
+    """The whole ranked table as CSV, to be read outside this page.
+
+    Every column that makes a row interpretable travels with it - the noise
+    floor for the search width, the trade count, the break-even win rate
+    beside the realised one, the split date, and the engine's own verdict -
+    because a spreadsheet of returns with the context stripped out is how a
+    2-trade fluke becomes somebody's strategy. The caveats ride in a header
+    comment block for the same reason: they are true of every row, and a
+    caveat that lives only on the web page is a caveat that does not travel.
+    """
+    import csv as _csv
+    import io as _io
+
+    data = strategy_batch.ranked_rows(coin_filter=coin, limit=limit, sort_by=sort_by)
+    rows = data["rows"]
+    buf = _io.StringIO()
+    for line in (data.get("note"), data.get("sizing_caveat"), data.get("execution_caveat")):
+        if line:
+            buf.write("# " + line.replace("\n", " ") + "\n")
+    cols = ["coin", "strategy", "params", "oos_return_pct", "in_sample_return_pct",
+            "overfit_gap_pct", "oos_win_rate", "in_sample_win_rate",
+            "break_even_win_rate_pct", "edge_points", "oos_trades", "oos_sharpe",
+            "oos_max_drawdown_pct", "profit_factor", "avg_win_pct", "avg_loss_pct",
+            "win_uniformity", "oos_final_balance", "beat_control",
+            "noise_floor_p95", "above_noise_floor", "buy_and_hold_oos_pct",
+            "split_label", "verdict_short"]
+    w = _csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+    w.writeheader()
+    for r in rows:
+        r = dict(r)
+        r["params"] = " ".join(f"{k}={v}" for k, v in sorted((r.get("params") or {}).items()))
+        w.writerow(r)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    return Response(
+        content=buf.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="strategy-lab-{stamp}.csv"'})
 
 
 @router.get("/strategy-lab/pine")

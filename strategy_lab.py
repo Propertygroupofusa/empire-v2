@@ -376,7 +376,89 @@ VARIANT_COUNT = sum(len(v[1]) for v in STRATEGIES.values())
 STARTING_BALANCE_USD = float(os.getenv("STRATEGY_LAB_STARTING_BALANCE_USD", "10000"))
 
 
-def replay_positions(closes, positions, fee_round_trip=None, start=0, end=None):
+# ── POSITION SIZING ──────────────────────────────────────────────────────
+#
+# THE LIMITATION THIS ADDRESSES
+#
+# Every result in this file was, until now, FULL-EQUITY: each trade risks
+# the entire balance and each win compounds into the next position. Nothing
+# is ever traded that way, which makes both halves of the headline wrong at
+# once - the return is the best case and the drawdown is the worst case, and
+# they are the same number's two faces.
+#
+# It also flatters strategies in a specific direction. Full-equity
+# compounding rewards a long unbroken win streak far more than it punishes
+# the drawdown that follows, so the ranking tilts toward whatever was
+# luckiest in sequence, not whatever had the best edge.
+#
+# THE MODES
+#
+#   full            risk everything, compound everything. The original
+#                   behaviour, still the default, so every existing number
+#                   and every verdict already recorded stays byte-identical.
+#
+#   fixed_fraction  risk a constant fraction of equity per trade. The
+#                   simplest honest correction.
+#
+#   vol_target      size so each trade carries roughly the SAME risk: when
+#                   recent realised volatility is high, take less; when it
+#                   is calm, take more. This is the idea behind
+#                   volatility-targeted and GARCH-style sizing - the bet is
+#                   on the strategy's edge, not on how violent the market
+#                   happened to be that week.
+#
+# WHAT SIZING CANNOT DO
+#
+# It cannot create an edge. A strategy with no edge, sized perfectly, still
+# loses - more slowly. Sizing decides how much of an edge you keep and how
+# much drawdown you endure collecting it, which is why it belongs BESIDE the
+# out-of-sample and control tests rather than instead of them.
+
+SIZING_MODES = ("full", "fixed_fraction", "vol_target")
+
+# Never more than this fraction of equity in one trade, whatever the
+# volatility maths says. Without a cap, a very quiet window drives the
+# vol_target multiplier arbitrarily high and reintroduces the exact
+# full-equity risk this mode exists to remove.
+MAX_POSITION_FRACTION = 1.0
+
+
+def _realised_vol(closes, i, window=20):
+    """Standard deviation of the last `window` bar returns, ending at bar i.
+
+    Strictly backward-looking: bar i's own close is the newest input, and
+    nothing after it is read. A sizing rule that peeks forward is the same
+    lookahead bug as a strategy that does, and it is harder to spot because
+    it moves the size rather than the signal.
+    """
+    lo = max(1, i - window + 1)
+    if i < 2 or i <= lo:
+        return None
+    rets = [closes[j] / closes[j - 1] - 1.0 for j in range(lo, i + 1)]
+    if len(rets) < 2:
+        return None
+    sd = statistics.pstdev(rets)
+    return sd if sd > 0 else None
+
+
+def _position_fraction(closes, i, sizing, fraction, target_vol, vol_window):
+    """How much of equity this trade takes, decided at ENTRY from past bars."""
+    if sizing == "full":
+        return 1.0
+    if sizing == "fixed_fraction":
+        return max(0.0, min(MAX_POSITION_FRACTION, fraction))
+    if sizing == "vol_target":
+        rv = _realised_vol(closes, i, vol_window)
+        if rv is None:
+            # No volatility estimate yet: take the fixed fraction rather than
+            # silently taking everything. An unknown risk is not a small one.
+            return max(0.0, min(MAX_POSITION_FRACTION, fraction))
+        return max(0.0, min(MAX_POSITION_FRACTION, target_vol / rv))
+    return 1.0
+
+
+def replay_positions(closes, positions, fee_round_trip=None, start=0, end=None,
+                     sizing="full", fraction=0.25, target_vol=0.02, vol_window=20):
     """Turn a position series into real round trips, charged real fees.
 
     Entry and exit are on the NEXT bar's close after the signal, never the
@@ -388,24 +470,37 @@ def replay_positions(closes, positions, fee_round_trip=None, start=0, end=None):
     end = len(closes) if end is None else end
     trades = []
     entry = None
+    size = 1.0
+    gross = []          # the raw price move each trade captured, before fees
+                        # and before sizing - tracked rather than derived,
+                        # because backing it out of a size-scaled net is how
+                        # the "fees dominate" check ends up reading a number
+                        # that is not a price move at all.
     for i in range(max(1, start), min(end, len(closes)) - 1):
         want = positions[i]
         fill = closes[i + 1]          # next bar - no same-bar fills
         if want and entry is None:
             entry = fill
+            # Decided from bars at or before the SIGNAL bar, never from the
+            # trade's own outcome.
+            size = _position_fraction(closes, i, sizing, fraction, target_vol, vol_window)
         elif not want and entry is not None:
-            trades.append((fill / entry - 1.0) - fee)
+            move = fill / entry - 1.0
+            gross.append(move)
+            trades.append((move - fee) * size)
             entry = None
     if entry is not None:
-        trades.append((closes[min(end, len(closes)) - 1] / entry - 1.0) - fee)
+        move = closes[min(end, len(closes)) - 1] / entry - 1.0
+        gross.append(move)
+        trades.append((move - fee) * size)
 
     if not trades:
         return {"trades": 0, "total_return_pct": 0.0, "win_rate": 0.0,
                 "avg_trade_pct": 0.0, "max_drawdown_pct": 0.0, "equity_mult": 1.0,
                 "sharpe": None, "final_balance": float(STARTING_BALANCE_USD),
-                "equity_curve": [float(STARTING_BALANCE_USD)]}
+                "equity_curve": [float(STARTING_BALANCE_USD)],
+                **_trade_anatomy([])}
 
-    gross = [t + fee for t in trades]          # what the move was, before fees
     eq, peak, mdd = 1.0, 1.0, 0.0
     curve = [float(STARTING_BALANCE_USD)]
     for t in trades:
@@ -441,6 +536,73 @@ def replay_positions(closes, positions, fee_round_trip=None, start=0, end=None):
                    if len(trades) > 1 and statistics.pstdev(trades) > 0 else None),
         "final_balance": round(STARTING_BALANCE_USD * eq, 2),
         "equity_curve": curve,
+        # A return is not comparable across sizing modes, so every result
+        # carries the mode that produced it. Two numbers sized differently
+        # sitting in one column is a chart that lies.
+        "sizing": sizing,
+        "sizing_detail": ("full equity per trade" if sizing == "full"
+                          else (f"{fraction * 100:.0f}% of equity per trade"
+                                if sizing == "fixed_fraction"
+                                else f"sized to {target_vol * 100:.1f}% volatility "
+                                     f"over {vol_window} bars, capped at "
+                                     f"{MAX_POSITION_FRACTION * 100:.0f}%")),
+        **_trade_anatomy(trades),
+    }
+
+
+def _trade_anatomy(trades):
+    """WHERE the money came from - not just how much.
+
+    A total return says a strategy worked. It does not say why, and without
+    the why there is no way to tell a real mechanism from a run of luck, and
+    no way to know what would break it.
+
+    The number that carries the most meaning here is the BREAK-EVEN win
+    rate: given how big this strategy's average winner and average loser
+    actually were, what fraction of trades did it have to win just to end
+    flat?
+
+        break_even = avg_loss / (avg_win + avg_loss)
+
+    The gap between that and the realised win rate IS the edge. A strategy
+    winning 41% of the time sounds poor until its break-even rate is 35% -
+    then those six points, compounded over hundreds of trades, are the
+    entire result. And a strategy winning 70% is not automatically good: if
+    its break-even rate is 75%, it is losing while looking like it wins,
+    which is exactly how a high win rate flatters a losing system.
+
+    win_uniformity separates two very different shapes that produce the same
+    average. Near 1.0 the winners are all about the same size - typical of a
+    fixed target, where the result is many small edges compounding. Well
+    below 1.0 a few outliers carry everything, and the strategy is really a
+    bet on catching those few; miss them and the record disappears.
+    """
+    wins = [t for t in trades if t > 0]
+    losses = [-t for t in trades if t <= 0]
+    avg_win = statistics.mean(wins) if wins else 0.0
+    avg_loss = statistics.mean(losses) if losses else 0.0
+    denom = avg_win + avg_loss
+    break_even = (avg_loss / denom) if denom > 0 else None
+    realised = (len(wins) / len(trades)) if trades else 0.0
+    gross_win = sum(wins)
+    gross_loss = sum(losses)
+    return {
+        "avg_win_pct": round(avg_win * 100, 3),
+        "avg_loss_pct": round(avg_loss * 100, 3),
+        "largest_win_pct": round(max(wins) * 100, 3) if wins else 0.0,
+        "largest_loss_pct": round(-max(losses) * 100, 3) if losses else 0.0,
+        # The fraction of trades this strategy had to win just to break even,
+        # given its own average winner and loser.
+        "break_even_win_rate_pct": round(break_even * 100, 1) if break_even is not None else None,
+        # Realised minus break-even. THIS is the edge, in points of win rate.
+        # Positive and it compounds; negative and the win rate is decoration.
+        "edge_points": (round((realised - break_even) * 100, 1)
+                        if break_even is not None else None),
+        "profit_factor": (round(gross_win / gross_loss, 2)
+                          if gross_loss > 0 else None),
+        # 1.0 = every winner the same size (a fixed target); well under 1.0 =
+        # a few outliers carrying the whole record.
+        "win_uniformity": (round(avg_win / max(wins), 2) if wins and max(wins) > 0 else None),
     }
 
 
@@ -505,7 +667,8 @@ def noise_floor_for_search(n_variants, sample_trades, trade_returns, fee,
 
 def run_strategy_lab(closes, highs, lows, strategies=None,
                      in_sample_frac=0.7, control_draws=20,
-                     fee_round_trip=None, label="series"):
+                     fee_round_trip=None, label="series",
+                     sizing="full", fraction=0.25, target_vol=0.02, vol_window=20):
     """Score every strategy variant out-of-sample, against its own control.
 
     Returns variants ranked by OUT-OF-SAMPLE return, each carrying how
@@ -531,13 +694,18 @@ def run_strategy_lab(closes, highs, lows, strategies=None,
                 rows.append({"strategy": name, "params": params, "error": str(e)})
                 continue
 
-            ins = replay_positions(closes, pos, fee, 0, split)
-            oos = replay_positions(closes, pos, fee, split, n)
+            _sz = dict(sizing=sizing, fraction=fraction,
+                       target_vol=target_vol, vol_window=vol_window)
+            ins = replay_positions(closes, pos, fee, 0, split, **_sz)
+            oos = replay_positions(closes, pos, fee, split, n, **_sz)
 
             ctrl = []
             for d in range(control_draws):
                 cpos = _matched_random_positions(pos, seed=d * 977 + 3, start=split, end=n)
-                c = replay_positions(closes, cpos, fee, split, n)
+                # The control is sized the SAME way. A strategy sized to 25%
+                # compared against a control sized to 100% would beat it on
+                # nothing but position size.
+                c = replay_positions(closes, cpos, fee, split, n, **_sz)
                 ctrl.append(c["total_return_pct"])
             ctrl.sort()
             beat = sum(1 for c in ctrl if oos["total_return_pct"] > c)
@@ -614,6 +782,7 @@ def run_strategy_lab(closes, highs, lows, strategies=None,
 
     return {
         "label": label,
+        "sizing": sizing,
         "bars": n,
         "in_sample_bars": split,
         "out_of_sample_bars": n - split,

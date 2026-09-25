@@ -74,7 +74,8 @@ def is_running() -> bool:
 
 
 async def start(coins, days=730, granularity=86400, in_sample_frac=0.7,
-                control_draws=10, fee_round_trip=None):
+                control_draws=10, fee_round_trip=None,
+                sizing="full", fraction=0.25, target_vol=0.02, vol_window=20):
     """Kick off a sweep. Refuses to start a second one over a live one."""
     async with _LOCK:
         if is_running():
@@ -86,10 +87,13 @@ async def start(coins, days=730, granularity=86400, in_sample_frac=0.7,
             "params": {"days": days, "granularity": granularity,
                        "in_sample_frac": in_sample_frac,
                        "control_draws": control_draws,
-                       "fee_round_trip": fee_round_trip},
+                       "fee_round_trip": fee_round_trip,
+                       "sizing": sizing, "fraction": fraction,
+                       "target_vol": target_vol, "vol_window": vol_window},
         })
     asyncio.create_task(_run(coins, days, granularity, in_sample_frac,
-                             control_draws, fee_round_trip))
+                             control_draws, fee_round_trip,
+                             sizing, fraction, target_vol, vol_window))
     return {"status": "started", **snapshot(include_results=False)}
 
 
@@ -122,7 +126,8 @@ async def _fetch_series(coins, days, granularity):
     return series, failures
 
 
-async def _run(coins, days, granularity, in_sample_frac, control_draws, fee):
+async def _run(coins, days, granularity, in_sample_frac, control_draws, fee,
+               sizing="full", fraction=0.25, target_vol=0.02, vol_window=20):
     import strategy_lab as LAB
     try:
         series, failures = await _fetch_series(coins, days, granularity)
@@ -145,7 +150,8 @@ async def _run(coins, days, granularity, in_sample_frac, control_draws, fee):
             # design exists to serve.
             res = await asyncio.to_thread(
                 LAB.run_strategy_lab, closes, highs, lows, None,
-                in_sample_frac, control_draws, fee, coin)
+                in_sample_frac, control_draws, fee, coin,
+                sizing, fraction, target_vol, vol_window)
             res["split_label"] = _split_label(times, res.get("in_sample_bars"))
             res["granularity_seconds"] = granularity
             per_coin[coin] = res
@@ -225,6 +231,7 @@ def ranked_rows(coin_filter: str = "", limit: int = 60, sort_by: str = "oos"):
     footnote somewhere the reader has already scrolled past.
     """
     import strategy_lab as LAB
+    _sizing = (_JOB.get("params") or {}).get("sizing", "full")
     rows = []
     for coin, res in (_JOB["per_coin"] or {}).items():
         if coin_filter and coin_filter.upper() not in coin.upper():
@@ -246,6 +253,16 @@ def ranked_rows(coin_filter: str = "", limit: int = 60, sort_by: str = "oos"):
                 "oos_sharpe": oos.get("sharpe"),
                 "oos_max_drawdown_pct": oos["max_drawdown_pct"],
                 "oos_final_balance": oos.get("final_balance"),
+                # WHERE the money came from, not just how much. The pair that
+                # matters is break-even vs realised win rate: the gap between
+                # them IS the edge, and it is the only thing that explains a
+                # 41%-win strategy making money while a 70%-win one loses.
+                "avg_win_pct": oos.get("avg_win_pct"),
+                "avg_loss_pct": oos.get("avg_loss_pct"),
+                "break_even_win_rate_pct": oos.get("break_even_win_rate_pct"),
+                "edge_points": oos.get("edge_points"),
+                "profit_factor": oos.get("profit_factor"),
+                "win_uniformity": oos.get("win_uniformity"),
                 "overfit_gap_pct": r["overfit_gap_pct"],
                 "beat_control": r.get("beat_control"),
                 "percentile_vs_control": r.get("percentile_vs_control"),
@@ -290,6 +307,32 @@ def ranked_rows(coin_filter: str = "", limit: int = 60, sort_by: str = "oos"):
         "total_rows": len(rows),
         "sorted_by": sort_by if sort_by in keys else "oos",
         "coin_filter": coin_filter,
+        # Stated on the results themselves rather than left to be remembered.
+        # Both of these change what a number means, and neither is visible in
+        # the number.
+        "sizing": _sizing,
+        # The caveat has to follow the run. Printing "these are full-equity
+        # figures" over a volatility-sized sweep would be a warning about a
+        # distortion that is no longer there - which teaches the reader to
+        # ignore the line that matters when it IS there.
+        "sizing_caveat": (
+            "Every figure here is FULL-EQUITY sizing: each trade risks the whole "
+            "balance, and each win compounds into the next position. Nothing is "
+            "ever traded that way. Real sizing - a fixed fraction, or a "
+            "volatility-scaled one - produces a smaller return AND a much smaller "
+            "drawdown, so these totals are an upper bound on the return and on the "
+            "risk together, not a forecast of either."
+            if _sizing == "full" else
+            f"Sized as '{_sizing}', not full equity, so these returns are NOT "
+            f"comparable with a full-equity run - the drawdowns are smaller for "
+            f"the same reason the returns are. Sizing decides how much of an edge "
+            f"you keep and how much drawdown you take collecting it; it cannot "
+            f"create one, and a strategy that loses here loses at any size."),
+        "execution_caveat": (
+            "Fills are at the next bar's CLOSE, with no intrabar stop or target, so "
+            "no bar can hit both and force a guess about which came first. An engine "
+            "that does model intrabar exits will differ - that is a different "
+            "assumption, not a different result."),
         "note": ("Ranked by out-of-sample. Holding back 30% of the data protects ONE "
                  "hypothesis, not the best of thousands - with this many variants "
                  "something clears any fixed bar by luck, which is what "
