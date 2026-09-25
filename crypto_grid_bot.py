@@ -1038,6 +1038,29 @@ async def worst_case_leg_fee_rate() -> float:
 GATE_CLEARING_MAX_PCT = float(os.getenv("GRID_GATE_CLEARING_MAX_PCT", "0.06"))
 AUTO_WIDEN_ENV_VAR = "GRID_AUTO_WIDEN"
 
+# THE FLEET'S MINIMUM STEP, set from measurement rather than from habit.
+#
+# Every branch sat at 2.00% because that is what it was created with, not
+# because anything measured said 2.00% was right. Measured on 14 days of real
+# hourly candles across the 8 live coins - counting completed round trips at
+# each spacing and pricing them at the maker-only cost of 1.37%:
+#
+#     step   trips/14d   net each   fleet total
+#     1.0%      34        -0.37%      -$8.71   more trades, every one a loss
+#     2.0%      17        +0.63%      +$7.41
+#     2.5%      12        +1.13%      +$9.39
+#     3.0%      10        +1.63%     +$11.28
+#
+# Tighter spacing trades MORE and earns LESS; below about 1.5% it is strictly
+# negative. That agrees with the 90-day backtest this fleet already ran, where
+# a wider step beat a tighter one on six of seven coins AND produced more
+# round trips, not fewer - selling early resets the reference upward and costs
+# the next entry.
+#
+# Applied as a one-directional floor, like every other spacing rule here: a
+# branch below it is raised, a branch above it is left alone.
+FLEET_MIN_STEP_PCT = float(os.getenv("GRID_FLEET_MIN_STEP_PCT", "0.025"))
+
 
 def auto_widen_enabled() -> bool:
     """Whether spacing may widen to clear the gate. ON unless switched off.
@@ -4424,6 +4447,15 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
             )
             new_grid_pct = floor
             spacing_log_note = f"{spacing_log_note or 'spacing'} (raised to fee-safe floor)"
+
+    # THE FLEET MINIMUM, applied before the gate-clearing floor so the two
+    # compose: this sets the measured baseline, and the gate floor below
+    # raises it further on any coin whose own volatility demands more.
+    _current_step = new_grid_pct if new_grid_pct is not None else branch.grid_pct
+    if _current_step < FLEET_MIN_STEP_PCT - 1e-9:
+        new_grid_pct = FLEET_MIN_STEP_PCT
+        spacing_log_note = (f"{spacing_log_note or 'spacing'} (raised {_current_step*100:.2f}% "
+                            f"-> {FLEET_MIN_STEP_PCT*100:.2f}% fleet minimum)")
 
     # THE GATE-CLEARING FLOOR.
     #
