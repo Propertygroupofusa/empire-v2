@@ -3303,7 +3303,60 @@ async def run_grid_self_tuning_sweep():
             log.warning(f"[GRID] self-tuning failed for {branch.bot_name} (non-fatal): {e}")
 
 
-NET_EDGE_GATE_ENABLED = os.getenv("GRID_NET_EDGE_GATE_ENABLED", "true").lower() == "true"
+# Kept only so an existing deployment's variable is still readable and
+# reportable. It is NO LONGER what decides whether the gate runs - see
+# is_net_edge_gate_active() directly below for why.
+NET_EDGE_GATE_ENV_SETTING = os.getenv("GRID_NET_EDGE_GATE_ENABLED", "true").lower() == "true"
+NET_EDGE_GATE_KEY = "grid_net_edge_gate_enabled"
+
+
+async def is_net_edge_gate_active() -> bool:
+    """Real, DB-persisted switch for the net-edge gate. Defaults ON.
+
+    Why this replaced a plain env read, 2026-09-25. The live account had
+    GRID_NET_EDGE_GATE_ENABLED set to a non-true value in Railway. The
+    gate's first statement was
+
+        if not NET_EDGE_GATE_ENABLED:
+            return True, "gate disabled"
+
+    so every dip-buy was allowed through with NO economic check at all,
+    and - because that early return recorded nothing - the telemetry read
+    GATE_PASS 0, GATE_BLOCK 0, GATE_OBSERVE 0, GATE_ERROR 0. A gate
+    switched off and a gate never reached were indistinguishable from
+    outside. It took reading the config panel to tell them apart, on a
+    real $22.90 buy that went in unexamined.
+
+    Two changes follow from that:
+
+      1. The switch lives in the database, like every other real-time
+         toggle here, so it is visible and changeable from the dashboard
+         instead of hiding in an environment variable nobody re-reads.
+      2. It DEFAULTS ON. This is a safety gate; the failure mode of a
+         silent default-off is money committed without its economics
+         being checked. Turning it off is now a deliberate, recorded act.
+
+    The env var no longer disables it. It is still reported so an operator
+    can see the old setting and clear it.
+    """
+    async with get_session_factory()() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == NET_EDGE_GATE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            return True
+        return bool(row.base_capital and row.base_capital >= 1.0)
+
+
+async def set_net_edge_gate_active(enabled: bool):
+    """Turn the net-edge gate on or off, durably."""
+    async with get_session_factory()() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == NET_EDGE_GATE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = TradingBotState(bot_name=NET_EDGE_GATE_KEY, base_capital=0.0, starting_capital=0.0)
+            db.add(row)
+        row.base_capital = 1.0 if enabled else 0.0
+        await db.commit()
 
 # The microstructure veto rides on the same gate but answers a different
 # question - the priced gates ask whether the STEP is worth taking, this
@@ -3406,10 +3459,19 @@ async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd
     KNOWN-GOOD action, while this one exists precisely to decide whether
     the action is good at all.
 
-    Disable with GRID_NET_EDGE_GATE_ENABLED=false to restore the previous
-    buy-every-dip behaviour exactly.
+    Turn off from the dashboard (POST /grid-status/net-edge-gate) to
+    restore the previous buy-every-dip behaviour. The environment variable
+    GRID_NET_EDGE_GATE_ENABLED no longer disables it - see
+    is_net_edge_gate_active() for why that changed.
     """
-    if not NET_EDGE_GATE_ENABLED:
+    if not await is_net_edge_gate_active():
+        # RECORDED, not silent. A disabled gate used to return here writing
+        # nothing, which made "switched off" and "never reached" look
+        # identical on the dashboard - four zeros either way. Every buy
+        # that goes in unchecked now says so in the feed.
+        await _record_gate_decision(
+            bot_name, product_id, "GATE_DISABLED",
+            f"net-edge gate is OFF - ${slice_usd:,.2f} buy allowed with NO economic check")
         return True, "gate disabled"
     try:
         import crypto_nine_coin_scanner as scanner

@@ -6632,6 +6632,27 @@ async def get_grid_fill_mix_endpoint():
     return await crypto_grid_bot_module.get_fill_mix()
 
 
+class SetNetEdgeGateRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/grid-status/net-edge-gate")
+async def set_net_edge_gate_endpoint(payload: SetNetEdgeGateRequest):
+    """Turn the net-edge gate on or off. Defaults ON.
+
+    The gate refuses a dip-buy whose arithmetic cannot pay even when it
+    goes right - net edge after real fees, whether the target is reachable
+    given how the coin actually moves, and the break-even win rate the
+    geometry demands. With it off, every dip is bought unchecked and each
+    such buy is recorded as GATE_DISABLED.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    await crypto_grid_bot_module.set_net_edge_gate_active(payload.enabled)
+    log.info(f"[dashboard] 🎯 Net-edge gate {'ENABLED' if payload.enabled else 'DISABLED'}")
+    return {"status": "updated", "net_edge_gate_active": payload.enabled}
+
+
 @router.post("/grid-status/tune-spacing-per-coin")
 async def tune_spacing_per_coin_endpoint(dry_run: bool = True, min_trips: int = 4,
                                          min_improvement_usd: float = 1.0,
@@ -6878,7 +6899,10 @@ async def get_capital_census(json: bool = False):
 #      independently and carries its own error, because the most useful
 #      moment for this page is exactly when something IS broken.
 
-LIVE_OPS_GATE_EVENTS = ("GATE_PASS", "GATE_BLOCK", "GATE_OBSERVE", "GATE_ERROR")
+LIVE_OPS_GATE_EVENTS = ("GATE_PASS", "GATE_BLOCK", "GATE_OBSERVE", "GATE_ERROR",
+                        # A buy allowed through with no economic check is the
+                        # single most important thing this feed can show.
+                        "GATE_DISABLED")
 # Execution outcomes, counted separately from gate decisions: a gate pass
 # says the bot WANTED to buy, these say whether the exchange let it. Kept
 # apart because a healthy pass rate with a rising rejection count is a
@@ -6886,7 +6910,7 @@ LIVE_OPS_GATE_EVENTS = ("GATE_PASS", "GATE_BLOCK", "GATE_OBSERVE", "GATE_ERROR")
 LIVE_OPS_ORDER_EVENTS = ("ORDER_REJECTED",)
 
 
-def _live_ops_config():
+async def _live_ops_config():
     """The settings ACTUALLY in effect in this process, read at call time.
 
     Deliberately re-read from the environment on every request rather than
@@ -6905,6 +6929,16 @@ def _live_ops_config():
         except (TypeError, ValueError):
             return default, f"unparseable ({raw!r}) - using default"
 
+    # The gate's real switch lives in the database now. Reading the env
+    # var here is what let the panel report OFF while the code decided
+    # something else - and this panel is the thing operators trust.
+    net_edge_gate_on = True
+    if crypto_grid_bot_module is not None:
+        try:
+            net_edge_gate_on = await crypto_grid_bot_module.is_net_edge_gate_active()
+        except Exception:
+            pass
+
     risk, risk_src = _f("PROP_MAX_RISK_PERCENT", 0.50)
     deploy, deploy_src = _f("GRID_AUTO_DEPLOY_AMOUNT_USD", 70.0)
     reserve, reserve_src = _f("GRID_CASH_RESERVE_USD", 88.0)
@@ -6914,8 +6948,8 @@ def _live_ops_config():
     return [
         {"key": "Max risk (both Alpaca bots)", "value": f"{risk * 100:.0f}%",
          "source": risk_src, "note": "one shared budget - prop_bot and alpaca_swing_bot"},
-        {"key": "Net-edge gate", "source": "default" if os.getenv("GRID_NET_EDGE_GATE_ENABLED") is None else "env",
-         "value": "ON" if (os.getenv("GRID_NET_EDGE_GATE_ENABLED", "true").lower() == "true") else "OFF",
+        {"key": "Net-edge gate", "source": "db",
+         "value": "ON" if net_edge_gate_on else "OFF",
          "note": "blocks dip-buys that cannot clear fees, spread and depth"},
         {"key": "Microstructure veto", "value": veto_mode,
          "source": "default" if os.getenv("GRID_MICROSTRUCTURE_VETO_MODE") is None else "env",
@@ -7320,7 +7354,7 @@ async def get_live_ops():
         _section("reconciliation", _recon()),
         _section("capital", _census()),
     ))
-    results["config"] = {"ok": True, "data": _live_ops_config(), "error": None}
+    results["config"] = {"ok": True, "data": await _live_ops_config(), "error": None}
     results["headline"] = _live_ops_headline(results.get("trades"), results.get("grid"))
     results["served_at"] = datetime.utcnow().isoformat() + "Z"
     return results
