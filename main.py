@@ -1196,6 +1196,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.debug(f"DB strategy override check skipped: {type(e).__name__}: {e}")
     RESOLVED_CRYPTO_MODE = crypto_mode
+    # Tell crypto_strategy_config what actually started, so its stale-env
+    # message stops claiming nothing will trade when something is.
+    try:
+        import crypto_strategy_config as _strategy_cfg
+        _strategy_cfg.note_runtime_mode(
+            crypto_mode,
+            "a DB strategy override" if crypto_mode != CRYPTO_STRATEGY_MODE
+            else "CRYPTO_STRATEGY_MODE")
+    except Exception as _e:
+        log.warning(f"could not register the running strategy mode: {_e}")
 
     try:
         import threading

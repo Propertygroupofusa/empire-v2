@@ -17,6 +17,31 @@ SUPPORTED_CRYPTO_STRATEGIES = frozenset({
 UNCONFIGURED = "unconfigured"
 
 
+# Names that were real once and are not strategies any more. Calling one of
+# these a typo sends the operator looking for a spelling mistake that is not
+# there; naming it as retired points at the real fix, which is deleting the
+# variable.
+RETIRED_STRATEGY_NAMES = {"delfina_scalping", "scalping", "delfina"}
+
+# What actually started, registered by whoever started it. This module is
+# sync and reads only the environment, so without this it cannot tell
+# "misconfigured and dead" from "misconfigured but running from a DB
+# override" - and those two deserve very different log levels.
+_RUNTIME_MODE = None
+_RUNTIME_SOURCE = None
+
+
+def note_runtime_mode(mode, source):
+    """Record the strategy a caller actually started, and where it came from."""
+    global _RUNTIME_MODE, _RUNTIME_SOURCE
+    _RUNTIME_MODE, _RUNTIME_SOURCE = mode, source
+
+
+def _is_retired_name():
+    raw = (os.getenv("CRYPTO_STRATEGY_MODE") or "").strip().strip('"').strip("'").strip()
+    return raw.lower() in RETIRED_STRATEGY_NAMES
+
+
 def get_crypto_strategy_mode() -> str:
     """The strategy to run, or UNCONFIGURED. Never a substitute.
 
@@ -83,9 +108,27 @@ def get_crypto_strategy_mode() -> str:
                 )
             return mode
 
+    # A DB strategy override can start a loop that this function cannot see:
+    # it is async and DB-backed, this is sync and env-only. Before this
+    # check existed the message below asserted "NO crypto loop will start
+    # and nothing will be bought or sold" while grid_fleet was running from
+    # exactly such an override and had bought a real NEAR-USD slice. A false
+    # alarm at ERROR level is not harmless - it teaches the operator to
+    # scroll past the one message that would matter if it were ever true.
+    if _RUNTIME_MODE is not None:
+        log.warning(
+            "CRYPTO_STRATEGY_MODE=%r is not a known strategy%s, but %r is "
+            "running from %s, so trading is NOT stopped. Clear the stale "
+            "variable when Railway allows it; nothing is broken meanwhile.",
+            os.getenv("CRYPTO_STRATEGY_MODE"),
+            " (a retired name, not a typo)" if _is_retired_name() else "",
+            _RUNTIME_MODE, _RUNTIME_SOURCE or "another source",
+        )
+        return UNCONFIGURED
+
     log.error(
-        "CRYPTO_STRATEGY_MODE=%r is not a known strategy. NO crypto loop will "
-        "start and nothing will be bought or sold. Set it to one of: %s. "
+        "CRYPTO_STRATEGY_MODE=%r is not a known strategy. No crypto loop will "
+        "start FROM THIS VARIABLE. Set it to one of: %s. "
         "On this deployment: grid_fleet on the crypto-trading service (which "
         "also needs SERVICE_ROLE=crypto-trading), family_tree on the web "
         "service. Refusing to substitute a strategy - an unchosen one spends "
