@@ -62,6 +62,26 @@
         margin-top: 2px; font-variant-numeric: tabular-nums;
     }
     .prox-next { text-align: right; font-variant-numeric: tabular-nums; }
+
+    /* The dot and the gap slide to their new position instead of jumping,
+       so real price movement between polls reads as movement rather than
+       as a static panel that occasionally redraws. */
+    .prox-dot, .prox-gap { transition: left .55s cubic-bezier(.4,0,.2,1), width .55s cubic-bezier(.4,0,.2,1); }
+    @media (prefers-reduced-motion: reduce) {
+        .prox-dot, .prox-gap { transition: none; }
+    }
+    .prox-live { animation: prox-flash .9s ease-out; }
+    @keyframes prox-flash {
+        0%   { background: var(--gold-bg); }
+        100% { background: transparent; }
+    }
+    .px-up   { color: var(--green) !important; }
+    .px-down { color: var(--red) !important; }
+    .tick-dot {
+        display:inline-block; width:7px; height:7px; border-radius:50%;
+        background: var(--green); margin-right:6px; vertical-align:middle;
+        animation: activity-pulse 2s infinite;
+    }
     .prox-dist { font-weight: 700; font-size: 0.95em; }
     .prox-at { font-size: 0.7em; color: var(--text-dim); }
     @media (max-width: 560px) {
@@ -3374,8 +3394,10 @@ function renderMoneyCheck(d) {
 
         wrap.innerHTML = head
             + `<div style="font-size:0.74em; color:var(--text-dim); margin-bottom:10px; font-variant-numeric:tabular-nums;">
-                 ${fmtUsd(d.working_usd)} working · ${d.free_cash_usd != null ? fmtUsd(d.free_cash_usd) : '—'} free
-                 · ${fmtUsd(d.reserve_usd)} of that is reserve</div>`
+                 <strong style="color:${d.deployed_usd > 0 ? 'var(--green)' : 'var(--red)'};">${fmtUsd(d.deployed_usd)}</strong> actually in coin
+                 · <strong>${fmtUsd(d.idle_usd)}</strong> sitting in cash
+                 · ${fmtUsd(d.allocated_usd)} earmarked to branches
+                 · ${fmtUsd(d.reserve_usd)} of the cash is reserve</div>`
             + actionable.map(f => card(f, true)).join('')
             + idle.map(f => card(f, false)).join('')
             + `<div style="font-size:0.7em; color:var(--text-dim); margin-top:8px; line-height:1.5;">${d.note || ''}</div>`;
@@ -3437,6 +3459,13 @@ async function runMoneyCheck() {
     }
 }
 
+// Last reading per coin, so a redraw can show what MOVED rather than
+// silently replacing the numbers. Live price moves constantly even on a
+// day with no trades - a panel that redraws identical-looking rows every
+// 15s makes live data look frozen.
+let lastProx = {};
+let proxTickAt = 0;
+
 function renderGridProximity(d) {
     const wrap = document.getElementById('grid-proximity-wrap');
     if (!wrap) return;
@@ -3488,6 +3517,15 @@ function renderGridProximity(d) {
         const bar = r => {
             const coin = r.b.product_id.replace('-USD', '');
             const pct = (r.pos * 100).toFixed(1);
+            // Closer to firing than last time reads green, further reads
+            // red. This is the number that actually matters on a quiet
+            // day, and it moves every single poll.
+            const prev = lastProx[r.b.product_id];
+            let moveCls = '';
+            if (prev !== undefined && Math.abs(prev - r.nextDist) > 0.0001) {
+                moveCls = r.nextDist < prev ? 'px-up' : 'px-down';
+            }
+            lastProx[r.b.product_id] = r.nextDist;
             // The stretch price still has to travel before this branch
             // acts, shaded in the colour of the action it is heading for.
             // The bar then reads as a distance, not just two endpoints.
@@ -3497,7 +3535,7 @@ function renderGridProximity(d) {
             const lo = Math.min(r.pos, targetPos) * 100;
             const hi = Math.max(r.pos, targetPos) * 100;
             const gapFill = (hi - lo) > 0.4
-                ? `<div style="position:absolute; left:${lo.toFixed(2)}%; width:${(hi - lo).toFixed(2)}%; top:1px; bottom:1px; background:${r.nextColor}; opacity:0.13;"></div>`
+                ? `<div class="prox-gap" style="position:absolute; left:${lo.toFixed(2)}%; width:${(hi - lo).toFixed(2)}%; top:1px; bottom:1px; background:${r.nextColor}; opacity:0.13;"></div>`
                 : '';
             const arrow = r.nextAction === 'sell' ? '↑' : '↓';
             const verb = r.nextAction === 'sell' ? 'sells' : 'buys';
@@ -3512,7 +3550,7 @@ function renderGridProximity(d) {
                         ${r.sellAt != null && r.sellAt >= r.buyAt && r.sellAt <= r.bandTop
                             ? `<div title="Sell trigger ${fmtCoinPrice(r.sellAt)}" style="position:absolute; left:${((r.sellAt - r.buyAt) / (r.bandTop - r.buyAt) * 100).toFixed(2)}%; top:0; bottom:0; width:2px; background:var(--green);"></div>`
                             : ''}
-                        <div title="Price now ${fmtCoinPrice(r.cur)}" style="position:absolute; left:${pct}%; top:50%; width:10px; height:10px; margin-left:-5px; margin-top:-5px; background:var(--text); border-radius:50%; box-shadow:0 0 0 2px var(--panel);"></div>
+                        <div class="prox-dot" title="Price now ${fmtCoinPrice(r.cur)}" style="position:absolute; left:${pct}%; top:50%; width:10px; height:10px; margin-left:-5px; margin-top:-5px; background:var(--text); border-radius:50%; box-shadow:0 0 0 2px var(--panel);"></div>
                     </div>
                     <div class="prox-ends">
                         <span>buy ${fmtCoinPrice(r.buyAt)}</span>
@@ -3520,19 +3558,21 @@ function renderGridProximity(d) {
                     </div>
                 </div>
                 <div class="prox-next">
-                    <div class="prox-dist" style="color:${r.nextColor};">${arrow} ${r.nextDist.toFixed(2)}%</div>
+                    <div class="prox-dist ${moveCls}" style="${moveCls ? '' : `color:${r.nextColor};`}">${arrow} ${r.nextDist.toFixed(2)}%</div>
                     <div class="prox-at">${verb} at ${fmtCoinPrice(r.nextAt)}</div>
                 </div>
             </div>`;
         };
 
         const closest = rows[0];
+        proxTickAt = Date.now();
         const legend = `
             <div style="display:flex; gap:16px; flex-wrap:wrap; font-size:0.72em; color:var(--text-dim); margin-bottom:8px;">
                 <span><span style="display:inline-block; width:10px; height:3px; background:var(--navy); vertical-align:middle;"></span> buy trigger</span>
                 <span><span style="display:inline-block; width:10px; height:3px; background:var(--green); vertical-align:middle;"></span> sell trigger (open slice)</span>
                 <span><span style="display:inline-block; width:10px; height:3px; background:var(--text-dim); opacity:0.55; vertical-align:middle;"></span> reference</span>
-                <span style="font-weight:600; color:var(--text);">Nearest: ${closest.b.product_id.replace('-USD', '')} needs ${closest.nextDist.toFixed(2)}% to ${closest.nextAction}</span>
+                <span style="font-weight:600; color:var(--text);"><span class="tick-dot"></span>Nearest: ${closest.b.product_id.replace('-USD', '')} needs ${closest.nextDist.toFixed(2)}% to ${closest.nextAction}</span>
+                <span id="prox-age" style="color:var(--text-dim);">live</span>
             </div>`;
         wrap.innerHTML = legend + rows.map(bar).join('');
     } catch (e) {
@@ -3780,6 +3820,37 @@ function renderRetiredTreeNote(data) {
     } catch (e) {
         el.innerHTML = '';
     }
+}
+
+// Price-only refresh for the panels that should visibly move.
+//
+// The full loadGridStatus() redraws the branch table, the ledger, the
+// P&L charts and the scale-bot panel - too heavy to run every few
+// seconds. But live PRICE moves constantly, even through a whole day
+// with no trade, and that movement is the honest answer to "is this
+// thing alive". So the proximity panel gets its own fast, narrow loop.
+let proxPollBusy = false;
+async function refreshProximityOnly() {
+    if (proxPollBusy || document.hidden) return;   // never stack, never poll a backgrounded tab
+    proxPollBusy = true;
+    try {
+        renderGridProximity(await apiGet('/grid-status', 12000));
+    } catch (e) {
+        // A missed price poll is not worth surfacing - the next one is
+        // seconds away, and the full refresh reports real outages.
+    } finally {
+        proxPollBusy = false;
+    }
+}
+
+// Ticks the "live / Ns ago" readout between polls so the panel is
+// visibly alive even while waiting on the next one.
+function tickProximityAge() {
+    const el = document.getElementById('prox-age');
+    if (!el || !proxTickAt) return;
+    const secs = Math.max(0, Math.round((Date.now() - proxTickAt) / 1000));
+    el.textContent = secs <= 1 ? 'live' : `${secs}s ago`;
+    el.style.color = secs > 30 ? 'var(--red)' : 'var(--text-dim)';
 }
 
 async function loadGridStatus() {
@@ -5395,9 +5466,17 @@ loadTicker();
 loadActivityFeed();
 loadCombinedProgress();
 setInterval(refresh, 15000);
-setInterval(loadTicker, 30000);
+setInterval(loadTicker, 15000);
 setInterval(loadActivityFeed, 5000);
 setInterval(loadCombinedProgress, 60000);
+// The panels that should visibly move, on their own fast loops.
+setInterval(refreshProximityOnly, 6000);
+setInterval(tickProximityAge, 1000);
+// A backgrounded tab skips its polls, so catch up the moment it returns
+// rather than showing a stale price until the next tick.
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) { refreshProximityOnly(); loadTicker(); }
+});
 </script>
 </body>
 </html>

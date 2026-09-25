@@ -2705,10 +2705,43 @@ async def money_check() -> dict:
     status = await get_grid_status()
     branches = status.get("branches") or []
     free_cash = status.get("real_free_cash_usd")
-    working = status.get("total_allocated_usd") or 0.0
+    allocated = status.get("total_allocated_usd") or 0.0
     floor = status.get("fee_safe_min_grid_pct")
 
+    # allocated_usd is an EARMARK, not an investment. A flat branch's whole
+    # allocation sits in the USD wallet until a dip triggers a buy. Only
+    # the capital behind an open slice is actually deployed into a coin.
+    # Reported as "working", a fleet with every branch flat looks fully
+    # invested while 100% of the money is cash - which is exactly what was
+    # on screen: "$553.84 working" against a Coinbase balance of $572.60
+    # USD and no crypto at all.
+    deployed = sum((b.get("allocated_usd") or 0.0) for b in branches if b.get("open_slices"))
+    earmarked_idle = max(0.0, allocated - deployed)
+    total_idle = earmarked_idle + (free_cash or 0.0)
+
     findings = []
+
+    if deployed <= 0:
+        findings.append({
+            "kind": "nothing_deployed",
+            "usd": round(total_idle, 2),
+            "action": None,
+            "detail": (f"Every branch is flat, so nothing is invested in any coin right now. "
+                       f"${allocated:,.2f} is EARMARKED to branches and ${(free_cash or 0.0):,.2f} is "
+                       f"loose - but all ${total_idle:,.2f} of it is sitting in the USD wallet "
+                       f"earning nothing until a dip triggers a buy."),
+            "basis": "branches holding zero open slices hold zero coin - an earmark is not an investment",
+        })
+    else:
+        findings.append({
+            "kind": "deployed",
+            "usd": round(deployed, 2),
+            "action": None,
+            "detail": (f"${deployed:,.2f} is genuinely in coin across "
+                       f"{sum(1 for b in branches if b.get('open_slices'))} branch(es). "
+                       f"${total_idle:,.2f} is still cash waiting on a trigger."),
+            "basis": "allocation behind branches that actually hold an open slice",
+        })
 
     # ── cash above the reserve ──────────────────────────────────────────
     if free_cash is None:
@@ -2729,12 +2762,13 @@ async def money_check() -> dict:
             })
         else:
             findings.append({
-                "kind": "cash_fully_deployed", "usd": round(max(0.0, deployable), 2),
+                "kind": "cash_committed", "usd": round(max(0.0, deployable), 2),
                 "action": None,
-                "detail": (f"${free_cash:,.2f} free, but ${GRID_CASH_RESERVE_USD:,.2f} of that is the "
-                           f"reserve backing the open branches' remaining levels. Only "
-                           f"${max(0.0, deployable):,.2f} is genuinely spare, under the "
-                           f"${GRID_AUTO_DEPLOY_AMOUNT_USD:,.2f} a branch needs. The cash is already at work."),
+                "detail": (f"${free_cash:,.2f} is loose, but ${GRID_CASH_RESERVE_USD:,.2f} of it is the "
+                           f"reserve backing open branches' remaining levels, leaving "
+                           f"${max(0.0, deployable):,.2f} spare - under the "
+                           f"${GRID_AUTO_DEPLOY_AMOUNT_USD:,.2f} a new branch needs. Committed is not the "
+                           f"same as invested: this money is spoken for, and it is still cash."),
                 "basis": "free cash minus GRID_CASH_RESERVE_USD - NOT free cash against zero",
             })
 
@@ -2795,7 +2829,10 @@ async def money_check() -> dict:
 
     actionable = [f for f in findings if f.get("action")]
     return {
-        "working_usd": round(working, 2),
+        "allocated_usd": round(allocated, 2),
+        "deployed_usd": round(deployed, 2),
+        "idle_usd": round(total_idle, 2),
+        "working_usd": round(deployed, 2),
         "free_cash_usd": round(free_cash, 2) if free_cash is not None else None,
         "reserve_usd": GRID_CASH_RESERVE_USD,
         "findings": findings,

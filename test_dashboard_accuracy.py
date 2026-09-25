@@ -334,6 +334,36 @@ ok("it points at the live ledger instead",
 ok("a positive window adds no such note",
    "deltaUsd < 0" in mom)
 
+# ── 9. live data has to LOOK live ───────────────────────────────────────
+print()
+print("-- price moves constantly, so the panel must show it moving --")
+ok("the price dot and gap animate to their new position",
+   ".prox-dot, .prox-gap { transition:" in SRC)
+ok("motion is disabled for prefers-reduced-motion",
+   "prefers-reduced-motion" in SRC and ".prox-dot, .prox-gap { transition: none" in SRC)
+prox = fn_body("renderGridProximity") or ""
+ok("each reading is compared against the previous one", "lastProx[" in prox)
+ok("closing in reads green, drifting away reads red",
+   "px-up" in prox and "px-down" in prox and "r.nextDist < prev" in prox)
+ok("the panel stamps when it last polled", "proxTickAt" in prox)
+
+fast = fn_body("refreshProximityOnly") or ""
+ok("there is a price-only refresh separate from the heavy redraw",
+   fast and "'/grid-status'" in fast)
+ok("it never stacks overlapping polls", "proxPollBusy" in fast)
+ok("it does not poll a backgrounded tab", "document.hidden" in fast)
+ok("a missed price poll is not reported as an outage",
+   "catch" in fast and "not worth surfacing" in fast)
+ok("the fast loop runs several times a minute",
+   "setInterval(refreshProximityOnly, 6000)" in SCRIPT)
+ok("the age readout ticks every second",
+   "setInterval(tickProximityAge, 1000)" in SCRIPT)
+age = fn_body("tickProximityAge") or ""
+ok("a stale readout turns red rather than lying",
+   "var(--red)" in age and "secs > 30" in age)
+ok("returning to the tab catches up immediately",
+   "visibilitychange" in SCRIPT)
+
 print()
 print(f"{CHECKS - len(FAILURES)}/{CHECKS} checks passed")
 if FAILURES:

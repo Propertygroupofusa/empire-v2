@@ -86,7 +86,18 @@ print("-- $88.14 free is not $88.14 idle --")
 ok("it subtracts the cash reserve", "GRID_CASH_RESERVE_USD" in MC_SRC)
 ok("it compares the remainder to what one branch costs",
    "GRID_AUTO_DEPLOY_AMOUNT_USD" in MC_SRC)
-ok("'already at work' is its own reported finding", "cash_fully_deployed" in MC_SRC)
+# "already at work" was itself the false comfort. Every branch was flat -
+# nothing was invested in any coin - while the panel reported $553.84
+# "working" against a Coinbase balance of $572.60 USD and no crypto. An
+# earmark to a branch that has not bought is still cash.
+ok("committed cash is never described as 'at work'",
+   "cash_committed" in MC_SRC and "already at work" not in MC_SRC)
+ok("it separates what is DEPLOYED from what is merely allocated",
+   "deployed" in MC_SRC and "earmarked_idle" in MC_SRC)
+ok("a fleet with no open slices reports that nothing is deployed",
+   "nothing_deployed" in MC_SRC)
+ok("the payload carries deployed, idle and allocated separately",
+   all(k in MC_SRC for k in ('"deployed_usd"', '"idle_usd"', '"allocated_usd"')))
 ok("unreadable cash is never called deployable", "cash_unknown" in MC_SRC)
 
 # The real arithmetic, on the real numbers from 2026-09-25.
