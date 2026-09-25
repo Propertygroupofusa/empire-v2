@@ -92,18 +92,53 @@ async def grid_claimed_products(include_inactive: bool = False):
 async def tree_claimed_products():
     """Coins the family tree owns.
 
-    A tree branch claims its configured product_id, and separately claims
-    whatever its BotPosition actually holds - those can differ while a
-    branch is mid-rotation, and both matter: the configured coin is what it
-    is about to buy, the held coin is what is really in the wallet.
+    A tree branch claims two different things, and the difference decides
+    what a RETIRED tree may keep claiming:
+
+      * its CONFIGURED product_id - the coin it is about to buy. This is a
+        claim on the FUTURE.
+      * whatever its BotPosition actually HOLDS - the coin really sitting
+        in the shared Coinbase wallet right now. A claim on the PRESENT.
+
+    While the tree trades, both matter and both are returned.
+
+    Once the tree is retired (is_crypto_passive_mode() - run_branch_cycle()
+    returns immediately for every branch, so no order is ever placed again),
+    the configured claim describes a purchase that will never happen. Held
+    coins are still real and still claimed; intentions are not.
+
+    Dropping that distinction had a real cost. On 2026-09-25 the Grid Bot -
+    the only crypto system still placing orders - could not open a single
+    new branch: its spread plan reported "OPEN NEW BRANCHES: 5, eligible
+    coins: NONE" with $259 to deploy and 35 freshly ranked coins available.
+    Every candidate was filtered out by crypto_grid_bot.py's own eligibility
+    check because the retired tree's branch rows were still reserving them
+    for buys that could not occur. A system that cannot trade was holding
+    the pool against the system that can.
+
+    Fails OPEN on a passive-mode lookup error, matching claimed_by_other()'s
+    own reasoning: this is de-confliction between two self-guarding systems,
+    so an unreadable flag must not halt coin selection. The cost of failing
+    open here is the status quo ante - the tree keeps its claims - which is
+    strictly no worse than before this change.
     """
+    try:
+        from crypto_family_tree_bot import is_crypto_passive_mode
+        retired = await is_crypto_passive_mode()
+    except Exception:
+        retired = False
+
     async with get_session_factory()() as db:
         branch_result = await db.execute(
             select(CryptoTreeBranch.bot_name, CryptoTreeBranch.product_id))
         rows = branch_result.all()
         tree_bots = {r[0] for r in rows}
-        claimed = {normalize_product(r[1]) for r in rows if r[1]}
+        # A retired tree claims nothing it merely INTENDS to buy.
+        claimed = set() if retired else {normalize_product(r[1]) for r in rows if r[1]}
 
+        # Held coins are claimed either way - they are really in the wallet,
+        # and a retired tree still owning a position is exactly the case
+        # where the grid must not trade that coin out from under it.
         pos_result = await db.execute(select(BotPosition.bot, BotPosition.symbol))
         for bot, symbol in pos_result.all():
             if bot in tree_bots and symbol:
