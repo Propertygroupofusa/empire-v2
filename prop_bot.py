@@ -221,14 +221,46 @@ def get_dynamic_max_positions(scale: float) -> int:
 # At $1K: aim for $1-2 per trade (0.75% targets on $130-170 positions)
 # At $5K: aim for $5-15 per trade (1% targets on $500+ positions)
 # At $25K: aim for $50-100 per trade (1% targets on $5,000+ positions)
+# Retuned 2026-09-25, per the account owner's request to make Alpaca take
+# profit faster. The low tiers did not implement the intent documented
+# three lines above them ("At $1K: aim for $1-2 per trade, 0.75% targets").
+#
+# What the old numbers actually demanded at this account's real size:
+# MAX_RISK_PERCENT caps total notional at 50% of equity, spread across up
+# to get_dynamic_max_positions() slots. At ~$1,006 equity that is ~$503
+# deployed over 8 slots - roughly $63 a position.
+#
+#     old $3.00 target on a $63 position = a 4.8% move
+#
+# A 4.8% move in SPY, QQQ or GLD is weeks of waiting, not days. So the
+# EXIT was the binding constraint on turnover, not the entry: capital sat
+# in a position waiting for a move that rarely came, instead of being
+# recycled into the next setup. Speeding up entries without this change
+# would just have filled all 8 slots faster and then stalled.
+#
+# The low tiers now sit near 1.5% of a real position at that tier, which
+# these instruments genuinely move in a day or two. Spread is not a threat
+# at this size - SPY's bid-ask is about a cent on a ~$769 share, under
+# 0.002% - and Alpaca equities are commission-free, so frequent round
+# trips cost almost nothing here. That is NOT true on the Coinbase side,
+# where a 1% round-trip fee makes small targets unprofitable.
+#
+# Upper tiers unchanged: they were never the constraint, and at $25K a
+# position is large enough that the old dollar targets are already ~1%.
 PROFIT_TARGET_DOLLARS_MILESTONES = [
-    (0,     1.50),      # Under $500: $1.50 target (fast compounding)
-    (500,   2.00),      # $500-$1K: $2 target
-    (1000,  3.00),      # $1K-$5K: $3 target (current account level)
-    (5000,  10.00),     # $5K-$10K: $10 target
-    (10000, 25.00),     # $10K-$25K: $25 target
-    (25000, 75.00),     # $25K+: $75 target
+    (0,     0.50),      # Under $500: ~1.5% of a real position at that size
+    (500,   0.75),      # $500-$1K
+    (1000,  1.00),      # $1K-$5K: ~1.6% on a ~$63 position (was $3.00 = 4.8%)
+    (5000,  5.00),      # $5K-$10K: ~1.6% on a ~$310 position (was $10.00)
+    (10000, 25.00),     # $10K-$25K: unchanged
+    (25000, 75.00),     # $25K+: unchanged
 ]
+
+# Absolute override, no deploy needed: set PROP_PROFIT_TARGET_DOLLARS to a
+# positive number and it wins over every tier above. It exists because the
+# tiers are REASONED from position size, not MEASURED from fills - so the
+# first real week of trading should tune this, not another estimate.
+PROFIT_TARGET_DOLLARS_OVERRIDE = _safe_float_env("PROP_PROFIT_TARGET_DOLLARS", "0")
 
 # Crypto-specific LOWER profit targets for fast compounding & high frequency
 # Crypto trades faster, so close positions sooner to reinvest quicker
@@ -258,6 +290,10 @@ TIER_LEVELS = [0.50, 1.00, 1.50]  # multipliers of profit target
 
 def get_profit_target_dollars(equity, is_crypto=False):
     """Get profit target based on account equity. Crypto uses lower targets for fast compounding."""
+    # An explicit override wins outright, including over the crypto tiers -
+    # a number the operator set by hand is a decision, not a suggestion.
+    if PROFIT_TARGET_DOLLARS_OVERRIDE > 0:
+        return PROFIT_TARGET_DOLLARS_OVERRIDE
     milestones = CRYPTO_PROFIT_TARGET_MILESTONES if is_crypto else PROFIT_TARGET_DOLLARS_MILESTONES
     if equity is None:
         return milestones[0][1]
