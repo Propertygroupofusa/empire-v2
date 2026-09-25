@@ -3408,6 +3408,73 @@ _HEARTBEAT_STAGES = {"entered": 1.0, "no_active_branches": 2.0, "cycled": 3.0}
 GRID_LEASE_KEY = "grid_bot_loop_owner"
 GRID_LEASE_STALE_SECONDS = int(os.getenv("GRID_LEASE_STALE_SECONDS", "180"))
 
+# --- DB-PERSISTED STRATEGY OVERRIDE ---------------------------------------
+# The strategy mode was the ONLY setting in this system that could be
+# changed exclusively through a Railway environment variable. Every other
+# live control - the master switch, spacing, auto-rotate, passive mode, the
+# entry variant - is DB-persisted and settable by one POST.
+#
+# That inconsistency cost an entire day on 2026-09-25.
+# CRYPTO_STRATEGY_MODE was stuck reading 'delfina_scalping' through roughly
+# six attempts to correct it: edited in place (reverted), deleted
+# (confirmed "(unset)"), re-added (reverted again), across a confirmed
+# process restart in the confirmed production environment with exactly one
+# key of that name. Meanwhile the operator could flip every OTHER control
+# instantly, because those live in the database.
+#
+# prop_bot.is_alpaca_passive_mode's own docstring already named the reason:
+# DB-persisted "avoids the exact stray-quote-character class of bug that
+# silently disabled the crypto coordinator". The strategy mode simply never
+# got the same treatment.
+#
+# Precedence, deliberately: this override wins over the environment. An
+# operator who sets it is making a decision, and the environment variable
+# is precisely the thing that could not be trusted to carry one.
+CRYPTO_STRATEGY_OVERRIDE_KEY = "crypto_strategy_mode_db_override"
+_STRATEGY_CODES = {1.0: "grid_fleet", 2.0: "family_tree",
+                   3.0: "btc_compound", 4.0: "multi_pair"}
+_STRATEGY_VALUES = {v: k for k, v in _STRATEGY_CODES.items()}
+
+
+async def get_db_strategy_override():
+    """The DB-persisted strategy mode, or None if none is set."""
+    try:
+        async with get_session_factory()() as db:
+            result = await db.execute(
+                select(TradingBotState).where(
+                    TradingBotState.bot_name == CRYPTO_STRATEGY_OVERRIDE_KEY))
+            row = result.scalar_one_or_none()
+    except Exception as e:
+        log.debug(f"DB strategy override unreadable: {type(e).__name__}: {e}")
+        return None
+    if row is None or not row.base_capital:
+        return None
+    return _STRATEGY_CODES.get(float(row.base_capital))
+
+
+async def set_db_strategy_override(mode):
+    """Set (or clear, with None) the DB-persisted strategy mode.
+
+    Only a known strategy is accepted - the same refusal
+    crypto_strategy_config makes, for the same reason: an unrecognised
+    value must never start a substitute that spends real money.
+    """
+    if mode is not None and mode not in _STRATEGY_VALUES:
+        raise ValueError(
+            f"unknown strategy {mode!r} - must be one of "
+            f"{sorted(_STRATEGY_VALUES)} or None to clear")
+    async with get_session_factory()() as db:
+        result = await db.execute(
+            select(TradingBotState).where(
+                TradingBotState.bot_name == CRYPTO_STRATEGY_OVERRIDE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = TradingBotState(bot_name=CRYPTO_STRATEGY_OVERRIDE_KEY, base_capital=0.0)
+            db.add(row)
+        row.base_capital = 0.0 if mode is None else _STRATEGY_VALUES[mode]
+        await db.commit()
+    return mode
+
 
 def _grid_owner_id() -> str:
     """Stable identity for this process, as an owner of the loop."""

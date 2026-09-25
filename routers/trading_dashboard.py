@@ -6134,6 +6134,57 @@ async def get_grid_trade_history_endpoint():
     )
 
 
+class SetCryptoStrategyOverrideRequest(BaseModel):
+    mode: str = None   # None or "" clears the override
+
+
+@router.post("/crypto-strategy-override")
+async def set_crypto_strategy_override_endpoint(payload: SetCryptoStrategyOverrideRequest):
+    """DB-persisted strategy mode, which WINS over the environment variable.
+
+    Exists because CRYPTO_STRATEGY_MODE was the only live control in this
+    system that could be changed exclusively through a Railway environment
+    variable - and on 2026-09-25 it could not be changed at all. It read
+    'delfina_scalping' through roughly six correction attempts: edited in
+    place (reverted), deleted (confirmed "(unset)"), re-added (reverted),
+    across a confirmed restart, in the confirmed production environment,
+    with exactly one key of that name. Every OTHER control - master switch,
+    spacing, auto-rotate, passive mode - flipped instantly, because those
+    live in the database.
+
+    Takes effect on the next process start, since main.py chooses which bot
+    thread to launch at startup. So: set it, then redeploy.
+
+    Pass mode=null (or an empty string) to clear it and fall back to the
+    environment. Only a known strategy is accepted - the same refusal
+    crypto_strategy_config makes, because an unrecognised value must never
+    start a substitute that spends real money."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    mode = (payload.mode or "").strip() or None
+    try:
+        await crypto_grid_bot_module.set_db_strategy_override(mode)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    log.warning(f"[dashboard] 🗄️ DB strategy override set to {mode!r} - takes effect on next restart")
+    return {"status": "updated", "db_strategy_override": mode,
+            "note": "Takes effect on the next process start - redeploy to apply."}
+
+
+@router.get("/crypto-strategy-override")
+async def get_crypto_strategy_override_endpoint():
+    """What the DB-persisted strategy override currently says, and what the
+    environment says, so the two can be compared without reading logs."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    db_mode = await crypto_grid_bot_module.get_db_strategy_override()
+    return {
+        "db_strategy_override": db_mode,
+        "env_crypto_strategy_mode": os.getenv("CRYPTO_STRATEGY_MODE") or "(unset)",
+        "effective_on_next_restart": db_mode or (os.getenv("CRYPTO_STRATEGY_MODE") or "(unset)"),
+    }
+
+
 class SetGridBotModeRequest(BaseModel):
     enabled: bool
 

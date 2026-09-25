@@ -1157,6 +1157,26 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Prop bot failed to start: {e}")
 
+    # A DB-persisted strategy override wins over the environment variable.
+    # See crypto_grid_bot.get_db_strategy_override for why: the env var was
+    # the one control that could not be corrected through the UI, and it
+    # stayed wrong through six attempts on 2026-09-25 while every
+    # DB-persisted control flipped instantly.
+    CRYPTO_STRATEGY_MODE = _resolved_crypto_mode = CRYPTO_STRATEGY_MODE
+    try:
+        import crypto_grid_bot as _grid_cfg
+        _db_mode = await _grid_cfg.get_db_strategy_override()
+        if _db_mode:
+            log.warning(
+                f"🗄️ DB strategy override active: {_db_mode!r} (environment says "
+                f"{CRYPTO_STRATEGY_MODE!r}). Clear it with POST "
+                f"/api/trading-dashboard/crypto-strategy-override once the "
+                f"environment variable is trustworthy again."
+            )
+            CRYPTO_STRATEGY_MODE = _db_mode
+    except Exception as e:
+        log.debug(f"DB strategy override check skipped: {type(e).__name__}: {e}")
+
     try:
         import threading
         if CRYPTO_STRATEGY_MODE == "family_tree" and crypto_family_tree_bot_module is not None:
