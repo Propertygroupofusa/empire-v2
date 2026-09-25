@@ -363,14 +363,32 @@ async def set_tier_highwater(value: float):
     except Exception as e:
         log.error(f"[CRYPTO] Failed to persist tier high-water mark: {e}")
 
-# Coinbase trading cost: 0.40% total round-trip assumption = 0.20% entry + 0.20% exit
-# This is used only to size the profit target sensibly, not charged/simulated here
-# (the real fee is already reflected in Coinbase's fill price/balance).
+# The real Coinbase round trip on this account: 0.75% per leg taker, so
+# 1.50% both ways. Measured on 2026-09-25 from Coinbase's own fill records
+# (liquidity_indicator + commission per fill), not assumed.
+#
+# WHAT THE OLD 0.4% COST
+#
+# This constant is not decorative - three live exit conditions below read
+# it directly:
+#
+#     rsi_exit = rsi > RSI_SELL_ABOVE and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE
+#
+# "sell when unrealized profit clears the round trip". At 0.4% that fired
+# on a 0.5% gain, which pays 1.50% in fees and books a real -1.00% LOSS
+# while logging it as a profitable exit. That is exactly the pattern that
+# cost the retired family tree $102.60 across 26 "TARGET HIT" trades -
+# wins that lost money.
+#
+# An earlier pass this session added FEE_FLOOR_ROUND_TRIP_PCT at the real
+# rate for the dollar profit target, and deliberately left this one alone
+# because other exit logic read it. Leaving it was the wrong call: the
+# other exit logic reading it was the problem, not a reason to keep it.
 try:
-    CRYPTO_ROUND_TRIP_FEE_RATE = _safe_float_env("CRYPTO_ROUND_TRIP_FEE_RATE", "0.004")
+    CRYPTO_ROUND_TRIP_FEE_RATE = _safe_float_env("CRYPTO_ROUND_TRIP_FEE_RATE", "0.015")
 except (ValueError, TypeError):
-    log.warning("Invalid CRYPTO_ROUND_TRIP_FEE_RATE value, using default: 0.004")
-    CRYPTO_ROUND_TRIP_FEE_RATE = 0.004
+    log.warning("Invalid CRYPTO_ROUND_TRIP_FEE_RATE value, using default: 0.015")
+    CRYPTO_ROUND_TRIP_FEE_RATE = 0.015
 
 # DEPRECATED: Fixed 37% target replaced with tiered system (see CRYPTO_TIER_LEVELS above)
 # The old fixed target was mathematically unsound: 18.5:1 reward/risk meant the bot held
@@ -425,11 +443,11 @@ TAKER_FEE_RATE = 0.006
 # Tier 2: Exit 1/3 at 6-10% (second profit zone, move stop to breakeven)
 # Tier 3: Remaining 1/3 trails at trailing stop (let winners run with protection)
 # This replaces the fixed 37% target which caused the bot to hold indefinitely
-# The round trip the FEE FLOOR prices against. Deliberately separate from
-# CRYPTO_ROUND_TRIP_FEE_RATE above, which defaults to 0.4% and is read by
-# other exit logic here. The account's real measured rate is 1.50% when
-# both legs fall back to market orders, and a floor must price the worst
-# case the trade can pay - an unfilled maker order becomes a market order.
+# The round trip the FEE FLOOR prices against. Now the same 1.50% as
+# CRYPTO_ROUND_TRIP_FEE_RATE above - kept as its own name because a floor
+# and an exit threshold are different jobs and may need to diverge again.
+# A floor must price the worst case the trade can pay: an unfilled maker
+# order becomes a market order, so taker is the honest rate.
 # Matches crypto_grid_bot and crypto_mean_reversion_bot.
 FEE_FLOOR_ROUND_TRIP_PCT = _safe_float_env("CRYPTO_ROUND_TRIP_FEE_PCT", "0.015")
 
@@ -1721,11 +1739,10 @@ async def run_crypto_cycle():
             try:
                 import fee_floor
                 _position_usd = abs(qty * entry) if qty and entry else 0.0
-                # NOT CRYPTO_ROUND_TRIP_FEE_RATE - that defaults to 0.4%,
-                # while the account's real measured taker round trip is
-                # 1.50%. Flooring against a stale optimistic rate
-                # under-protects by nearly 4x, and other exit logic in this
-                # file reads that constant, so it is left alone.
+                # Both constants are now the real measured 1.50%, so this
+                # no longer differs from CRYPTO_ROUND_TRIP_FEE_RATE. Kept
+                # explicit because a floor must never quietly inherit
+                # whatever an exit threshold happens to be set to.
                 _floor_usd = fee_floor.min_profit_usd(
                     _position_usd, FEE_FLOOR_ROUND_TRIP_PCT)
                 if _floor_usd > _min_profit:

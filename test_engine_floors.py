@@ -103,8 +103,18 @@ ok("coinbase bot floors its DOLLAR target by position size",
 ok("REGRESSION: it does NOT floor against its own stale 0.4% constant",
    "min_profit_usd(\n                    _position_usd, CRYPTO_ROUND_TRIP_FEE_RATE)" not in cb)
 ok("it prices the worst case instead", "FEE_FLOOR_ROUND_TRIP_PCT" in cb)
-ok("it explains why the stale constant is left alone",
-   "under-protects" in cb and "other exit logic" in cb)
+# This used to assert the comment explaining why CRYPTO_ROUND_TRIP_FEE_RATE
+# was left at its stale 0.4% "because other exit logic reads it". That
+# reasoning was wrong and has been fixed: the other exit logic reading a
+# 0.4% round trip was the problem, not a reason to preserve it. Three live
+# RSI exits sold whenever unrealized profit cleared 0.4%, which pays 1.50%
+# in fees and books a real loss while logging a profitable exit.
+ok("the stale 0.4% constant is gone, not merely explained",
+   'CRYPTO_ROUND_TRIP_FEE_RATE = _safe_float_env("CRYPTO_ROUND_TRIP_FEE_RATE", "0.004")' not in cb)
+ok("it now defaults to the measured 1.50% round trip",
+   'CRYPTO_ROUND_TRIP_FEE_RATE", "0.015"' in cb)
+ok("the floor and the exit threshold agree on the real rate",
+   'FEE_FLOOR_ROUND_TRIP_PCT = _safe_float_env("CRYPTO_ROUND_TRIP_FEE_PCT", "0.015")' in cb)
 ok("the wiring can never raise", "fee floor check skipped" in cb)
 ok("it raises the target, never lowers it",
    "if _floor_usd > _min_profit:" in cb)

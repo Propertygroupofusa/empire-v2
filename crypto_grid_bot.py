@@ -357,7 +357,8 @@ MIN_DYNAMIC_GRID_PCT = 0.003
 # ── THE REAL ROUND-TRIP FEE RATE ────────────────────────────────────────
 # Real bug found 2026-09-05, from the account's own live snapshot: every
 # branch was trading at 2.00% spacing while _grid_slice_net_pnl() priced
-# every round trip at engine.ROUND_TRIP_FEE_RATE (0.008 = 0.4% each way),
+# every round trip at engine.ROUND_TRIP_FEE_RATE (now 0.015 = the real
+# measured 0.75% each way, taker),
 # a HARDCODED assumption. get_real_fee_tier() has always fetched the
 # account's genuine live Coinbase taker rate every cycle - and its own
 # docstring admits the maker/taker numbers were "not consumed by anything
@@ -474,9 +475,11 @@ async def get_effective_round_trip_fee_rate() -> float:
 # ── MAKER ORDERS ────────────────────────────────────────────────────────
 # Grid trading is a limit-order strategy by nature: buy X% below, sell X%
 # above. It was placing MARKET orders to do that job and paying the taker
-# premium for nothing. At Coinbase's real base tier that is ~1.2%/leg taker
-# vs ~0.6%/leg maker - on a 2.6% grid it is the difference between keeping
-# 8% of each trade's gross move and keeping 54% of it.
+# premium for nothing. Measured from this account's own fills on
+# 2026-09-25: 0.75%/leg taker vs 0.35%/leg maker - so 1.50% versus 0.70%
+# on a round trip. On a 2.00% grid that is the difference between keeping
+# 25% of each trade's gross move and keeping 65% of it, and it is what
+# sets the fee floor at 1.70% instead of 0.90%.
 #
 # Deliberately maker-FIRST, market-FALLBACK rather than a full resting-grid
 # rewrite: the existing price trigger, slice selection and

@@ -6304,7 +6304,7 @@ async def set_grid_maker_orders_endpoint(payload: SetGridMakerOrdersRequest):
     Grid trading is a limit-order strategy by nature - buy X% below, sell
     X% above - but this bot has always placed MARKET orders to do it,
     paying the taker premium for nothing. At Coinbase's real base tier
-    that is roughly 1.2%/leg taker versus 0.6%/leg maker: on a 2.6% grid,
+    measured on this account: 0.75%/leg taker versus 0.35%/leg maker. On a 2.00% grid,
     the difference between keeping ~8% of each trade's gross move and
     keeping ~54% of it.
 

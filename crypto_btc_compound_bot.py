@@ -283,7 +283,17 @@ TARGET_LOW_PCT = _safe_float_env("BTC_COMPOUND_TARGET_LOW_PCT", "0.021")   # 2.1
 TARGET_MED_PCT = _safe_float_env("BTC_COMPOUND_TARGET_MED_PCT", "0.025")   # 2.5%
 TARGET_HIGH_PCT = _safe_float_env("BTC_COMPOUND_TARGET_HIGH_PCT", "0.04")  # 4%
 
-ROUND_TRIP_FEE_RATE = _safe_float_env("BTC_COMPOUND_ROUND_TRIP_FEE_RATE", "0.008")  # ~0.4% each way, taker
+# The real Coinbase round trip: 0.75% per leg taker = 1.50% both ways,
+# measured 2026-09-25 from Coinbase's own fill records (liquidity_indicator
+# and commission per fill), not assumed. The old 0.008 was documented as
+# "~0.4% each way, taker" and was roughly half the truth.
+#
+# crypto_family_tree_bot re-exports this as its own ROUND_TRIP_FEE_RATE and
+# prices exit fees with it, and the dashboard shows a per-trade fee
+# estimate from it - so every one of those understated the cost of getting
+# out. Live order execution reads the OBSERVED rate via
+# get_effective_round_trip_fee_rate(), which is unaffected either way.
+ROUND_TRIP_FEE_RATE = _safe_float_env("BTC_COMPOUND_ROUND_TRIP_FEE_RATE", "0.015")
 
 # The most an entry is allowed to demand of the win rate before this bot
 # refuses to place it.
