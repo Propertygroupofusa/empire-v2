@@ -72,16 +72,45 @@ BASE = f"https://{HOST}"
 
 
 # ── .env ─────────────────────────────────────────────────────
+ENV_FILE = HERE / ".env"
+ENV_KEYS_FOUND = []          # names only. Never values.
+
+
 def load_env():
-    f = HERE / ".env"
-    if not f.exists():
+    """Reads .env, including MULTI-LINE PEM values.
+
+    A CDP private key pasted straight from Coinbase looks like
+
+        COINBASE_API_PRIVATE_KEY=-----BEGIN EC PRIVATE KEY-----
+        MHcCAQEE...
+        -----END EC PRIVATE KEY-----
+
+    A naive line-by-line parser captures only the first line and silently
+    produces a truncated, unusable key - so the value is gathered through
+    to the END line. Single-line values using \n escapes still work.
+    """
+    if not ENV_FILE.exists():
         return
-    for line in f.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+    lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        i += 1
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+        k, v = k.strip(), v.strip().strip('"').strip("'")
+        if v.startswith("-----BEGIN") and "-----END" not in v:
+            block = [v]
+            while i < len(lines):
+                nxt = lines[i].strip().strip('"').strip("'")
+                i += 1
+                block.append(nxt)
+                if nxt.startswith("-----END"):
+                    break
+            v = "\n".join(block)
+        ENV_KEYS_FOUND.append(k)
+        os.environ.setdefault(k, v)
 
 
 load_env()
@@ -150,7 +179,9 @@ def check_auth():
     The old bot announced 'Live Trading' on the strength of a key being
     present in a file. Present is not the same as working."""
     if not KEY_NAME or not PRIVATE_KEY:
-        return False, "COINBASE_API_KEY_NAME / COINBASE_API_PRIVATE_KEY not set in .env"
+        missing = [n for n, v in (("COINBASE_API_KEY_NAME", KEY_NAME),
+                                  ("COINBASE_API_PRIVATE_KEY", PRIVATE_KEY)) if not v]
+        return False, f"{' and '.join(missing)} not set"
     try:
         request("GET", "/api/v3/brokerage/accounts?limit=1")
         return True, "authenticated"
@@ -374,6 +405,22 @@ def main():
     if not authed and LIVE:
         print("   NOTE:  SCALPER_LIVE=true but authentication failed, so this")
         print("          bot CANNOT place orders. It is not trading.")
+
+    if not authed:
+        # Says what it actually read, so "not set" stops being a guessing
+        # game. Prints variable NAMES and key LENGTHS only - never a value,
+        # because this output gets pasted into chat windows.
+        print(f"\n   .env path:   {ENV_FILE}")
+        print(f"   .env exists: {ENV_FILE.exists()}")
+        if ENV_FILE.exists():
+            print(f"   names in .env: {', '.join(ENV_KEYS_FOUND) or '(none parsed)'}")
+        print(f"   COINBASE_API_KEY_NAME:    {len(KEY_NAME)} chars"
+              f"{' — expected ~95, starting organizations/' if 0 < len(KEY_NAME) < 40 else ''}")
+        print(f"   COINBASE_API_PRIVATE_KEY: {len(PRIVATE_KEY)} chars"
+              f"{' — expected a PEM block or 88-char base64' if 0 < len(PRIVATE_KEY) < 60 else ''}")
+        if KEY_NAME and not KEY_NAME.startswith("organizations/"):
+            print("   WARNING: key name does not start with 'organizations/' - that is")
+            print("            a legacy Coinbase Pro key, which no longer works.")
 
     bal = get_usd_balance() if authed else None
     print(f"   Coinbase USD balance: {'$%.2f' % bal if bal is not None else 'UNKNOWN (not read)'}")
