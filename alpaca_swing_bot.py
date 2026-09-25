@@ -64,6 +64,25 @@ def get_base_url():
 LIVE_TRADE = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 
 # Swing trading symbols: indices + commodities
+def _intraday_interval_minutes() -> int:
+    """Minutes between intraday entry checks. Must divide 60 evenly.
+
+    An interval that does not divide 60 produces uneven gaps (7 gives
+    :56 -> :00, a four-minute gap after six seven-minute ones), so a bad
+    value falls back to 5 rather than silently trading on a ragged clock.
+    """
+    raw = os.getenv("SWING_INTRADAY_INTERVAL_MINUTES", "5")
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return 5
+    if n < 1 or n > 60 or 60 % n != 0:
+        return 5
+    return n
+
+
+SWING_INTRADAY_INTERVAL_MINUTES = _intraday_interval_minutes()
+
 SWING_SYMBOLS = {
     "MES": {"name": "Micro S&P 500", "proxy": "SPY"},
     "MNQ": {"name": "Micro Nasdaq", "proxy": "QQQ"},
@@ -1096,9 +1115,28 @@ def run():
                 now.time() <= datetime.strptime("16:00", "%H:%M").time()
             )
 
-            # Run intraday checks every 15 minutes during market hours
+            # Run intraday checks during market hours, every
+            # SWING_INTRADAY_INTERVAL_MINUTES.
+            #
+            # This was hardcoded to 15 - FOUR entry checks an hour, 26 a
+            # trading day. With an 11-symbol universe and an RSI/SMA entry
+            # gate, that was the binding constraint on how often this bot
+            # could take a setup at all: a dip that formed and recovered
+            # inside a 15-minute gap was never seen.
+            #
+            # Loosened 2026-09-25 per the account owner, to get stock
+            # entries taken faster. Safe to loosen HERE in a way it is not
+            # on the crypto side: Alpaca equities are commission-free, so
+            # more frequent entries do not pay the 1% round-trip fee a
+            # Coinbase grid trade does. Spread and slippage still cost,
+            # which is why this is 5 minutes and not 30 seconds.
+            #
+            # Honest limit: this increases OPPORTUNITIES, not edge. The
+            # entry gate still has to pass. What it buys is catching the
+            # same setup sooner, and seeing ones that used to form and
+            # resolve between checks.
             if is_market_open:
-                if now.minute % 15 == 0:  # On 15-min marks (9:30, 9:45, etc)
+                if now.minute % SWING_INTRADAY_INTERVAL_MINUTES == 0:
                     log.info(f"\n⏰ {now.strftime('%H:%M')} — Running intraday check...")
                     loop.run_until_complete(run_intraday_check())
                     time.sleep(60)  # Sleep 1 min to avoid duplicate
