@@ -49,13 +49,29 @@ def ok(label, cond):
 src = open(os.path.join(HERE, "crypto_grid_bot.py"), encoding="utf-8").read()
 
 # --- the chosen eight, exactly ------------------------------------------
-m = re.search(r'"GRID_WORKING_SET",\s*\n\s*"([^"]+)"', src)
-ok("a default working set is defined", m is not None)
-coins = [c.strip() for c in m.group(1).split(",")] if m else []
-CHOSEN = ["BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD",
-          "ARB-USD", "NEAR-USD", "LINK-USD", "AVAX-USD"]
-ok("it is exactly the eight coins the operator chose", coins == CHOSEN)
-ok("ARB is included - it holds the only funded branch", "ARB-USD" in coins)
+# Parsed with AST, not a regex: the default is written as ADJACENT string
+# literals (implicit concatenation), and a regex grabbing only the first
+# one silently reports half the list as the whole list - which is exactly
+# what this check did on its first run after the set grew past one line.
+def _default_working_set(source):
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and getattr(node.func, "attr", "") == "getenv"
+                and node.args
+                and getattr(node.args[0], "value", "") == "GRID_WORKING_SET"
+                and len(node.args) > 1):
+            return ast.literal_eval(node.args[1])
+    return None
+
+
+_raw = _default_working_set(src)
+ok("a default working set is defined", _raw is not None)
+coins = [c.strip() for c in (_raw or "").split(",") if c.strip()]
+CHOSEN = ["BTC-USD", "NEAR-USD", "DOGE-USD", "ARB-USD", "ETH-USD", "SOL-USD", "LINK-USD",
+          "INJ-USD", "APT-USD", "TIA-USD", "LDO-USD", "FIL-USD", "ICP-USD", "SUI-USD"]
+ok("it is exactly the fourteen coins selected", coins == CHOSEN)
+ok("ARB is included - it is the largest funded branch", "ARB-USD" in coins)
 ok("NEAR is included - it ranked #2 at 36.1% ROI", "NEAR-USD" in coins)
 ok("DOGE and ETH are included - both earned real money in September",
    "DOGE-USD" in coins and "ETH-USD" in coins)
@@ -126,9 +142,9 @@ ok("a coin already claimed by a branch is still skipped",
    not eligible("ARB-USD", working_set=True, **{**base, "claimed": {"ARB-USD"}}))
 ok("a coin the tree really holds is still skipped",
    not eligible("BTC-USD", working_set=True, **{**base, "tree_held": {"BTC-USD"}}))
-ok("with nothing excluded or claimed, all eight are available",
+ok("with nothing excluded or claimed, all fourteen are available",
    sum(1 for c in CHOSEN if eligible(c, working_set=True,
-       auto_excluded=set(), hand_excluded=set(), claimed=set(), tree_held=set())) == 8)
+       auto_excluded=set(), hand_excluded=set(), claimed=set(), tree_held=set())) == 14)
 
 width = max(len(l) for l, _ in checks)
 for label, passed in checks:

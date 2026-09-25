@@ -1777,7 +1777,8 @@ MIN_REQUIRED_ROI_PCT = float(os.getenv("GRID_MIN_REQUIRED_ROI_PCT", "20.0"))
 GRID_WORKING_SET = [
     c.strip().upper() for c in os.getenv(
         "GRID_WORKING_SET",
-        "BTC-USD,ETH-USD,SOL-USD,DOGE-USD,ARB-USD,NEAR-USD,LINK-USD,AVAX-USD",
+        "BTC-USD,NEAR-USD,DOGE-USD,ARB-USD,ETH-USD,SOL-USD,LINK-USD,"
+        "INJ-USD,APT-USD,TIA-USD,LDO-USD,FIL-USD,ICP-USD,SUI-USD",
     ).split(",") if c.strip()
 ]
 
