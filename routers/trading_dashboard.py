@@ -6618,6 +6618,20 @@ async def rebalance_flat_grid_branches_endpoint():
     return await crypto_grid_bot_module.rebalance_flat_grid_branches_now()
 
 
+@router.get("/grid-status/fill-mix")
+async def get_grid_fill_mix_endpoint():
+    """How grid legs REALLY filled: maker, or fallen back to market (taker).
+
+    The spacing floor prices the taker round trip on purpose, because an
+    unfilled maker order becomes a market order. If maker legs turn out to
+    fill nearly always, that floor is conservative - but nothing measured
+    it until now, so neither answer could be chosen on evidence.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    return await crypto_grid_bot_module.get_fill_mix()
+
+
 @router.post("/grid-status/reanchor-flat-branches")
 async def reanchor_flat_grid_branches_endpoint():
     """Move every FLAT branch's reference price to the live market price.

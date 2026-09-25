@@ -529,6 +529,102 @@ async def expected_leg_fee_rate() -> float:
     return (await get_effective_round_trip_fee_rate()) / 2
 
 
+# --- maker/taker fill mix -------------------------------------------------
+# Two rows, each holding two counters in the generic TradingBotState bucket:
+#   base_capital     = legs that filled as MAKER
+#   starting_capital = legs that fell back to a MARKET order (taker)
+GRID_FILL_MIX_BUY_KEY = "grid_fill_mix_buy"
+GRID_FILL_MIX_SELL_KEY = "grid_fill_mix_sell"
+
+
+async def _record_fill_leg(key: str, was_maker: bool):
+    """Count one filled leg by how it actually filled.
+
+    Added 2026-09-25, because nothing in this codebase measured it and a
+    real decision was resting on the guess. fee_safe_floor_pct() priced
+    the minimum spacing off the MAKER rate while grid_buy() falls back to
+    a market order after MAKER_ORDER_WAIT_SECONDS - so the floor read
+    0.90% against a taker round trip of 1.50%, certifying an 0.80%-wide
+    band of spacings that lose money whenever a fallback happens. The
+    floor now prices the taker leg unconditionally, which is correct but
+    conservative: if maker legs really do fill almost always, the fleet is
+    trading wider than it needs to.
+
+    Neither the safe answer nor the tighter one can be chosen on
+    evidence until something counts. This counts.
+
+    Never allowed to raise. A counter that can break a trade is worse than
+    no counter - the same rule _record_gate_decision() and _log_activity()
+    already follow.
+    """
+    try:
+        async with get_session_factory()() as db:
+            result = await db.execute(
+                select(TradingBotState).where(TradingBotState.bot_name == key))
+            row = result.scalar_one_or_none()
+            if row is None:
+                row = TradingBotState(bot_name=key, base_capital=0.0, starting_capital=0.0)
+                db.add(row)
+            if was_maker:
+                row.base_capital = float(row.base_capital or 0.0) + 1.0
+            else:
+                row.starting_capital = float(row.starting_capital or 0.0) + 1.0
+            await db.commit()
+    except Exception as e:
+        log.warning(f"[GRID] fill-mix counter failed for {key} (ignored): {e}")
+
+
+async def get_fill_mix() -> dict:
+    """What the legs REALLY paid, as counted - never inferred from config.
+
+    maker_rate is None, not a number, until at least one leg has filled:
+    a rate over zero legs is not a measurement.
+    """
+    out = {}
+    total_maker = total_taker = 0.0
+    for label, key in (("buy", GRID_FILL_MIX_BUY_KEY), ("sell", GRID_FILL_MIX_SELL_KEY)):
+        maker = taker = 0.0
+        try:
+            async with get_session_factory()() as db:
+                result = await db.execute(
+                    select(TradingBotState).where(TradingBotState.bot_name == key))
+                row = result.scalar_one_or_none()
+                if row is not None:
+                    maker = float(row.base_capital or 0.0)
+                    taker = float(row.starting_capital or 0.0)
+        except Exception as e:
+            log.warning(f"[GRID] fill-mix read failed for {key}: {e}")
+        legs = maker + taker
+        out[label] = {
+            "maker_legs": int(maker), "taker_legs": int(taker), "legs": int(legs),
+            "maker_rate": round(maker / legs, 4) if legs else None,
+        }
+        total_maker += maker
+        total_taker += taker
+
+    legs = total_maker + total_taker
+    maker_rate = (total_maker / legs) if legs else None
+    real_round_trip = await get_effective_round_trip_fee_rate()
+    maker_leg = (_cached_real_maker_fee_rate
+                 if _cached_real_maker_fee_rate is not None else real_round_trip / 2)
+    taker_leg = real_round_trip / 2
+    out["overall"] = {
+        "maker_legs": int(total_maker), "taker_legs": int(total_taker), "legs": int(legs),
+        "maker_rate": round(maker_rate, 4) if maker_rate is not None else None,
+        # What a round trip has actually averaged, weighted by how the legs
+        # really filled. None until something has filled.
+        "blended_round_trip_fee_rate": (
+            round((maker_rate * maker_leg + (1 - maker_rate) * taker_leg) * 2, 6)
+            if maker_rate is not None else None),
+        "taker_round_trip_fee_rate": round(taker_leg * 2, 6),
+        "maker_round_trip_fee_rate": round(maker_leg * 2, 6),
+        "note": ("The spacing floor deliberately prices the TAKER round trip, because "
+                 "an unfilled maker order becomes a market order. These counts are the "
+                 "evidence that would justify relaxing that - not a reason to on their own."),
+    }
+    return out
+
+
 async def grid_buy(session, usd_amount: float, product_id: str):
     """Real grid BUY: maker first (cheap, may not fill), market fallback
     (always fills, costs more). Returns (filled_qty, price, leg_fee_rate)
@@ -539,6 +635,7 @@ async def grid_buy(session, usd_amount: float, product_id: str):
         if fill:
             qty, price = fill
             log.info(f"[GRID] {product_id}: real MAKER buy filled {qty:.8f} @ ${price:,.6f} (cheaper fee)")
+            await _record_fill_leg(GRID_FILL_MIX_BUY_KEY, True)
             return qty, price, (_cached_real_maker_fee_rate
                                 if _cached_real_maker_fee_rate is not None
                                 else (await get_effective_round_trip_fee_rate()) / 2)
@@ -546,6 +643,7 @@ async def grid_buy(session, usd_amount: float, product_id: str):
     if not fill:
         return None
     qty, price = fill
+    await _record_fill_leg(GRID_FILL_MIX_BUY_KEY, False)
     return qty, price, (await get_effective_round_trip_fee_rate()) / 2
 
 
@@ -557,6 +655,7 @@ async def grid_sell(session, qty: float, product_id: str):
         if fill:
             filled_qty, price = fill
             log.info(f"[GRID] {product_id}: real MAKER sell filled {filled_qty:.8f} @ ${price:,.6f} (cheaper fee)")
+            await _record_fill_leg(GRID_FILL_MIX_SELL_KEY, True)
             return filled_qty, price, (_cached_real_maker_fee_rate
                                        if _cached_real_maker_fee_rate is not None
                                        else (await get_effective_round_trip_fee_rate()) / 2)
@@ -564,6 +663,7 @@ async def grid_sell(session, qty: float, product_id: str):
     if not fill:
         return None
     filled_qty, price = fill
+    await _record_fill_leg(GRID_FILL_MIX_SELL_KEY, False)
     return filled_qty, price, (await get_effective_round_trip_fee_rate()) / 2
 
 
@@ -4075,6 +4175,10 @@ async def get_grid_status() -> dict:
         "effective_round_trip_fee_rate": (await expected_leg_fee_rate()) * 2,
         "real_fee_rate_observed": _cached_real_round_trip_fee_rate is not None,
         "fee_safe_min_grid_pct": await fee_safe_floor_pct(),
+        # Measured, not assumed: how the legs REALLY filled. The floor
+        # above prices the taker round trip; this is the evidence that
+        # would justify relaxing it.
+        "fill_mix": await get_fill_mix(),
         # Maker (post-only limit) orders: roughly half the fee of the market
         # orders this bot has always used. Off until turned on deliberately.
         "maker_orders_active": await is_maker_orders_active(),
