@@ -2475,6 +2475,144 @@ async def _maybe_rotate_one_grid_branch(branch: CryptoGridBranch, after_sale: bo
     return {"action": "rotated", "orders_placed": False, **result}
 
 
+async def tune_spacing_per_coin(dry_run: bool = True, min_trips: int = 4,
+                                min_improvement_usd: float = 1.0) -> dict:
+    """Pick each branch's grid step from MEASURED performance on its own coin.
+
+    The account owner's ask: "learn as you go and change it to where it can
+    get better and faster... then we get tighter and tighter to what it
+    should be."
+
+    The important correction is in the word "tighter". Tighter is not
+    reliably better, and the real 30-day data says so:
+
+        35-coin aggregate   2.0% +$306.98   2.5% +$348.21   (wider won)
+        STX-USD             2.0% +$25.32    2.5% +$33.77    (wider won)
+        POL-USD             2.0% +$18.36    2.5% +$14.71    (tighter won)
+
+    Total grid profit is roughly trips x capital x margin / levels, so a
+    tighter step buys more trips and sells margin on every one. Which side
+    wins depends on how that particular coin actually moves. There is no
+    single best step for the fleet, and a tuner that only ever tightens is
+    a machine for walking the fleet to its floor on a hunch - the same
+    mistake as the 1.25% recommendation of 2026-09-25, automated.
+
+    So this measures, and moves the step in whichever direction the
+    measurement points.
+
+    Evidence rules, all of which exist to stop it acting on noise:
+
+      * min_trips - a candidate that completed fewer than this many round
+        trips in the replay is ignored however good its total looks. One
+        lucky trip is not a spacing verdict.
+      * min_improvement_usd - the winner must beat what the branch runs
+        today by this much. Without it the tuner churns the fleet over
+        rounding differences.
+      * the fee-safe floor still applies, unconditionally. A candidate
+        below it is clamped up, never followed down. The floor prices the
+        TAKER round trip because an unfilled maker order becomes a market
+        order, and no measurement here may lift it.
+
+    dry_run=True (the default) changes nothing and returns the plan.
+
+    NOTE ON PRECEDENCE: a manually promoted global candidate
+    (get_live_grid_spacing_override) beats per-branch spacing outright in
+    run_grid_branch_cycle. While one is set - it is '3_levels_2.0pct'
+    today - applying this tuner writes values the live cycle will ignore.
+    The plan says so per branch rather than pretending otherwise.
+    """
+    import crypto_selection_backtest as lab
+
+    override = await get_live_grid_spacing_override()
+    override_is_set = override in GRID_LEVEL_SPACING_CANDIDATES
+    floor = await fee_safe_floor_pct()
+    branches = [b for b in await get_grid_branches() if b.active]
+
+    plans, skipped = [], []
+    for b in branches:
+        try:
+            res = await lab.run_grid_level_spacing_comparison(coins=[b.product_id])
+        except Exception as exc:
+            skipped.append({"product_id": b.product_id, "reason": f"backtest failed: {exc}"})
+            continue
+
+        rows = []
+        for label, cfg in GRID_LEVEL_SPACING_CANDIDATES.items():
+            entry = (res or {}).get(label) or {}
+            per_coin = (entry.get("per_coin") or {}).get(b.product_id) or entry
+            net = per_coin.get("net_usd", per_coin.get("net_pnl_usd"))
+            trips = per_coin.get("trips", per_coin.get("round_trips"))
+            if net is None or trips is None:
+                continue
+            rows.append({"label": label, "net_usd": float(net), "trips": int(trips),
+                         "grid_pct": cfg["grid_pct"], "num_levels": cfg["num_levels"],
+                         "below_floor": cfg["grid_pct"] < floor})
+
+        eligible = [r for r in rows if r["trips"] >= min_trips and not r["below_floor"]]
+        if not eligible:
+            skipped.append({"product_id": b.product_id,
+                            "reason": f"no candidate cleared {min_trips} trips above the {floor*100:.2f}% floor",
+                            "candidates": rows})
+            continue
+
+        best = max(eligible, key=lambda r: r["net_usd"])
+        current = next((r for r in rows if abs(r["grid_pct"] - b.grid_pct) < 1e-9), None)
+        current_net = current["net_usd"] if current else None
+        gain = (best["net_usd"] - current_net) if current_net is not None else None
+
+        if current is not None and abs(best["grid_pct"] - b.grid_pct) < 1e-9:
+            skipped.append({"product_id": b.product_id,
+                            "reason": f"already on the measured best ({best['label']})"})
+            continue
+        if gain is not None and gain < min_improvement_usd:
+            skipped.append({"product_id": b.product_id,
+                            "reason": f"best candidate {best['label']} beats current by only ${gain:.2f} "
+                                      f"(needs ${min_improvement_usd:.2f}) - not worth churning"})
+            continue
+
+        plans.append({
+            "product_id": b.product_id, "bot_name": b.bot_name,
+            "from_grid_pct": b.grid_pct, "to_grid_pct": best["grid_pct"],
+            "direction": "tighter" if best["grid_pct"] < b.grid_pct else "wider",
+            "to_label": best["label"], "to_levels": best["num_levels"],
+            "measured_net_usd": round(best["net_usd"], 2), "measured_trips": best["trips"],
+            "beats_current_by_usd": round(gain, 2) if gain is not None else None,
+            "would_take_effect": not override_is_set,
+        })
+
+    applied = []
+    if not dry_run:
+        for plan in plans:
+            async with get_session_factory()() as db:
+                result = await db.execute(
+                    select(CryptoGridBranch).where(CryptoGridBranch.bot_name == plan["bot_name"]))
+                row = result.scalar_one_or_none()
+                if row is None:
+                    continue
+                row.grid_pct = max(plan["to_grid_pct"], floor)
+                row.num_levels = max(1, min(_safe_num_levels_for_allocation(row.allocated_usd),
+                                            plan["to_levels"]))
+                await db.commit()
+            applied.append(plan["product_id"])
+            await _log_activity_safe(
+                plan["bot_name"], plan["product_id"], "SPACING_TUNED",
+                f"{plan['from_grid_pct']*100:.2f}% -> {plan['to_grid_pct']*100:.2f}% "
+                f"({plan['direction']}, measured +${plan['measured_net_usd']:.2f} "
+                f"over {plan['measured_trips']} trips)")
+
+    return {
+        "status": "dry_run" if dry_run else "applied",
+        "fee_safe_floor_pct": floor,
+        "global_override": override,
+        "global_override_blocks_per_coin": override_is_set,
+        "plans": plans, "plan_count": len(plans),
+        "applied": applied, "skipped": skipped,
+        "rules": {"min_trips": min_trips, "min_improvement_usd": min_improvement_usd,
+                  "floor_is_never_crossed": True,
+                  "direction": "whichever the measurement points - not always tighter"},
+    }
+
+
 async def reanchor_flat_grid_branches_now() -> dict:
     """Move every FLAT branch's reference_price to the live market price.
 
