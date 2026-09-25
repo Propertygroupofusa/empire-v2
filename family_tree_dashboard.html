@@ -3223,15 +3223,45 @@ function renderGridMakerOnlyToggle(data) {
 }
 
 async function toggleGridMakerOnly(enable) {
-    const msg = enable
-        ? 'Remove the market fallback from Grid Bot?\n\nFrom now on a limit order that does not fill is simply ' +
-          'cancelled — no market order behind it. That is what lets the fee floor drop from 1.70% to 0.90%, ' +
-          'which is what makes the live 2.00% spacing profitable instead of 0.17% short.\n\nThe cost is missed ' +
-          'cycles: a buy that does not fill does not happen, and a sell waits. Emergency "sell everything" still ' +
-          'sells at market.\n\nThis also switches on limit orders if they are off.'
-        : 'Restore the market fallback?\n\nNo trade will be missed again — but the fee floor goes back to 1.70%, ' +
-          'and the current 2.00% spacing stops clearing its real costs.';
-    if (!confirm(msg)) return;
+    // TWO-STEP, IN-PAGE, AND VERIFIED.
+    //
+    // This used a native confirm() and a fire-and-forget POST. The account
+    // owner pressed it and the switch did not land - and nothing on the page
+    // could say whether the dialog was dismissed, the fetch failed against a
+    // restarting service, or the write itself was refused. A control that
+    // can fail without saying so is worse than one that is hard to find.
+    //
+    // So: the confirmation is a second tap on the button itself (a native
+    // dialog can be suppressed on mobile and cannot be styled or seen in a
+    // screenshot), the button reports its own progress, and success is not
+    // claimed from the POST returning 200 - the server is RE-READ and the
+    // flag is checked. If it did not change, the button says so and stays
+    // where it is.
+    const btn = document.querySelector('#grid-maker-only-toggle .mo-btn');
+    if (!btn) return;
+
+    if (btn.dataset.armed !== '1') {
+        btn.dataset.armed = '1';
+        btn.dataset.label = btn.textContent;
+        btn.textContent = enable
+            ? 'Tap again to remove the market fallback'
+            : 'Tap again to restore the market fallback';
+        btn.style.background = 'linear-gradient(135deg,#dc2626 0%,#991b1b 100%)';
+        clearTimeout(window.__moArm);
+        window.__moArm = setTimeout(() => {
+            if (btn.dataset.armed === '1') {
+                btn.dataset.armed = '0';
+                btn.textContent = btn.dataset.label;
+                btn.style.background = '';
+            }
+        }, 6000);
+        return;
+    }
+
+    clearTimeout(window.__moArm);
+    btn.dataset.armed = '0';
+    btn.disabled = true;
+    btn.textContent = 'Applying…';
     try {
         const res = await fetch(API_BASE + '/grid-status/maker-only', {
             method: 'POST',
@@ -3239,10 +3269,30 @@ async function toggleGridMakerOnly(enable) {
             body: JSON.stringify({ enabled: enable }),
         });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
+
+        // Do not trust the POST. Ask the server what it actually holds now.
+        const check = await (await fetch(API_BASE + '/grid-status')).json();
+        if (!!check.maker_only_active !== !!enable) {
+            throw new Error('the server still reports maker_only_active=' +
+                            check.maker_only_active + ' after the write');
+        }
+        btn.textContent = enable ? 'Removed ✓' : 'Restored ✓';
         loadGridStatus();
     } catch (e) {
-        alert('Could not change the fallback setting: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = 'Failed — tap to retry';
+        btn.style.background = 'linear-gradient(135deg,#dc2626 0%,#991b1b 100%)';
+        const el = document.getElementById('grid-maker-only-toggle');
+        if (el) {
+            const p = document.createElement('p');
+            p.className = 'why';
+            p.style.color = '#ef4444';
+            p.style.marginTop = '8px';
+            p.textContent = 'Did not take effect: ' + e.message +
+                ' — nothing was changed. If the service was mid-deploy, wait a few seconds and tap again.';
+            el.appendChild(p);
+        }
     }
 }
 
