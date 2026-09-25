@@ -1388,6 +1388,192 @@ def _replay_grid_bot(closes, highs, lows, spend=None,
     return result
 
 
+def _replay_grid_bot_v2(closes, highs, lows, spend=None,
+                        buy_pct=None, sell_pct=None, num_levels=STRATEGY_LAB_GRID_LEVELS,
+                        drawdown_breaker_pct=None):
+    """_replay_grid_bot with the two things the live bot does that it does not.
+
+    Built 2026-09-25 to answer two direct questions with measurement
+    rather than argument:
+
+      1. Should the EXIT distance be the same as the ENTRY distance?
+         They are one variable today (grid_pct on both sides), but they
+         do different jobs - entry distance sets how selective the buys
+         are, exit distance sets how long a winner is held. buy_pct and
+         sell_pct are separate here.
+
+      2. Is the 25% drawdown breaker set anywhere near right? Modelled on
+         the live branch it needs a ~30% price collapse to fire, by which
+         point all levels are long since filled and there is nothing left
+         to pause. drawdown_breaker_pct sweeps it.
+
+    TWO CORRECTIONS to _replay_grid_bot, both of which make this STRICTER,
+    not more flattering:
+
+    a. NEVER SELL AT A LOSS. The original pops the oldest slice whenever
+       the rise trigger fires, whatever that slice cost. The live bot
+       refuses - _pick_profitable_slice_to_sell requires the slice being
+       sold to itself be fee-adjusted net-profitable, added after a real
+       DOGE-USD branch booked a genuine loss that way. Without this, a
+       tighter sell_pct scores artificially well precisely because it
+       fires more often on slices that are underwater. Testing a faster
+       exit without modelling the guard that makes a faster exit safe
+       would answer a question nobody asked.
+
+    b. THE DRAWDOWN BREAKER pauses NEW BUYS only, never sells, matching
+       run_grid_branch_cycle. Equity is allocated + unrealized, the same
+       formula _grid_branch_real_equity uses, and peak is tracked from
+       the flat start.
+
+    Everything else - FIFO order, reference updating only on a real fill,
+    hourly closes, the shared round-trip fee - is unchanged, so results
+    stay comparable with the existing sweeps.
+    """
+    spend = spend if spend is not None and spend > 0 else SPEND
+    buy_pct = buy_pct if buy_pct is not None else STRATEGY_LAB_GRID_PCT
+    sell_pct = sell_pct if sell_pct is not None else buy_pct
+    slice_usd = spend / num_levels
+    half_fee = engine.ROUND_TRIP_FEE_RATE / 2
+
+    n = len(closes)
+    if n < 2:
+        return None
+
+    trades = []
+    open_slices = []
+    reference = closes[0]
+    peak_equity = spend
+    buys_paused_bars = 0
+
+    def slice_net(slot, price):
+        gross = slot["qty"] * (price - slot["entry"])
+        fee = slot["qty"] * (slot["entry"] + price) * half_fee
+        return gross - fee
+
+    i = 1
+    while i < n:
+        price = closes[i]
+
+        equity = spend + sum(s["qty"] * (price - s["entry"]) for s in open_slices)
+        if equity > peak_equity:
+            peak_equity = equity
+        breached = (drawdown_breaker_pct is not None and peak_equity > 0
+                    and (peak_equity - equity) / peak_equity >= drawdown_breaker_pct)
+        if breached:
+            buys_paused_bars += 1
+
+        if price <= reference * (1 - buy_pct) and len(open_slices) < num_levels:
+            if not breached:
+                open_slices.append({"entry": price, "qty": slice_usd / price})
+                reference = price
+        elif price >= reference * (1 + sell_pct) and open_slices:
+            # Oldest slice that is GENUINELY net-profitable, not simply
+            # the oldest. A rise that finds nothing profitable waits.
+            idx = next((k for k, s in enumerate(open_slices) if slice_net(s, price) > 0), None)
+            if idx is not None:
+                slot = open_slices.pop(idx)
+                trades.append(("GRID_CYCLE", slice_net(slot, price)))
+                reference = price
+        i += 1
+
+    final_price = closes[-1]
+    for slot in open_slices:
+        trades.append(("OPEN_AT_WINDOW_END", slot["qty"] * (final_price - slot["entry"])))
+
+    result = _summarize_strategy_trades(trades, spend)
+    if result is not None:
+        result["open_slices_at_end"] = len(open_slices)
+        result["buys_paused_bars"] = buys_paused_bars
+        result["buy_pct"] = buy_pct
+        result["sell_pct"] = sell_pct
+        result["drawdown_breaker_pct"] = drawdown_breaker_pct
+    return result
+
+
+async def run_exit_distance_and_breaker_sweeps(coins=None, days=90, num_levels=3,
+                                               buy_pct=0.020, max_concurrent=6):
+    """SHADOW-MODE. Two questions, one fetch of real candles, no orders.
+
+    A. EXIT DISTANCE. Entry and exit are one variable in the live bot
+       (grid_pct on both sides) though they do different jobs: entry
+       distance sets how selective the buys are, exit distance sets how
+       long a winner is held. Entry is held fixed here and the exit swept
+       from the 1.70% fee floor up to 3.00%.
+
+    B. DRAWDOWN BREAKER. Modelled on a real branch the live 25% setting
+       needs a ~30% price collapse before it fires, by which point every
+       level is filled and there is nothing left to pause. Swept against
+       10/15/20/25% and no breaker at all.
+
+    Uses _replay_grid_bot_v2, which models the live never-sell-at-a-loss
+    guard. That matters most for A: without it a tighter exit scores well
+    precisely by dumping underwater slices, which the live bot refuses to
+    do, and the answer would be flattering and wrong.
+    """
+    coins = coins or ["BTC-USD", "NEAR-USD", "DOGE-USD", "ARB-USD", "ETH-USD", "SOL-USD", "LINK-USD"]
+    exits = [0.017, 0.020, 0.025, 0.030]
+    breakers = [0.10, 0.15, 0.20, 0.25, None]
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async with aiohttp.ClientSession() as session:
+        async def _one(product_id):
+            async with semaphore:
+                candles = await fetch_historical_candles(session, product_id, days=days)
+            if candles is None:
+                return product_id, None, None
+            closes, highs, lows, _t = candles
+            a = {}
+            for e in exits:
+                r = _replay_grid_bot_v2(closes, highs, lows, buy_pct=buy_pct,
+                                        sell_pct=e, num_levels=num_levels)
+                a[f"{e*100:.2f}%"] = {"net": round(r["total_pnl"], 2) if r else None,
+                                      "trips": r["num_trades"] if r else 0}
+            b = {}
+            for bk in breakers:
+                r = _replay_grid_bot_v2(closes, highs, lows, buy_pct=buy_pct,
+                                        sell_pct=buy_pct, num_levels=num_levels,
+                                        drawdown_breaker_pct=bk)
+                b["none" if bk is None else f"{bk*100:.0f}%"] = {
+                    "net": round(r["total_pnl"], 2) if r else None,
+                    "trips": r["num_trades"] if r else 0,
+                    "paused_bars": (r or {}).get("buys_paused_bars", 0)}
+            return product_id, a, b
+
+        outcomes = await asyncio.gather(*(_one(p) for p in coins))
+
+    exit_rows, breaker_rows, skipped = [], [], []
+    exit_tot = {f"{e*100:.2f}%": {"net": 0.0, "trips": 0} for e in exits}
+    bk_tot = {("none" if b is None else f"{b*100:.0f}%"): {"net": 0.0, "trips": 0, "paused_bars": 0}
+              for b in breakers}
+    for pid, a, b in outcomes:
+        if a is None:
+            skipped.append(pid)
+            continue
+        exit_rows.append({"product_id": pid, **a})
+        breaker_rows.append({"product_id": pid, **b})
+        for k, v in a.items():
+            if v["net"] is not None:
+                exit_tot[k]["net"] += v["net"]; exit_tot[k]["trips"] += v["trips"]
+        for k, v in b.items():
+            if v["net"] is not None:
+                bk_tot[k]["net"] += v["net"]; bk_tot[k]["trips"] += v["trips"]
+                bk_tot[k]["paused_bars"] += v["paused_bars"]
+    for d in (exit_tot, bk_tot):
+        for v in d.values():
+            v["net"] = round(v["net"], 2)
+
+    return {
+        "backtest_days": days, "num_levels": num_levels, "buy_pct": buy_pct,
+        "coins_tested": len(exit_rows), "skipped": skipped,
+        "exit_distance": {"per_coin": exit_rows, "totals": exit_tot,
+                          "best": max(exit_tot, key=lambda k: exit_tot[k]["net"]) if exit_tot else None},
+        "drawdown_breaker": {"per_coin": breaker_rows, "totals": bk_tot,
+                             "best": max(bk_tot, key=lambda k: bk_tot[k]["net"]) if bk_tot else None},
+        "note": ("Models the live never-sell-at-a-loss guard. Entry fixed while the exit "
+                 "is swept, so the two distances are measured separately for the first time."),
+    }
+
+
 # A perpetual-futures position pays FUNDING to the other side, typically
 # every 8 hours. On hourly candles that is roughly funding_8h / 8 per bar.
 # 0.01% per 8h is the common neutral baseline on major venues; it swings

@@ -6653,6 +6653,17 @@ async def set_net_edge_gate_endpoint(payload: SetNetEdgeGateRequest):
     return {"status": "updated", "net_edge_gate_active": payload.enabled}
 
 
+@router.post("/crypto-selection-backtest/exit-distance-and-breaker")
+async def run_exit_distance_and_breaker_endpoint(days: int = 90, num_levels: int = 3,
+                                                 buy_pct: float = 0.020):
+    """SHADOW-MODE. Sweeps the EXIT distance separately from the entry
+    distance, and sweeps the drawdown breaker. Places no orders."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_exit_distance_and_breaker_sweeps(
+        days=days, num_levels=num_levels, buy_pct=buy_pct)
+
+
 @router.post("/grid-status/tune-spacing-per-coin")
 async def tune_spacing_per_coin_endpoint(dry_run: bool = True, min_trips: int = 4,
                                          min_improvement_usd: float = 1.0,
