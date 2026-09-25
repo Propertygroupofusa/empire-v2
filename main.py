@@ -18,9 +18,17 @@ from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from datetime import datetime
 import os
 import sys
+import time
 import asyncio
 import uvicorn
 import logging
+
+# Wall-clock at import, i.e. when THIS process started. /health subtracts
+# it to report uptime, which is how an "is the variable wrong or did the
+# process never restart to re-read it?" ambiguity gets resolved from
+# outside. Module scope on purpose: it must be bound once at process
+# start, never per request.
+_PROCESS_STARTED_AT = time.time()
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
@@ -1946,10 +1954,29 @@ async def health():
     running build can just say what it is. `git log --oneline -1` locally
     versus `commit` here answers "did my push actually deploy?" outright.
     Falls back to "unknown" off-Railway, where the variable is absent.
+
+    uptime_seconds exists for the OTHER half of that question, which the
+    commit alone cannot answer. An environment-variable change does not
+    change the commit, so when a variable edit appears not to have taken,
+    "is the variable wrong?" and "did the process ever restart to re-read
+    it?" look identical from outside - and os.getenv() is only re-read at
+    process start. That ambiguity stalled the CRYPTO_STRATEGY_MODE fix on
+    2026-09-25 across three consecutive checks.
+
+    With uptime, the two separate cleanly: a large uptime alongside a
+    stale value means the process never restarted (on Railway, typically
+    a staged variable change that was never applied), while a small
+    uptime alongside a stale value means the process DID restart and the
+    variable genuinely is not set on this service.
+
+    crypto_strategy_mode is reported for the same reason - it is the
+    variable this deployment gets wrong most often, and reading it here
+    costs nothing.
     """
     sha = (os.getenv("RAILWAY_GIT_COMMIT_SHA")
            or os.getenv("RAILWAY_GIT_COMMIT")
            or "")
+    uptime = round(time.time() - _PROCESS_STARTED_AT, 1)
     return {
         "status": "ok",
         "platform": "pgusa-documents",
@@ -1960,6 +1987,9 @@ async def health():
         "deployed_at": os.getenv("RAILWAY_DEPLOYMENT_CREATED_AT") or "unknown",
         "service": os.getenv("RAILWAY_SERVICE_NAME") or "unknown",
         "service_role": os.getenv("SERVICE_ROLE") or "unset",
+        "uptime_seconds": uptime,
+        "uptime_human": f"{int(uptime // 3600)}h {int((uptime % 3600) // 60)}m",
+        "crypto_strategy_mode": os.getenv("CRYPTO_STRATEGY_MODE") or "(unset)",
     }
 
 
