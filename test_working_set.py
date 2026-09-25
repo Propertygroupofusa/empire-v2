@@ -68,13 +68,19 @@ def _default_working_set(source):
 _raw = _default_working_set(src)
 ok("a default working set is defined", _raw is not None)
 coins = [c.strip() for c in (_raw or "").split(",") if c.strip()]
-CHOSEN = ["BTC-USD", "NEAR-USD", "DOGE-USD", "ARB-USD", "ETH-USD", "SOL-USD", "LINK-USD",
-          "INJ-USD", "APT-USD", "TIA-USD", "LDO-USD", "FIL-USD", "ICP-USD", "SUI-USD"]
+# Ranked by MEASURED GRID net, not directional ROI. See GRID_WORKING_SET's
+# comment: ranking grid coins by direction produced nearly the inverse
+# answer (BONK -40.87% directional but +$12.94 on the grid at 100% wins;
+# NEAR +31.36% directional but ONE trip in 30 days).
+CHOSEN = ["ETC-USD", "FLOKI-USD", "BCH-USD", "DOGE-USD", "BONK-USD", "SHIB-USD", "OP-USD",
+          "XRP-USD", "INJ-USD", "ALGO-USD", "SEI-USD", "AAVE-USD", "ATOM-USD", "SUI-USD"]
 ok("it is exactly the fourteen coins selected", coins == CHOSEN)
-ok("ARB is included - it is the largest funded branch", "ARB-USD" in coins)
-ok("NEAR is included - it ranked #2 at 36.1% ROI", "NEAR-USD" in coins)
-ok("DOGE and ETH are included - both earned real money in September",
-   "DOGE-USD" in coins and "ETH-USD" in coins)
+ok("BONK is included despite -40.87% directional ROI - it went 7/7 on the grid",
+   "BONK-USD" in coins)
+ok("NEAR is EXCLUDED - one grid trip in 30 days, however good its direction",
+   "NEAR-USD" not in coins)
+ok("DOGE is included - real September money AND +$13.36 on the grid",
+   "DOGE-USD" in coins)
 
 # --- it must be overridable without a deploy -----------------------------
 ok("the set is read from the environment, not frozen in source",

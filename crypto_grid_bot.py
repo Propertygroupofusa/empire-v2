@@ -1749,8 +1749,27 @@ async def _first_ranked_coin_beating_btc(ranked_product_ids: list) -> str:
 # finding somewhere, however mediocre, to go.
 MIN_REQUIRED_ROI_PCT = float(os.getenv("GRID_MIN_REQUIRED_ROI_PCT", "20.0"))
 
-# The coins the account owner actually wants this fleet trading, chosen by
-# them on 2026-09-25 and overridable without a deploy.
+# The coins the account owner actually wants this fleet trading, selected
+# 2026-09-25 from REAL GRID results and overridable without a deploy.
+#
+# SELECTED ON THE WRONG METRIC FIRST, and the correction matters more than
+# the list. The first cut used backtest_one_coin's ranking - a TARGET/STOP
+# replay, which measures DIRECTION. A grid does not care about direction;
+# it profits from movement that returns. Ranking grid coins by directional
+# ROI produced almost the inverse of the right answer:
+#
+#   BONK  directional ROI -40.87%  ->  grid +$12.94 on 7 trips, 100% wins
+#   OP    directional ROI -31.92%  ->  grid  +$9.91 on 12 trips, 83% wins
+#   NEAR  directional ROI +31.36%  ->  grid  +$0.95 on ONE trip in 30 days
+#   FIL   directional ROI +17.74%  ->  grid  +$1.11 on TWO trips
+#
+# A coin can fall 40% in a month and still hand a grid seven clean round
+# trips on the way down. A coin can rise steadily and hand it one.
+#
+# These are now ranked by measured grid net at 3 levels / 2.0% over the
+# same 30 days. Combined: $134.76 across 119 round trips, against $21.05
+# and ~30 trips for the previous set - 6.4x the profit and ~4x the
+# frequency, on identical capital and settings.
 #
 # This exists because three independent filters stacked into a total
 # shutout that day. A spread plan reported "OPEN NEW BRANCHES: 5, eligible
@@ -1777,8 +1796,8 @@ MIN_REQUIRED_ROI_PCT = float(os.getenv("GRID_MIN_REQUIRED_ROI_PCT", "20.0"))
 GRID_WORKING_SET = [
     c.strip().upper() for c in os.getenv(
         "GRID_WORKING_SET",
-        "BTC-USD,NEAR-USD,DOGE-USD,ARB-USD,ETH-USD,SOL-USD,LINK-USD,"
-        "INJ-USD,APT-USD,TIA-USD,LDO-USD,FIL-USD,ICP-USD,SUI-USD",
+        "ETC-USD,FLOKI-USD,BCH-USD,DOGE-USD,BONK-USD,SHIB-USD,OP-USD,"
+        "XRP-USD,INJ-USD,ALGO-USD,SEI-USD,AAVE-USD,ATOM-USD,SUI-USD",
     ).split(",") if c.strip()
 ]
 
