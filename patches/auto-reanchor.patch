@@ -1,0 +1,71 @@
+--- a/crypto_grid_bot.py
++++ b/crypto_grid_bot.py
+@@ -1063,5 +1063,15 @@
+ 
+ 
++def auto_reanchor_enabled() -> bool:
++    """Whether a FLAT branch's reference follows the market. ON unless off.
++
++    Defaults ON because the alternative is a self-tightening trap: a branch
++    that has not filled drifts further from ever filling, and the only cure
++    was a human noticing a dashboard card and pressing a button. Set
++    GRID_AUTO_REANCHOR=false to go back to manual.
++    """
++    raw = (os.getenv("GRID_AUTO_REANCHOR") or "").strip().strip('"').strip("'").lower()
++    return raw not in {"0", "false", "no", "off"}
+ def auto_widen_enabled() -> bool:
+     """Whether spacing may widen to clear the gate. ON unless switched off.
+ 
+@@ -4506,5 +4506,52 @@
+         grid_pct = branch.grid_pct
+ 
++    # ---- A STALE REFERENCE MAKES A BRANCH WAIT FOR A DIP THAT PASSED ----
++    #
++    # reference_price is written exactly twice: when a branch is created, and
++    # thereafter only on a real fill. Nothing moves it toward the market. So a
++    # flat branch that has not traded through a rally measures its next buy
++    # from a level the market already left - and since no fill means no
++    # re-anchor, a rising market makes the next fill HARDER, not easier.
++    #
++    # Live on 2026-09-25 at a 2.50% step, six flat branches were waiting for
++    # falls of 2.89% to 4.80%. ARB needed 4.80%, nearly twice its own spacing.
++    #
++    # reanchor_flat_grid_branches_now() already does this correctly and is
++    # wired to a dashboard button. A button is a one-shot: references go stale
++    # again the moment the market moves, so the fleet needs it every cycle
++    # rather than whenever somebody notices.
++    #
++    # Same safety rules as that function, enforced here rather than inherited:
++    # FLAT branches only (with a slice open the reference is ALSO the sell
++    # trigger, so moving it would move the exit of a live position), and
++    # UPWARD only (a lower reference is a lower buy trigger, i.e. further from
++    # the market, so a branch already below its reference is nearer a fill
++    # than a fresh anchor would leave it).
++    if (auto_reanchor_enabled() and not slices and price
++            and branch.reference_price and price > branch.reference_price):
++        _old = branch.reference_price
++        try:
++            async with get_session_factory()() as db:
++                result = await db.execute(
++                    select(CryptoGridBranch).where(
++                        CryptoGridBranch.bot_name == branch.bot_name))
++                row = result.scalar_one_or_none()
++                # Re-checked inside the transaction: a fill may have landed
++                # between the read above and this write, and a branch that is
++                # no longer flat must not be re-anchored.
++                if row is not None and not row.open_slices:
++                    row.reference_price = price
++                    await db.commit()
++                    branch.reference_price = price
++                    log.info(
++                        f"[GRID] {branch.bot_name}: re-anchored {branch.product_id} "
++                        f"{_old:,.6f} -> {price:,.6f}. Its next buy now sits one "
++                        f"{grid_pct*100:.2f}% step below the live market instead of "
++                        f"{((price / _old - 1) + grid_pct) * 100:.2f}% below it."
++                    )
++        except Exception as e:
++            log.warning(f"[GRID] {branch.bot_name}: re-anchor failed ({e}) - left on "
++                        f"its old reference, which only costs a delayed entry")
+     # ---- Real dip: buy a new slice (skipped while drawdown-breached) ----
+     if drawdown_breached:
+         log.info(
