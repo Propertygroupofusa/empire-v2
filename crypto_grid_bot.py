@@ -3245,6 +3245,15 @@ async def _log_grid_trade(bot_name, product_id, entry_price, exit_price, qty, pn
                 exit_expected_price=exit_expected_price,
             ))
             await db.commit()
+        # The memory is written from the same place as the ledger, and is
+        # equally best-effort: a lesson that fails to save must never
+        # unwind a real sale that already completed.
+        try:
+            import grid_learning
+            await grid_learning.record_closed_trade(product_id, round(pnl, 2))
+        except Exception as e:
+            log.error(f"[LEARN] lesson not recorded for {product_id} "
+                      f"(pnl {pnl:+.2f}) - the real trade is unaffected: {e}")
     except Exception as e:
         # Deliberately still non-fatal - the real sale already happened and
         # allocated_usd is already updated; raising here would not un-sell
@@ -3890,6 +3899,24 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
         if not gate_ok:
             log.info(f"[GRID] {branch.bot_name}: ⛔ net-edge gate - {gate_reason}")
             return
+
+        # What the fleet already learned about this coin, from its own
+        # closed round trips. ADVISORY unless enforcement is explicitly
+        # switched on in the database - see grid_learning.check_before_buy.
+        # It fails OPEN by design: an unreadable memory must never be the
+        # thing that quietly halts trading.
+        try:
+            import grid_learning
+            memo = await grid_learning.check_before_buy(branch.product_id)
+            if memo.get("trades"):
+                log.info(f"[LEARN] {branch.bot_name}: {memo['lesson']}")
+            if not memo.get("allow", True):
+                log.warning(f"[GRID] {branch.bot_name}: 🧠 memory blocked this buy - {memo['lesson']}")
+                await _log_activity_safe(branch.bot_name, branch.product_id, "LESSON_BLOCK",
+                                         f"🧠 buy blocked by the fleet's own record: {memo['lesson']}")
+                return
+        except Exception as e:
+            log.warning(f"[LEARN] {branch.bot_name}: memory unavailable ({e}) - trading anyway")
 
         fill = await grid_buy(session, spend, branch.product_id)
         if not fill:

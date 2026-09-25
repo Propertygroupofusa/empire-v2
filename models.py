@@ -1119,6 +1119,81 @@ class CryptoGridTradeHistory(Base):
         }
 
 
+class GridLesson(Base):
+    """What the fleet has learned about one coin, from its own closed trades.
+
+    One row per product_id, rewritten after every completed grid round
+    trip. This is the durable version of bot_learning_engine.py, which
+    kept the same idea in a local bot_learnings.json - a file on Railway's
+    ephemeral disk, wiped on every redeploy, and imported by nothing.
+
+    WHY THE EVIDENCE IS AGGREGATE, NOT PER-TRADE
+
+    The file version wrote a "losing pattern" on the FIRST loss and
+    check_before_trade() returned safe=False on any match, checking losing
+    patterns before winning ones. A coin was therefore blocked forever
+    after a single red trade. This fleet closes 75.6% of its round trips
+    green, so roughly one in four is red BY DESIGN - DOGE is +$12.80 over
+    15 trades and has 4 losses. Wiring that in as written would have shut
+    off every coin within days, each one while profitable.
+
+    So a lesson here is a running tally, and a verdict is only allowed to
+    turn negative once the sample is big enough to mean something.
+    """
+    __tablename__ = "grid_lessons"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(String, unique=True, index=True)
+
+    trades = Column(Integer, default=0)
+    wins = Column(Integer, default=0)
+    losses = Column(Integer, default=0)
+    total_pnl = Column(Float, default=0.0)
+    gross_win_usd = Column(Float, default=0.0)
+    gross_loss_usd = Column(Float, default=0.0)
+
+    # The conditions that actually govern a grid round trip, carried so a
+    # lesson can say something more useful than "this coin lost".
+    last_step_pct = Column(Float, nullable=True)
+    last_pnl = Column(Float, nullable=True)
+    best_trade_usd = Column(Float, nullable=True)
+    worst_trade_usd = Column(Float, nullable=True)
+
+    # "earning" | "watch" | "avoid" - see grid_learning.verdict_for()
+    verdict = Column(String, default="watch", index=True)
+    lesson = Column(String, default="")
+
+    first_seen = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def win_rate(self):
+        return (self.wins / self.trades * 100.0) if self.trades else 0.0
+
+    def avg_pnl(self):
+        return (self.total_pnl / self.trades) if self.trades else 0.0
+
+    def to_dict(self):
+        return {
+            "product_id": self.product_id,
+            "trades": self.trades,
+            "wins": self.wins,
+            "losses": self.losses,
+            "win_rate": round(self.win_rate(), 1),
+            "total_pnl": round(self.total_pnl or 0.0, 2),
+            "avg_pnl": round(self.avg_pnl(), 4),
+            "gross_win_usd": round(self.gross_win_usd or 0.0, 2),
+            "gross_loss_usd": round(self.gross_loss_usd or 0.0, 2),
+            "last_step_pct": self.last_step_pct,
+            "last_pnl": self.last_pnl,
+            "best_trade_usd": self.best_trade_usd,
+            "worst_trade_usd": self.worst_trade_usd,
+            "verdict": self.verdict,
+            "lesson": self.lesson,
+            "first_seen": (self.first_seen.isoformat() + "Z") if self.first_seen else None,
+            "updated_at": (self.updated_at.isoformat() + "Z") if self.updated_at else None,
+        }
+
+
 class ClosedTrade(Base):
     """One completed round trip, with the conditions that caused it.
 

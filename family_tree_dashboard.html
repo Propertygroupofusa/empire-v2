@@ -973,6 +973,20 @@
         </div>
     </div>
 
+    <div class="section-title">🧠 What the fleet has learned</div>
+    <div class="panel">
+        <div class="panel-sub">One plain-English lesson per coin, written from its own closed round trips and
+            re-read before every buy. A verdict only turns negative once a coin has enough closed trades to mean
+            something - at a 75%+ win rate roughly one trade in four is red <em>by design</em>, and treating that as
+            a lesson is how a profitable fleet talks itself out of its own winners. Advisory unless enforcement is
+            switched on.</div>
+        <div style="margin:10px 0; display:flex; gap:8px; flex-wrap:wrap;">
+            <button id="lessons-btn" class="unlock-btn" style="margin-top:0;" onclick="loadLessons()">🧠 Show what it learned</button>
+            <button id="lessons-backfill-btn" class="unlock-btn" style="margin-top:0;" onclick="backfillLessons(this)">↻ Learn from every past trade</button>
+        </div>
+        <div id="lessons-wrap"><div class="coin-history-empty">Not loaded yet - tap a button above.</div></div>
+    </div>
+
     <div class="section-title">💵 Is any money sitting still?</div>
     <div class="panel">
         <div class="panel-sub">One check for every dollar that is not currently earning, and the single action that
@@ -3223,6 +3237,87 @@ const SAFE_MONEY_ACTIONS = {
               + "an open slice is never touched.",
     },
 };
+
+// The fleet's memory, on screen.
+function renderLessons(d) {
+    const wrap = document.getElementById('lessons-wrap');
+    if (!wrap) return;
+    try {
+        const rows = d.lessons || [];
+        if (rows.length === 0) {
+            wrap.innerHTML = '<div class="coin-history-empty">Nothing learned yet - tap '
+                + '"Learn from every past trade" to build the memory from the trades already on record.</div>';
+            return;
+        }
+        const COLOUR = { earning: 'var(--green)', avoid: 'var(--red)', watch: 'var(--text-dim)' };
+        const ICON = { earning: '✅', avoid: '⛔', watch: '⏳' };
+        const card = l => `
+            <div style="border-left:3px solid ${COLOUR[l.verdict] || 'var(--border)'};
+                        background:var(--bg); border-radius:4px; padding:9px 11px; margin-bottom:7px;">
+                <div style="display:flex; justify-content:space-between; gap:10px; align-items:baseline; flex-wrap:wrap;">
+                    <strong style="font-size:0.88em;">${ICON[l.verdict] || ''} ${l.product_id.replace('-USD', '')}
+                        <span style="font-weight:400; color:var(--text-dim); font-size:0.85em;">${l.verdict}</span></strong>
+                    <span style="font-variant-numeric:tabular-nums; font-weight:700; font-size:0.85em;
+                                 color:${l.total_pnl >= 0 ? 'var(--green)' : 'var(--red)'};">
+                        ${l.total_pnl >= 0 ? '+' : '-'}${fmtUsd(Math.abs(l.total_pnl))}
+                        <span style="font-weight:400; color:var(--text-dim);">
+                            · ${l.trades} trip${l.trades === 1 ? '' : 's'} · ${l.win_rate.toFixed(0)}%</span></span>
+                </div>
+                <div style="font-size:0.8em; margin-top:4px; line-height:1.5;">${l.lesson}</div>
+            </div>`;
+        wrap.innerHTML =
+            `<div style="font-size:0.74em; color:var(--text-dim); margin-bottom:8px;">
+                ${d.lesson_count} coin${d.lesson_count === 1 ? '' : 's'} on record ·
+                enforcement <strong style="color:${d.enforcement_active ? 'var(--gold)' : 'var(--text-dim)'};">
+                ${d.enforcement_active ? 'ON - a lesson can block a buy' : 'OFF - advisory only'}</strong>
+                · a verdict needs ${d.min_trades_for_a_verdict} trips, a block needs ${d.min_trades_to_block}</div>`
+            + rows.map(card).join('')
+            + `<div style="font-size:0.7em; color:var(--text-dim); margin-top:8px; line-height:1.5;">${d.note || ''}</div>`;
+    } catch (e) {
+        wrap.innerHTML = `<div class="coin-history-empty">Could not render the lessons (${e.message}).</div>`;
+    }
+}
+
+async function loadLessons() {
+    const btn = document.getElementById('lessons-btn');
+    const wrap = document.getElementById('lessons-wrap');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Loading…'; }
+    try {
+        renderLessons(await apiGet('/grid-status/lessons', 30000));
+    } catch (e) {
+        wrap.innerHTML = `<div class="coin-history-empty">Could not load lessons: ${e.message}</div>`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '\U0001f9e0 Show what it learned'; }
+    }
+}
+
+// Replays the ledger into the memory. Writes no orders and moves no
+// money - it only rebuilds what the fleet already knows from trades it
+// has already closed.
+async function backfillLessons(btn) {
+    const original = btn ? btn.textContent : '';
+    if (!confirm('Rebuild the memory from every round trip already on record?\n\n'
+               + 'No order is placed and no money moves - it only re-reads closed trades.')) {
+        if (btn) { btn.textContent = 'Cancelled - nothing changed';
+                   setTimeout(() => { btn.textContent = original; }, 2500); }
+        return;
+    }
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Learning…'; }
+    try {
+        const res = await fetch(API_BASE + '/grid-status/lessons/backfill', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Admin-Key': adminKey },
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+        renderLessons(body);
+        if (btn) btn.textContent = `✅ Learned from ${body.trades_replayed || 0}`;
+    } catch (e) {
+        if (btn) btn.textContent = '⚠️ ' + e.message;
+    } finally {
+        setTimeout(() => { if (btn) { btn.textContent = original; btn.disabled = false; } }, 3500);
+    }
+}
 
 // The "press a button and make money" panel, built honestly.
 //

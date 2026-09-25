@@ -6627,6 +6627,56 @@ async def rebalance_flat_grid_branches_endpoint():
     return await crypto_grid_bot_module.rebalance_flat_grid_branches_now()
 
 
+@router.get("/grid-status/lessons")
+async def grid_lessons_endpoint():
+    """Everything the fleet has learned about each coin, from its own
+    closed round trips. Read-only.
+
+    The durable replacement for bot_learning_engine.py, which stored the
+    same idea in a local JSON file on Railway's ephemeral disk and was
+    imported by nothing.
+    """
+    import grid_learning
+    return JSONResponse(content=await grid_learning.get_all_lessons(), headers={
+        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+        "Pragma": "no-cache", "Expires": "0"})
+
+
+@router.post("/grid-status/lessons/backfill")
+async def grid_lessons_backfill_endpoint():
+    """Replay every round trip already in the ledger into the memory.
+
+    Without this the memory starts empty and re-learns, at real cost,
+    what the fleet already paid to find out across its recorded trades.
+    Rebuilds from the ledger, so it is safe to run more than once.
+    """
+    import grid_learning
+    return await grid_learning.backfill_from_trade_history()
+
+
+class SetLessonEnforcementRequest(BaseModel):
+    active: bool
+
+
+@router.post("/grid-status/lessons/enforce")
+async def set_lesson_enforcement_endpoint(payload: SetLessonEnforcementRequest):
+    """Allow a lesson to actually BLOCK a buy, instead of only informing.
+
+    Defaults OFF, and deliberately so. A memory that stops trading a coin
+    on its own is a capital-stranding mechanism, and this account has
+    already paid for one: on 2026-09-25 auto-rotate retired four EARNING
+    branches on thin evidence and left $276.80 - 64% of the account -
+    sitting idle. Even switched on, a lesson can only block a coin that is
+    down over at least grid_learning.MIN_TRADES_TO_BLOCK closed round
+    trips.
+    """
+    import grid_learning
+    active = await grid_learning.set_enforcement_active(bool(payload.active))
+    log.warning(f"[dashboard] 🧠 lesson enforcement set to {active}")
+    return {"status": "updated", "enforcement_active": active,
+            "min_trades_to_block": grid_learning.MIN_TRADES_TO_BLOCK}
+
+
 @router.get("/grid-status/money-check")
 async def grid_money_check_endpoint():
     """Every dollar in the fleet that is not currently earning, and the one
