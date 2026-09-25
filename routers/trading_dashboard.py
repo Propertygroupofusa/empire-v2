@@ -5086,7 +5086,8 @@ async def manual_open_prop_position(ticker: str):
         pb.APEX_MANDATE["universe"]["futures"] +
         pb.APEX_MANDATE["universe"]["crypto"] +
         pb.APEX_MANDATE["universe"]["commodities"] +
-        pb.APEX_MANDATE["universe"]["inverse_etfs"]
+        pb.APEX_MANDATE["universe"]["inverse_etfs"] +
+        pb.APEX_MANDATE["universe"]["equities"]
     )
     if contract not in approved_universe:
         raise HTTPException(status_code=400, detail=f"{contract} ({ticker}) is not in the approved trading universe")
@@ -5205,11 +5206,19 @@ async def alpaca_entry_eligibility():
         }
 
     excluded_symbols = await pb.get_effective_excluded_symbols()
+    # Must match prop_bot's MANDATE CHECK 1 exactly. ["equities"] was
+    # missing here on 2026-09-25, so this page reported META, NVDA, AAPL,
+    # GOOGL, AMZN and MSFT as "not in the approved trading universe" while
+    # the live bot would have allowed every one of them. Six of sixteen
+    # tickers looked permanently banned for a reason that was only true of
+    # this diagnostic - and on the 30-day momentum replay META was the
+    # single best performer in the book at +$39.06.
     approved_universe = (
         pb.APEX_MANDATE["universe"]["futures"] +
         pb.APEX_MANDATE["universe"]["crypto"] +
         pb.APEX_MANDATE["universe"]["commodities"] +
-        pb.APEX_MANDATE["universe"]["inverse_etfs"]
+        pb.APEX_MANDATE["universe"]["inverse_etfs"] +
+        pb.APEX_MANDATE["universe"]["equities"]
     )
 
     async with aiohttp.ClientSession() as session:
