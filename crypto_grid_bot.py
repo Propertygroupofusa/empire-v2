@@ -1740,6 +1740,69 @@ async def _first_ranked_coin_beating_btc(ranked_product_ids: list) -> str:
 MIN_REQUIRED_ROI_PCT = float(os.getenv("GRID_MIN_REQUIRED_ROI_PCT", "20.0"))
 
 
+async def _spread_candidate_coins(wanted: int):
+    """Coins a spread may open a branch on, best first. Returns (coins, note).
+
+    Tries the ranked picker first, because a coin with a real backtested
+    ROI is a better choice than an arbitrary one. But that picker RAISES
+    when no coin has a backtest run yet, or when none clears
+    MIN_REQUIRED_ROI_PCT - a completely normal state on an account that
+    has not run the backtests, and the reason a live spread created zero
+    branches while reporting success.
+
+    So the nine-coin fleet list backs it up. Those are the coins this
+    system is built around; opening a branch on one is never absurd, and
+    an empty fleet beats a perfect one that does not exist.
+
+    Everything already claimed by a grid branch, excluded by the tree, or
+    held by a tree branch is filtered out, so this can never hand back a
+    coin two systems would then fight over.
+    """
+    import crypto_nine_coin_scanner as scanner
+    import crypto_family_tree_bot as tree
+    import crypto_coin_claims as claims
+
+    ranked, note = [], ""
+    for _ in range(wanted):
+        try:
+            pick = await pick_best_ranked_coin_for_grid()
+        except Exception as e:
+            note = f"Ranked picker had nothing ({e})."
+            break
+        if not pick or pick in ranked:
+            break
+        ranked.append(pick)
+
+    try:
+        excluded = await tree.get_effective_excluded_coins()
+    except Exception:
+        excluded = set()
+    claimed = await get_grid_branch_claimed_coins()
+    try:
+        tree_held = await claims.claimed_by_other(claims.GRID)
+    except Exception:
+        tree_held = set()
+
+    def eligible(pid):
+        return (pid not in excluded and pid not in claimed
+                and claims.normalize_product(pid) not in tree_held)
+
+    out = [p for p in ranked if eligible(p)]
+    for pid in scanner.NINE_COINS:
+        if len(out) >= wanted:
+            break
+        if pid not in out and eligible(pid):
+            out.append(pid)
+
+    if not note and len(out) < wanted:
+        note = "Every remaining coin is already claimed or excluded."
+    if ranked and len(out) > len(ranked):
+        note = (note + " Filled the rest from the nine-coin fleet list.").strip()
+    elif not ranked and out:
+        note = (note + " Used the nine-coin fleet list.").strip()
+    return out, note or "Ranked picks available."
+
+
 async def spread_capital_evenly(target_branches: int = 7, dry_run: bool = True) -> dict:
     """Level the fleet: pull cash out of over-funded FLAT branches and put
     it into new branches on unclaimed coins, until capital sits in roughly
@@ -1876,25 +1939,34 @@ async def spread_capital_evenly(target_branches: int = 7, dry_run: bool = True) 
             t["skipped"] = f"{type(e).__name__}: {e}"
             log.warning(f"[GRID] spread: could not top up {t['bot_name']}: {e}")
 
-    for _ in range(max(0, slots)):
-        try:
-            product_id = await pick_best_ranked_coin_for_grid()
-        except Exception as e:
-            plan["new_branches"].append({"skipped": f"no eligible coin left: {e}"})
-            break
-        if not product_id:
-            plan["new_branches"].append({"skipped": "no eligible unclaimed coin left"})
+    candidates, candidate_note = await _spread_candidate_coins(max(0, slots))
+    plan["candidate_coins"] = candidates
+    plan["candidate_note"] = candidate_note
+
+    created = 0
+    for product_id in candidates:
+        if created >= slots:
             break
         try:
             branch = await create_grid_branch(product_id, per_branch)
             plan["new_branches"].append({"bot_name": branch.bot_name, "product_id": product_id,
                                          "allocated_usd": per_branch})
+            created += 1
             log.info(f"[GRID] spread: created {branch.bot_name} on {product_id} "
                      f"with ${per_branch:,.2f}")
         except Exception as e:
-            plan["new_branches"].append({"product_id": product_id, "skipped": f"{type(e).__name__}: {e}"})
+            # Keep going. One coin being ineligible is not a reason to stop
+            # levelling the fleet - the first version broke out of this loop
+            # on the first failure and therefore created ZERO branches
+            # whenever the ranked picker had nothing, which is exactly what
+            # happened on a live account with no qualifying backtest data.
+            plan["new_branches"].append({"product_id": product_id,
+                                         "skipped": f"{type(e).__name__}: {e}"})
             log.warning(f"[GRID] spread: could not create a branch on {product_id}: {e}")
-            break
+    if created < slots:
+        plan["new_branches"].append({
+            "skipped": f"wanted {slots} new branch(es), opened {created} - "
+                       f"ran out of eligible coins. {candidate_note}"})
 
     plan["status"] = "spread"
     plan["changed"] = True

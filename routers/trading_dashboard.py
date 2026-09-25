@@ -6415,6 +6415,57 @@ async def reallocate_adaptive_fleet_endpoint(payload: ReallocateAdaptiveFleetReq
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get("/grid-status/spread-plan")
+async def get_spread_plan(target_branches: int = 7):
+    """The spread plan as plain text, openable in a phone browser.
+
+    The POST above is dry-run-by-default and returns JSON, which is the
+    right shape for the button but useless when the button appears to do
+    nothing and the operator needs to know WHY. A browser address bar
+    cannot POST, so this exists purely so the plan and every refusal can
+    be read on the device this account is actually operated from.
+
+    Read-only. It never changes anything.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    plan = await crypto_grid_bot_module.spread_capital_evenly(
+        target_branches=target_branches, dry_run=True)
+
+    out = ["SPREAD PLAN (nothing has been changed)", "=" * 46, ""]
+    status = plan.get("status")
+    if status in ("unavailable", "too_thin"):
+        out += [f"REFUSED: {status}", "", plan.get("detail", "")]
+        return Response(content="\n".join(out), media_type="text/plain; charset=utf-8")
+
+    out += [
+        f"  pool            ${plan.get('pool_usd', 0):>10,.2f}   (free cash + every FLAT branch)",
+        f"  reserve held    ${plan.get('reserve_usd', 0):>10,.2f}",
+        f"  distributable   ${plan.get('distributable_usd', 0):>10,.2f}",
+        f"  per branch      ${plan.get('per_branch_usd', 0):>10,.2f}   across {target_branches}",
+        "",
+    ]
+    w = plan.get("withdrawals") or []
+    t = plan.get("top_ups") or []
+    held = plan.get("untouched_holding") or []
+    out.append(f"WITHDRAW FROM ({len(w)})")
+    out += [f"  {x['product_id']:<10} ${x['from_usd']:>9,.2f} -> ${x['to_usd']:>8,.2f}  "
+            f"frees ${x['release_usd']:,.2f}" for x in w] or ["  (none)"]
+    out += ["", f"TOP UP ({len(t)})"]
+    out += [f"  {x['product_id']:<10} ${x['from_usd']:>9,.2f} -> ${x['to_usd']:>8,.2f}  "
+            f"adds ${x['add_usd']:,.2f}" for x in t] or ["  (none)"]
+    out += ["", f"OPEN NEW BRANCHES: {plan.get('new_branch_slots', 0)}"]
+    cands = plan.get("candidate_coins") or []
+    out.append(f"  eligible coins: {', '.join(cands) if cands else 'NONE'}")
+    if plan.get("candidate_note"):
+        out.append(f"  {plan['candidate_note']}")
+    if held:
+        out += ["", "LEFT ALONE (holding open slices, not idle cash)"]
+        out += [f"  {x['product_id']:<10} ${x['allocated_usd']:,.2f}" for x in held]
+    out += ["", "Nothing above has happened. Press the Spread button to apply it."]
+    return Response(content="\n".join(out), media_type="text/plain; charset=utf-8")
+
+
 @router.post("/grid-status/spread-evenly")
 async def spread_grid_capital_evenly(target_branches: int = 7, dry_run: bool = True):
     """Level the fleet so capital is not stranded in one branch.
