@@ -302,6 +302,38 @@ ok("wide tables scroll inside their own box, not the page",
 ok("the proximity row restacks at phone width",
    "@media (max-width: 560px)" in SRC and ".prox-row" in SRC)
 
+# ── 8. the retired system does not govern the live page ─────────────────
+print()
+print("-- a dead system's numbers do not speak for the live one --")
+exp_fn = fn_body("renderRollingExpectancyBanner") or ""
+ok("the expectancy banner hides when the tree loop is not running",
+   "family_tree_loop_running === false" in exp_fn)
+ok("it still shows when the tree IS running and expectancy is negative",
+   "exp.negative" in exp_fn)
+# Both gates this banner describes live in the tree bot, not the grid.
+TREE = io.open("crypto_family_tree_bot.py", encoding="utf-8").read()
+GRID = io.open("crypto_grid_bot.py", encoding="utf-8").read()
+ok("the expectancy gate exists in the family-tree bot",
+   "get_rolling_expectancy()" in TREE)
+ok("the grid bot never gates on rolling expectancy",
+   "get_rolling_expectancy" not in GRID)
+
+mom = fn_body("fmtCombinedMomentum") or ""
+ok("a negative window names the retired tree's closed loss",
+   "-$508.44" in mom and "2026-09-09" in mom)
+# Collapse whitespace first: the sentence wraps across source lines, so
+# matching the raw text looks for a string that only exists once the
+# browser has laid it out.
+mom_flat = " ".join(mom.split())
+ok("it says that loss is not the live grid's pace",
+   "not the live grid's pace" in mom_flat)
+ok("it says the grid is not trying to win it back",
+   "not trying to win it back" in mom_flat)
+ok("it points at the live ledger instead",
+   "Grid Trade History" in mom)
+ok("a positive window adds no such note",
+   "deltaUsd < 0" in mom)
+
 print()
 print(f"{CHECKS - len(FAILURES)}/{CHECKS} checks passed")
 if FAILURES:

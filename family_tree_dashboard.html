@@ -4702,7 +4702,14 @@ function renderRollingExpectancyBanner(data) {
     // reasons for the same real fact), not informative. Real bug found
     // from the account owner's own screenshot: both banners were
     // rendering at once.
-    if (!exp || !exp.negative || data.crypto_passive_mode) {
+    // The gate this banner explains lives only in the family-tree bot
+    // (both call sites log [TREE]); the grid bot never reads expectancy.
+    // With the tree loop stopped, nothing was going to enter anyway, so
+    // "entries are paused" describes a brake on a car with no engine -
+    // and, printed on a page about the live grid, reads as though the
+    // live engine had stopped. It had not.
+    if (!exp || !exp.negative || data.crypto_passive_mode
+        || data.family_tree_loop_running === false) {
         el.style.display = 'none';
         el.innerHTML = '';
         return;
@@ -5176,7 +5183,14 @@ function fmtCombinedMomentum(history) {
     const cls = deltaUsd >= 0 ? 'up' : 'down';
     const arrow = deltaUsd >= 0 ? '▲' : '▼';
     const sign = deltaUsd >= 0 ? '+' : '-';
-    return `<span class="${cls}">${arrow} ${sign}${fmtUsd(Math.abs(deltaUsd))} (${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%)</span> over the last ${spanStr} of real tracking`;
+    return `<span class="${cls}">${arrow} ${sign}${fmtUsd(Math.abs(deltaUsd))} (${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%)</span> over the last ${spanStr} of real tracking`
+        + (deltaUsd < 0
+            ? `<div style="font-size:0.78em; color:var(--text-dim); margin-top:6px; line-height:1.5;">
+                 This window still contains the retired family tree, which closed <strong>-$508.44</strong> across
+                 167 trades and stopped trading on 2026-09-09. That loss is booked and closed - it is not the live
+                 grid's pace, and the grid is not trying to win it back. What the live engine has actually done is
+                 in <strong>Grid Trade History</strong> below.</div>`
+            : '');
 }
 
 // Real, honest "at this pace" projection - per the account owner's
