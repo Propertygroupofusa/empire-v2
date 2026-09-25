@@ -13,3 +13,6 @@ video-editor/node_modules/
 video-editor/build/
 video-editor/dist/
 empire.db
+
+# Collected market data - regenerable, can grow large, not source
+kalshi_polymarket_data.jsonl
