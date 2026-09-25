@@ -34,8 +34,23 @@ from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 from crypto_strategy_config import get_crypto_strategy_mode
 
-# Load .env file to make credentials available to background bots
-load_dotenv(override=True)
+# Load .env to make credentials available to background bots in local
+# development. override=False (the default) is deliberate and load-bearing:
+# the real process environment WINS over the file.
+#
+# This was override=True, which inverts that. On Railway every setting -
+# CRYPTO_STRATEGY_MODE, SERVICE_ROLE, the Coinbase credentials - arrives as
+# a real environment variable, so a stray .env reaching the image would
+# silently beat every one of them, and beat them invisibly: the Railway UI
+# would show the correct value while the process used the file's. Hunting a
+# variable that "won't take" is already this deployment's most expensive
+# recurring failure (it cost most of 2026-09-25), and override=True is a
+# loaded version of exactly that trap.
+#
+# .env is gitignored, so it is not in the image today. That is the only
+# reason this was harmless, and it is one `git add -f` away from not being.
+# Real environment first is also the conventional precedence.
+load_dotenv()
 
 # CRITICAL: Ensure greenlet is available for SQLAlchemy async support
 try:
