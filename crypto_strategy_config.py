@@ -50,10 +50,38 @@ def get_crypto_strategy_mode() -> str:
     failure, which is why quotes and whitespace come off before the
     membership check rather than after.
     """
-    raw = os.getenv("CRYPTO_STRATEGY_MODE")
-    mode = (raw or "").strip().strip('"').strip("'").strip()
-    if mode in SUPPORTED_CRYPTO_STRATEGIES:
-        return mode
+    # CRYPTO_STRATEGY_MODE_OVERRIDE is checked FIRST and is an escape hatch,
+    # not a feature. On 2026-09-25 the deployment reached a state where
+    # CRYPTO_STRATEGY_MODE could not be corrected through the Railway UI at
+    # all: the variable was deleted (confirmed - /health reported "(unset)"),
+    # re-added as family_tree, and a fresh process six minutes later still
+    # read the old 'delfina_scalping'. A deleted value came back on its own,
+    # most likely a redeploy of an earlier deployment restoring that
+    # deployment's variable snapshot.
+    #
+    # Every other explanation had already been eliminated by measurement:
+    # the environment was production, /health listed exactly one key named
+    # CRYPTO_STRATEGY_MODE, uptime proved the process had restarted, and the
+    # commit proved the running build was current.
+    #
+    # So this accepts a SECOND name with no deployment history to restore.
+    # Setting a brand-new variable sidesteps whatever is pinning the old one.
+    # It is deliberately checked first so it can win without the stuck value
+    # having to be removed. Same validation - it is a new name, not a new
+    # trust level, and an unusable value here still yields UNCONFIGURED
+    # rather than a substitute.
+    for var in ("CRYPTO_STRATEGY_MODE_OVERRIDE", "CRYPTO_STRATEGY_MODE"):
+        raw = os.getenv(var)
+        mode = (raw or "").strip().strip('"').strip("'").strip()
+        if mode in SUPPORTED_CRYPTO_STRATEGIES:
+            if var != "CRYPTO_STRATEGY_MODE":
+                log.warning(
+                    "Using %s=%r. This overrides CRYPTO_STRATEGY_MODE=%r and exists "
+                    "only because that variable could not be corrected through the "
+                    "Railway UI. Remove it once the underlying variable is fixed.",
+                    var, mode, os.getenv("CRYPTO_STRATEGY_MODE"),
+                )
+            return mode
 
     log.error(
         "CRYPTO_STRATEGY_MODE=%r is not a known strategy. NO crypto loop will "
@@ -61,8 +89,11 @@ def get_crypto_strategy_mode() -> str:
         "On this deployment: grid_fleet on the crypto-trading service (which "
         "also needs SERVICE_ROLE=crypto-trading), family_tree on the web "
         "service. Refusing to substitute a strategy - an unchosen one spends "
-        "real money on positions you did not ask for.",
-        raw, "/".join(sorted(SUPPORTED_CRYPTO_STRATEGIES)),
+        "real money on positions you did not ask for. If this variable cannot "
+        "be corrected through the Railway UI, set CRYPTO_STRATEGY_MODE_OVERRIDE "
+        "to the same value instead - it is checked first and wins.",
+        os.getenv("CRYPTO_STRATEGY_MODE"),
+        "/".join(sorted(SUPPORTED_CRYPTO_STRATEGIES)),
     )
     return UNCONFIGURED
 
