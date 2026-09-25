@@ -6627,6 +6627,31 @@ async def rebalance_flat_grid_branches_endpoint():
     return await crypto_grid_bot_module.rebalance_flat_grid_branches_now()
 
 
+@router.get("/grid-status/money-check")
+async def grid_money_check_endpoint():
+    """Every dollar in the fleet that is not currently earning, and the one
+    action that fixes each - read-only, so it can never move money itself.
+
+    Backs the dashboard's "Is any money sitting still?" button. The button
+    exists because the account owner asked for something he could press to
+    make money; a button cannot create edge, but the gap between money
+    that is earning and money that is merely sitting is real, measurable,
+    and was previously only visible by reading four panels and doing the
+    arithmetic by hand.
+
+    It reports "the cash is already at work" just as loudly as it reports
+    an opportunity - the first draft would have called the $88.14 free
+    balance idle, when that is exactly GRID_CASH_RESERVE_USD backing the
+    open branches' remaining levels.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    data = await crypto_grid_bot_module.money_check()
+    return JSONResponse(content=data, headers={
+        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+        "Pragma": "no-cache", "Expires": "0"})
+
+
 @router.get("/grid-status/fill-mix")
 async def get_grid_fill_mix_endpoint():
     """How grid legs REALLY filled: maker, or fallen back to market (taker).

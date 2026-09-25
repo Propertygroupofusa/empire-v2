@@ -973,6 +973,18 @@
         </div>
     </div>
 
+    <div class="section-title">💵 Is any money sitting still?</div>
+    <div class="panel">
+        <div class="panel-sub">One check for every dollar that is not currently earning, and the single action that
+            fixes each one. A button cannot create an edge - what it can do is close the gap between money that is
+            working and money that is only sitting. Nothing here is a forecast, and this check never moves money by
+            itself: it shows you what it found, and you decide.</div>
+        <div style="margin:10px 0;">
+            <button id="money-check-btn" class="unlock-btn" style="margin-top:0;" onclick="runMoneyCheck()">🔎 Check for idle money</button>
+        </div>
+        <div id="money-check-wrap"><div class="coin-history-empty">Not run yet - tap the button above.</div></div>
+    </div>
+
     <div class="section-title">📍 Where every branch sits right now</div>
     <div class="panel">
         <div class="panel-sub">The dot is where price is now. The bar is this branch's own grid band - one step below its reference on the left, one step above on the right, reference in the middle. It buys when the dot reaches the left mark and sells an open slice when it reaches the green one, so the shaded stretch is the distance still to travel. Closest to acting is listed first.</div>
@@ -3194,6 +3206,142 @@ function renderStatusStrip(d, history) {
 // from the nearest of those two" is the single most honest live answer
 // to "what is it doing?" - and it is the question the old tree panels
 // never answered.
+// Which findings may be fixed with ONE TAP from this panel, and the exact
+// reason each is safe to hand a button to.
+//
+// The bar: it must place no order, spend no cash, and sell nothing. A
+// control that moves real money belongs behind the deliberate flow above,
+// not behind a button on a panel whose whole job is to be pressed
+// casually. Re-anchoring clears that bar; spreading capital does not, so
+// it is reported as a finding but gets no button.
+const SAFE_MONEY_ACTIONS = {
+    '/grid-status/reanchor-flat-branches': {
+        label: '\u2699\ufe0f Re-anchor the stale branches',
+        safety: "Places no order, spends nothing, sells nothing - it only moves a FLAT branch's "
+              + "reference price up to the live market, so its next buy sits one normal step away "
+              + "instead of behind a dip that already happened. Upward only, and a branch holding "
+              + "an open slice is never touched.",
+    },
+};
+
+// The "press a button and make money" panel, built honestly.
+//
+// The request was literal: something to press that makes money. There is
+// no such button - a button cannot create an edge, and any control that
+// claims to is either front-running the strategy's own exits or lying.
+// What a button CAN do is close the gap between capital that is earning
+// and capital that is only sitting, because that gap is real, it is
+// measurable, and until now reading it meant checking four panels and
+// doing the arithmetic by hand.
+//
+// It has to be equally willing to say there is nothing to do. The first
+// version of this would have reported $88.14 of "idle cash" against
+// $484.46 working - 15.4% of the account apparently wasted - and offered
+// to deploy it. That cash is GRID_CASH_RESERVE_USD, the reserve funding
+// the remaining levels of every open branch. Deploying it would have left
+// $0.14 of buffer and called it an improvement.
+function renderMoneyCheck(d) {
+    const wrap = document.getElementById('money-check-wrap');
+    if (!wrap) return;
+    try {
+        const findings = d.findings || [];
+        const actionable = findings.filter(f => f.action);
+        const idle = findings.filter(f => !f.action);
+
+        const head = actionable.length
+            ? `<div style="font-size:0.95em; font-weight:700; color:var(--gold); margin-bottom:8px;">
+                 ⚡ ${actionable.length} thing${actionable.length === 1 ? '' : 's'} worth doing right now</div>`
+            : `<div style="font-size:0.95em; font-weight:700; color:var(--green); margin-bottom:8px;">
+                 ✅ Nothing is sitting still - every dollar that can be working, is.</div>`;
+
+        const card = (f, act) => `
+            <div style="border:1px solid ${act ? 'var(--gold)' : 'var(--border)'};
+                        background:${act ? 'var(--gold-bg)' : 'var(--bg)'};
+                        border-radius:6px; padding:10px 12px; margin-bottom:8px;">
+                <div style="display:flex; justify-content:space-between; gap:10px; align-items:baseline; flex-wrap:wrap;">
+                    <strong style="font-size:0.88em;">${act ? '⚡' : '✅'} ${f.kind.replace(/_/g, ' ')}</strong>
+                    ${f.usd != null ? `<span style="font-variant-numeric:tabular-nums; font-weight:700;">${fmtUsd(f.usd)}</span>` : ''}
+                </div>
+                <div style="font-size:0.82em; margin-top:4px; line-height:1.5;">${f.detail}</div>
+                <div style="font-size:0.7em; color:var(--text-dim); margin-top:5px;">
+                    Measured against: ${f.basis}</div>
+                ${act ? (SAFE_MONEY_ACTIONS[f.action]
+                    ? `<div style="margin-top:8px;">
+                        <button class="unlock-btn" style="margin-top:0; font-size:0.82em; padding:5px 12px;"
+                                onclick="runMoneyAction('${f.action}', this)">${SAFE_MONEY_ACTIONS[f.action].label}</button>
+                        <div style="font-size:0.68em; color:var(--text-dim); margin-top:5px;">
+                            ${SAFE_MONEY_ACTIONS[f.action].safety}</div>
+                       </div>`
+                    : `<div style="font-size:0.72em; color:var(--text-dim); margin-top:6px;">
+                        Fix: <code>${f.action}</code> — this one spends or sells, so it is deliberately
+                        not a one-tap button here. Use the controls above.</div>`) : ''}
+            </div>`;
+
+        wrap.innerHTML = head
+            + `<div style="font-size:0.74em; color:var(--text-dim); margin-bottom:10px; font-variant-numeric:tabular-nums;">
+                 ${fmtUsd(d.working_usd)} working · ${d.free_cash_usd != null ? fmtUsd(d.free_cash_usd) : '—'} free
+                 · ${fmtUsd(d.reserve_usd)} of that is reserve</div>`
+            + actionable.map(f => card(f, true)).join('')
+            + idle.map(f => card(f, false)).join('')
+            + `<div style="font-size:0.7em; color:var(--text-dim); margin-top:8px; line-height:1.5;">${d.note || ''}</div>`;
+    } catch (e) {
+        wrap.innerHTML = `<div class="coin-history-empty">Could not render the money check (${e.message}).</div>`;
+    }
+}
+
+// Runs one whitelisted, non-spending fix, then re-runs the check so the
+// panel shows the result rather than the intention.
+async function runMoneyAction(action, btn) {
+    const spec = SAFE_MONEY_ACTIONS[action];
+    if (!spec) return;
+    const original = btn ? btn.textContent : '';
+    // A dismissed confirm() on a phone returns with no request and no
+    // error, which previously looked identical to a silent failure. Say
+    // so either way.
+    if (!confirm('Re-anchor every FLAT grid branch to the live market price?\n\n'
+               + 'No order is placed, nothing is sold, and no cash is spent. '
+               + 'Branches holding an open slice are left alone.')) {
+        if (btn) {
+            btn.textContent = 'Cancelled - nothing changed';
+            setTimeout(() => { btn.textContent = original; }, 2500);
+        }
+        return;
+    }
+    if (btn) { btn.disabled = true; btn.textContent = '\u23f3 Working\u2026'; }
+    try {
+        const res = await fetch(API_BASE + action, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Admin-Key': adminKey },
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+        const n = Array.isArray(body.reanchored) ? body.reanchored.length
+                : (body.reanchored != null ? body.reanchored
+                : (body.updated != null ? body.updated : null));
+        if (btn) btn.textContent = n != null ? `\u2705 Re-anchored ${n}` : '\u2705 Done';
+        await runMoneyCheck();
+        await loadGridStatus();
+    } catch (e) {
+        if (btn) btn.textContent = '\u26a0\ufe0f ' + e.message;
+        setTimeout(() => { if (btn) { btn.textContent = original; btn.disabled = false; } }, 4000);
+        return;
+    }
+    if (btn) btn.disabled = false;
+}
+
+async function runMoneyCheck() {
+    const btn = document.getElementById('money-check-btn');
+    const wrap = document.getElementById('money-check-wrap');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Checking…'; }
+    try {
+        renderMoneyCheck(await apiGet('/grid-status/money-check', 45000));
+    } catch (e) {
+        wrap.innerHTML = `<div class="coin-history-empty">Could not run the money check: ${e.message}</div>`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '\U0001f50e Check for idle money'; }
+    }
+}
+
 function renderGridProximity(d) {
     const wrap = document.getElementById('grid-proximity-wrap');
     if (!wrap) return;

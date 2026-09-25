@@ -2673,6 +2673,139 @@ async def tune_spacing_per_coin(dry_run: bool = True, min_trips: int = 4,
     }
 
 
+async def money_check() -> dict:
+    """Every dollar in this fleet that is NOT currently earning, and what
+    (if anything) can be done about it in one action. Read-only.
+
+    WHY THIS EXISTS
+
+    The account owner asked for a button that makes money when pressed.
+    The honest engineering answer is that a button cannot create edge -
+    but it CAN close the gap between money that is earning and money that
+    is merely sitting, and that gap is measurable, so it should be on
+    screen instead of in someone's head.
+
+    The first draft of this was going to be "deploy the idle cash", since
+    $88.14 was sitting free against $484.46 working - 15.4% of the crypto
+    account apparently doing nothing. That would have been wrong and
+    expensive: GRID_CASH_RESERVE_USD is 88.0, so that cash IS the reserve
+    that funds the remaining levels of every open branch. Deploying it
+    would have left $0.14 of buffer and called it an improvement. Hence
+    the rule this function follows everywhere: a finding is only reported
+    when the money is genuinely unemployed, measured against the rule
+    that governs it, not against zero.
+
+    Each finding carries:
+      kind      - what is idle
+      usd       - dollars involved, where that is meaningful
+      detail    - a plain sentence naming the real numbers
+      action    - the endpoint that fixes it, or None when nothing can
+      basis     - what the claim is measured against; never a forecast
+    """
+    status = await get_grid_status()
+    branches = status.get("branches") or []
+    free_cash = status.get("real_free_cash_usd")
+    working = status.get("total_allocated_usd") or 0.0
+    floor = status.get("fee_safe_min_grid_pct")
+
+    findings = []
+
+    # ── cash above the reserve ──────────────────────────────────────────
+    if free_cash is None:
+        findings.append({
+            "kind": "cash_unknown", "usd": None, "action": None,
+            "detail": "The real Coinbase balance could not be read, so idle cash cannot be judged.",
+            "basis": "unknown cash is never treated as deployable",
+        })
+    else:
+        deployable = free_cash - GRID_CASH_RESERVE_USD
+        if deployable >= GRID_AUTO_DEPLOY_AMOUNT_USD:
+            findings.append({
+                "kind": "idle_cash", "usd": round(deployable, 2),
+                "action": "/grid-status/spread-evenly",
+                "detail": (f"${deployable:,.2f} sits above the ${GRID_CASH_RESERVE_USD:,.2f} reserve - "
+                           f"enough for at least one more ${GRID_AUTO_DEPLOY_AMOUNT_USD:,.2f} branch."),
+                "basis": "free cash minus the reserve that funds open branches' remaining levels",
+            })
+        else:
+            findings.append({
+                "kind": "cash_fully_deployed", "usd": round(max(0.0, deployable), 2),
+                "action": None,
+                "detail": (f"${free_cash:,.2f} free, but ${GRID_CASH_RESERVE_USD:,.2f} of that is the "
+                           f"reserve backing the open branches' remaining levels. Only "
+                           f"${max(0.0, deployable):,.2f} is genuinely spare, under the "
+                           f"${GRID_AUTO_DEPLOY_AMOUNT_USD:,.2f} a branch needs. The cash is already at work."),
+                "basis": "free cash minus GRID_CASH_RESERVE_USD - NOT free cash against zero",
+            })
+
+    # ── a step below the fee floor loses money on every round trip ──────
+    if floor is not None:
+        below = [b for b in branches if b.get("grid_pct") is not None
+                 and b["grid_pct"] < floor - 1e-9]
+        if below:
+            findings.append({
+                "kind": "below_fee_floor", "usd": None,
+                "action": "/grid-status/tune-spacing-per-coin",
+                "detail": (f"{len(below)} branch(es) trade below the {floor * 100:.2f}% fee floor "
+                           f"({', '.join(b['product_id'] for b in below)}). Every completed round trip "
+                           f"there loses money even when the trade is right."),
+                "basis": "arithmetic: a target under the round-trip fee cannot net a gain",
+            })
+
+    # ── a stale reference makes a branch wait for a dip that passed ─────
+    stale = []
+    for b in branches:
+        ref, cur, g = b.get("reference_price"), b.get("current_price"), b.get("grid_pct")
+        if not ref or not cur or g is None or b.get("open_slices"):
+            continue
+        if cur > ref:
+            needs_now = (cur - ref * (1 - g)) / cur * 100.0
+            stale.append({"product_id": b["product_id"],
+                          "needs_now_pct": round(needs_now, 2),
+                          "needs_after_pct": round(g * 100.0, 2),
+                          "saves_pts": round(needs_now - g * 100.0, 2)})
+    if stale:
+        stale.sort(key=lambda x: -x["saves_pts"])
+        total = round(sum(x["saves_pts"] for x in stale), 2)
+        findings.append({
+            "kind": "stale_reference", "usd": None,
+            "action": "/grid-status/reanchor-flat-branches",
+            "detail": (f"{len(stale)} flat branch(es) still measure their next buy from a reference the "
+                       f"market has already left behind, so each waits for a dip deeper than its own step: "
+                       + ", ".join(f"{x['product_id']} needs {x['needs_now_pct']:.2f}% instead of "
+                                   f"{x['needs_after_pct']:.2f}%" for x in stale[:4])
+                       + f". Re-anchoring recovers {total:.2f} percentage points of waiting."),
+            "basis": "live price against each branch's own stored reference; upward only, never downward",
+            "branches": stale,
+        })
+
+    # ── capital parked in a branch that is switched off ─────────────────
+    parked = [b for b in branches if not b.get("active") and (b.get("allocated_usd") or 0) > 0]
+    if parked:
+        findings.append({
+            "kind": "paused_with_capital",
+            "usd": round(sum(b["allocated_usd"] for b in parked), 2),
+            "action": None,
+            "detail": (f"{len(parked)} paused branch(es) still hold "
+                       f"${sum(b['allocated_usd'] for b in parked):,.2f}: "
+                       + ", ".join(b["product_id"] for b in parked)
+                       + ". A paused branch never buys, so that capital is idle by choice."),
+            "basis": "allocated_usd on branches with active = false",
+        })
+
+    actionable = [f for f in findings if f.get("action")]
+    return {
+        "working_usd": round(working, 2),
+        "free_cash_usd": round(free_cash, 2) if free_cash is not None else None,
+        "reserve_usd": GRID_CASH_RESERVE_USD,
+        "findings": findings,
+        "actionable_count": len(actionable),
+        "note": ("Nothing here is a forecast. Each finding names money that is measurably not "
+                 "working and the rule it was measured against. The fleet's own record is the only "
+                 "evidence of what working capital earns."),
+    }
+
+
 async def reanchor_flat_grid_branches_now() -> dict:
     """Move every FLAT branch's reference_price to the live market price.
 
