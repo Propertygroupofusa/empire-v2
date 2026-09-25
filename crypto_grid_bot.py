@@ -3294,15 +3294,94 @@ async def check_shadow_mode_status():
         log.debug(f"[SHADOW] Status check failed (non-blocking): {type(e).__name__}: {e}")
 
 
+GRID_HEARTBEAT_KEY = "grid_bot_last_cycle_at"
+_HEARTBEAT_STAGES = {"entered": 1.0, "no_active_branches": 2.0, "cycled": 3.0}
+
+
+async def _record_grid_heartbeat(stage: str):
+    """Stamp 'the grid loop reached here, at this moment'.
+
+    Written BEFORE any gate below can return, so it answers the question
+    that was unanswerable on 2026-09-25: is the loop running at all?
+
+    That day was spent inferring liveness from a side effect - whether a
+    branch's stored grid_pct had been rewritten to match a promoted
+    spacing override. The proxy was wrong. The BTC branch had been PAUSED
+    since 2026-09-08, and this function filters to active branches, so its
+    spacing could never update however healthy the loop was. Hours went
+    into "the loop is dead" on the strength of a dial that was never
+    connected to it.
+
+    Nine separate switches can stop this system silently: strategy mode,
+    SERVICE_ROLE, credentials, STOP_TRADING, the master switch, a branch's
+    own active flag, tree passive mode, and the exclusion layers. They all
+    produce the identical symptom - nothing happens. A timestamp separates
+    "not running" from "running but gated", which no amount of reading
+    balances or spacing can.
+
+    `stage` records how far it got, so the heartbeat also names the gate:
+    "entered" = the loop is alive, "no_active_branches" = alive with
+    nothing to do, "cycled" = it reached real work.
+    """
+    try:
+        async with get_session_factory()() as db:
+            result = await db.execute(
+                select(TradingBotState).where(TradingBotState.bot_name == GRID_HEARTBEAT_KEY))
+            row = result.scalar_one_or_none()
+            if row is None:
+                row = TradingBotState(bot_name=GRID_HEARTBEAT_KEY, base_capital=0.0)
+                db.add(row)
+            # base_capital carries epoch seconds, starting_capital the stage -
+            # reusing the generic TradingBotState bucket every other flag in
+            # this file uses, rather than adding a table for one timestamp.
+            row.base_capital = float(time.time())
+            row.starting_capital = _HEARTBEAT_STAGES.get(stage, 0.0)
+            await db.commit()
+    except Exception as e:
+        # A heartbeat must never be able to stop the thing it measures.
+        log.debug(f"[GRID] heartbeat write failed (non-fatal): {type(e).__name__}: {e}")
+
+
+async def get_grid_heartbeat() -> dict:
+    """Age and stage of the last grid-loop heartbeat, or never-seen."""
+    try:
+        async with get_session_factory()() as db:
+            result = await db.execute(
+                select(TradingBotState).where(TradingBotState.bot_name == GRID_HEARTBEAT_KEY))
+            row = result.scalar_one_or_none()
+    except Exception as e:
+        return {"seen": False, "error": f"{type(e).__name__}: {e}"}
+    if row is None or not row.base_capital:
+        return {"seen": False, "stage": None, "age_seconds": None, "alive": False,
+                "detail": "The grid loop has never recorded a cycle on this database."}
+    age = round(time.time() - float(row.base_capital), 1)
+    by_value = {v: k for k, v in _HEARTBEAT_STAGES.items()}
+    return {
+        "seen": True,
+        "stage": by_value.get(float(row.starting_capital or 0.0), "unknown"),
+        "age_seconds": age,
+        # CYCLE_SECONDS is 30, so 10 missed cycles is unambiguously dead.
+        "alive": age < 300,
+        "last_cycle_at": datetime.utcfromtimestamp(float(row.base_capital)).isoformat() + "Z",
+    }
+
+
 async def run_grid_branches_cycle():
     """Real per-cycle driver for every active grid branch - a true no-op
     unless is_grid_bot_active() is on AND at least one real active
     branch exists."""
+    # Stamped first, before any gate below can return: a loop that is
+    # running but gated must look different from a loop that is not
+    # running at all. See _record_grid_heartbeat for what conflating the
+    # two cost.
+    await _record_grid_heartbeat("entered")
     if not await is_grid_bot_active():
         return
     branches = [b for b in await get_grid_branches() if b.active]
     if not branches:
+        await _record_grid_heartbeat("no_active_branches")
         return
+    await _record_grid_heartbeat("cycled")
     async with engine.aiohttp.ClientSession() as session:
         # Refresh the account's REAL Coinbase fee rate ONCE per cycle (not
         # once per branch - it is an account-wide rate, so one real API
@@ -3506,6 +3585,12 @@ async def get_grid_status() -> dict:
     return {
         "fleet_name": "Adaptive Capital Fleet",
         "mode_active": mode_active,
+        # The ONE field that says whether the loop is running, as opposed to
+        # running-but-gated or not running at all. Everything else on this
+        # dashboard describes state the loop acts on; only this describes the
+        # loop. Added after a full day was lost inferring liveness from a
+        # paused branch's stale spacing - see _record_grid_heartbeat.
+        "heartbeat": await get_grid_heartbeat(),
         "dynamic_spacing_active": await is_dynamic_spacing_active(),
         "avg_swing_spacing_active": await is_avg_swing_spacing_active(),
         "grid_spacing_override": await get_live_grid_spacing_override(),
