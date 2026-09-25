@@ -2431,7 +2431,9 @@ def _replay_grid_rotation(candidates: dict, btc_series: tuple, start_coin: str, 
     return result
 
 
-async def run_grid_rotation_effectiveness_backtest(coins=None, days=BACKTEST_DAYS, spend=SPEND, max_concurrent=6):
+async def run_grid_rotation_effectiveness_backtest(coins=None, days=BACKTEST_DAYS, spend=SPEND, max_concurrent=6,
+                                                   grid_pct=STRATEGY_LAB_GRID_PCT,
+                                                   num_levels=STRATEGY_LAB_GRID_LEVELS):
     """SHADOW-MODE, additive - never touches live trading, never places a
     real order. For each real candidate coin, replays what a single real
     Grid Bot branch STARTING on that coin would have done over the real
@@ -2442,7 +2444,26 @@ async def run_grid_rotation_effectiveness_backtest(coins=None, days=BACKTEST_DAY
     for the live blended ranking signal). Fetches every real candidate's
     full historical series ONCE (shared across every starting-coin
     replay, not re-fetched per coin) - this is O(coins) real API calls,
-    not O(coins²)."""
+    not O(coins²).
+
+    grid_pct/num_levels default to STRATEGY_LAB_GRID_PCT (1.0%) and
+    STRATEGY_LAB_GRID_LEVELS (10), which is what every rotation figure
+    quoted to date was measured at - including the headline
+    baseline +$123.95 -> with-rotation +$638.43.
+
+    That default is the PROBLEM this parameterisation exists to fix. The
+    same module's own level/spacing sweep found 1.0%/10-levels to be the
+    WEAKEST grid family it tested (+$122.61 - +$132), and 3 levels at
+    2.5% the strongest (+$348.21, 278 trades, 76.3% win rate) - but that
+    sweep ran with rotation OFF. So the two largest measured levers have
+    never been measured TOGETHER, and rotation's 5.15x was earned on top
+    of the worst available base config.
+
+    Nobody knows yet whether rotation's gain survives on a 3-level/2.5%
+    base, compounds with it, or partly overlaps it - rotation and wider
+    spacing may both be capturing the same "don't sit in a dead coin"
+    effect. Passing grid_pct=0.025, num_levels=3 answers that directly,
+    against the same real candles, with one run."""
     coins = coins or COIN_FAMILY_TREE
     semaphore = asyncio.Semaphore(max_concurrent)
     last_error = {}
@@ -2467,8 +2488,12 @@ async def run_grid_rotation_effectiveness_backtest(coins=None, days=BACKTEST_DAY
 
     per_coin = []
     for start_coin in candidates:
-        baseline = _replay_grid_rotation(candidates, btc_series, start_coin, spend=spend, rotation_enabled=False)
-        with_rotation = _replay_grid_rotation(candidates, btc_series, start_coin, spend=spend, rotation_enabled=True)
+        baseline = _replay_grid_rotation(candidates, btc_series, start_coin, spend=spend,
+                                         grid_pct=grid_pct, num_levels=num_levels,
+                                         rotation_enabled=False)
+        with_rotation = _replay_grid_rotation(candidates, btc_series, start_coin, spend=spend,
+                                              grid_pct=grid_pct, num_levels=num_levels,
+                                              rotation_enabled=True)
         per_coin.append({"product_id": start_coin, "baseline": baseline, "with_rotation": with_rotation})
 
     def _total(key):
@@ -2484,6 +2509,10 @@ async def run_grid_rotation_effectiveness_backtest(coins=None, days=BACKTEST_DAY
     return {
         "backtest_days": days,
         "spend_per_trade": spend,
+        # Echoed so two runs are never confusable: every rotation figure
+        # quoted before this parameter existed was 1.0%/10 levels.
+        "grid_pct": grid_pct,
+        "num_levels": num_levels,
         "rotation_rank_lookback_hours": ROTATION_RANK_LOOKBACK_HOURS,
         "rotation_cooldown_hours": ROTATION_COOLDOWN_HOURS,
         "coins_tested": len(coins),

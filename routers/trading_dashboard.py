@@ -3659,7 +3659,10 @@ async def run_grid_higher_tf_trend_backtest():
 
 
 @router.post("/crypto-selection-backtest/grid-rotation-effectiveness")
-async def run_grid_rotation_effectiveness_backtest_endpoint():
+async def run_grid_rotation_effectiveness_backtest_endpoint(
+    grid_pct: float = None,
+    num_levels: int = None,
+):
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     Direct answer to the account owner's own question after
     crypto_grid_9 disappeared (reallocated its own idle real cash into
@@ -3675,11 +3678,29 @@ async def run_grid_rotation_effectiveness_backtest_endpoint():
     methodology and its one honest simplification (a BTC-relative-
     strength proxy standing in for the live blended ranking signal).
 
+    grid_pct/num_levels override the grid config both sides of the
+    comparison are replayed at. Left unset they keep this module's
+    historical defaults - 1.0% spacing, 10 levels - which is what every
+    rotation figure quoted to date (baseline +$123.95 vs with-rotation
+    +$638.43) was measured at.
+
+    Those defaults are also the WEAKEST grid family this module's own
+    level/spacing sweep found (+$122.61 - +$132), while 3 levels at 2.5%
+    was the strongest (+$348.21) - measured with rotation OFF. So the two
+    biggest known levers have never been run together. Pass
+    grid_pct=0.025&num_levels=3 to settle whether rotation's gain
+    compounds with the better base config or merely overlaps it.
+
     Pulls real historical data from Coinbase's public candles endpoint -
     can take 30-90 seconds depending on that endpoint's response time."""
     if crypto_selection_backtest_module is None:
         raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
-    return await crypto_selection_backtest_module.run_grid_rotation_effectiveness_backtest()
+    kwargs = {}
+    if grid_pct is not None:
+        kwargs["grid_pct"] = grid_pct
+    if num_levels is not None:
+        kwargs["num_levels"] = num_levels
+    return await crypto_selection_backtest_module.run_grid_rotation_effectiveness_backtest(**kwargs)
 
 
 class SetExitModeRequest(BaseModel):
