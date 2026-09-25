@@ -55,6 +55,8 @@ from crypto_family_tree_bot import COIN_FAMILY_TREE, BREAKEVEN_TRIGGER_PCT
 from database import get_session_factory
 from models import CryptoTreeBranch, CryptoGridBranch, CryptoCoinTradeHistory
 
+CANDLE_USER_AGENT = os.getenv("BACKTEST_CANDLE_USER_AGENT", "Mozilla/5.0 (compatible; empire-v2-backtest)")
+
 SPEND = 150.0
 BACKTEST_DAYS = 30
 
@@ -202,7 +204,14 @@ async def fetch_candles_window(session, product_id, start, end, min_candles=ATR_
         for attempt in range(5):
             try:
                 async with _get_candle_semaphore():
-                    async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
+                    async with session.get(url, headers={"Accept": "application/json",
+                                                         # Coinbase's public candles endpoint
+                                                         # answers 403 to a request with no
+                                                         # User-Agent, which reads as "no data"
+                                                         # rather than "blocked" and silently
+                                                         # returned 4 candles instead of 2160.
+                                                         "User-Agent": CANDLE_USER_AGENT},
+                                           timeout=15) as r:
                         if r.status == 429:
                             last_error = f"HTTP 429 rate limited"
                             await asyncio.sleep(min(0.5 * (2 ** attempt), 8.0))
@@ -1445,7 +1454,7 @@ def _replay_grid_bot(closes, highs, lows, spend=None,
 
 def _replay_grid_bot_v2(closes, highs, lows, spend=None,
                         buy_pct=None, sell_pct=None, num_levels=STRATEGY_LAB_GRID_LEVELS,
-                        drawdown_breaker_pct=None):
+                        drawdown_breaker_pct=None, brake_mask=None):
     """_replay_grid_bot with the two things the live bot does that it does not.
 
     Built 2026-09-25 to answer two direct questions with measurement
@@ -1499,6 +1508,8 @@ def _replay_grid_bot_v2(closes, highs, lows, spend=None,
     reference = closes[0]
     peak_equity = spend
     buys_paused_bars = 0
+    braked_bars = 0
+    braked_buys_skipped = 0
 
     def slice_net(slot, price):
         gross = slot["qty"] * (price - slot["entry"])
@@ -1517,8 +1528,24 @@ def _replay_grid_bot_v2(closes, highs, lows, spend=None,
         if breached:
             buys_paused_bars += 1
 
+        # The risk brake. brake_mask[i] True means "do not open NEW
+        # positions on this bar" - exactly what the drawdown breaker
+        # already does, and exactly what a news signal would be used for.
+        # It never blocks a SELL: an open slice must always be able to
+        # get out, whatever the headline says.
+        braked = bool(brake_mask[i]) if (brake_mask is not None and i < len(brake_mask)) else False
+        if braked:
+            braked_bars += 1
+
         if price <= reference * (1 - buy_pct) and len(open_slices) < num_levels:
-            if not breached:
+            if braked:
+                # Counted, because "how often did the brake actually
+                # change a decision" is the only number that says whether
+                # it did anything at all. A brake that never fires on a
+                # bar the bot would have bought is a brake that does
+                # nothing, however clever its signal.
+                braked_buys_skipped += 1
+            elif not breached:
                 open_slices.append({"entry": price, "qty": slice_usd / price})
                 reference = price
         elif price >= reference * (1 + sell_pct) and open_slices:
@@ -1539,6 +1566,8 @@ def _replay_grid_bot_v2(closes, highs, lows, spend=None,
     if result is not None:
         result["open_slices_at_end"] = len(open_slices)
         result["buys_paused_bars"] = buys_paused_bars
+        result["braked_bars"] = braked_bars
+        result["braked_buys_skipped"] = braked_buys_skipped
         result["buy_pct"] = buy_pct
         result["sell_pct"] = sell_pct
         result["drawdown_breaker_pct"] = drawdown_breaker_pct
@@ -3846,7 +3875,14 @@ async def _fetch_1min_candles_window(session, product_id: str, days: int = OPENI
         for attempt in range(5):
             try:
                 async with _get_candle_semaphore():
-                    async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
+                    async with session.get(url, headers={"Accept": "application/json",
+                                                         # Coinbase's public candles endpoint
+                                                         # answers 403 to a request with no
+                                                         # User-Agent, which reads as "no data"
+                                                         # rather than "blocked" and silently
+                                                         # returned 4 candles instead of 2160.
+                                                         "User-Agent": CANDLE_USER_AGENT},
+                                           timeout=15) as r:
                         if r.status == 429:
                             last_error = "HTTP 429 rate limited"
                             await asyncio.sleep(min(0.5 * (2 ** attempt), 8.0))
