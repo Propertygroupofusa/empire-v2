@@ -1933,7 +1933,34 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "platform": "pgusa-documents", "version": "v2.1-trading-signals"}
+    """Liveness, plus WHICH COMMIT is actually serving this request.
+
+    The hardcoded "version" below is a build label that has not changed in
+    a long time, so it answered "is it up?" and nothing else. That gap cost
+    real time on 2026-09-25: two fixes (33ddd4b, 8b4153b) sat pushed to
+    origin/main while the running service kept serving the old code, and
+    the only way to notice was to probe a behaviour that differed - reading
+    openapi.json for a query param, or watching for a log line to change.
+
+    Railway injects RAILWAY_GIT_COMMIT_SHA into every deploy, so the
+    running build can just say what it is. `git log --oneline -1` locally
+    versus `commit` here answers "did my push actually deploy?" outright.
+    Falls back to "unknown" off-Railway, where the variable is absent.
+    """
+    sha = (os.getenv("RAILWAY_GIT_COMMIT_SHA")
+           or os.getenv("RAILWAY_GIT_COMMIT")
+           or "")
+    return {
+        "status": "ok",
+        "platform": "pgusa-documents",
+        "version": "v2.1-trading-signals",
+        "commit": sha[:7] if sha else "unknown",
+        "commit_full": sha or "unknown",
+        "branch": os.getenv("RAILWAY_GIT_BRANCH") or "unknown",
+        "deployed_at": os.getenv("RAILWAY_DEPLOYMENT_CREATED_AT") or "unknown",
+        "service": os.getenv("RAILWAY_SERVICE_NAME") or "unknown",
+        "service_role": os.getenv("SERVICE_ROLE") or "unset",
+    }
 
 
 @app.get("/study-app")
