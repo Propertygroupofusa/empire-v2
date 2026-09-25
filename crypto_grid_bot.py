@@ -2673,6 +2673,130 @@ async def tune_spacing_per_coin(dry_run: bool = True, min_trips: int = 4,
     }
 
 
+async def force_one_buy(bot_name: str, amount_usd: float = None) -> dict:
+    """Place ONE real slice now, to measure whether a maker order fills.
+
+    This exists for a single, narrow question that nothing else can
+    answer: is a post-only limit order actually resting and filling as
+    MAKER, or is it timing out and falling through to a market order?
+
+    It matters more than any other setting here. A maker round trip costs
+    0.70% and a taker round trip 1.50%. The spacing floor prices taker,
+    because an unfilled maker order becomes a market order - so the floor
+    sits at 1.70% and no step below it can profit. If maker fills are
+    real, the floor is 0.90% and a 1.25% step nets +0.55% instead of
+    -0.25%, which is the difference between a fleet that trades a few
+    times a week and one that trades several times a day.
+
+    Until 2026-09-25 that question was unanswerable, because _build_jwt
+    signed the query string and get_best_bid_ask() returned 401 on every
+    call - so place_maker_buy() bailed on its first line and not one
+    maker order was ever placed. That is fixed; this measures whether the
+    fix works.
+
+    It buys at the CURRENT price rather than waiting for a dip, which is a
+    slightly worse entry than the grid would normally take. That is the
+    deliberate cost of the measurement. The slice is otherwise completely
+    ordinary: it sells when price rises a step above its own entry, same
+    as any other.
+
+    Guarded: one named branch, one slice, capped at the branch's normal
+    slice size, and it refuses if the branch already holds every level it
+    is allowed.
+    """
+    async with get_session_factory()() as db:
+        result = await db.execute(
+            select(CryptoGridBranch).where(CryptoGridBranch.bot_name == bot_name))
+        branch = result.scalar_one_or_none()
+    if branch is None:
+        return {"status": "error", "detail": f"no grid branch named {bot_name!r}"}
+    if not branch.active:
+        return {"status": "refused", "detail": f"{bot_name} is paused"}
+
+    open_slices = await get_grid_slices(bot_name)
+    if len(open_slices) >= (branch.num_levels or 1):
+        return {"status": "refused",
+                "detail": (f"{bot_name} already holds {len(open_slices)}/{branch.num_levels} "
+                           f"levels - forcing another would exceed its own limit")}
+
+    normal_slice = (branch.allocated_usd or 0.0) / max(1, branch.num_levels or 1)
+    spend = min(float(amount_usd or normal_slice), normal_slice)
+    if spend < MIN_TRADE_USD:
+        return {"status": "refused",
+                "detail": f"${spend:.2f} is below the ${MIN_TRADE_USD:.2f} minimum trade size"}
+
+    before = await get_fill_mix()
+
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        real_cash, cash_err = await engine.get_usd_balance(session)
+        if real_cash is None:
+            return {"status": "error", "detail": f"real balance unavailable: {cash_err}"}
+        if real_cash < spend:
+            return {"status": "refused",
+                    "detail": f"only ${real_cash:.2f} real USD available, need ${spend:.2f}"}
+
+        log.warning(f"[GRID] 🔬 FORCED BUY on {bot_name} ({branch.product_id}) for ${spend:.2f} "
+                    f"- measuring whether the maker path fills")
+        fill = await grid_buy(session, spend, branch.product_id)
+
+    if not fill:
+        reason = engine._last_order_error.get(branch.product_id, "no reason reported")
+        return {"status": "no_fill", "detail": reason, "fill_mix_before": before}
+
+    qty, price, leg_rate = fill
+    after = await get_fill_mix()
+
+    # The counter is the ground truth for THIS order: whichever leg count
+    # moved is what this fill actually was.
+    b_buy = (before.get("buy") or {})
+    a_buy = (after.get("buy") or {})
+    was_maker = (a_buy.get("maker_legs", 0) or 0) > (b_buy.get("maker_legs", 0) or 0)
+
+    async with get_session_factory()() as db:
+        db.add(CryptoGridSlice(
+            bot_name=bot_name, product_id=branch.product_id,
+            entry_price=price, qty=qty, opened_at=datetime.utcnow(),
+            entry_fee_rate=leg_rate, entry_expected_price=price))
+        result = await db.execute(
+            select(CryptoGridBranch).where(CryptoGridBranch.bot_name == bot_name))
+        row = result.scalar_one_or_none()
+        if row is not None:
+            # Match the real buy path exactly: it sets reference_price and
+            # NOTHING else. allocated_usd is the branch's total capital and
+            # is not decremented on a buy - the open slice IS that capital,
+            # now held as coin. Subtracting here as well would count the
+            # same dollars out twice and shrink the branch on every fill.
+            row.reference_price = price
+        await db.commit()
+
+    msg = (f"🔬 FORCED BUY: {bot_name} bought {qty:.8f} {branch.product_id} @ "
+           f"${price:,.6f} (${qty * price:.2f}) - filled as "
+           f"{'MAKER' if was_maker else 'TAKER'}")
+    log.warning(f"[GRID] {msg}")
+    await _log_activity_safe(bot_name, branch.product_id, "FORCED_BUY", msg)
+
+    return {
+        "status": "filled",
+        "bot_name": bot_name,
+        "product_id": branch.product_id,
+        "qty": qty,
+        "fill_price": price,
+        "spent_usd": round(qty * price, 2),
+        "leg_fee_rate_recorded": leg_rate,
+        "was_maker": was_maker,
+        "sells_at": round(price * (1 + (branch.grid_pct or 0.02)), 8),
+        "fill_mix_before": before,
+        "fill_mix_after": after,
+        "what_this_means": (
+            "MAKER fills are real - the 1.70% floor is priced against a taker round trip "
+            "the fleet is not actually paying, and can be reviewed."
+            if was_maker else
+            "This order still fell through to a market order. The floor stays at 1.70%: "
+            "a post-only order that does not rest is a taker fill, whatever the intent."),
+    }
+
+
 async def money_check() -> dict:
     """Every dollar in this fleet that is NOT currently earning, and what
     (if anything) can be done about it in one action. Read-only.

@@ -6627,6 +6627,32 @@ async def rebalance_flat_grid_branches_endpoint():
     return await crypto_grid_bot_module.rebalance_flat_grid_branches_now()
 
 
+class ForceBuyRequest(BaseModel):
+    bot_name: str
+    amount_usd: float = None
+
+
+@router.post("/grid-status/force-buy")
+async def grid_force_buy_endpoint(payload: ForceBuyRequest):
+    """Place ONE real slice now, purely to measure whether a maker order fills.
+
+    Spends real money. It exists because the maker/taker question cannot
+    be answered any other way: the fill-mix counter needs a fill, and
+    until the JWT query-string fix landed, place_maker_buy() returned on
+    its first line every time, so the maker path had never once run.
+
+    It buys at the current price instead of waiting for a dip, which is a
+    slightly worse entry than the grid would take on its own. That is the
+    cost of the measurement. The slice is otherwise ordinary and sells a
+    step above its own entry like any other.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    result = await crypto_grid_bot_module.force_one_buy(payload.bot_name, payload.amount_usd)
+    log.warning(f"[dashboard] 🔬 forced buy on {payload.bot_name}: {result.get('status')}")
+    return result
+
+
 @router.get("/grid-status/fee-reality")
 async def grid_fee_reality_endpoint(limit: int = 250):
     """What Coinbase says the fills ACTUALLY cost - maker vs taker, and the
