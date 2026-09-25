@@ -690,18 +690,58 @@
         </div>
     </div>
 
+    <!-- THE STATUS STRIP.
+         Added 2026-09-25. Before this, the three questions that actually
+         matter - is it running, what is it worth, did it trade today -
+         were answerable only by scrolling past a ticker, a header, five
+         conditional banners and a panel for closing a position that had
+         already been sold. On a phone that is several screens before the
+         first real number, which is how a stopped fleet went unnoticed
+         for sixteen days while everything "looked configured".
+         Verdict first, detail after. -->
+    <div class="panel" id="status-strip" style="padding:14px 18px; margin-bottom:16px;">
+        <div style="display:flex; flex-wrap:wrap; gap:18px; align-items:baseline;">
+            <div style="min-width:150px;">
+                <div style="font-size:0.72em; letter-spacing:.08em; text-transform:uppercase; color:var(--text-dim);">Grid bot</div>
+                <div id="strip-live" style="font-size:1.5em; font-weight:700;">checking…</div>
+                <div id="strip-live-sub" style="font-size:0.75em; color:var(--text-dim);"></div>
+            </div>
+            <div style="min-width:120px;">
+                <div style="font-size:0.72em; letter-spacing:.08em; text-transform:uppercase; color:var(--text-dim);">Crypto total</div>
+                <div id="strip-total" style="font-size:1.5em; font-weight:700;">—</div>
+                <div id="strip-total-sub" style="font-size:0.75em; color:var(--text-dim);"></div>
+            </div>
+            <div style="min-width:120px;">
+                <div style="font-size:0.72em; letter-spacing:.08em; text-transform:uppercase; color:var(--text-dim);">Traded today</div>
+                <div id="strip-today" style="font-size:1.5em; font-weight:700;">—</div>
+                <div id="strip-today-sub" style="font-size:0.75em; color:var(--text-dim);"></div>
+            </div>
+            <div style="min-width:120px;">
+                <div style="font-size:0.72em; letter-spacing:.08em; text-transform:uppercase; color:var(--text-dim);">Branches</div>
+                <div id="strip-branches" style="font-size:1.5em; font-weight:700;">—</div>
+                <div id="strip-branches-sub" style="font-size:0.75em; color:var(--text-dim);"></div>
+            </div>
+        </div>
+    </div>
+
     <div id="exit-mode-badge" style="display:none; font-size:0.8em; color: var(--text-dim); margin-bottom: 8px;"></div>
     <div id="reversal-trade-badge" style="display:none; font-size:0.8em; color: var(--text-dim); margin-bottom: 8px;"></div>
     <div id="tree-loop-banner"></div>
-    <div class="panel" style="padding:14px 18px; margin-bottom:16px;">
-        <button class="unlock-btn" onclick="confirmCloseBtcCompound()">💵 Close btc_compound's BTC &amp; free the cash</button>
-        <div style="font-size:0.8em; color: var(--text-dim); margin-top:6px;">
-            Sells the BTC position the <code>btc_compound</code> loop is holding, at market, using that
-            bot's own exit path (real P&amp;L recorded, profit skim applied, position cleared). Shows you
-            the plan first and asks before placing anything. The freed USD becomes shared wallet cash —
-            how much each bot may then deploy is bounded by its cash share.
+
+    <!-- Collapsed 2026-09-25: btc_compound's position was sold, so this is
+         a recovery tool rather than something to act on. It held prime
+         space above every live number with four lines of explanation. -->
+    <details class="panel" style="padding:10px 18px; margin-bottom:16px;">
+        <summary style="cursor:pointer; font-size:0.85em; color:var(--text-dim);">Recovery tools</summary>
+        <div style="margin-top:10px;">
+            <button class="unlock-btn" onclick="confirmCloseBtcCompound()">💵 Close btc_compound's BTC &amp; free the cash</button>
+            <div style="font-size:0.8em; color: var(--text-dim); margin-top:6px;">
+                Sells any BTC position the <code>btc_compound</code> loop is holding, at market, using
+                that bot's own exit path. Shows the plan first and asks before placing anything.
+                Only relevant if that loop is holding something — normally it is not.
+            </div>
         </div>
-    </div>
+    </details>
     <div id="crypto-passive-mode-banner" style="display:none;"></div>
     <div id="rolling-expectancy-banner" style="display:none;"></div>
     <div id="usdc-blindspot-banner" style="display:none;"></div>
@@ -3106,12 +3146,87 @@ async function toggleGridAutoRotate(enable) {
     }
 }
 
+// The status strip: the three questions worth answering before anything
+// else. Reads only data loadGridStatus already fetched, so it costs no
+// extra request and can never disagree with the panels below it.
+//
+// Every value here is measured, never inferred. That distinction is the
+// whole reason this exists: for sixteen days this page showed balances,
+// branches and settings that all looked correct while the loop was not
+// running at all, because nothing on it reported whether the bot was
+// ALIVE - only what it would do if it were.
+function renderStatusStrip(d, history) {
+    try {
+        var hb = (d && d.heartbeat) || {};
+        var live = document.getElementById('strip-live');
+        var liveSub = document.getElementById('strip-live-sub');
+        if (hb.seen && hb.alive) {
+            live.textContent = 'RUNNING';
+            live.style.color = '#1a7f37';
+            liveSub.textContent = 'last cycle ' + hb.age_seconds + 's ago (' + (hb.stage || '') + ')';
+        } else if (hb.seen) {
+            live.textContent = 'STALLED';
+            live.style.color = '#b42318';
+            liveSub.textContent = 'last cycle ' + hb.age_seconds + 's ago — expected under 30s';
+        } else {
+            live.textContent = 'NOT RUNNING';
+            live.style.color = '#b42318';
+            // A missing heartbeat is not "no data" - it is the loop never
+            // having executed. Saying so plainly is the point.
+            liveSub.textContent = 'no cycle has ever been recorded';
+        }
+
+        var alloc = Number(d.total_allocated_usd || 0);
+        var cash = Number(d.real_free_cash_usd || 0);
+        var unreal = Number(d.total_unrealized_net_usd || 0);
+        document.getElementById('strip-total').textContent = '$' + (alloc + cash).toFixed(2);
+        document.getElementById('strip-total-sub').textContent =
+            '$' + cash.toFixed(2) + ' cash · $' + alloc.toFixed(2) + ' working'
+            + (unreal ? ' · ' + (unreal < 0 ? '-$' : '+$') + Math.abs(unreal).toFixed(2) + ' open' : '');
+
+        // "Today" is deliberately a DATE comparison, not a count. A running
+        // total looks identical whether the bot traded this morning or last
+        // month - which is exactly how $19.55 from September read as
+        // current profit for over two weeks.
+        var trades = (history && history.recent_trades) || [];
+        var today = new Date().toISOString().slice(0, 10);
+        var todays = trades.filter(function (t) {
+            return String(t.closed_at || '').slice(0, 10) === today;
+        });
+        var el = document.getElementById('strip-today');
+        var sub = document.getElementById('strip-today-sub');
+        if (todays.length) {
+            var net = todays.reduce(function (a, t) { return a + Number(t.pnl || 0); }, 0);
+            el.textContent = (net < 0 ? '-$' : '+$') + Math.abs(net).toFixed(2);
+            el.style.color = net < 0 ? '#b42318' : '#1a7f37';
+            sub.textContent = todays.length + ' trade' + (todays.length === 1 ? '' : 's') + ' today';
+        } else {
+            el.textContent = 'none';
+            el.style.color = 'var(--text-dim)';
+            var newest = trades[0] && String(trades[0].closed_at || '').slice(0, 10);
+            sub.textContent = newest ? ('last trade ' + newest) : 'no trades on record';
+        }
+
+        var branches = (d && d.branches) || [];
+        var activeCount = branches.filter(function (b) { return b.active; }).length;
+        document.getElementById('strip-branches').textContent = activeCount + ' / ' + branches.length;
+        var steps = {};
+        branches.forEach(function (b) { if (b.grid_pct) steps[(b.grid_pct * 100).toFixed(2) + '%'] = 1; });
+        document.getElementById('strip-branches-sub').textContent =
+            'active · step ' + (Object.keys(steps).join(', ') || '—');
+    } catch (e) {
+        // A broken strip must never take the rest of the page with it.
+        console.error('status strip failed', e);
+    }
+}
+
 async function loadGridStatus() {
     try {
         const [data, history] = await Promise.all([
             apiGet('/grid-status'),
             apiGet('/grid-status/trade-history').catch(function () { return { branches: [], total_realized_pnl: null, total_trade_count: 0, overall_win_rate: 0 }; }),
         ]);
+        renderStatusStrip(data, history);
         const tradeHistoryByBot = {};
         (history.branches || []).forEach(function (h) { tradeHistoryByBot[h.bot_name] = h; });
         // Per branch AND coin. A branch outlives the coin it points at, so
