@@ -1,5 +1,26 @@
 """What YOUR grid configuration does across simulated price paths.
 
+⚠️  THIS MODEL IS OUTRANKED. Do not use it to choose spacing, levels, or
+filters. crypto_selection_backtest.py replays the same mechanics over REAL
+Coinbase candles across 35 coins, and where the two disagree the real
+backtest is right. Two live examples, both of which this model got wrong on
+2026-09-25:
+
+    SPACING  This model (random walks) put 3_levels_2.0pct ahead of
+             3_levels_2.5pct. The real 30-day backtest says the opposite:
+             2.5pct +$348.21 (278 trades, 76.3%) vs 2.0pct +$306.98 (327
+             trades, 72.5%). Random walks have no mean reversion, so they
+             systematically reward tighter spacing more than real markets do.
+
+    TRENDS   This model showed a sustained downtrend costing -$13.22 per
+             branch, which argued for a trend filter. The real backtest of
+             exactly that filter: ungated +$123.95 vs trend-gated (SMA20 >
+             SMA50) +$13.81. The filter destroys 89% of the P&L, because it
+             sits out the chop that a grid earns from.
+
+Use this file for INTUITION about how the strategy responds to volatility
+and drift. Use the real backtests for DECISIONS.
+
 THIS IS NOT A BACKTEST. No historical prices are used. It runs the grid's
 real mechanics - buy a slice a step below the reference, sell the oldest
 slice a step above, cap at num_levels, pay the real round-trip fee - over
