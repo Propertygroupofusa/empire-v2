@@ -6618,6 +6618,22 @@ async def rebalance_flat_grid_branches_endpoint():
     return await crypto_grid_bot_module.rebalance_flat_grid_branches_now()
 
 
+@router.post("/grid-status/reanchor-flat-branches")
+async def reanchor_flat_grid_branches_endpoint():
+    """Move every FLAT branch's reference price to the live market price.
+
+    reference_price is only ever written at branch creation and on a real
+    fill, so a branch that has not traded since a rally waits for a dip
+    measured from a level the market already left. This re-measures it
+    from today. Branches holding open slices are skipped - there the
+    reference is also the sell trigger. Places no orders; writes nothing
+    but reference_price.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    return await crypto_grid_bot_module.reanchor_flat_grid_branches_now()
+
+
 @router.post("/grid-status/move-cash")
 async def move_cash_between_grid_branches_endpoint(payload: MoveCashBetweenGridBranchesRequest):
     """One-step real grid-to-grid cash move - per the account owner's

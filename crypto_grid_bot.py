@@ -2375,6 +2375,127 @@ async def _maybe_rotate_one_grid_branch(branch: CryptoGridBranch, after_sale: bo
     return {"action": "rotated", "orders_placed": False, **result}
 
 
+async def reanchor_flat_grid_branches_now() -> dict:
+    """Move every FLAT branch's reference_price to the live market price.
+
+    Why this exists, 2026-09-25. reference_price is written exactly twice:
+    once when a branch is created, and thereafter only on a real fill
+    (`fresh.reference_price = filled_price`). Nothing re-anchors it to the
+    market. So a branch created before a rally sits with its reference
+    below the market, and since a buy needs
+    `price <= reference_price * (1 - grid_pct)` the dip it waits for is
+    measured from a level the market already left.
+
+    That is self-tightening: no fill means no re-anchor, so a rising
+    market makes the next fill harder, not easier. On the live account all
+    seven branches had gone sixteen days without a trade while needing
+    falls of 2.70% to 3.67% from the current price to trigger a 2.00%
+    grid step.
+
+    SAFETY - this only ever touches branches holding NOTHING:
+
+      * A branch with open slices is SKIPPED, never re-anchored. With a
+        slice open the reference is also the sell trigger
+        (`price >= reference_price * (1 + grid_pct)`), so moving it would
+        move the exit of a position already on the book. Flat branches
+        have no such tie.
+      * reference_price is the ONLY field written. Spacing, levels,
+        allocation and active flags are untouched.
+      * The reference only ever moves UP. A lower reference means a lower
+        buy trigger, i.e. further from the market. A branch trading below
+        its reference is already nearer a fill than a fresh anchor would
+        leave it, so it is skipped.
+      * A branch whose live price cannot be read is skipped, not guessed.
+      * Every before/after pair is returned, so the move is auditable and
+        can be put back by hand.
+
+    Places no orders. The next ordinary cycle decides whether to buy, and
+    every existing gate still applies to it.
+    """
+    branches = await get_grid_branches()
+    moved, skipped = [], []
+
+    distinct_products = {b.product_id for b in branches if b.active}
+    live_prices = {}
+    if distinct_products:
+        async with engine.aiohttp.ClientSession() as session:
+            for product_id in distinct_products:
+                try:
+                    price, _atr = await engine.get_price_and_volatility(session, product_id)
+                    live_prices[product_id] = price
+                except Exception as exc:
+                    log.warning(f"[GRID] re-anchor: no price for {product_id}: {exc}")
+
+    for b in branches:
+        if not b.active:
+            skipped.append({"bot_name": b.bot_name, "reason": "branch is not active"})
+            continue
+        slices = await get_grid_slices(b.bot_name)
+        if slices:
+            skipped.append({"bot_name": b.bot_name,
+                            "reason": f"holds {len(slices)} open slice(s) - reference is also its sell trigger"})
+            continue
+        price = live_prices.get(b.product_id)
+        if not price or price <= 0:
+            skipped.append({"bot_name": b.bot_name, "reason": "no live price - not guessing"})
+            continue
+
+        old = b.reference_price
+        # Only ever re-anchor UPWARD. The buy trigger is
+        # reference_price * (1 - grid_pct), so a LOWER reference means a
+        # LOWER trigger - further from the market, harder to fill. When the
+        # live price sits below the reference the branch is already closer
+        # to a fill than a fresh anchor would put it, and re-anchoring
+        # would take that away.
+        #
+        # Caught by test_reanchor.py before this ever ran: on the live
+        # fleet BTC was the one branch trading BELOW its reference, needing
+        # a 1.42% fall against a 2.00% step. Blanket re-anchoring would
+        # have moved it back to needing the full 2.00% - the opposite of
+        # the point.
+        if old and price <= old:
+            skipped.append({
+                "bot_name": b.bot_name,
+                "reason": (f"live ${price:,.6f} is at or below its reference ${old:,.6f} - "
+                           f"already closer to a fill than a re-anchor would leave it"),
+            })
+            continue
+        async with get_session_factory()() as db:
+            result = await db.execute(
+                select(CryptoGridBranch).where(CryptoGridBranch.bot_name == b.bot_name))
+            fresh = result.scalar_one_or_none()
+            if fresh is None:
+                skipped.append({"bot_name": b.bot_name, "reason": "branch vanished between read and write"})
+                continue
+            if await get_grid_slices(b.bot_name):
+                skipped.append({"bot_name": b.bot_name, "reason": "slice opened during re-anchor - left alone"})
+                continue
+            fresh.reference_price = price
+            await db.commit()
+
+        drop_before = ((old - price) / old * 100) if old else None
+        moved.append({
+            "bot_name": b.bot_name, "product_id": b.product_id,
+            "old_reference_price": old, "new_reference_price": price,
+            "grid_pct": b.grid_pct,
+            "buy_triggers_at": round(price * (1 - b.grid_pct), 8),
+            "drop_needed_before_pct": round(-drop_before + b.grid_pct * 100, 2) if drop_before is not None else None,
+            "drop_needed_now_pct": round(b.grid_pct * 100, 2),
+        })
+        msg = (f"re-anchored reference ${old:,.6f} -> ${price:,.6f}; a {b.grid_pct*100:.2f}% dip "
+               f"now triggers at ${price * (1 - b.grid_pct):,.6f}")
+        log.info(f"[GRID] {b.bot_name}: {msg}")
+        await _log_activity_safe(b.bot_name, b.product_id, "REANCHOR", msg)
+
+    return {
+        "moved": moved, "moved_count": len(moved),
+        "skipped": skipped, "skipped_count": len(skipped),
+        "orders_placed": False,
+        "note": ("reference_price only; spacing, levels and allocation untouched. "
+                 "Branches holding open slices were skipped."),
+    }
+
+
 async def rebalance_flat_grid_branches_now() -> dict:
     """Apply the live edge rule immediately to every movable flat branch."""
     actions = []
