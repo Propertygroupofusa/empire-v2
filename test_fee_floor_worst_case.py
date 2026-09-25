@@ -28,9 +28,21 @@ the taker leg - for as long as an unfilled maker order can become a market
 order. The maker saving belongs in the margin earned at a given spacing,
 never in permission to set a spacing that cannot survive a fallback.
 
-Maker fill rate is not measured anywhere in this codebase. Until something
-counts fallbacks there is no evidence for the optimistic assumption, and a
-floor may not assume what nothing measures.
+WHAT CHANGED, AND WHAT DID NOT (2026-09-25, later the same day)
+
+Maker-ONLY mode removes the market fallback from grid_buy()/grid_sell()
+outright: a leg that does not fill as a maker does not fill at all. That
+is not optimism about fill rates - it deletes the taker path rather than
+hoping to avoid it - so while it is on, the honest worst case really is
+the maker leg, and the floor may price it.
+
+The original bug is still a bug, and this file still fails on it: the
+floor may NEVER consult is_maker_orders_active(), because maker mode being
+on says nothing about whether the fallback exists. Only
+is_maker_only_active() may be consulted, and only under two guards it
+carries itself - it fails closed, and the maker rate it permits has to be
+a MEASURED one. test_maker_only.py holds those guards; this file holds the
+line that maker MODE alone can never move the floor.
 
 Run: python3 test_fee_floor_worst_case.py
 """
@@ -82,10 +94,13 @@ ok("the floor still adds a net margin on top of the fee",
    "TARGET_NET_MARGIN_PCT" in floor)
 
 worst = body_src("worst_case_leg_fee_rate")
-ok("the worst case is the taker round trip halved, unconditionally",
+ok("the worst case still knows the taker round trip",
    "get_effective_round_trip_fee_rate" in worst)
-ok("the worst case does NOT consult whether maker mode is on",
-   "is_maker_orders_active" not in worst and "maker" not in worst.lower())
+ok("REGRESSION: the worst case does NOT consult whether maker MODE is on",
+   "is_maker_orders_active" not in worst)
+ok("the only maker question it may ask is whether the FALLBACK is gone",
+   [t for t in ("is_maker_only_active", "is_maker_orders_active", "expected_leg_fee_rate")
+    if t in worst] == ["is_maker_only_active"])
 
 # --- the estimator is deliberately left alone -----------------------------
 est = body_src("expected_leg_fee_rate")
@@ -119,6 +134,17 @@ ok("a spacing at exactly the floor earns the target margin against taker",
    abs((f - LIVE_TAKER_ROUND_TRIP) - LIVE_TARGET_MARGIN) < 1e-9)
 ok("a maker round trip at the floor earns MORE, which is where the saving belongs",
    (f - 0.007) > LIVE_TARGET_MARGIN)
+
+# The maker-only floor, stated as the same arithmetic. This is the number
+# the fallback removal is worth, and it is only legal because the taker
+# path is gone - not because maker fills are likely.
+LIVE_MAKER_LEG = 0.0035          # measured on a real fill
+maker_only_floor = floor_for(LIVE_MAKER_LEG * 2, LIVE_TARGET_MARGIN)
+ok("with the fallback removed the floor is 0.90%", abs(maker_only_floor - 0.009) < 1e-9)
+ok("the live 2.00% spacing clears the maker-only floor with room to spare",
+   0.02 - maker_only_floor > 0.005)
+ok("REGRESSION: removing the fallback is what moves the floor, and it moves it 0.80%",
+   abs((f - maker_only_floor) - 0.008) < 1e-9)
 ok("the absolute minimum still applies when fees are near zero",
    floor_for(0.0, 0.0) == MIN_DYNAMIC)
 

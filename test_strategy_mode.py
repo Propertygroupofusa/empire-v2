@@ -102,9 +102,27 @@ ok("and the 'not a known strategy' message is on the ERROR call",
    "log.error(" in body
    and "not a known strategy" in body.split("log.error(", 1)[1].split(")", 1)[0]
    + body.split("log.error(", 1)[1][:400])
-ok("no WARNING claims the strategy is unusable",
-   all("not a known strategy" not in chunk[:400]
-       for chunk in body.split("log.warning(")[1:]))
+# The rule is about the CLAIM, not the phrase. The old check banned the
+# words "not a known strategy" from every log.warning, which broke the day a
+# legitimate warning had to use them: when note_runtime_mode() proves a loop
+# is really running from a DB override, the honest message is "the variable
+# is not a known strategy, BUT something is running, so trading is NOT
+# stopped". That is the opposite of claiming the system is unusable - it is
+# the fix for a false alarm - and a substring ban could not tell the two
+# apart. So a warning may say the value is unknown; it may not say, at
+# WARNING level, that nothing is running.
+for chunk in body.split("log.warning(")[1:]:
+    # Cut at the NEXT log call: a fixed-width window runs past the end of
+    # this warning and into the log.error() below it, then reports that
+    # error's wording as if the warning had said it.
+    head = chunk.split("log.")[0]
+    if "not a known strategy" in head:
+        ok("a WARNING that mentions an unknown strategy also says trading is NOT stopped",
+           "NOT stopped" in head)
+        ok("and that WARNING does not also claim nothing will trade",
+           "No crypto loop will" not in head and "nothing will be bought" not in head)
+ok("the DEAD claim is reserved for ERROR, where it is true",
+   "No crypto loop will" in body.split("log.error(", 1)[1][:600])
 ok("the message says nothing will be bought or sold",
    "nothing will be bought or sold" in src)
 ok("and names both services' correct values",

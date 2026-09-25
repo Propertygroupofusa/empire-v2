@@ -522,6 +522,144 @@ async def set_maker_orders_active(enabled: bool):
         await db.commit()
 
 
+# --- maker-ONLY mode ------------------------------------------------------
+# The stronger form of maker orders: maker first, and if it does not fill,
+# NOTHING. No market fallback.
+#
+# Why this exists. On 2026-09-25 the live account's own numbers read:
+#
+#     taker round trip   1.50%   (0.75% a leg)
+#     maker round trip   0.70%   (0.35% a leg - MEASURED, on a real fill)
+#     adverse selection  0.67%   (measured by the net-edge gate)
+#     live grid spacing  2.00%
+#
+# With the market fallback in place the floor must price taker, because an
+# unfilled maker order really does become a market order: a 1.70% floor and
+# a 2.17% true cost against 2.00% of step - the step LOSES 0.17% a cycle.
+# Remove the fallback and the real cost is 1.37% (0.70% + 0.67%), which
+# that same 2.00% step clears by 0.63%. What changes the arithmetic is not
+# a cleverer limit price. It is whether the taker path exists at all.
+#
+# (The floor and the cost are different numbers and must not be conflated:
+# the 0.90% floor is 0.70% of fees PLUS the 0.20% margin the floor insists
+# on earning. Adding adverse selection to the FLOOR rather than to the cost
+# double-counts that margin - it reads 1.57% and understates the headroom.)
+#
+# What it costs. A grid has no urgency on either leg. A buy that does not
+# fill simply does not happen this cycle - the price is still there next
+# cycle, and the branch keeps its cash. The sell leg only ever fires on a
+# slice _pick_profitable_slice_to_sell has already certified as net
+# profitable, so waiting for a maker fill cannot turn a winner into a
+# loser. And the one path that must always get out -
+# close_all_grid_branches() - calls engine.place_market_sell() directly and
+# is deliberately untouched by this mode, while the drawdown breaker only
+# ever pauses BUYS. Nothing that MUST fill is routed through here.
+MAKER_ONLY_MODE_KEY = "grid_maker_only_mode"
+
+# With no fallback to rush toward, a resting order can afford to rest. Used
+# INSTEAD of MAKER_ORDER_WAIT_SECONDS while maker-only is on: long enough
+# to be filled by ordinary book movement, rather than needing to be lucky
+# inside the 45 seconds a pending market fallback allowed.
+MAKER_ONLY_ORDER_WAIT_SECONDS = int(os.getenv("GRID_MAKER_ONLY_WAIT_SECONDS", "240"))
+
+# How often a cycle passed rather than paying taker. Counted, because the
+# cost of this mode is missed trades and an uncounted cost is an assumed one.
+GRID_MAKER_ONLY_SKIP_BUY_KEY = "grid_maker_only_skipped_buy"
+GRID_MAKER_ONLY_SKIP_SELL_KEY = "grid_maker_only_skipped_sell"
+
+
+async def is_maker_only_active() -> bool:
+    """Whether the market fallback is genuinely switched off.
+
+    Two conditions, both required: the maker-only flag is set AND maker
+    orders are on at all. Maker-only without maker orders would mean "never
+    place a maker order, and never fall back either" - a bot that cannot
+    trade.
+
+    FAILS CLOSED. Every consumer of this - above all
+    worst_case_leg_fee_rate(), which is a safety floor rather than an
+    estimate - is safe when this answers False and unsafe when it wrongly
+    answers True. So an unreadable toggle reads as False and the floor
+    stays priced against taker.
+    """
+    try:
+        async with get_session_factory()() as db:
+            result = await db.execute(
+                select(TradingBotState).where(TradingBotState.bot_name == MAKER_ONLY_MODE_KEY))
+            row = result.scalar_one_or_none()
+            if row is None or not (row.base_capital and row.base_capital >= 1.0):
+                return False
+        return await is_maker_orders_active()
+    except Exception as e:
+        log.warning(f"[GRID] maker-only toggle unreadable ({e}) - assuming the market "
+                    f"fallback is still live; the spacing floor stays taker-priced")
+        return False
+
+
+async def set_maker_only_active(enabled: bool):
+    """Remove the market fallback (True) or restore it (False).
+
+    Turning it ON also turns maker orders on, because maker-only is
+    meaningless without them and a half-set pair would silently stop the
+    whole fleet trading.
+    """
+    if enabled and not await is_maker_orders_active():
+        await set_maker_orders_active(True)
+    async with get_session_factory()() as db:
+        result = await db.execute(
+            select(TradingBotState).where(TradingBotState.bot_name == MAKER_ONLY_MODE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            db.add(TradingBotState(bot_name=MAKER_ONLY_MODE_KEY,
+                                   base_capital=1.0 if enabled else 0.0))
+        else:
+            row.base_capital = 1.0 if enabled else 0.0
+        await db.commit()
+    log.warning(f"[GRID] maker-ONLY mode set to {enabled} - market fallback "
+                f"{'REMOVED' if enabled else 'restored'}")
+
+
+async def maker_wait_seconds() -> int:
+    """How long a post-only order is left resting before it is given up on."""
+    return MAKER_ONLY_ORDER_WAIT_SECONDS if await is_maker_only_active() else MAKER_ORDER_WAIT_SECONDS
+
+
+async def _record_maker_only_skip(key: str):
+    """Count one cycle that passed rather than pay taker. Never raises."""
+    try:
+        async with get_session_factory()() as db:
+            result = await db.execute(
+                select(TradingBotState).where(TradingBotState.bot_name == key))
+            row = result.scalar_one_or_none()
+            if row is None:
+                row = TradingBotState(bot_name=key, base_capital=0.0)
+                db.add(row)
+            row.base_capital = float(row.base_capital or 0.0) + 1.0
+            await db.commit()
+    except Exception as e:
+        log.warning(f"[GRID] maker-only skip counter failed for {key} (ignored): {e}")
+
+
+async def get_maker_only_skips() -> dict:
+    """How many cycles maker-only cost, as counted."""
+    out = {}
+    for label, key in (("buy", GRID_MAKER_ONLY_SKIP_BUY_KEY),
+                       ("sell", GRID_MAKER_ONLY_SKIP_SELL_KEY)):
+        n = 0.0
+        try:
+            async with get_session_factory()() as db:
+                result = await db.execute(
+                    select(TradingBotState).where(TradingBotState.bot_name == key))
+                row = result.scalar_one_or_none()
+                if row is not None:
+                    n = float(row.base_capital or 0.0)
+        except Exception as e:
+            log.warning(f"[GRID] maker-only skip read failed for {key}: {e}")
+        out[label] = int(n)
+    out["total"] = out["buy"] + out["sell"]
+    return out
+
+
 async def expected_leg_fee_rate() -> float:
     """The REAL per-leg fee rate the next order is expected to pay: the
     maker rate when maker orders are on, the taker rate otherwise. Half the
@@ -621,20 +759,26 @@ async def get_fill_mix() -> dict:
             if maker_rate is not None else None),
         "taker_round_trip_fee_rate": round(taker_leg * 2, 6),
         "maker_round_trip_fee_rate": round(maker_leg * 2, 6),
-        "note": ("The spacing floor deliberately prices the TAKER round trip, because "
-                 "an unfilled maker order becomes a market order. These counts are the "
-                 "evidence that would justify relaxing that - not a reason to on their own."),
+        "note": ("While the market fallback exists the spacing floor prices the TAKER "
+                 "round trip, because an unfilled maker order becomes a market order, and "
+                 "these counts are evidence toward relaxing that - not a reason to on their "
+                 "own. Under maker-ONLY mode the fallback is gone, so the floor prices the "
+                 "measured maker leg and these counts become the check that it is telling "
+                 "the truth: any taker leg counted while maker-only is on is a bug."),
     }
     return out
 
 
 async def grid_buy(session, usd_amount: float, product_id: str):
     """Real grid BUY: maker first (cheap, may not fill), market fallback
-    (always fills, costs more). Returns (filled_qty, price, leg_fee_rate)
-    or None - the real rate actually paid comes back with the fill so the
-    slice can record it and be priced honestly later."""
+    (always fills, costs more) - unless maker-ONLY mode has removed that
+    fallback, in which case an unfilled maker order simply means no buy
+    this cycle. Returns (filled_qty, price, leg_fee_rate) or None - the
+    real rate actually paid comes back with the fill so the slice can
+    record it and be priced honestly later."""
     if await is_maker_orders_active():
-        fill = await engine.place_maker_buy(session, usd_amount, product_id, MAKER_ORDER_WAIT_SECONDS)
+        fill = await engine.place_maker_buy(session, usd_amount, product_id,
+                                            await maker_wait_seconds())
         if fill:
             qty, price = fill
             log.info(f"[GRID] {product_id}: real MAKER buy filled {qty:.8f} @ ${price:,.6f} (cheaper fee)")
@@ -642,6 +786,14 @@ async def grid_buy(session, usd_amount: float, product_id: str):
             return qty, price, (_cached_real_maker_fee_rate
                                 if _cached_real_maker_fee_rate is not None
                                 else (await get_effective_round_trip_fee_rate()) / 2)
+        if await is_maker_only_active():
+            # No fallback, by design. A buy that does not happen costs
+            # nothing and the dip will still be there next cycle; a taker
+            # buy costs 0.75% and would make the spacing floor a lie.
+            log.info(f"[GRID] {product_id}: maker buy did not fill and maker-ONLY mode is on - "
+                     f"passing this cycle rather than paying the taker leg")
+            await _record_maker_only_skip(GRID_MAKER_ONLY_SKIP_BUY_KEY)
+            return None
     fill = await engine.place_market_buy(session, usd_amount, product_id)
     if not fill:
         return None
@@ -651,10 +803,19 @@ async def grid_buy(session, usd_amount: float, product_id: str):
 
 
 async def grid_sell(session, qty: float, product_id: str):
-    """Real grid SELL: maker first, market fallback. Returns
-    (filled_qty, price, leg_fee_rate) or None."""
+    """Real grid SELL: maker first, market fallback - unless maker-ONLY
+    mode has removed the fallback. Returns (filled_qty, price,
+    leg_fee_rate) or None.
+
+    Waiting is safe on this leg specifically because of who calls it: the
+    only caller is the rise trigger, and it only ever hands over a slice
+    _pick_profitable_slice_to_sell has already certified as net
+    profitable at the current price. There is no forced exit here to
+    strand - close_all_grid_branches() sells at market directly.
+    """
     if await is_maker_orders_active():
-        fill = await engine.place_maker_sell(session, qty, product_id, MAKER_ORDER_WAIT_SECONDS)
+        fill = await engine.place_maker_sell(session, qty, product_id,
+                                             await maker_wait_seconds())
         if fill:
             filled_qty, price = fill
             log.info(f"[GRID] {product_id}: real MAKER sell filled {filled_qty:.8f} @ ${price:,.6f} (cheaper fee)")
@@ -662,6 +823,11 @@ async def grid_sell(session, qty: float, product_id: str):
             return filled_qty, price, (_cached_real_maker_fee_rate
                                        if _cached_real_maker_fee_rate is not None
                                        else (await get_effective_round_trip_fee_rate()) / 2)
+        if await is_maker_only_active():
+            log.info(f"[GRID] {product_id}: maker sell did not fill and maker-ONLY mode is on - "
+                     f"holding the slice rather than paying the taker leg out of its own profit")
+            await _record_maker_only_skip(GRID_MAKER_ONLY_SKIP_SELL_KEY)
+            return None
     fill = await engine.place_market_sell(session, qty, product_id)
     if not fill:
         return None
@@ -719,11 +885,36 @@ async def fee_safe_floor_pct() -> float:
 async def worst_case_leg_fee_rate() -> float:
     """The highest per-leg fee a single leg can really pay.
 
-    Maker orders are an attempt, not a guarantee - an unfilled maker order
-    becomes a market order - so the worst case is always the taker leg,
-    whether or not maker mode is on.
+    Normally that is the taker leg. A maker order is an attempt, not a
+    guarantee, and an unfilled one becomes a market order, so whether
+    MAKER MODE is on changes nothing here and must never be consulted -
+    that exact confusion is what certified an 0.80%-wide band of losing
+    spacings as fee-safe (see test_fee_floor_worst_case.py).
+
+    Maker-ONLY mode makes a different claim. It does not hope the maker
+    order fills; it deletes the market fallback out of grid_buy() and
+    grid_sell(), so a leg that does not fill as a maker does not fill at
+    all. While that is genuinely on, the taker leg is not a worst case the
+    bot can reach - it is a path that no longer exists - and the honest
+    worst case is the maker leg.
+
+    Two guards keep that from becoming the old bug under a new name:
+
+      * is_maker_only_active() FAILS CLOSED, so an unreadable toggle
+        prices taker rather than assuming the cheap path.
+      * The maker rate has to be a MEASURED one - _cached_real_maker_fee_rate
+        comes from the account's real Coinbase fee tier. A floor may not
+        assume what nothing has measured, so without it, taker again.
+
+    And the result is clamped to the taker leg, because no arrangement of
+    maker orders can ever cost MORE than paying taker on both legs.
     """
-    return (await get_effective_round_trip_fee_rate()) / 2
+    taker_leg = (await get_effective_round_trip_fee_rate()) / 2
+    if _cached_real_maker_fee_rate is None:
+        return taker_leg
+    if not await is_maker_only_active():
+        return taker_leg
+    return min(float(_cached_real_maker_fee_rate), taker_leg)
 
 
 async def is_grid_bot_active() -> bool:
@@ -4661,6 +4852,7 @@ async def get_grid_status() -> dict:
     # legs of a round trip can genuinely cost different rates. Left None when
     # maker orders are off so every slice shares one flat rate, as before.
     status_exit_leg_rate = await expected_leg_fee_rate() if await is_maker_orders_active() else None
+    _maker_only = await is_maker_only_active()
 
     distinct_products = {b.product_id for b in branches}
     live_prices = {}
@@ -4809,7 +5001,16 @@ async def get_grid_status() -> dict:
         # orders this bot has always used. Off until turned on deliberately.
         "maker_orders_active": await is_maker_orders_active(),
         "real_maker_fee_rate": _cached_real_maker_fee_rate,
-        "maker_order_wait_seconds": MAKER_ORDER_WAIT_SECONDS,
+        "maker_order_wait_seconds": await maker_wait_seconds(),
+        # Maker-ONLY: the market fallback removed entirely. This is the one
+        # thing that legitimately lets the spacing floor above come down off
+        # the taker leg, because it is the only thing that makes the taker
+        # leg unreachable rather than merely unlikely.
+        "maker_only_active": _maker_only,
+        "maker_only_skipped_cycles": await get_maker_only_skips(),
+        "floor_priced_against": ("maker (the market fallback is removed)"
+                                 if _maker_only and _cached_real_maker_fee_rate is not None
+                                 else "taker (an unfilled maker order still becomes a market order)"),
         "branches": out,
     }
 

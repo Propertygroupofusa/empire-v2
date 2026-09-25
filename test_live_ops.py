@@ -41,10 +41,28 @@ def _extract(path, start_marker, end_marker):
 
 
 # --- the config panel ------------------------------------------------------
-config_src = _extract(ROUTER, "def _live_ops_config():", "\nasync def _live_ops_gate_feed")
-ns = {"os": os}
+# _live_ops_config is ASYNC. The start marker below deliberately includes
+# "async ", because "def _live_ops_config():" also matches as a SUBSTRING of
+# the async line - which silently sliced the "async " off the front and
+# produced a sync function full of awaits. That is a SyntaxError at exec
+# time, so this whole file stopped running the moment the function was made
+# async, and every check below went unenforced without one FAIL being
+# printed. A test that cannot fail is worse than no test.
+config_src = _extract(ROUTER, "async def _live_ops_config():", "\nasync def _live_ops_gate_feed")
+assert config_src.startswith("async def "), "the slice lost its async prefix again"
+# The one await inside reaches the grid module for the net-edge switch; the
+# panel already falls back to True when that raises, so a stub that raises
+# exercises the documented path without a database.
+class _NoGridModule:
+    def __getattr__(self, name):
+        raise RuntimeError("no grid module in this test")
+ns = {"os": os, "crypto_grid_bot_module": _NoGridModule()}
 exec(config_src, ns)
-_live_ops_config = ns["_live_ops_config"]
+_live_ops_config_async = ns["_live_ops_config"]
+
+
+def _live_ops_config():
+    return asyncio.run(_live_ops_config_async())
 
 
 def cfg(**env):

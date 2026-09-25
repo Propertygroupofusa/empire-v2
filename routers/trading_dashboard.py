@@ -6321,6 +6321,58 @@ async def set_grid_maker_orders_endpoint(payload: SetGridMakerOrdersRequest):
     return {"status": "updated", "maker_orders_active": payload.enabled}
 
 
+class SetGridMakerOnlyRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/grid-status/maker-only")
+async def set_grid_maker_only_endpoint(payload: SetGridMakerOnlyRequest):
+    """Remove the market fallback entirely - maker fills or no fill.
+
+    This is the switch that actually changes the arithmetic, and it is
+    worth being exact about why, because "use maker orders" on its own
+    does not.
+
+    Maker-FIRST still ends at a market order, so the spacing floor has to
+    price the taker leg: 1.70%, and a real cost of 2.17% once the measured
+    0.67% of adverse selection is counted. The live 2.00% step loses 0.17%
+    a cycle against that. Maker-ONLY deletes the taker path rather than
+    hoping to avoid it, so the floor honestly prices the MEASURED maker leg
+    - 0.90% - and the real cost falls to 1.37% (0.70% fees + 0.67%
+    adverse), which the same 2.00% step clears by 0.63%. Nothing about the
+    limit price changed; what changed is that there is no longer a more
+    expensive way for the order to end.
+
+    What it costs: missed cycles. An unfilled buy simply does not buy (the
+    dip is still there next cycle, and the cash was never spent), and an
+    unfilled sell holds a slice that _pick_profitable_slice_to_sell has
+    already certified as profitable, so it is never a loss locked in -
+    only a gain deferred. Both are counted, under
+    maker_only_skipped_cycles in grid status, because the cost of this
+    mode is missed trades and an uncounted cost is an assumed one.
+
+    What it does NOT touch: close_all_grid_branches() sells at market
+    directly, so the emergency exit is unaffected, and the drawdown
+    breaker only ever pauses buys. Nothing that must fill is routed
+    through the maker path.
+
+    Turning this on also turns maker orders on, since maker-only without
+    them would mean a bot that cannot trade at all. Takes effect on the
+    live bot's very next cycle, no restart needed."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    await crypto_grid_bot_module.set_maker_only_active(payload.enabled)
+    floor = await crypto_grid_bot_module.fee_safe_floor_pct()
+    log.info(f"[dashboard] 🎯 Grid Bot maker-ONLY mode {'ENABLED - market fallback REMOVED' if payload.enabled else 'disabled - market fallback restored'}; "
+             f"fee-safe spacing floor now {floor * 100:.2f}%")
+    return {
+        "status": "updated",
+        "maker_only_active": payload.enabled,
+        "maker_orders_active": await crypto_grid_bot_module.is_maker_orders_active(),
+        "fee_safe_min_grid_pct": floor,
+    }
+
+
 class SetGridSpacingOverrideRequest(BaseModel):
     label: str
 
@@ -7294,20 +7346,71 @@ async def _live_ops_runner():
     service_role = (os.getenv("SERVICE_ROLE") or "").strip().lower()
     this_process = "bot_runner.py (grid fleet)" if service_role == "crypto-trading" else "main.py (web app)"
 
+    # THE EVIDENCE THAT OUTRANKS THE ENVIRONMENT.
+    #
+    # Both gates below read variables scoped to THIS process, and on the web
+    # service both are guaranteed to read the wrong half: the grid runner is
+    # a different service. So this panel declared, in red, "The bot cannot
+    # trade until the failing item below is fixed. Nothing under this panel
+    # will move while it fails" - directly above its own live feed showing
+    # the grid deciding 2 seconds ago across 8 branches, and beside a
+    # CRYPTO_STRATEGY_MODE that is a RETIRED name rather than a typo.
+    #
+    # Observed live 2026-09-25: mode 'delfina_scalping', SERVICE_ROLE unset,
+    # both gates red, 48 gate decisions in 24h and a 2.5-second-old cycle.
+    # The panel was not describing a broken bot; it was describing variables
+    # it cannot see, in the voice of a bot that cannot trade.
+    #
+    # crypto_strategy_config already solved this for the LOG, downgrading its
+    # ERROR to a WARNING when note_runtime_mode() proves something is really
+    # running ("A false alarm at ERROR level is not harmless - it teaches the
+    # operator to scroll past the one message that would matter if it were
+    # ever true"). That reasoning holds exactly as well for this panel, and
+    # this panel is what the operator actually reads.
+    #
+    # The grid heartbeat is the cross-service version of that proof. Only
+    # run_grid_branches_cycle() writes it, and that only runs inside
+    # bot_runner.py, so a fresh one is direct evidence that the grid runner
+    # IS wired up and IS looping - stronger evidence than any environment
+    # variable, which only says what was intended. It is read through the
+    # database, so it crosses the service boundary that the variables cannot.
+    #
+    # Stale or unreadable => falls through to the env answer, so this can
+    # only ever clear a gate on positive proof, never hide a real failure.
+    grid_alive = False
+    grid_beat = None
+    if crypto_grid_bot_module is not None:
+        try:
+            grid_beat = await crypto_grid_bot_module.get_grid_heartbeat()
+            grid_alive = bool(grid_beat.get("alive"))
+        except Exception:
+            grid_alive = False
+    beat_age = (grid_beat or {}).get("age_seconds")
+    proof = (f"the grid runner recorded a cycle {beat_age:.0f}s ago, so it is "
+             f"running on its own service" if grid_alive and beat_age is not None
+             else "the grid runner is recording cycles")
+
     gates = [
-        {"name": "A crypto loop owns execution", "ok": mode in known,
-         "detail": f"{mode or '(unset)'} - run by {owner}" if owner
-                   else f"{mode or '(unset)'} - matches no known mode",
+        {"name": "A crypto loop owns execution", "ok": mode in known or grid_alive,
+         "detail": (f"{mode or '(unset)'} - run by {owner}" if owner
+                    else (f"{mode or '(unset)'} is not a mode THIS process can start, but "
+                          f"{proof}" if grid_alive
+                          else f"{mode or '(unset)'} - matches no known mode")),
          "fix": "set CRYPTO_STRATEGY_MODE per service: grid_fleet on the "
                 "crypto-trading service, family_tree on the web service"},
         {"name": "Grid runner service is wired up",
-         # Only THIS process can be checked here. On the web service the
-         # honest answer is "not me, and I cannot see the other one" - never
-         # a green tick implying the grid runner was verified.
-         "ok": service_role == "crypto-trading",
+         # Only THIS process's variables can be checked here, so on the web
+         # service they can never say yes. The heartbeat can, and it is the
+         # better evidence: variables say what was intended, a recorded cycle
+         # says what happened.
+         "ok": service_role == "crypto-trading" or grid_alive,
          "detail": (f"SERVICE_ROLE={service_role or '(unset)'} - this process is {this_process}"
                     + ("" if service_role == "crypto-trading"
-                       else "; the grid runner is a SEPARATE service whose variables this page cannot read")),
+                       else (f"; the grid runner is a SEPARATE service, and "
+                             f"this page cannot read its variables - but {proof}" if grid_alive
+                             else "; the grid runner is a SEPARATE service, and "
+                                  "this page cannot read its variables, nor has it "
+                                  "recorded any recent cycle"))),
          "fix": "on the crypto-trading service set BOTH: SERVICE_ROLE=crypto-trading "
                 "AND CRYPTO_STRATEGY_MODE=grid_fleet. Without SERVICE_ROLE, "
                 "service_entrypoint.py launches main.py instead of bot_runner.py "
@@ -7349,6 +7452,11 @@ async def _live_ops_runner():
         "tree_retired": passive,
         "last_activity_at": last_any.isoformat() if last_any else None,
         "last_activity_age_seconds": last_activity_age,
+        # Surfaced so the page can show WHY a gate cleared on evidence rather
+        # than on configuration - a gate that goes green for an unstated
+        # reason is its own kind of dishonest.
+        "grid_heartbeat": grid_beat,
+        "grid_runner_proven_alive": grid_alive,
     }
 
 
