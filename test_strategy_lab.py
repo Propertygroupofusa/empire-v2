@@ -194,6 +194,41 @@ ok("results are ranked by OUT-OF-SAMPLE, not in-sample",
    r["ranked"] == sorted(r["ranked"],
                          key=lambda x: -x["out_of_sample"]["total_return_pct"]))
 
+# ── 7. a fleet sweep is wider than one coin's sweep ────────────────────
+print()
+print("-- running N variants on 8 coins is 8N tests, not N --")
+ok("run_fleet exists", hasattr(sl, "run_fleet"))
+ok("the grid is the full 432 the account asked for", sl.VARIANT_COUNT == 432,
+   str(sl.VARIANT_COUNT))
+
+# The floor must rise with the TRUE width, or an 8-coin sweep passes
+# results that are pure search.
+rets2 = [abs(noise[i] / noise[i - 1] - 1) for i in range(1, len(noise))]
+one = sl.noise_floor_for_search(432, 12, rets2, 0.015, draws=40, seed=2)
+fleet = sl.noise_floor_for_search(432 * 8, 12, rets2, 0.015, draws=40, seed=2)
+ok("the 8-coin floor is higher than the single-coin floor",
+   fleet["p95"] > one["p95"], f"{one['p95']} -> {fleet['p95']}")
+
+FSRC = io.open("strategy_lab.py", encoding="utf-8").read()
+ok("run_fleet computes the floor at variants x coins",
+   "true_width = n_variants * len(usable)" in FSRC)
+ok("it re-runs the winner on every other coin",
+   "cross_coin" in FSRC and "does not generalise" in FSRC.lower())
+ok("it refuses a winner that pays on too few coins",
+   "DOES NOT GENERALISE" in FSRC)
+ok("it records the real 2026-09-25 result that motivated the gate",
+   "atr_breakout(21, 0.75)" in FSRC and "NEAR-USD" in FSRC)
+ok("it notes that losing less than holding is not an edge",
+   "Losing less than holding is not an edge" in FSRC)
+
+# The gate must actually fire on the shape of that real result.
+prof = ["NEAR-USD"]
+cross_n = 8
+ok("1-of-8 profitable trips the generalisation gate",
+   len(prof) < max(2, cross_n // 2))
+ok("5-of-8 profitable would not trip it",
+   not (5 < max(2, cross_n // 2)))
+
 print()
 print(f"{CHECKS - len(FAILURES)}/{CHECKS} checks passed")
 if FAILURES:

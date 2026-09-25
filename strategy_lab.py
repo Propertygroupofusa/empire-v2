@@ -213,6 +213,104 @@ def strat_donchian_breakout(closes, highs, lows, period=20, exit_period=10):
     return pos
 
 
+def rsi(closes, period=14):
+    out = [None] * len(closes)
+    if len(closes) <= period:
+        return out
+    gains = losses = 0.0
+    for i in range(1, period + 1):
+        d = closes[i] - closes[i - 1]
+        gains += max(d, 0.0)
+        losses += max(-d, 0.0)
+    ag, al = gains / period, losses / period
+    out[period] = 100.0 if al == 0 else 100 - 100 / (1 + ag / al)
+    for i in range(period + 1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        ag = (ag * (period - 1) + max(d, 0.0)) / period
+        al = (al * (period - 1) + max(-d, 0.0)) / period
+        out[i] = 100.0 if al == 0 else 100 - 100 / (1 + ag / al)
+    return out
+
+
+def strat_rsi_reversion(closes, highs, lows, period=14, oversold=30, overbought=70):
+    r = rsi(closes, period)
+    pos, holding = [], 0
+    for i in range(len(closes)):
+        if r[i] is None:
+            pos.append(0)
+            continue
+        if r[i] < oversold:
+            holding = 1
+        elif r[i] > overbought:
+            holding = 0
+        pos.append(holding)
+    return pos
+
+
+def strat_sma_cross(closes, highs, lows, fast=20, slow=50):
+    f, s_ = sma(closes, fast), sma(closes, slow)
+    return [1 if (f[i] is not None and s_[i] is not None and f[i] > s_[i]) else 0
+            for i in range(len(closes))]
+
+
+def strat_momentum(closes, highs, lows, lookback=20, threshold=0.0):
+    """Long while price is up more than `threshold` over `lookback` bars."""
+    pos = []
+    for i in range(len(closes)):
+        if i < lookback:
+            pos.append(0)
+            continue
+        pos.append(1 if (closes[i] / closes[i - lookback] - 1.0) > threshold else 0)
+    return pos
+
+
+def strat_volume_breakout(closes, highs, lows, volumes=None, period=20, mult=2.0):
+    """Long when volume spikes above its own average AND price is up.
+
+    Named by the account owner. Falls back to a price-range proxy when no
+    volume series is supplied, and says so rather than silently pretending
+    it had volume.
+    """
+    n = len(closes)
+    series = volumes if volumes else [highs[i] - lows[i] for i in range(n)]
+    avg = sma(series, period)
+    pos, holding = [], 0
+    for i in range(n):
+        if avg[i] is None or i == 0:
+            pos.append(0)
+            continue
+        if series[i] > avg[i] * mult and closes[i] > closes[i - 1]:
+            holding = 1
+        elif closes[i] < closes[i - 1]:
+            holding = 0
+        pos.append(holding)
+    return pos
+
+
+def strat_price_vs_sma(closes, highs, lows, period=50, buffer_pct=0.0):
+    """Long while price holds above its own moving average by a buffer."""
+    m = sma(closes, period)
+    return [1 if (m[i] is not None and closes[i] > m[i] * (1 + buffer_pct)) else 0
+            for i in range(len(closes))]
+
+
+def strat_atr_breakout(closes, highs, lows, period=14, mult=1.5):
+    """Long on a move larger than `mult` x ATR; flat on the reverse."""
+    a = atr(closes, highs, lows, period)
+    pos, holding = [], 0
+    for i in range(len(closes)):
+        if a[i] is None or i == 0:
+            pos.append(0)
+            continue
+        move = closes[i] - closes[i - 1]
+        if move > a[i] * mult:
+            holding = 1
+        elif move < -a[i] * mult:
+            holding = 0
+        pos.append(holding)
+    return pos
+
+
 def strat_buy_and_hold(closes, highs, lows):
     """The benchmark everything must beat. A strategy that trades all year
     and lands under buy-and-hold has spent fees to underperform doing
@@ -222,20 +320,50 @@ def strat_buy_and_hold(closes, highs, lows):
 
 STRATEGIES = {
     "ema_cross": (strat_ema_cross,
-                  [{"fast": f, "slow": s} for f in (8, 12, 20) for s in (26, 50, 100) if f < s]),
+                  [{"fast": f, "slow": s}
+                   for f in (3, 5, 8, 12, 20, 26, 34) for s in (26, 50, 100, 200) if f < s]),
+    "sma_cross": (strat_sma_cross,
+                  [{"fast": f, "slow": s}
+                   for f in (3, 5, 10, 20, 30, 50) for s in (50, 100, 150, 200) if f < s]),
     "macd": (strat_macd,
              [{"fast": f, "slow": s, "signal": g}
-              for f in (8, 12) for s in (21, 26) for g in (7, 9)]),
+              for f in (5, 8, 12, 16) for s in (21, 26, 34) for g in (7, 9, 12)]),
     "bollinger_breakout": (strat_bollinger_breakout,
-                           [{"period": p, "mult": m} for p in (14, 20, 30) for m in (1.5, 2.0, 2.5)]),
+                           [{"period": p, "mult": m}
+                            for p in (10, 14, 20, 30, 50, 100)
+                            for m in (0.75, 1.0, 1.5, 2.0, 2.5, 3.0)]),
     "bollinger_reversion": (strat_bollinger_reversion,
-                            [{"period": p, "mult": m} for p in (14, 20, 30) for m in (1.5, 2.0, 2.5)]),
+                            [{"period": p, "mult": m}
+                             for p in (10, 14, 20, 30, 50, 100)
+                             for m in (0.75, 1.0, 1.5, 2.0, 2.5, 3.0)]),
     "supertrend": (strat_supertrend,
-                   [{"period": p, "mult": m} for p in (7, 10, 14) for m in (2.0, 3.0, 4.0)]),
+                   [{"period": p, "mult": m}
+                    for p in (5, 7, 10, 14, 21, 28) for m in (1.5, 2.0, 2.5, 3.0, 3.5, 4.0)]),
     "donchian_breakout": (strat_donchian_breakout,
-                          [{"period": p, "exit_period": e} for p in (20, 40, 55) for e in (10, 20)]),
+                          [{"period": p, "exit_period": e}
+                           for p in (10, 20, 30, 40, 55) for e in (3, 5, 10, 20, 30)]),
+    "rsi_reversion": (strat_rsi_reversion,
+                      [{"period": p, "oversold": o, "overbought": b}
+                       for p in (5, 7, 14, 21, 28) for o in (20, 25, 30, 35)
+                       for b in (65, 70, 75, 80)]),
+    "momentum": (strat_momentum,
+                 [{"lookback": l, "threshold": t}
+                  for l in (5, 10, 15, 20, 30, 50, 100)
+                  for t in (0.0, 0.02, 0.05, 0.10, 0.15, 0.20)]),
+    "volume_breakout": (strat_volume_breakout,
+                        [{"period": p, "mult": m}
+                         for p in (10, 20, 30, 50, 100) for m in (1.25, 1.5, 2.0, 2.5, 3.0)]),
+    "price_vs_sma": (strat_price_vs_sma,
+                     [{"period": p, "buffer_pct": b}
+                      for p in (10, 20, 30, 50, 100, 200)
+                      for b in (0.0, 0.01, 0.02, 0.03, 0.05)]),
+    "atr_breakout": (strat_atr_breakout,
+                     [{"period": p, "mult": m}
+                      for p in (5, 7, 10, 14, 21, 28) for m in (0.5, 0.75, 1.0, 1.5, 2.0, 2.5)]),
     "buy_and_hold": (strat_buy_and_hold, [{}]),
 }
+
+VARIANT_COUNT = sum(len(v[1]) for v in STRATEGIES.values())
 
 
 # ── the replay ──────────────────────────────────────────────────────────
@@ -469,4 +597,118 @@ def run_strategy_lab(closes, highs, lows, strategies=None,
         "buy_and_hold_oos_pct": bh_oos,
         "verdict": verdict,
         "ranked": ranked,
+    }
+
+
+def run_fleet(series_by_coin, strategies=None, in_sample_frac=0.7,
+              control_draws=10, fee_round_trip=None):
+    """Run every variant across every coin, then judge the winner honestly.
+
+    TWO THINGS A PER-COIN RUN CANNOT SEE, both learned by running it:
+
+    1. THE REAL SEARCH WIDTH. run_strategy_lab computes its noise floor for
+       N variants. Running the same N across 8 coins is 8N tests, and the
+       floor rises with width. On this account's coins: the best of 432
+       zero-edge strategies reaches +68.5% out-of-sample by luck; the best
+       of 3,456 reaches +92.0%. Judging an 8-coin sweep against the
+       432-variant floor passes results that are pure search.
+
+    2. WHETHER THE WINNER GENERALISES. The 2026-09-25 sweep produced one
+       survivor - atr_breakout(21, 0.75) on NEAR-USD at +226.5%
+       out-of-sample, above even the corrected floor, beating its matched
+       control 100% of the time. Run on the other seven coins it returned
+       -33.8, -48.0, -33.1, -2.8, -3.9, -59.6 and -23.6 percent. It was one
+       lucky coin out of 3,456 tests, which is precisely what the
+       multiple-comparisons arithmetic predicts.
+
+       It "beat buy-and-hold on 6/8" only because buy-and-hold was -33% to
+       -64% on those coins. Losing less than holding is not an edge.
+
+    So the winner of a fleet sweep is re-run, unchanged, on every other
+    coin. A parameter set that only pays on the coin it was found on was
+    found, not discovered.
+    """
+    fee = BACKTEST_ROUND_TRIP_FEE_RATE if fee_round_trip is None else fee_round_trip
+    strategies = strategies or STRATEGIES
+    per_coin, all_rets = {}, []
+
+    for coin, (closes, highs, lows) in series_by_coin.items():
+        r = run_strategy_lab(closes, highs, lows, strategies, in_sample_frac,
+                             control_draws, fee, label=coin)
+        per_coin[coin] = r
+        if "error" not in r:
+            all_rets += [abs(closes[i] / closes[i - 1] - 1) for i in range(1, len(closes))]
+
+    usable = {c: r for c, r in per_coin.items() if "error" not in r}
+    if not usable:
+        return {"error": "no coin produced a result", "per_coin": per_coin}
+
+    n_variants = max(r["variants_tested"] for r in usable.values())
+    true_width = n_variants * len(usable)
+    typical_trades = max(1, int(statistics.median(
+        [r["ranked"][0]["out_of_sample"]["trades"] for r in usable.values()]) or 1))
+    fleet_floor = noise_floor_for_search(true_width, typical_trades, all_rets, fee,
+                                         draws=120, seed=17)
+
+    # The single best variant anywhere, judged against the FLEET floor.
+    best_coin, best_row = None, None
+    for coin, r in usable.items():
+        for row in r["ranked"]:
+            if row["out_of_sample"]["trades"] < MIN_OOS_TRADES:
+                continue
+            if best_row is None or (row["out_of_sample"]["total_return_pct"]
+                                    > best_row["out_of_sample"]["total_return_pct"]):
+                best_coin, best_row = coin, row
+
+    cross = {}
+    if best_row is not None:
+        fn = strategies[best_row["strategy"]][0]
+        for coin, (closes, highs, lows) in series_by_coin.items():
+            try:
+                pos = fn(closes, highs, lows, **best_row["params"])
+            except Exception:
+                continue
+            split = int(len(closes) * in_sample_frac)
+            oos = replay_positions(closes, pos, fee, split, len(closes))
+            bh = replay_positions(closes, [1] * len(closes), fee, split, len(closes))
+            cross[coin] = {"oos_pct": oos["total_return_pct"],
+                           "trades": oos["trades"],
+                           "buy_hold_pct": bh["total_return_pct"],
+                           "beats_buy_hold": oos["total_return_pct"] > bh["total_return_pct"]}
+
+    profitable = [c for c, v in cross.items() if v["oos_pct"] > 0]
+    verdict = "no variant anywhere cleared the minimum trade count"
+    if best_row is not None:
+        b = best_row["out_of_sample"]["total_return_pct"]
+        if b <= fleet_floor["p95"]:
+            verdict = (f"NO EDGE ACROSS THE FLEET. The best result anywhere "
+                       f"({best_row['strategy']} on {best_coin}, {b:+.1f}%) is under the "
+                       f"{fleet_floor['p95']:+.1f}% that the best of {true_width} zero-edge "
+                       f"strategies reaches by luck at this search width.")
+        elif len(profitable) < max(2, len(cross) // 2):
+            verdict = (f"DOES NOT GENERALISE. {best_row['strategy']} {best_row['params']} "
+                       f"returned {b:+.1f}% on {best_coin} but is profitable on only "
+                       f"{len(profitable)}/{len(cross)} coins "
+                       f"({', '.join(sorted(profitable)) or 'none'}). One lucky coin out of "
+                       f"{true_width} tests is what this search width produces from noise.")
+        else:
+            verdict = (f"{best_row['strategy']} {best_row['params']}: {b:+.1f}% on "
+                       f"{best_coin}, above the {fleet_floor['p95']:+.1f}% fleet noise floor, "
+                       f"and profitable on {len(profitable)}/{len(cross)} coins. Survives "
+                       f"every gate - forward-test it, do not fund it on this.")
+
+    return {
+        "coins": list(usable.keys()),
+        "variants_per_coin": n_variants,
+        "true_search_width": true_width,
+        "fleet_noise_floor": fleet_floor,
+        "best": ({"coin": best_coin, "strategy": best_row["strategy"],
+                  "params": best_row["params"],
+                  "out_of_sample": best_row["out_of_sample"],
+                  "percentile_vs_control": best_row.get("percentile_vs_control")}
+                 if best_row else None),
+        "cross_coin": cross,
+        "profitable_on": profitable,
+        "verdict": verdict,
+        "per_coin_verdicts": {c: r["verdict"] for c, r in usable.items()},
     }
