@@ -68,7 +68,7 @@ except ImportError:
 # Bump on every change. Printed by the banner and by --import-key so the
 # running copy identifies itself - two rounds were lost to a stale file on
 # disk looking identical to a fresh one.
-BOT_VERSION = "2026-09-25.6-multikey"
+BOT_VERSION = "2026-09-25.7-jwt-uri-fix"
 
 HERE = Path(__file__).resolve().parent
 STATE_FILE = None  # set after LIVE is known - see below
@@ -178,9 +178,21 @@ def auth_headers(method, path):
 
 
 def request(method, path, body=None, auth=True):
+    """The query string goes on the URL but NOT into the JWT.
+
+    CDP validates the 'uri' claim against the path WITHOUT query
+    parameters. Signing "GET host/api/v3/brokerage/accounts?limit=250"
+    produces a signature that can never match, and the call returns 401 -
+    which looks exactly like a revoked credential and is not one. That
+    misread cost real time on this project before it was tracked down.
+
+    Split here rather than at each call site, so no future caller can
+    reintroduce it by passing a path containing '?'.
+    """
     url = BASE + path
+    sign_path = path.split("?", 1)[0]
     data = json.dumps(body).encode() if body else None
-    headers = auth_headers(method, path) if auth else {"Content-Type": "application/json"}
+    headers = auth_headers(method, sign_path) if auth else {"Content-Type": "application/json"}
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     with urllib.request.urlopen(req, timeout=20) as r:
         return json.loads(r.read().decode())
