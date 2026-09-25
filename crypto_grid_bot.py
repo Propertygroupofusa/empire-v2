@@ -1739,6 +1739,38 @@ async def _first_ranked_coin_beating_btc(ranked_product_ids: list) -> str:
 # finding somewhere, however mediocre, to go.
 MIN_REQUIRED_ROI_PCT = float(os.getenv("GRID_MIN_REQUIRED_ROI_PCT", "20.0"))
 
+# The coins the account owner actually wants this fleet trading, chosen by
+# them on 2026-09-25 and overridable without a deploy.
+#
+# This exists because three independent filters stacked into a total
+# shutout that day. A spread plan reported "OPEN NEW BRANCHES: 5, eligible
+# coins: NONE" with $259.41 to deploy and 35 freshly ranked coins in hand:
+#
+#   MIN_REQUIRED_ROI_PCT (20%)   only 3 of 35 coins cleared it - UNI 40.0%,
+#                                NEAR 36.1%, ARB 34.5%. FIL missed at 18.8%.
+#   MANUAL_EXCLUDED_COINS        a hardcoded set that blocks UNI, the #1
+#                                ranked coin, and STX, which earned real
+#                                money in September.
+#   TOP_N_ELIGIBLE_COINS (15)    cuts everything outside the top 15 by
+#                                backtest ROI, which is what starved the
+#                                generic nine-coin fallback below.
+#
+# Of the three survivors, one was hardcoded-blocked and one was already
+# claimed. Every automatic layer was individually defensible and together
+# they left nothing to trade.
+#
+# So these coins are judged on two questions only: has the operator
+# excluded this by hand from the dashboard, and is another branch already
+# on it. Backtest ROI still ORDERS the picks - ranked coins are offered
+# first - it just no longer silently empties the pool. An automated filter
+# may rank a deliberate choice lower; it may not veto it outright.
+GRID_WORKING_SET = [
+    c.strip().upper() for c in os.getenv(
+        "GRID_WORKING_SET",
+        "BTC-USD,ETH-USD,SOL-USD,DOGE-USD,ARB-USD,NEAR-USD,LINK-USD,AVAX-USD",
+    ).split(",") if c.strip()
+]
+
 
 async def _spread_candidate_coins(wanted: int):
     """Coins a spread may open a branch on, best first. Returns (coins, note).
@@ -1777,17 +1809,38 @@ async def _spread_candidate_coins(wanted: int):
         excluded = await tree.get_effective_excluded_coins()
     except Exception:
         excluded = set()
+    # WORKING SET coins answer to the operator's own dashboard toggle, not
+    # to the automatic layers - see GRID_WORKING_SET for why. Anything the
+    # operator excluded by hand still counts, for every coin.
+    try:
+        reasons = await tree.get_effective_excluded_coins_with_reasons()
+        hand_excluded = {pid for pid, why in (reasons or {}).items()
+                         if "dashboard" in str(why).lower()}
+    except Exception:
+        # Fail CLOSED for the working set only: without reasons we cannot
+        # tell a hand exclusion from an automatic one, so honour them all
+        # rather than risk trading a coin the operator killed by hand.
+        hand_excluded = set(excluded)
+
     claimed = await get_grid_branch_claimed_coins()
     try:
         tree_held = await claims.claimed_by_other(claims.GRID)
     except Exception:
         tree_held = set()
 
-    def eligible(pid):
-        return (pid not in excluded and pid not in claimed
+    def eligible(pid, working_set=False):
+        blocked = hand_excluded if working_set else excluded
+        return (pid not in blocked and pid not in claimed
                 and claims.normalize_product(pid) not in tree_held)
 
     out = [p for p in ranked if eligible(p)]
+    # The operator's own chosen coins come next, BEFORE the generic fleet
+    # list, and are judged only on hand exclusions and claims.
+    for pid in GRID_WORKING_SET:
+        if len(out) >= wanted:
+            break
+        if pid not in out and eligible(pid, working_set=True):
+            out.append(pid)
     for pid in scanner.NINE_COINS:
         if len(out) >= wanted:
             break
@@ -1797,9 +1850,9 @@ async def _spread_candidate_coins(wanted: int):
     if not note and len(out) < wanted:
         note = "Every remaining coin is already claimed or excluded."
     if ranked and len(out) > len(ranked):
-        note = (note + " Filled the rest from the nine-coin fleet list.").strip()
+        note = (note + " Filled the rest from the working set.").strip()
     elif not ranked and out:
-        note = (note + " Used the nine-coin fleet list.").strip()
+        note = (note + " Used the operator's working set.").strip()
     return out, note or "Ranked picks available."
 
 
