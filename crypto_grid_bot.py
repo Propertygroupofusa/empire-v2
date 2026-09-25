@@ -3669,6 +3669,35 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     # a guaranteed loss, with no warning. Nothing live hit this (the
     # promoted 3_levels_2.5pct is 2.5% against a ~1.2% floor), but "nothing
     # has hit it yet" is not a guarantee. This makes it unreachable.
+    # THE HOLE THIS CLOSES, found live 2026-09-25 with real money at stake.
+    #
+    # The guarantee below only ran when a dynamic source had SET
+    # new_grid_pct. With the promoted override, avg-swing spacing and
+    # fee-tier spacing all switched off, new_grid_pct stays None and the
+    # whole check was skipped - so a branch simply KEPT whatever spacing it
+    # was born with, unchecked.
+    #
+    # create_grid_branch's default is 1.00%. Five branches (ETC, FLOKI,
+    # BCH, DOGE, BONK) were created that way minutes after the three
+    # spacing modes were turned off, and every one sat at 1.00% against a
+    # 1.70% floor. On the live fee tier a completed round trip at 1.00%
+    # nets -$0.02 at maker rates and -$0.12 at taker: a guaranteed loss on
+    # every cycle, with nothing in the log to say so.
+    #
+    # The floor is a property of the SPACING A BRANCH WILL TRADE AT, not of
+    # the mechanism that happened to choose it. So it is applied to the
+    # branch's own value whenever no dynamic source spoke.
+    if new_grid_pct is None:
+        _floor = await fee_safe_floor_pct()
+        if branch.grid_pct < _floor:
+            log.warning(
+                f"[GRID] {branch.bot_name}: its own stored spacing {branch.grid_pct*100:.3f}% is "
+                f"below the fee-safe floor {_floor*100:.3f}% and no dynamic source is active - "
+                f"a full round trip at that spacing loses money. Raising to the floor."
+            )
+            new_grid_pct = _floor
+            spacing_log_note = "raised to fee-safe floor (no dynamic source active)"
+
     if new_grid_pct is not None:
         floor = await fee_safe_floor_pct()
         if new_grid_pct < floor:

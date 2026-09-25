@@ -116,6 +116,54 @@ fbody = "\n".join(ast.unparse(s) for s in floorfn.body[1:])
 ok("the crypto floor counts BOTH fee legs", "leg * 2" in fbody)
 ok("and adds a target net margin on top", "TARGET_NET_MARGIN_PCT" in fbody)
 
+
+# --- the floor must not depend on WHICH mechanism chose the spacing ------
+# Found live 2026-09-25 with real money at stake. The guarantee only ran
+# when a dynamic source had set new_grid_pct. With the promoted override,
+# avg-swing and fee-tier spacing all switched off, new_grid_pct stays None
+# and the check was skipped entirely - so a branch kept whatever spacing it
+# was born with. create_grid_branch's default is 1.00%. Five branches (ETC,
+# FLOKI, BCH, DOGE, BONK) were created that way minutes after the three
+# modes were turned off and every one sat at 1.00% against a 1.70% floor,
+# where a completed round trip nets -$0.02 at maker and -$0.12 at taker.
+import ast as _ast
+# NOT `src` - in this file that is prop_bot.py. The grid cycle lives in
+# crypto_grid_bot.py and must be read explicitly.
+_grid_src = open(os.path.join(HERE, "crypto_grid_bot.py"), encoding="utf-8").read()
+_tree = _ast.parse(_grid_src)
+_cycle = next((n for n in _ast.walk(_tree)
+               if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+               and n.name == "run_grid_branch_cycle"), None)
+_body = "\n".join(_ast.unparse(x) for x in (_cycle.body[1:] if _cycle else []))
+
+ok("REGRESSION: the floor is applied when NO dynamic source spoke",
+   "if new_grid_pct is None:" in _body and "fee_safe_floor_pct" in _body)
+ok("it floors the branch's OWN stored spacing, not just a dynamic value",
+   "branch.grid_pct < _floor" in _body)
+ok("it says so in the log rather than raising silently",
+   "no dynamic source is active" in _body)
+
+
+def effective_step(stored, dynamic, floor):
+    """What a branch will really trade at."""
+    chosen = dynamic if dynamic is not None else stored
+    return max(chosen, floor)
+
+
+FLOOR = 0.017
+ok("REGRESSION: a branch born at 1.00% with every mode off is raised to the floor",
+   abs(effective_step(0.010, None, FLOOR) - FLOOR) < 1e-9)
+ok("a dynamic value below the floor is still raised",
+   abs(effective_step(0.020, 0.012, FLOOR) - FLOOR) < 1e-9)
+ok("a healthy stored spacing is left alone",
+   abs(effective_step(0.020, None, FLOOR) - 0.020) < 1e-9)
+ok("a healthy dynamic spacing is left alone",
+   abs(effective_step(0.010, 0.025, FLOOR) - 0.025) < 1e-9)
+ok("no path can ever trade below the floor",
+   all(effective_step(s, d, FLOOR) >= FLOOR - 1e-12
+       for s in (0.001, 0.010, 0.017, 0.030)
+       for d in (None, 0.005, 0.017, 0.040)))
+
 width = max(len(l) for l, _ in checks)
 for label, passed in checks:
     print(f"  [{'PASS' if passed else 'FAIL'}] {label:<{width}}")
