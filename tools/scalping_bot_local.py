@@ -400,7 +400,65 @@ def run_cycle(state, authed):
     return executed
 
 
+def import_key(path=None):
+    """Read a Coinbase CDP key JSON and append it to .env.
+
+    Exists because PowerShell's ConvertFrom-Json failed on the downloaded
+    file, leaving empty values in .env, and because quoting a PEM block
+    through a PowerShell one-liner is its own source of errors. Python's
+    json module handles the escaping, and the field name has changed
+    across CDP releases, so several spellings are accepted.
+
+    Prints field names and value LENGTHS only - never a value.
+    """
+    src = Path(path) if path else (Path.home() / "Downloads" / "cdp_api_key.json")
+    print(f"\nReading {src}")
+    if not src.exists():
+        print("  NOT FOUND. Pass the path:  python scalping_bot.py --import-key \"C:\\path\\to\\key.json\"")
+        return 1
+    try:
+        data = json.loads(src.read_text(encoding="utf-8-sig"))   # -sig strips a BOM
+    except Exception as e:
+        print(f"  Could not parse as JSON: {type(e).__name__}: {e}")
+        print(f"  First 40 characters: {src.read_text(encoding='utf-8-sig', errors='replace')[:40]!r}")
+        return 1
+
+    print(f"  fields: {', '.join(data.keys())}")
+    for k, v in data.items():
+        print(f"    {k}: {len(str(v))} chars")
+
+    name = next((data[k] for k in ("name", "id", "apiKeyName", "api_key_name") if data.get(k)), None)
+    key = next((data[k] for k in ("privateKey", "private_key", "apiSecret", "secret") if data.get(k)), None)
+    if not name or not key:
+        print("\n  Could not find both a key name and a private key in that file.")
+        print("  Tell me the field names listed above and I will adjust.")
+        return 1
+
+    env = HERE / ".env"
+    existing = env.read_text(encoding="utf-8") if env.exists() else ""
+    # Drop any previous entries for these two names, blank or not, so the
+    # file ends up with exactly one of each rather than a growing pile.
+    kept = [ln for ln in existing.splitlines()
+            if not ln.strip().startswith(("COINBASE_API_KEY_NAME=", "COINBASE_API_PRIVATE_KEY="))
+            and not ln.strip().startswith(("-----BEGIN", "-----END"))
+            and "PRIVATE KEY" not in ln]
+    kept += [f"COINBASE_API_KEY_NAME={name}", f"COINBASE_API_PRIVATE_KEY={key}"]
+    env.write_text("\n".join(kept) + "\n", encoding="utf-8")
+
+    print(f"\n  Wrote {env}")
+    print(f"    COINBASE_API_KEY_NAME:    {len(name)} chars"
+          f"{'  <- expected ~95 starting organizations/' if not str(name).startswith('organizations/') else '  OK'}")
+    print(f"    COINBASE_API_PRIVATE_KEY: {len(key)} chars")
+    print("\n  Now run:  python scalping_bot.py")
+    return 0
+
+
 def main():
+    if "--import-key" in sys.argv:
+        i = sys.argv.index("--import-key")
+        arg = sys.argv[i + 1] if len(sys.argv) > i + 1 else None
+        sys.exit(import_key(arg))
+
     authed, why = check_auth()
     if authed:
         mode = "LIVE — real orders" if LIVE else "PAPER — no orders will be placed"
