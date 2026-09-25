@@ -3658,6 +3658,43 @@ async def run_grid_higher_tf_trend_backtest():
     return await crypto_selection_backtest_module.run_grid_higher_tf_trend_comparison()
 
 
+@router.post("/crypto-selection-backtest/short-side")
+async def run_short_side_comparison_endpoint(
+    grid_pct: float = 0.025,
+    num_levels: int = 3,
+    funding_8h: float = None,
+):
+    """SHADOW-MODE ONLY. Would being able to SHORT crypto have made money?
+
+    Direct answer to the account owner's own question: the Alpaca side
+    already profits when the market falls, using inverse ETFs bought long.
+    Coinbase SPOT cannot - nothing there rises when a coin drops - so the
+    only route is perpetual futures on a different venue and a different
+    account. That is a real build, and it should be justified by evidence
+    before anyone opens an account.
+
+    Replays three strategies over the same real candles, defaulting to the
+    config actually promoted live (3 levels, 2.5%): long only (what runs
+    today), short only (the mirror, PAYING perpetual funding on every open
+    slice every bar), and both together.
+
+    Places no orders and touches no account.
+
+    Read the result carefully: a positive short number is not permission to
+    trade it. Funding is modelled; liquidation is not, perp fees are
+    assumed equal to spot, and real funding spikes against the crowded side
+    exactly when a short grid is most exposed. A long slice's loss is
+    capped at its cost; a short slice's is not. The response carries these
+    caveats with it so they cannot be read away from the number.
+
+    Pulls real historical data from Coinbase's public candles endpoint -
+    30-90 seconds depending on that endpoint."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_short_side_comparison(
+        grid_pct=grid_pct, num_levels=num_levels, funding_8h=funding_8h)
+
+
 @router.post("/crypto-selection-backtest/grid-rotation-effectiveness")
 async def run_grid_rotation_effectiveness_backtest_endpoint(
     grid_pct: float = None,

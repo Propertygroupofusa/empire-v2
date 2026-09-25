@@ -1388,6 +1388,107 @@ def _replay_grid_bot(closes, highs, lows, spend=None,
     return result
 
 
+# A perpetual-futures position pays FUNDING to the other side, typically
+# every 8 hours. On hourly candles that is roughly funding_8h / 8 per bar.
+# 0.01% per 8h is the common neutral baseline on major venues; it swings
+# with sentiment and goes AGAINST the crowded side, so a short pays more
+# when shorting is popular - exactly when a short grid would be busiest.
+PERP_FUNDING_RATE_8H = float(os.getenv("PERP_FUNDING_RATE_8H", "0.0001"))
+
+
+def _replay_grid_bot_short(closes, highs, lows, spend=None,
+                           grid_pct=STRATEGY_LAB_GRID_PCT,
+                           num_levels=STRATEGY_LAB_GRID_LEVELS,
+                           funding_8h=None):
+    """The exact mirror of _replay_grid_bot: SELL high, BUY BACK lower.
+
+    Built to answer one question the account owner asked directly on
+    2026-09-25: the Alpaca side profits when the market falls, via inverse
+    ETFs bought long. Coinbase SPOT cannot do that - there is nothing to
+    buy that rises when a coin drops. The only route is perpetual futures
+    on a different venue and a different account.
+
+    That is a real build, so it should be justified by evidence first.
+    This replays what a SHORT grid would have done over the same real
+    candles the long grid is measured on.
+
+    Mechanics, mirrored exactly so the comparison is fair:
+        long grid   buys  grid_pct BELOW the reference, sells grid_pct above
+        short grid  sells grid_pct ABOVE the reference, buys back below
+
+    Costs that only the short side pays, and that make this NOT a
+    free mirror image:
+
+      FUNDING. A perp position pays funding to the other side, typically
+      every 8 hours, charged on NOTIONAL rather than on profit. Held
+      slices accrue it every bar. Ignoring it is the single easiest way to
+      make a short strategy look profitable when it is not - it is the
+      same class of error as a paper backtest that never charges fees,
+      which on 2026-09-25 turned a -0.48%/trade scalper into a +352%
+      paper result.
+
+      ASYMMETRIC LOSS. A long slice can lose at most its own cost. A
+      short slice's loss is unbounded - price can double. This replay
+      records that honestly rather than capping it.
+
+    NOT modelled, and they matter before any real money moves:
+    liquidation at a maintenance-margin breach, perp fees differing from
+    spot, and funding that spikes against the crowded side precisely when
+    a short grid is most exposed. Treat a positive result here as
+    "worth investigating", never as "deploy".
+    """
+    spend = spend if spend is not None and spend > 0 else SPEND
+    funding = PERP_FUNDING_RATE_8H if funding_8h is None else funding_8h
+    funding_per_bar = funding / 8.0  # hourly candles
+    slice_usd = spend / num_levels
+    trades = []
+    n = len(closes)
+    if n < 2:
+        return None
+
+    i = 1
+    open_slices = []  # FIFO: [{entry, qty}] - each is a SHORT
+    reference = closes[0]
+    funding_paid = 0.0
+
+    while i < n:
+        price = closes[i]
+        # Funding accrues on every open slice, every bar, on notional.
+        for slot in open_slices:
+            funding_paid += slot["qty"] * price * funding_per_bar
+
+        if price >= reference * (1 + grid_pct) and len(open_slices) < num_levels:
+            # Price rose - SELL (open a short) here.
+            open_slices.append({"entry": price, "qty": slice_usd / price})
+            reference = price
+        elif price <= reference * (1 - grid_pct) and open_slices:
+            # Price fell - BUY BACK the oldest short. Profit is the
+            # DROP, so the sign is inverted against the long replay.
+            slot = open_slices.pop(0)
+            gross = slot["qty"] * (slot["entry"] - price)
+            fee = slot["qty"] * (slot["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            trades.append(("SHORT_GRID_CYCLE", gross - fee))
+            reference = price
+        i += 1
+
+    final_price = closes[-1]
+    for slot in open_slices:
+        gross = slot["qty"] * (slot["entry"] - final_price)
+        trades.append(("OPEN_AT_WINDOW_END", gross))
+
+    # Funding is booked as one honest line rather than smeared across
+    # trades, so its size is visible instead of hidden in the average.
+    if funding_paid > 0:
+        trades.append(("FUNDING_PAID", -funding_paid))
+
+    result = _summarize_strategy_trades(trades, spend)
+    if result is not None:
+        result["open_shorts_at_end"] = len(open_slices)
+        result["funding_paid_usd"] = round(funding_paid, 4)
+        result["funding_rate_8h"] = funding
+    return result
+
+
 def _replay_swing_trading(closes, highs, lows, spend=None,
                            lookback_hours=STRATEGY_LAB_SWING_LOOKBACK_HOURS,
                            target_pct=STRATEGY_LAB_SWING_TARGET_PCT,
@@ -2429,6 +2530,124 @@ def _replay_grid_rotation(candidates: dict, btc_series: tuple, start_coin: str, 
     result["rotations"] = rotations
     result["final_coin"] = current_coin
     return result
+
+
+async def run_short_side_comparison(coins=None, days=BACKTEST_DAYS, max_concurrent=6,
+                                    spend=SPEND, grid_pct=0.025, num_levels=3,
+                                    funding_8h=None):
+    """SHADOW-MODE. Would being able to SHORT crypto have made money?
+
+    Direct answer to the account owner's question on 2026-09-25: the
+    Alpaca side already profits when the market falls, through inverse
+    ETFs bought long. Coinbase SPOT cannot - nothing there rises when a
+    coin drops - so the only route is perpetual futures on a different
+    venue and a different account. That is a real build, and it should be
+    justified by evidence before anyone opens an account.
+
+    Replays three strategies over the SAME real candles, at the config
+    actually promoted live (3 levels, 2.5%):
+
+        LONG ONLY   what runs today - buy dips, sell rallies
+        SHORT ONLY  the mirror - sell rallies, buy back dips, PAYING
+                    perpetual funding on every open slice every bar
+        BOTH        long and short run together on the same coin
+
+    Places no orders, touches no account, reads only public candles.
+
+    Read the result carefully. A positive short number is NOT permission
+    to trade it. Funding is modelled, but liquidation is not, perp fees
+    are assumed equal to spot, and real funding spikes against the
+    crowded side exactly when a short grid is most exposed. And a short
+    loss is unbounded where a long loss is capped at cost. Treat this as
+    "is the idea alive at all", not as a deployment signal.
+    """
+    coins = coins or COIN_FAMILY_TREE
+    semaphore = asyncio.Semaphore(max_concurrent)
+    last_error = {}
+
+    async def _fetch(session, product_id):
+        async with semaphore:
+            candles = await fetch_historical_candles(session, product_id, days=days,
+                                                     last_error_out=last_error)
+        return product_id, candles
+
+    async with aiohttp.ClientSession() as session:
+        results = await asyncio.gather(*[_fetch(session, pid) for pid in coins])
+
+    per_coin, skipped = [], []
+    for pid, candles in results:
+        if candles is None:
+            skipped.append({"product_id": pid,
+                            "reason": last_error.get(pid, "not enough historical data")})
+            continue
+        closes, highs, lows, _times = candles
+        long_r = _replay_grid_bot(closes, highs, lows, spend=spend,
+                                  grid_pct=grid_pct, num_levels=num_levels)
+        short_r = _replay_grid_bot_short(closes, highs, lows, spend=spend,
+                                         grid_pct=grid_pct, num_levels=num_levels,
+                                         funding_8h=funding_8h)
+        long_pnl = (long_r or {}).get("total_pnl", 0.0)
+        short_pnl = (short_r or {}).get("total_pnl", 0.0)
+        per_coin.append({
+            "product_id": pid,
+            "long_only": long_r,
+            "short_only": short_r,
+            "both_combined_pnl": round(long_pnl + short_pnl, 2),
+            "short_helped": short_pnl > 0,
+        })
+
+    if not per_coin:
+        return {"error": "no coin returned enough historical data", "skipped": skipped}
+
+    def _total(key):
+        return round(sum((r[key] or {}).get("total_pnl", 0.0) for r in per_coin), 2)
+
+    long_total = _total("long_only")
+    short_total = _total("short_only")
+    both_total = round(long_total + short_total, 2)
+    funding_total = round(sum((r["short_only"] or {}).get("funding_paid_usd", 0.0)
+                              for r in per_coin), 2)
+    helped = sum(1 for r in per_coin if r["short_helped"])
+
+    if short_total <= 0:
+        verdict = ("SHORTING WOULD HAVE LOST MONEY over this window. A perpetual "
+                   "futures account is not justified by this evidence.")
+    elif both_total > long_total * 1.25:
+        verdict = ("Shorting added real value here. Worth INVESTIGATING a perp "
+                   "venue - not deploying. Liquidation and funding spikes are "
+                   "not modelled, and a short loss is unbounded.")
+    else:
+        verdict = ("Shorting was roughly neutral - it did not clearly beat "
+                   "long-only. The added venue, account and liquidation risk "
+                   "are probably not worth it on this evidence.")
+
+    return {
+        "backtest_days": days,
+        "grid_pct": grid_pct,
+        "num_levels": num_levels,
+        "spend_per_coin": spend,
+        "funding_rate_8h": PERP_FUNDING_RATE_8H if funding_8h is None else funding_8h,
+        "coins_tested": len(per_coin),
+        "skipped": skipped,
+        "long_only_total_pnl": long_total,
+        "short_only_total_pnl": short_total,
+        "both_combined_total_pnl": both_total,
+        "total_funding_paid_usd": funding_total,
+        "coins_where_short_profited": helped,
+        "better": max([("long_only", long_total), ("short_only", short_total),
+                       ("both", both_total)], key=lambda kv: kv[1])[0],
+        "verdict": verdict,
+        "caveats": [
+            "Liquidation at a maintenance-margin breach is NOT modelled.",
+            "Perp fees are assumed equal to spot fees; they usually differ.",
+            "Funding is a flat assumption - real funding spikes against the "
+            "crowded side, which is exactly when a short grid is most exposed.",
+            "A long slice's loss is capped at its cost. A short slice's is not.",
+            "This is a different venue AND a different account - new build, "
+            "new funding, new operational risk.",
+        ],
+        "per_coin": per_coin,
+    }
 
 
 async def run_grid_rotation_effectiveness_backtest(coins=None, days=BACKTEST_DAYS, spend=SPEND, max_concurrent=6,
