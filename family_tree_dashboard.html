@@ -2577,16 +2577,36 @@ function renderGridRealizedTotalBanner(historyTotals, statusData) {
     const unrealizedKnown = unrealized !== null && unrealized !== undefined;
     const combined = unrealizedKnown ? realized + unrealized : null;
     const combinedColor = combined !== null ? (combined > 0 ? 'var(--green)' : (combined < 0 ? 'var(--red)' : 'var(--text-dim)')) : 'var(--text-dim)';
+    // TOTAL leads and realized sits underneath it as a component. This used
+    // to be the other way round, with realized big and the combined total in
+    // smaller type below - which is backwards, because a grid slice only
+    // sells ABOVE its own entry. Realized therefore cannot go negative and
+    // cannot warn about anything; the combined total is the only one of the
+    // two that can. An unknown unrealized leg shows as unknown and is never
+    // backfilled with realized.
+    const gapWarning = (combined !== null && realized > 0 && combined < 0)
+        ? `<div style="margin-top:10px; padding:9px 11px; border:1px solid #5a4420; background:#241b0d;
+                   border-radius:6px; font-size:0.8em; color:#f0c97a;">
+               ⚠️ Closed trades show +${fmtUsd(realized)} while the account is -${fmtUsd(Math.abs(combined))}
+               overall. A grid slice only sells above its own entry, so realized P&L cannot go negative —
+               the loss is sitting in open slices, not in the trade log.
+           </div>`
+        : '';
     return `<div style="margin-top:14px; padding:14px; background:var(--bg); border-radius:8px; border:1px solid var(--border);">
-        <div style="font-size:1.05em; font-weight:700; color:${realizedColor};">
-            🏆 Total real profit already taken (all-time, every closed trade): ${realized >= 0 ? '+' : ''}${fmtUsd(realized)}
+        <div style="font-size:1.25em; font-weight:700; color:${combinedColor};">
+            💵 Total right now — taken plus still open, net of real fees: ${combined === null ? 'unknown right now (a live price fetch failed)' : `${combined >= 0 ? '+' : ''}${fmtUsd(combined)}`}
         </div>
         <div style="font-size:0.8em; color:var(--text-dim); margin-top:2px;">
-            ${tradeCount} real completed trade${tradeCount === 1 ? '' : 's'} across every Grid Bot branch ever run · ${winRate.toFixed(0)}% win rate
+            The only one of these figures that can go down. Open slices are marked at the current price.
         </div>
-        <div style="font-size:0.95em; font-weight:700; margin-top:10px; color:${combinedColor};">
-            💵 Combined grand total right now (taken + what's still open, net of real fees): ${combined === null ? 'unknown right now' : `${combined >= 0 ? '+' : ''}${fmtUsd(combined)}`}
+        <div style="font-size:0.92em; font-weight:700; margin-top:10px; color:${realizedColor};">
+            🏆 Of that, already taken (all-time, every closed trade): ${realized >= 0 ? '+' : ''}${fmtUsd(realized)}
         </div>
+        <div style="font-size:0.8em; color:var(--text-dim); margin-top:2px;">
+            ${tradeCount} real completed trade${tradeCount === 1 ? '' : 's'} across every Grid Bot branch ever run ·
+            ${winRate.toFixed(0)}% win rate — winners by construction, since a slice cannot sell below its own entry
+        </div>
+        ${gapWarning}
     </div>`;
 }
 

@@ -7047,7 +7047,8 @@ async def get_fleet_metrics(window_days: float = 1.0,
 
     drawdown = metrics.drawdown_stats(trades, equity_usd=equity)
     report = metrics.fleet_report(rows_out, stats, capital, tally,
-                                  slippage=slippage, drawdown=drawdown, orders=orders)
+                                  slippage=slippage, drawdown=drawdown, orders=orders,
+                                  unrealized_net_usd=grid.get("total_unrealized_net_usd"))
     report["per_coin"] = per_coin
     if target_round_trips or target_net:
         report["vs_target"] = metrics.compare_to_target(
@@ -7114,5 +7115,38 @@ async def get_live_ops():
         _section("capital", _census()),
     ))
     results["config"] = {"ok": True, "data": _live_ops_config(), "error": None}
+    results["headline"] = _live_ops_headline(results.get("trades"), results.get("grid"))
     results["served_at"] = datetime.utcnow().isoformat() + "Z"
     return results
+
+
+def _live_ops_headline(trades_section, grid_section):
+    """TOTAL P&L, assembled from the two sections that each hold half of it.
+
+    Realized lives in the trade history and unrealized lives in the grid
+    status, and they are fetched independently - so either one can fail on
+    its own. When that happens the total is reported as unmeasurable, NOT
+    as the half that survived. A page that silently renders realized under
+    a "total" label the moment a price fetch times out is worse than one
+    that admits it does not know, because it fails in the flattering
+    direction: realized is positive by construction (a grid slice only
+    sells above its own entry) while the total is the only one of the two
+    that can go down.
+    """
+    import crypto_fleet_metrics as metrics
+
+    def _leg(section, key):
+        if not section or not section.get("ok"):
+            return None, (section or {}).get("error") or "section unavailable"
+        return (section.get("data") or {}).get(key), None
+
+    realized, realized_err = _leg(trades_section, "total_realized_pnl")
+    unrealized, unrealized_err = _leg(grid_section, "total_unrealized_net_usd")
+    trips, _ = _leg(trades_section, "total_trade_count")
+
+    data = metrics.total_pnl_stats(realized, unrealized, round_trips=trips)
+    data["sources"] = {
+        "realized": realized_err or "grid trade history",
+        "unrealized": unrealized_err or "grid status, marked at the current price",
+    }
+    return {"ok": True, "data": data, "error": None}

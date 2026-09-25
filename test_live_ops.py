@@ -187,8 +187,40 @@ ok("the pipeline separates 'no branches' from 'no dips'",
 ok("the pipeline explains an all-rejected cycle as the gate working",
    "doing its job" in page)
 ok("the page renders realized money", "renderMoney" in page and "total_realized_pnl" in page)
-ok("realized P&L is labelled as closed round trips, not paper gains",
-   "not paper gains" in page)
+
+# --- the headline is TOTAL, not realized ----------------------------------
+# Realized cannot go negative - a grid slice only sells above its own entry -
+# so it can never warn about anything. These checks pin the ordering so it
+# cannot quietly invert back.
+ok("the page has a headline block", "renderHeadline" in page and 'id="p-headline"' in page)
+ok("the headline is fed by its own server section", "d.headline" in page)
+ok("the headline is labelled as taken plus still open",
+   "Total P&amp;L — taken plus still open" in page)
+ok("the headline sits ABOVE the runner panel",
+   page.index('id="p-headline"') < page.index('id="p-runner"'))
+ok("and above the realized money panel",
+   page.index('id="p-headline"') < page.index('id="p-money"'))
+ok("an unmeasurable total says so rather than showing a number",
+   "not measurable" in page)
+ok("the total is never backfilled from the realized half",
+   "d.measurable ? signed(d.total_usd)" in page)
+ok("realized is captioned as a component of the total, not the headline",
+   'the &quot;taken&quot; half of the total above' in page
+   or 'the "taken" half of the total above' in page)
+ok("the win rate carries the by-construction caption",
+   "winners by construction" in page)
+ok("the gap warning is rendered when the server flags one", "d.warning" in page)
+ok("a negative dollar figure never renders as '$-'",
+   "(n < 0 ? '-$' : '$')" in page)
+
+# The server half: one place computes the total, so this page and the
+# terminal view cannot disagree about it.
+ok("the server builds the headline section", "_live_ops_headline" in router_src)
+ok("and it is attached to the live-ops payload", 'results["headline"]' in router_src)
+ok("and it delegates to the one function that defines a total",
+   "total_pnl_stats" in router_src)
+ok("the metrics report is given the unrealized leg",
+   "unrealized_net_usd=grid.get(" in router_src)
 
 # --- the Coinbase total can explain its own blank --------------------------
 ok("the total stays all-or-nothing",

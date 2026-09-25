@@ -43,6 +43,25 @@
          padding:14px;margin-bottom:14px}
   .panel.err{border-color:#4a2626;background:#1a1010}
 
+  /* The headline. TOTAL is the only number on this page that can go down,
+     so it gets the size and realized sits underneath it as a component.
+     See _live_ops_headline() for why the ordering is load-bearing. */
+  .hero{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+        padding:16px 14px;margin-bottom:14px}
+  .hero .lbl{font-size:0.78rem;text-transform:uppercase;letter-spacing:0.09em;
+             color:var(--ink-dim);font-weight:600}
+  .hero .big{font-family:var(--mono);font-size:2.4rem;line-height:1.1;font-weight:650;
+             letter-spacing:-0.02em;margin:4px 0 2px;overflow-wrap:anywhere}
+  .hero .big .none{font-size:1.4rem}
+  .hero .read{font-size:0.86rem;color:var(--ink-dim)}
+  .hero .legs{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px;
+              border-top:1px solid var(--line);padding-top:12px}
+  .hero .leg .lv{font-family:var(--mono);font-size:1.02rem}
+  .hero .leg .ln{font-size:0.76rem;color:var(--ink-dim);margin-top:2px}
+  .hero .leg .ln small{display:block;color:var(--ink-faint);font-size:0.72rem;line-height:1.3}
+  .hero .warn{margin-top:12px;border:1px solid #5a4420;background:#241b0d;
+              border-radius:8px;padding:10px 12px;font-size:0.82rem;color:#f0c97a}
+
   .kv{display:grid;grid-template-columns:1fr auto;gap:7px 12px;align-items:baseline}
   .kv .k{color:var(--ink-dim);font-size:0.88rem;min-width:0}
   .kv .k small{display:block;color:var(--ink-faint);font-size:0.76rem;line-height:1.3}
@@ -119,6 +138,14 @@
   <div class="beat" id="beat">
     <span><span class="dot"></span><span class="state" id="beat-state">Connecting…</span></span>
     <span class="sub" id="beat-sub"></span>
+  </div>
+
+  <div class="hero" id="p-headline">
+    <div class="lbl">Total P&amp;L — taken plus still open</div>
+    <div class="big" id="hero-total"><span class="none">—</span></div>
+    <div class="read" id="hero-read">Loading…</div>
+    <div class="legs" id="hero-legs"></div>
+    <div id="hero-warn"></div>
   </div>
 
   <div class="panel" id="p-runner">
@@ -199,10 +226,14 @@ function when(iso){
   return isNaN(d) ? '' : d.toLocaleTimeString();
 }
 // A real number or an explicit dash. Never 0 standing in for "unknown".
+// Sign OUTSIDE the currency symbol, same as signed() below: a negative run
+// through toLocaleString gives "$-594.99", which reads as a typo - and a
+// negative free-cash figure is exactly the one that must not be misread.
 function money(v, dp=2){
-  return (v === null || v === undefined || isNaN(v))
-    ? '<span class="none">—</span>'
-    : '$' + Number(v).toLocaleString(undefined,{minimumFractionDigits:dp, maximumFractionDigits:dp});
+  if (v === null || v === undefined || isNaN(v)) return '<span class="none">—</span>';
+  const n = Number(v);
+  const s = Math.abs(n).toLocaleString(undefined,{minimumFractionDigits:dp, maximumFractionDigits:dp});
+  return (n < 0 ? '-$' : '$') + s;
 }
 function signed(v){
   if (v === null || v === undefined || isNaN(v)) return '<span class="none">—</span>';
@@ -397,16 +428,59 @@ function renderCash(cash){
   }
 }
 
+// The headline. TOTAL leads; realized and unrealized are the two halves of
+// it, shown underneath at component size. Realized used to be the big
+// number here, which is exactly backwards: a grid slice only sells above
+// its own entry, so realized cannot go negative and therefore cannot warn
+// about anything. TOTAL is the number that can.
+function renderHeadline(head){
+  const big = document.getElementById('hero-total');
+  const read = document.getElementById('hero-read');
+  const legs = document.getElementById('hero-legs');
+  const warn = document.getElementById('hero-warn');
+  warn.innerHTML = '';
+
+  if (!head || !head.ok){
+    big.innerHTML = '<span class="none">—</span>';
+    read.textContent = (head && head.error) ? String(head.error) : 'Total unavailable.';
+    legs.innerHTML = '';
+    return;
+  }
+  const d = head.data || {};
+
+  // An unmeasurable total shows a dash and says which half is missing. It
+  // is never backfilled with the half that did load.
+  big.innerHTML = d.measurable ? signed(d.total_usd) : '<span class="none">not measurable</span>';
+  read.textContent = d.reading || '';
+
+  legs.innerHTML = `
+    <div class="leg">
+      <div class="lv">${signed(d.realized_usd)}</div>
+      <div class="ln">Taken<small>${d.round_trips ?? 0} closed round trip${d.round_trips === 1 ? '' : 's'}</small></div>
+    </div>
+    <div class="leg">
+      <div class="lv">${signed(d.unrealized_usd)}</div>
+      <div class="ln">Still open<small>marked at the current price, net of exit fees</small></div>
+    </div>`;
+
+  if (d.warning){ warn.innerHTML = `<div class="warn">⚠️ ${esc(d.warning)}</div>`; }
+}
+
 function renderMoney(trades){
   const kv = document.getElementById('money-kv');
   const rec = document.getElementById('recent-trades');
   if (!trades.ok){ kv.innerHTML = panelError('p-money', trades.error); rec.innerHTML=''; return; }
   const d = trades.data || {};
+  // Realized only. The headline at the top of the page is the total; this
+  // panel breaks the "taken" half of it down. The win rate below is
+  // deliberately captioned rather than left bare: a grid slice only sells
+  // above its own entry, so a high win rate here is a property of the
+  // mechanism, not evidence that the strategy works.
   kv.innerHTML = `
-    <div class="k">Realized P&amp;L, all time<small>closed round trips only — not paper gains</small></div>
+    <div class="k">Realized P&amp;L, all time<small>the "taken" half of the total above — closed round trips only</small></div>
     <div class="v">${signed(d.total_realized_pnl)}</div>
     <div class="k">Round trips closed</div><div class="v">${d.total_trade_count ?? '—'}</div>
-    <div class="k">Win rate</div>
+    <div class="k">Win rate<small>winners by construction — a slice cannot sell below its own entry</small></div>
     <div class="v">${d.overall_win_rate == null ? '<span class="none">—</span>' : Number(d.overall_win_rate).toFixed(1)+'%'}</div>`;
 
   const coins = (d.coins || []).slice(0, 6);
@@ -558,6 +632,7 @@ async function tick(){
     const d = await res.json();
     ['p-runner','p-pipe','p-cash','p-money','p-gate','p-config','p-branches','p-capital','p-recon']
       .forEach(id => document.getElementById(id).classList.remove('err'));
+    renderHeadline(d.headline);
     renderBeat(d.gate);
     renderRunner(d.runner);
     renderPipeline(d);

@@ -8,9 +8,12 @@
 #
 # Needs bash, curl and python3. No jq - it is not installed everywhere.
 #
-# It shows realized profit from CLOSED round trips and nothing else as
-# "made". Unrealized value moves with the market and is not money until a
-# slice is sold back.
+# It leads with TOTAL - realized plus unrealized - because that is the only
+# figure that can go down. Realized on its own cannot: a grid slice only
+# sells ABOVE its own entry, so the closed-trade ledger is positive by
+# construction while underwater slices sit unclosed and unreported. Both
+# halves are shown underneath, and a missing half makes the total
+# unmeasurable rather than quietly equal to the half that loaded.
 
 set -uo pipefail
 
@@ -35,7 +38,11 @@ B="\033[1m"; D="\033[2m"; R="\033[0m"
 GRN="\033[32m"; RED="\033[31m"; YEL="\033[33m"; CYN="\033[36m"
 
 def money(v, dp=2):
-    return "  --  " if v is None else f"${v:,.{dp}f}"
+    # Sign OUTSIDE the currency symbol. f"${-594.99:,.2f}" renders "$-594.99",
+    # which reads as a typo at a glance - and a negative free-cash figure is
+    # precisely the one this view exists to make unmissable.
+    if v is None: return "  --  "
+    return f"{'-' if v < 0 else ''}${abs(v):,.{dp}f}"
 
 def signed(v):
     if v is None: return f"{D}  --  {R}"
@@ -72,19 +79,41 @@ else:
     print(f"  {D}bot last wrote to the log: {hb}{R}")
 
 # ---- money --------------------------------------------------------------
+# The server computes the total in one place (_live_ops_headline ->
+# crypto_fleet_metrics.total_pnl_stats) so this view and the web dashboard
+# cannot disagree about it. Falls back to the two halves only when an older
+# deploy has not shipped the headline section yet.
 print()
+head_ok, head, head_err = sec("headline")
 ok, tr, err = sec("trades")
+if head_ok and head:
+    print(f"{B}TOTAL{R}     " + (signed(head.get("total_usd")) if head.get("measurable")
+                                 else f"{YEL}not measurable{R}")
+          + f"  {D}taken + still open{R}")
+    print(f"  {D}taken      {R}{signed(head.get('realized_usd'))}"
+          f"  {D}{head.get('round_trips') or 0} closed round trip(s){R}")
+    print(f"  {D}still open {R}{signed(head.get('unrealized_usd'))}"
+          f"  {D}marked at the current price{R}")
+    if head.get("warning"):
+        print(f"  {YEL}! {head['warning']}{R}")
+    elif not head.get("measurable"):
+        print(f"  {YEL}! {head.get('reading')}{R}")
+    print()
+
 if not ok:
     print(f"{RED}trades: {err}{R}")
 else:
     n = tr.get("total_trade_count") or 0
     pnl = tr.get("total_realized_pnl")
     wr = tr.get("overall_win_rate")
-    print(f"{B}REALIZED{R}  {signed(pnl)}  from {n} closed round trip(s)"
-          + (f"  ·  {wr:.0f}% won" if wr is not None else ""))
+    if not head_ok:
+        print(f"{B}REALIZED{R}  {signed(pnl)}  from {n} closed round trip(s)"
+              + (f"  ·  {wr:.0f}% won" if wr is not None else ""))
+    elif wr is not None:
+        print(f"  {D}win rate {wr:.0f}% - winners by construction, a slice cannot"
+              f" sell below its own entry{R}")
     if n == 0:
-        print(f"  {D}nothing has been bought AND sold back yet - this is the only{R}")
-        print(f"  {D}number that counts as money made{R}")
+        print(f"  {D}nothing has been bought AND sold back yet{R}")
     for c in (tr.get("coins") or [])[:8]:
         print(f"    {c['product_id']:<10} {signed(c['total_pnl'])}  "
               f"{D}{c['trade_count']} trades · {c['win_rate']:.0f}% won{R}")

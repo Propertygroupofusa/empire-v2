@@ -117,6 +117,84 @@ def round_trip_stats(trades):
     }
 
 
+def total_pnl_stats(realized_net_usd, unrealized_net_usd, round_trips=None):
+    """THE headline number: realized + unrealized, i.e. what the account is worth.
+
+    Realized alone is the figure that flatters a grid, and it does so
+    structurally rather than by accident. A slice only ever sells ABOVE its
+    own entry, so the closed-trade ledger CANNOT show a loss: realized is
+    positive by construction while underwater slices sit unclosed and
+    unreported. A scenario model of this exact configuration (3 levels,
+    2.5% spacing, 1% round trip) put realized at $0.00 and TOTAL at
+    -$13.22 in a sustained downtrend, with only 4% of paths ending
+    positive. A dashboard leading with realized would have shown nothing
+    wrong the whole way down.
+
+    So TOTAL leads and realized is a component of it, never the other way
+    round.
+
+    Either leg missing makes the total UNMEASURABLE rather than a partial
+    sum. Showing realized on its own under a "total" label - which is what
+    a naive `realized + (unrealized or 0)` produces the moment a price
+    fetch fails - is the precise error this function exists to prevent.
+    """
+    def _num(v):
+        try:
+            return None if v is None else float(v)
+        except (TypeError, ValueError):
+            return None
+
+    realized = _num(realized_net_usd)
+    unrealized = _num(unrealized_net_usd)
+
+    missing = []
+    if realized is None:
+        missing.append("realized")
+    if unrealized is None:
+        missing.append("unrealized")
+
+    measurable = not missing
+    total = (realized + unrealized) if measurable else None
+
+    if not measurable:
+        reading = ("total cannot be computed - "
+                   + " and ".join(missing) + " P&L is unavailable")
+    elif total > 0:
+        reading = "up overall, counting what is still open"
+    elif total < 0:
+        reading = "down overall once open slices are counted"
+    else:
+        reading = "flat overall"
+
+    # The gap IS the warning. A large positive realized sitting on top of a
+    # negative total is the failure mode, stated in words so it cannot be
+    # skimmed past.
+    warning = None
+    if measurable and realized > 0 and total < 0:
+        # Sign OUTSIDE the currency symbol. f"${-13.22:.2f}" renders "$-13.22",
+        # which reads as a typo at a glance - and this is the one sentence on
+        # the page nobody can afford to misread.
+        warning = (f"Closed trades show +${realized:.2f} while the account is "
+                   f"-${abs(total):.2f} overall. A grid slice only sells above its "
+                   f"own entry, so realized P&L cannot go negative - the loss is "
+                   f"sitting in open slices, not in the trade log.")
+
+    return {
+        "total_usd": _round(total),
+        "realized_usd": _round(realized),
+        "unrealized_usd": _round(unrealized),
+        "round_trips": round_trips,
+        "measurable": measurable,
+        "missing": missing,
+        "reading": reading,
+        "warning": warning,
+        "note": ("Realized is closed round trips only. Unrealized is every open "
+                 "slice marked at the current price, net of the fees an exit "
+                 "would cost. TOTAL is the pair together and is the only one of "
+                 "the three that can go down."),
+    }
+
+
 def per_coin_profile(trades, window_hours=None):
     """Each coin's own trade profile, in the shape a target gets written in.
 
@@ -418,14 +496,21 @@ def branch_row(branch, swing_pct=None, gate=None, live_price=None, fee_round_tri
 
 
 def fleet_report(branch_rows, stats, capital, gate_tally, slippage=None, drawdown=None,
-                 orders=None):
+                 orders=None, unrealized_net_usd=None):
     """The aggregate: P&L, velocity and RISK together, plus execution quality.
 
     All three legs, because the first two alone flatter a system that is
     making money by taking a risk nobody measured.
+
+    `total` comes first and is the headline. `pnl` below it is realized
+    only - a component of the total, not a substitute for it. See
+    total_pnl_stats for why that ordering is load-bearing rather than
+    cosmetic.
     """
     evaluated = sum((gate_tally or {}).values())
     return {
+        "total": total_pnl_stats((stats or {}).get("net_pnl"), unrealized_net_usd,
+                                 round_trips=(stats or {}).get("round_trips")),
         "branches": branch_rows,
         "slippage": slippage,
         "drawdown": drawdown,
@@ -611,9 +696,49 @@ def _self_test():
     ok("and the net gap too", arb_c["net"]["ratio"] == round(0.12/1.40, 3))
     ok("the target is echoed beside the actual", arb_c["round_trips"]["target"] == 12)
 
+    # --- the headline: TOTAL, not realized ----------------------------------
+    t = total_pnl_stats(12.94, -3.40, round_trips=22)
+    ok("total is realized plus unrealized", t["total_usd"] == 9.54)
+    ok("realized survives as a component, not the headline", t["realized_usd"] == 12.94)
+    ok("and the round trip count rides along", t["round_trips"] == 22)
+
+    # The failure mode the whole function exists for.
+    bad = total_pnl_stats(0.39, -13.61)
+    ok("a green trade log on a red account is flagged", bad["warning"] is not None)
+    ok("and the warning names the realized figure and the real total",
+       "+$0.39" in bad["warning"] and "-$13.22" in bad["warning"])
+    ok("and never renders a negative as '$-'", "$-" not in bad["warning"])
+    ok("and says where the loss actually is", "open slices" in bad["warning"])
+    ok("the reading says down, not up", "down overall" in bad["reading"])
+
+    ok("a healthy account raises no warning", total_pnl_stats(5.0, 2.0)["warning"] is None)
+    ok("a losing trade log raises no warning either - it is already honest",
+       total_pnl_stats(-2.0, -1.0)["warning"] is None)
+    ok("flat reads as flat", total_pnl_stats(1.0, -1.0)["reading"] == "flat overall")
+
+    # A missing leg must never be silently treated as zero.
+    gone = total_pnl_stats(12.94, None)
+    ok("an unpriceable open position makes the total unmeasurable",
+       gone["total_usd"] is None and gone["measurable"] is False)
+    ok("and it is NOT quietly replaced by realized", gone["total_usd"] != gone["realized_usd"])
+    ok("and the missing leg is named", gone["missing"] == ["unrealized"])
+    ok("and the reading says so", "cannot be computed" in gone["reading"])
+    ok("a missing realized leg is caught the same way",
+       total_pnl_stats(None, -3.0)["missing"] == ["realized"])
+    ok("both missing names both", total_pnl_stats(None, None)["missing"] == ["realized", "unrealized"])
+    ok("a non-numeric leg is missing, not coerced",
+       total_pnl_stats(12.94, "n/a")["measurable"] is False)
+
     rep = fleet_report([row], mixed, busy, {"GATE_PASS": 4, "GATE_BLOCK": 11},
                        slippage=sl, drawdown=dd,
-                       orders={"submitted": 6, "filled": 4, "rejected": 2})
+                       orders={"submitted": 6, "filled": 4, "rejected": 2},
+                       unrealized_net_usd=-0.12)
+    ok("the report leads with the total", list(rep)[0] == "total")
+    ok("and the total combines realized net with unrealized",
+       rep["total"]["total_usd"] == round(mixed["net_pnl"] - 0.12, 2))
+    ok("realized stays available underneath it", rep["pnl"]["net_pnl"] == mixed["net_pnl"])
+    ok("a report with no unrealized figure reports no total, rather than realized",
+       fleet_report([row], mixed, busy, {})["total"]["total_usd"] is None)
     ok("the report carries the risk leg", rep["drawdown"]["max_drawdown_usd"] == 1.70)
     ok("and execution quality", rep["slippage"] is not None and rep["orders"]["rejected"] == 2)
     ok("the fleet report totals every verdict as signals evaluated",
