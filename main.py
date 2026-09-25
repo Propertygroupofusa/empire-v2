@@ -1987,11 +1987,28 @@ async def health():
     crypto_strategy_mode is reported for the same reason - it is the
     variable this deployment gets wrong most often, and reading it here
     costs nothing.
+
+    environment and project close the last blind spot. Railway scopes
+    variables to a selected ENVIRONMENT, so editing one the domain does
+    not serve saves correctly and never takes effect - indistinguishable
+    from every other cause without knowing which environment is actually
+    serving. Reporting it turns "my edit did not take" into a comparison
+    against what the Railway UI shows at the top of the page.
+
+    strategy_env_keys lists the NAMES of every environment variable
+    containing "STRATEGY", which catches the duplicate- and misspelled-key
+    case from the server side - the exact failure that cost hours on
+    2026-09-25, where two CRYPTO_STRATEGY_MODE entries existed and the
+    stale one won. Names only, never values, and only keys matching that
+    narrow pattern: this endpoint is public, so it must never become a way
+    to read credentials out of the environment.
     """
     sha = (os.getenv("RAILWAY_GIT_COMMIT_SHA")
            or os.getenv("RAILWAY_GIT_COMMIT")
            or "")
     uptime = round(time.time() - _PROCESS_STARTED_AT, 1)
+    # Names only. Never values - /health is unauthenticated.
+    strategy_env_keys = sorted(k for k in os.environ if "STRATEGY" in k.upper())
     return {
         "status": "ok",
         "platform": "pgusa-documents",
@@ -2005,6 +2022,9 @@ async def health():
         "uptime_seconds": uptime,
         "uptime_human": f"{int(uptime // 3600)}h {int((uptime % 3600) // 60)}m",
         "crypto_strategy_mode": os.getenv("CRYPTO_STRATEGY_MODE") or "(unset)",
+        "environment": os.getenv("RAILWAY_ENVIRONMENT_NAME") or "unknown",
+        "project": os.getenv("RAILWAY_PROJECT_NAME") or "unknown",
+        "strategy_env_keys": strategy_env_keys,
     }
 
 
