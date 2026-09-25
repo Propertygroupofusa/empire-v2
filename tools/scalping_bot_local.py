@@ -65,6 +65,11 @@ try:
 except ImportError:
     sys.exit("Missing dependencies. Run:  pip install pyjwt cryptography")
 
+# Bump on every change. Printed by the banner and by --import-key so the
+# running copy identifies itself - two rounds were lost to a stale file on
+# disk looking identical to a fresh one.
+BOT_VERSION = "2026-09-25.6-multikey"
+
 HERE = Path(__file__).resolve().parent
 STATE_FILE = None  # set after LIVE is known - see below
 HOST = "api.coinbase.com"
@@ -412,7 +417,8 @@ def import_key(path=None):
     Prints field names and value LENGTHS only - never a value.
     """
     src = Path(path) if path else (Path.home() / "Downloads" / "cdp_api_key.json")
-    print(f"\nReading {src}")
+    print(f"\n  bot version {BOT_VERSION}")
+    print(f"Reading {src}")
     if not src.exists():
         print("  NOT FOUND. Pass the path:  python scalping_bot.py --import-key \"C:\\path\\to\\key.json\"")
         return 1
@@ -487,7 +493,7 @@ def main():
     else:
         mode = "NOT AUTHENTICATED — cannot trade"
 
-    print("\nScalping Bot")
+    print(f"\nScalping Bot  (version {BOT_VERSION})")
     print(f"   Auth:  {'OK' if authed else 'FAILED'} ({why})")
     print(f"   Mode:  {mode}")
     if not authed and LIVE:
