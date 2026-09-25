@@ -445,7 +445,23 @@ def _build_jwt(method: str, path: str) -> str:
         "iss": "cdp",
         "nbf": now,
         "exp": now + 120,
-        "uri": f"{method} {COINBASE_HOST}{path}",
+        # The URI claim must NOT carry the query string. Coinbase signs
+        # "GET host/api/v3/brokerage/product_book", not
+        # "GET host/api/v3/brokerage/product_book?product_id=BTC-USD&limit=1",
+        # so including it makes every parameterised request fail the
+        # signature check and return 401.
+        #
+        # What that cost, live: get_best_bid_ask() passes
+        # "...product_book?product_id=X&limit=1". It 401'd on every call and
+        # returned (None, None) - and place_maker_buy/place_maker_sell open
+        # with "if bid is None: return None", so they fell straight through
+        # to place_market_buy/sell. Not one maker order was ever placed.
+        # Every fill paid the 1.50% taker round trip instead of 0.70%,
+        # which pinned the fee floor at 1.70%, which pinned the grid step at
+        # 2.00%, which is why the fleet trades a few times a week.
+        # get_recent_market_trades() and the order-reconciliation fill
+        # lookup were failing the same way, silently.
+        "uri": f"{method} {COINBASE_HOST}{path.split('?', 1)[0]}",
     }
     headers = {"kid": COINBASE_API_KEY_NAME, "nonce": secrets.token_hex(16)}
     jwt_token = pyjwt.encode(payload, private_key, algorithm=algorithm, headers=headers)

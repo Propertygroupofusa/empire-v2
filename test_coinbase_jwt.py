@@ -25,6 +25,22 @@ separate hand-rolled implementations in this repo were malformed:
 None of them could ever have authenticated. Each was written separately
 instead of reusing the one that works, so each invented its own bug.
 
+2026-09-25 UPDATE - the "reference" had the bug too.
+
+This file fixed three hand-rolled implementations and pointed them at
+crypto_btc_compound_bot._build_jwt as the one that worked. It did not.
+Both bot modules interpolated the raw `path` into the claim, and every
+caller that passed parameters - get_best_bid_ask, get_book_depth,
+get_recent_market_trades, the historical/fills reconciliation - failed
+its signature check and returned 401.
+
+The cost was invisible because each caller failed closed and quietly:
+get_best_bid_ask returned (None, None), place_maker_buy opens with
+"if bid is None: return None", and grid_buy then fell through to a market
+order. Not one maker order was ever placed. Every fill paid the 1.50%
+taker round trip instead of 0.70% maker, which held the fee floor at
+1.70%, which held the grid step at 2.00%.
+
 THE CONTRACT (crypto_btc_compound_bot._build_jwt is the reference):
     payload["uri"]  == "<METHOD> <host><path>"   and NEVER a query string
     payload["iss"]  == "cdp"
@@ -76,7 +92,24 @@ for path in TARGETS:
     for uri in uri_claim_strings(path):
         label = f"{path}: uri {uri[:52]}"
         # A query string in the signed uri is THE bug that caused the 401.
-        ok(f"{label} - no query string", "?" not in uri)
+        #
+        # This check used to be `"?" not in uri`, scanning the SOURCE text.
+        # That could only ever catch a query string written as a literal -
+        # and the one that actually cost money arrived at RUNTIME, through
+        # the `path` variable: get_best_bid_ask() passes
+        # "...product_book?product_id=X&limit=1" into f"{method} {HOST}{path}".
+        # The source held no "?", so this test passed for months while every
+        # parameterised request 401'd, every maker order fell through to a
+        # market order, and the fleet paid taker on every single fill.
+        #
+        # So the claim is clean if it carries no literal query string AND
+        # either interpolates no raw path at all, or explicitly strips one.
+        strips_query = "split('?'" in uri or 'split("?"' in uri
+        interpolates_path = "{path}" in uri
+        no_literal_query = "?" not in uri.replace("split('?'", "").replace('split("?"', "")
+        ok(f"{label} - no literal query string", no_literal_query)
+        ok(f"{label} - a runtime path is stripped before signing",
+           strips_query or not interpolates_path)
         # Must carry a method. Either literal or an f-string {method} slot.
         has_method = ("{method}" in uri
                       or re.search(r"\b(GET|POST|DELETE|PUT)\b", uri) is not None)
