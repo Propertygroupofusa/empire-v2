@@ -583,16 +583,44 @@ async def slice_round_trip_fee_rate(slice_row, exit_leg_rate: float = None) -> f
 
 async def fee_safe_floor_pct() -> float:
     """The real minimum grid spacing that can actually clear a round trip,
-    priced against the REAL fee rate rather than the old hardcoded one.
-    Every spacing mode floors at this - a branch can never again be set to
-    a spacing whose full cycle is a guaranteed real loss."""
-    # With maker orders live the real round trip is two MAKER legs, roughly
-    # half a taker round trip - so the smallest move that can clear fees
-    # drops too, and the grid can trade meaningfully tighter (more fills) at
-    # the same real net margin. This is where most of the maker benefit
-    # actually shows up, not just in a bigger margin per trade.
-    leg = await expected_leg_fee_rate()
+    priced against the WORST fee the round trip can really pay.
+
+    Corrected 2026-09-25. This used expected_leg_fee_rate(), which returns
+    the MAKER rate whenever maker orders are on. That is the right rate to
+    ESTIMATE with and the wrong one to FLOOR with, because grid_buy() and
+    grid_sell() are documented as "maker first (cheap, may not fill),
+    market fallback (always fills, costs more)": after
+    MAKER_ORDER_WAIT_SECONDS they place a market order and pay taker.
+
+    With the live numbers that gap was not academic. The maker-priced
+    floor read 0.90% while a round trip that fell back on both legs costs
+    1.50%, so this function was certifying spacings between those two
+    figures as fee-safe when they are a guaranteed loss on any cycle that
+    falls back. The whole contract of this function is that a branch can
+    never be set to a spacing whose full cycle is a guaranteed real loss,
+    and against taker fallback it was not keeping it.
+
+    Maker fill rate is not measured anywhere in this codebase, so there is
+    no evidence available to justify the optimistic assumption. Until
+    something counts fallbacks, the floor prices the case the bot can
+    actually end up in.
+
+    The maker benefit is still real - it shows up in the MARGIN earned at
+    a given spacing, which is where it belongs, rather than in permission
+    to set a spacing that cannot survive a fallback.
+    """
+    leg = await worst_case_leg_fee_rate()
     return max(MIN_DYNAMIC_GRID_PCT, TARGET_NET_MARGIN_PCT + leg * 2)
+
+
+async def worst_case_leg_fee_rate() -> float:
+    """The highest per-leg fee a single leg can really pay.
+
+    Maker orders are an attempt, not a guarantee - an unfilled maker order
+    becomes a market order - so the worst case is always the taker leg,
+    whether or not maker mode is on.
+    """
+    return (await get_effective_round_trip_fee_rate()) / 2
 
 
 async def is_grid_bot_active() -> bool:
