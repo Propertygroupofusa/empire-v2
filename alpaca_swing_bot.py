@@ -96,7 +96,18 @@ SWING_SYMBOLS = {
     # without shorting or margin (this bot is long-only). No futures-proxy
     # contract code exists for these, so the ETF ticker is its own key.
     "SH":  {"name": "Short S&P 500 (inverse)", "proxy": "SH"},
-    "PSQ": {"name": "Short Nasdaq (inverse)", "proxy": "PSQ"},
+    # "PSQ" DISABLED 2026-09-25, matching prop_bot.py's own removal on
+    # 2026-09-10 (commit f276415): 25% win rate, -$427 across 4 real trades.
+    #
+    # prop_bot dropped it on that evidence and this file never got the
+    # message - so one bot had stopped trading PSQ while the other kept
+    # buying it, on the SAME Alpaca account. The evidence applies to the
+    # instrument, not to whichever bot happened to record it.
+    #
+    # The other three inverse ETFs stay: they are how this long-only bot
+    # profits when the market falls, and only PSQ has real evidence against
+    # it. Re-enable if a later backtest clears it.
+    # "PSQ": {"name": "Short Nasdaq (inverse)", "proxy": "PSQ"},
     "DOG": {"name": "Short Dow 30 (inverse)", "proxy": "DOG"},
     "RWM": {"name": "Short Russell 2000 (inverse)", "proxy": "RWM"},
 }
