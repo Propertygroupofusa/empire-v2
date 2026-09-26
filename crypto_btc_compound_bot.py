@@ -1625,7 +1625,9 @@ def summarise_fills(fills: list) -> dict:
     }
 
 
-async def get_recent_fills_summary(session, limit: int = 250) -> dict:
+async def get_recent_fills_summary(session, limit: int = 250,
+                                   want_classified: int = 40,
+                                   max_pages: int = 12) -> dict:
     """What Coinbase itself says every recent fill actually cost.
 
     Exists to settle one question with ground truth instead of inference:
@@ -1647,18 +1649,54 @@ async def get_recent_fills_summary(session, limit: int = 250) -> dict:
     Read-only. Returns {} on any failure rather than raising - a
     diagnostic must never be able to disturb live trading.
     """
-    path = f"/api/v3/brokerage/orders/historical/fills?limit={int(limit)}"
+    # PAGE UNTIL THERE ARE ENOUGH SPOT FILLS, not until 250 fills of any kind.
+    #
+    # This asked for one page and hoped. On this account that was the wrong
+    # bet: 237 of 250 fills came back Kalshi event contracts, which the loop
+    # below correctly discards - leaving 13 spot fills and a truthful but
+    # useless "NOT ENOUGH EVIDENCE". The filter was never the problem. The
+    # SAMPLE was: 95% of it was thrown away and nothing went back for more.
+    #
+    # Kalshi is not evenly spread either - 712 of 925 of its fills landed on
+    # a single day, 2026-09-06 - so how much of a page survives depends
+    # entirely on where in the history the page happens to fall. A fixed
+    # page size cannot be sized around that; paging to a target can.
+    #
+    # Capped at max_pages so an account that is ALL non-spot terminates
+    # instead of walking its entire history. pages_read and
+    # non_spot_fills_skipped are both returned, so a starved sample says so
+    # rather than looking like a quiet account.
+    fills, cursor, pages = [], None, 0
     try:
-        async with session.get(
-            COINBASE_BASE_URL + path,
-            headers=_auth_headers("GET", path),
-            timeout=20,
-        ) as r:
-            if r.status != 200:
-                return {"error": f"HTTP {r.status}", "detail": (await r.text())[:300]}
-            fills = (await r.json()).get("fills", [])
+        while pages < max_pages:
+            path = ("/api/v3/brokerage/orders/historical/fills"
+                    f"?limit={int(limit)}" + (f"&cursor={cursor}" if cursor else ""))
+            async with session.get(
+                COINBASE_BASE_URL + path,
+                headers=_auth_headers("GET", path),
+                timeout=20,
+            ) as r:
+                if r.status != 200:
+                    if fills:
+                        break      # keep what we have; a partial sample beats none
+                    return {"error": f"HTTP {r.status}", "detail": (await r.text())[:300]}
+                body = await r.json()
+            batch = body.get("fills") or []
+            fills.extend(batch)
+            pages += 1
+            cursor = body.get("cursor") or None
+            # Count only what this function can actually use: spot fills that
+            # Coinbase labelled MAKER or TAKER.
+            usable = sum(
+                1 for f in fills
+                if (f.get("product_id") or "").endswith("-USD")
+                and "KALSHI" not in (f.get("product_id") or "").upper()
+                and (f.get("liquidity_indicator") or "").upper() in ("MAKER", "TAKER"))
+            if usable >= want_classified or not cursor or not batch:
+                break
     except Exception as e:
-        return {"error": f"{type(e).__name__}: {e}"}
+        if not fills:
+            return {"error": f"{type(e).__name__}: {e}"}
 
     by_side = {}
     per_product = {}
@@ -1667,6 +1705,12 @@ async def get_recent_fills_summary(session, limit: int = 250) -> dict:
     notional_total = 0.0
     oldest = newest = None
     skipped_non_spot = 0
+    # Counted here as well as in summarise_fills. A str.replace that matched
+    # the return dict of BOTH functions added this key to this one without
+    # the variable behind it - a NameError that took /fee-reality to a 500
+    # and was invisible to every test, because the tests read the source and
+    # the source looked right.
+    quote_sized = 0
 
     for f in fills:
         pid_raw = f.get("product_id") or "?"
@@ -1690,7 +1734,11 @@ async def get_recent_fills_summary(session, limit: int = 250) -> dict:
         # notional on an account holding $572, which dragged the computed
         # fee rate to 0.0002% and produced a confident "the floor can come
         # down" verdict from arithmetic that was pure nonsense.
-        notional = size if f.get("size_in_quote") else size * price
+        if f.get("size_in_quote"):
+            quote_sized += 1
+            notional = size
+        else:
+            notional = size * price
         ts = f.get("trade_time") or f.get("sequence_timestamp")
         if ts:
             oldest = ts if oldest is None or ts < oldest else oldest
@@ -1733,6 +1781,7 @@ async def get_recent_fills_summary(session, limit: int = 250) -> dict:
         p["notional"] = round(p["notional"], 2)
 
     return {
+        "pages_read": pages,
         "fills_returned": len(fills),
         "fills_examined": len(fills) - skipped_non_spot,
         "non_spot_fills_skipped": skipped_non_spot,
@@ -1753,6 +1802,11 @@ async def get_recent_fills_summary(session, limit: int = 250) -> dict:
         "newest_fill": newest,
         "classified_fills": classified,
         "enough_to_conclude": classified >= 20,
+        # So a starved sample reads as starved rather than as a quiet account.
+        "sample_note": (f"{skipped_non_spot} of {len(fills)} fills across {pages} page(s) "
+                        f"were non-spot (Kalshi event contracts) and were discarded - "
+                        f"they carry no liquidity_indicator and a different fee schedule. "
+                        f"{classified} spot fills carried a MAKER/TAKER label."),
         "note": ("liquidity_indicator and commission come from Coinbase, not from this "
                  "codebase's assumptions. real_round_trip_fee_rate is what an average round "
                  "trip ACTUALLY cost across these fills, and it is the number the spacing "
