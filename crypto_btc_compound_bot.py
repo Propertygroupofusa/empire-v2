@@ -1555,6 +1555,12 @@ def summarise_fills(fills: list) -> dict:
     maker = taker = 0
     quote_sized = 0
     all_orders = set()
+    # Split by side as well as counted. A ledger row is a CLOSE, so the
+    # honest thing to compare 249 recorded round trips against is the number
+    # of distinct SELL orders - not total orders halved, which assumes every
+    # buy found a matching sell inside the window and that nothing was
+    # scaled into or out of in pieces.
+    buy_orders, sell_orders = set(), set()
     for f in fills:
         try:
             size = float(f.get("size") or 0)
@@ -1590,7 +1596,8 @@ def summarise_fills(fills: list) -> dict:
             taker += 1
         p = per.setdefault(pid, {"product_id": pid, "fills": 0, "bought_usd": 0.0,
                                  "sold_usd": 0.0, "bought_qty": 0.0, "sold_qty": 0.0,
-                                 "commission_usd": 0.0, "orders": set()})
+                                 "commission_usd": 0.0, "orders": set(),
+                                 "buy_orders": set(), "sell_orders": set()})
         p["fills"] += 1
         # DISTINCT ORDERS, not fills. One order can fill in many pieces, so
         # "fills / 2 = round trips" overstates activity by however much
@@ -1601,6 +1608,10 @@ def summarise_fills(fills: list) -> dict:
         if oid:
             p["orders"].add(oid)
             all_orders.add(oid)
+            if side == "BUY":
+                p["buy_orders"].add(oid); buy_orders.add(oid)
+            elif side == "SELL":
+                p["sell_orders"].add(oid); sell_orders.add(oid)
         p["commission_usd"] += comm
         fees += comm
         if side == "BUY":
@@ -1613,8 +1624,9 @@ def summarise_fills(fills: list) -> dict:
         p["qty_left_over"] = round(p["bought_qty"] - p["sold_qty"], 10)
         for k in ("bought_usd", "sold_usd", "commission_usd"):
             p[k] = round(p[k], 2)
-        # The set is for counting, not for serialising.
-        p["orders"] = len(p.pop("orders", ()) or ())
+        # The sets are for counting, not for serialising.
+        for k in ("orders", "buy_orders", "sell_orders"):
+            p[k] = len(p.pop(k, ()) or ())
         rows.append(p)
     rows.sort(key=lambda r: r["net_usd"])
     return {
@@ -1623,6 +1635,8 @@ def summarise_fills(fills: list) -> dict:
         # order can fill in many pieces; counting fills and halving them
         # invents activity that never occurred.
         "orders": len(all_orders),
+        "buy_orders": len(buy_orders),
+        "sell_orders": len(sell_orders),
         "products": rows,
         "bought_usd": round(buy_usd, 2),
         "sold_usd": round(sell_usd, 2),

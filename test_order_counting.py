@@ -69,6 +69,43 @@ ok("fills/2 would have claimed 157 round trips",
 ok("orders/2 says 31 - a fifth of that",
    r["orders"] // 2 == 31, r["orders"] // 2)
 
+print("\nsell orders are the right denominator for CLOSES")
+
+# A ledger row records a close. So the figure to set 249 recorded round
+# trips against is the count of distinct SELL orders - not total orders
+# halved, which silently assumes every buy found a sell inside the window.
+r = M.summarise_fills([fill("B1", side="BUY"), fill("B1", side="BUY"),
+                       fill("B2", side="BUY"),
+                       fill("S1", side="SELL")])
+ok("four fills", r["fills"] == 4, r["fills"])
+ok("three orders", r["orders"] == 3, r["orders"])
+ok("two of them are buys", r["buy_orders"] == 2, r["buy_orders"])
+ok("one is a sell", r["sell_orders"] == 1, r["sell_orders"])
+ok("orders//2 would have said 1 round trip", r["orders"] // 2 == 1)
+ok("and sell_orders agrees here, at 1", r["sell_orders"] == 1)
+
+# Where they disagree: an open position never sold inside the window.
+r = M.summarise_fills([fill("B1", side="BUY"), fill("B2", side="BUY"),
+                       fill("B3", side="BUY"), fill("S1", side="SELL")])
+ok("four orders, three of them buys", r["orders"] == 4 and r["buy_orders"] == 3)
+ok("orders//2 claims 2 closes", r["orders"] // 2 == 2)
+ok("sell_orders says 1, which is the true number of closes",
+   r["sell_orders"] == 1, r["sell_orders"])
+
+print("\nside counts are ints and serialise")
+json.dumps(r)
+ok("buy_orders is an int", isinstance(r["buy_orders"], int))
+ok("sell_orders is an int", isinstance(r["sell_orders"], int))
+ok("per-product buy_orders is an int",
+   isinstance(r["products"][0]["buy_orders"], int))
+ok("per-product sell_orders is an int",
+   isinstance(r["products"][0]["sell_orders"], int))
+
+# A fill with no order id cannot be attributed to either side.
+r = M.summarise_fills([fill(None, side="SELL"), fill("S", side="SELL")])
+ok("an id-less sell fill does not inflate sell_orders",
+   r["sell_orders"] == 1, r["sell_orders"])
+
 print("\nnothing else about the statement changed")
 
 r = M.summarise_fills([fill("A", side="BUY", size="2", price="100", comm="1"),
