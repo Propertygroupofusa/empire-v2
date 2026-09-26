@@ -55,8 +55,13 @@ b = N.build(WATCH)
 ok("daily P&L is null, not a number", b["capital"]["daily_pnl_usd"] is None)
 ok("and it says WHY it is null",
    "nobody measured" in b["capital"]["daily_pnl_note"], b["capital"]["daily_pnl_note"])
-ok("the page renders it as NOT REPORTED, not as $0",
-   "NOT REPORTED" in open("newsroom.html", encoding="utf-8").read())
+# &nbsp; keeps the label on one line in the tile; normalise it away so this
+# asserts the WORDS on screen, not the whitespace markup around them.
+_page = open("newsroom.html", encoding="utf-8").read().replace("&nbsp;", " ")
+ok("the page renders it as NOT REPORTED, not as $0", "NOT REPORTED" in _page)
+ok("and the reason is still on the page, just out of the tile",
+   'id="pnlnote"' in _page and "daily_pnl_note" in _page,
+   "moving it must not drop it")
 
 print("\nthe book total is the CENSUS total, not a target")
 

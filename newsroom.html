@@ -98,7 +98,7 @@
   .note .k{font-size:10px;letter-spacing:.12em;color:var(--faint)}
 
   .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
-  .kpi{border:1px solid var(--line);padding:10px 12px;background:var(--panel2)}
+  .kpi{border:1px solid var(--line);padding:10px 12px;background:var(--panel2);display:flex;flex-direction:column;justify-content:flex-start}
   .kpi .l{font-size:10px;letter-spacing:.14em;color:var(--faint)}
   .kpi .v{font-size:21px;margin-top:3px;font-variant-numeric:tabular-nums}
   .kpi .s{font-size:11px;color:var(--dim);margin-top:2px}
@@ -183,6 +183,7 @@
       <h2><span>CAPITAL FLOW DESK</span><em>the book, as it is</em></h2>
       <div class="body">
         <div class="kpis" id="kpis"></div>
+        <div class="desknote" id="pnlnote"></div>
         <table style="margin-top:12px"><thead><tr>
           <th>HOLDING</th><th class="n">USD</th><th class="n">SHARE</th><th></th>
         </tr></thead><tbody id="alloc"></tbody></table>
@@ -271,12 +272,13 @@ function render(d){
     <div class="kpi"><div class="l">COVERED</div><div class="v">${pct(c.covered_share_pct,1)}</div>
       <div class="s">of coin value has a level</div></div>
     <div class="kpi"><div class="l">TODAY'S P&amp;L</div>
-      <div class="v" style="color:var(--faint)">NOT REPORTED</div>
-      <div class="s">${esc(c.daily_pnl_note || "")}</div></div>
+      <div class="v" style="color:var(--faint)">NOT&nbsp;REPORTED</div>
+      <div class="s">no measurement exists</div></div>
     <div class="kpi"><div class="l">BLIND SPOTS</div>
       <div class="v">${c.unpriced_assets == null ? "—" : c.unpriced_assets}</div>
       <div class="s">unpriced · ${usd(c.dust_usd)} stranded</div></div>`;
 
+  $("pnlnote").textContent = c.daily_pnl_note || "";
   const a = $("alloc"); a.innerHTML = "";
   (c.allocation || []).forEach(r => {
     const over = (r.share_pct || 0) > 20;
