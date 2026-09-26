@@ -1198,12 +1198,27 @@ async def is_grid_auto_rotate_active() -> bool:
     owner's own explicit request for this behavior, and because it
     reuses the exact same real coin-ranking signal already live via the
     $20 Quick Buy button, not a new, unvalidated strategy needing a
-    shadow-mode period first."""
+    shadow-mode period first.
+
+    FAILS CLOSED as of 2026-09-26. A missing row used to return True, so
+    a fresh database - or a deleted row - silently switched automatic
+    capital rotation ON with nobody having asked for it. A control that
+    turns itself on when its own state cannot be found is not a switch.
+    Every other toggle in this module (maker-only, auto-widen) already
+    fails closed; this one now matches. The behaviour when the row EXISTS
+    is unchanged, so an account that deliberately enabled it keeps it.
+
+    A missing row is also logged rather than assumed, because "off"
+    because-nobody-set-it and "off" because-somebody-set-it are different
+    facts and only one of them is a decision.
+    """
     async with get_session_factory()() as db:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == GRID_AUTO_ROTATE_MODE_KEY))
         row = result.scalar_one_or_none()
         if row is None:
-            return True
+            log.info("[GRID] auto-rotate has no stored state - treating as OFF. "
+                     "Nothing has enabled it; set it explicitly to turn it on.")
+            return False
         return bool(row.base_capital and row.base_capital >= 1.0)
 
 
@@ -3560,14 +3575,61 @@ async def reanchor_flat_grid_branches_now() -> dict:
 
 
 async def rebalance_flat_grid_branches_now() -> dict:
-    """Apply the live edge rule immediately to every movable flat branch."""
+    """Apply the live edge rule immediately to every movable flat branch.
+
+    WHAT THIS DID ON 2026-09-26, and why it is gated now.
+
+    At 00:59 this collapsed an eight-branch fleet into three in a single
+    call - BTC $69.23, NEAR $207.69, ARB $276.92. No money was lost (the
+    total stayed exactly $553.84; move_cash_between_grid_branches merges a
+    flat branch into another and deletes the emptied row), but half the
+    account landed on ARB, which completed ONE 2.50% round trip in thirty
+    days and is the worst oscillator in the set. The five coins it
+    abandoned - BONK, FLOKI, DOGE, ETC, BCH - carry 26 of the fleet's 34
+    available monthly round trips between them.
+
+    Three things combined to let that happen, and all three are fixed:
+
+      1. It loops EVERY branch, so one call is a fleet-wide merge.
+      2. It passed after_sale=True, which waives
+         GRID_ROTATION_COOLDOWN_SECONDS. That flag means "this ONE branch
+         just sold its last slice and earned an immediate redeploy" - it
+         is not a licence for a bulk sweep to skip every cooldown at once.
+         Now passes after_sale=False, so the cooldown that exists to stop
+         branches ping-ponging actually applies here too.
+      3. It never checked is_grid_auto_rotate_active(). The scheduled
+         sweep at run_grid_auto_rotate_sweep() does. So the fleet's
+         auto-rotate toggle read FALSE the whole time and was simply not
+         wired to this path - the switch was real and this door was not
+         behind it.
+
+    Gating a manual endpoint on the automatic toggle is deliberate: this
+    moves real capital across the whole fleet with no confirmation step,
+    and there is no button for it in the dashboard, so anything reaching
+    the URL gets a fleet-wide merge. Turn auto-rotate on to use it.
+    """
+    if not await is_grid_auto_rotate_active():
+        log.info("[GRID] rebalance-flat-branches refused: auto-rotate is OFF. This "
+                 "endpoint merges flat branches across the WHOLE fleet in one call, "
+                 "so it follows the same switch the scheduled sweep does.")
+        return {
+            "actions": [], "action_count": 0,
+            "skipped_errors": [], "orders_placed": False,
+            "refused": True,
+            "note": ("Auto-rotate is switched off, and this endpoint moves capital "
+                     "across every flat branch at once. Enable auto-rotate first if "
+                     "that is genuinely what you want."),
+        }
     actions = []
     skipped_errors = []
     for branch in await get_grid_branches():
         if not branch.active:
             continue
         try:
-            result = await _maybe_rotate_one_grid_branch(branch, after_sale=True)
+            # after_sale=False: the per-branch cooldown applies. See the
+            # docstring above - borrowing the post-sale flag here is what
+            # let eight branches merge in one pass.
+            result = await _maybe_rotate_one_grid_branch(branch, after_sale=False)
             if result is not None:
                 actions.append(result)
         except Exception as exc:
