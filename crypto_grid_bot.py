@@ -4875,7 +4875,12 @@ async def check_shadow_mode_status():
 
 
 GRID_HEARTBEAT_KEY = "grid_bot_last_cycle_at"
-_HEARTBEAT_STAGES = {"entered": 1.0, "no_active_branches": 2.0, "cycled": 3.0}
+_HEARTBEAT_STAGES = {"entered": 1.0, "no_active_branches": 2.0, "cycled": 3.0,
+                     # A loop that is alive but refused the lease is NOT the
+                     # same as one that merely "entered" and is still working.
+                     # Conflating them is what made a 40-minute stall on
+                     # 2026-09-26 read as ordinary progress.
+                     "lease_refused": 4.0}
 
 # --- THE OWNERSHIP LEASE --------------------------------------------------
 # Who is allowed to run the grid loop right now.
@@ -5026,6 +5031,57 @@ async def acquire_grid_lease() -> tuple:
         return False, f"lease check failed ({type(e).__name__}: {e}) - not running"
 
 
+async def read_grid_lease_state() -> dict:
+    """Who holds the loop lease, how fresh it is, and whether THIS process
+    could take it. Read-only - never claims, renews or releases.
+
+    Exists because on 2026-09-26 the grid heartbeat read "entered" for over
+    forty minutes with no gate events, and the reason was unreachable: the
+    only code that knew sat behind a log.debug, and the lease row was not
+    surfaced anywhere. Diagnosing a stalled trading loop should not require
+    server logs nobody can get to.
+    """
+    me = _grid_owner_id()
+    mine = _owner_hash(me)
+    now = time.time()
+    try:
+        async with get_session_factory()() as db:
+            result = await db.execute(
+                select(TradingBotState).where(TradingBotState.bot_name == GRID_LEASE_KEY))
+            row = result.scalar_one_or_none()
+            if row is None:
+                return {"held": False, "this_process": me,
+                        "note": "no lease row - the next cycle claims it"}
+            held_by = float(row.base_capital or 0.0)
+            last_seen = float(row.starting_capital or 0.0)
+            age = now - last_seen
+            is_mine = held_by == mine
+            # A negative age means last_seen is in the FUTURE, which no live
+            # renewal can produce. That would make `age > STALE` permanently
+            # false and deadlock every process out of the loop forever, so it
+            # is reported as its own fault rather than as a fresh lease.
+            corrupt = age < -5
+            return {
+                "held": True,
+                "this_process": me,
+                "held_by_this_process": is_mine,
+                "last_seen_age_seconds": round(age, 1),
+                "stale_after_seconds": GRID_LEASE_STALE_SECONDS,
+                "takeover_possible": bool(age > GRID_LEASE_STALE_SECONDS),
+                "timestamp_looks_corrupt": corrupt,
+                "note": (
+                    "this process owns the loop" if is_mine else
+                    ("lease timestamp is in the FUTURE - no process can ever take "
+                     "over and the loop is deadlocked until this row is reset"
+                     if corrupt else
+                     f"another process holds it, last seen {age:.0f}s ago; it "
+                     f"becomes claimable after {GRID_LEASE_STALE_SECONDS}s of silence")
+                ),
+            }
+    except Exception as e:
+        return {"held": None, "error": f"{type(e).__name__}: {e}"}
+
+
 async def _record_grid_heartbeat(stage: str):
     """Stamp 'the grid loop reached here, at this moment'.
 
@@ -5109,7 +5165,14 @@ async def run_grid_branches_cycle():
     # noticed at all.
     allowed, why = await acquire_grid_lease()
     if not allowed:
-        log.debug(f"[GRID] {why}")
+        # WARNING, not debug. This is the single way the loop can be alive,
+        # heartbeating, and doing no work at all - and at debug level that
+        # state is invisible in production. On 2026-09-26 the heartbeat read
+        # "entered" for over forty minutes while nothing traded, and the
+        # reason was sitting in a log line nobody could see. A loop that has
+        # decided not to work must say so at a level someone will read.
+        log.warning(f"[GRID] not cycling: {why}")
+        await _record_grid_heartbeat("lease_refused")
         return
     if "TAKEN OVER" in why:
         log.warning(f"[GRID] {why}")
@@ -5371,6 +5434,9 @@ async def get_grid_status() -> dict:
         # loop. Added after a full day was lost inferring liveness from a
         # paused branch's stale spacing - see _record_grid_heartbeat.
         "heartbeat": await get_grid_heartbeat(),
+        # Surfaced because a heartbeat alone cannot distinguish "working" from
+        # "alive but locked out of working" - see read_grid_lease_state.
+        "loop_lease": await read_grid_lease_state(),
         "dynamic_spacing_active": await is_dynamic_spacing_active(),
         "avg_swing_spacing_active": await is_avg_swing_spacing_active(),
         "grid_spacing_override": await get_live_grid_spacing_override(),
