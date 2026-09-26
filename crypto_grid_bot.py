@@ -6207,9 +6207,15 @@ async def get_pipeline_funnel() -> dict:
     return {
         "scans": sig.get("scored") if sig.get("available") else None,
         "qualified": sig.get("would_trade_count") if sig.get("available") else None,
+        # All-time, both cohorts: fill_mix and the skip counters have been
+        # running since long before GRID_CONFIG_EPOCH, while scans and
+        # completed are current-configuration only. Labelled rather than
+        # silently mixed - that mixing is the exact fault the cohort split
+        # was built to end.
         "attempted": attempted,
         "filled": filled,
         "expired": expired,
+        "attempted_basis": "all-time (fill mix and skip counters predate the config epoch)",
         "completed": (edge.get("current") or {}).get("trades") if edge.get("available") else None,
         "top_rejection": sig.get("top_rejection"),
         "rejected_by": sig.get("rejected_by"),

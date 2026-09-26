@@ -347,6 +347,22 @@ ok("the bottleneck is the EARLIEST blocked stage, not the last empty one",
 ok("and the funnel is served through the crash guard",
    'await _never_fails(get_pipeline_funnel' in GRID)
 
+ok("summary exposes would_trade_count at the TOP level, which the funnel reads",
+   '"would_trade_count": sum(1 for r in rows if r.would_trade),\n        "window"' in SRC,
+   "it lived only inside _funnel, so get_pipeline_funnel read a missing key "
+   "and got None - falsy, so the bottleneck was right BY ACCIDENT")
+ok("a row with no category reads as pre_instrumentation, not unknown",
+   '"pre_instrumentation"' in SRC and 'or "unknown"' not in SRC,
+   "the first live funnel said 'unknown 162 of 162, 100%' and every one of "
+   "those rows was written before the column existed")
+ok("the headline ignores uncategorised rows rather than reporting them",
+   'k != "pre_instrumentation"' in SRC)
+ok("and says so plainly when nothing is categorised yet",
+   "predate the instrumentation" in SRC)
+ok("the funnel labels which stages are all-time vs current-config",
+   "attempted_basis" in GRID and "predate the config epoch" in GRID,
+   "fill mix and skip counters span both cohorts; scans and completed do not")
+
 
 print("\nit cannot stall or crash the live loop")
 ok("a wall-clock budget exists on the telemetry pass",

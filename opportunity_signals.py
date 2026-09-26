@@ -550,7 +550,7 @@ def _funnel(rows) -> dict:
         # WHERE THE FUNNEL LEAKS. "0 qualified" is not a diagnosis; this is.
         # Sorted most-common first so the top line is the bottleneck.
         "rejected_by": dict(sorted(
-            Counter(r.reject_category or "unknown"
+            Counter(r.reject_category or "pre_instrumentation"
                     for r in rows if not r.would_trade).items(),
             key=lambda kv: -kv[1])),
         # The most recent reading, so a funnel of zeros still says something.
@@ -619,6 +619,7 @@ async def summary(min_rows: int = 30) -> dict:
         "available": True,
         "live": SIGNALS_LIVE,
         "scored": len(rows),
+        "would_trade_count": sum(1 for r in rows if r.would_trade),
         "window": (f"most recent {SUMMARY_MAX_ROWS} scores"
                    if len(rows) >= SUMMARY_MAX_ROWS else "all scores"),
         "resolved": len(resolved),
@@ -667,14 +668,18 @@ async def summary(min_rows: int = 30) -> dict:
                                         for r in rows_) / len(rows_), 4),
         }
 
-    all_rejects = Counter(r.reject_category or "unknown"
+    all_rejects = Counter(r.reject_category or "pre_instrumentation"
                           for r in rows if not r.would_trade)
     out["rejected_by"] = dict(sorted(all_rejects.items(), key=lambda kv: -kv[1]))
-    if all_rejects:
-        top, n = max(all_rejects.items(), key=lambda kv: kv[1])
+    named = {k: v for k, v in all_rejects.items() if k != "pre_instrumentation"}
+    if named:
+        top, n = max(named.items(), key=lambda kv: kv[1])
+        out["top_rejection"] = (f"{top} ({n} of {sum(named.values())} categorised "
+                                f"refusals, {n / sum(named.values()) * 100:.0f}%)")
+    elif all_rejects:
         out["top_rejection"] = (
-            f"{top} ({n} of {sum(all_rejects.values())} refusals, "
-            f"{n / sum(all_rejects.values()) * 100:.0f}%)")
+            f"none categorised yet - all {sum(all_rejects.values())} refusals "
+            f"predate the instrumentation")
 
     out["estimators"] = {"momentum_15m": _est("expected_move_pct"),
                          "atr_half": _est("expected_move_atr_pct")}
