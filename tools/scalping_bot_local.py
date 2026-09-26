@@ -69,7 +69,7 @@ except ImportError:
 # Bump on every change. Printed by the banner and by --import-key so the
 # running copy identifies itself - two rounds were lost to a stale file on
 # disk looking identical to a fresh one.
-BOT_VERSION = "2026-09-26.4-min-order"
+BOT_VERSION = "2026-09-26.5-compound"
 
 HERE = Path(__file__).resolve().parent
 STATE_FILE = None  # set after LIVE is known - see below
@@ -133,6 +133,14 @@ KEY_NAME = os.getenv("COINBASE_API_KEY_NAME", "").strip()
 PRIVATE_KEY = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\n", "\n").strip()
 LIVE = os.getenv("SCALPER_LIVE", "false").strip().lower() == "true"
 CAPITAL_USD = float(os.getenv("SCALPER_CAPITAL_USD", "0") or 0)
+
+# Compounding, and it cuts BOTH ways on purpose. The working envelope is
+# the starting envelope plus realised P&L, so wins raise the position size
+# and losses lower it. One-directional compounding - growing on wins,
+# holding size through losses - is how an unproven strategy turns a losing
+# streak into a large one. Symmetry means a bad run automatically shrinks
+# the bet.
+COMPOUND = os.getenv("SCALPER_COMPOUND", "true").strip().lower() == "true"
 
 # Live and paper keep SEPARATE ledgers. Running both against one file
 # would have each overwrite the other's trade history every cycle, and the
@@ -459,8 +467,15 @@ def run_cycle(state, authed):
     # rejections - Coinbase caught it, but the bot should not be firing
     # orders it cannot fund.
     free_usd = get_usd_balance()
-    budget = CAPITAL_USD if free_usd is None else min(CAPITAL_USD, free_usd)
+    realised = realised_pnl(state)
+    envelope = CAPITAL_USD + realised if COMPOUND else CAPITAL_USD
+    envelope = max(0.0, envelope)
+    budget = envelope if free_usd is None else min(envelope, free_usd)
     alloc = budget * CONFIG["max_alloc_pct"] / 100
+    if COMPOUND and buys and abs(realised) >= 0.01:
+        print(f"\n   Compounding: ${CAPITAL_USD:.2f} start {'+' if realised >= 0 else '-'} "
+              f"${abs(realised):.2f} realised = ${envelope:.2f} envelope "
+              f"(${alloc:.2f} per position)")
 
     slots = max(0, CONFIG["max_positions"] - len(state["positions"]))
     affordable = 999 if free_usd is None else (int(free_usd // alloc) if alloc > 0 else 0)
