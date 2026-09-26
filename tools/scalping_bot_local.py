@@ -69,7 +69,7 @@ except ImportError:
 # Bump on every change. Printed by the banner and by --import-key so the
 # running copy identifies itself - two rounds were lost to a stale file on
 # disk looking identical to a fresh one.
-BOT_VERSION = "2026-09-26.2-fund-aware"
+BOT_VERSION = "2026-09-26.4-min-order"
 
 HERE = Path(__file__).resolve().parent
 STATE_FILE = None  # set after LIVE is known - see below
@@ -150,6 +150,12 @@ CONFIG = {
     # help when six correlated coins signal together: it just fills to 4
     # on a single market move. Exits are never capped by this.
     "max_new_positions_per_cycle": 2,
+    # Floor on a single order. Allocation is a PERCENTAGE of the balance,
+    # so as capital depletes the size shrinks toward zero rather than the
+    # bot stopping: a $4 balance produced $1.00 orders in testing. That is
+    # below Coinbase's order minimum on most pairs, and at 1.2% round-trip
+    # fees it cannot return anything meaningful even when it fills.
+    "min_order_usd": 5.0,
     "max_alloc_pct": 25.0,
     "cycle_seconds": 900,
 }
@@ -437,43 +443,59 @@ def run_cycle(state, authed):
             print(f"         SELL FAILED {coin}: {res}")
 
     # ── pass 2b: entries, strongest first, capped ───────────
+    #
+    # Every limit is resolved BEFORE anything is printed, so the log states
+    # what will actually be attempted. The previous order announced
+    # "Taking the 2 strongest" and then bought one, because max_positions
+    # was only checked inside the loop afterwards - accurate in its parts
+    # and misleading as a whole, which is the failure mode this whole
+    # project has been about.
     buys = sorted([x for x in reads if x["action"] == "BUY" and not x["pos"]],
                   key=lambda x: -x["score"])
-    if len(buys) > CONFIG["max_new_positions_per_cycle"]:
-        skipped = [b["coin"] for b in buys[CONFIG["max_new_positions_per_cycle"]:]]
-        print(f"\n   {len(buys)} BUY signals in one cycle - crypto moves as a block, "
-              f"so this is one market-wide dip, not {len(buys)} independent setups.")
-        print(f"   Taking the {CONFIG['max_new_positions_per_cycle']} strongest, "
-              f"skipping: {', '.join(skipped)}")
 
     # Size against the SMALLER of the configured envelope and the real
     # balance. A live run with SCALPER_CAPITAL_USD=500 against a $479.21
     # balance sent three $125 orders and then three INSUFFICIENT_FUND
     # rejections - Coinbase caught it, but the bot should not be firing
-    # orders it cannot fund, and a rejection is a wasted request and a
-    # misleading log line.
+    # orders it cannot fund.
     free_usd = get_usd_balance()
     budget = CAPITAL_USD if free_usd is None else min(CAPITAL_USD, free_usd)
-    if free_usd is not None and free_usd < CAPITAL_USD:
-        print(f"\n   Envelope ${CAPITAL_USD:.2f} exceeds the ${free_usd:.2f} actually "
-              f"available - sizing against the balance.")
+    alloc = budget * CONFIG["max_alloc_pct"] / 100
+
+    slots = max(0, CONFIG["max_positions"] - len(state["positions"]))
+    affordable = 999 if free_usd is None else (int(free_usd // alloc) if alloc > 0 else 0)
+    take = min(len(buys), CONFIG["max_new_positions_per_cycle"], slots, affordable)
+
+    if buys and alloc < CONFIG["min_order_usd"]:
+        print(f"\n   {len(buys)} BUY signals, but ${alloc:.2f} per order is below the "
+              f"${CONFIG['min_order_usd']:.2f} minimum - not trading.")
+        print(f"   Capital is too low to place an order worth making. Add funds or "
+              f"wait for a position to close.")
+        take = 0
+
+    if buys and take:
+        if free_usd is not None and free_usd < CAPITAL_USD:
+            print(f"\n   Envelope ${CAPITAL_USD:.2f} exceeds the ${free_usd:.2f} "
+                  f"available - sizing against the balance (${alloc:.2f} each).")
+        if take < len(buys):
+            # Name the binding limit, rather than implying the cap did it.
+            if slots < min(len(buys), CONFIG["max_new_positions_per_cycle"]):
+                why_capped = (f"only {slots} of {CONFIG['max_positions']} position "
+                              f"slots free")
+            elif affordable < min(len(buys), CONFIG["max_new_positions_per_cycle"]):
+                why_capped = (f"${free_usd:.2f} funds only {affordable} order(s) "
+                              f"at ${alloc:.2f}")
+            else:
+                why_capped = (f"crypto moves as a block, so {len(buys)} signals is one "
+                              f"market-wide dip, not {len(buys)} independent setups")
+            print(f"\n   {len(buys)} BUY signals - taking "
+                  f"{take if take else 'none'} ({why_capped}).")
+            if take:
+                print(f"   Buying:  {', '.join(b['coin'] for b in buys[:take])}")
+            print(f"   Skipping: {', '.join(b['coin'] for b in buys[take:])}")
 
     opened = 0
-    for r in buys:
-        if opened >= CONFIG["max_new_positions_per_cycle"]:
-            break
-        if len(state["positions"]) >= CONFIG["max_positions"]:
-            print(f"         {r['coin']} skipped - already at max_positions "
-                  f"({CONFIG['max_positions']})")
-            break
-        alloc = budget * CONFIG["max_alloc_pct"] / 100
-        if alloc <= 0:
-            print("         BUY signal but no funds available — skipped")
-            break
-        if free_usd is not None and alloc > free_usd:
-            print(f"         {r['coin']} skipped - ${alloc:.2f} needed, "
-                  f"${free_usd:.2f} free")
-            break
+    for r in buys[:take]:
         ok, res = place_order(r["coin"], "BUY", usd_amount=alloc)
         if ok:
             state["positions"][r["coin"]] = {
