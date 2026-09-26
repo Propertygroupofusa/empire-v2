@@ -4604,11 +4604,16 @@ function escText(v) {
 }
 
 // The fleet against the whole venue, and what could replace what is
-// failing. Ranked on CORRELATION first: the account owner's own recorded
-// experience is "they all dragged down and I lost a lot of money", and
-// the measured reason is that the coins moved together. A faster coin
-// that falls on the same days is not a replacement, it is more of the
-// same position.
+// failing. Ranked on CORRELATION first, because the recorded experience
+// of this account was that a wider set all dragged down together and
+// cost real money - and the measured reason is that the coins moved as
+// one. A faster coin that falls on the same days is not a replacement,
+// it is more of the same position.
+//
+// No apostrophes in comments in this file: test_dashboard_accuracy
+// extracts functions by brace-matching with quote tracking and does not
+// skip comments, so a lone quote character here silently swallows the
+// rest of the file and corrupts every later assertion.
 function renderFleetReview(d) {
     const wrap = document.getElementById('fleet-review-wrap');
     if (!wrap) return;

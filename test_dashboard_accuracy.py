@@ -84,7 +84,21 @@ def ok(label, cond, detail=""):
 
 
 def fn_body(name):
-    """Source of one top-level JS function, by brace matching."""
+    """Source of one top-level JS function, by brace matching.
+
+    COMMENT AWARE, and it has to be. This scanner tracks quotes so a brace
+    inside a string does not end the function - but a comment is not code,
+    and twice now an ordinary apostrophe in a `//` line ("the owner's own
+    record") has read as an unterminated string and swallowed the rest of
+    the file. The failure is silent and cuts both ways: the extraction
+    that follows is 200KB of unrelated source, so an assertion can fail
+    for no reason OR pass because the text it wanted happened to appear
+    somewhere else entirely. A false pass in a file of accuracy checks is
+    worse than the bug it was meant to catch.
+
+    Regex literals are still not parsed - `/"/` would confuse it - so the
+    page avoids quote characters inside them, with a comment saying why.
+    """
     m = re.search(r"^(?:async )?function %s\s*\(" % re.escape(name), SCRIPT, re.M)
     if not m:
         return None
@@ -92,6 +106,7 @@ def fn_body(name):
     depth, j, in_s, esc, q = 0, i, False, False, ""
     while j < len(SCRIPT):
         c = SCRIPT[j]
+        nxt = SCRIPT[j + 1] if j + 1 < len(SCRIPT) else ""
         if in_s:
             if esc:
                 esc = False
@@ -99,6 +114,17 @@ def fn_body(name):
                 esc = True
             elif c == q:
                 in_s = False
+        elif c == "/" and nxt == "/":
+            j = SCRIPT.find("\n", j)
+            if j == -1:
+                break
+            continue
+        elif c == "/" and nxt == "*":
+            end = SCRIPT.find("*/", j + 2)
+            if end == -1:
+                break
+            j = end + 2
+            continue
         else:
             if c in "\"'`":
                 in_s, q = True, c
@@ -136,6 +162,15 @@ if legend:
     txt = legend.group(0)
     hard = re.findall(r"(?<!\$\{)\b\d+(?:\.\d+)?%", txt)
     ok("the legend paragraph hardcodes no percentage at all", not hard, str(hard))
+
+# A guard against the failure this scanner used to have silently: no
+# function in this page is a fifth of the file. If one extracts that big,
+# the scan ran away and every assertion below it is meaningless.
+for _probe in ("renderGridStatus", "renderGridBranchChart", "renderStatusStrip"):
+    _b = fn_body(_probe) or ""
+    ok(f"{_probe} extracts to a plausible size, not a runaway scan",
+       0 < len(_b) < len(SCRIPT) * 0.2,
+       f"{len(_b)} chars of a {len(SCRIPT)}-char script")
 
 chart = fn_body("renderGridBranchChart") or ""
 ok("the empty-branch chart note reads the branch's own step",
