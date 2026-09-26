@@ -44,6 +44,82 @@
     /* A wide table scrolls inside its own box; the page body never does. */
     .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; }
 
+    /* THE BRANCH TABLE, ON A PHONE.
+       Seven columns behind a 620px min-width means the last two - Status and
+       the Pause/Lock/Withdraw controls - are off-screen on every phone, and
+       a control you cannot reach on a live-money dashboard is worse than an
+       ugly one. Below 760px each row becomes a card: the table elements go
+       to display:block and every cell carries its own label from the
+       data-label attribute, so the header row is no longer load-bearing. */
+    @media (max-width: 760px) {
+        .branch-table, .branch-table tbody, .branch-table tr, .branch-table td {
+            display: block;
+            width: 100%;
+        }
+        .branch-table { min-width: 0 !important; }
+        .branch-table thead { display: none; }
+        .branch-table tr.branch-row {
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px 12px;
+            margin-bottom: 10px;
+            background: var(--card-bg, transparent);
+        }
+        .branch-table tr.branch-detail { padding: 0 2px 12px; }
+        .branch-table td {
+            padding: 4px 0 !important;
+            border: none;
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 14px;
+            text-align: right;
+        }
+        .branch-table td::before {
+            content: attr(data-label);
+            color: var(--text-dim);
+            font-size: 0.82em;
+            text-align: left;
+            flex: 0 0 auto;
+            white-space: nowrap;
+        }
+        /* The branch name is the card's heading, not a labelled field. */
+        .branch-table td.cell-branch {
+            display: block;
+            text-align: left;
+            font-weight: 600;
+            font-size: 1.05em;
+            padding-bottom: 6px !important;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 4px;
+        }
+        .branch-table td.cell-branch::before { content: none; }
+        /* Controls sit on their own row, full width, never clipped. */
+        .branch-table td.cell-actions {
+            display: flex; flex-wrap: wrap; gap: 8px 16px;
+            justify-content: flex-start; text-align: left;
+            padding-top: 10px !important; margin-top: 6px;
+            border-top: 1px solid var(--border);
+        }
+        .branch-table td.cell-actions::before { content: none; }
+        .branch-table td.cell-actions br { display: none; }
+        .branch-table td.cell-results { text-align: right; }
+    }
+    /* The controls were separated by <br> and grew a third link only on
+       branches that could be withdrawn from, so no two rows had the same
+       height or the same hit targets. One flex row, always the same shape. */
+    .branch-actions { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; }
+    .branch-actions a { white-space: nowrap; }
+
+    /* Empty state as a badge rather than a sentence. */
+    .badge {
+        display: inline-block; padding: 2px 8px; border-radius: 10px;
+        font-size: 0.8em; line-height: 1.5; white-space: nowrap;
+        background: rgba(128,128,128,.14); color: var(--text-dim);
+    }
+    .badge.waiting { background: rgba(245,158,11,.14); color: #b45309; }
+    @media (prefers-color-scheme: dark) { .badge.waiting { color: #e0a45c; } }
+
     /* One branch's distance-to-trigger row. */
     .prox-row {
         display: grid;
@@ -2369,7 +2445,7 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
 
     content.innerHTML = `
         <div class="table-scroll">
-        <table style="width:100%; min-width:620px; border-collapse:collapse; font-size:0.9em;">
+        <table class="branch-table" style="width:100%; min-width:620px; border-collapse:collapse; font-size:0.9em;">
             <thead><tr style="text-align:left; border-bottom:1px solid var(--border);">
                 <th style="padding:6px 8px;">Branch</th><th style="padding:6px 8px;">Coin</th>
                 <th style="padding:6px 8px;">Allocated</th><th style="padding:6px 8px;">Open slices</th>
@@ -2377,7 +2453,18 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
                 <th style="padding:6px 8px;">Status</th><th style="padding:6px 8px;"></th>
             </tr></thead>
             <tbody>
-                ${branches.map(b => {
+                ${[...branches].sort((p, q) => (q.open_slices || 0) - (p.open_slices || 0)
+                                             || p.bot_name.localeCompare(q.bot_name)).map(b => {
+                    // A branch holding nothing needs one line, not a row and
+                    // a chart. Four of six are flat at any given time, so the
+                    // two that actually hold money were being pushed down the
+                    // page by the four that do not. Sorted by open slices,
+                    // and the flat ones start collapsed behind one toggle.
+                    //
+                    // hidden, not display:none - the publish skeleton's own
+                    // [hidden] rule wins over the media query's display:block,
+                    // which a style attribute would not.
+                    const isFlat = !(b.open_slices > 0);
                     // Real, hourly self-tuning badge - per the account owner's
                     // direct "learn from its mistakes and make itself better
                     // every hr" request. Only ever shown once this specific
@@ -2422,16 +2509,39 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
                                   && k !== (b.bot_name + '|' + b.product_id))
                         .map(k => tradeHistoryByBotCoin[k].product_id);
 
+                    // STRUCTURED, not narrative. This cell used to read "No
+                    // closed trades on BTC-USD yet this branch earned +$12.80
+                    // over 15 trades on DOGE-USD before it was moved here" -
+                    // one sentence carrying two different numbers about two
+                    // different coins, in a table cell. Same facts, same
+                    // separation of current coin from prior coins, as a
+                    // figure and a sublabel. The coins stay NAMED: folding
+                    // them into "other" is what made the old row misleading.
+                    // LAID OUT as data, not CONDENSED to less of it.
+                    //
+                    // The first pass at shortening this cell deleted two
+                    // things test_branch_coin_label.py exists to protect:
+                    // the branch lifetime that reconciles the two figures,
+                    // and "before it was moved here", which is the only
+                    // thing explaining why a branch has P&L on a coin it
+                    // does not hold. Four facts live here - current-coin
+                    // P&L, prior-coin P&L, the prior coins BY NAME, and the
+                    // lifetime - and dropping any of them is how this cell
+                    // told the reader something false in the first place.
+                    // So the sentence becomes a figure and a sublabel, and
+                    // every fact stays.
+                    const coinsNamed = otherCoins.length ? otherCoins.join(', ') : 'coins it no longer holds';
                     let resultsStr;
                     if (lifetimeTrades === 0) {
-                        resultsStr = '<span style="color:var(--text-dim);">No closed trades yet</span>';
+                        resultsStr = '<span class="badge">no closed trades</span>';
                     } else if (coinTrades === 0) {
                         // Every trade this branch ever closed was on a different coin.
-                        // Showing its lifetime total here would be the exact bug.
-                        resultsStr = `<span style="color:var(--text-dim);">No closed trades on ${b.product_id} yet</span>`
-                            + `<div style="font-size:0.8em; color:var(--text-dim); margin-top:2px;">`
-                            + `this branch earned ${otherPnl >= 0 ? '+' : ''}${fmtUsd(otherPnl)} over ${otherTrades} trade${otherTrades === 1 ? '' : 's'} `
-                            + `on ${otherCoins.length ? otherCoins.join(', ') : 'coins it no longer holds'} before it was moved here</div>`;
+                        // Showing its lifetime total here would be the exact bug, and
+                        // so would any trade count written next to the CURRENT coin.
+                        resultsStr = `<span class="badge">No closed trades on ${b.product_id} yet</span>`
+                            + `<div style="font-size:0.8em; color:var(--text-dim); margin-top:3px;">`
+                            + `${otherPnl >= 0 ? '+' : ''}${fmtUsd(otherPnl)} \u00b7 ${otherTrades} trade${otherTrades === 1 ? '' : 's'} `
+                            + `on ${coinsNamed} before it was moved here</div>`;
                     } else {
                         const pnlColor = coinPnl >= 0 ? 'var(--green)' : 'var(--red)';
                         // No percentage here, deliberately.
@@ -2449,41 +2559,63 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
                             + `<div style="font-size:0.8em; color:var(--text-dim); margin-top:2px;">on ${b.product_id} · ${coinTrades} trade${coinTrades === 1 ? '' : 's'} · ${coinHist.win_rate.toFixed(0)}% win</div>`;
                         if (otherTrades > 0) {
                             resultsStr += `<div style="font-size:0.78em; color:var(--text-dim); margin-top:3px;">`
-                                + `+ ${otherPnl >= 0 ? '+' : ''}${fmtUsd(otherPnl)} earlier on ${otherCoins.length ? otherCoins.join(', ') : 'other coins'} `
-                                + `· branch lifetime ${lifetimePnl >= 0 ? '+' : ''}${fmtUsd(lifetimePnl)} over ${lifetimeTrades} trades</div>`;
+                                + `${otherPnl >= 0 ? '+' : ''}${fmtUsd(otherPnl)} earlier on ${coinsNamed}`
+                                + `<br>branch lifetime ${lifetimePnl >= 0 ? '+' : ''}${fmtUsd(lifetimePnl)} `
+                                + `over ${lifetimeTrades} trades</div>`;
                         }
                     }
                     const statusStr = (b.drawdown_breached
                         ? `🛑 <span style="color:var(--red);" title="Real equity is down ${((b.drawdown_pct || 0) * 100).toFixed(0)}% from its own $${(b.peak_equity || 0).toFixed(2)} peak - new buys paused, existing slices still sell normally">breach (${((b.drawdown_pct || 0) * 100).toFixed(0)}% down)</span>`
                         : (b.active ? '🟢 active' : '⏸️ paused'))
                         + (b.locked ? `<br><span style="color:var(--navy);" title="This branch's cash can't be withdrawn or moved out - by hand or by auto-rotate - until unlocked">🔒 locked</span>` : '');
-                    return `<tr style="border-bottom:1px solid var(--border);">
-                        <td style="padding:6px 8px;">${b.bot_name}</td>
-                        <td style="padding:6px 8px;">${b.product_id}</td>
-                        <td style="padding:6px 8px;">${fmtUsd(b.allocated_usd)}</td>
-                        <td style="padding:6px 8px;">${slicesStr}</td>
-                        <td style="padding:6px 8px;">${resultsStr}</td>
-                        <td style="padding:6px 8px;">${statusStr}</td>
-                        <td style="padding:6px 8px; white-space:nowrap;">
+                    // data-label on every cell: below 760px the header row
+                    // is hidden and each cell labels itself, which is what
+                    // turns this row into a card without a second template.
+                    //
+                    // The controls stay VISIBLE rather than moving behind a
+                    // kebab menu. A three-dot menu would tidy the row, but
+                    // Pause and Lock are the two things you reach for when
+                    // something is going wrong with real money, and putting
+                    // them one tap further away to gain a few pixels is a
+                    // bad trade. They are normalised into one flex row
+                    // instead, so every branch has the same shape whether or
+                    // not Withdraw applies to it.
+                    return `<tr class="branch-row${isFlat ? ' branch-flat' : ''}"${isFlat ? ' hidden' : ''} style="border-bottom:1px solid var(--border);">
+                        <td class="cell-branch" data-label="Branch" style="padding:6px 8px;">${b.bot_name}</td>
+                        <td data-label="Coin" style="padding:6px 8px;">${b.product_id}</td>
+                        <td data-label="Allocated" style="padding:6px 8px;">${fmtUsd(b.allocated_usd)}</td>
+                        <td data-label="Open slices" style="padding:6px 8px;">${slicesStr}</td>
+                        <td class="cell-results" data-label="Real results" style="padding:6px 8px;">${resultsStr}</td>
+                        <td data-label="Status" style="padding:6px 8px;">${statusStr}</td>
+                        <td class="cell-actions" data-label="" style="padding:6px 8px;">
+                            <span class="branch-actions">
                             <a href="#" onclick="toggleGridBranchActive('${b.bot_name}', ${!b.active}); return false;" style="color:var(--navy);">
                                 ${b.active ? 'Pause' : 'Resume'}
                             </a>
-                            <br><a href="#" onclick="toggleGridBranchLocked('${b.bot_name}', ${!b.locked}); return false;" style="color:var(--navy); font-size:0.9em;" title="${b.locked ? 'Allow this branch cash to be withdrawn/moved again' : 'Protect this branch cash from ever being withdrawn or moved out - its normal trading is unaffected'}">
+                            <a href="#" onclick="toggleGridBranchLocked('${b.bot_name}', ${!b.locked}); return false;" style="color:var(--navy); font-size:0.9em;" title="${b.locked ? 'Allow this branch cash to be withdrawn/moved again' : 'Protect this branch cash from ever being withdrawn or moved out - its normal trading is unaffected'}">
                                 ${b.locked ? '🔓 Unlock' : '🔒 Lock'}
                             </a>
                             ${(b.open_slices === 0 && !b.locked) ? `
-                            <br><a href="#" onclick="openWithdrawGridModal('${b.bot_name}', '${b.product_id}', ${b.allocated_usd}); return false;" style="color:var(--navy); font-size:0.9em;">
+                            <a href="#" onclick="openWithdrawGridModal('${b.bot_name}', '${b.product_id}', ${b.allocated_usd}); return false;" style="color:var(--navy); font-size:0.9em;">
                                 💵 Withdraw
                             </a>` : ''}
+                            </span>
                         </td>
                     </tr>
-                    <tr style="border-bottom:1px solid var(--border);">
+                    <tr class="branch-detail${isFlat ? ' branch-flat' : ''}"${isFlat ? ' hidden' : ''} style="border-bottom:1px solid var(--border);">
                         <td colspan="7" style="padding:4px 8px 14px;">${renderGridBranchChart(b)}</td>
                     </tr>`;
                 }).join('')}
             </tbody>
         </table>
         </div>
+        ${branches.filter(b => !(b.open_slices > 0)).length ? `
+        <div style="margin-top:8px;">
+            <a href="#" id="grid-flat-toggle" onclick="toggleFlatGridBranches(); return false;"
+               style="color:var(--navy); font-size:0.85em;">
+                Show ${branches.filter(b => !(b.open_slices > 0)).length} flat branch${branches.filter(b => !(b.open_slices > 0)).length === 1 ? '' : 'es'} \u25be
+            </a>
+        </div>` : ''}
         <p style="margin-top:10px; font-size:0.76em; color:var(--text-dim); line-height:1.5;">
             "Open slices" is how many of this branch's ${levelsPhrase} are currently open (each buys on its own
             ${stepPhrase} dip and sells FIFO on a ${stepPhrase} bounce) - "ref" is the real reference price the next
@@ -2837,6 +2969,23 @@ async function closeAllGridSlices(btn) {
 // information, color is just a quick visual cue on top of it). The
 // OLDEST open slice (next in line to sell, FIFO) gets a real "next"
 // ring so it's obvious which one the branch will act on first.
+function toggleFlatGridBranches() {
+    // Flat branches are hidden with the [hidden] attribute rather than a
+    // style, so this toggles the attribute. Reading the CURRENT state off
+    // the first row rather than a module flag means the toggle still knows
+    // where it stands after the 10-second poll rebuilds the table.
+    const rows = document.querySelectorAll('.branch-flat');
+    if (!rows.length) return;
+    const show = rows[0].hidden;
+    rows.forEach(r => { r.hidden = !show; });
+    const link = document.getElementById('grid-flat-toggle');
+    if (link) {
+        const n = document.querySelectorAll('tr.branch-row.branch-flat').length;
+        link.textContent = (show ? 'Hide ' : 'Show ') + n + ' flat branch'
+            + (n === 1 ? '' : 'es') + (show ? ' \u25b4' : ' \u25be');
+    }
+}
+
 function renderGridBranchChart(b) {
     const slices = b.slices || [];
     if (b.current_price == null) {
@@ -2847,9 +2996,27 @@ function renderGridBranchChart(b) {
     const buyTrigger = ref * (1 - b.grid_pct);
     const sellTrigger = ref * (1 + b.grid_pct);
 
-    const fmtPrice = p => p >= 1
-        ? '$' + p.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-        : '$' + p.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 6 });
+    // SIGNIFICANT FIGURES, not a fixed six decimals.
+    //
+    // BONK trades near $0.0000037. At maximumFractionDigits:6 the price, the
+    // reference, the buy trigger and the SELL trigger all rendered as
+    // "$0.000004" - four different numbers, one string, and no way to tell
+    // which side of the grid the coin was on. The slider below was drawing
+    // correctly the whole time; only its labels had collapsed.
+    //
+    // Four significant figures keeps the decimals that distinguish them
+    // ($0.0000037 / $0.0000371 / $0.0000036) and never falls back to
+    // exponential, which toPrecision does below 1e-7.
+    const fmtPrice = p => {
+        if (p == null || !isFinite(p)) return '\u2014';
+        if (p >= 1) return '$' + p.toLocaleString(undefined,
+            { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        if (p === 0) return '$0.00';
+        const decimals = Math.min(18, Math.max(2, 3 - Math.floor(Math.log10(Math.abs(p)))));
+        let s = p.toFixed(decimals);
+        if (s.indexOf('.') !== -1) s = s.replace(/0+$/, '').replace(/\.$/, '');
+        return '$' + s;
+    };
 
     const allPrices = [price, ref, buyTrigger, sellTrigger, ...slices.map(s => s.entry_price)];
     let domainMin = Math.min(...allPrices);
@@ -2916,7 +3083,10 @@ function renderGridBranchChart(b) {
     const topmostLabelY = axisY - 14 - maxLane * LANE_HEIGHT;
     const LABEL_TOP_MARGIN = 10; // real minimum distance the topmost stacked label keeps from the diagram's own top edge
     const viewBoxTop = Math.min(0, topmostLabelY - LABEL_TOP_MARGIN);
-    const H = 124 - viewBoxTop;
+    // 136, not 124: the domain-bound labels below the axis need their own
+    // row under the trigger prices at y=110. Text outside the viewBox is
+    // not clipped by a scrollbar, it simply is not drawn.
+    const H = 136 - viewBoxTop;
 
     // Real "next to sell" marker - per a real, live-confirmed fix: the
     // live bot no longer force-sells the literal oldest slice unconditionally
@@ -2955,8 +3125,16 @@ function renderGridBranchChart(b) {
         const netColor = b.total_unrealized_net_usd >= 0 ? 'var(--green)' : 'var(--red)';
         const sign = b.total_unrealized_net_usd >= 0 ? '+' : '';
         const pctStr = b.total_unrealized_net_pct != null ? ` (${sign}${(b.total_unrealized_net_pct * 100).toFixed(2)}%)` : '';
-        return `<div style="font-size:0.82em; margin-top:6px; color:${netColor}; font-weight:600;">
-            💰 If sold right now, net of real fees: ${sign}${fmtUsd(b.total_unrealized_net_usd)}${pctStr} across ${slices.length} open slice${slices.length === 1 ? '' : 's'}
+        // "If sold right now, net of real fees: -$0.05 (-0.67%) across 1
+        // open slice" was a sentence where a metric belonged. The two facts
+        // it carries - that the figure is NET OF FEES, and how many slices
+        // it spans - move to a tooltip and a compact suffix; neither is
+        // dropped, because "net of fees" is the whole reason this number
+        // differs from the one Coinbase shows.
+        return `<div style="font-size:0.82em; margin-top:6px; color:${netColor}; font-weight:600;"
+                     title="Net of real Coinbase fees on both legs - what this branch would actually bank if every open slice sold at the current price.">
+            Unrealized ${sign}${fmtUsd(b.total_unrealized_net_usd)}${pctStr}
+            <span style="font-weight:400; opacity:.75;">· ${slices.length} slice${slices.length === 1 ? '' : 's'} · net of fees</span>
         </div>`;
     })() : '';
 
@@ -2967,6 +3145,12 @@ function renderGridBranchChart(b) {
         </div>
         <svg viewBox="0 ${viewBoxTop} ${W} ${H}" style="width:100%; max-width:${W}px; height:auto; display:block;">
             <line x1="${marginX}" y1="${axisY}" x2="${W - marginX}" y2="${axisY}" stroke="var(--border)" stroke-width="1.5"/>
+            <!-- The endpoints were unlabelled, so the line showed WHERE the
+                 price sat without ever saying between what. These are the
+                 drawn domain's real bounds, from the same x() scale every
+                 other mark on this axis uses. -->
+            <text x="${marginX}" y="126" text-anchor="start" font-size="9" fill="var(--text-dim)">${fmtPrice(domainMin)}</text>
+            <text x="${W - marginX}" y="126" text-anchor="end" font-size="9" fill="var(--text-dim)">${fmtPrice(domainMax)}</text>
             ${triggerLine(buyTrigger, '↓ buy dip')}
             ${triggerLine(sellTrigger, '↑ sell rise')}
             <line x1="${x(ref)}" y1="8" x2="${x(ref)}" y2="${axisY}" stroke="var(--navy)" stroke-width="1.5" stroke-dasharray="5,2" opacity="0.5"/>
@@ -2974,7 +3158,7 @@ function renderGridBranchChart(b) {
             <polygon points="${x(price) - 5},2 ${x(price) + 5},2 ${x(price)},9" fill="var(--navy)"/>
             ${sliceMarkers}
         </svg>
-        ${slices.length === 0 ? `<div style="font-size:0.78em; color:var(--text-dim); margin-top:4px;">No open slices yet - waiting for a real ${b.grid_pct != null ? (b.grid_pct * 100).toFixed(2) + '%' : ''} dip below the reference price.</div>` : netSummary}`;
+        ${slices.length === 0 ? `<div style="margin-top:5px;"><span class="badge waiting" title="This branch holds nothing. It opens a slice on a full-step dip below the reference line above.">waiting for \u2212${b.grid_pct != null ? (b.grid_pct * 100).toFixed(2) + '%' : ''} dip</span></div>` : netSummary}`;
 }
 
 // Real, opt-in fee-tier-aware dynamic grid spacing toggle - per the
