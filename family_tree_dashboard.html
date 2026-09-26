@@ -4421,6 +4421,7 @@ function renderGridProximity(d) {
                         <span>buy ${fmtCoinPrice(r.buyAt)}</span>
                         <span>now ${fmtCoinPrice(r.cur)}</span>
                     </div>
+                    ${stopLine(r)}
                 </div>
                 <div class="prox-next">
                     <div class="prox-dist ${moveCls}" style="${moveCls ? '' : `color:${r.nextColor};`}">${arrow} ${r.nextDist.toFixed(2)}%</div>
@@ -4443,6 +4444,43 @@ function renderGridProximity(d) {
     } catch (e) {
         wrap.innerHTML = `<div class="coin-history-empty">Could not draw branch proximity (${e.message}).</div>`;
     }
+}
+
+// The third level that decides what happens to a branch, shown beside the
+// two that were already here. A stop is not a detail: on the live fleet
+// one 8% number meant a trigger that had never fired in 60 days on BTC
+// and one that fired on 54% of BONK entries. Where it sits, and what set
+// it, belong on the same row as the buy and sell triggers.
+function stopLine(r) {
+    const b = r.b || {};
+    if (b.stop_pct == null || !b.open_slices) return '';
+    const pct = Number(b.stop_pct) * 100;
+
+    if (pct <= 0) {
+        return `<div class="prox-ends" style="color:var(--red); font-weight:600;">
+                    <span>\u26a0\ufe0f no stop on this branch</span>
+                    <span>a slice here can fall without limit</span>
+                </div>`;
+    }
+
+    // Distance from the CURRENT price down to the nearest slice's stop -
+    // the number that says how much room is actually left, which a bare
+    // percentage of entry does not.
+    const slices = (b.slices || []).filter(s => s && s.entry_price);
+    let nearest = null;
+    slices.forEach(s => {
+        const lvl = s.entry_price * (1 - Number(b.stop_pct));
+        if (nearest === null || lvl > nearest) nearest = lvl;
+    });
+    const room = (nearest != null && r.cur) ? (r.cur - nearest) / r.cur * 100 : null;
+    const src = b.stop_source === 'adaptive'
+        ? `${pct.toFixed(2)}% \u00b7 ${Number(b.stop_daily_vol_pct || 0).toFixed(2)}% daily vol`
+        : `${pct.toFixed(2)}% \u00b7 ${String(b.stop_source || 'fixed').replace(/_/g, ' ')}`;
+
+    return `<div class="prox-ends" title="${escText(b.stop_reason || '')}">
+                <span>stop ${nearest != null ? fmtCoinPrice(nearest) : '\u2014'}</span>
+                <span>${room != null ? room.toFixed(2) + '% of room' : ''} \u00b7 ${src}</span>
+            </div>`;
 }
 
 // Realized P&L per coin, live grid only. Diverging from a real zero

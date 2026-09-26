@@ -217,6 +217,32 @@ GRID_AUTO_ROTATE_MODE_KEY = "crypto_grid_auto_rotate_active"
 # to 5. The confirmed-live oscillation bug that cooldown was written for
 # stays fixed.
 GRID_AUTO_ROTATE_INTERVAL_SECONDS = int(os.getenv("GRID_AUTO_ROTATE_INTERVAL_SECONDS", str(5 * 60)))
+
+# FLOATING BASE. reference_price already floats on every real fill - buy
+# and sell both write it (see run_grid_branch_cycle). What it cannot do is
+# float when there IS no fill, and that is the case that strands capital:
+# a flat branch whose coin rallied away keeps measuring its next buy from
+# a level the market left, so it waits for a dip deeper than its own step.
+# Measured on the live fleet 2026-09-26: ONDO needed 5.46% against a 2.50%
+# step, TIA 3.81%. Together 4.27 percentage points of pure waiting.
+#
+# reanchor_flat_grid_branches_now() has existed since 2026-09-25 and fixes
+# exactly this, but only when a human presses it - so the drift simply
+# rebuilt. Running it on a schedule is the whole change.
+#
+# Safe by construction, not by care: it places no order, spends nothing,
+# sells nothing, writes only reference_price, moves it only UPWARD, and
+# skips any branch holding an open slice (where the reference is also the
+# sell trigger). See its own docstring.
+GRID_REANCHOR_INTERVAL_SECONDS = int(os.getenv("GRID_REANCHOR_INTERVAL_SECONDS", str(60 * 60)))
+_last_grid_reanchor_at = 0.0
+
+
+def auto_reanchor_enabled() -> bool:
+    """ON unless switched off. The alternative is what the fleet already
+    did: drift back into waiting for a dip that already happened."""
+    return (os.getenv("GRID_AUTO_REANCHOR", "true") or "true").strip().lower() not in (
+        "false", "0", "no", "off")
 # Below this, a real Coinbase round-trip (sell nothing / just a fresh
 # buy into the new branch) isn't worth the real trading fee it costs to
 # move - matches the same order-of-magnitude reasoning as MIN_TRADE_USD,
@@ -5853,6 +5879,25 @@ async def run_grid_branches_cycle():
         except Exception as e:
             log.error(f"[GRID] auto-rotate sweep error: {e}")
 
+    # Floating base: pull every FLAT branch's reference up to the live
+    # market so its next buy sits one normal step away instead of behind a
+    # dip that already happened. Same in-process throttle as above.
+    global _last_grid_reanchor_at
+    if (auto_reanchor_enabled()
+            and now - _last_grid_reanchor_at >= GRID_REANCHOR_INTERVAL_SECONDS):
+        _last_grid_reanchor_at = now
+        try:
+            _ra = await reanchor_flat_grid_branches_now()
+            _moved = _ra.get("moved") or []
+            if _moved:
+                log.info(f"[GRID] floating base: re-anchored {len(_moved)} flat branch(es) - "
+                         + ", ".join(f"{m.get('bot_name')} {m.get('product_id')}"
+                                     for m in _moved[:6]))
+        except Exception as e:
+            # Never fatal. A stale reference costs opportunity; a stopped
+            # trading loop costs everything.
+            log.error(f"[GRID] re-anchor sweep error: {e}")
+
     # Real, hourly self-tuning sweep - per the account owner's direct
     # request to make this bot "grow and be better than the hrs before
     # and learn from it's mistakes... every hr." See
@@ -6098,6 +6143,8 @@ async def get_grid_status() -> dict:
         "grid_spacing_override_candidates": GRID_LEVEL_SPACING_CANDIDATES,
         "auto_rotate_active": await is_grid_auto_rotate_active(),
         "auto_rotate_interval_minutes": GRID_AUTO_ROTATE_INTERVAL_SECONDS // 60,
+        "auto_reanchor_active": auto_reanchor_enabled(),
+        "reanchor_interval_minutes": GRID_REANCHOR_INTERVAL_SECONDS // 60,
         "adaptive_fleet": await get_adaptive_fleet_status(),
         "drawdown_breaker_pct": GRID_DRAWDOWN_BREAKER_PCT,
         "branch_count": len(branches),
