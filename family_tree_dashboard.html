@@ -2443,6 +2443,13 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
             ? `up-to-${loLevels} concurrent real position${loLevels === 1 ? '' : 's'}`
             : `up-to-${loLevels}\u2013${hiLevels} concurrent real positions`);
 
+    // Maker-only removes the market fallback, so the round trip really is
+    // two maker legs; without it an unfilled limit becomes a market order
+    // and the taker rate is the honest one to price against.
+    gridRoundTripFeeRate = (data.maker_only_active && data.effective_round_trip_fee_rate != null)
+        ? data.effective_round_trip_fee_rate
+        : (data.real_round_trip_fee_rate != null ? data.real_round_trip_fee_rate : 0.015);
+
     content.innerHTML = `
         <div class="table-scroll">
         <table class="branch-table" style="width:100%; min-width:620px; border-collapse:collapse; font-size:0.9em;">
@@ -2986,6 +2993,14 @@ function toggleFlatGridBranches() {
     }
 }
 
+// The round-trip fee rate the accumulation panel prices break-even against,
+// taken from the live payload rather than assumed. renderGridBranchChart is
+// called per branch with only the branch, and the rate is a fleet-level
+// field, so it is stashed here when renderGridStatus runs. Defaulting to the
+// TAKER round trip on purpose: if the payload is missing, the panel should
+// overstate what a bounce must cover, never understate it.
+let gridRoundTripFeeRate = 0.015;
+
 function renderGridBranchChart(b) {
     const slices = b.slices || [];
     if (b.current_price == null) {
@@ -3138,6 +3153,56 @@ function renderGridBranchChart(b) {
         </div>`;
     })() : '';
 
+    // WHAT A FURTHER DROP ACTUALLY DOES.
+    //
+    // A long-only spot grid cannot profit from a fall; it accumulates. That
+    // is not a bug, but the page has been showing only half of it - the
+    // per-slice entries and a combined unrealized figure - and leaving the
+    // two numbers that decide whether accumulating is working out of view:
+    // the BLENDED average the position actually breaks even against, and
+    // what the next level does to it.
+    //
+    // Both halves are shown, deliberately. Averaging down lowers the price a
+    // bounce has to reach AND raises the money at risk, and a panel that
+    // showed only the first would be arguing for the trade rather than
+    // describing it. NEAR's third level would take one coin from $76 to
+    // $145 - a quarter of the whole fleet - and nothing on this page said so.
+    const accumulation = (() => {
+        if (!slices.length) return '';
+        const f = gridRoundTripFeeRate / 2;                 // one leg
+        const basis = slices.reduce((t, s) => t + s.entry_price * s.qty, 0);
+        const qty = slices.reduce((t, s) => t + s.qty, 0);
+        if (!qty || !basis) return '';
+        const blended = basis / qty;
+        // Break-even is not the blended entry: both legs pay a fee, so the
+        // sell has to clear the buy basis grossed up by the round trip.
+        const breakEven = blended * (1 + f) / (1 - f);
+        const toBreakEven = (breakEven / price - 1) * 100;
+        const levels = b.num_levels || 1;
+        const sliceUsd = (b.allocated_usd || 0) / levels;
+        const nextAt = (ref || price) * (1 - (b.grid_pct || 0));
+        const room = levels - slices.length;
+        let html = `<div style="margin-top:7px; font-size:0.8em; display:flex; flex-wrap:wrap; gap:2px 18px;">`
+            + `<span><span style="color:var(--text-dim);">blended</span> <strong>${fmtPrice(blended)}</strong></span>`
+            + `<span title="The blended entry grossed up by the real round-trip fee - what a bounce must actually reach, not where the coins were bought."><span style="color:var(--text-dim);">break-even</span> <strong>${fmtPrice(breakEven)}</strong> `
+            + `<span style="color:${toBreakEven <= 0 ? 'var(--green)' : 'var(--text-dim)'};">(${toBreakEven >= 0 ? '+' : ''}${toBreakEven.toFixed(2)}% from here)</span></span>`
+            + `</div>`;
+        if (room > 0 && nextAt > 0 && sliceUsd > 0) {
+            const nq = sliceUsd / nextAt;
+            const blended2 = (basis + nextAt * nq) / (qty + nq);
+            html += `<div style="margin-top:3px; font-size:0.78em; color:var(--text-dim);">`
+                + `Next level at <strong>${fmtPrice(nextAt)}</strong> (${((nextAt / price - 1) * 100).toFixed(2)}% away) `
+                + `pulls blended to <strong>${fmtPrice(blended2)}</strong> `
+                + `and takes the position to <strong>${fmtUsd(basis + sliceUsd)}</strong> from ${fmtUsd(basis)}.`
+                + `</div>`;
+        } else if (room <= 0) {
+            html += `<div style="margin-top:3px; font-size:0.78em; color:var(--text-dim);">`
+                + `All ${levels} levels are held - there is no further averaging down. `
+                + `From here this branch only exits, at ${fmtPrice(breakEven)} or better.</div>`;
+        }
+        return html;
+    })();
+
     return `
         <div style="font-size:0.82em; margin-bottom:2px;">
             <strong style="color:var(--navy);">Now ${fmtPrice(price)}</strong>
@@ -3158,7 +3223,7 @@ function renderGridBranchChart(b) {
             <polygon points="${x(price) - 5},2 ${x(price) + 5},2 ${x(price)},9" fill="var(--navy)"/>
             ${sliceMarkers}
         </svg>
-        ${slices.length === 0 ? `<div style="margin-top:5px;"><span class="badge waiting" title="This branch holds nothing. It opens a slice on a full-step dip below the reference line above.">waiting for \u2212${b.grid_pct != null ? (b.grid_pct * 100).toFixed(2) + '%' : ''} dip</span></div>` : netSummary}`;
+        ${slices.length === 0 ? `<div style="margin-top:5px;"><span class="badge waiting" title="This branch holds nothing. It opens a slice on a full-step dip below the reference line above.">waiting for \u2212${b.grid_pct != null ? (b.grid_pct * 100).toFixed(2) + '%' : ''} dip</span></div>` : netSummary + accumulation}`;
 }
 
 // Real, opt-in fee-tier-aware dynamic grid spacing toggle - per the
