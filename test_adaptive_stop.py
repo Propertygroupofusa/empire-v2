@@ -223,11 +223,60 @@ ok("a zero stop on a branch holding slices is logged at WARNING",
 ok("the stop-loss log reports the distance that actually fired",
    "{_stop_pct * 100:.1f}% stop" in cyc_src)
 
+print("\na NEW coin needs no setup - and thin history is refused, not guessed")
+
+A._VOL_CACHE.clear()
+calls.clear()
+# A coin nobody has configured, with a full history: it just works.
+full = [100.0]
+random.seed(11)
+for _ in range(24 * 30):
+    full.append(full[-1] * (1 + random.gauss(0, 0.01)))
+v = asyncio.run(A.measure_daily_vol(object(), "BRANDNEW-USD",
+                                    fetcher=counting_fetcher({"BRANDNEW-USD": full})))
+ok("an unconfigured coin with real history gets a measured stop", v is not None, v)
+r = A.resolve("BRANDNEW-USD", 0.08, v, overrides={}, mode_override="adaptive")
+ok("and resolves as adaptive with no per-coin setup", r["source"] == "adaptive", r)
+ok("the stop is inside the floor and the cap",
+   A.DEFAULT_FLOOR <= r["stop_pct"] <= A.DEFAULT_CAP, r)
+
+A._VOL_CACHE.clear()
+# Three days: a freshly listed coin. Enough to compute a number, nowhere
+# near enough to trust it - and short series bias LOW, so the computed
+# stop would be the tightest one on a coin nobody has evidence about.
+thin = [100.0 * (1 + 0.001 * i) for i in range(72)]
+raw = A.daily_vol_pct_from_closes(thin)
+ok("three days DOES produce a number if asked directly", raw is not None, raw)
+ok("and that number would land on the FLOOR - a hair trigger",
+   A.scaled_stop(raw) == A.DEFAULT_FLOOR, A.scaled_stop(raw))
+
+got = asyncio.run(A.measure_daily_vol(object(), "THIN-USD",
+                                      fetcher=counting_fetcher({"THIN-USD": thin})))
+ok("but measure_daily_vol refuses it", got is None, got)
+ok("which keeps the fixed stop, the known quantity",
+   A.resolve("THIN-USD", 0.08, got, overrides={}, mode_override="adaptive")["stop_pct"] == 0.08)
+ok("and it is not cached, so tomorrow's longer history is used",
+   "THIN-USD" not in A._VOL_CACHE, A._VOL_CACHE)
+
+A._VOL_CACHE.clear()
+enough = full[:int(A.MIN_VOL_DAYS * 24) + 5]
+ok("just over the minimum is accepted",
+   asyncio.run(A.measure_daily_vol(object(), "OK-USD",
+                                   fetcher=counting_fetcher({"OK-USD": enough}))) is not None)
+A._VOL_CACHE.clear()
+just_under = full[:int(A.MIN_VOL_DAYS * 24) - 5]
+ok("just under it is refused",
+   asyncio.run(A.measure_daily_vol(object(), "NO-USD",
+                                   fetcher=counting_fetcher({"NO-USD": just_under}))) is None)
+ok("the minimum is at least a week",
+   A.MIN_VOL_DAYS >= 7, A.MIN_VOL_DAYS)
+A._VOL_CACHE.clear()
+
 print("\nthe policy in force is readable, so 'did it take' is answerable")
 
 pol = A.policy()
 for field in ("mode", "vol_multiple", "vol_window_days", "floor_pct", "cap_pct",
-              "overrides", "measured_coins"):
+              "overrides", "measured_coins", "min_vol_days"):
     ok(f"policy() reports {field}", field in pol, pol)
 ok("mode is one of the two real values", pol["mode"] in ("fixed", "adaptive"))
 

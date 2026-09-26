@@ -118,6 +118,24 @@ VOL_WINDOW_DAYS = int(os.getenv("GRID_STOP_VOL_WINDOW_DAYS", "30") or 30)
 VOL_CACHE_SECONDS = float(os.getenv("GRID_STOP_VOL_CACHE_SECONDS", str(6 * 3600)))
 _VOL_CACHE = {}
 
+# HOW LITTLE HISTORY IS TOO LITTLE.
+#
+# A new coin joins the fleet and this module sizes its stop with no setup
+# at all - which is the point, and is exactly why the thin-history case
+# has to be closed. A freshly listed coin, or a fetch that returns partial
+# data, produces a short series, and a short series under-measures
+# volatility in the same direction every time. Measured: three days of
+# candles on a gently trending series read 0.01% daily volatility and
+# resolved to the 3% FLOOR - a hair trigger on the one coin nobody has any
+# evidence about.
+#
+# Seven days is where the measurement demonstrably settles: on the live
+# fleet the 7, 30 and 60-day windows agreed with each other while the
+# 25-hour window read 3-4x low. Below that, the answer is "not enough
+# history", which resolve() reads as "keep the fixed stop" - the known
+# quantity, not a computed guess.
+MIN_VOL_DAYS = float(os.getenv("GRID_STOP_MIN_VOL_DAYS", "7") or 7)
+
 
 async def measure_daily_vol(session, product_id, days=None, fetcher=None, now=None,
                             cached_only=False):
@@ -155,7 +173,14 @@ async def measure_daily_vol(session, product_id, days=None, fetcher=None, now=No
     if not got or not got[0]:
         return None
 
-    vol = daily_vol_pct_from_closes(got[0])
+    closes = got[0]
+    # Enough history to mean something, or none at all. A partial series
+    # is not a small amount of evidence - it is evidence biased one way.
+    min_bars = int(MIN_VOL_DAYS * 24)
+    if len(closes) < min_bars:
+        return None
+
+    vol = daily_vol_pct_from_closes(closes)
     # Only a real reading is cached. Caching a None would pin a branch to
     # the fixed stop for six hours over one failed fetch.
     if vol is not None:
@@ -292,5 +317,6 @@ def policy():
         "cap_pct": _env_float(CAP_ENV, DEFAULT_CAP),
         "overrides": parse_overrides(),
         "vol_cache_seconds": VOL_CACHE_SECONDS,
+        "min_vol_days": MIN_VOL_DAYS,
         "measured_coins": sorted(_VOL_CACHE),
     }
