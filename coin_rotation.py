@@ -114,6 +114,39 @@ ROTATE_MIN_CANDLES = int(os.getenv("GRID_ROTATE_MIN_CANDLES", "600"))
 ROTATE_FETCH_ATTEMPTS = int(os.getenv("GRID_ROTATE_FETCH_ATTEMPTS", "4"))
 ROTATE_FETCH_BACKOFF_SECONDS = float(os.getenv("GRID_ROTATE_FETCH_BACKOFF", "1.5"))
 
+# A THIN BOOK IS A FEE, NOT A BARGAIN.
+#
+# count_round_trips ranks on oscillation alone, and oscillation is exactly
+# what an illiquid coin has most of - its price jumps because nobody is
+# there, not because there is a move to catch. Measured on the live
+# candidates, 2026-09-26, 24h notional against 60-day trips at a 2.50%
+# step:
+#
+#     SAND   11 trips    $111,534/day      <- 2nd best oscillator in 49
+#     SNX    10 trips    $209,336/day      <- 3rd
+#     FIL     8 trips  $2,936,171/day
+#     LDO     8 trips    $900,415/day
+#     ONDO   14 trips $15,915,661/day      <- best, and deep
+#
+# Ranking on trips alone puts SAND and SNX straight into the fleet on a
+# book a twentieth the depth of what it already holds. On a book that
+# thin a grid order does not get the maker fill it is priced for; it
+# crosses the spread and pays taker (0.75%/leg, 1.50% round trip) against
+# a 2.50% step. That turns the fleet's best-looking candidates into its
+# most expensive ones, and the trip count never shows it.
+#
+# So liquidity is a FLOOR, not a tiebreak, and it is applied fail-closed:
+# a candidate whose depth cannot be measured is not rotated onto. It is
+# deliberately NOT applied to incumbents - a coin already holding real
+# money is never force-sold over a liquidity reading.
+ROTATE_MIN_24H_NOTIONAL_USD = float(
+    os.getenv("GRID_ROTATE_MIN_NOTIONAL_USD", "750000"))
+
+# Depth is read from the same public candles endpoint as everything else
+# (24 hourly candles, volume x close), so it needs no extra credential and
+# no new host.
+ROTATE_LIQUIDITY_HOURS = int(os.getenv("GRID_ROTATE_LIQUIDITY_HOURS", "24"))
+
 
 # ---- THE UNIVERSE IS LOCKED, AND SMALL, ON PURPOSE ----
 #
@@ -347,7 +380,57 @@ async def trips_for(product_ids, *, step, session=None, fetcher=None):
     return fresh
 
 
-def plan_rotations(branches, scores, *, min_margin=None):
+async def measure_liquidity(session, product_ids, *, hours=None, fetcher=None):
+    """24h notional traded per coin, in USD: {product_id: usd}.
+
+    A coin whose depth will not load is LEFT OUT of the map rather than
+    given a zero. The difference matters because the floor is applied
+    fail-closed downstream: absent means "not rotated onto", while a zero
+    would read as a measured, real answer. Same distinction measure_universe
+    already draws for trips, and for the same reason - a fetch failure is
+    not evidence about a coin.
+    """
+    hours = hours or ROTATE_LIQUIDITY_HOURS
+    if fetcher is None:
+        async def fetcher(pid):
+            url = (f"https://api.exchange.coinbase.com/products/{pid}/candles"
+                   f"?granularity=3600")
+            async with session.get(url, timeout=aiohttp_timeout()) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"HTTP {resp.status}")
+                return await resp.json()
+
+    out = {}
+    for product_id in product_ids:
+        try:
+            rows = await fetcher(product_id)
+        except Exception as exc:
+            log.warning(f"[ROTATE] {product_id}: depth unavailable ({exc}) - not scored "
+                        f"for liquidity, so it cannot be rotated onto.")
+            continue
+        if not isinstance(rows, list) or not rows:
+            continue
+        # Coinbase candles: [time, low, high, open, close, volume], newest first.
+        window = [r for r in rows[:hours] if isinstance(r, (list, tuple)) and len(r) >= 6]
+        if len(window) < max(2, hours // 2):
+            log.info(f"[ROTATE] {product_id}: only {len(window)} depth candles - not scored")
+            continue
+        try:
+            out[product_id] = float(sum(r[5] * r[4] for r in window))
+        except (TypeError, ValueError) as exc:
+            log.warning(f"[ROTATE] {product_id}: unreadable depth rows ({exc}) - not scored")
+    return out
+
+
+def aiohttp_timeout():
+    """Kept tiny and separate so measure_liquidity stays importable without
+    aiohttp installed - the tests drive it with their own fetcher."""
+    import aiohttp
+    return aiohttp.ClientTimeout(total=30)
+
+
+def plan_rotations(branches, scores, *, min_margin=None, liquidity=None,
+                   min_notional=None):
     """Which FLAT branches should move, and onto what.
 
     `branches` is an iterable of objects or dicts carrying bot_name,
@@ -372,9 +455,18 @@ def plan_rotations(branches, scores, *, min_margin=None):
          is not evidence against it.
       5. Best available candidate goes to the worst scoring incumbent, and
          each candidate is consumed once.
+      6. When a `liquidity` map is supplied, a candidate must clear
+         `min_notional` of 24h traded volume, and a candidate MISSING from
+         that map is refused. Thin books oscillate most and fill worst; see
+         ROTATE_MIN_24H_NOTIONAL_USD. Incumbents are never tested against
+         this - it gates what money moves ONTO, never what it moves out of.
+         Passing no map at all disables the floor, which is what every
+         caller that cannot measure depth should do rather than guess.
     """
     if min_margin is None:
         min_margin = ROTATE_MIN_TRIP_MARGIN
+    if min_notional is None:
+        min_notional = ROTATE_MIN_24H_NOTIONAL_USD
 
     def _get(b, key):
         return b.get(key) if isinstance(b, dict) else getattr(b, key, None)
@@ -399,9 +491,23 @@ def plan_rotations(branches, scores, *, min_margin=None):
     # this function proposes nothing at all - rotation cannot introduce a
     # coin the fleet was not already on. That is the intended default.
     allowed = set(universe(held))
+
+    def deep_enough(pid):
+        if liquidity is None:
+            return True
+        depth = liquidity.get(pid)
+        if depth is None:
+            log.info(f"[ROTATE] {pid}: no depth reading - not offered as a candidate")
+            return False
+        if depth < min_notional:
+            log.info(f"[ROTATE] {pid}: ${depth:,.0f}/day is below the "
+                     f"${min_notional:,.0f} floor - not offered as a candidate")
+            return False
+        return True
+
     candidates = sorted(
         ((trips, pid) for pid, trips in scores.items()
-         if pid not in held and pid in allowed),
+         if pid not in held and pid in allowed and deep_enough(pid)),
         reverse=True,
     )
     movable.sort()   # worst incumbent first
