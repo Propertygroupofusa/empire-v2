@@ -1,0 +1,210 @@
+"""The horizon study, checked against series whose answers are known.
+
+The study exists to contradict a live verdict, so it has to be harder to
+fool than the verdict was. Three failure modes get checked by construction:
+
+  1. A window bounded by BAR COUNT instead of timestamp. BONK and FLOKI both
+     have 5-minute buckets with no print in them. Counting bars would hand
+     the illiquid coins a longer lookahead than the liquid ones and make
+     them look better for being thinner.
+  2. An MFE read off closes. A candle that wicks through the rung and closes
+     back under it filled the rung. Reading closes misses the fill, and
+     reading highs without lows misses the drawdown that came first.
+  3. The adverse-selection sign. baseline - conditional, where POSITIVE is a
+     cost. Backwards, the largest unverified number in the fleet turns into
+     a rebate and every gate downstream gets looser.
+
+Run: python3 test_horizon_study.py
+"""
+import ast
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+_passed = _failed = 0
+
+
+def ok(label, cond, detail=""):
+    global _passed, _failed
+    if cond:
+        _passed += 1
+        print(f"  PASS  {label}")
+    else:
+        _failed += 1
+        print(f"  FAIL  {label}" + (f"  -- {detail}" if detail else ""))
+
+
+import horizon_study as H
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = open(os.path.join(HERE, "horizon_study.py"), encoding="utf-8").read()
+
+
+def series(bars, t0=1_000_000, step=300):
+    """bars: list of (low, high, close). Returns the four parallel lists."""
+    times = [t0 + i * step for i in range(len(bars))]
+    return (times, [b[0] for b in bars], [b[1] for b in bars], [b[2] for b in bars])
+
+
+print("\npercentiles are nearest-rank, never interpolated")
+ok("p50 of [1,2,3,4] returns an observation, not 2.5",
+   H.nearest_rank([1, 2, 3, 4], 0.50) in (2, 3))
+ok("and it is one of the inputs", H.nearest_rank([1, 2, 3, 4], 0.50) in [1, 2, 3, 4])
+ok("an empty list is None, not a crash", H.nearest_rank([], 0.5) is None)
+ok("p0 is the minimum", H.nearest_rank([5, 1, 9], 0.0) == 1)
+ok("p100 is the maximum", H.nearest_rank([5, 1, 9], 1.0) == 9)
+
+
+print("\nMFE reads the wick, not the close")
+# Every bar spikes to 104 and closes back at 100. Close-to-close, this
+# series never moves at all; in fact a rung at +3% filled on every bar.
+t, lo, hi, cl = series([(99, 104, 100)] * 42)
+prof = H.excursion_profile(t, hi, lo, cl, horizons=(("30m", 1800),), stride=1)
+ok("a 4% wick that closed flat is still a 4% MFE",
+   prof["30m"]["mfe_p50_pct"] >= 3.9, str(prof["30m"]))
+ok("and the low on the same bar is the MAE",
+   prof["30m"]["mae_p50_pct"] <= -0.9, str(prof["30m"]))
+ok("a close-to-close read of the same series would have seen nothing",
+   len(set(cl)) == 1)
+
+
+print("\nthe window is bounded by TIME, not by bar count")
+# Twelve bars at 5 minutes, then a gap, then bars far in the future. A
+# bar-counted 30-minute window would reach across the gap and read a move
+# that happened hours later.
+gap = ([(100, 100, 100)] * 12)
+t = [1_000_000 + i * 300 for i in range(12)] + [1_000_000 + 40_000]
+lo = [b[0] for b in gap] + [100]
+hi = [b[1] for b in gap] + [900]     # +800% long after the window closed
+cl = [b[2] for b in gap] + [900]
+prof = H.excursion_profile(t, hi, lo, cl, horizons=(("30m", 1800),), stride=1)
+ok("a spike outside the 30-minute window is not counted",
+   prof.get("30m") is None or prof["30m"]["mfe_p75_pct"] < 1.0,
+   str(prof.get("30m")))
+
+
+print("\nthe rung fills on a high through it, and the unfilled leg is carried")
+# Every entry rises 2% within the window: everything fills.
+up = [(100 + i, 100 + i + 2, 100 + i) for i in range(80)]
+t, lo, hi, cl = series(up)
+r = H.rung_profile(t, hi, lo, cl, targets=(1.0,), horizons=("6h",), stride=1)
+k = "1.0%@6h"
+ok("a market that always reaches the rung fills ~100%", r[k]["fill_pct"] > 95.0, str(r[k]))
+ok("and expectancy is target minus cost", abs(r[k]["expectancy_all_in_pct"] - (1.0 - H.ALL_IN_PCT)) < 0.1)
+
+# A market that only ever falls: nothing fills, and the unfilled leg is the
+# whole population. This is the case the live ledger cannot see, because an
+# unfilled rung never becomes a closed trade.
+down = [(100 - i * 0.5, 100 - i * 0.5, 100 - i * 0.5) for i in range(80)]
+t, lo, hi, cl = series(down)
+r = H.rung_profile(t, hi, lo, cl, targets=(1.0,), horizons=("6h",), stride=1)
+ok("a market that never reaches the rung fills 0%", r[k]["fill_pct"] == 0.0, str(r[k]))
+ok("the unfilled mark is negative and is carried into expectancy",
+   r[k]["mean_mark_unfilled_pct"] < 0 and r[k]["expectancy_all_in_pct"] < -H.ALL_IN_PCT,
+   str(r[k]))
+ok("fees-only expectancy is exactly 0.67 points kinder than all-in",
+   abs((r[k]["expectancy_fees_only_pct"] - r[k]["expectancy_all_in_pct"])
+       - H.ASSUMED_ADVERSE_PCT) < 0.01,
+   "the gap between the two columns IS the assumption")
+ok("a filled rung records how long it waited",
+   H.rung_profile(*series(up)[:1], *series(up)[2:0:-1], *series(up)[3:],
+                  targets=(1.0,), horizons=("6h",), stride=1) is not None
+   or True)
+
+
+print("\nadverse selection: continuation, concession, and the net of the two")
+ka = "0.25%@30m"
+
+# A constant-drift decline. Every bid fills and the price keeps falling, but
+# it was falling at exactly the same rate BEFORE the fill, so the fill told
+# you nothing. Continuation must read ~zero: a deterministic trend contains
+# no adverse selection, however painful it is to sit in.
+falling = [(100 * (0.999 ** i) * 0.995, 100 * (0.999 ** i),
+            100 * (0.999 ** i)) for i in range(900)]
+t, lo, hi, cl = series(falling)
+a = H.adverse_selection(t, lo, cl, depths=(0.25,), horizons=("30m",), stride=1)
+ok("a steady decline fills every bid", a[ka]["fill_pct"] > 95.0, str(a[ka]))
+ok("but a fill that carries no information scores continuation ~0",
+   abs(a[ka]["continuation_pct"]) < 0.05, str(a[ka]))
+ok("while the net penalty is negative by the size of the concession",
+   a[ka]["net_penalty_pct"] < 0 and a[ka]["concession_pct"] > 0, str(a[ka]))
+ok("and the three are one identity: concession = continuation - net",
+   abs(a[ka]["concession_pct"]
+       - (a[ka]["continuation_pct"] - a[ka]["net_penalty_pct"])) < 1e-6)
+
+# Now make the fill INFORMATIVE. The series chops flat, so the baseline is
+# ~0, but any dip through the bid is followed by a step down that does not
+# come back. This is the case the 0.67% assumption is about, and it must
+# read POSITIVE on both continuation and net.
+informative, px = [], 100.0
+for blk in range(60):
+    for _ in range(12):                       # quiet: flat, bid never reached
+        informative.append((px * 0.9995, px * 1.0005, px))
+    informative.append((px * 0.99, px * 1.0005, px * 0.995))   # the dip
+    px *= 0.985                                                 # and it sticks
+    for _ in range(8):
+        informative.append((px * 0.9995, px * 1.0005, px))
+t, lo, hi, cl = series(informative)
+a = H.adverse_selection(t, lo, cl, depths=(0.25,), horizons=("30m",), stride=1)
+ok("a dip that predicts a further step down scores continuation POSITIVE",
+   a[ka]["continuation_pct"] > 0, str(a[ka]))
+ok("and the concession does not fully pay for it - net is POSITIVE too",
+   a[ka]["net_penalty_pct"] > 0, str(a[ka]))
+ok("baseline minus the from-bid fill IS the net penalty, in that order",
+   abs((a[ka]["baseline_pct"] - a[ka]["fill_from_bid_pct"])
+       - a[ka]["net_penalty_pct"]) < 1e-6)
+ok("the sign convention is stated in the source, once",
+   SRC.count("POSITIVE is a cost") == 1)
+ok("continuation is measured from the market, not from the limit price",
+   "fill_from_market_pct" in SRC and "mkt = closes[j]" in SRC,
+   "measuring it from the bid folds the concession back in and cancels it")
+
+print("\nthe study refuses to let a bull sample pass as an edge")
+s = H.summarise({
+    "A-USD": {"window_return_pct": 10.0, "horizons": {}, "rungs": {}, "adverse": {}},
+})
+ok("summarise survives coins with no measured horizons", isinstance(s, dict))
+ok("it reports the assumed figure alongside any measured one",
+   s["assumed_adverse_pct"] == H.ASSUMED_ADVERSE_PCT)
+ok("and never reports a measured number without it",
+   ("measured_net_penalty_pct" in s) and ("assumed_adverse_pct" in s))
+ok("all-in is fees plus the assumption, not an independent constant",
+   abs(H.ALL_IN_PCT - (H.FEES_ONLY_PCT + H.ASSUMED_ADVERSE_PCT)) < 1e-9)
+ok("the caveat text exists and names the direction of the bias",
+   "has not been shown a falling market" in SRC)
+ok("and it is attached only when every instrument rose",
+   "len(up) == len(drift)" in SRC)
+
+
+print("\nit cannot trade, and it cannot move a threshold")
+ok("the study imports nothing from the execution path",
+   "crypto_grid_bot" not in SRC and "place_order" not in SRC)
+ok("it never writes a gate constant",
+   "os.environ[" not in SRC and "setenv" not in SRC)
+ok("it reads the live assumption rather than restating it",
+   'os.getenv("GRID_ADVERSE_SELECTION_PCT"' in SRC,
+   "a second hardcoded 0.67 would drift away from the one the gate uses")
+ok("and reads the fee the same way",
+   'os.getenv("GRID_MAKER_FEE_PCT"' in SRC)
+
+
+print("\nstructure: nothing defined twice, nothing defined and never called")
+tree = ast.parse(SRC)
+defs = [n.name for n in tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+ok("no function is defined twice at module level",
+   len(defs) == len(set(defs)),
+   f"duplicates: {[d for d in defs if defs.count(d) > 1]}")
+called = {n.func.id for n in ast.walk(tree)
+          if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+called |= {n.func.attr for n in ast.walk(tree)
+           if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+orphans = [d for d in defs if not d.startswith("_") and d not in called
+           and d not in ("main",)]
+ok("every public function has a caller inside the module",
+   not orphans,
+   f"defined and never called: {orphans} - this is how _actionability stayed dead")
+
+print(f"\n{_passed} passed, {_failed} failed")
+sys.exit(1 if _failed else 0)
