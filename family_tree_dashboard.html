@@ -527,14 +527,25 @@
     @media (max-width: 640px) {
         /* THE TAPE. Each print floats once, then is removed - a tape is a
            sequence of events, not a list that accumulates. */
-        @keyframes tape-float {
-            from { opacity: 0; transform: translateY(14px); }
-            12%  { opacity: 1; }
-            to   { opacity: 0; transform: translateY(-26px); }
+        /* A print drifts sideways WITHIN its own lane and never leaves it.
+           The old keyframe moved vertically, which walked a print out of
+           its row and into the one above - the same overlap the lanes
+           exist to prevent. */
+        @keyframes tape-lane {
+            from { opacity: 0; transform: translateX(-10px); }
+            10%  { opacity: 1; }
+            80%  { opacity: 1; }
+            to   { opacity: 0; transform: translateX(18px); }
         }
-        .tape-print { animation: tape-float 5.5s linear forwards; }
+        /* Reduced motion: it still has to clear the lane for the next
+           print, so it fades rather than sitting there for six seconds. */
+        @keyframes tape-lane-still {
+            from, 85% { opacity: 1; transform: none; }
+            to        { opacity: 0; transform: none; }
+        }
+        .tape-print { animation: tape-lane 5.5s linear forwards; }
         @media (prefers-reduced-motion: reduce) {
-            .tape-print { animation: none; opacity: 1; transform: none; }
+            .tape-print { animation: tape-lane-still 5.5s linear forwards; }
         }
         .tape-row { display: grid; grid-template-columns: 4.2em 3.6em 1fr 6.2em;
                     gap: 8px; padding: 4px 0; align-items: baseline;
@@ -1167,7 +1178,7 @@
             <br><br><strong>These are other people's trades, not yours.</strong> Coinbase publishes every fill
             on the venue, so this is the whole market's flow on your holdings. This account is not currently
             placing orders, so a tape of your own fills would be an empty box.</div>
-        <div id="tape-float" style="position:relative; height:70px; overflow:hidden;
+        <div id="tape-float" style="position:relative; height:96px; overflow:hidden;
                                     border-bottom:1px solid var(--border); margin-bottom:8px;"></div>
         <div id="tape-summary" style="font-size:0.74em; color:var(--text-dim); margin-bottom:6px;"></div>
         <div id="tape-wrap"><div class="coin-history-empty">Loading…</div></div>
@@ -5201,21 +5212,63 @@ renderTokenBar();
 
 const _tapeSeen = new Set();
 
+// Lanes, not a random scatter.
+//
+// The first version put every print at bottom:2px with a random left
+// between 6% and 68%. On a phone that is a ~230px band holding labels
+// 110-160px wide, and twelve prints arrive inside 2.6s while each lives
+// 6s - so they landed on one line on top of each other and the tape was
+// unreadable. Worse under prefers-reduced-motion, where they do not even
+// drift apart.
+//
+// So a print is assigned a LANE and a lane holds one print at a time. If
+// every lane is busy the print is dropped rather than stacked: a tape
+// that skips a print is still a tape, and one that overlaps them is a
+// smear. Dropped prints are still in the list below - nothing is lost,
+// only the floating decoration is thinned.
+// ONE constant drives the lane reservation, the animation and the
+// removal. The first attempt reserved a lane for 1.7s while the print
+// stayed on screen for 6s, so a lane was handed out again with the
+// previous print still sitting in it - the same overlap, now with extra
+// machinery. If these three numbers can disagree, eventually they do.
+const TAPE_LANES = 3;
+const TAPE_PRINT_MS = 2600;
+let _laneFreeAt = new Array(TAPE_LANES).fill(0);
+
 function floatPrint(row) {
     const box = document.getElementById('tape-float');
     if (!box) return;
+
+    const now = Date.now();
+    let lane = -1, earliest = Infinity;
+    for (let i = 0; i < TAPE_LANES; i++) {
+        if (_laneFreeAt[i] <= now && _laneFreeAt[i] < earliest) {
+            earliest = _laneFreeAt[i];
+            lane = i;
+        }
+    }
+    if (lane < 0) return;            // every lane busy - skip, never overlap
+    _laneFreeAt[lane] = now + TAPE_PRINT_MS;
+
     const up = row.side === 'buy';
     const el = document.createElement('div');
     el.className = 'tape-print';
-    el.style.cssText = `position:absolute; left:${6 + Math.random() * 62}%;
-        bottom:2px; font-size:${Math.min(1.5, 0.78 + Math.log10(Math.max(1, row.usd)) * 0.22)}em;
-        font-weight:700; white-space:nowrap; pointer-events:none;
-        color:${up ? 'var(--green)' : 'var(--red)'};`;
-    el.textContent = `${up ? '+' : '−'}$${Math.round(row.usd).toLocaleString('en-US')} ${row.asset}`;
+    // Size still carries the magnitude, but capped tighter so a $65k print
+    // cannot grow wide enough to run off its own lane on a phone.
+    const size = Math.min(1.15, 0.72 + Math.log10(Math.max(1, row.usd)) * 0.13);
+    el.style.cssText = 'position:absolute; left:0; right:0;' +
+        'top:' + (lane * (100 / TAPE_LANES)) + '%;' +
+        'height:' + (100 / TAPE_LANES) + '%;' +
+        'display:flex; align-items:center;' +
+        'padding-left:' + (4 + lane * 9) + '%;' +
+        'font-size:' + size + 'em; font-weight:700; white-space:nowrap;' +
+        'overflow:hidden; text-overflow:ellipsis; pointer-events:none;' +
+        'animation-duration:' + TAPE_PRINT_MS + 'ms;' +
+        'color:' + (up ? 'var(--green)' : 'var(--red)') + ';';
+    el.textContent = (up ? '+' : '\u2212') + '$' +
+        Math.round(row.usd).toLocaleString('en-US') + ' ' + row.asset;
     box.appendChild(el);
-    // The animation is 5.5s; remove a little after so the node cannot pile
-    // up on a tab that has been open for hours.
-    setTimeout(() => el.remove(), 6000);
+    setTimeout(() => el.remove(), TAPE_PRINT_MS);
 }
 
 async function loadTape() {
@@ -5238,7 +5291,7 @@ async function loadTape() {
         });
         if (_tapeSeen.size > 4000) _tapeSeen.clear();
         // Newest last, so they appear in the order they happened.
-        fresh.slice(0, 12).reverse().forEach((x, i) => setTimeout(() => floatPrint(x), i * 220));
+        fresh.slice(0, 9).reverse().forEach((x, i) => setTimeout(() => floatPrint(x), i * 650));
 
         const s = d;
         document.getElementById('tape-summary').innerHTML =
