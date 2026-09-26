@@ -2894,6 +2894,28 @@ async def _maybe_rotate_one_grid_branch(branch: CryptoGridBranch, after_sale: bo
     # that ranking (coin_rotation documents the +0.344 persistence figure
     # this margin is sized against). Veto only - this can cancel a rotation
     # ROI wanted, never start one ROI did not.
+    # ---- THE COIN LIST IS LOCKED ----
+    #
+    # Per the account owner, from experience: widening the coin list is how
+    # this account lost real money before - "they all dragged down." Across
+    # 120 days these coins carry +0.574 average pairwise correlation and on
+    # 31% of days 80%+ of them fell together, so a wider list is not a wider
+    # spread of risk, it is the same bet written more times. A grid buys
+    # dips, so on those days every branch fills at once and none can sell.
+    #
+    # With GRID_COIN_UNIVERSE unset the allowed set is the coins the fleet
+    # already holds, so this refuses every NEW coin and permits only a
+    # reshuffle among coins a human already chose.
+    _allowed = set(rotation.universe(await get_grid_branch_claimed_coins()))
+    if best_pid not in _allowed:
+        log.info(
+            f"[GRID] auto-rotate declined {branch.bot_name}: ROI ranks {best_pid} best, "
+            f"but it is outside the locked coin universe ({', '.join(sorted(_allowed)) or 'none'}). "
+            f"Set {rotation.COIN_UNIVERSE_ENV} to change which coins the fleet may hold - "
+            f"rotation does not widen the list on its own."
+        )
+        return
+
     if rotation.auto_rotate_enabled():
         try:
             trips = await rotation.trips_for([branch.product_id, best_pid],

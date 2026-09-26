@@ -82,6 +82,7 @@ no orders - the caller applies the plan, so the decision can be unit
 tested against fixtures with no network and no live account.
 """
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -107,6 +108,61 @@ ROTATE_MIN_TRIP_MARGIN = int(os.getenv("GRID_ROTATE_MIN_TRIP_MARGIN", "3"))
 # A coin that cannot even be measured is not a candidate. Guards against
 # ranking a coin #1 on four candles of history.
 ROTATE_MIN_CANDLES = int(os.getenv("GRID_ROTATE_MIN_CANDLES", "600"))
+
+# A coin in the locked universe that will not load gets pulled again, not
+# replaced. Rate limits are the common cause and they clear in seconds.
+ROTATE_FETCH_ATTEMPTS = int(os.getenv("GRID_ROTATE_FETCH_ATTEMPTS", "4"))
+ROTATE_FETCH_BACKOFF_SECONDS = float(os.getenv("GRID_ROTATE_FETCH_BACKOFF", "1.5"))
+
+
+# ---- THE UNIVERSE IS LOCKED, AND SMALL, ON PURPOSE ----
+#
+# Per the account owner, from experience: "last time I tried to do this and
+# go and try to pull all these different coins, they all dragged down and I
+# lost a lot of money on that."
+#
+# That is not caution, it is the correct reading of this asset class.
+# Measured on 120 days of real daily returns across 16 coins:
+#
+#     average pairwise correlation          +0.574
+#     BTC / ETH                             +0.880
+#     DOGE / SUI                            +0.850
+#     days where 80%+ fell TOGETHER         37 of 120  (31%)
+#     worst day                             16 of 16 down, -9.15% avg
+#
+# Sixteen coins is not sixteen bets. It is closer to two or three. And a
+# grid makes the concentration worse rather than better, because it BUYS
+# dips: on each of those 37 days every branch fills with losing slices at
+# once and none of them can sell. Widening the coin list widens that.
+#
+# So the candidate set is a fixed list, never a scan. With
+# GRID_COIN_UNIVERSE unset the universe is exactly the coins the fleet
+# ALREADY holds - meaning rotation can reshuffle capital among coins that
+# were already chosen, and can never introduce a new one on its own.
+COIN_UNIVERSE_ENV = "GRID_COIN_UNIVERSE"
+
+
+def configured_universe():
+    """The explicit coin list, or None when the fleet's own coins are it."""
+    raw = (os.getenv(COIN_UNIVERSE_ENV) or "").strip()
+    if not raw:
+        return None
+    coins = [c.strip().upper() for c in raw.replace(";", ",").split(",") if c.strip()]
+    return coins or None
+
+
+def universe(current_product_ids):
+    """Every coin this fleet is allowed to consider, and nothing else.
+
+    Unset env -> the coins already held. That default is deliberate: it
+    means the rotation logic can only ever reshuffle money between coins a
+    human already put it on, and introducing a new coin stays a human
+    decision. Nothing here ever scans a market for something better.
+    """
+    configured = configured_universe()
+    if configured:
+        return list(dict.fromkeys(configured))
+    return list(dict.fromkeys(p for p in current_product_ids if p))
 
 
 def auto_rotate_enabled() -> bool:
@@ -178,12 +234,30 @@ async def measure_universe(session, product_ids, step, *,
 
     scores = {}
     for product_id in product_ids:
-        try:
-            got = await fetcher(session, product_id, start, end,
-                                granularity=granularity)
-        except Exception as exc:
-            log.warning(f"[ROTATE] {product_id}: history unavailable ({exc}) - "
-                        f"not scored, so it is neither a candidate nor a reason to move")
+        # Keep pulling THIS coin rather than moving on to a different one.
+        # The universe is fixed (see universe() above), so a coin that will
+        # not load is a coin to retry, never a coin to substitute - the
+        # substitution is exactly the behaviour that widened the list last
+        # time and cost real money.
+        got = None
+        last_exc = None
+        for attempt in range(1, ROTATE_FETCH_ATTEMPTS + 1):
+            try:
+                got = await fetcher(session, product_id, start, end,
+                                    granularity=granularity)
+                break
+            except Exception as exc:
+                last_exc = exc
+                if attempt < ROTATE_FETCH_ATTEMPTS:
+                    delay = ROTATE_FETCH_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                    log.info(f"[ROTATE] {product_id}: history attempt {attempt} failed "
+                             f"({exc}) - retrying in {delay:.1f}s")
+                    await asyncio.sleep(delay)
+        if got is None:
+            log.warning(f"[ROTATE] {product_id}: history unavailable after "
+                        f"{ROTATE_FETCH_ATTEMPTS} attempts ({last_exc}) - not scored, so it "
+                        f"is neither a candidate nor a reason to move. No other coin is "
+                        f"pulled in its place.")
             continue
         if not got or len(got) < 3:
             continue
@@ -291,8 +365,14 @@ def plan_rotations(branches, scores, *, min_margin=None):
             continue
         movable.append((scores[product_id], _get(b, "bot_name"), product_id))
 
+    # Candidates come from the LOCKED universe only. With GRID_COIN_UNIVERSE
+    # unset that set is the coins already held, so `candidates` is empty and
+    # this function proposes nothing at all - rotation cannot introduce a
+    # coin the fleet was not already on. That is the intended default.
+    allowed = set(universe(held))
     candidates = sorted(
-        ((trips, pid) for pid, trips in scores.items() if pid not in held),
+        ((trips, pid) for pid, trips in scores.items()
+         if pid not in held and pid in allowed),
         reverse=True,
     )
     movable.sort()   # worst incumbent first

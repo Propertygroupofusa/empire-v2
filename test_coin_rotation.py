@@ -71,6 +71,13 @@ ok("mismatched highs/lows is zero, not an exception",
 
 print("\nplan_rotations - the rules that stop it losing money")
 
+# These cases test the ranking rules, so they declare an explicit universe.
+# Without one the coin list is locked to what the fleet already holds and
+# nothing is ever proposed - which is its own test, further down.
+os.environ["GRID_COIN_UNIVERSE"] = "BTC-USD,NEAR-USD,DOGE-USD,ONDO-USD,TIA-USD,SUI-USD"
+import importlib
+importlib.reload(R)
+
 BR = [
     {"bot_name": "g1", "product_id": "BTC-USD", "open_slices": 0},
     {"bot_name": "g2", "product_id": "NEAR-USD", "open_slices": 1},   # HOLDS
@@ -238,6 +245,82 @@ ok("an unmeasurable INCUMBENT leaves ROI in charge", veto_blocks(here=None, ther
 ok("an unmeasurable CANDIDATE leaves ROI in charge", veto_blocks(here=2, there=None) is False)
 ok("the veto can never START a rotation - it only returns block/allow",
    veto_blocks(here=0, there=0) is True and veto_blocks(here=0, there=99) is False)
+
+
+
+print("\nthe locked universe - rotation may never widen the coin list")
+
+old_uni = os.environ.pop("GRID_COIN_UNIVERSE", None)
+import importlib; importlib.reload(R)
+
+HELD = [
+    {"bot_name": "g1", "product_id": "BTC-USD", "open_slices": 0},
+    {"bot_name": "g2", "product_id": "NEAR-USD", "open_slices": 0},
+]
+WIDE = {"BTC-USD": 0, "NEAR-USD": 5, "ONDO-USD": 16, "TIA-USD": 11, "FIL-USD": 7}
+
+ok("unset env -> the universe IS the coins already held",
+   set(R.universe(["BTC-USD", "NEAR-USD"])) == {"BTC-USD", "NEAR-USD"})
+plans = R.plan_rotations(HELD, WIDE, min_margin=3)
+ok("unset env -> NO new coin is ever proposed, however good it scores",
+   plans == [], f"got {plans}")
+
+os.environ["GRID_COIN_UNIVERSE"] = "BTC-USD,NEAR-USD,ONDO-USD"
+importlib.reload(R)
+plans = R.plan_rotations(HELD, WIDE, min_margin=3)
+targets = {p["to_product_id"] for p in plans}
+ok("an explicit universe permits ONLY coins on that list",
+   targets <= {"ONDO-USD"}, f"got {targets}")
+ok("TIA and FIL score higher than nothing but are NOT on the list, so are refused",
+   "TIA-USD" not in targets and "FIL-USD" not in targets)
+ok("the permitted coin does move when it clears the margin", "ONDO-USD" in targets)
+
+os.environ["GRID_COIN_UNIVERSE"] = " btc-usd ; near-usd , ondo-usd "
+importlib.reload(R)
+ok("the list tolerates spaces, semicolons and lowercase",
+   set(R.configured_universe()) == {"BTC-USD", "NEAR-USD", "ONDO-USD"},
+   f"got {R.configured_universe()}")
+
+os.environ["GRID_COIN_UNIVERSE"] = "   "
+importlib.reload(R)
+ok("a blank list falls back to held coins, never to 'everything'",
+   R.configured_universe() is None)
+
+if old_uni is None:
+    os.environ.pop("GRID_COIN_UNIVERSE", None)
+else:
+    os.environ["GRID_COIN_UNIVERSE"] = old_uni
+importlib.reload(R)
+
+
+print("\nretry, not substitute - a coin that will not load is pulled again")
+
+async def _retry_checks():
+    attempts = {"n": 0}
+    async def flaky(session, product_id, start, end, granularity=None):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise RuntimeError("429 rate limited")
+        h, l = series([1.0] + [0.95, 1.06] * 400)
+        return (h, h, l, None)
+
+    R._TRIPS_CACHE.clear()
+    got = await R.measure_universe(None, ["FLAKY-USD"], 0.025, fetcher=flaky)
+    ok("a coin that fails twice then succeeds IS scored (retried, not dropped)",
+       got.get("FLAKY-USD", 0) > 0, f"got {got} after {attempts['n']} attempts")
+    ok("it took more than one attempt", attempts["n"] >= 3, f"attempts={attempts['n']}")
+
+    hopeless = {"n": 0}
+    async def dead(session, product_id, start, end, granularity=None):
+        hopeless["n"] += 1
+        raise RuntimeError("404")
+    got2 = await R.measure_universe(None, ["GONE-USD"], 0.025, fetcher=dead)
+    ok("a permanently dead coin is given every attempt before giving up",
+       hopeless["n"] == R.ROTATE_FETCH_ATTEMPTS, f"attempts={hopeless['n']}")
+    ok("and is then absent, not zero, and nothing is pulled in its place",
+       got2 == {}, f"got {got2}")
+
+asyncio.run(_retry_checks())
 
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
