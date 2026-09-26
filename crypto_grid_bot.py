@@ -5594,7 +5594,7 @@ async def run_grid_branches_cycle():
             await _score_short_term_opportunities(session, branches, _deadline)
             if time.time() < _deadline:
                 await signals.resolve(
-                    session, lambda pid: _mid_price(session, pid),
+                    session, lambda pid: signals.fetch_candles_full(session, pid),
                     deadline=_deadline)
                 # Candles, not mid samples: wicks count, and the ORDER of
                 # the two extremes decides whether an MFE was collectable.
@@ -6040,16 +6040,6 @@ async def get_realized_edge(days: int = None) -> dict:
             "those are where adverse selection actually lands"),
     }
 
-
-
-async def _mid_price(session, product_id: str):
-    """Mid of the book, or None. Mid at both ends of a measurement so the
-    spread is never booked as a move the market did not make."""
-    try:
-        bid, ask = await engine.get_best_bid_ask(session, product_id)
-        return (bid + ask) / 2.0 if bid is not None and ask is not None else None
-    except Exception:
-        return None
 
 
 # Wall-clock ceiling for the whole telemetry pass, and it is load-bearing.

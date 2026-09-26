@@ -274,6 +274,14 @@ async def main():
         callers = len(_re.findall(rf"[^a-z_]{h}\(", SRC)) - 1   # minus the def
         ok(f"  {h} is actually called", callers >= 1,
            "defined and never called - a test on it proves nothing")
+    # The same check over the BOT's private helpers. _mid_price survived one
+    # refactor as a defined-but-uncalled function because nothing looked.
+    bot_helpers = _re.findall(r"^async def (_[a-z_]+)\(", GRIDSRC, _re.M)
+    for h in bot_helpers:
+        n = len(_re.findall(rf"[^a-z_]{h}\(", GRIDSRC)) - 1
+        ok(f"  crypto_grid_bot.{h} is called", n >= 1,
+           "defined and never called")
+
     for public in ("regime_summary", "resolve_crossings", "observe",
                    "due_for_score", "window_excursion", "fetch_candles_full"):
         ok(f"  {public} is reachable from the bot",

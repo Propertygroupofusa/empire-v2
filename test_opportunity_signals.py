@@ -198,18 +198,30 @@ async def _runtime():
             row.scored_at = dt.datetime.utcnow() - dt.timedelta(minutes=31)
         await db.commit()
 
-    async def price_for(pid):
-        return 0.51                      # +2.0% from 0.50
+    # Candles covering the 30 minutes after the score. Closes stay at 0.50
+    # while the HIGHS run to 0.51 - so a close-based read would see no move
+    # at all, and only the highs show the +2.0% that actually happened.
+    _T0 = int(dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc).timestamp()) - 1860
+    CANDLES = ([_T0 + 300 * i for i in range(7)], [0.50] * 7,
+               [0.502, 0.505, 0.507, 0.509, 0.510, 0.510, 0.510],
+               [0.499, 0.500, 0.502, 0.505, 0.508, 0.509, 0.509], [1.0] * 7)
 
-    n = await S.resolve(None, price_for)
+    async def candles_for(pid):
+        return CANDLES
+
+    n = await S.resolve(None, candles_for)
     ok("the horizon resolves", n == 1)
     async with get_session_factory()() as db:
         row = (await db.execute(select(models.ShortTermSignal))).scalars().all()[0]
     ok("all three horizons filled", None not in (row.actual_move_5m_pct,
                                                  row.actual_move_15m_pct,
                                                  row.actual_move_30m_pct))
-    ok("actual move is measured against the scored price",
-       abs(row.actual_move_30m_pct - 2.0) < 0.01, row.actual_move_30m_pct)
+    ok("MFE comes from candle HIGHS, not closes (closes never moved)",
+       abs(row.actual_mfe_pct - 2.0) < 0.01, row.actual_mfe_pct)
+    ok("  and each horizon's move is bounded to its OWN window",
+       row.actual_move_5m_pct is not None
+       and abs(row.actual_move_30m_pct - 0.0) < 0.01,
+       "closes were flat, so every horizon's close-to-close move is 0")
     ok("a +2.0%% move beat the 1.0%% prediction -> materialized",
        row.materialized is True)
     ok("time-to-target is recorded", row.minutes_to_target is not None)
@@ -247,12 +259,20 @@ async def _runtime():
         rows = (await db.execute(select(models.ShortTermSignal))).scalars().all()
         rows[-1].scored_at = dt.datetime.utcnow() - dt.timedelta(minutes=31)
         await db.commit()
-    await S.resolve(None, lambda pid: _ret(100.8))      # +0.8%: up, but small
+    _T1 = int(dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc).timestamp()) - 1860
+    SMALL = ([_T1 + 300 * i for i in range(7)], [100.0] * 7,
+             [100.2, 100.4, 100.6, 100.8, 100.8, 100.8, 100.8],
+             [99.9, 100.0, 100.2, 100.4, 100.5, 100.5, 100.5], [1.0] * 7)
+    await S.resolve(None, lambda pid: _ret(SMALL))     # +0.8% peak: up, but small
     async with get_session_factory()() as db:
         row2 = (await db.execute(select(models.ShortTermSignal))).scalars().all()[-1]
+    # Read from the PEAK, not the 30-minute close. The move did go the right
+    # way - it reached +0.8% - and closed back at flat, which is precisely why
+    # a close-to-close read is the wrong measure of whether an edge existed.
     ok("a move that went the RIGHT way but too small nets negative",
-       row2.actual_move_30m_pct > 0 and row2.net_after_costs_pct < 0,
-       f"move={row2.actual_move_30m_pct} net={row2.net_after_costs_pct}")
+       row2.actual_mfe_pct > 0 and row2.net_after_costs_pct < 0,
+       f"peak={row2.actual_mfe_pct} close={row2.actual_move_30m_pct} "
+       f"net={row2.net_after_costs_pct}")
     ok("  and it is correctly marked as NOT materialized",
        row2.materialized is False)
 

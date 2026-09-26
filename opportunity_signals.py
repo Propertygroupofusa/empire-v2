@@ -519,15 +519,31 @@ async def record(product_id: str, bot_name: str, price: float, scored: dict):
         return False
 
 
-async def resolve(session, price_for, max_rows: int = 8, deadline=None):
+async def resolve(session, candles_for, max_rows: int = 8, deadline=None):
     """Mark the predictions whose horizons have come due. Never raises.
 
-    `price_for` is an async callable taking a product_id and returning the
-    current price, or None. Injected rather than imported so this module
-    stays testable without a network.
+    Reads candle HIGHS AND LOWS, not sampled prices, for the same reasons
+    resolve_crossings does - and this is the larger dataset of the two, so
+    leaving it on the weaker measurement would have put the flattering
+    number where most of the evidence lives.
 
-    Each horizon fills once. The 30-minute pass also computes the verdict
-    columns and stamps resolved_at, so a row is complete or visibly not.
+    What sampling the mid every cycle could not do:
+
+      WICKS. A candle that spikes 3% and closes flat still hit 3%. Between
+      two samples 37 seconds apart, that spike is invisible - and MFE is
+      exactly the quantity it belongs to.
+
+      ORDER. Three mid reads cannot say which extreme came first, so a move
+      that dumps hard and then rips scores as a clean win. minutes_to_target
+      was being set to the age of whichever SAMPLE happened to be highest,
+      which is not when the target was reached.
+
+    `candles_for` is an async callable taking a product_id and returning
+    (times, closes, highs, lows, volumes) or None. Injected rather than
+    imported so this stays testable without a network.
+
+    Each horizon's realised move is bounded to its OWN window, so the
+    5-minute figure cannot be contaminated by what happened at minute 25.
     """
     try:
         now = datetime.utcnow()
@@ -539,57 +555,65 @@ async def resolve(session, price_for, max_rows: int = 8, deadline=None):
                 .limit(max_rows))).scalars().all()
             if not rows:
                 return 0
-            prices, done = {}, 0
+            series, done = {}, 0
             for row in rows:
-                # Each unresolved product costs one book read at up to 15s.
-                # Stopping mid-pass is free: an unfilled horizon stays
-                # pending and is picked up next cycle. Holding the loop past
-                # its lease is not.
+                # One candle fetch per product at up to 15s. Stopping mid-pass
+                # is free: an unfilled horizon stays pending and is picked up
+                # next cycle. Holding the loop past its lease is not.
                 if deadline is not None and time.time() >= deadline:
                     break
-                age_min = ((now - row.scored_at).total_seconds() / 60.0) if row.scored_at else 0
-                due = [h for h in HORIZONS_MIN
-                       if age_min >= h and getattr(row, f"actual_move_{h}m_pct") is None]
-                if not due:
+                if not row.scored_at or not row.price_at_score:
                     continue
-                if row.product_id not in prices:
+                age_min = (now - row.scored_at).total_seconds() / 60.0
+                if age_min < HORIZONS_MIN[0]:
+                    continue
+                if row.product_id not in series:
                     try:
-                        prices[row.product_id] = await price_for(row.product_id)
+                        series[row.product_id] = await candles_for(row.product_id)
                     except Exception:
-                        prices[row.product_id] = None
-                price = prices.get(row.product_id)
-                if price is None or not row.price_at_score:
+                        series[row.product_id] = None
+                c = series.get(row.product_id)
+                if not c:
                     continue
-                move = (price / row.price_at_score - 1.0) * 100.0
-                for h in due:
-                    setattr(row, f"actual_move_{h}m_pct", round(move, 4))
-                # Excursions accumulate across every pass, so they track the
-                # best and worst the move ever reached rather than only the
-                # value at one arbitrary sample.
-                if row.actual_mfe_pct is None or move > row.actual_mfe_pct:
-                    row.actual_mfe_pct = round(move, 4)
-                    if (row.expected_move_pct is not None
-                            and move >= row.expected_move_pct
-                            and row.minutes_to_target is None):
-                        row.minutes_to_target = round(age_min, 1)
-                if row.actual_mae_pct is None or move < row.actual_mae_pct:
-                    row.actual_mae_pct = round(move, 4)
+                times, closes, highs, lows, _vols = c
+                t0 = int(row.scored_at.replace(tzinfo=timezone.utc).timestamp())
 
-                if row.actual_move_30m_pct is not None:
-                    row.materialized = bool(
-                        row.expected_move_pct is not None
-                        and row.actual_mfe_pct is not None
-                        and row.actual_mfe_pct >= row.expected_move_pct)
-                    # THE COLUMN THAT SETTLES IT. Priced against the BEST the
-                    # move ever reached, which flatters the signal on purpose:
-                    # it assumes a perfect exit nobody gets. If the number is
-                    # still negative under that assumption, no execution
-                    # improvement rescues it.
-                    if row.actual_mfe_pct is not None and row.cost_assumed_pct is not None:
-                        row.net_after_costs_pct = round(
-                            row.actual_mfe_pct - row.cost_assumed_pct, 4)
-                    row.resolved_at = now
-                    done += 1
+                for h in HORIZONS_MIN:
+                    if age_min < h or getattr(row, f"actual_move_{h}m_pct") is not None:
+                        continue
+                    within = [i for i, ts in enumerate(times) if t0 <= ts <= t0 + h * 60]
+                    if within:
+                        setattr(row, f"actual_move_{h}m_pct",
+                                round((closes[within[-1]] / row.price_at_score - 1.0) * 100.0, 4))
+
+                exc = window_excursion(times, highs, lows, t0, row.price_at_score,
+                                       until_epoch=t0 + HORIZONS_MIN[-1] * 60)
+                if exc is not None:
+                    mfe, mfe_at, mae, mae_at = exc
+                    row.actual_mfe_pct, row.actual_mae_pct = mfe, mae
+                    # The minute the target was actually reached, from the
+                    # candle that reached it - not the age of whichever
+                    # sample happened to be highest when we looked.
+                    if (row.expected_move_pct is not None
+                            and mfe >= row.expected_move_pct):
+                        row.minutes_to_target = mfe_at
+
+                if age_min < HORIZONS_MIN[-1]:
+                    continue
+                row.materialized = bool(
+                    row.expected_move_pct is not None
+                    and row.actual_mfe_pct is not None
+                    and row.actual_mfe_pct >= row.expected_move_pct)
+                # THE COLUMN THAT SETTLES IT. Priced against the BEST the move
+                # ever reached, which flatters the signal on purpose: it
+                # assumes a perfect exit nobody gets. If the number is still
+                # negative under that assumption, no execution improvement
+                # rescues it.
+                if row.actual_mfe_pct is not None and row.cost_assumed_pct is not None:
+                    row.net_after_costs_pct = round(
+                        row.actual_mfe_pct - row.cost_assumed_pct, 4)
+                row.resolved_at = now
+                done += 1
             await db.commit()
             return done
     except Exception as e:
