@@ -111,6 +111,17 @@ SUMMARY_MAX_ROWS = int(os.getenv("GRID_SIGNAL_SUMMARY_ROWS", "5000"))
 # belongs between expected move and real cost.
 VIABILITY_MARGIN_PCT = float(os.getenv("GRID_VIABILITY_MARGIN_PCT", "0.10"))
 
+# How long an alert can take to reach a human. The grid detects a crossing
+# every candle, but notification rides the hourly watch and the scheduler
+# refuses anything shorter - 15 minutes was tried and rejected at the
+# platform. A real constraint, not a tuning choice, and the thing the window
+# distribution has to be measured against.
+ALERT_DELIVERY_DELAY_SECONDS = int(os.getenv("GRID_ALERT_DELAY_SECONDS", "3600"))
+
+# The live stop as a percent, read from the same env var the grid uses, so
+# the two can never disagree about what would have been survivable.
+GRID_STOP_PCT_LABEL = float(os.getenv("GRID_STOP_LOSS_PCT", "0.08")) * 100
+
 # Candles are 5 minutes, so these are the horizons the data can actually
 # support. A 1-minute return was asked for and is not offered: the series
 # does not carry it, and interpolating one would be inventing a reading.
@@ -630,6 +641,61 @@ def _percentiles(values) -> dict:
             "min": values[0], "max": values[-1]}
 
 
+def _percentiles(values) -> dict:
+    """p25 / median / p75 / mean over an already-sorted list.
+
+    Computed in Python rather than SQL on purpose: percentile_cont is
+    Postgres-only and every test here runs on SQLite, and a query that works
+    in production but not under test is a query nobody checks. The rows are
+    already in memory for the rest of this summary anyway.
+    """
+    n = len(values)
+    if not n:
+        return {"n": 0}
+
+    def at(q):
+        # Nearest-rank, never interpolated. With a handful of windows an
+        # interpolated percentile synthesises a duration that never occurred;
+        # these are real observations and should stay that way.
+        return values[min(n - 1, max(0, int(round(q * (n - 1)))))]
+
+    return {"n": n, "p25": at(0.25), "median": at(0.50), "p75": at(0.75),
+            "mean": round(sum(values) / n, 1), "min": values[0], "max": values[-1]}
+
+
+def _actionability(dist: dict) -> dict:
+    """Can these alerts be acted on, or are they only evidence?
+
+      p75 < delay   three quarters of windows close before the alert lands.
+                    The pipeline is formally an OFFLINE OBSERVER: good for
+                    measuring whether edges exist, false-alarm rates and
+                    diurnal patterns; useless for execution at this cadence.
+      p25 > delay   even the short windows outlive the delay. Actionable.
+      between       mixed - some windows survive delivery, most may not.
+
+    Stated as a verdict because "p75 is 2100 and the delay is 3600" is the
+    same fact and nobody applies it at a glance.
+    """
+    d = ALERT_DELIVERY_DELAY_SECONDS
+    if not dist.get("n"):
+        return {"verdict": "no closed windows yet - nothing to judge",
+                "delivery_delay_seconds": d}
+    if dist["p75"] < d:
+        v = (f"OFFLINE OBSERVER - 75% of windows close inside the {d // 60}min alert "
+             f"delay (p75 {dist['p75'] / 60:.1f}min). These alerts can measure "
+             f"whether opportunities exist; they cannot be traded at this cadence.")
+    elif dist["p25"] > d:
+        v = (f"ACTIONABLE - even short windows outlive the {d // 60}min delay "
+             f"(p25 {dist['p25'] / 60:.1f}min).")
+    else:
+        v = (f"MIXED - p25 {dist['p25'] / 60:.1f}min, p75 {dist['p75'] / 60:.1f}min "
+             f"against a {d // 60}min delay. Some windows survive delivery, most "
+             f"may not.")
+    return {"verdict": v, "delivery_delay_seconds": d,
+            "p25_minutes": round(dist["p25"] / 60, 1),
+            "p75_minutes": round(dist["p75"] / 60, 1)}
+
+
 def is_viable(net_edge_pct, margin: float = None) -> bool:
     """Whether this reading clears its costs by enough to count.
 
@@ -763,7 +829,11 @@ async def detect_crossing(product_id: str, scored: dict, price: float):
 
 
 async def resolve_crossings(price_for, max_rows: int = 8, deadline=None):
-    """Mark what happened in the 30 minutes after each alert. Never raises.
+    """Track each alert's price path and mark it at 30 minutes. Never raises.
+
+    Called every cycle, so MFE and MAE accumulate across ~48 samples rather
+    than being read once at the end - which is the difference between an
+    excursion and an endpoint.
 
     net_after_costs_pct is priced against the BEST the move reached, which
     flatters the crossing on purpose - if an alert loses money even assuming
@@ -782,7 +852,7 @@ async def resolve_crossings(price_for, max_rows: int = 8, deadline=None):
             for row in rows:
                 if deadline is not None and _t.time() >= deadline:
                     break
-                if not row.crossed_at or (now - row.crossed_at).total_seconds() < 1800:
+                if not row.crossed_at:
                     continue
                 if row.product_id not in prices:
                     try:
@@ -793,10 +863,27 @@ async def resolve_crossings(price_for, max_rows: int = 8, deadline=None):
                 if price is None or not row.price_at_cross:
                     continue
                 move = (price / row.price_at_cross - 1.0) * 100.0
+
+                # SAMPLE ON EVERY VISIT; RESOLVE ONLY AT 30 MINUTES.
+                #
+                # This used to skip every row under 30 minutes old and then
+                # take ONE reading, so actual_mfe_pct and actual_mae_pct were
+                # both that single endpoint wearing the names of two
+                # excursions. The entire point of MAE is the PATH - whether a
+                # winner dipped hard before it paid, which is what decides
+                # whether it could have been held at all. An endpoint cannot
+                # answer that, and it would have reported every winner as
+                # smooth.
+                #
+                # Resolution already runs every cycle (~37s), so accumulating
+                # across visits buys a real excursion path for nothing.
+                row.actual_mfe_pct = round(max(
+                    move, row.actual_mfe_pct if row.actual_mfe_pct is not None else move), 4)
+                row.actual_mae_pct = round(min(
+                    move, row.actual_mae_pct if row.actual_mae_pct is not None else move), 4)
+                if (now - row.crossed_at).total_seconds() < 1800:
+                    continue
                 row.actual_move_30m_pct = round(move, 4)
-                row.actual_mfe_pct = round(max(move, row.actual_mfe_pct or move), 4)
-                row.actual_mae_pct = round(min(move, row.actual_mae_pct
-                                               if row.actual_mae_pct is not None else move), 4)
                 if row.cost_pct is not None:
                     row.net_after_costs_pct = round(row.actual_mfe_pct - row.cost_pct, 4)
                     row.paid_off = row.net_after_costs_pct > 0
@@ -864,6 +951,33 @@ async def regime_summary() -> dict:
         nets = [r.net_after_costs_pct for r in resolved if r.net_after_costs_pct is not None]
         out["paid_off_pct"] = round(len(paid) / len(resolved) * 100, 1)
         out["mean_net_after_costs_pct"] = (round(sum(nets) / len(nets), 4) if nets else None)
+        # FALSE ALARM is not the complement of the win rate. One that nets
+        # -0.01% was nearly right; one whose best price never covered half its
+        # cost was never an opportunity. Those have opposite fixes - tighten
+        # the threshold, or abandon the coin - and one number hides which.
+        badly_wrong = [r for r in resolved
+                       if r.net_after_costs_pct is not None and r.cost_pct
+                       and r.net_after_costs_pct < -0.5 * r.cost_pct]
+        out["false_alarm_pct"] = round(len(badly_wrong) / len(resolved) * 100, 1)
+        maes = [r.actual_mae_pct for r in resolved if r.actual_mae_pct is not None]
+        out["worst_drawdown_pct"] = min(maes) if maes else None
+        # MAE ON THE WINNERS, a different question from worst-overall.
+        #   MFE says whether the edge existed.
+        #   MAE on winners says whether it could have been HELD.
+        # A 65% hit rate whose winners each dipped 2.5% first is not a 65%
+        # strategy at an 8% stop - it is one that gets shaken out before the
+        # favourable move develops. The hit rate alone claims alpha nobody
+        # could have harvested.
+        win_maes = sorted(r.actual_mae_pct for r in paid if r.actual_mae_pct is not None)
+        out["mae_on_winners"] = _percentiles(win_maes) if win_maes else {"n": 0}
+        if win_maes:
+            med = win_maes[len(win_maes) // 2]
+            out["holdable"] = (
+                f"winners dipped a median {med:.2f}% before paying, against a live "
+                f"stop at -{GRID_STOP_PCT_LABEL:.0f}% - "
+                + ("survivable." if med > -GRID_STOP_PCT_LABEL else
+                   "the stop would have taken most of them out first, so this edge "
+                   "cannot be held as configured."))
         # FALSE ALARM is not the complement of the win rate. A crossing that
         # nets -0.01% was nearly right; one whose best price never covered
         # half its cost was never an opportunity at all. Lumping them

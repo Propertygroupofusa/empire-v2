@@ -160,6 +160,53 @@ async def main():
        g2["worst_drawdown_pct"] == -2.5,
        "MFE alone scores a 3% drawdown that recovered the same as a straight "
        "line up; only one is survivable at this slice size")
+
+    print("\nthe go/no-go: window distribution against the DELIVERY delay")
+    ok("no closed windows yet is not a verdict",
+       "nothing to judge" in S._actionability({"n": 0})["verdict"])
+    short = S._actionability(S._percentiles([300, 600, 900, 1200]))
+    ok("p75 inside the alert delay -> OFFLINE OBSERVER",
+       "OFFLINE OBSERVER" in short["verdict"], short["verdict"])
+    ok("  and it says why: measurable, not tradeable at this cadence",
+       "cannot be traded at this cadence" in short["verdict"])
+    long_ = S._actionability(S._percentiles([7200, 9000, 12000, 20000]))
+    ok("p25 outliving the delay -> ACTIONABLE",
+       "ACTIONABLE" in long_["verdict"], long_["verdict"])
+    mixed = S._actionability(S._percentiles([600, 1800, 7200, 20000]))
+    ok("straddling the delay -> MIXED, not rounded to either",
+       "MIXED" in mixed["verdict"], mixed["verdict"])
+    ok("the delay is the REAL one, not a tuning choice",
+       S.ALERT_DELIVERY_DELAY_SECONDS == 3600,
+       "15 minutes was tried and rejected at the scheduler")
+
+    print("\nMAE on WINNERS: could the edge have been held?")
+    async with get_session_factory()() as db:
+        for mae in (-0.4, -0.6, -0.5):        # winners that dipped shallowly
+            db.add(models.RegimeCrossing(
+                product_id="H-USD", direction="into_viable",
+                crossed_at=dt.datetime.utcnow(), price_at_cross=1.0, cost_pct=1.37,
+                net_after_costs_pct=0.9, paid_off=True, actual_mae_pct=mae,
+                resolved_at=dt.datetime.utcnow()))
+        db.add(models.RegimeCrossing(          # a LOSER that dipped hard
+            product_id="H-USD", direction="into_viable",
+            crossed_at=dt.datetime.utcnow(), price_at_cross=1.0, cost_pct=1.37,
+            net_after_costs_pct=-1.0, paid_off=False, actual_mae_pct=-9.0,
+            resolved_at=dt.datetime.utcnow()))
+        await db.commit()
+    g3 = await S.regime_summary()
+    # The claim is exclusion, not a bound: earlier fixtures in this same
+    # database also carry winners, so asserting a range would be testing the
+    # fixtures rather than the filter.
+    ok("mae_on_winners excludes the LOSER that dipped -9%",
+       g3["mae_on_winners"]["min"] > -9.0 and g3["mae_on_winners"]["n"] >= 3,
+       g3["mae_on_winners"])
+    ok("  while worst_drawdown_pct still sees the -9%% loser",
+       g3["worst_drawdown_pct"] == -9.0, g3["worst_drawdown_pct"])
+    ok("shallow winner dips read as survivable at the live stop",
+       "survivable" in g3["holdable"], g3["holdable"])
+    ok("the stop it compares against is the LIVE one, not a literal",
+       S.GRID_STOP_PCT_LABEL == 8.0,
+       "read from GRID_STOP_LOSS_PCT so the two cannot disagree")
     print(f"\n{P} passed, {F} failed"); sys.exit(1 if F else 0)
 
 async def _v(x): return x
