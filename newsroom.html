@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Empire Newsroom</title>
+<style>
+  :root{
+    --bg:#07090c; --panel:#0d1117; --panel2:#111823; --line:#1e2b3a;
+    --ink:#d7e3f0; --dim:#7b8fa5; --faint:#4a5c70;
+    --amber:#f0b429; --green:#3fd68c; --red:#ff5c5c; --blue:#4aa8ff;
+    --live:#ff2d2d;
+    --mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--ink); font-family:var(--mono);
+    font-size:13px; line-height:1.45;
+    padding:env(safe-area-inset-top,0px) 0 env(safe-area-inset-bottom,0px);
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1400px;margin:0 auto;padding:16px}
+  .rule{border:0;border-top:1px solid var(--line);margin:0}
+
+  /* masthead */
+  .masthead{
+    border:1px solid var(--line); background:var(--panel);
+    padding:14px 16px; display:flex; flex-wrap:wrap; gap:12px;
+    align-items:center; justify-content:space-between;
+  }
+  .brand{font-size:18px;letter-spacing:.18em;font-weight:700}
+  .brand span{color:var(--amber)}
+  .clock{color:var(--dim);font-size:12px;letter-spacing:.08em}
+  .onair{
+    display:inline-flex;align-items:center;gap:8px;
+    border:1px solid var(--live);color:var(--live);
+    padding:4px 10px;letter-spacing:.16em;font-size:11px;font-weight:700;
+  }
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--live);
+       animation:pulse 1.6s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+  @media (prefers-reduced-motion:reduce){.dot{animation:none}}
+
+  /* ticker */
+  .ticker{
+    border:1px solid var(--line);border-top:0;background:#120d05;
+    display:flex;align-items:stretch;overflow:hidden;
+  }
+  .ticker .tag{
+    background:var(--live);color:#fff;padding:7px 12px;font-weight:700;
+    letter-spacing:.14em;font-size:11px;white-space:nowrap;display:flex;align-items:center;
+  }
+  .ticker .track{overflow:hidden;flex:1;position:relative}
+  .ticker .run{display:inline-block;white-space:nowrap;padding:7px 0;
+               animation:slide 48s linear infinite;color:var(--amber)}
+  .ticker .run b{color:var(--ink);font-weight:400}
+  @keyframes slide{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+  @media (prefers-reduced-motion:reduce){.ticker .run{animation:none;white-space:normal}}
+
+  /* grid */
+  .grid{display:grid;gap:12px;margin-top:12px;grid-template-columns:1fr}
+  @media(min-width:900px){
+    .grid{grid-template-columns:1fr 1fr}
+    .span2{grid-column:1/-1}
+  }
+  .desk{border:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column}
+  .desk>h2{
+    margin:0;padding:9px 12px;font-size:11px;letter-spacing:.2em;
+    background:var(--panel2);border-bottom:1px solid var(--line);
+    color:var(--dim);font-weight:700;display:flex;justify-content:space-between;gap:8px;
+  }
+  .desk>h2 em{font-style:normal;color:var(--faint);letter-spacing:.06em;font-weight:400}
+  .body{padding:12px;overflow-x:auto}
+
+  .story{font-size:15px;line-height:1.6}
+  .who{color:var(--dim);font-size:11px;letter-spacing:.14em;margin-bottom:6px}
+
+  table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+  th{text-align:left;color:var(--faint);font-weight:400;font-size:11px;
+     letter-spacing:.1em;padding:0 10px 6px 0;border-bottom:1px solid var(--line)}
+  td{padding:5px 10px 5px 0;border-bottom:1px solid #131c27}
+  td.n,th.n{text-align:right}
+  tr:last-child td{border-bottom:0}
+
+  .pill{display:inline-block;padding:1px 7px;border:1px solid currentColor;
+        font-size:10px;letter-spacing:.09em;white-space:nowrap}
+  .c-crit{color:var(--red)} .c-high{color:var(--amber)} .c-med{color:var(--blue)}
+  .c-low{color:var(--green)} .c-un{color:var(--faint)}
+  .bar{height:5px;background:#16202c;position:relative;min-width:56px}
+  .bar>i{display:block;height:100%;background:var(--green)}
+  .bar.warn>i{background:var(--amber)} .bar.bad>i{background:var(--red)}
+
+  .note{border-left:2px solid var(--line);padding:6px 0 6px 10px;margin-bottom:10px}
+  .note:last-child{margin-bottom:0}
+  .note .h{color:var(--ink)}
+  .note .d{color:var(--dim);font-size:12px}
+  .note .k{font-size:10px;letter-spacing:.12em;color:var(--faint)}
+
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+  .kpi{border:1px solid var(--line);padding:10px 12px;background:var(--panel2)}
+  .kpi .l{font-size:10px;letter-spacing:.14em;color:var(--faint)}
+  .kpi .v{font-size:21px;margin-top:3px;font-variant-numeric:tabular-nums}
+  .kpi .s{font-size:11px;color:var(--dim);margin-top:2px}
+
+  .script p{margin:0 0 9px}
+  .script p:first-child{color:var(--amber)}
+  .caveat{border:1px solid #3a2a12;background:#161005;color:var(--amber);
+          padding:9px 12px;font-size:12px;margin-top:12px}
+  .err{border:1px solid #4a1d1d;background:#180b0b;color:var(--red);padding:12px}
+  footer{color:var(--faint);font-size:11px;padding:14px 2px;line-height:1.7}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="masthead">
+    <div>
+      <div class="brand">EMPIRE <span>NEWSROOM</span></div>
+      <div class="clock" id="clock">connecting…</div>
+    </div>
+    <div class="onair"><span class="dot"></span><span id="airtext">ON AIR</span></div>
+  </div>
+
+  <div class="ticker">
+    <div class="tag">BREAKING</div>
+    <div class="track"><div class="run" id="ticker">loading the feed…</div></div>
+  </div>
+
+  <div id="err"></div>
+
+  <div class="grid">
+    <section class="desk span2">
+      <h2><span>MAIN STUDIO</span><em id="asof"></em></h2>
+      <div class="body">
+        <div class="who">REPORTER <b id="anchor">—</b> &nbsp;·&nbsp; NETWORK Empire Crypto News</div>
+        <div class="story" id="story">…</div>
+      </div>
+    </section>
+
+    <section class="desk">
+      <h2><span>QUANT DESK</span><em>score = headroom · steadiness · weight</em></h2>
+      <div class="body">
+        <table><thead><tr>
+          <th>ASSET</th><th class="n">SCORE</th><th></th><th>TREND</th><th class="n">VALUE</th>
+        </tr></thead><tbody id="quant"></tbody></table>
+      </div>
+    </section>
+
+    <section class="desk">
+      <h2><span>RISK DESK</span><em>alert levels, not orders</em></h2>
+      <div class="body">
+        <table><thead><tr>
+          <th>ASSET</th><th>RISK</th><th class="n">TO LEVEL</th><th>ACTION</th>
+        </tr></thead><tbody id="risk"></tbody></table>
+      </div>
+    </section>
+
+    <section class="desk">
+      <h2><span>PRODUCER NOTES</span><em>ranked by dollars at stake</em></h2>
+      <div class="body" id="notes"></div>
+    </section>
+
+    <section class="desk">
+      <h2><span>CAPITAL FLOW DESK</span><em>the book, as it is</em></h2>
+      <div class="body">
+        <div class="kpis" id="kpis"></div>
+        <table style="margin-top:12px"><thead><tr>
+          <th>HOLDING</th><th class="n">USD</th><th class="n">SHARE</th><th></th>
+        </tr></thead><tbody id="alloc"></tbody></table>
+      </div>
+    </section>
+
+    <section class="desk span2">
+      <h2><span>REPORTER SCRIPT</span><em>read aloud</em></h2>
+      <div class="body script" id="script"></div>
+    </section>
+  </div>
+
+  <div class="caveat" id="disclaimer"></div>
+
+  <footer>
+    Every figure on this page is read live from the venue through
+    <code>/api/trading-dashboard/newsroom</code>. Nothing is written by hand and
+    nothing is estimated. Where a measurement does not exist, the desk says so
+    on air instead of filling the silence.
+  </footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const usd = n => (n == null ? "—" : "$" + Number(n).toLocaleString("en-US",
+  {minimumFractionDigits:2, maximumFractionDigits:2}));
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const pct = (n, d) => (n == null ? "—" : Number(n).toFixed(d == null ? 2 : d) + "%");
+
+const RISK_CLASS = {CRITICAL:"c-crit", HIGH:"c-high", CONCENTRATION:"c-high",
+  MEDIUM:"c-med", LOW:"c-low", UNKNOWN:"c-un", STRANDED:"c-un", UNMEASURED:"c-un"};
+
+function render(d){
+  $("anchor").textContent = d.anchor || "—";
+  $("airtext").textContent = d.on_air ? "ON AIR" : "OFF AIR";
+  $("story").textContent = d.current_story || "—";
+  $("asof").textContent = d.as_of ? "as of " + d.as_of : "";
+  $("disclaimer").textContent = d.disclaimer || "";
+
+  const lines = (d.breaking || []).map(x => "◆ " + x).join("　　　");
+  $("ticker").innerHTML = esc(lines) + "　　　" + esc(lines);
+
+  const q = $("quant"); q.innerHTML = "";
+  (d.quant_desk || []).slice(0, 14).forEach(r => {
+    const cls = r.score >= 70 ? "" : (r.score >= 45 ? "warn" : "bad");
+    q.insertAdjacentHTML("beforeend",
+      `<tr><td>${esc(r.asset)}</td><td class="n">${r.score == null ? "NO DATA" : r.score}</td>
+       <td><span class="bar ${cls}"><i style="width:${Math.max(2, r.score||0)}%"></i></span></td>
+       <td>${esc(r.trend)}</td><td class="n">${usd(r.usd)}</td></tr>`);
+  });
+  if (!q.children.length) q.innerHTML = `<tr><td colspan="5">No scoreable positions.</td></tr>`;
+
+  const rk = $("risk"); rk.innerHTML = "";
+  (d.risk_desk || []).slice(0, 14).forEach(r => {
+    rk.insertAdjacentHTML("beforeend",
+      `<tr><td>${esc(r.asset)}</td>
+       <td><span class="pill ${RISK_CLASS[r.risk_level] || "c-un"}">${esc(r.risk_level)}</span></td>
+       <td class="n">${pct(r.pct_to_stop)}</td>
+       <td style="color:var(--dim)">${esc(r.action)}</td></tr>`);
+  });
+
+  const n = $("notes"); n.innerHTML = "";
+  (d.producer_notes || []).forEach((x, i) => {
+    n.insertAdjacentHTML("beforeend",
+      `<div class="note"><div class="k">TOP STORY #${i+1} · ${esc(x.kind)}</div>
+       <div class="h">${esc(x.headline)}</div><div class="d">${esc(x.detail)}</div></div>`);
+  });
+  if (!n.children.length) n.innerHTML = `<div class="note"><div class="h">Quiet tape.</div>
+    <div class="d">Nothing is near its level and nothing breaks the concentration rule.</div></div>`;
+
+  const c = d.capital || {};
+  $("kpis").innerHTML = `
+    <div class="kpi"><div class="l">BOOK TOTAL</div><div class="v">${usd(c.total_usd)}</div>
+      <div class="s">${usd(c.coin_usd)} coin · ${usd(c.cash_usd)} cash</div></div>
+    <div class="kpi"><div class="l">COVERED</div><div class="v">${pct(c.covered_share_pct,1)}</div>
+      <div class="s">of coin value has a level</div></div>
+    <div class="kpi"><div class="l">TODAY'S P&amp;L</div>
+      <div class="v" style="color:var(--faint)">NOT REPORTED</div>
+      <div class="s">${esc(c.daily_pnl_note || "")}</div></div>
+    <div class="kpi"><div class="l">BLIND SPOTS</div>
+      <div class="v">${c.unpriced_assets == null ? "—" : c.unpriced_assets}</div>
+      <div class="s">unpriced · ${usd(c.dust_usd)} stranded</div></div>`;
+
+  const a = $("alloc"); a.innerHTML = "";
+  (c.allocation || []).forEach(r => {
+    const over = (r.share_pct || 0) > 20;
+    a.insertAdjacentHTML("beforeend",
+      `<tr><td>${esc(r.asset)}</td><td class="n">${usd(r.usd)}</td>
+       <td class="n" style="${over ? "color:var(--amber)" : ""}">${pct(r.share_pct,1)}</td>
+       <td><span class="bar ${over ? "warn" : ""}" style="min-width:90px">
+         <i style="width:${Math.min(100,(r.share_pct||0)*3)}%"></i></span></td></tr>`);
+  });
+
+  $("script").innerHTML = (d.script || []).map(l => `<p>${esc(l)}</p>`).join("");
+  $("clock").textContent = "live · refreshed " + new Date().toLocaleTimeString();
+}
+
+async function load(){
+  try{
+    const r = await fetch("/api/trading-dashboard/newsroom", {cache:"no-store"});
+    if(!r.ok) throw new Error("feed returned HTTP " + r.status);
+    render(await r.json());
+    $("err").innerHTML = "";
+  }catch(e){
+    $("err").innerHTML = `<div class="err">FEED DOWN — ${esc(e.message)}.
+      Nothing below is being updated. Rather than show you stale numbers dressed
+      as live ones, the desk is telling you the feed is out.</div>`;
+    $("airtext").textContent = "FEED DOWN";
+    $("clock").textContent = "last attempt " + new Date().toLocaleTimeString();
+  }
+}
+load();
+setInterval(load, 15 * 60 * 1000);   // broadcast cycle: every 15 minutes
+</script>
+</body>
+</html>

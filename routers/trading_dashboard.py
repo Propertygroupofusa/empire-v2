@@ -1844,6 +1844,21 @@ async def _load_coin_history_rows(db):
     return rows
 
 
+@router.get("/newsroom")
+async def get_newsroom(anchor: str = "Delfine", window_days: int = 30):
+    """The broadcast: the same watch data, written as news.
+
+    Read-only GET, same as the watch it is built on. Every figure on air
+    traces to a live endpoint; where no measurement exists the desk says so
+    rather than filling the silence. Notably capital.daily_pnl_usd is null
+    and carries the reason - an estimate there would be the one number on
+    the screen nobody measured.
+    """
+    import newsroom_brief
+    watch = await get_holdings_watch(window_days=window_days)
+    return newsroom_brief.build(watch, anchor=anchor)
+
+
 @router.get("/holdings-watch")
 async def get_holdings_watch(window_days: int = 30):
     """Alert levels for every coin in the account, including the unwatched.

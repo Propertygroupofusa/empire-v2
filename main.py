@@ -1570,6 +1570,22 @@ async def serve_live_dashboard():
     return FileResponse(dashboard_path, media_type="text/html", headers=_NO_STORE)
 
 
+@app.get("/newsroom")
+async def serve_newsroom():
+    """The Empire Newsroom terminal.
+
+    A broadcast desk over the same numbers the dashboards already show. The
+    reframe is the point: a balance sheet is work nobody does daily, a
+    newscast is something you watch. Every desk on the page is wired to
+    /api/trading-dashboard/newsroom, which is wired to the holdings watch,
+    which is wired to the venue. Nothing on this page is written by hand.
+    """
+    path = os.path.join(os.path.dirname(__file__), "newsroom.html")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Newsroom not found")
+    return FileResponse(path, media_type="text/html", headers=_NO_STORE)
+
+
 @app.get("/family-tree-dashboard")
 async def serve_family_tree_dashboard():
     """Serve the crypto_family_tree_bot.py dashboard (admin-only data,
