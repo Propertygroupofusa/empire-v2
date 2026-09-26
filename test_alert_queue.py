@@ -13,6 +13,7 @@ Three ways this goes wrong, one test section each:
   * IT DROPS THINGS. An alert that was generated, lost, and never missed by
     anyone is the failure that matters here.
 """
+import json
 import os
 
 import alert_queue as Q
@@ -188,6 +189,51 @@ ok("dedupe_key is unique, so a retry cannot double-send",
    "dedupe_key = Column(String, unique=True" in M)
 ok("AssetAlertState exists, which is what makes transitions possible",
    "class AssetAlertState(Base):" in M)
+
+
+print("\nthe diagnosis explains a missing channel WITHOUT leaking it")
+
+_old = os.environ.pop(S.WEBHOOK_ENV, None)
+try:
+    d = S.diagnose()
+    ok("it names the variable expected", d["expected_variable"] == S.WEBHOOK_ENV)
+    ok("it says the variable is absent", d["present"] is False)
+    ok("and gives a reason a human can act on",
+       "different service" in d["why_not"] and "restarted" in d["why_not"], d["why_not"])
+    ok("it mentions that Railway injects at container start",
+       "container start" in d["why_not"])
+
+    os.environ[S.WEBHOOK_ENV] = "   "
+    d = S.diagnose()
+    ok("an empty value is distinguished from an absent one",
+       d["present"] is True and d["non_empty"] is False)
+    ok("and says so", "present but empty" in d["why_not"], d["why_not"])
+
+    os.environ[S.WEBHOOK_ENV] = "hooks.slack.com/services/XXX"
+    d = S.diagnose()
+    ok("a value that is not a URL is caught", d["looks_like_url"] is False)
+    ok("and named as the problem", "not a URL" in d["why_not"], d["why_not"])
+
+    SECRET = "https://hooks.example.com/SUPERSECRETTOKEN123"
+    os.environ[S.WEBHOOK_ENV] = SECRET
+    d = S.diagnose()
+    ok("a valid URL reports no problem", d["why_not"] is None)
+    ok("THE VALUE IS NEVER IN THE OUTPUT",
+       "SUPERSECRETTOKEN123" not in json.dumps(d),
+       "this endpoint is unauthenticated - a leaked webhook is a spam channel")
+    ok("nor is any part of the host", "hooks.example.com" not in json.dumps(d))
+
+    os.environ["MY_SLACK_ALERT_HOOK"] = "x"
+    os.environ.pop(S.WEBHOOK_ENV, None)
+    d = S.diagnose()
+    ok("a near-miss variable name is surfaced to explain a typo",
+       "MY_SLACK_ALERT_HOOK" in d["similar_variables_seen"], d["similar_variables_seen"])
+    ok("but only its NAME", "x" not in json.dumps(d["similar_variables_seen"]))
+finally:
+    os.environ.pop("MY_SLACK_ALERT_HOOK", None)
+    os.environ.pop(S.WEBHOOK_ENV, None)
+    if _old is not None:
+        os.environ[S.WEBHOOK_ENV] = _old
 
 print(f"\n{_passed}/{_passed + _failed} checks passed")
 raise SystemExit(1 if _failed else 0)

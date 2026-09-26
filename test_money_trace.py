@@ -11,8 +11,15 @@ The live 56-day window, read from Coinbase's own fills:
     sold            $43,332.16
     commission      $ 1,854.53   <- the only part actually gone
     net cash flow   -$8,502.53   <- became coin, still held
-    fills                 1,944  -> ~972 implied round trips
-    our books               249  -> about 74% never reached the ledger
+    fills                 1,944
+
+The last two lines of this header used to read "-> ~972 implied round
+trips / about 74% never reached the ledger". Both were wrong, and this
+file asserted them, which is why the panel went on showing 74% in red for
+hours after the figure was retracted everywhere else. Fills are not orders
+and orders are not round trips; measured from distinct SELL orders on spot
+pairs the gap is 32 of 281 closes, 11.4%. The tests below assert the shape
+of an honest answer rather than a specific wrong number.
 """
 
 import json
@@ -88,19 +95,68 @@ class MoneyTrace(unittest.TestCase):
         self.assertIn("not a loss", seg)
         self.assertIn("still held", seg)
 
-    def test_the_reconciliation_gap_is_computed_and_shown(self):
-        html = render(LIVE)
-        # 1944 fills -> 972 implied round trips, 249 recorded, ~723 missing
-        self.assertIn("~723", html)
-        self.assertIn("74%", html)
-        self.assertIn("Never reached our ledger", html)
+    # THIS TEST USED TO ASSERT THE BUG.
+    #
+    # It required "~723" and "74%" on the page - the figures the panel got
+    # from fills/2. That arithmetic was retracted on 2026-09-26 (it counted
+    # Coinbase event contracts the bots never traded, and counted fills
+    # rather than orders), but this test kept demanding it, so the panel
+    # went on telling the account owner in red that his books described a
+    # quarter of reality. They describe 89% of it.
+    #
+    # A test that asserts the same arithmetic as the code cannot catch the
+    # code being wrong. These assert the SHAPE of an honest answer instead:
+    # the panel reads a reconciliation block, and says so when there isn't
+    # one rather than computing a number itself.
 
-    def test_a_clean_ledger_shows_no_gap_row(self):
-        clean = json.loads(json.dumps(LIVE))
-        clean["statement"]["fills"] = 500
-        clean["our_ledgers"]["combined_trades"] = 250
-        html = render(clean)
+    def test_the_panel_no_longer_does_its_own_arithmetic(self):
+        src = HTML.read_text(encoding="utf-8")
+        body = "\n".join(l for l in src.split("\n")
+                          if not l.strip().startswith("//"))
+        for gone in ("const implied", "const missing", "missPct"):
+            self.assertNotIn(gone, body,
+                             "%s is live arithmetic the panel must not do" % gone)
+        self.assertNotIn("Never reached our ledger", body)
+
+    def test_it_reports_the_order_based_gap_when_given_one(self):
+        d = json.loads(json.dumps(LIVE))
+        d["reconciliation"] = {
+            "closes_at_exchange": 281,
+            "our_recorded_round_trips": 249,
+            "gap": 32, "gap_pct": 11.4,
+            "spot": {"fills": 1019, "orders": 670, "commission_usd": 428.01},
+            "event_contracts": {"fills": 932, "products": 107,
+                                "commission_usd": 1428.96,
+                                "note": "Coinbase event contracts, not spot."},
+        }
+        html = render(d)
+        self.assertIn("281", html)          # closes at the exchange
+        self.assertIn("249", html)          # rows we recorded
+        self.assertIn("11.4%", html)        # the real gap
+        self.assertNotIn("74%", html.replace(
+            "said 74% - that counted event contracts", ""))
+        self.assertIn("Spot closes at the exchange", html)
+
+    def test_event_contracts_are_shown_as_excluded_not_hidden(self):
+        d = json.loads(json.dumps(LIVE))
+        d["reconciliation"] = {
+            "closes_at_exchange": 281, "our_recorded_round_trips": 249,
+            "gap": 32, "gap_pct": 11.4,
+            "spot": {"fills": 1019, "orders": 670},
+            "event_contracts": {"fills": 932, "products": 107,
+                                "commission_usd": 1428.96,
+                                "note": "Coinbase event contracts, not spot."},
+        }
+        html = render(d)
+        self.assertIn("Event contracts, excluded", html)
+        self.assertIn("932", html)
+        self.assertIn("$1,428.96", html)
+
+    def test_with_no_reconciliation_block_it_claims_nothing(self):
+        html = render(LIVE)          # the live fixture has no block
+        self.assertIn("Reconciliation unavailable", html)
         self.assertNotIn("Never reached our ledger", html)
+        self.assertNotIn("74%", html)
 
     def test_both_ledgers_are_broken_out(self):
         html = render(LIVE)

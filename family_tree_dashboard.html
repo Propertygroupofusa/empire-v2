@@ -4653,12 +4653,30 @@ function renderMoneyTrace(d) {
                         color:${colour || 'var(--text)'};">${value}</div>
         </div>`;
 
-    // A round trip is two fills. Far more fills than that means executions
-    // the ledger never saw.
-    const implied = Math.floor((st.fills || 0) / 2);
-    const recorded = ours.combined_trades || 0;
-    const missing = Math.max(0, implied - recorded);
-    const missPct = implied ? (missing / implied * 100) : 0;
+    // FILLS ARE NOT ORDERS AND ORDERS ARE NOT ROUND TRIPS.
+    //
+    // This panel used to compute `fills / 2` and report the shortfall as
+    // "never reached our ledger - about 74%". Both halves were wrong. It
+    // counted Coinbase EVENT CONTRACTS the bots have never traded, and it
+    // counted fills rather than orders - POL-USD alone shows 315 fills
+    // across 202 orders, so halving fills invents activity that never
+    // happened. The panel then told the account owner, in red, that his
+    // books described a quarter of reality. They describe 89% of it.
+    //
+    // The endpoint now sends a `reconciliation` block that counts distinct
+    // SELL ORDERS on spot pairs - a ledger row records a CLOSE, and a sell
+    // order is what a close IS. This reads that block and no longer does
+    // any arithmetic of its own; where the block is missing (an older
+    // deploy) it says so rather than falling back to the wrong sum.
+    const rec = d.reconciliation || {};
+    const spot = rec.spot || {};
+    const ev = rec.event_contracts || {};
+    const closes = rec.closes_at_exchange;
+    const recorded = (rec.our_recorded_round_trips != null)
+        ? rec.our_recorded_round_trips : (ours.combined_trades || 0);
+    const gap = rec.gap;
+    const gapPct = rec.gap_pct;
+    const haveRec = closes != null;
 
     wrap.innerHTML =
         `<div style="font-size:0.72em; color:var(--text-dim); margin-bottom:8px;">
@@ -4672,14 +4690,22 @@ function renderMoneyTrace(d) {
                'negative means cash became coin, which is still held - not a loss by itself',
                Number(st.net_cash_flow_usd) < 0 ? 'var(--text-dim)' : 'var(--green)')
         + `<div style="font-size:0.78em; font-weight:700; margin:14px 0 4px;">What our books caught</div>`
-        + line('Fills at the exchange', String(st.fills || 0), 'two fills make one round trip')
-        + line('Round trips we recorded', String(recorded),
-               `tree ${ours.tree_trades || 0} \u00b7 grid ${ours.grid_trades || 0}`)
-        + (missing > 0
-            ? line('Never reached our ledger', `~${missing}`,
-                   `about ${missPct.toFixed(0)}% of implied round trips - our books describe a fraction of what really happened`,
-                   'var(--red)')
-            : '')
+        + (haveRec
+            ? line('Spot closes at the exchange', String(closes),
+                   `distinct SELL orders on -USD pairs, from ${spot.fills || 0} fills across ${spot.orders || 0} orders`)
+              + line('Round trips we recorded', String(recorded),
+                     `tree ${ours.tree_trades || 0} \u00b7 grid ${ours.grid_trades || 0}`)
+              + line('Gap', `${gap > 0 ? '' : ''}${gap}`,
+                     gapPct != null
+                        ? `${gapPct.toFixed(1)}% of closes. Earlier versions of this panel said 74% - that counted event contracts and counted fills instead of orders.`
+                        : 'closes minus recorded rows',
+                     Math.abs(gapPct || 0) > 25 ? 'var(--red)' : 'var(--text-dim)')
+              + (ev.fills
+                  ? line('Event contracts, excluded', String(ev.fills),
+                         `${ev.products || 0} products, ${usd(ev.commission_usd)} commission. ${escText(ev.note || '')}`)
+                  : '')
+            : line('Reconciliation unavailable', '\u2014',
+                   'this deploy does not send the order-based reconciliation block; no gap is being claimed rather than computing the old, wrong one'))
         + line('Realized, our books', usd(ours.combined_realized_pnl),
                `tree ${usd(ours.tree_realized_pnl)} \u00b7 grid ${usd(ours.grid_realized_pnl)}`,
                Number(ours.combined_realized_pnl) < 0 ? 'var(--red)' : 'var(--green)')

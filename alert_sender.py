@@ -41,6 +41,49 @@ def channel_configured() -> bool:
     return bool(webhook_url())
 
 
+def diagnose() -> dict:
+    """Why is there no channel? Names only - never a value.
+
+    "channel_configured: false" is true and useless when someone has just
+    set the variable and is asking why nothing happened. The usual causes
+    are a near-miss on the name, the variable landing on a different
+    Railway service than the one running this process, or a deploy that has
+    not restarted yet. This reports enough to tell those apart WITHOUT ever
+    printing a secret: variable NAMES that look related, whether the exact
+    one is present, and whether its value is empty or malformed.
+    """
+    url = os.getenv(WEBHOOK_ENV)
+    near = sorted(k for k in os.environ
+                  if k != WEBHOOK_ENV
+                  and any(w in k.upper() for w in ("ALERT", "WEBHOOK", "SLACK",
+                                                   "DISCORD", "NOTIF")))
+    if url is None:
+        why = (f"{WEBHOOK_ENV} is not present in this process at all. Either it "
+               f"was set on a different service than the one running this app, "
+               f"or the deploy has not restarted since. Railway injects "
+               f"variables at container start - an existing container does not "
+               f"pick up a new one.")
+    elif not url.strip():
+        why = f"{WEBHOOK_ENV} is present but empty."
+    elif not url.strip().lower().startswith(("http://", "https://")):
+        why = (f"{WEBHOOK_ENV} is set but does not start with http:// or "
+               f"https://, so it is not a URL this can POST to.")
+    else:
+        why = None
+    return {
+        "expected_variable": WEBHOOK_ENV,
+        "present": url is not None,
+        "non_empty": bool((url or "").strip()),
+        "looks_like_url": bool((url or "").strip().lower().startswith(
+            ("http://", "https://"))),
+        "similar_variables_seen": near,
+        "why_not": why,
+        "format_variable": FORMAT_ENV,
+        "format_value": (os.getenv(FORMAT_ENV) or "generic (default)"),
+        "note": "No value is ever reported here - only whether one exists.",
+    }
+
+
 def render(alert: dict) -> str:
     """One line a human reads on a phone at 3am, then the detail."""
     pre = SEVERITY_PREFIX.get(alert.get("severity"), "[ALERT]")

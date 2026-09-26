@@ -1876,6 +1876,9 @@ async def get_alert_queue(limit: int = 50, db: AsyncSession = Depends(get_db)):
     configured = alert_sender.channel_configured()
     return {
         "channel_configured": configured,
+        # "false" is true and useless to someone who has just set the
+        # variable and is asking why nothing happened.
+        "channel_diagnosis": (None if configured else alert_sender.diagnose()),
         "channel_note": (None if configured else
                          f"No {alert_sender.WEBHOOK_ENV} is set, so NOTHING is "
                          f"being delivered. Alerts are still being generated and "
