@@ -190,10 +190,27 @@ ok("a real TYPO, nothing running            -> error (someone's bot is dead)",
 ok("  and the accepted values are listed, because a typo has a fix",
    "grid_fleet" in msg and "Accepted values" in msg)
 
+# ABSENT is not WRONG. The fix printed inside the old ERROR was "on the web
+# service leave CRYPTO_STRATEGY_MODE UNSET", and unsetting it produced
+# "CRYPTO_STRATEGY_MODE=None is not a known strategy" - obeying the advice
+# re-raised the alarm. Deleting the stale variable is the whole remedy, so it
+# has to actually end the noise.
 lvl, msg, mode = observe(None)
-ok("unset env, nothing running              -> error", lvl == "error")
+ok("REGRESSION: unset env is not an ERROR - it is the fix being applied",
+   lvl == "ok")
+ok("  and it still starts nothing", mode == cfg.UNCONFIGURED)
 lvl, msg, mode = observe(None, register="btc_compound")
-ok("unset env, something running            -> warning", lvl == "warning")
+ok("unset env, something running            -> still quiet", lvl == "ok")
+
+# ...but the one process where absence IS fatal must still shout, or that
+# step-down would hide a dead fleet.
+runner = open(os.path.join(HERE, "bot_runner.py"), encoding="utf-8").read()
+_after = runner.split("if strategy_mode == UNCONFIGURED:", 1)[1][:900]
+ok("bot_runner still logs its OWN error when the mode is unusable",
+   "log.error(" in _after)
+ok("  and it says no loop runs on EITHER service, so nothing is hidden",
+   "loop is running anywhere" in _after)
+ok("  and it refuses to start the fleet", "return" in _after)
 
 # The advice inside those messages must not start a second strategy on the
 # balance grid_fleet is trading.

@@ -156,6 +156,34 @@ def get_crypto_strategy_mode() -> str:
                 )
             return mode
 
+    # ABSENT is not the same fault as WRONG, and the old code could not tell
+    # them apart - both landed on the ERROR below. That made the advice in
+    # that ERROR contradict itself: it says "on the web service leave
+    # CRYPTO_STRATEGY_MODE UNSET", and then an unset variable produced
+    #
+    #     CRYPTO_STRATEGY_MODE=None is not a known strategy. No crypto loop
+    #     will start FROM THIS VARIABLE.
+    #
+    # So following the fix printed inside the error re-raised the error, with
+    # a different value in it. Deleting the stale variable - the whole point -
+    # would have swapped one red line every boot for another.
+    #
+    # A missing variable is a process with no crypto strategy, which on the
+    # web service is the intended state and on any other process is simply
+    # nothing to say. The one place where absence IS fatal announces it
+    # itself: bot_runner.py takes UNCONFIGURED and logs "NO crypto loop is
+    # running anywhere - not here, and not on the web service" at ERROR
+    # before exiting. So nothing is hidden by stepping down here, and the
+    # dashboard's runner panel still goes red when no loop is alive anywhere.
+    if not any((os.getenv(v) or "").strip()
+               for v in ("CRYPTO_STRATEGY_MODE", "CRYPTO_STRATEGY_MODE_OVERRIDE")):
+        log.info(
+            "No CRYPTO_STRATEGY_MODE set, so no crypto loop starts from this "
+            "variable. On the web service that is the intended state - the "
+            "grid fleet runs on the crypto-trading service. %s", _WIRING,
+        )
+        return UNCONFIGURED
+
     # A DB strategy override can start a loop that this function cannot see:
     # it is async and DB-backed, this is sync and env-only. Before this
     # check existed the message below asserted "NO crypto loop will start
@@ -199,8 +227,10 @@ def get_crypto_strategy_mode() -> str:
         return UNCONFIGURED
 
     log.error(
-        "CRYPTO_STRATEGY_MODE=%r is not a known strategy. No crypto loop will "
-        "start FROM THIS VARIABLE. Accepted values: %s. Refusing to substitute "
+        "CRYPTO_STRATEGY_MODE=%r is not a known strategy - somebody typed a "
+        "value meaning to run something, and it is not running. "
+        "No crypto loop will start FROM THIS VARIABLE. "
+        "Accepted values: %s. Refusing to substitute "
         "a strategy - an unchosen one spends real money on positions you did "
         "not ask for. %s",
         os.getenv("CRYPTO_STRATEGY_MODE"),
