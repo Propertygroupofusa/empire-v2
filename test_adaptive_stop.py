@@ -250,8 +250,23 @@ ok("three days DOES produce a number if asked directly", raw is not None, raw)
 ok("and that number would land on the FLOOR - a hair trigger",
    A.scaled_stop(raw) == A.DEFAULT_FLOOR, A.scaled_stop(raw))
 
-got = asyncio.run(A.measure_daily_vol(object(), "THIN-USD",
-                                      fetcher=counting_fetcher({"THIN-USD": thin})))
+# A three-day-old coin has 72 HOURLY candles and 3 DAILY ones. The fetcher
+# has to respect granularity or the thin case is not being modelled at all
+# - an earlier version of this test served hourly bars to the daily
+# request and "passed" while the coin was still brand new.
+def by_granularity(hourly=None, daily=None):
+    async def _f(session, pid, start, end, granularity=3600):
+        series = (hourly if granularity == 3600 else daily) or {}
+        if pid not in series:
+            raise RuntimeError("HTTP 404")
+        return (series[pid], [], [])
+    return _f
+
+
+A._VOL_CACHE.clear()
+got = asyncio.run(A.measure_daily_vol(
+    object(), "THIN-USD",
+    fetcher=by_granularity(hourly={"THIN-USD": thin}, daily={"THIN-USD": thin[:3]})))
 ok("but measure_daily_vol refuses it", got is None, got)
 ok("which keeps the fixed stop, the known quantity",
    A.resolve("THIN-USD", 0.08, got, overrides={}, mode_override="adaptive")["stop_pct"] == 0.08)
@@ -260,23 +275,72 @@ ok("and it is not cached, so tomorrow's longer history is used",
 
 A._VOL_CACHE.clear()
 enough = full[:int(A.MIN_VOL_DAYS * 24) + 5]
-ok("just over the minimum is accepted",
+ok("just over the hourly minimum is accepted",
    asyncio.run(A.measure_daily_vol(object(), "OK-USD",
-                                   fetcher=counting_fetcher({"OK-USD": enough}))) is not None)
+                                   fetcher=by_granularity(hourly={"OK-USD": enough}))) is not None)
 A._VOL_CACHE.clear()
 just_under = full[:int(A.MIN_VOL_DAYS * 24) - 5]
-ok("just under it is refused",
-   asyncio.run(A.measure_daily_vol(object(), "NO-USD",
-                                   fetcher=counting_fetcher({"NO-USD": just_under}))) is None)
+ok("just under it falls through to daily rather than being accepted",
+   asyncio.run(A.measure_daily_vol(
+       object(), "NO-USD",
+       fetcher=by_granularity(hourly={"NO-USD": just_under}))) is None)
 ok("the minimum is at least a week",
    A.MIN_VOL_DAYS >= 7, A.MIN_VOL_DAYS)
 A._VOL_CACHE.clear()
+
+print("\na thin HOURLY fetch drops to daily bars before giving up")
+
+# A fetcher that has no hourly data but plenty of daily - the truncated
+# or rate-limited case, where the coin has years of history and only the
+# request failed.
+def granular_fetcher(hourly, daily):
+    seen = []
+
+    async def _f(session, pid, start, end, granularity=3600):
+        seen.append(granularity)
+        series = hourly if granularity == 3600 else daily
+        if pid not in series:
+            raise RuntimeError("HTTP 404")
+        return (series[pid], [], [])
+    return _f, seen
+
+random.seed(21)
+deep = [100.0]
+for _ in range(200):
+    deep.append(deep[-1] * (1 + random.gauss(0, 0.04)))
+
+A._VOL_CACHE.clear(); A._VOL_SOURCE.clear()
+f, seen = granular_fetcher({}, {"DEEP-USD": deep})
+v = asyncio.run(A.measure_daily_vol(object(), "DEEP-USD", fetcher=f))
+ok("a coin with no hourly data still gets measured from daily bars",
+   v is not None, v)
+ok("it tried hourly FIRST, then daily", seen == [3600, 86400], seen)
+ok("and the reading is recorded as coming from the deep fallback",
+   A._VOL_SOURCE.get("DEEP-USD") == "daily", A._VOL_SOURCE)
+ok("daily bars are scaled as one bar per day, not twenty-four",
+   abs(v - A.daily_vol_pct_from_closes(deep, bars_per_day=1)) < 1e-9, v)
+
+A._VOL_CACHE.clear(); A._VOL_SOURCE.clear()
+f, seen = granular_fetcher({"H-USD": full}, {"H-USD": deep})
+v = asyncio.run(A.measure_daily_vol(object(), "H-USD", fetcher=f))
+ok("when hourly IS available the daily fetch is never made", seen == [3600], seen)
+ok("and the source says hourly", A._VOL_SOURCE.get("H-USD") == "hourly")
+
+A._VOL_CACHE.clear(); A._VOL_SOURCE.clear()
+f, seen = granular_fetcher({"NEW-USD": thin}, {"NEW-USD": deep[:5]})
+v = asyncio.run(A.measure_daily_vol(object(), "NEW-USD", fetcher=f))
+ok("a genuinely NEW coin fails both and keeps the fixed stop", v is None, v)
+ok("it did try both before giving up", seen == [3600, 86400], seen)
+ok("and nothing was cached, so tomorrow it is measured again",
+   "NEW-USD" not in A._VOL_CACHE)
+A._VOL_CACHE.clear(); A._VOL_SOURCE.clear()
 
 print("\nthe policy in force is readable, so 'did it take' is answerable")
 
 pol = A.policy()
 for field in ("mode", "vol_multiple", "vol_window_days", "floor_pct", "cap_pct",
-              "overrides", "measured_coins", "min_vol_days"):
+              "overrides", "measured_coins", "min_vol_days",
+              "deep_window_days", "vol_sources"):
     ok(f"policy() reports {field}", field in pol, pol)
 ok("mode is one of the two real values", pol["mode"] in ("fixed", "adaptive"))
 

@@ -117,6 +117,9 @@ VOL_WINDOW_DAYS = int(os.getenv("GRID_STOP_VOL_WINDOW_DAYS", "30") or 30)
 # Same cache shape coin_rotation already uses for its trip counts.
 VOL_CACHE_SECONDS = float(os.getenv("GRID_STOP_VOL_CACHE_SECONDS", str(6 * 3600)))
 _VOL_CACHE = {}
+# product_id -> "hourly" | "daily", so a reading taken from the deep
+# fallback is visible rather than indistinguishable from the normal path.
+_VOL_SOURCE = {}
 
 # HOW LITTLE HISTORY IS TOO LITTLE.
 #
@@ -135,6 +138,28 @@ _VOL_CACHE = {}
 # history", which resolve() reads as "keep the fixed stop" - the known
 # quantity, not a computed guess.
 MIN_VOL_DAYS = float(os.getenv("GRID_STOP_MIN_VOL_DAYS", "7") or 7)
+
+# DEEPER HISTORY BEFORE GIVING UP.
+#
+# "Not enough history" conflates two different situations, and only one of
+# them is real:
+#
+#   the coin genuinely just listed   -> no source anywhere has more. The
+#                                       fixed stop is the only honest answer.
+#   the HOURLY fetch came back thin  -> a rate limit, a truncated page, a
+#                                       partial response. The coin has
+#                                       years of history; we just failed to
+#                                       ask for it properly.
+#
+# The second case should never fall back. Daily candles cover far more
+# calendar time per request, and the two measures agree where both exist
+# (2026-09-26: NEAR 5.49% daily-bar vs 7.40% hourly, BTC 2.02% vs 1.81%,
+# SAND 3.81% vs 4.01%). So a thin hourly series drops to daily bars over
+# half a year before the fixed stop is considered.
+DEEP_WINDOW_DAYS = int(os.getenv("GRID_STOP_DEEP_WINDOW_DAYS", "180") or 180)
+
+# Daily bars, so this is 30 returns - a real sample, where 7 would not be.
+MIN_DEEP_BARS = int(os.getenv("GRID_STOP_MIN_DEEP_BARS", "30") or 30)
 
 
 async def measure_daily_vol(session, product_id, days=None, fetcher=None, now=None,
@@ -165,26 +190,40 @@ async def measure_daily_vol(session, product_id, days=None, fetcher=None, now=No
 
     import datetime as _dt
     end = _dt.datetime.now(_dt.timezone.utc)
-    start = end - _dt.timedelta(days=days)
-    try:
-        got = await fetcher(session, product_id, start, end, granularity=3600)
-    except Exception:
-        return None
-    if not got or not got[0]:
-        return None
 
-    closes = got[0]
-    # Enough history to mean something, or none at all. A partial series
-    # is not a small amount of evidence - it is evidence biased one way.
-    min_bars = int(MIN_VOL_DAYS * 24)
-    if len(closes) < min_bars:
-        return None
+    async def _try(window_days, granularity, bars_per_day, min_bars):
+        try:
+            got = await fetcher(session, product_id,
+                                end - _dt.timedelta(days=window_days), end,
+                                granularity=granularity)
+        except Exception:
+            return None
+        if not got or not got[0]:
+            return None
+        closes = got[0]
+        # Enough history to mean something, or none at all. A partial
+        # series is not a small amount of evidence - it is evidence
+        # biased one way, and always the same way.
+        if len(closes) < min_bars:
+            return None
+        return daily_vol_pct_from_closes(closes, bars_per_day=bars_per_day)
 
-    vol = daily_vol_pct_from_closes(closes)
+    # Hourly over the normal window first - the finer series, and the one
+    # the multiple was calibrated against.
+    vol = await _try(days, 3600, 24, int(MIN_VOL_DAYS * 24))
+    source = "hourly"
+    if vol is None:
+        # Then half a year of daily bars, which reaches far more calendar
+        # time per request. Only a coin that genuinely has no history
+        # fails both.
+        vol = await _try(DEEP_WINDOW_DAYS, 86400, 1, MIN_DEEP_BARS)
+        source = "daily"
+
     # Only a real reading is cached. Caching a None would pin a branch to
     # the fixed stop for six hours over one failed fetch.
     if vol is not None:
         _VOL_CACHE[product_id] = (now, vol)
+        _VOL_SOURCE[product_id] = source
     return vol
 
 
@@ -318,5 +357,7 @@ def policy():
         "overrides": parse_overrides(),
         "vol_cache_seconds": VOL_CACHE_SECONDS,
         "min_vol_days": MIN_VOL_DAYS,
+        "deep_window_days": DEEP_WINDOW_DAYS,
+        "vol_sources": dict(_VOL_SOURCE),
         "measured_coins": sorted(_VOL_CACHE),
     }
