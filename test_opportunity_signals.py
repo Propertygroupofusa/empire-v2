@@ -62,8 +62,31 @@ ok("the per-branch trading cycle never mentions the scorer",
 fleet = GRID.split("async def run_grid_branches_cycle")[1].split("\nasync def ")[0]
 ok("scoring runs AFTER every branch has decided",
    fleet.index("_score_short_term_opportunities") > fleet.index("run_grid_branch_cycle(session, branch)"))
+# Asserted via AST, not a character window. The previous version looked for
+# "except Exception" within 400 characters of the call, and adding one comment
+# and one more resolver line pushed the handler past that boundary - a test
+# that failed on formatting while the guard it checks was intact. The claim is
+# structural: the scoring call sits inside a try that has a handler.
+def _guarded(func_name, call_name):
+    for node in ast.walk(ast.parse(GRID)):
+        if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == func_name):
+            continue
+        for t in ast.walk(node):
+            if isinstance(t, ast.Try) and t.handlers and any(
+                    isinstance(c, ast.Call)
+                    and call_name in ast.dump(c.func)
+                    for c in ast.walk(t)):
+                return True
+    return False
+
+
 ok("the scoring pass cannot break the cycle",
-   "except Exception" in fleet.split("_score_short_term_opportunities")[1][:400])
+   _guarded("run_grid_branches_cycle", "_score_short_term_opportunities"),
+   "the call must sit inside a try that has a handler")
+ok("and so must both resolvers",
+   _guarded("run_grid_branches_cycle", "resolve_crossings")
+   and _guarded("run_grid_branches_cycle", "resolve"))
 ok("no execution path reads a score",
    "score_total" not in GRID.split("def _score_short_term_opportunities")[0])
 
