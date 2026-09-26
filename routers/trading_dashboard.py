@@ -818,22 +818,45 @@ async def get_coinbase_statement(start: str, end: str,
 
     statement = mod.summarise_fills(raw["fills"])
 
+    # Parse the window ONCE, into real datetimes. The first version compared
+    # a DateTime column against `start.replace("Z", "")` - a string - which
+    # Postgres would not cast and the endpoint answered 500 instead of
+    # answering the question. A ledger comparison that cannot run is worse
+    # than no comparison, because the statement half still looked fine.
+    def _dt(s):
+        try:
+            return datetime.fromisoformat(str(s).replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            return None
+    t0, t1 = _dt(start), _dt(end)
+
     # What OUR records claim for the same window, so the two can be compared
     # rather than each being believed on its own.
-    tree_q = await db.execute(
-        select(func.sum(CryptoCoinTradeHistory.pnl), func.count(CryptoCoinTradeHistory.id))
-        .where(CryptoCoinTradeHistory.closed_at >= start.replace("Z", ""))
-        .where(CryptoCoinTradeHistory.closed_at <= end.replace("Z", "")))
-    tree_pnl, tree_n = tree_q.one()
     # Imported locally, matching how every other CryptoGrid* model is reached
     # in this module - the top-level models import does not carry them.
     from models import CryptoGridTradeHistory
-    grid_q = await db.execute(
-        select(func.sum(CryptoGridTradeHistory.pnl), func.count(CryptoGridTradeHistory.id))
-        .where(CryptoGridTradeHistory.closed_at >= start.replace("Z", ""))
-        .where(CryptoGridTradeHistory.closed_at <= end.replace("Z", "")))
-    grid_pnl, grid_n = grid_q.one()
-    ledger_total = round((tree_pnl or 0.0) + (grid_pnl or 0.0), 2)
+    ledger_error = None
+    tree_pnl = tree_n = grid_pnl = grid_n = None
+    if t0 and t1:
+        try:
+            tree_pnl, tree_n = (await db.execute(
+                select(func.sum(CryptoCoinTradeHistory.pnl),
+                       func.count(CryptoCoinTradeHistory.id))
+                .where(CryptoCoinTradeHistory.closed_at >= t0)
+                .where(CryptoCoinTradeHistory.closed_at <= t1))).one()
+            grid_pnl, grid_n = (await db.execute(
+                select(func.sum(CryptoGridTradeHistory.pnl),
+                       func.count(CryptoGridTradeHistory.id))
+                .where(CryptoGridTradeHistory.closed_at >= t0)
+                .where(CryptoGridTradeHistory.closed_at <= t1))).one()
+        except Exception as e:
+            # The exchange half is the point of this endpoint. A failure to
+            # read OUR OWN tables must not take it down with it.
+            ledger_error = f"{type(e).__name__}: {e}"
+    else:
+        ledger_error = "start/end were not parseable as ISO-8601"
+    ledger_total = (round((tree_pnl or 0.0) + (grid_pnl or 0.0), 2)
+                    if ledger_error is None else None)
 
     return {
         "available": True,
@@ -843,6 +866,7 @@ async def get_coinbase_statement(start: str, end: str,
         "truncated": raw.get("truncated", False),
         "statement": statement,
         "our_ledgers": {
+            "error": ledger_error,
             "tree_realized_pnl": round(tree_pnl or 0.0, 2), "tree_trades": tree_n or 0,
             "grid_realized_pnl": round(grid_pnl or 0.0, 2), "grid_trades": grid_n or 0,
             "combined_realized_pnl": ledger_total,
