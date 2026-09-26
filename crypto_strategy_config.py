@@ -23,6 +23,30 @@ UNCONFIGURED = "unconfigured"
 # variable.
 RETIRED_STRATEGY_NAMES = {"delfina_scalping", "scalping", "delfina"}
 
+# What the two services should be set to, as of 2026-09-26.
+#
+# "family_tree on the web service" used to be the second half of this
+# sentence. Repeating it would now cost money. Every mode spends the SAME
+# Coinbase balance - main.py: "Only one runs at a time because all modes
+# share the same real Coinbase account and balance" - and grid_fleet is the
+# strategy that is live on it, on the other service. Telling the operator to
+# set family_tree here, to clear a log line, would start a second strategy on
+# the money the fleet is already trading: the 2026-09-25 btc_compound bill
+# again, this time printed as advice.
+#
+# So on the web service the correct value is NO value, and the messages below
+# say so.
+_WIRING = (
+    "Correct wiring: on the crypto-trading service set BOTH "
+    "CRYPTO_STRATEGY_MODE=grid_fleet AND SERVICE_ROLE=crypto-trading. On the "
+    "web service leave CRYPTO_STRATEGY_MODE UNSET - every mode spends the same "
+    "Coinbase balance, so setting one here would put a second strategy on the "
+    "money the grid fleet is already trading. If the variable cannot be removed "
+    "through the Railway UI, set CRYPTO_STRATEGY_MODE_OVERRIDE instead - it is "
+    "checked first and wins."
+)
+
+
 # What actually started, registered by whoever started it. This module is
 # sync and reads only the environment, so without this it cannot tell
 # "misconfigured and dead" from "misconfigured but running from a DB
@@ -32,9 +56,33 @@ _RUNTIME_SOURCE = None
 
 
 def note_runtime_mode(mode, source):
-    """Record the strategy a caller actually started, and where it came from."""
+    """Record the strategy a caller actually started. Only a REAL one counts.
+
+    That guard is the whole point, and leaving it out turned the safety
+    feature into its own failure. main.py registers whatever lifespan()
+    resolved - which, with a stale variable and no DB override, is
+    UNCONFIGURED. Recording that set _RUNTIME_MODE to a truthy non-strategy,
+    so every later read took the "something is running" branch and logged:
+
+        CRYPTO_STRATEGY_MODE='delfina_scalping' is not a known strategy
+        (a retired name, not a typo), but 'unconfigured' is running from
+        CRYPTO_STRATEGY_MODE, so trading is NOT stopped.
+
+    Nothing was running. That branch exists to suppress a FALSE ERROR; it
+    had become a false ALL-CLEAR, which is the worse of the two - a wrong
+    ERROR at least sends someone to look.
+
+    Returns True if the registration was accepted.
+    """
     global _RUNTIME_MODE, _RUNTIME_SOURCE
+    if mode not in SUPPORTED_CRYPTO_STRATEGIES:
+        # Not a caller error. "I resolved to UNCONFIGURED and started
+        # nothing" is an honest thing to report; it just is not evidence
+        # that anything is trading, so it must not be stored as such.
+        log.debug("not recording %r as a running strategy - it is not one", mode)
+        return False
     _RUNTIME_MODE, _RUNTIME_SOURCE = mode, source
+    return True
 
 
 def _is_retired_name():
@@ -126,17 +174,38 @@ def get_crypto_strategy_mode() -> str:
         )
         return UNCONFIGURED
 
+    # A RETIRED name is a different fault from a typo, and one level does not
+    # fit both. delfina_scalping / scalping / delfina name strategies that no
+    # longer exist in this build: no module, no dispatch branch, nothing in
+    # the code to repair. Nothing was substituted, so nothing was spent, and
+    # on the web service "no crypto loop from this variable" is the INTENDED
+    # state. An ERROR every boot, describing an intended state, is how an
+    # operator learns to scroll past ERRORs - which is the exact habit this
+    # module was written to stop.
+    #
+    # The one process where a retired name IS an emergency does not depend on
+    # this level: bot_runner.py (the crypto-trading service) sees UNCONFIGURED
+    # and logs its own ERROR, "NO crypto loop is running anywhere", then
+    # exits. So the downgrade here cannot quiet the service that matters.
+    if _is_retired_name():
+        log.warning(
+            "CRYPTO_STRATEGY_MODE=%r names a RETIRED strategy. There is no code "
+            "behind that name anywhere in this build - it is not a typo, and "
+            "there is nothing to fix in the code. Nothing was substituted and "
+            "no crypto loop will start FROM THIS VARIABLE. The fix is to DELETE "
+            "the stale variable. %s",
+            os.getenv("CRYPTO_STRATEGY_MODE"), _WIRING,
+        )
+        return UNCONFIGURED
+
     log.error(
         "CRYPTO_STRATEGY_MODE=%r is not a known strategy. No crypto loop will "
-        "start FROM THIS VARIABLE. Set it to one of: %s. "
-        "On this deployment: grid_fleet on the crypto-trading service (which "
-        "also needs SERVICE_ROLE=crypto-trading), family_tree on the web "
-        "service. Refusing to substitute a strategy - an unchosen one spends "
-        "real money on positions you did not ask for. If this variable cannot "
-        "be corrected through the Railway UI, set CRYPTO_STRATEGY_MODE_OVERRIDE "
-        "to the same value instead - it is checked first and wins.",
+        "start FROM THIS VARIABLE. Accepted values: %s. Refusing to substitute "
+        "a strategy - an unchosen one spends real money on positions you did "
+        "not ask for. %s",
         os.getenv("CRYPTO_STRATEGY_MODE"),
         "/".join(sorted(SUPPORTED_CRYPTO_STRATEGIES)),
+        _WIRING,
     )
     return UNCONFIGURED
 

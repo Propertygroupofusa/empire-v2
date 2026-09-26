@@ -64,7 +64,9 @@ def main():
             "CRYPTO_STRATEGY_MODE is missing or not a known strategy, so NO crypto "
             "loop is running anywhere - not here, and not on the web service. Set "
             "CRYPTO_STRATEGY_MODE=grid_fleet and SERVICE_ROLE=crypto-trading on THIS "
-            "service, and CRYPTO_STRATEGY_MODE=family_tree on the web service."
+            "service, and leave CRYPTO_STRATEGY_MODE UNSET on the web service - "
+            "every mode spends the same Coinbase balance, so a second strategy "
+            "there would trade the money this fleet is already using."
         )
         return
     if strategy_mode != "grid_fleet":

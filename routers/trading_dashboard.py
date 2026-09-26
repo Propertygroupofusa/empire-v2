@@ -7576,8 +7576,13 @@ async def _live_ops_runner():
                     else (f"{mode or '(unset)'} is not a mode THIS process can start, but "
                           f"{proof}" if grid_alive
                           else f"{mode or '(unset)'} - matches no known mode")),
-         "fix": "set CRYPTO_STRATEGY_MODE per service: grid_fleet on the "
-                "crypto-trading service, family_tree on the web service"},
+         # Not "family_tree on the web service" any more. All modes share one
+         # Coinbase balance, and grid_fleet is live on it from the other
+         # service, so that instruction now reads as "start a second strategy
+         # on the money the fleet is trading".
+         "fix": "set CRYPTO_STRATEGY_MODE=grid_fleet on the crypto-trading "
+                "service and leave it UNSET on the web service - every mode "
+                "spends the same Coinbase balance"},
         {"name": "Grid runner service is wired up",
          # Only THIS process's variables can be checked here, so on the web
          # service they can never say yes. The heartbeat can, and it is the

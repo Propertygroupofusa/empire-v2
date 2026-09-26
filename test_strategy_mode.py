@@ -123,10 +123,35 @@ for chunk in body.split("log.warning(")[1:]:
            "No crypto loop will" not in head and "nothing will be bought" not in head)
 ok("the DEAD claim is reserved for ERROR, where it is true",
    "No crypto loop will" in body.split("log.error(", 1)[1][:600])
-ok("the message says nothing will be bought or sold",
-   "nothing will be bought or sold" in src)
-ok("and names both services' correct values",
-   "SERVICE_ROLE=crypto-trading" in src and "family_tree on the web" in src)
+# Two assertions used to sit here and both had rotted into the opposite of
+# their intent:
+#
+#   "the message says nothing will be bought or sold" passed only because
+#   that phrase survived in a COMMENT explaining why the claim was removed -
+#   test_strategy_mode_message.py asserts the executable code must NOT make
+#   it, because grid_fleet was buying while the line was printed.
+#
+#   "names both services' correct values" pinned the string "family_tree on
+#   the web", which stopped being correct once grid_fleet went live on the
+#   shared Coinbase balance. A test can pin advice in place long after the
+#   advice turns into a way to lose money.
+#
+# Both are replaced with the claim that is actually true now.
+ok("the refusal is scoped to the variable, not asserted over all trading",
+   "FROM THIS VARIABLE" in body and "nothing will be bought or sold" not in body)
+ok("the crypto-trading service is told to set BOTH variables",
+   "CRYPTO_STRATEGY_MODE=grid_fleet" in src and "SERVICE_ROLE=crypto-trading" in src)
+# Asserted against `body` (comments and docstring stripped), because the
+# comment above the constant QUOTES the retired advice to explain why it was
+# removed - matching on the raw file would score that explanation as the bug
+# still being present. And the phrases are ones that fit on one source line:
+# a message assembled from adjacent string literals has no contiguous form in
+# the file for anything spanning the break. What the operator actually READS
+# is asserted in test_strategy_mode_message.py, off the emitted log record.
+ok("REGRESSION: the web service is told to leave it UNSET, not set family_tree",
+   "CRYPTO_STRATEGY_MODE UNSET" in body and "family_tree on the web" not in body)
+ok("and the reason is given, so it is not obeyed blindly",
+   "Coinbase balance" in body)
 
 # --- the dedicated runner must not blame the web service ------------------
 runner = open(os.path.join(HERE, "bot_runner.py"), encoding="utf-8").read()

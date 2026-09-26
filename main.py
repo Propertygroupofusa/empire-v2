@@ -1198,6 +1198,12 @@ async def lifespan(app: FastAPI):
     RESOLVED_CRYPTO_MODE = crypto_mode
     # Tell crypto_strategy_config what actually started, so its stale-env
     # message stops claiming nothing will trade when something is.
+    #
+    # crypto_mode is deliberately passed through even when it is UNCONFIGURED
+    # - that is the honest answer, and note_runtime_mode() refuses to record
+    # a non-strategy as "running". Before it did, a stale variable with no DB
+    # override registered 'unconfigured' as the live mode and every later log
+    # line read "trading is NOT stopped" while nothing was trading at all.
     try:
         import crypto_strategy_config as _strategy_cfg
         _strategy_cfg.note_runtime_mode(

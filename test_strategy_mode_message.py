@@ -95,23 +95,116 @@ ok("registration can never break startup",
 
 
 # --- the rule, as behaviour ----------------------------------------------
-def level(env_value, runtime_mode, supported=("btc_compound", "family_tree",
-                                              "grid_fleet", "multi_pair")):
-    if (env_value or "").strip() in supported:
-        return "ok"
-    return "warning" if runtime_mode else "error"
+#
+# This block used to re-implement the rule:
+#
+#     return "warning" if runtime_mode else "error"
+#
+# and so it shared the bug instead of catching it. The real
+# note_runtime_mode() accepted ANY value, and main.py registers whatever
+# lifespan() resolved - UNCONFIGURED, when the variable is stale and there is
+# no DB override. 'unconfigured' is truthy, so the model above scored that as
+# "warning" and called it correct, while the live web service logged
+#
+#     but 'unconfigured' is running from CRYPTO_STRATEGY_MODE, so trading is
+#     NOT stopped
+#
+# with nothing running at all. A model of the code cannot fail where the code
+# fails. So these now drive the actual module and read the actual log record.
+import importlib
+import logging
+
+sys.path.insert(0, HERE)
+import crypto_strategy_config as cfg
 
 
-ok("valid env, nothing registered           -> ok",
-   level("grid_fleet", None) == "ok")
-ok("REGRESSION: stale env, grid running     -> warning, not error",
-   level("delfina_scalping", "grid_fleet") == "warning")
-ok("stale env, nothing running              -> error (it is true then)",
-   level("delfina_scalping", None) == "error")
-ok("unset env, nothing running              -> error",
-   level(None, None) == "error")
-ok("unset env, something running            -> warning",
-   level(None, "btc_compound") == "warning")
+class _Capture(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+def observe(env_value, register=None):
+    """Resolve for real and return (level, message, resolved_mode)."""
+    before = os.environ.get("CRYPTO_STRATEGY_MODE")
+    cap = _Capture()
+    try:
+        if env_value is None:
+            os.environ.pop("CRYPTO_STRATEGY_MODE", None)
+        else:
+            os.environ["CRYPTO_STRATEGY_MODE"] = env_value
+        importlib.reload(cfg)          # clears _RUNTIME_MODE too
+        if register is not None:
+            cfg.note_runtime_mode(register, "a DB strategy override")
+        cfg.log.addHandler(cap)
+        cfg.log.setLevel(logging.DEBUG)
+        resolved = cfg.get_crypto_strategy_mode()
+    finally:
+        cfg.log.removeHandler(cap)
+        if before is None:
+            os.environ.pop("CRYPTO_STRATEGY_MODE", None)
+        else:
+            os.environ["CRYPTO_STRATEGY_MODE"] = before
+    loud = [r for r in cap.records if r.levelno >= logging.WARNING]
+    if not loud:
+        return "ok", "", resolved
+    r = loud[-1]
+    return r.levelname.lower(), r.getMessage(), resolved
+
+
+lvl, msg, mode = observe("grid_fleet")
+ok("valid env, nothing registered           -> no complaint", lvl == "ok")
+ok("  and it resolves to the strategy asked for", mode == "grid_fleet")
+
+lvl, msg, mode = observe("delfina_scalping", register="grid_fleet")
+ok("stale env, grid REALLY running          -> warning", lvl == "warning")
+ok("  and it says trading is not stopped", "NOT stopped" in msg)
+ok("  and it names what is actually running", "grid_fleet" in msg)
+
+# THE REGRESSION. main.py passes the mode it resolved, which here is the
+# UNCONFIGURED sentinel - a truthy string that is not a strategy.
+lvl, msg, mode = observe("delfina_scalping", register=cfg.UNCONFIGURED)
+ok("REGRESSION: registering UNCONFIGURED is refused, not believed",
+   "unconfigured" not in msg)
+ok("  so it never reports trading as running when nothing is",
+   "NOT stopped" not in msg)
+ok("  and note_runtime_mode says so in its return value",
+   cfg.note_runtime_mode(cfg.UNCONFIGURED, "x") is False
+   and cfg.note_runtime_mode("grid_fleet", "x") is True)
+
+lvl, msg, mode = observe("delfina_scalping")
+ok("retired name, nothing running           -> warning, named as retired",
+   lvl == "warning" and "RETIRED" in msg)
+ok("  it says there is no code behind the name, so no one hunts for a typo",
+   "no code behind that name" in msg and "not a typo" in msg)
+ok("  and the fix is deleting the variable, not choosing a replacement",
+   "DELETE the stale variable" in msg)
+ok("  it still refuses to substitute anything", mode == cfg.UNCONFIGURED)
+
+lvl, msg, mode = observe("grid_flee")
+ok("a real TYPO, nothing running            -> error (someone's bot is dead)",
+   lvl == "error")
+ok("  and the accepted values are listed, because a typo has a fix",
+   "grid_fleet" in msg and "Accepted values" in msg)
+
+lvl, msg, mode = observe(None)
+ok("unset env, nothing running              -> error", lvl == "error")
+lvl, msg, mode = observe(None, register="btc_compound")
+ok("unset env, something running            -> warning", lvl == "warning")
+
+# The advice inside those messages must not start a second strategy on the
+# balance grid_fleet is trading.
+for label, (l, m, _) in (("retired", observe("delfina_scalping")),
+                         ("typo", observe("grid_flee"))):
+    ok(f"the {label} message never tells the web service to set family_tree",
+       "family_tree on the web" not in m)
+    ok(f"the {label} message tells the web service to leave it UNSET",
+       "CRYPTO_STRATEGY_MODE UNSET" in m)
+
+importlib.reload(cfg)   # leave the module as we found it
 
 width = max(len(l) for l, _ in checks)
 for label, passed in checks:
