@@ -69,7 +69,7 @@ except ImportError:
 # Bump on every change. Printed by the banner and by --import-key so the
 # running copy identifies itself - two rounds were lost to a stale file on
 # disk looking identical to a fresh one.
-BOT_VERSION = "2026-09-26.1-correlation-cap"
+BOT_VERSION = "2026-09-26.2-fund-aware"
 
 HERE = Path(__file__).resolve().parent
 STATE_FILE = None  # set after LIVE is known - see below
@@ -446,6 +446,18 @@ def run_cycle(state, authed):
         print(f"   Taking the {CONFIG['max_new_positions_per_cycle']} strongest, "
               f"skipping: {', '.join(skipped)}")
 
+    # Size against the SMALLER of the configured envelope and the real
+    # balance. A live run with SCALPER_CAPITAL_USD=500 against a $479.21
+    # balance sent three $125 orders and then three INSUFFICIENT_FUND
+    # rejections - Coinbase caught it, but the bot should not be firing
+    # orders it cannot fund, and a rejection is a wasted request and a
+    # misleading log line.
+    free_usd = get_usd_balance()
+    budget = CAPITAL_USD if free_usd is None else min(CAPITAL_USD, free_usd)
+    if free_usd is not None and free_usd < CAPITAL_USD:
+        print(f"\n   Envelope ${CAPITAL_USD:.2f} exceeds the ${free_usd:.2f} actually "
+              f"available - sizing against the balance.")
+
     opened = 0
     for r in buys:
         if opened >= CONFIG["max_new_positions_per_cycle"]:
@@ -454,9 +466,13 @@ def run_cycle(state, authed):
             print(f"         {r['coin']} skipped - already at max_positions "
                   f"({CONFIG['max_positions']})")
             break
-        alloc = CAPITAL_USD * CONFIG["max_alloc_pct"] / 100
+        alloc = budget * CONFIG["max_alloc_pct"] / 100
         if alloc <= 0:
-            print("         BUY signal but SCALPER_CAPITAL_USD is 0 — skipped")
+            print("         BUY signal but no funds available — skipped")
+            break
+        if free_usd is not None and alloc > free_usd:
+            print(f"         {r['coin']} skipped - ${alloc:.2f} needed, "
+                  f"${free_usd:.2f} free")
             break
         ok, res = place_order(r["coin"], "BUY", usd_amount=alloc)
         if ok:
@@ -465,6 +481,8 @@ def run_cycle(state, authed):
                 "opened": datetime.now(timezone.utc).isoformat()}
             executed += 1
             opened += 1
+            if free_usd is not None:
+                free_usd -= alloc      # spent, so the next order sees the truth
             print(f"         BOUGHT {r['coin']} ${alloc:.2f} (score={r['score']})")
         else:
             print(f"         BUY FAILED {r['coin']}: {res}")
