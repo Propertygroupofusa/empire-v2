@@ -1083,6 +1083,17 @@ class CryptoGridSlice(Base):
     # it; afterwards it is unrecoverable. Without it the closed ledger cannot
     # separate "this entry was expensive" from ordinary variance.
     entry_spread_pct = Column(Float, nullable=True)
+    # The gate's FULL diagnostic at the moment it approved this entry, as
+    # JSON: spread, net edge, adverse selection, target, hourly swing,
+    # breakeven win rate, the fee it priced against, and its own reason
+    # string. One column rather than ten, so the gate can gain a field
+    # without a migration.
+    #
+    # Strictly telemetry. The gate's boolean is what authorises a trade;
+    # nothing in this blob is ever read back to make a decision. It exists
+    # to answer, later, WHY a set of trades performed the way it did -
+    # which the P&L alone cannot separate from variance.
+    entry_gate_json = Column(Text, nullable=True)
 
     # The REAL per-leg Coinbase fee rate actually paid to open this slice.
     # A maker (resting limit) fill costs roughly half a taker (market) fill,
@@ -1142,6 +1153,7 @@ class CryptoGridTradeHistory(Base):
     # accumulates if collection starts before it is needed.
     exit_reason = Column(String, nullable=True)     # "profit_target" | "stop_loss"
     entry_spread_pct = Column(Float, nullable=True)  # live spread when the order was placed
+    entry_gate_json = Column(Text, nullable=True)    # the gate's full diagnostic at entry
     mae_pct = Column(Float, nullable=True)          # worst point of the trade, vs entry
     mfe_pct = Column(Float, nullable=True)          # best point of the trade, vs entry
     entry_atr_pct = Column(Float, nullable=True)    # volatility when it was opened

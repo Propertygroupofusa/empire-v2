@@ -36,6 +36,7 @@ grid_pct above it, reference_price updating to the real fill price on
 every real buy AND every real sell.
 """
 import asyncio
+import json
 import logging
 import os
 import zlib
@@ -3953,10 +3954,24 @@ async def get_grid_slices(bot_name: str) -> list:
         return list(result.scalars().all())
 
 
+def _safe_json(d):
+    """Serialise a diagnostic blob, or return None. Never raises.
+
+    Telemetry must not be able to break a trade. A gate detail containing
+    something unserialisable is a logging problem; the fill already
+    happened and the slice row still has to be written.
+    """
+    try:
+        return json.dumps(d, default=str, sort_keys=True) if d else None
+    except Exception:
+        return None
+
+
 async def _log_grid_trade(bot_name, product_id, entry_price, exit_price, qty, pnl, opened_at,
                           entry_expected_price=None, exit_expected_price=None,
                           exit_reason=None, mae_pct=None, mfe_pct=None,
-                          entry_atr_pct=None, stop_pct=None, entry_spread_pct=None):
+                          entry_atr_pct=None, stop_pct=None, entry_spread_pct=None,
+                          entry_gate_json=None):
     """Real, persisted record of one completed real grid-slice round
     trip. Best-effort, deliberately never allowed to raise - a logging
     failure here must never affect the real trade or the real
@@ -3976,7 +3991,7 @@ async def _log_grid_trade(bot_name, product_id, entry_price, exit_price, qty, pn
                 # zero that would read as "never moved".
                 exit_reason=exit_reason, mae_pct=mae_pct, mfe_pct=mfe_pct,
                 entry_atr_pct=entry_atr_pct, stop_pct=stop_pct,
-                entry_spread_pct=entry_spread_pct,
+                entry_spread_pct=entry_spread_pct, entry_gate_json=entry_gate_json,
             ))
             await db.commit()
         # The memory is written from the same place as the ledger, and is
@@ -4437,6 +4452,11 @@ async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd
         # already uses for last_error_out.
         if detail_out is not None and isinstance(_detail, dict):
             detail_out.update(_detail)
+            # The row dict carries spread, net edge, adverse selection and the
+            # target, but not the fee this gate actually priced against - that
+            # is computed here (maker vs taker, maker-only aware) and passed
+            # IN. Without it the recorded diagnostic cannot be re-derived.
+            detail_out["fee_round_trip_pct"] = fee_round_trip
         if not ok:
             await _record_gate_decision(bot_name, product_id, "GATE_BLOCK", reason)
             return False, reason
@@ -4780,6 +4800,10 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                                    # a question the P&L alone cannot separate
                                    # from ordinary variance.
                                    entry_spread_pct=_gate_detail.get("spread_pct"),
+                                   # The gate's full reasoning, as JSON. Best
+                                   # effort: a blob that will not serialise must
+                                   # never block a fill that already happened.
+                                   entry_gate_json=_safe_json(_gate_detail),
                                    # `price` is the live price this cycle read
                                    # BEFORE deciding to buy - what the bot
                                    # believed it would pay. Stored beside what
@@ -4990,6 +5014,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                               mfe_pct=getattr(oldest, "mfe_pct", None),
                               entry_atr_pct=getattr(oldest, "entry_atr_pct", None),
                               entry_spread_pct=getattr(oldest, "entry_spread_pct", None),
+                              entry_gate_json=getattr(oldest, "entry_gate_json", None),
                               stop_pct=(GRID_STOP_LOSS_PCT or None))
         is_true_oldest = slices[0].id == oldest.id
         msg = (

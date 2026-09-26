@@ -117,5 +117,29 @@ _written = {c for c in _re.findall(r"(\w+)=", CYCLE)}
 for _c in ("entry_atr_pct", "entry_fee_rate", "entry_expected_price"):
     ok(f"CryptoGridSlice.{_c} has a writer in the cycle", _c in _written)
 
+
+print("\nthe gate diagnostic is TELEMETRY, never the execution decision")
+ok("the gate still returns exactly (ok, reason) - signature unchanged",
+   "gate_ok, gate_reason = await _net_edge_gate_ok(" in CYCLE,
+   "other callers depend on the two-tuple; detail_out must not change it")
+ok("execution branches on the BOOLEAN, not on the dict",
+   "if not gate_ok:" in CYCLE,
+   "the diagnostic blob must never gate a trade")
+_after = CYCLE.split("if not gate_ok:")[1][:600] if "if not gate_ok:" in CYCLE else ""
+ok("no field of _gate_detail is consulted to decide whether to buy",
+   "_gate_detail.get" not in CYCLE.split("db.add(CryptoGridSlice")[0].split("if not gate_ok:")[1],
+   "the dict is read only when RECORDING the fill, never before it")
+ok("detail_out is optional - the gate works with no dict passed",
+   "detail_out: dict = None" in SRC and "if detail_out is not None" in SRC)
+
+print("\nserialising the diagnostic cannot break a trade")
+ok("_safe_json exists", "def _safe_json(" in SRC)
+ok("it swallows serialisation failures", "except Exception:\n        return None" in SRC)
+ok("an empty diagnostic writes None, not an empty blob",
+   "if d else None" in SRC)
+ok("the fee the gate priced against is included",
+   'detail_out["fee_round_trip_pct"] = fee_round_trip' in SRC,
+   "the row dict lacks it, so without this the diagnostic cannot be re-derived")
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
