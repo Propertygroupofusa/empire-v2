@@ -196,6 +196,54 @@ async def measure_universe(session, product_ids, step, *,
     return scores
 
 
+# product_id -> (measured_at_monotonic, trips). Candle history over sixty
+# days does not meaningfully change between one five-minute sweep and the
+# next, and re-pulling it every sweep would hammer the candle endpoint into
+# a rate limit - which, per measure_universe's own contract, reads as "not
+# scored" and would silently disable the veto exactly when it fires most.
+_TRIPS_CACHE = {}
+TRIPS_CACHE_SECONDS = float(os.getenv("GRID_ROTATE_CACHE_SECONDS", str(6 * 3600)))
+
+
+async def trips_for(product_ids, *, step, session=None, fetcher=None):
+    """Cached round-trip counts for a handful of coins.
+
+    Returns {product_id: trips} for whatever could be measured. A coin
+    absent from the result was NOT measurable - callers must treat that as
+    "no opinion", never as zero, or a rate-limited fetch turns into a
+    verdict that a coin is dead.
+    """
+    import time as _time
+
+    want = [p for p in dict.fromkeys(product_ids) if p]
+    fresh, stale = {}, []
+    now = _time.monotonic()
+    for pid in want:
+        hit = _TRIPS_CACHE.get(pid)
+        if hit and (now - hit[0]) < TRIPS_CACHE_SECONDS:
+            fresh[pid] = hit[1]
+        else:
+            stale.append(pid)
+    if not stale:
+        return fresh
+
+    owns_session = session is None
+    if owns_session:
+        import aiohttp
+        session_cm = aiohttp.ClientSession()
+        session = await session_cm.__aenter__()
+    try:
+        measured = await measure_universe(session, stale, step, fetcher=fetcher)
+    finally:
+        if owns_session:
+            await session_cm.__aexit__(None, None, None)
+
+    for pid, trips in measured.items():
+        _TRIPS_CACHE[pid] = (now, trips)
+    fresh.update(measured)
+    return fresh
+
+
 def plan_rotations(branches, scores, *, min_margin=None):
     """Which FLAT branches should move, and onto what.
 

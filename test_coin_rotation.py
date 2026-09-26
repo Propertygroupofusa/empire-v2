@@ -187,5 +187,57 @@ ok("a real plan names the coins and the counts",
        R.plan_rotations(BR, SC, min_margin=3), SC))
 
 
+
+
+print("\ntrips_for - the cache the veto depends on")
+
+async def _cache_checks():
+    calls = {"n": 0}
+    async def fetcher(session, product_id, start, end, granularity=None):
+        calls["n"] += 1
+        if product_id == "DEAD-USD":
+            raise RuntimeError("429")
+        h, l = series([1.0] + [0.95, 1.06] * 400)
+        return (h, h, l, None)
+
+    R._TRIPS_CACHE.clear()
+    a = await R.trips_for(["A-USD", "B-USD"], step=0.025, session=object(), fetcher=fetcher)
+    first = calls["n"]
+    b = await R.trips_for(["A-USD", "B-USD"], step=0.025, session=object(), fetcher=fetcher)
+    ok("a second call inside the TTL re-fetches nothing", calls["n"] == first, f"{first} -> {calls['n']}")
+    ok("the cached answer matches the measured one", a == b)
+
+    R._TRIPS_CACHE.clear(); calls["n"] = 0
+    got = await R.trips_for(["A-USD", "DEAD-USD"], step=0.025, session=object(), fetcher=fetcher)
+    ok("an unmeasurable coin is ABSENT from trips_for, never zero",
+       "DEAD-USD" not in got and got.get("A-USD", 0) > 0, f"got {got}")
+    ok("an unmeasurable coin is not cached as a verdict", "DEAD-USD" not in R._TRIPS_CACHE)
+
+    R._TRIPS_CACHE.clear()
+    empty = await R.trips_for([], step=0.025, session=object(), fetcher=fetcher)
+    ok("an empty request is an empty answer, not an exception", empty == {})
+
+asyncio.run(_cache_checks())
+
+
+print("\nthe veto's decision table (as wired into _maybe_rotate_one_grid_branch)")
+
+def veto_blocks(here, there, margin=R.ROTATE_MIN_TRIP_MARGIN):
+    """Mirrors the live condition exactly: block when the gap is too thin."""
+    if here is None or there is None:
+        return False                      # no opinion -> ROI alone decides
+    return (there - here) < margin
+
+ok("ROI's pick with FEWER trips is blocked (the ARB case: +26.7% ROI, 2 trips)",
+   veto_blocks(here=5, there=2) is True)
+ok("ROI's pick with a thin 2-trip edge is blocked", veto_blocks(here=2, there=4) is True)
+ok("ROI's pick with a wide 9-trip edge is allowed", veto_blocks(here=2, there=11) is False)
+ok("exactly the margin is allowed", veto_blocks(here=2, there=5) is False)
+ok("one under the margin is blocked", veto_blocks(here=2, there=4) is True)
+ok("an unmeasurable INCUMBENT leaves ROI in charge", veto_blocks(here=None, there=11) is False)
+ok("an unmeasurable CANDIDATE leaves ROI in charge", veto_blocks(here=2, there=None) is False)
+ok("the veto can never START a rotation - it only returns block/allow",
+   veto_blocks(here=0, there=0) is True and veto_blocks(here=0, there=99) is False)
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

@@ -48,6 +48,7 @@ from sqlalchemy import select, func, case, desc
 
 import crypto_btc_compound_bot as engine
 import crypto_mean_reversion_bot as mean_reversion_engine
+import coin_rotation as rotation
 from database import get_session_factory
 from models import CryptoGridBranch, CryptoGridSlice, CryptoGridTradeHistory, TradingBotState, CryptoTreeBranch, BotPosition
 
@@ -2866,6 +2867,54 @@ async def _maybe_rotate_one_grid_branch(branch: CryptoGridBranch, after_sale: bo
         }
     if best_pid == branch.product_id:
         return  # already the real best available coin - no pointless move
+
+    # ---- ROI RANKS THE WRONG THING FOR A GRID ----
+    #
+    # _best_available_coin_and_roi() ranks on latest backtested ROI, which
+    # measures a coin GOING UP. A grid does not need the price to go up; it
+    # needs it to COME BACK. Those are different coins, and on this account
+    # they were opposite ones.
+    #
+    # Measured 2026-09-26 on real candles, complete 2.50% round trips over
+    # 60 days against the ROI the ranker was reading:
+    #
+    #     coin    ROI      round trips
+    #     ARB     +26.7%             2      <- ranked #1, traded twice
+    #     NEAR    +21.9%             5
+    #     BCH     -34.7%             3
+    #     ONDO         -            11      <- never ranked, trades constantly
+    #
+    # ARB is the branch holding the fleet's largest allocation and it
+    # completed one round trip in thirty days. Rotating on ROI would have
+    # put MORE money there.
+    #
+    # So ROI still proposes, but oscillation has a veto: a move only
+    # happens when the candidate has also actually round-tripped more than
+    # the coin being left, by a margin wide enough to clear the noise in
+    # that ranking (coin_rotation documents the +0.344 persistence figure
+    # this margin is sized against). Veto only - this can cancel a rotation
+    # ROI wanted, never start one ROI did not.
+    if rotation.auto_rotate_enabled():
+        try:
+            trips = await rotation.trips_for([branch.product_id, best_pid],
+                                             step=branch.grid_pct)
+            here, there = trips.get(branch.product_id), trips.get(best_pid)
+            if here is not None and there is not None:
+                if there - here < rotation.ROTATE_MIN_TRIP_MARGIN:
+                    log.info(
+                        f"[GRID] auto-rotate declined {branch.bot_name}: ROI ranks {best_pid} "
+                        f"above {branch.product_id}, but over {rotation.ROTATE_LOOKBACK_DAYS}d "
+                        f"{best_pid} completed {there} round trip(s) against {here} - "
+                        f"under the {rotation.ROTATE_MIN_TRIP_MARGIN}-trip margin, so the "
+                        f"money stays where it is"
+                    )
+                    return
+        except Exception as e:
+            # Measurement is a veto, not a gate: if it cannot be taken, fall
+            # through to the behaviour that existed before it.
+            log.warning(f"[GRID] oscillation veto unavailable for {branch.bot_name} "
+                        f"({e}) - falling back to the ROI ranking alone")
+
     amount = branch.allocated_usd
     result = await move_cash_between_grid_branches(branch.bot_name, amount, product_id=best_pid)
     log.info(
