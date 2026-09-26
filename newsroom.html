@@ -152,6 +152,28 @@
           padding:9px 12px;font-size:12px;margin-top:12px}
   .err{border:1px solid #4a1d1d;background:#180b0b;color:var(--red);padding:12px}
   footer{color:var(--faint);font-size:11px;padding:14px 2px;line-height:1.7}
+
+/* ---- MATRIX DESK -------------------------------------------------- */
+#matrix table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+#matrix th{text-align:left;font-size:.62em;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--dim);padding:.5em .6em;border-bottom:1px solid var(--line);font-weight:600}
+#matrix td{padding:.55em .6em;border-bottom:1px solid var(--line2, rgba(255,255,255,.06))}
+#matrix td.r{text-align:right}
+#matrix tr.m-stretched td{background:rgba(224,166,60,.09)}
+#matrix .m-pair{font-weight:700;letter-spacing:.04em}
+#matrix .m-z{font-weight:700}
+#matrix .m-z.hi{color:var(--amber,#e0a63c)}
+#matrix .m-state{font-size:.68em;letter-spacing:.14em;text-transform:uppercase;
+  padding:.18em .55em;border-radius:2px;border:1px solid currentColor}
+#matrix .s-STRETCHED{color:var(--amber,#e0a63c)}
+#matrix .s-DRIFTING{color:var(--dim)}
+#matrix .s-EQUILIBRIUM{color:var(--ok,#43b3a5)}
+#matrix .s-UNKNOWN{color:var(--dim);opacity:.7}
+#matrix .m-note{font-size:.8em;color:var(--dim);line-height:1.5;margin-top:1em;
+  border-top:1px solid var(--line);padding-top:.9em}
+#matrix .m-edge{margin-top:.7em;font-size:.78em;color:var(--dim)}
+#matrix .m-edge b{color:var(--amber,#e0a63c)}
+#matrix .m-detail{font-size:.8em;color:var(--dim)}
 </style>
 </head>
 <body>
@@ -231,6 +253,11 @@
       <div class="body" id="league"></div>
     </section>
 
+    <section class="desk span2 seg" data-seg="matrix">
+      <h2><span>MATRIX DESK</span><em id="matrixsub">coin against coin, dollar removed</em></h2>
+      <div class="body" id="matrix"><div class="muted">Loading the cross-rates…</div></div>
+    </section>
+
     <section class="desk span2">
       <h2><span>COPY DESK</span><em>every figure re-derived from source</em></h2>
       <div class="body" id="copy"></div>
@@ -266,7 +293,7 @@ const RISK_CLASS = {CRITICAL:"c-crit", HIGH:"c-high", CONCENTRATION:"c-high",
 const SEGMENTS = [
   ['account','WHOLE ACCOUNT'], ['studio','MAIN STUDIO'], ['risk','RISK DESK'],
   ['league','LEAGUE'], ['quant','QUANT DESK'], ['notes','PRODUCER NOTES'],
-  ['capital','CAPITAL FLOW'], ['script','REPORTER SCRIPT'],
+  ['capital','CAPITAL FLOW'], ['matrix','MATRIX DESK'], ['script','REPORTER SCRIPT'],
 ];
 const TV = new URLSearchParams(location.search).has('tv');
 let segIdx = 0;
@@ -479,6 +506,73 @@ document.addEventListener('keydown', e => {
 
 load();
 setInterval(load, 15 * 60 * 1000);   // broadcast cycle: every 15 minutes
+
+/* ---- MATRIX DESK ---------------------------------------------------
+   Its own fetch, because the cross-rates need daily candles for a dozen
+   coins and that is far slower than the newsroom feed. Loading it inline
+   would hold up every other desk behind it. */
+function fmtRatio(v){
+  if(v === null || v === undefined) return '—';
+  const a = Math.abs(v);
+  if(a >= 1000) return v.toLocaleString('en-US',{maximumFractionDigits:0});
+  if(a >= 1)    return v.toFixed(4);
+  if(a >= 0.001) return v.toFixed(6);
+  return v.toExponential(3);
+}
+
+async function loadMatrix(){
+  const box = document.getElementById('matrix');
+  if(!box) return;
+  try{
+    const r = await fetch('/api/trading-dashboard/matrix-desk?top=14');
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+
+    const sub = document.getElementById('matrixsub');
+    if(sub) sub.textContent = d.window_days + '-day average · ' + d.pairs + ' pairs';
+
+    const rows = (d.rows || []).map(function(p){
+      const cls = p.status === 'STRETCHED' ? 'm-stretched' : '';
+      const zc  = (p.z !== null && Math.abs(p.z) >= 2) ? 'hi' : '';
+      return '<tr class="' + cls + '">'
+        + '<td class="m-pair">' + esc(p.pair) + '</td>'
+        + '<td class="r">' + fmtRatio(p.ratio) + '</td>'
+        + '<td class="r">' + fmtRatio(p.mean) + '</td>'
+        + '<td class="r m-z ' + zc + '">' + (p.z === null ? '—' : (p.z > 0 ? '+' : '') + p.z.toFixed(2)) + '</td>'
+        + '<td><span class="m-state s-' + esc(p.status) + '">' + esc(p.status) + '</span></td>'
+        + '<td class="m-detail">' + esc(p.detail || '') + '</td>'
+        + '</tr>';
+    }).join('');
+
+    const e = d.edge || {};
+    const edgeRows = (e.rows || []).map(function(x){
+      return esc(x.gate) + ' held ' + x.hold_days + 'd: ' + x.mean_pct.toFixed(3)
+           + '% gross, <b>' + (x.net_pct > 0 ? '+' : '') + x.net_pct.toFixed(3)
+           + '% after fees</b> (' + x.win_rate_pct.toFixed(1) + '% win rate, t=' + x.t_stat + ')';
+    }).join(' · ');
+
+    box.innerHTML =
+      '<div style="margin-bottom:.8em">' + esc(d.headline || '') + '</div>'
+      + '<table><thead><tr><th>Pair</th><th class="r">Live</th><th class="r">'
+      + d.window_days + 'd avg</th><th class="r">Z</th><th>State</th><th>Reading</th>'
+      + '</tr></thead><tbody>' + (rows || '<tr><td colspan="6">No usable pairs.</td></tr>')
+      + '</tbody></table>'
+      + '<div class="m-note"><strong>STRETCHED does not mean rotate.</strong> '
+      + esc(e.verdict || '') + ' ' + esc(e.why_it_looks_good || '')
+      + '<div class="m-edge">' + edgeRows + '</div>'
+      + '<div class="m-edge">' + esc(e.why_the_gate_is_wrong || '') + '</div>'
+      + (Object.keys(d.unavailable || {}).length
+          ? '<div class="m-edge">No usable history for: '
+            + esc(Object.keys(d.unavailable).join(', ')) + '</div>'
+          : '')
+      + '</div>';
+  }catch(err){
+    box.innerHTML = '<div class="muted">Matrix desk unavailable: ' + esc(err.message) + '</div>';
+  }
+}
+loadMatrix();
+setInterval(loadMatrix, 15 * 60 * 1000);
+
 </script>
 </body>
 </html>

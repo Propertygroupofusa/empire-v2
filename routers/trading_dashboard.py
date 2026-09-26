@@ -9244,3 +9244,71 @@ async def auto_trim_status():
     if history_note:
         out["history_note"] = history_note
     return out
+
+
+@router.get("/matrix-desk")
+async def matrix_desk(top: int = 18, window: int = 30):
+    """Coin-to-coin ratios for the newsroom's Matrix Desk.
+
+    Read-only, and deliberately descriptive. The proposal this was built
+    from flashed "GATE UNLOCKED: ROTATE" on a stretched ratio. That was
+    tested over 350 sessions and 120 pairs of this account's own coins and
+    every gate setting loses money once both legs are paid for, so what
+    ships is the measurement, the state, and the refutation printed beside
+    it - never an instruction.
+
+    Coins are taken from the account itself, largest first, so the desk
+    shows the pairs the owner is actually exposed to rather than a fixed
+    list that drifts out of date.
+    """
+    try:
+        import cross_rates
+        import account_census
+        import crypto_selection_backtest as CSB
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"matrix desk unavailable: {exc}")
+
+    from datetime import datetime, timedelta, timezone
+
+    window = max(5, min(int(window or 30), 120))
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=window + 20)
+
+    async with aiohttp.ClientSession() as session:
+        census = await account_census.census(session, tracked_usd=0.0)
+        if not census.get("available"):
+            raise HTTPException(status_code=502,
+                                detail=f"account unreadable: {census.get('error')}")
+
+        # Largest holdings only. A matrix over fifty coins is 1,225 pairs
+        # and unreadable from a sofa, and the tail cannot move the account
+        # whatever its ratio does.
+        stable = getattr(account_census, "STABLE", set())
+        wanted = [h["asset"] for h in (census.get("holdings") or [])
+                  if h.get("asset") not in stable][:12]
+
+        closes, failed = {}, {}
+        for asset in wanted:
+            try:
+                got = await CSB.fetch_candles_window(
+                    session, f"{asset}-USD", start, end, granularity=86400)
+            except Exception as exc:
+                failed[asset] = f"{type(exc).__name__}: {exc}"
+                continue
+            if not got or not got[0] or len(got[0]) < 6:
+                failed[asset] = f"only {len(got[0]) if got and got[0] else 0} sessions"
+                continue
+            closes[asset] = got[0]
+
+    out = cross_rates.matrix(wanted, closes, window=window, top=top)
+    out["as_of"] = census.get("as_of")
+    out["window_days"] = window
+    out["unavailable"] = failed
+    out["holdings_usd"] = {h["asset"]: h["usd"] for h in (census.get("holdings") or [])
+                           if h.get("asset") in wanted}
+    out["disclaimer"] = (
+        "These are ratios between coins you hold, with the dollar taken out. "
+        "STRETCHED means a ratio is far from its recent average. It does NOT "
+        "mean rotate: acting on it was measured over 350 sessions and loses "
+        "money at every gate setting once both legs are paid for.")
+    return out
