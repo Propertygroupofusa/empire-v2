@@ -6090,6 +6090,11 @@ async def _score_short_term_opportunities(session, branches, deadline=None):
             return
         pid = getattr(branch, "product_id", None)
         try:
+            # Ask BEFORE spending three network calls. The throttle used to
+            # gate only the row write, so the fetches ran every cycle and
+            # their results were discarded seven times out of eight.
+            if not await signals.due_for_score(pid):
+                continue
             candles = await signals.fetch_candles_with_volume(session, pid)
             if not candles:
                 continue

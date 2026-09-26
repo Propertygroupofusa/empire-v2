@@ -32,6 +32,8 @@ os.environ["DATABASE_URL"] = "sqlite+aiosqlite:////tmp/t_regime.db"
 if os.path.exists("/tmp/t_regime.db"): os.remove("/tmp/t_regime.db")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import opportunity_signals as S
+GRIDSRC = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "crypto_grid_bot.py"), encoding="utf-8").read()
 from database import Base, get_engine, get_session_factory
 import models
 from sqlalchemy import select
@@ -258,6 +260,29 @@ async def main():
        sq.paid_off is False and sq.net_after_costs_pct > 10,
        f"net {sq.net_after_costs_pct} paid_off {sq.paid_off} - the position was "
        f"gone before the peak and could not collect it")
+
+    print("\nnothing is defined, tested, and never called")
+    # THE BUG THIS CATCHES. _actionability was written, given six passing
+    # tests, and never wired into regime_summary - a revert-and-reapply
+    # dropped the one line that called it. Every test passed against a
+    # function the payload never reached. Unit tests cannot see this; only
+    # asking "who calls it" can.
+    import inspect, re as _re
+    SRC = inspect.getsource(S)
+    helpers = [m for m in _re.findall(r"^def (_[a-z_]+)\(", SRC, _re.M)]
+    for h in helpers:
+        callers = len(_re.findall(rf"[^a-z_]{h}\(", SRC)) - 1   # minus the def
+        ok(f"  {h} is actually called", callers >= 1,
+           "defined and never called - a test on it proves nothing")
+    for public in ("regime_summary", "resolve_crossings", "observe",
+                   "due_for_score", "window_excursion", "fetch_candles_full"):
+        ok(f"  {public} is reachable from the bot",
+           public in GRIDSRC or f"{public}(" in SRC,
+           "a public helper nothing calls is dead weight")
+
+    ok("alert_actionability is SERVED, not merely computable",
+       '"alert_actionability": _actionability(' in SRC,
+       "this is the exact line that went missing")
     print(f"\n{P} passed, {F} failed"); sys.exit(1 if F else 0)
 
 async def _v(x): return x

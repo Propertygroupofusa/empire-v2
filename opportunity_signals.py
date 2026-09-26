@@ -205,22 +205,14 @@ async def fetch_candles_with_volume(session, product_id: str, granularity: int =
 
     Returns (closes, highs, lows, volumes) or None. Never raises.
     """
-    url = (f"https://api.exchange.coinbase.com/products/{product_id}"
-           f"/candles?granularity={granularity}")
-    try:
-        async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
-            if r.status != 200:
-                return None
-            data = await r.json()
-            if not data or len(data) < 20:
-                return None
-            # Coinbase returns newest-first: [time, low, high, open, close, volume]
-            c = list(reversed(data))
-            return ([float(x[4]) for x in c], [float(x[2]) for x in c],
-                    [float(x[1]) for x in c], [float(x[5]) for x in c])
-    except Exception as e:
-        log.debug(f"[SIGNAL] candle fetch failed for {product_id}: {e}")
+    # Two fetchers meant two identical HTTP calls per coin on any cycle where
+    # both scoring and crossing resolution ran. fetch_candles_full is a strict
+    # superset, so this drops the one column its callers do not use.
+    full = await fetch_candles_full(session, product_id, granularity)
+    if not full:
         return None
+    _times, closes, highs, lows, volumes = full
+    return (closes, highs, lows, volumes) if len(closes) >= 20 else None
 
 
 def _pct(a, b):
@@ -699,28 +691,6 @@ def _percentiles(values) -> dict:
             "min": values[0], "max": values[-1]}
 
 
-def _percentiles(values) -> dict:
-    """p25 / median / p75 / mean over an already-sorted list.
-
-    Computed in Python rather than SQL on purpose: percentile_cont is
-    Postgres-only and every test here runs on SQLite, and a query that works
-    in production but not under test is a query nobody checks. The rows are
-    already in memory for the rest of this summary anyway.
-    """
-    n = len(values)
-    if not n:
-        return {"n": 0}
-
-    def at(q):
-        # Nearest-rank, never interpolated. With a handful of windows an
-        # interpolated percentile synthesises a duration that never occurred;
-        # these are real observations and should stay that way.
-        return values[min(n - 1, max(0, int(round(q * (n - 1)))))]
-
-    return {"n": n, "p25": at(0.25), "median": at(0.50), "p75": at(0.75),
-            "mean": round(sum(values) / n, 1), "min": values[0], "max": values[-1]}
-
-
 def _actionability(dist: dict) -> dict:
     """Can these alerts be acted on, or are they only evidence?
 
@@ -764,6 +734,32 @@ def is_viable(net_edge_pct, margin: float = None) -> bool:
     if net_edge_pct is None:
         return False
     return net_edge_pct > (VIABILITY_MARGIN_PCT if margin is None else margin)
+
+
+async def due_for_score(product_id: str) -> bool:
+    """Whether this coin's candle has turned over since its last score.
+
+    Exposed so a caller can skip the NETWORK work, not just the write.
+    observe() throttles the row, but the three fetches feeding it were running
+    every cycle and having their results discarded seven times out of eight -
+    roughly 1,500 wasted requests an hour on a six-coin fleet, every one of
+    them inside the budget that protects the trading lease.
+
+    Fails CLOSED: an unreadable throttle means "not due", because scoring more
+    often than the candle updates produces duplicate rows that each count as
+    an independent prediction in every hit rate computed from them.
+    """
+    try:
+        async with get_session_factory()() as db:
+            recent = (await db.execute(
+                select(ShortTermSignal.scored_at)
+                .where(ShortTermSignal.product_id == product_id)
+                .order_by(ShortTermSignal.scored_at.desc()).limit(1))).scalar_one_or_none()
+        return (recent is None
+                or (datetime.utcnow() - recent).total_seconds() >= SCORE_MIN_GAP_SECONDS)
+    except Exception as e:
+        log.debug(f"[SIGNAL] throttle unreadable for {product_id}: {e}")
+        return False
 
 
 async def observe(product_id: str, bot_name: str, price: float, scored: dict):
@@ -1012,6 +1008,12 @@ async def regime_summary() -> dict:
         # if three quarters of windows close inside the notification delay,
         # the alert is evidence that opportunities exist and nothing more.
         "window_seconds": _percentiles(windows),
+        # THE GO / NO-GO. The distribution only means something relative to
+        # how long an alert takes to arrive, so the comparison is made here
+        # rather than left to whoever reads two numbers. This line is the one
+        # a revert-and-reapply dropped, leaving _actionability defined,
+        # six-times tested, and never called.
+        "alert_actionability": _actionability(_percentiles(windows)),
     }
     if len(resolved) < 10:
         out["verdict"] = (f"not enough data ({len(resolved)}/10 crossings resolved) - "
