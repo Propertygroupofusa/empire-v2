@@ -113,5 +113,40 @@ ok("the thresholds are untouched",
 ok("it still returns from the cycle rather than trading on",
    re.search(r"log\.critical\(f?\"\[KILL CONDITION\].*?\n(?:.*?\n)??\s+return", SRC, re.S) is not None)
 
+
+print("\nthe diagnosis reaches the dashboard, not just the log")
+ROUTER = open(os.path.join(HERE, "routers/trading_dashboard.py"), encoding="utf-8").read()
+PAGE = open(os.path.join(HERE, "alpaca_dashboard.html"), encoding="utf-8").read()
+
+ok("the endpoint serves buying power", '"buying_power": _num(' in ROUTER)
+ok("and the floor it is judged against", '"buying_power_floor"' in ROUTER)
+ok("and whether that is actually halting trading", '"buying_power_halted"' in ROUTER)
+ok("and the reason", '"buying_power_reason"' in ROUTER)
+ok("the floor is read from the mandate, never repeated",
+   'APEX_MANDATE["capital"]["critical_buying_power"]' in ROUTER,
+   "two copies of a threshold drift, and the dashboard's copy drifts unseen")
+ok("the reason DELEGATES to prop_bot rather than re-deriving it",
+   "prop_bot_module.explain_low_buying_power(" in ROUTER,
+   "a second copy of the reasoning is a second thing to keep correct")
+ok("a healthy account returns no reason at all",
+   "if bp is None or not _bp_halted(account)" in ROUTER,
+   "a permanent explanation on a healthy account is noise")
+ok("the reason cannot break the endpoint",
+   "log.debug(f\"buying-power reason unavailable" in ROUTER)
+
+ok("the page has a buying-power tile", 'id="stat-bp"' in PAGE)
+ok("it is coloured only while actually halting, not permanently",
+   "data.buying_power_halted ? ' neg' : ''" in PAGE)
+ok("a halt banner exists and is hidden by default",
+   'id="bp-banner" hidden' in PAGE)
+ok("the banner states the number, the floor AND the cash beside it",
+   "buying_power_floor" in PAGE and "data.cash" in PAGE,
+   "$77 alone reads as broke; $77 against $810 cash is the real question")
+ok("it shows the reason when there is one",
+   "data.buying_power_reason" in PAGE)
+ok("and says so plainly when no field explains it",
+   "No account field explains it" in PAGE,
+   "an unexplained halt is itself a finding, not a blank")
+
 print(f"\n{_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)

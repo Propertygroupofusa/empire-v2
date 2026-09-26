@@ -4345,6 +4345,49 @@ def _safe_float(v):
         return None
 
 
+
+def _num(v, default=None):
+    """Alpaca returns numeric account fields as JSON strings."""
+    try:
+        return round(float(v), 2)
+    except (TypeError, ValueError):
+        return default
+
+
+def _prop_bp_floor():
+    """The floor the prop bot actually halts at, read from its own mandate
+    rather than repeated here - two copies of a threshold drift, and the one
+    that drifts is the one on the dashboard."""
+    try:
+        from bot_mandates import APEX_MANDATE
+        return float(APEX_MANDATE["capital"]["critical_buying_power"])
+    except Exception:
+        return None
+
+
+def _bp_halted(account) -> bool:
+    """Whether the prop bot is refusing to trade on buying power right now."""
+    bp, floor = _num(account.get("buying_power")), _prop_bp_floor()
+    return bool(bp is not None and floor is not None and bp < floor)
+
+
+def _bp_reason(account):
+    """Why buying power is low, in the bot's own words.
+
+    Delegates to prop_bot.explain_low_buying_power so the dashboard and the
+    log line can never disagree about the diagnosis - a second copy of this
+    reasoning would be a second thing to keep correct.
+    """
+    try:
+        bp = _num(account.get("buying_power"))
+        if bp is None or not _bp_halted(account):
+            return None
+        return prop_bot_module.explain_low_buying_power(bp, dict(account))
+    except Exception as e:
+        log.debug(f"buying-power reason unavailable: {type(e).__name__}: {e}")
+        return None
+
+
 @router.get("/alpaca-overview")
 async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
     """Real Alpaca account snapshot for a focused, at-a-glance dashboard:
@@ -4410,6 +4453,22 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
         "session_pl": round(session_pl, 2),
         "session_pl_pct": round(session_pl_pct, 2),
         "equity_floor": equity_floor,
+        # BUYING POWER, AND WHY IT IS WHAT IT IS.
+        #
+        # The prop bot halts when this drops under its floor, and that halt
+        # was visible only as a CRITICAL log line - in Railway, which is the
+        # one place the account owner cannot conveniently read. On 2026-09-26
+        # it repeated every cycle saying "$77.08 < $150" beside $810.64 of
+        # cash, with no way to tell an unsettled-funds wait from a PDT
+        # restriction that waiting never fixes.
+        #
+        # The account fields that answer it come back on the SAME fetch this
+        # endpoint already makes. Serving them costs nothing and puts the
+        # diagnosis where it is actually read.
+        "buying_power": _num(account.get("buying_power")),
+        "buying_power_floor": _prop_bp_floor(),
+        "buying_power_halted": _bp_halted(account),
+        "buying_power_reason": _bp_reason(account),
         "scale": scale,
         "goal": goal,
         "progress_to_goal_pct": progress_to_goal_pct,
