@@ -1193,6 +1193,20 @@
         <div id="sell-amount-wrap"></div>
     </div>
 
+    <div class="section-title">✂️ The trimmer</div>
+    <div class="panel">
+        <div class="panel-sub">Checks every 15 minutes whether any coin has drifted past your 20% rule,
+            and sells the smallest amount that clears it - so you are not the one clicking sell.
+            It only ever SELLS, and only a coin that is over the line; nothing here buys anything.
+            <br><br>It is <strong>off until you arm it in Railway</strong>. There is no button for that
+            here on purpose: arming a loop that sells without a human in the room should take more
+            than a click on a page anyone with the URL can open.</div>
+        <div style="margin:10px 0; display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="unlock-btn" style="margin-top:0;" onclick="loadAutoTrim()">✂️ What would it do right now</button>
+        </div>
+        <div id="auto-trim-wrap"><div class="coin-history-empty">Not loaded.</div></div>
+    </div>
+
     <div class="section-title">🎚️ Trading profile</div>
     <div class="panel">
         <div class="panel-sub">Between <strong>2026-08-26 and 2026-09-24</strong> the fleet placed 230 spot
@@ -7462,6 +7476,81 @@ setInterval(tickProximityAge, 1000);
 document.addEventListener('visibilitychange', () => {
     if (!document.hidden) { refreshProximityOnly(); loadTicker(); }
 });
+
+// ------------------------------------------------------------------ THE TRIMMER
+// Read-only. This calls a GET that stops before the order on purpose, so
+// looking at what the trimmer intends never requires the write token.
+async function loadAutoTrim() {
+    const wrap = document.getElementById('auto-trim-wrap');
+    wrap.innerHTML = '<div class="coin-history-empty">Reading the live book…</div>';
+    try {
+        const r = await fetch('/api/trading-dashboard/auto-trim');
+        if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + (await r.text()).slice(0, 180));
+        const d = await r.json();
+
+        const armed = d.armed;
+        const badge = armed
+            ? '<span style="color:var(--danger,#e05a4e);font-weight:600">ARMED - it will place these</span>'
+            : '<span style="color:var(--text-dim)">OBSERVING - nothing will be placed</span>';
+
+        const acting = (d.plans || []).filter(p => p.act);
+        const blocked = (d.plans || []).filter(p => !p.act &&
+            ['COOLDOWN','TOO_SMALL','UNPRICED','UNCOMPUTABLE','NO_TOTAL'].includes(p.reason));
+
+        let rows = acting.map(p => `
+            <tr>
+              <td style="font-weight:600">${p.asset}</td>
+              <td style="text-align:right">${p.share_pct}%</td>
+              <td style="text-align:right">$${(p.usd||0).toLocaleString('en-US',{maximumFractionDigits:0})}</td>
+              <td style="text-align:right;color:var(--danger,#e05a4e);font-weight:600">
+                  -$${(p.trim_usd||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
+              <td style="font-size:0.85em;color:var(--text-dim)">${p.detail || ''}</td>
+            </tr>`).join('');
+
+        if (!rows) rows = '<tr><td colspan="5" style="color:var(--text-dim)">Nothing is over the limit.</td></tr>';
+
+        const blockedHtml = blocked.length ? `
+            <div style="margin-top:10px;font-size:0.78em;color:var(--text-dim)">
+              <strong>Over the line but not actionable:</strong>
+              ${blocked.map(p => `${p.asset} (${p.reason})`).join(', ')}
+            </div>` : '';
+
+        const b = d.bounds || {};
+        wrap.innerHTML = `
+          <div style="margin-bottom:8px">${badge} &nbsp;·&nbsp;
+            <span style="color:var(--text-dim)">checks every ${Math.round((d.check_seconds||900)/60)} min,
+            book read ${d.as_of || ''}</span></div>
+          <div style="font-size:0.9em;margin-bottom:10px">${d.headline || ''}</div>
+          <table style="width:100%;border-collapse:collapse;font-size:0.82em">
+            <thead><tr style="color:var(--text-dim);text-align:left">
+              <th>Coin</th><th style="text-align:right">Share</th><th style="text-align:right">Held</th>
+              <th style="text-align:right">Would sell</th><th>Why</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+          ${blockedHtml}
+          <div style="margin-top:12px;font-size:0.76em;color:var(--text-dim);line-height:1.5">
+            <strong>Its limits.</strong> Trims to ${(d.limit_pct - d.buffer_pct).toFixed(1)}% rather than
+            exactly ${d.limit_pct}%, so an ordinary tick does not put it straight back over.
+            No single order over $${(b.max_trim_usd||0).toLocaleString()},
+            no more than $${(b.max_daily_usd||0).toLocaleString()} in a day
+            ($${(d.spent_today_usd||0).toFixed(2)} used today),
+            never more than ${b.max_position_share_pct}% of one position at once,
+            and one trim per coin per ${b.cooldown_hours} hours.
+            Anything under $${b.min_trim_usd} is left alone because the fee would eat it.
+            <br><br><strong>To arm it:</strong> ${d.how_to_arm || ''}
+            ${d.history_note ? '<br><br><strong style="color:var(--danger,#e05a4e)">' + d.history_note + '</strong>' : ''}
+          </div>
+          ${(d.recent_trims && d.recent_trims.length) ? `
+          <div style="margin-top:12px;font-size:0.78em">
+            <strong>Placed in the last 7 days:</strong>
+            ${d.recent_trims.map(t => `${t.asset} $${(t.usd||0).toFixed(2)} (${t.placed_at.slice(0,16).replace('T',' ')})`).join(' · ')}
+          </div>` : ''}
+        `;
+    } catch (e) {
+        wrap.innerHTML = '<div class="coin-history-empty">Could not read the trimmer: ' + e.message + '</div>';
+    }
+}
+
 </script>
 </body>
 </html>

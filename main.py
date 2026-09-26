@@ -1154,6 +1154,20 @@ async def lifespan(app: FastAPI):
             logger.info("🛑 Experiment guard running (budget + deadline auto-revert)")
         except Exception as e:
             logger.warning(f"alert queue not started: {type(e).__name__}: {e}")
+
+        # THE AUTO-TRIMMER. The only background task in this process that
+        # can SELL, so the switch is stated here as well as in the module:
+        # it does nothing at all unless AUTO_TRIM_MODE is exactly "arm".
+        # Unset, misspelled or "true" all observe. It only ever reduces a
+        # holding that is over the concentration limit; there is no code
+        # path in auto_trim.py that buys, and a test asserts it.
+        try:
+            import auto_trim_worker
+            from database import get_session_factory as _trim_sf
+            asyncio.create_task(auto_trim_worker.run_periodically(_trim_sf))
+            logger.info(f"✂️ Auto-trimmer running, mode={auto_trim_worker.current_mode()}")
+        except Exception as e:
+            logger.warning(f"auto-trimmer not started: {type(e).__name__}: {e}")
         log.info("⏱️ Alpaca auto-close loop started (8% profit target / 10-day max hold, 10% skim to locked profit)")
     except Exception as e:
         log.warning(f"Alpaca auto-close loop startup failed: {e}")

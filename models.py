@@ -2527,3 +2527,40 @@ class HorizonStudyRun(Base):
     # moving and a half-migrated schema is a worse record than a blob with a
     # date on it.
     payload_json = Column(Text, nullable=True)
+
+
+class AutoTrimAction(Base):
+    """Every concentration decision the trimmer made, including the refusals.
+
+    Only logging the sales would make this unauditable in the direction
+    that matters. The question someone asks after a bad week is not "what
+    did it sell" - that is visible in the ledger anyway - it is "why did it
+    NOT sell ZEC on the 24th", and that answer only exists if the skips
+    are written down too.
+
+    status is one of:
+      skipped   - no order was sent; skipped_reason says which rule stopped it
+      placing   - the row was written and the order is in flight. A row left
+                  in this state means the process died mid-order, and the
+                  venue is the authority on whether it filled.
+      placed    - accepted by Coinbase; order_id is its id
+      rejected  - the venue refused it; skipped_reason carries its message
+      failed    - the request itself failed (network, auth, timeout)
+
+    usd is the ESTIMATE at decision time, not the fill. A market IOC fills
+    at whatever it fills at, and pretending otherwise would put a number in
+    this table that no one measured.
+    """
+    __tablename__ = "auto_trim_actions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    asset = Column(String, index=True)
+    status = Column(String, index=True)
+    usd = Column(Float, default=0.0)            # estimated proceeds
+    base_size = Column(String)                  # units, as sent
+    share_pct = Column(Float)                   # share of the account when decided
+    decided_at = Column(DateTime, default=datetime.utcnow, index=True)
+    placed_at = Column(DateTime, index=True)    # set ONLY when accepted
+    order_id = Column(String)
+    skipped_reason = Column(String, index=True)
+    detail = Column(String)

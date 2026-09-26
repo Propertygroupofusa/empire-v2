@@ -9153,3 +9153,78 @@ def _live_ops_headline(trades_section, grid_section):
         "unrealized": unrealized_err or "grid status, marked at the current price",
     }
     return {"ok": True, "data": data, "error": None}
+
+
+@router.get("/auto-trim")
+async def auto_trim_status():
+    """What the trimmer would do right now, and whether it is allowed to.
+
+    A GET on purpose: reading what a money-moving loop intends must not
+    itself require the write token, or the only way to audit it is to be
+    holding the credential that lets you fire it.
+
+    This endpoint NEVER places anything. It runs exactly the sizing the
+    worker runs, against the same live census, and stops before the order.
+    """
+    try:
+        import auto_trim
+        import auto_trim_worker
+        import account_census
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"auto-trim unavailable: {exc}")
+
+    from datetime import datetime, timedelta
+    now = datetime.utcnow()
+    mode = auto_trim_worker.current_mode()
+
+    history, history_note = [], None
+    try:
+        from models import AutoTrimAction
+        from database import get_session_factory
+        since = now - timedelta(days=auto_trim_worker.HISTORY_DAYS)
+        async with get_session_factory()() as db:
+            rows = (await db.execute(
+                select(AutoTrimAction)
+                .where(AutoTrimAction.placed_at != None)          # noqa: E711
+                .where(AutoTrimAction.placed_at >= since)
+                .order_by(AutoTrimAction.placed_at.desc()))).scalars().all()
+        history = [{"asset": r.asset, "usd": r.usd, "placed_at": r.placed_at} for r in rows]
+    except Exception as exc:
+        history_note = (f"trim history unreadable ({type(exc).__name__}) - the worker "
+                        f"would SKIP this pass rather than trim against an unknown "
+                        f"daily total, so the preview below is optimistic")
+
+    async with aiohttp.ClientSession() as session:
+        census = await account_census.census(session, tracked_usd=0.0)
+    if not census.get("available"):
+        raise HTTPException(status_code=502,
+                            detail=f"account unreadable: {census.get('error')}")
+
+    plans = auto_trim.plan_trims(census.get("holdings") or [],
+                                 census.get("total_usd"), now=now, history=history)
+    out = auto_trim.summarise(plans, mode)
+    out.update({
+        "is_a_preview_not_an_order": True,
+        "as_of": census.get("as_of"),
+        "total_usd": census.get("total_usd"),
+        "limit_pct": auto_trim.LIMIT_PCT,
+        "buffer_pct": auto_trim.BUFFER_PCT,
+        "bounds": {
+            "min_trim_usd": auto_trim.MIN_TRIM_USD,
+            "max_trim_usd": auto_trim.MAX_TRIM_USD,
+            "max_daily_usd": auto_trim.MAX_DAILY_TRIM_USD,
+            "max_position_share_pct": auto_trim.MAX_POSITION_SHARE_PCT,
+            "cooldown_hours": auto_trim.COOLDOWN_HOURS,
+        },
+        "spent_today_usd": auto_trim.spent_today(history, now),
+        "check_seconds": auto_trim_worker.CHECK_SECONDS,
+        "how_to_arm": (f"Set {auto_trim_worker.MODE_ENV}=arm in Railway and redeploy. "
+                       f"Any other value observes. There is no dashboard button for "
+                       f"this on purpose - arming a loop that sells without a human "
+                       f"should take more than a click."),
+        "recent_trims": [{"asset": h["asset"], "usd": h["usd"],
+                          "placed_at": h["placed_at"].isoformat() + "Z"} for h in history[:20]],
+    })
+    if history_note:
+        out["history_note"] = history_note
+    return out
