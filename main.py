@@ -1386,6 +1386,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# THE WRITE GUARD GOES ON FIRST so it runs LAST on the way in - Starlette
+# applies middleware in reverse order of registration, so the guard added
+# here sits closest to the routes and sees the request after CORS has done
+# its work. See write_guard.py for why this is middleware and not 110
+# decorators, and why it fails closed.
+app.middleware("http")(__import__("write_guard").guard)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
