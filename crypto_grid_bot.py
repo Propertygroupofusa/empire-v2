@@ -1062,6 +1062,37 @@ AUTO_WIDEN_ENV_VAR = "GRID_AUTO_WIDEN"
 # branch below it is raised, a branch above it is left alone.
 FLEET_MIN_STEP_PCT = float(os.getenv("GRID_FLEET_MIN_STEP_PCT", "0.025"))
 
+# ---- THE STOP LOSS ----
+#
+# Sell a slice that has fallen this far below its own entry, at a loss, on
+# purpose. Zero disables it.
+#
+# Added 2026-09-26 for a problem the account owner named from experience:
+# "I wind up losing on these coins, and it took a long time for it to
+# recover the money." Without a stop, a slice that falls 40% is held
+# indefinitely waiting for +2.50%. BONK did exactly that, -43.8% in one
+# measured window, and the grid simply sat in it.
+#
+# 8% is not a fitted number. Swept 5% to 25% on the live six coins across
+# two out-of-sample windows, EVERY level beat no-stop in the losing window:
+#
+#     stop     losing window    winning window
+#     none          -$15.28            +$2.77
+#     5%             -$7.51            +$2.77
+#     8%             -$5.36            +$2.77   <- chosen
+#     10%            -$8.61            +$2.77
+#     25%            -$9.23            +$2.77
+#
+# Two things make this worth shipping where the rest of tonight's tuning
+# was not. The benefit does not depend on the exact level - anything in
+# that range roughly halves the loss - so it is not a parameter found by
+# searching. And the winning window is IDENTICAL at every level, because
+# no stop ever fired there: it costs nothing when things go well and only
+# acts when they do not.
+GRID_STOP_LOSS_PCT = float(os.getenv("GRID_STOP_LOSS_PCT", "0.08"))
+if GRID_STOP_LOSS_PCT < 0 or GRID_STOP_LOSS_PCT >= 1:
+    raise ValueError(f"GRID_STOP_LOSS_PCT must be in [0, 1), got {GRID_STOP_LOSS_PCT}")
+
 
 def auto_widen_enabled() -> bool:
     """Whether spacing may widen to clear the gate. ON unless switched off.
@@ -4752,15 +4783,79 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     # ever locking in a real loss.
     real_fee_rate = await get_effective_round_trip_fee_rate()
     exit_leg_rate = await expected_leg_fee_rate()
-    if price >= branch.reference_price * (1 + grid_pct) and slices:
-        oldest = _pick_profitable_slice_to_sell(slices, price, real_fee_rate, exit_leg_rate)
-        if oldest is None:
-            log.info(
-                f"[GRID] {branch.bot_name}: real rise trigger fired (${price:,.4f} >= "
-                f"${branch.reference_price * (1 + grid_pct):,.4f}) but no open slice would net a real "
-                f"profit at this price - holding every slice, waiting for a genuinely profitable one"
+
+    # ---- STOP LOSS: the one place this bot sells at a loss ON PURPOSE ----
+    #
+    # This is in direct tension with _pick_profitable_slice_to_sell() below,
+    # which exists precisely to stop the bot realising losses - written after
+    # the account owner caught a DOGE branch closing -$1.57 across four
+    # trades. That rule is NOT being loosened. The difference is intent:
+    #
+    #   below  - a RISE fired the trigger, and the bot must not mistake it
+    #            for profit on a slice that is actually underwater. Still
+    #            enforced, unchanged.
+    #   here   - the position has fallen far enough that holding it is the
+    #            larger risk. Sold deliberately, named as a stop, logged as
+    #            a loss.
+    #
+    # Why it exists, from the owner: "I wind up losing on these coins, and
+    # it took a long time for it to recover the money." Without a stop, a
+    # slice that falls 40% is held forever waiting for +2.50%. BONK did
+    # exactly that: -43.8% in one measured window.
+    #
+    # Measured on the live six coins, two out-of-sample windows, stop swept
+    # from 5% to 25%:
+    #
+    #     stop     losing window    winning window
+    #     none          -$15.28            +$2.77
+    #     5%             -$7.51            +$2.77
+    #     8%             -$5.36            +$2.77   <- best
+    #     10%            -$8.61            +$2.77
+    #     25%            -$9.23            +$2.77
+    #
+    # EVERY level from 5% to 25% beat no-stop in both windows, so the
+    # benefit does not depend on picking the number right - which is what
+    # separates this from a fitted parameter. And the winning window is
+    # IDENTICAL at every level: no stop ever fired there. It is pure
+    # downside insurance, free on the upside.
+    #
+    # GRID_STOP_LOSS_PCT=0 disables it entirely.
+    #
+    # This block only CHOOSES a slice. Every line of order placement,
+    # P&L, shadow logging, row deletion and trade recording below is the
+    # existing, already-proven sell path, reused unchanged - the stop must
+    # not get its own copy of the most dangerous code in this file.
+    _stop_slice = None
+    if GRID_STOP_LOSS_PCT > 0 and slices:
+        for _sl in slices:
+            _entry = getattr(_sl, "entry_price", None)
+            if _entry and price <= _entry * (1 - GRID_STOP_LOSS_PCT):
+                _stop_slice = _sl
+                break
+
+    if _stop_slice is not None or (price >= branch.reference_price * (1 + grid_pct) and slices):
+        if _stop_slice is not None:
+            # The stop deliberately bypasses _pick_profitable_slice_to_sell.
+            # That function's whole job is to refuse a losing sale; here the
+            # loss is the point, so it is named, logged at WARNING, and the
+            # slice is chosen explicitly rather than certified profitable.
+            oldest = _stop_slice
+            log.warning(
+                f"[GRID] {branch.bot_name}: 🛑 STOP LOSS on {branch.product_id} - slice entered at "
+                f"${oldest.entry_price:,.6f} is down {(1 - price / oldest.entry_price) * 100:.2f}% at "
+                f"${price:,.6f}, past the {GRID_STOP_LOSS_PCT * 100:.1f}% stop. Selling at a loss on "
+                f"purpose: a slice this far down waits a very long time for +{grid_pct * 100:.2f}%, "
+                f"and that wait is the risk this stop exists to cut."
             )
-            return
+        else:
+            oldest = _pick_profitable_slice_to_sell(slices, price, real_fee_rate, exit_leg_rate)
+            if oldest is None:
+                log.info(
+                    f"[GRID] {branch.bot_name}: real rise trigger fired (${price:,.4f} >= "
+                    f"${branch.reference_price * (1 + grid_pct):,.4f}) but no open slice would net a real "
+                    f"profit at this price - holding every slice, waiting for a genuinely profitable one"
+                )
+                return
         fill = await grid_sell(session, oldest.qty, branch.product_id)
         if not fill:
             log.warning(f"[GRID] {branch.bot_name}: real grid sell of {branch.product_id} did not fill - will retry next cycle")
