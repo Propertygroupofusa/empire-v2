@@ -1150,7 +1150,7 @@
         </div>
         <div class="panel">
             <div class="panel-title">Realized P&amp;L, cumulative</div>
-            <div class="panel-sub">The running total of closed grid profit, trade by trade, oldest to newest.</div>
+            <div class="panel-sub">The running total of closed grid profit, trade by trade, oldest to newest. Closed money only - the open slices counted at the top of this page are not in this line, which is why it ends lower than the headline number up there.</div>
             <div id="grid-pnl-curve"><div class="coin-history-empty">Loading…</div></div>
         </div>
     </div>
@@ -4487,6 +4487,11 @@ function renderGridPnlCurve(history) {
         const shownSum = trades.reduce((s, t) => s + t.pnl, 0);
         const total = history.total_realized_pnl != null ? history.total_realized_pnl : shownSum;
         const startAt = total - shownSum;
+        // Trades that exist in the ledger but not in this window. Their sum IS
+        // startAt, so the left edge of the line is a real running total, not a
+        // synthetic offset - but the reader cannot know that unless it is said.
+        const olderCount = (history.total_trade_count != null && history.total_trade_count > trades.length)
+            ? history.total_trade_count - trades.length : 0;
 
         let running = startAt;
         const pts = [{ x: 0, y: running, t: null }];
@@ -4525,9 +4530,13 @@ function renderGridPnlCurve(history) {
                 <text x="${W - padR}" y="${H - 5}" text-anchor="end" font-size="9" fill="var(--text-dim)">${last}</text>
             </svg>
             <div style="font-size:0.72em; color:var(--text-dim); margin-top:4px; font-variant-numeric:tabular-nums;">
-                Last ${trades.length} closed round trip${trades.length === 1 ? '' : 's'}, ending at
+                ${olderCount > 0
+                    ? `Starts at ${fmtSignedUsd(startAt)} - the running total after the ${olderCount} earlier
+                       trade${olderCount === 1 ? '' : 's'} the feed does not send - then plots the last
+                       ${trades.length} closed round trip${trades.length === 1 ? '' : 's'}, ending at `
+                    : `All ${trades.length} closed round trip${trades.length === 1 ? '' : 's'}, ending at `}
                 <strong style="color:${endUp ? 'var(--green)' : 'var(--red)'};">${total >= 0 ? '+' : '-'}${fmtUsd(Math.abs(total))}</strong>
-                all-time realized.
+                all-time realized. Closed money only - open slices are not in this line.
             </div>`;
     } catch (e) {
         wrap.innerHTML = `<div class="coin-history-empty">Could not draw the P&L curve (${e.message}).</div>`;
