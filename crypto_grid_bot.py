@@ -3954,7 +3954,9 @@ async def get_grid_slices(bot_name: str) -> list:
 
 
 async def _log_grid_trade(bot_name, product_id, entry_price, exit_price, qty, pnl, opened_at,
-                          entry_expected_price=None, exit_expected_price=None):
+                          entry_expected_price=None, exit_expected_price=None,
+                          exit_reason=None, mae_pct=None, mfe_pct=None,
+                          entry_atr_pct=None, stop_pct=None):
     """Real, persisted record of one completed real grid-slice round
     trip. Best-effort, deliberately never allowed to raise - a logging
     failure here must never affect the real trade or the real
@@ -3968,6 +3970,12 @@ async def _log_grid_trade(bot_name, product_id, entry_price, exit_price, qty, pn
                 exit_price=exit_price, qty=qty, pnl=round(pnl, 2), opened_at=opened_at,
                 entry_expected_price=entry_expected_price,
                 exit_expected_price=exit_expected_price,
+                # Instrumentation for settling the stop level later on real
+                # entries. All nullable - a trade that predates this, or one
+                # whose excursion tracking failed, records None rather than a
+                # zero that would read as "never moved".
+                exit_reason=exit_reason, mae_pct=mae_pct, mfe_pct=mfe_pct,
+                entry_atr_pct=entry_atr_pct, stop_pct=stop_pct,
             ))
             await db.commit()
         # The memory is written from the same place as the ledger, and is
@@ -4784,6 +4792,44 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     real_fee_rate = await get_effective_round_trip_fee_rate()
     exit_leg_rate = await expected_leg_fee_rate()
 
+    # ---- EXCURSION TRACKING ----
+    #
+    # Record how far each open slice has gone against and in favour of the
+    # entry. Costs one UPDATE per open slice per cycle and changes no
+    # trading behaviour whatsoever.
+    #
+    # It exists so the stop level can eventually be settled with evidence
+    # rather than argument. Fixed 8% beat ATR x 3 by $0.74 across two
+    # windows - a tie broken on simplicity, not a demonstrated edge. With
+    # MAE on every real trade, "would a 5% stop have done better?" is
+    # answerable from the closed book on IDENTICAL entries, which is a
+    # cleaner experiment than a backtest that also changes the entries.
+    if slices and price:
+        try:
+            async with get_session_factory()() as db:
+                for _sl in slices:
+                    _entry = getattr(_sl, "entry_price", None)
+                    if not _entry:
+                        continue
+                    _exc = (price / _entry) - 1.0
+                    _row = (await db.execute(select(CryptoGridSlice).where(
+                        CryptoGridSlice.id == _sl.id))).scalar_one_or_none()
+                    if _row is None:
+                        continue
+                    _dirty = False
+                    if _row.mae_pct is None or _exc < _row.mae_pct:
+                        _row.mae_pct = _exc; _dirty = True
+                    if _row.mfe_pct is None or _exc > _row.mfe_pct:
+                        _row.mfe_pct = _exc; _dirty = True
+                    if _dirty:
+                        _sl.mae_pct = _row.mae_pct
+                        _sl.mfe_pct = _row.mfe_pct
+                await db.commit()
+        except Exception as e:
+            # Pure instrumentation. It must never be able to stop the thing
+            # it measures, the same rule the heartbeat already follows.
+            log.debug(f"[GRID] {branch.bot_name}: excursion tracking skipped ({e})")
+
     # ---- STOP LOSS: the one place this bot sells at a loss ON PURPOSE ----
     #
     # This is in direct tension with _pick_profitable_slice_to_sell() below,
@@ -4905,7 +4951,17 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
         await _log_grid_trade(branch.bot_name, branch.product_id, oldest.entry_price,
                               filled_price, filled_qty, pnl, oldest.opened_at,
                               entry_expected_price=oldest.entry_expected_price,
-                              exit_expected_price=price)
+                              exit_expected_price=price,
+                              # _stop_slice is set only when the stop chose this
+                              # slice, so it is the honest source of the reason -
+                              # not the sign of the P&L, which cannot tell a stop
+                              # from an ordinary sale that happened to lose.
+                              exit_reason=("stop_loss" if _stop_slice is not None
+                                           else "profit_target"),
+                              mae_pct=getattr(oldest, "mae_pct", None),
+                              mfe_pct=getattr(oldest, "mfe_pct", None),
+                              entry_atr_pct=getattr(oldest, "entry_atr_pct", None),
+                              stop_pct=(GRID_STOP_LOSS_PCT or None))
         is_true_oldest = slices[0].id == oldest.id
         msg = (
             f"{'📈' if pnl >= 0 else '📉'} {branch.bot_name} GRID SELL: sold "

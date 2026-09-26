@@ -1062,6 +1062,23 @@ class CryptoGridSlice(Base):
     entry_price = Column(Float)
     qty = Column(Float)
     opened_at = Column(DateTime, default=datetime.utcnow)
+
+    # ---- EXCURSION TRACKING, updated every cycle while the slice is open ----
+    #
+    # The worst and best this position ever got, as a percentage of entry.
+    # Recorded so a future stop-level comparison can be run on the SAME real
+    # entries instead of re-backtesting: a trade whose MAE reached -6.2%
+    # tells you directly whether a 5% stop would have fired on it and a 8%
+    # stop would not. Re-running a backtest to answer that instead changes
+    # the entries too, which is a different experiment.
+    #
+    # Added 2026-09-26 after shipping the 8% stop on two windows of evidence.
+    # Fixed 8% beat ATR x 3 by $0.74 - a tie broken on simplicity, not a
+    # demonstrated edge. These columns are what eventually settles it.
+    mae_pct = Column(Float, nullable=True)   # max adverse excursion, negative
+    mfe_pct = Column(Float, nullable=True)   # max favourable excursion, positive
+    entry_atr_pct = Column(Float, nullable=True)  # volatility at entry, for ATR-scaled comparison
+
     # The REAL per-leg Coinbase fee rate actually paid to open this slice.
     # A maker (resting limit) fill costs roughly half a taker (market) fill,
     # so once maker orders are live the two legs of one round trip can
@@ -1102,6 +1119,27 @@ class CryptoGridTradeHistory(Base):
     # CryptoGridSlice.entry_expected_price.
     entry_expected_price = Column(Float, nullable=True)
     exit_expected_price = Column(Float, nullable=True)
+
+    # ---- WHAT THIS TRADE WOULD TELL A LATER EXPERIMENT ----
+    #
+    # Carried over from the slice at close. With MAE recorded per trade, the
+    # question "would a 5% stop have beaten the 8% one?" is answerable from
+    # the real closed book, on identical entries, instead of by re-running a
+    # backtest that also changes which trades happened.
+    #
+    # exit_reason separates a sale that hit its profit target from one the
+    # stop forced. Without it the ledger shows a loss and cannot say whether
+    # the stop did its job or the grid sold badly.
+    #
+    # Honest note on the timeline: this fleet completes roughly 0.65 round
+    # trips a day, so the ~250 trades that experiment wants is about a year
+    # of data. Recorded now because the cost is nothing and the data only
+    # accumulates if collection starts before it is needed.
+    exit_reason = Column(String, nullable=True)     # "profit_target" | "stop_loss"
+    mae_pct = Column(Float, nullable=True)          # worst point of the trade, vs entry
+    mfe_pct = Column(Float, nullable=True)          # best point of the trade, vs entry
+    entry_atr_pct = Column(Float, nullable=True)    # volatility when it was opened
+    stop_pct = Column(Float, nullable=True)         # the stop level in force at the time
 
     def to_dict(self):
         return {
