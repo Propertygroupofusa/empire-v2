@@ -3956,7 +3956,7 @@ async def get_grid_slices(bot_name: str) -> list:
 async def _log_grid_trade(bot_name, product_id, entry_price, exit_price, qty, pnl, opened_at,
                           entry_expected_price=None, exit_expected_price=None,
                           exit_reason=None, mae_pct=None, mfe_pct=None,
-                          entry_atr_pct=None, stop_pct=None):
+                          entry_atr_pct=None, stop_pct=None, entry_spread_pct=None):
     """Real, persisted record of one completed real grid-slice round
     trip. Best-effort, deliberately never allowed to raise - a logging
     failure here must never affect the real trade or the real
@@ -3976,6 +3976,7 @@ async def _log_grid_trade(bot_name, product_id, entry_price, exit_price, qty, pn
                 # zero that would read as "never moved".
                 exit_reason=exit_reason, mae_pct=mae_pct, mfe_pct=mfe_pct,
                 entry_atr_pct=entry_atr_pct, stop_pct=stop_pct,
+                entry_spread_pct=entry_spread_pct,
             ))
             await db.commit()
         # The memory is written from the same place as the ledger, and is
@@ -4338,7 +4339,7 @@ async def _record_gate_decision(bot_name: str, product_id: str, verdict: str, re
 
 
 async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd: float,
-                            bot_name: str = "grid"):
+                            bot_name: str = "grid", detail_out: dict = None):
     """Should this dip actually be bought? Returns (ok, reason).
 
     Four things the dip trigger alone cannot see, checked against the real
@@ -4427,6 +4428,15 @@ async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd
             bid_depth_usd=bid_depth, ask_depth_usd=ask_depth,
             slice_usd=slice_usd, fee_round_trip=fee_round_trip,
         )
+        # The gate already measured the live spread against the real book.
+        # It was being discarded, so the one moment the system knows what a
+        # trade's spread actually was - the instant before the order - was
+        # lost, and the closed ledger could never answer whether wide-spread
+        # entries underperform. Handed back through an out-dict rather than
+        # a changed return signature, the same pattern fetch_candles_window
+        # already uses for last_error_out.
+        if detail_out is not None and isinstance(_detail, dict):
+            detail_out.update(_detail)
         if not ok:
             await _record_gate_decision(bot_name, product_id, "GATE_BLOCK", reason)
             return False, reason
@@ -4695,8 +4705,10 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
             log.info(f"[GRID] {branch.bot_name}: only ${spend:.2f} real spendable for a new slice (below ${MIN_TRADE_USD:.2f} minimum) - waiting")
             return
 
+        _gate_detail = {}
         gate_ok, gate_reason = await _net_edge_gate_ok(
-            session, branch.product_id, grid_pct, spend, bot_name=branch.bot_name)
+            session, branch.product_id, grid_pct, spend, bot_name=branch.bot_name,
+            detail_out=_gate_detail)
         if not gate_ok:
             log.info(f"[GRID] {branch.bot_name}: ⛔ net-edge gate - {gate_reason}")
             return
@@ -4761,6 +4773,13 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                                    # this cycle already made to get `price`.
                                    entry_atr_pct=((_atr / filled_price)
                                                   if _atr and filled_price else None),
+                                   # The live spread the gate measured on the
+                                   # real book immediately before this order.
+                                   # Kept so the closed ledger can answer
+                                   # whether wide-spread entries underperform -
+                                   # a question the P&L alone cannot separate
+                                   # from ordinary variance.
+                                   entry_spread_pct=_gate_detail.get("spread_pct"),
                                    # `price` is the live price this cycle read
                                    # BEFORE deciding to buy - what the bot
                                    # believed it would pay. Stored beside what
@@ -4970,6 +4989,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                               mae_pct=getattr(oldest, "mae_pct", None),
                               mfe_pct=getattr(oldest, "mfe_pct", None),
                               entry_atr_pct=getattr(oldest, "entry_atr_pct", None),
+                              entry_spread_pct=getattr(oldest, "entry_spread_pct", None),
                               stop_pct=(GRID_STOP_LOSS_PCT or None))
         is_true_oldest = slices[0].id == oldest.id
         msg = (

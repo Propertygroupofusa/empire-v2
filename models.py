@@ -1078,6 +1078,11 @@ class CryptoGridSlice(Base):
     mae_pct = Column(Float, nullable=True)   # max adverse excursion, negative
     mfe_pct = Column(Float, nullable=True)   # max favourable excursion, positive
     entry_atr_pct = Column(Float, nullable=True)  # volatility at entry, for ATR-scaled comparison
+    # The live bid/ask spread the net-edge gate measured on the real book in
+    # the instant before this order. That is the only moment the system knows
+    # it; afterwards it is unrecoverable. Without it the closed ledger cannot
+    # separate "this entry was expensive" from ordinary variance.
+    entry_spread_pct = Column(Float, nullable=True)
 
     # The REAL per-leg Coinbase fee rate actually paid to open this slice.
     # A maker (resting limit) fill costs roughly half a taker (market) fill,
@@ -1136,6 +1141,7 @@ class CryptoGridTradeHistory(Base):
     # of data. Recorded now because the cost is nothing and the data only
     # accumulates if collection starts before it is needed.
     exit_reason = Column(String, nullable=True)     # "profit_target" | "stop_loss"
+    entry_spread_pct = Column(Float, nullable=True)  # live spread when the order was placed
     mae_pct = Column(Float, nullable=True)          # worst point of the trade, vs entry
     mfe_pct = Column(Float, nullable=True)          # best point of the trade, vs entry
     entry_atr_pct = Column(Float, nullable=True)    # volatility when it was opened
