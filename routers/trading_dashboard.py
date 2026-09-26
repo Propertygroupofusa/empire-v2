@@ -7495,6 +7495,36 @@ async def grid_fee_reality_endpoint(limit: int = 250):
         "Pragma": "no-cache", "Expires": "0"})
 
 
+@router.get("/grid-status/fleet-review")
+async def fleet_review_endpoint(top_n: int = 10, fee: float = 0.70,
+                                min_notional: float = 750000.0):
+    """What the fleet holds, what is failing, and what could replace it.
+
+    A PROPOSAL. Read-only - it places no order, creates no branch and
+    moves no capital. The trading universe stays locked to coins a human
+    named; this is the evidence a human would use to name a different one.
+    """
+    import fleet_review
+    fleet = []
+    try:
+        if crypto_grid_bot_module is not None:
+            branches = await crypto_grid_bot_module.get_grid_branches()
+            fleet = [b.product_id for b in branches if b.active]
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"fleet unreadable: {exc}")
+    if not fleet:
+        return JSONResponse(content={"fleet": [], "detail": "no active branches"})
+    try:
+        data = await fleet_review.review(fleet, top_n=top_n, fee_pct=fee,
+                                         min_notional=min_notional)
+    except Exception as exc:
+        log.warning(f"[dashboard] fleet review failed: {exc}")
+        raise HTTPException(status_code=502, detail=f"fleet review failed: {exc}")
+    return JSONResponse(content=data, headers={
+        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+        "Pragma": "no-cache", "Expires": "0"})
+
+
 @router.get("/grid-status/universe-scan")
 async def universe_scan_endpoint(fee: float = 0.70, min_notional: float = 750000.0):
     """Every USD pair on the venue, measured against movement and depth.

@@ -1137,6 +1137,20 @@
         <div id="money-check-wrap"><div class="coin-history-empty">Not run yet - tap the button above.</div></div>
     </div>
 
+    <div class="section-title">🧭 What's coming up next</div>
+    <div class="panel">
+        <div class="panel-sub">Each branch measured against every USD pair on the venue - can it move further
+            than the fee in a day, and is its book deep enough to fill as a maker rather than crossing the
+            spread. A branch that fails the second one pays taker on every trade, which is 1.50% against a
+            2.50% step. Underneath, what could replace it: ranked by how differently it moves from the
+            branches you keep, not by how fast it moves, because coins that fall on the same days are one
+            bet wearing several tickers. <strong>A proposal only - nothing here moves money.</strong></div>
+        <div style="margin:10px 0;">
+            <button id="fleet-review-btn" class="unlock-btn" style="margin-top:0;" onclick="runFleetReview()">🧭 Review the fleet</button>
+        </div>
+        <div id="fleet-review-wrap"><div class="coin-history-empty">Not run yet - tap the button above. Takes about 20 seconds to measure all 402 pairs.</div></div>
+    </div>
+
     <div class="section-title">📍 Where every branch sits right now</div>
     <div class="panel">
         <div class="panel-sub">The dot is where price is now - the "now" figure under each bar is that dot's price. The bar is this branch's own grid band: one step below its reference on the left, one step above on the right. It buys when the dot reaches the left mark and sells an open slice when it reaches the green one. Both distances are shown on the right - how far price must FALL to buy, and how far it must RISE to sell - with the nearer one first and in colour. A branch holding nothing has no sell to travel to. Closest to acting is listed first.</div>
@@ -4587,6 +4601,93 @@ function escText(v) {
         out = out.split(pairs[i][0]).join(pairs[i][1]);
     }
     return out;
+}
+
+// The fleet against the whole venue, and what could replace what is
+// failing. Ranked on CORRELATION first: the account owner's own recorded
+// experience is "they all dragged down and I lost a lot of money", and
+// the measured reason is that the coins moved together. A faster coin
+// that falls on the same days is not a replacement, it is more of the
+// same position.
+function renderFleetReview(d) {
+    const wrap = document.getElementById('fleet-review-wrap');
+    if (!wrap) return;
+    const fleet = d.fleet || [];
+    if (fleet.length === 0) {
+        wrap.innerHTML = '<div class="coin-history-empty">No active branches to review.</div>';
+        return;
+    }
+    const money = n => '$' + Number(n || 0).toLocaleString('en-US', { maximumFractionDigits: 0 });
+
+    const branchRow = f => {
+        const failing = f.verdict !== 'tradeable';
+        return `
+        <div style="display:grid; grid-template-columns:5.5em 1fr; gap:10px; padding:7px 0;
+                    border-bottom:1px solid var(--border);">
+            <div>
+                <div style="font-weight:700; font-size:0.86em;">${escText(String(f.product_id).replace('-USD', ''))}</div>
+                <div style="font-size:0.66em; color:${failing ? 'var(--red)' : 'var(--text-dim)'}; font-weight:${failing ? '700' : '400'};">
+                    ${failing ? 'FAILS' : '#' + f.rank + ' of ' + f.of}</div>
+            </div>
+            <div style="font-size:0.76em; font-variant-numeric:tabular-nums;">
+                <span>${Number(f.daily_vol_pct || 0).toFixed(2)}% a day</span>
+                <span style="color:var(--text-dim);"> \u00b7 ${money(f.notional_24h_usd)} of depth</span>
+                ${failing ? `<div style="color:var(--red); margin-top:3px; font-size:0.94em;">${escText(f.reason || '')}</div>` : ''}
+            </div>
+        </div>`;
+    };
+
+    const CORRCOL = { diversifies: 'var(--green)', ok: 'var(--text-dim)', 'same bet': 'var(--red)' };
+    const candRow = c => `
+        <div style="display:grid; grid-template-columns:5.5em 1fr 4.4em; gap:10px; padding:6px 0;
+                    border-bottom:1px solid var(--border); align-items:center;">
+            <div style="font-weight:700; font-size:0.84em;">${escText(String(c.product_id).replace('-USD', ''))}</div>
+            <div style="font-size:0.74em; font-variant-numeric:tabular-nums; color:var(--text-dim);">
+                ${Number(c.daily_vol_pct || 0).toFixed(2)}% a day \u00b7 ${money(c.notional_24h_usd)} of depth</div>
+            <div style="text-align:right; font-size:0.78em; font-weight:700;
+                        color:${CORRCOL[c.corr_verdict] || 'var(--text-dim)'};"
+                 title="${escText(c.corr_verdict || '')} - correlation to the branches you keep">
+                ${Number(c.avg_corr).toFixed(2)}</div>
+        </div>`;
+
+    const swaps = (d.suggested_swaps || []).map(s => `
+        <div style="border:1px solid var(--green); background:rgba(16,185,129,0.06);
+                    border-radius:8px; padding:10px 12px; margin-bottom:7px;">
+            <div style="font-weight:700; font-size:0.86em;">
+                ${escText(String(s.out).replace('-USD', ''))}
+                <span style="color:var(--text-dim);">\u2192</span>
+                ${escText(String(s.in).replace('-USD', ''))}</div>
+            <div style="font-size:0.76em; margin-top:4px; line-height:1.5;">${escText(s.why || '')}</div>
+        </div>`).join('');
+
+    wrap.innerHTML =
+        `<div style="font-size:0.72em; color:var(--text-dim); margin-bottom:8px;">
+            ${d.scanned} pairs measured \u00b7 ${d.tradeable} clear both bars \u00b7
+            the branches you keep move together at
+            <strong>${Number(d.fleet_internal_corr).toFixed(2)}</strong> correlation</div>`
+        + `<div style="font-size:0.78em; font-weight:700; margin:4px 0 4px;">Your branches now</div>`
+        + fleet.map(branchRow).join('')
+        + (swaps ? `<div style="font-size:0.78em; font-weight:700; margin:14px 0 6px;">Suggested swaps
+             <span style="font-weight:400; color:var(--text-dim);">- a proposal, nothing moves</span></div>` + swaps : '')
+        + `<div style="font-size:0.78em; font-weight:700; margin:14px 0 4px;">Shortlist
+             <span style="font-weight:400; color:var(--text-dim);">- lowest correlation to what you keep, first</span></div>`
+        + (d.candidates || []).map(candRow).join('')
+        + `<div style="font-size:0.7em; color:var(--text-dim); margin-top:10px; line-height:1.5;">${escText(d.note || '')}</div>`;
+}
+
+async function runFleetReview() {
+    const btn = document.getElementById('fleet-review-btn');
+    const wrap = document.getElementById('fleet-review-wrap');
+    const original = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '\u23f3 Measuring 402 pairs\u2026'; }
+    try {
+        renderFleetReview(await apiGet('/grid-status/fleet-review', 120000));
+        if (btn) btn.textContent = '\u2705 Reviewed';
+    } catch (e) {
+        if (wrap) wrap.innerHTML = `<div class="coin-history-empty">Could not review the fleet (${escText(e.message)}).</div>`;
+        if (btn) btn.textContent = '\u26a0\ufe0f ' + e.message;
+    }
+    setTimeout(() => { if (btn) { btn.textContent = original; btn.disabled = false; } }, 3000);
 }
 
 // BOTH directions, not just the nearer one.
