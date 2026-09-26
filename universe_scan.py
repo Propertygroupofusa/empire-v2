@@ -49,6 +49,12 @@ MIN_24H_NOTIONAL_USD = 750_000.0
 WINDOW_DAYS = 180
 MIN_BARS = 30
 
+# 429 is a rate limit and 5xx is the venue having a moment. Both clear on
+# their own; neither is evidence about a coin.
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+RETRY_ATTEMPTS = 4
+RETRY_BACKOFF_SECONDS = 1.5
+
 
 async def list_usd_products(session):
     """Every online, tradeable USD pair. Never a guessed list."""
@@ -83,13 +89,31 @@ async def measure_one(session, pid, *, days=WINDOW_DAYS):
     url = CANDLES_URL.format(pid=pid)
     params = {"granularity": 86400,
               "start": start.isoformat(), "end": end.isoformat()}
-    try:
-        async with session.get(url, params=params, timeout=_timeout(45)) as r:
-            if r.status != 200:
-                return {"product_id": pid, "skipped": f"candles HTTP {r.status}"}
-            rows = await r.json()
-    except Exception as exc:
-        return {"product_id": pid, "skipped": f"{type(exc).__name__}"}
+
+    # A 429 is the venue saying "slow down", not "this coin has no
+    # history". Recorded as no-data it becomes a fact about the coin, and
+    # on the first full run that is exactly what happened to ZEC and XRP -
+    # the account's two largest holdings, 46% of its value, reported as
+    # unmeasurable because the scan asked too fast. coin_rotation's own
+    # fetcher has retried on this since it was written; this did not.
+    rows = None
+    last = None
+    for attempt in range(RETRY_ATTEMPTS):
+        try:
+            async with session.get(url, params=params, timeout=_timeout(45)) as r:
+                if r.status == 200:
+                    rows = await r.json()
+                    break
+                last = f"candles HTTP {r.status}"
+                if r.status not in RETRYABLE_STATUS:
+                    break
+        except Exception as exc:
+            last = f"{type(exc).__name__}"
+        if attempt < RETRY_ATTEMPTS - 1:
+            await asyncio.sleep(RETRY_BACKOFF_SECONDS * (2 ** attempt))
+    if rows is None:
+        return {"product_id": pid, "skipped": last or "no response",
+                "retried": RETRY_ATTEMPTS}
 
     if not isinstance(rows, list) or len(rows) < MIN_BARS:
         return {"product_id": pid,
@@ -112,8 +136,13 @@ async def measure_one(session, pid, *, days=WINDOW_DAYS):
 def assess(row, *, fee_pct=ROUND_TRIP_FEE_PCT, min_notional=MIN_24H_NOTIONAL_USD):
     """Adds a verdict. A coin fails for a stated reason or not at all."""
     if row.get("skipped"):
-        row["verdict"] = "no data"
-        row["reason"] = row["skipped"]
+        skipped = str(row["skipped"])
+        rate_limited = any(str(c) in skipped for c in RETRYABLE_STATUS)
+        row["verdict"] = "unmeasured" if rate_limited else "no data"
+        row["reason"] = (
+            f"{skipped} after {row.get('retried', 1)} attempts - the venue would not "
+            f"serve it, which says nothing about the coin. Re-run to measure it."
+            if rate_limited else skipped)
         return row
 
     vol = row.get("daily_vol_pct") or 0.0

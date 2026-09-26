@@ -67,6 +67,34 @@ ok("it gets a 'no data' verdict", r["verdict"] == "no data", r)
 ok("and keeps the reason it failed", "3 daily bars" in r["reason"], r)
 ok("it is NOT counted as tradeable", r["verdict"] != "tradeable")
 
+print("\na rate limit is not a fact about the coin")
+
+r = U.assess({"product_id": "ZEC-USD", "skipped": "candles HTTP 429", "retried": 4})
+ok("429 reads as 'unmeasured', not 'no data'", r["verdict"] == "unmeasured", r)
+ok("and the reason says it is about the venue, not the coin",
+   "says nothing about the coin" in r["reason"], r)
+ok("and says how many attempts were made", "4 attempts" in r["reason"], r)
+for code in (500, 502, 503, 504):
+    rr = U.assess({"product_id": "X-USD", "skipped": f"candles HTTP {code}", "retried": 4})
+    ok(f"HTTP {code} is also 'unmeasured'", rr["verdict"] == "unmeasured", rr)
+
+r = U.assess({"product_id": "DEAD-USD", "skipped": "only 3 daily bars"})
+ok("a genuinely short history is still 'no data'", r["verdict"] == "no data", r)
+ok("neither is ever counted as tradeable",
+   U.assess({"product_id": "Z", "skipped": "candles HTTP 429"})["verdict"] != "tradeable")
+
+ok("the retry list covers rate limits and 5xx",
+   U.RETRYABLE_STATUS == {429, 500, 502, 503, 504}, U.RETRYABLE_STATUS)
+ok("and it retries more than once", U.RETRY_ATTEMPTS >= 3, U.RETRY_ATTEMPTS)
+
+src_fn = open(U.__file__).read()
+ok("the fetch retries rather than returning on the first bad status",
+   "RETRY_ATTEMPTS" in src_fn and "RETRY_BACKOFF_SECONDS" in src_fn)
+ok("a NON-retryable status breaks out instead of burning four attempts",
+   "if r.status not in RETRYABLE_STATUS:" in src_fn)
+ok("the live ZEC/XRP incident is recorded where the code is",
+   "ZEC and XRP" in src_fn)
+
 print("\nthe scan separates the three outcomes and counts them")
 
 
