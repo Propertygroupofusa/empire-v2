@@ -1016,16 +1016,69 @@ async def get_coinbase_statement(start: str, end: str,
             "combined_realized_pnl": ledger_total,
             "combined_trades": (tree_n or 0) + (grid_n or 0),
         },
-        "reconciliation": {
-            "coinbase_fills": statement["fills"],
-            "our_recorded_round_trips": (tree_n or 0) + (grid_n or 0),
-            "coinbase_commission_usd": statement["commission_usd"],
-            "basis": ("A round trip is two fills, so roughly half the fill count "
-                      "should appear as recorded trades. A large shortfall means "
-                      "real executions never reached our ledger at all - which is "
-                      "the failure mode already confirmed for the ARB close on "
-                      "2026-09-23."),
+        "reconciliation": _reconcile(statement, (tree_n or 0) + (grid_n or 0)),
+    }
+
+
+def _reconcile(statement: dict, recorded_rows: int) -> dict:
+    """Set our ledger row count against the number of CLOSES on the exchange.
+
+    Two earlier versions of this comparison were wrong, and both overstated
+    the gap badly enough to be acted on:
+
+      1. "A round trip is two fills, so half the fill count should appear."
+         One order fills in many pieces - POL-USD alone shows 315 fills
+         across 202 orders - so halving fills invents activity that never
+         happened. That arithmetic reported 74% of executions unrecorded.
+      2. Counting everything on the account. This account also holds
+         Coinbase EVENT CONTRACTS (product ids like KXBTC15M-...-KALSHI -
+         a Coinbase product, settled on the Kalshi exchange, which is why
+         the venue tag reads that way). No code in this repository can
+         construct such a product id; every Coinbase order path here is
+         built from a -USD spot pair. A grid ledger row can therefore never
+         correspond to one of those fills, and including them reported a
+         gap that was two thirds imaginary.
+
+    So: spot pairs only, and distinct SELL orders as the denominator -
+    a ledger row records a CLOSE, and a sell order is what a close IS.
+    Measured this way on 2026-09-26 the gap was 32 closes out of 281, 11.4%.
+    """
+    spot, other = [], []
+    for row in statement.get("products") or []:
+        (spot if str(row.get("product_id", "")).endswith("-USD") else other).append(row)
+
+    def _sum(rows, key):
+        return sum(r.get(key) or 0 for r in rows)
+
+    closes = _sum(spot, "sell_orders")
+    return {
+        "spot": {
+            "products": len(spot),
+            "fills": _sum(spot, "fills"),
+            "orders": _sum(spot, "orders"),
+            "buy_orders": _sum(spot, "buy_orders"),
+            "closes": closes,
+            "commission_usd": round(_sum(spot, "commission_usd"), 2),
         },
+        "event_contracts": {
+            "products": len(other),
+            "fills": _sum(other, "fills"),
+            "orders": _sum(other, "orders"),
+            "commission_usd": round(_sum(other, "commission_usd"), 2),
+            "note": ("Coinbase event contracts, not spot. Bought on Coinbase; "
+                     "the -KALSHI tag is the exchange the contract settles on. "
+                     "Excluded from the ledger comparison because no bot here "
+                     "can place one. A contract bought and never sold EXPIRED - "
+                     "expiry settles as a balance credit, not a fill, so its "
+                     "outcome is not visible in this feed at all."),
+        },
+        "closes_at_exchange": closes,
+        "our_recorded_round_trips": recorded_rows,
+        "gap": closes - recorded_rows,
+        "gap_pct": round((closes - recorded_rows) / closes * 100, 1) if closes else None,
+        "basis": ("Spot pairs only, counting distinct SELL orders. A ledger row "
+                  "records a close; a sell order is what a close is. Fills are "
+                  "not orders and orders are not round trips."),
     }
 
 
