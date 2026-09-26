@@ -1137,6 +1137,46 @@
         <div id="money-check-wrap"><div class="coin-history-empty">Not run yet - tap the button above.</div></div>
     </div>
 
+    <div class="section-title">🛡️ Every coin you hold, and where its level is</div>
+    <div class="panel">
+        <div class="panel-sub">The six branches above are the only coins this bot manages. The account holds
+            <strong>forty-five</strong>, and until now nothing priced, watched or stopped the other thirty-nine.
+            This puts a level under every one of them, sized the same way the live branches are sized:
+            2.5&times; that coin's own daily volatility, floored at 3% and capped at 25%, measured from its
+            highest high in the window rather than from what you paid.
+            <strong>These are ALERT LEVELS, not stop-loss orders.</strong> Nothing rests at the exchange and
+            nothing here will sell - a real stop needs an order. What it can do is tell you where one would go,
+            and which positions are already past it.</div>
+        <div style="margin:10px 0;">
+            <button id="holdings-watch-btn" class="unlock-btn" style="margin-top:0;" onclick="runHoldingsWatch()">🛡️ Put levels on everything</button>
+        </div>
+        <div id="holdings-watch-wrap"><div class="coin-history-empty">Not run yet - tap the button above. Measures volatility and a 30-day peak for every holding, so it takes about a minute.</div></div>
+    </div>
+
+    <div class="section-title">🏆 Empire Excellence League</div>
+    <div class="panel">
+        <div class="panel-sub">Every holding as a competitor, ranked by how well it is actually holding up rather
+            than by how much it is worth. The score is three measured things and nothing else: headroom above its
+            own level, inverse daily volatility, and whether it respects your 20% concentration rule. Movement is
+            real - the standing seven days ago is recomputed from candles, not remembered - so promotions,
+            relegations and Most Improved are earned. A coin that cannot be measured appears as UNRATED with the
+            reason, never quietly dropped, and on a quiet week nobody wins the medal.</div>
+        <div style="margin:10px 0;">
+            <button id="league-btn" class="unlock-btn" style="margin-top:0;" onclick="runLeague()">🏆 Run the standings</button>
+        </div>
+        <div id="league-wrap"><div class="coin-history-empty">Not run yet - tap the button above.</div></div>
+    </div>
+
+    <div class="section-title">🔔 The alarm</div>
+    <div class="panel">
+        <div class="panel-sub">A level you have to come and look at is decorative. This is the queue that turns it
+            into something that reaches you. It fires on <strong>transitions</strong> - a coin becoming breached is
+            news, a coin still being breached is not, which is the difference between an alarm and ninety-six
+            identical messages a day. Recoveries are reported too, because silence after an alarm reads exactly
+            like a broken sender. Nothing is marked sent unless it was actually delivered.</div>
+        <div id="alert-queue-wrap"><div class="coin-history-empty">Loading…</div></div>
+    </div>
+
     <div class="section-title">🔎 Where the money went</div>
     <div class="panel">
         <div class="panel-sub">The negative cash figure at the top of this page is not money that went somewhere -
@@ -4715,6 +4755,248 @@ function renderMoneyTrace(d) {
              The record was truncated - there are more fills than were read, so these totals are a floor.</div>` : '');
 }
 
+// ---------------------------------------------------------------------------
+// THE RISK DESK, THE LEAGUE, AND THE ALARM
+//
+// These three read endpoints that exist because six branches were the only
+// coins in this account anything watched. Forty-five are held. The other
+// thirty-nine had no price check, no level and no owner, and the largest
+// single position - a quarter of the book - was among them.
+//
+// None of these places an order. holdings-watch and newsroom are GETs and
+// stay GETs for that reason: they must work while DASHBOARD_WRITE_TOKEN is
+// unset, which is exactly when an unwatched book most needs looking at.
+// ---------------------------------------------------------------------------
+
+const _wUSD = n => (Number(n) < 0 ? '-$' : '$') + Math.abs(Number(n) || 0)
+    .toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const _wPCT = (n, d) => (n == null ? '—' : Number(n).toFixed(d == null ? 2 : d) + '%');
+
+const WATCH_COLOUR = {
+    BREACHED: 'var(--red)', NEAR_STOP: 'var(--amber, #f0b429)', OK: 'var(--green)',
+    UNPRICED: 'var(--text-dim)', NO_VOLATILITY_DATA: 'var(--text-dim)',
+    BELOW_MIN_TRADE: 'var(--text-dim)',
+};
+const WATCH_LABEL = {
+    BREACHED: 'PAST ITS LEVEL', NEAR_STOP: 'CLOSE', OK: 'CLEAR',
+    UNPRICED: 'NO PRICE', NO_VOLATILITY_DATA: 'NOT MEASURABLE',
+    BELOW_MIN_TRADE: 'TOO SMALL TO SELL',
+};
+
+function renderHoldingsWatch(d) {
+    const wrap = document.getElementById('holdings-watch-wrap');
+    if (!d) { wrap.innerHTML = '<div class="coin-history-empty">No data.</div>'; return; }
+
+    const row = r => `
+        <div style="display:grid; grid-template-columns:4.6em 1fr 5.2em 6.2em; gap:9px; padding:7px 0;
+                    border-bottom:1px solid var(--border); align-items:center;">
+            <div style="font-weight:700; font-size:0.84em;">${escText(r.asset)}</div>
+            <div style="font-size:0.72em; color:var(--text-dim); line-height:1.45;">
+                <span style="color:${WATCH_COLOUR[r.status] || 'var(--text-dim)'}; font-weight:700;">
+                    ${escText(WATCH_LABEL[r.status] || r.status)}</span>
+                ${r.stop_level != null
+                    ? ` · level ${Number(r.stop_level).toPrecision(6)} (${_wPCT(r.stop_pct * 100)} below a ${Number(r.peak_price).toPrecision(6)} peak)`
+                    : ` · ${escText((r.note || '').split('.')[0])}`}
+                ${r.over_concentration_limit
+                    ? `<div style="color:var(--amber, #f0b429);">${_wPCT(r.share_of_account_pct, 1)} of the account - over the 20% rule you set</div>`
+                    : ''}</div>
+            <div style="text-align:right; font-size:0.78em; font-variant-numeric:tabular-nums;
+                        color:${WATCH_COLOUR[r.status] || 'var(--text-dim)'};">
+                ${r.pct_to_stop != null ? _wPCT(r.pct_to_stop) : '—'}</div>
+            <div style="text-align:right; font-size:0.8em; font-weight:700;
+                        font-variant-numeric:tabular-nums;">${_wUSD(r.usd)}</div>
+        </div>`;
+
+    const group = (title, rows, note) => rows && rows.length
+        ? `<div style="font-size:0.78em; font-weight:700; margin:14px 0 2px;">${title}
+             ${note ? `<span style="font-weight:400; color:var(--text-dim);">- ${note}</span>` : ''}</div>`
+          + rows.map(row).join('')
+        : '';
+
+    const breached = d.breached || [], near = d.near || [];
+    const clear = (d.rows || []).filter(r => r.status === 'OK');
+    const blind = (d.unpriced || []).concat(d.no_vol || []);
+    const dust = d.dust || [];
+
+    wrap.innerHTML =
+        `<div style="border:1px solid var(--amber, #f0b429); background:rgba(240,180,41,0.07);
+                     border-radius:8px; padding:9px 11px; margin-bottom:10px; font-size:0.76em; line-height:1.5;">
+            ${escText(d.disclaimer || '')}</div>`
+        + `<div style="font-size:0.72em; color:var(--text-dim); margin-bottom:6px;">
+             ${d.assets} holdings · ${_wUSD(d.coin_usd)} in coin · ${_wUSD(d.cash_usd)} cash ·
+             <strong>${_wPCT(d.covered_share_pct, 1)} of coin value now has a level</strong></div>`
+        + group('Past its level', breached, 'decide, do not drift')
+        + group('Close to its level', near, 'within reach')
+        + group('Clear', clear)
+        + group('Cannot be measured', blind, 'unknown, not small - nothing can be said about these')
+        + group('Below the venue minimum', dust, 'no exit exists at this size')
+        + `<div style="font-size:0.72em; color:var(--text-dim); margin-top:10px; line-height:1.5;">
+             Levels are 2.5&times; each coin's own daily volatility, floored at 3% and capped at 25%,
+             measured from its highest high over ${d.window_days || 30} days - the same sizing the live
+             branches use. The peak comes from candle history rather than a stored value, so there is no
+             state to go stale when an updater stops running.</div>`;
+}
+
+async function runHoldingsWatch() {
+    const btn = document.getElementById('holdings-watch-btn');
+    const wrap = document.getElementById('holdings-watch-wrap');
+    const original = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Measuring every holding…'; }
+    try {
+        const r = await fetch('/api/trading-dashboard/holdings-watch', { cache: 'no-store' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        renderHoldingsWatch(await r.json());
+    } catch (e) {
+        wrap.innerHTML = `<div class="coin-history-empty" style="color:var(--red);">
+            Could not measure: ${escText(e.message)}. Nothing is being shown rather than
+            showing a partial book as if it were the whole one.</div>`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = original; }
+    }
+}
+
+const DIV_COLOUR = {
+    'ELITE DIVISION': 'var(--amber, #f0b429)', 'CHALLENGER DIVISION': 'var(--blue, #4aa8ff)',
+    'PROSPECT DIVISION': 'var(--text-dim)', 'UNRATED': 'var(--text-dim)',
+};
+
+function renderLeague(L) {
+    const wrap = document.getElementById('league-wrap');
+    if (!L) { wrap.innerHTML = '<div class="coin-history-empty">No standings.</div>'; return; }
+    const medal = ['\u{1F947}', '\u{1F948}', '\u{1F949}'];
+    const chg = n => n == null
+        ? '<span style="color:var(--text-dim);">—</span>'
+        : (n > 0 ? `<span style="color:var(--green);">▲ ${n}</span>`
+                 : n < 0 ? `<span style="color:var(--red);">▼ ${Math.abs(n)}</span>`
+                         : '<span style="color:var(--text-dim);">—</span>');
+
+    const row = r => `
+        <div style="display:grid; grid-template-columns:3.4em 4.6em 3.2em 3.4em 1fr 5.6em; gap:8px;
+                    padding:6px 0; border-bottom:1px solid var(--border); align-items:center;">
+            <div style="font-size:0.8em;">${r.rank && r.rank <= 3 ? medal[r.rank - 1] : ''}${r.rank == null ? '—' : r.rank}</div>
+            <div style="font-weight:700; font-size:0.84em;">${escText(r.asset)}</div>
+            <div style="text-align:right; font-size:0.82em; font-weight:700;
+                        font-variant-numeric:tabular-nums;">${r.score == null ? '—' : r.score}</div>
+            <div style="text-align:right; font-size:0.74em;">${chg(r.score_change)}</div>
+            <div style="font-size:0.72em; color:var(--text-dim);">
+                ${escText(r.unrated_reason || r.trend || '')}
+                ${r.promoted ? ' <span style="color:var(--green); font-weight:700;">PROMOTED</span>' : ''}
+                ${r.relegated ? ' <span style="color:var(--red); font-weight:700;">RELEGATED</span>' : ''}</div>
+            <div style="text-align:right; font-size:0.78em; font-variant-numeric:tabular-nums;">${_wUSD(r.usd)}</div>
+        </div>`;
+
+    const mi = L.most_improved;
+    let html = '';
+    if (mi) {
+        html += `<div style="border:1px solid var(--amber, #f0b429); background:rgba(240,180,41,0.07);
+                     border-radius:8px; padding:10px 12px; margin-bottom:10px;">
+            <div style="font-size:0.7em; letter-spacing:0.14em; color:var(--amber, #f0b429);">\u{1F3C5} MOST IMPROVED ASSET</div>
+            <div style="font-size:1.1em; font-weight:700; margin:3px 0;">
+                ${escText(mi.asset)} <span style="color:var(--green);">+${mi.improvement_points}</span></div>
+            <div style="font-size:0.75em; color:var(--text-dim); line-height:1.5;">
+                ${mi.from_score} → ${mi.to_score}${mi.rank_change ? ` · up ${Math.abs(mi.rank_change)} place(s)` : ''}<br>
+                ${escText((mi.reasons || []).join(' · '))}</div></div>`;
+    } else if (L.has_history) {
+        html += `<div style="font-size:0.74em; color:var(--text-dim); margin-bottom:10px; line-height:1.5;">
+            No asset moved enough this window, so no medal is awarded. A Most Improved that always
+            finds a winner is a participation trophy.</div>`;
+    }
+
+    ['ELITE DIVISION', 'CHALLENGER DIVISION', 'PROSPECT DIVISION', 'UNRATED'].forEach(dv => {
+        const rows = (L.divisions || {})[dv] || [];
+        if (!rows.length) return;
+        html += `<div style="font-size:0.78em; font-weight:700; margin:14px 0 2px;
+                             color:${DIV_COLOUR[dv]};">${escText(dv)}
+                   <span style="font-weight:400; color:var(--text-dim);">
+                     ${escText((L.division_bands || {})[dv] || 'not scoreable')} · ${rows.length}</span></div>`
+              + rows.map(row).join('');
+    });
+
+    html += `<div style="font-size:0.72em; color:var(--text-dim); margin-top:10px; line-height:1.5;">
+        ${escText(L.basis || '')}<br>${escText(L.assumption || '')}</div>`;
+    wrap.innerHTML = html;
+}
+
+async function runLeague() {
+    const btn = document.getElementById('league-btn');
+    const wrap = document.getElementById('league-wrap');
+    const original = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Rebuilding the standings…'; }
+    try {
+        const r = await fetch('/api/trading-dashboard/newsroom?league_days=7', { cache: 'no-store' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        renderLeague(d.league);
+        const c = d.copy_desk;
+        if (c && c.correction_count) {
+            wrap.insertAdjacentHTML('afterbegin',
+                `<div style="border:1px solid var(--red); background:rgba(239,68,68,0.07);
+                             border-radius:8px; padding:9px 11px; margin-bottom:10px; font-size:0.76em;">
+                    <strong>COPY DESK: ${c.correction_count} correction(s)</strong> - a figure on this page
+                    does not agree with the rows behind it. ${escText((c.corrections[0] || {}).note || '')}</div>`);
+        }
+    } catch (e) {
+        wrap.innerHTML = `<div class="coin-history-empty" style="color:var(--red);">
+            Could not build the standings: ${escText(e.message)}.</div>`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = original; }
+    }
+}
+
+async function loadAlertQueue() {
+    const wrap = document.getElementById('alert-queue-wrap');
+    if (!wrap) return;
+    try {
+        const r = await fetch('/api/trading-dashboard/alert-queue?limit=12', { cache: 'no-store' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        const c = d.counts || {};
+        const g = d.channel_diagnosis;
+
+        const banner = d.channel_configured
+            ? `<div style="border:1px solid var(--green); background:rgba(16,185,129,0.06);
+                     border-radius:8px; padding:9px 11px; margin-bottom:10px; font-size:0.78em;">
+                 ✓ A delivery channel is configured. Alerts are being sent.</div>`
+            : `<div style="border:1px solid var(--amber, #f0b429); background:rgba(240,180,41,0.07);
+                     border-radius:8px; padding:9px 11px; margin-bottom:10px; font-size:0.76em; line-height:1.55;">
+                 <strong>Nothing is being delivered.</strong> ${escText((g && g.why_not) || d.channel_note || '')}
+                 <br>Alerts are still being generated and <strong>held</strong> - they are not marked sent,
+                 because a queue that reports success with nowhere to send is worse than an empty one.
+                 Set <code>${escText(d.webhook_env || 'ALERT_WEBHOOK_URL')}</code> and the backlog flushes.
+                 ${g && g.similar_variables_seen && g.similar_variables_seen.length
+                     ? `<br>Similar variable names visible to this process:
+                        ${escText(g.similar_variables_seen.join(', '))}` : ''}</div>`;
+
+        const SEV = { CRITICAL: 'var(--red)', HIGH: 'var(--amber, #f0b429)', INFO: 'var(--text-dim)' };
+        const rows = (d.alerts || []).map(a => `
+            <div style="display:grid; grid-template-columns:5.2em 1fr 5em; gap:9px; padding:6px 0;
+                        border-bottom:1px solid var(--border); align-items:center;">
+                <div style="font-size:0.7em; font-weight:700; color:${SEV[a.severity] || 'var(--text-dim)'};">
+                    ${escText(a.severity)}</div>
+                <div style="font-size:0.78em;">${escText(a.message)}
+                    ${a.last_error ? `<div style="font-size:0.86em; color:var(--red); margin-top:2px;">
+                        ${escText(a.last_error)}</div>` : ''}</div>
+                <div style="text-align:right; font-size:0.72em; color:var(--text-dim);">
+                    ${escText(a.status)}${a.attempts ? ` · ${a.attempts} try` : ''}</div>
+            </div>`).join('');
+
+        wrap.innerHTML = banner
+            + `<div style="font-size:0.72em; color:var(--text-dim); margin-bottom:6px;">
+                 ${c.pending || 0} waiting · ${c.sent || 0} sent · ${c.failed || 0} failed ·
+                 ${d.assets_tracked || 0} assets tracked for changes</div>`
+            + (rows || '<div class="coin-history-empty">Nothing has fired yet.</div>')
+            + `<div style="font-size:0.72em; color:var(--text-dim); margin-top:10px; line-height:1.5;">
+                 ${escText(d.policy || '')} Retries back off
+                 ${(d.backoff_seconds || []).join('s, ')}s over ${d.max_attempts} attempts, then the row is
+                 marked failed <em>with its error</em> and stays visible. Nothing under
+                 ${_wUSD(d.min_alert_usd)} fires at all.</div>`;
+    } catch (e) {
+        wrap.innerHTML = `<div class="coin-history-empty" style="color:var(--red);">
+            Could not read the queue: ${escText(e.message)}. The alarm's own health is unknown,
+            which is not the same as healthy.</div>`;
+    }
+}
+
 async function runMoneyTrace() {
     const btn = document.getElementById('money-trace-btn');
     const wrap = document.getElementById('money-trace-wrap');
@@ -6755,10 +7037,15 @@ refresh();
 loadTicker();
 loadActivityFeed();
 loadCombinedProgress();
+// The alarm's own health loads itself - unlike the two button panels above
+// it costs one cheap DB read, and an alarm you have to remember to check is
+// the thing this whole section exists to replace.
+loadAlertQueue();
 setInterval(refresh, 15000);
 setInterval(loadTicker, 15000);
 setInterval(loadActivityFeed, 5000);
 setInterval(loadCombinedProgress, 60000);
+setInterval(loadAlertQueue, 60000);
 // The panels that should visibly move, on their own fast loops.
 setInterval(refreshProximityOnly, 6000);
 setInterval(tickProximityAge, 1000);
