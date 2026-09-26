@@ -49,6 +49,7 @@ Run:  python scalping_bot.py
 import base64
 import json
 import os
+import re
 import secrets
 import statistics
 import sys
@@ -68,7 +69,7 @@ except ImportError:
 # Bump on every change. Printed by the banner and by --import-key so the
 # running copy identifies itself - two rounds were lost to a stale file on
 # disk looking identical to a fresh one.
-BOT_VERSION = "2026-09-25.8-trailing-junk"
+BOT_VERSION = "2026-09-26.1-correlation-cap"
 
 HERE = Path(__file__).resolve().parent
 STATE_FILE = None  # set after LIVE is known - see below
@@ -145,6 +146,10 @@ CONFIG = {
     "take_profit_pct": 2.4,
     "trailing_stop_pct": 1.2,
     "max_positions": 4,
+    # Cap on positions OPENED IN ONE CYCLE. max_positions alone does not
+    # help when six correlated coins signal together: it just fills to 4
+    # on a single market move. Exits are never capped by this.
+    "max_new_positions_per_cycle": 2,
     "max_alloc_pct": 25.0,
     "cycle_seconds": 900,
 }
@@ -364,7 +369,28 @@ def place_order(coin, side, usd_amount=None, base_size=None):
 
 # ── CYCLE ────────────────────────────────────────────────────
 def run_cycle(state, authed):
+    """Two passes: read every signal, then act on them.
+
+    The single-pass version acted on each coin as it read it, so on a
+    market-wide dip it opened positions in COINS order until max_positions
+    was full - which is to say, alphabetically-ish, with no regard for
+    which setups were strongest.
+
+    That matters because crypto is one correlated block. A cycle showing
+    six of seven coins at their lower Bollinger band is not six
+    independent opportunities; it is the whole market down together. Four
+    positions opened into that are one bet at 4x size, and they stop out
+    together at -0.8% each, which is -2.0% each after fees.
+
+    So: SELLs run first and are never capped - an exit must always be
+    able to fire. BUYs are then ranked by signal score and limited to
+    max_new_positions_per_cycle, so a broad dip enters small and a
+    genuinely isolated setup is unaffected.
+    """
     executed = 0
+    reads = []
+
+    # ── pass 1: read ────────────────────────────────────────
     for coin in COINS:
         prices = get_candles(coin)
         if len(prices) < 20:
@@ -381,39 +407,67 @@ def run_cycle(state, authed):
         held = f" | {(px - pos['entry'])/pos['entry']*100:+.2f}%" if pos else ""
         print(f"   {coin:<5} ${px:<12,.4f} {action:<5} {why}{held}")
 
-        if not (LIVE and authed):
-            continue
+        score = 0
+        m = re.search(r"score=(\d+)", why)
+        if m:
+            score = int(m.group(1))
+        reads.append({"coin": coin, "px": px, "pos": pos, "action": action,
+                      "why": why, "score": score})
 
-        if action == "BUY" and len(state["positions"]) < CONFIG["max_positions"]:
-            alloc = CAPITAL_USD * CONFIG["max_alloc_pct"] / 100
-            if alloc <= 0:
-                print("         BUY signal but SCALPER_CAPITAL_USD is 0 — skipped")
-                continue
-            ok, res = place_order(coin, "BUY", usd_amount=alloc)
-            if ok:
-                state["positions"][coin] = {"entry": px, "qty": alloc / px, "peak": px,
-                                            "opened": datetime.now(timezone.utc).isoformat()}
-                executed += 1
-                print(f"         BOUGHT ${alloc:.2f}")
-            else:
-                print(f"         BUY FAILED: {res}")
+    if not (LIVE and authed):
+        return executed
 
-        elif action == "SELL" and pos:
-            ok, res = place_order(coin, "SELL", base_size=pos["qty"])
-            if ok:
-                gross = (px - pos["entry"]) * pos["qty"]
-                fees = (pos["entry"] * pos["qty"] + px * pos["qty"]) * TAKER_FEE_RATE
-                state["closed_trades"].append({
-                    "coin": coin, "entry": pos["entry"], "exit": px, "qty": pos["qty"],
-                    "gross_pnl_usd": round(gross, 2), "fees_usd": round(fees, 2),
-                    "net_pnl_usd": round(gross - fees, 2), "reason": why,
-                    "closed": datetime.now(timezone.utc).isoformat(),
-                })
-                del state["positions"][coin]
-                executed += 1
-                print(f"         SOLD  net ${gross - fees:+.2f} after ${fees:.2f} fees")
-            else:
-                print(f"         SELL FAILED: {res}")
+    # ── pass 2a: exits, uncapped ────────────────────────────
+    for r in [x for x in reads if x["action"] == "SELL" and x["pos"]]:
+        coin, px, pos = r["coin"], r["px"], r["pos"]
+        ok, res = place_order(coin, "SELL", base_size=pos["qty"])
+        if ok:
+            gross = (px - pos["entry"]) * pos["qty"]
+            fees = (pos["entry"] * pos["qty"] + px * pos["qty"]) * TAKER_FEE_RATE
+            state["closed_trades"].append({
+                "coin": coin, "entry": pos["entry"], "exit": px, "qty": pos["qty"],
+                "gross_pnl_usd": round(gross, 2), "fees_usd": round(fees, 2),
+                "net_pnl_usd": round(gross - fees, 2), "reason": r["why"],
+                "closed": datetime.now(timezone.utc).isoformat(),
+            })
+            state["positions"].pop(coin, None)
+            executed += 1
+            print(f"         SOLD  {coin} net ${gross - fees:+.2f} after ${fees:.2f} fees")
+        else:
+            print(f"         SELL FAILED {coin}: {res}")
+
+    # ── pass 2b: entries, strongest first, capped ───────────
+    buys = sorted([x for x in reads if x["action"] == "BUY" and not x["pos"]],
+                  key=lambda x: -x["score"])
+    if len(buys) > CONFIG["max_new_positions_per_cycle"]:
+        skipped = [b["coin"] for b in buys[CONFIG["max_new_positions_per_cycle"]:]]
+        print(f"\n   {len(buys)} BUY signals in one cycle - crypto moves as a block, "
+              f"so this is one market-wide dip, not {len(buys)} independent setups.")
+        print(f"   Taking the {CONFIG['max_new_positions_per_cycle']} strongest, "
+              f"skipping: {', '.join(skipped)}")
+
+    opened = 0
+    for r in buys:
+        if opened >= CONFIG["max_new_positions_per_cycle"]:
+            break
+        if len(state["positions"]) >= CONFIG["max_positions"]:
+            print(f"         {r['coin']} skipped - already at max_positions "
+                  f"({CONFIG['max_positions']})")
+            break
+        alloc = CAPITAL_USD * CONFIG["max_alloc_pct"] / 100
+        if alloc <= 0:
+            print("         BUY signal but SCALPER_CAPITAL_USD is 0 — skipped")
+            break
+        ok, res = place_order(r["coin"], "BUY", usd_amount=alloc)
+        if ok:
+            state["positions"][r["coin"]] = {
+                "entry": r["px"], "qty": alloc / r["px"], "peak": r["px"],
+                "opened": datetime.now(timezone.utc).isoformat()}
+            executed += 1
+            opened += 1
+            print(f"         BOUGHT {r['coin']} ${alloc:.2f} (score={r['score']})")
+        else:
+            print(f"         BUY FAILED {r['coin']}: {res}")
     return executed
 
 
