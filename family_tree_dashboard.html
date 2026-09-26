@@ -1139,7 +1139,7 @@
 
     <div class="section-title">📍 Where every branch sits right now</div>
     <div class="panel">
-        <div class="panel-sub">The dot is where price is now. The bar is this branch's own grid band - one step below its reference on the left, one step above on the right, reference in the middle. It buys when the dot reaches the left mark and sells an open slice when it reaches the green one, so the shaded stretch is the distance still to travel. Closest to acting is listed first.</div>
+        <div class="panel-sub">The dot is where price is now - the "now" figure under each bar is that dot's price. The bar is this branch's own grid band: one step below its reference on the left, one step above on the right. It buys when the dot reaches the left mark and sells an open slice when it reaches the green one. Both distances are shown on the right - how far price must FALL to buy, and how far it must RISE to sell - with the nearer one first and in colour. A branch holding nothing has no sell to travel to. Closest to acting is listed first.</div>
         <div id="grid-proximity-wrap"><div class="coin-history-empty">Loading…</div></div>
     </div>
 
@@ -4423,10 +4423,7 @@ function renderGridProximity(d) {
                     </div>
                     ${stopLine(r)}
                 </div>
-                <div class="prox-next">
-                    <div class="prox-dist ${moveCls}" style="${moveCls ? '' : `color:${r.nextColor};`}">${arrow} ${r.nextDist.toFixed(2)}%</div>
-                    <div class="prox-at">${verb} at ${fmtCoinPrice(r.nextAt)}</div>
-                </div>
+                <div class="prox-next">${bothLegs(r, moveCls, arrow)}</div>
             </div>`;
         };
 
@@ -4557,6 +4554,42 @@ function escText(v) {
         out = out.split(pairs[i][0]).join(pairs[i][1]);
     }
     return out;
+}
+
+// BOTH directions, not just the nearer one.
+//
+// The panel showed a single percentage - whichever trigger was closer -
+// so a branch holding slices looked like it had one thing it could do.
+// BTC on 2026-09-26 needed a 2.38% FALL to buy and a 2.41% RISE to sell:
+// two live triggers in opposite directions, one of them invisible. The
+// account owner had to ask what the numbers under the dot were, which is
+// the panel failing at the one job it has.
+function bothLegs(r, moveCls, arrow) {
+    const buy = `
+        <div class="prox-dist ${r.nextAction === 'buy' ? moveCls : ''}"
+             style="${r.nextAction === 'buy' && moveCls ? '' : `color:${r.nextAction === 'buy' ? 'var(--navy)' : 'var(--text-dim)'};`}
+                    ${r.nextAction === 'buy' ? '' : 'font-size:0.82em; font-weight:600;'}">
+            \u2193 ${Math.max(0, (r.cur - r.buyAt) / r.cur * 100).toFixed(2)}%
+        </div>
+        <div class="prox-at">buy at ${fmtCoinPrice(r.buyAt)}</div>`;
+
+    if (r.sellAt == null) {
+        // Nothing open means nothing to sell - said out loud, because a
+        // blank reads as a missing number rather than an empty position.
+        return buy + `<div class="prox-at" style="opacity:0.55;">no slice to sell</div>`;
+    }
+
+    const sell = `
+        <div class="prox-dist ${r.nextAction === 'sell' ? moveCls : ''}"
+             style="${r.nextAction === 'sell' && moveCls ? '' : `color:${r.nextAction === 'sell' ? 'var(--green)' : 'var(--text-dim)'};`}
+                    ${r.nextAction === 'sell' ? '' : 'font-size:0.82em; font-weight:600;'}">
+            \u2191 ${Math.max(0, (r.sellAt - r.cur) / r.cur * 100).toFixed(2)}%
+        </div>
+        <div class="prox-at">sell at ${fmtCoinPrice(r.sellAt)}</div>`;
+
+    // Nearer leg first - the panel is sorted by what happens next, and the
+    // rows should read the same way inside themselves.
+    return r.nextAction === 'sell' ? sell + buy : buy + sell;
 }
 
 // Money the branches SAY they have, against money that is actually
