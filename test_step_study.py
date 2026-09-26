@@ -122,6 +122,19 @@ clean = S.render({0.025: {"BTC-USD": 30}}, [], fee_pct=0.70, slice_usd=SLICE, da
 ok("with no losing rows that paragraph does not appear",
    "run at the wrong fee" not in clean)
 
+print("\nthe table never prints the same column twice")
+
+two = S.render({0.025: {"BTC-USD": 30}}, [], fee_pct=0.70, slice_usd=SLICE, days=60)
+ok("at a real fee both the paid and the free column appear",
+   two.count("@0.70%") == 1 and two.count("@0.05%") == 1, two)
+
+one = S.render({0.025: {"BTC-USD": 30}}, [], fee_pct=0.05, slice_usd=SLICE, days=60)
+ceiling = one[one.index("CEILING"):]
+ok("run AT the low-fee rate the duplicate column is dropped",
+   ceiling.count("@0.05%") == 1, ceiling)
+ok("and the remaining column still carries the numbers",
+   "$" in ceiling and "30" in ceiling)
+
 print("\ncompounding comes after profit - the rule is stated where it is read")
 
 ok("the module says compounding follows realized profit",

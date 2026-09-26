@@ -205,12 +205,20 @@ def render(counts, missing, *, fee_pct, slice_usd, days, free_fee_pct=SPREAD_ONL
                  "closed. A sub-fee step does not trade, it just never fires.")
 
     lines.append(f"\n\nCEILING over {days} days on a ${slice_usd:,.2f} slice\n")
-    lines.append(f"{'step':>6} {'trips':>6} {'@' + f'{fee_pct:.2f}%':>12} "
-                 f"{'@' + f'{free_fee_pct:.2f}%':>12}")
+    # When the study is already being run AT the low-fee rate, the second
+    # column is the first one twice. Two identical columns under identical
+    # headers reads as a bug in the table rather than a choice.
+    show_free = abs(float(fee_pct) - float(free_fee_pct)) > 1e-9
+    head = f"{'step':>6} {'trips':>6} {'@' + f'{fee_pct:.2f}%':>12}"
+    if show_free:
+        head += f" {'@' + f'{free_fee_pct:.2f}%':>12}"
+    lines.append(head)
     for step in steps:
-        lines.append(f"{step * 100:5.2f}% {totals[step]:6d} "
-                     f"{project_usd(totals[step], step * 100, fee_pct, slice_usd):11,.2f}$ "
-                     f"{project_usd(totals[step], step * 100, free_fee_pct, slice_usd):11,.2f}$")
+        row = (f"{step * 100:5.2f}% {totals[step]:6d} "
+               f"{project_usd(totals[step], step * 100, fee_pct, slice_usd):11,.2f}$")
+        if show_free:
+            row += f" {project_usd(totals[step], step * 100, free_fee_pct, slice_usd):11,.2f}$"
+        lines.append(row)
 
     bstep, busd = best_step(totals, fee_pct, slice_usd)
     most = max(totals, key=lambda s: totals[s])
