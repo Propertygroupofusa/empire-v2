@@ -50,6 +50,7 @@ from sqlalchemy import select, func, case, desc
 import crypto_btc_compound_bot as engine
 import crypto_mean_reversion_bot as mean_reversion_engine
 import coin_rotation as rotation
+import opportunity_signals as signals
 from database import get_session_factory
 from models import CryptoGridBranch, CryptoGridSlice, CryptoGridTradeHistory, GridMakerExpiry, TradingBotState, CryptoTreeBranch, BotPosition
 
@@ -5572,6 +5573,25 @@ async def run_grid_branches_cycle():
         # never delay a trading decision, and capped per cycle.
         await _resolve_maker_expiries(session)
 
+        # Short-horizon opportunity scoring - OBSERVATION ONLY.
+        #
+        # Placed here, after every branch has already decided, precisely so
+        # it cannot influence one. Nothing on the execution path reads a
+        # score; opportunity_signals.SIGNALS_LIVE defaults off and even when
+        # on, the score never overrides _net_edge_gate_ok - that gate is
+        # arithmetic about cost and the score is a guess about opportunity.
+        #
+        # Each pass writes a dated, falsifiable prediction and marks the ones
+        # whose horizons have come due. The point is to find out whether a
+        # high score means anything BEFORE it is allowed to mean anything.
+        try:
+            await _score_short_term_opportunities(session, branches)
+            await signals.resolve(
+                session,
+                lambda pid: _mid_price(session, pid))
+        except Exception as e:
+            log.debug(f"[SIGNAL] scoring pass skipped: {type(e).__name__}: {e}")
+
     # Real, periodic automatic idle-cash rotation - throttled here (not
     # inside run_grid_auto_rotate_sweep itself) via a plain in-process
     # timestamp, same pattern crypto_family_tree_bot.py's own scheduled-
@@ -5863,6 +5883,9 @@ async def get_grid_status() -> dict:
         # cancelled post-only order. The skip COUNT above says what this mode
         # costs; this says whether that cost bought anything.
         "maker_expiry_drift": await get_maker_expiry_drift(),
+        # Short-horizon opportunity scoring, and whether it has predicted
+        # anything yet. Observation only - see opportunity_signals.
+        "short_term_signals": await signals.summary(),
         "floor_priced_against": ("maker (the market fallback is removed)"
                                  if _maker_only and _cached_real_maker_fee_rate is not None
                                  else "taker (an unfilled maker order still becomes a market order)"),
@@ -5997,6 +6020,70 @@ async def get_realized_edge(days: int = None) -> dict:
             "completed round trips only; slices still open are not here, and "
             "those are where adverse selection actually lands"),
     }
+
+
+
+async def _mid_price(session, product_id: str):
+    """Mid of the book, or None. Mid at both ends of a measurement so the
+    spread is never booked as a move the market did not make."""
+    try:
+        bid, ask = await engine.get_best_bid_ask(session, product_id)
+        return (bid + ask) / 2.0 if bid is not None and ask is not None else None
+    except Exception:
+        return None
+
+
+async def _score_short_term_opportunities(session, branches):
+    """Score each branch's coin once per cycle and write the prediction down.
+
+    The ECONOMICS come from crypto_nine_coin_scanner.evaluate_grid_step - the
+    same function the live net-edge gate calls - asked whether a step the
+    size of the expected capturable move would clear. One formula, one source
+    of truth. This loop contributes only the short-horizon shape the gate
+    does not measure: momentum, volume and pullback quality.
+
+    Never raises, never trades, never informs a trade. Two reads per coin per
+    cycle; any single coin failing just skips that coin.
+    """
+    if not branches:
+        return
+    import crypto_nine_coin_scanner as _scan
+    fee_rt = (await worst_case_leg_fee_rate()) * 2
+    for branch in branches:
+        pid = getattr(branch, "product_id", None)
+        try:
+            candles = await signals.fetch_candles_with_volume(session, pid)
+            if not candles:
+                continue
+            closes, highs, lows, volumes = candles
+            bid, ask, bid_depth, ask_depth = await engine.get_book_top_and_depth(session, pid)
+            if bid is None or ask is None:
+                continue
+            mid = (bid + ask) / 2.0
+            atr_pct = engine._atr_pct_from_candles(closes, highs, lows)
+            slice_usd = (branch.allocated_usd or 0) / max(branch.num_levels or 1, 1)
+
+            # Ask the LIVE gate about a step the size of the move we expect to
+            # capture. Not a re-implementation of it - the function itself.
+            economics = None
+            if atr_pct:
+                swing = await engine.get_average_hourly_swing_pct(session, pid)
+                _ok, _why, detail = _scan.evaluate_grid_step(
+                    pid, atr_pct * 0.5, swing, best_bid=bid, best_ask=ask,
+                    bid_depth_usd=bid_depth, ask_depth_usd=ask_depth,
+                    slice_usd=slice_usd, fee_round_trip=fee_rt)
+                economics = dict(detail or {}, slice_usd=slice_usd)
+
+            scored = signals.score(
+                closes=closes, highs=highs, lows=lows, volumes=volumes,
+                spread_pct=((ask - bid) / mid * 100.0 if mid else None),
+                bid_depth_usd=bid_depth, ask_depth_usd=ask_depth,
+                atr_pct=atr_pct, rsi=engine._rsi_from_closes(closes),
+                economics=economics)
+            await signals.record(pid, branch.bot_name, mid, scored)
+        except Exception as e:
+            log.debug(f"[SIGNAL] {pid or '?'} not scored: "
+                      f"{type(e).__name__}: {e}")
 
 
 async def close_all_grid_slices() -> dict:

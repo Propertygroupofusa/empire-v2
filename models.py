@@ -1112,6 +1112,81 @@ class CryptoGridSlice(Base):
     entry_expected_price = Column(Float, nullable=True)
 
 
+class ShortTermSignal(Base):
+    """One short-horizon opportunity score, and what the market did next.
+
+    THIS IS A PREDICTION LEDGER, NOT A TRIGGER.
+
+    The ask was a scorer for rapid intraday cycling: momentum, volume,
+    pullback quality, spread, liquidity, expected capturable move, rolled
+    into a 0-100 score. Adding indicators is easy and proves nothing. So
+    every score written here is a dated, falsifiable prediction, and the
+    resolver fills in what actually happened at 5, 15 and 30 minutes:
+
+        predicted    expected_move_pct, expected_net_edge_pct
+        happened     actual_move_pct, actual_mfe_pct, actual_mae_pct
+        verdict      materialized (did the move reach the prediction?)
+                     minutes_to_target (how long it took, if it arrived)
+                     net_after_costs_pct (what a real round trip would net)
+
+    That last column is the one that matters. A signal can be directionally
+    right and still lose money, because the cost of a round trip is charged
+    per trip regardless of how small the move was. net_after_costs_pct is
+    the prediction scored the way the account experiences it.
+
+    Nothing here gates a trade while OPPORTUNITY_SIGNALS_LIVE is off, which
+    is the default. The score is deliberately powerless until its own hit
+    rate has been measured - which is the whole point of writing it down
+    before wiring it up.
+    """
+    __tablename__ = "short_term_signal"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(String, index=True)
+    bot_name = Column(String, index=True, nullable=True)
+    scored_at = Column(DateTime, default=datetime.utcnow, index=True)
+    price_at_score = Column(Float)
+
+    # --- the sub-scores, each 0-100, kept separate so a later analysis can
+    # ask which ones carried the signal instead of only whether the blend did
+    score_momentum = Column(Float, nullable=True)
+    score_volume = Column(Float, nullable=True)
+    score_pullback = Column(Float, nullable=True)
+    score_volatility = Column(Float, nullable=True)
+    score_spread = Column(Float, nullable=True)
+    score_liquidity = Column(Float, nullable=True)
+    score_total = Column(Float, index=True, nullable=True)
+
+    # --- the raw readings behind them, so a score can be re-derived later
+    ret_5m_pct = Column(Float, nullable=True)
+    ret_15m_pct = Column(Float, nullable=True)
+    ret_30m_pct = Column(Float, nullable=True)
+    rsi = Column(Float, nullable=True)
+    atr_pct = Column(Float, nullable=True)
+    volume_ratio = Column(Float, nullable=True)     # recent volume vs baseline
+    spread_pct = Column(Float, nullable=True)
+    bid_depth_usd = Column(Float, nullable=True)
+    ask_depth_usd = Column(Float, nullable=True)
+
+    # --- the prediction
+    expected_move_pct = Column(Float, nullable=True)
+    expected_net_edge_pct = Column(Float, nullable=True)
+    cost_assumed_pct = Column(Float, nullable=True)  # fees + spread + adverse, at score time
+    would_trade = Column(Boolean, nullable=True)     # what the HARD gate said, not the score
+
+    # --- what actually happened, filled in later. Nullable so a row is
+    # usable while still resolving, and a restart mid-flight loses nothing.
+    actual_move_5m_pct = Column(Float, nullable=True)
+    actual_move_15m_pct = Column(Float, nullable=True)
+    actual_move_30m_pct = Column(Float, nullable=True)
+    actual_mfe_pct = Column(Float, nullable=True)    # best the move ever got
+    actual_mae_pct = Column(Float, nullable=True)    # worst it got first
+    materialized = Column(Boolean, nullable=True)    # did MFE reach expected_move_pct?
+    minutes_to_target = Column(Float, nullable=True)
+    net_after_costs_pct = Column(Float, nullable=True)
+    resolved_at = Column(DateTime, nullable=True, index=True)
+
+
 class GridMakerExpiry(Base):
     """One post-only order that rested its whole window, filled nothing, and
     was cancelled with NO market order behind it.

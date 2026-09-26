@@ -1,0 +1,234 @@
+"""The opportunity score, marked against what actually happened.
+
+A scorer is the easiest thing in trading to build and the easiest to fool
+yourself with: indicators always produce a number, and a number always looks
+like knowledge. So these tests check the two properties that decide whether
+this one is worth anything.
+
+  1. It cannot trade. The score never reaches the execution path, and
+     would_trade comes from cost arithmetic alone - a 100-point setup with a
+     negative net edge still comes back False.
+  2. It is falsifiable. Every score is a dated prediction, and the resolver
+     marks it against the real move INCLUDING what a round trip would net
+     after costs. A signal can be directionally right and still lose money,
+     because cost is charged per trip and not per percent.
+
+Run: python3 test_opportunity_signals.py
+"""
+import ast
+import asyncio
+import datetime as dt
+import os
+import sys
+
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:////tmp/t_signals.db")
+for f in ("/tmp/t_signals.db",):
+    if os.path.exists(f):
+        os.remove(f)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+_passed = _failed = 0
+
+
+def ok(label, cond, detail=""):
+    global _passed, _failed
+    if cond:
+        _passed += 1
+        print(f"  PASS  {label}")
+    else:
+        _failed += 1
+        print(f"  FAIL  {label}" + (f"  -- {detail}" if detail else ""))
+
+
+import opportunity_signals as S
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+GRID = open(os.path.join(HERE, "crypto_grid_bot.py"), encoding="utf-8").read()
+SRC = open(os.path.join(HERE, "opportunity_signals.py"), encoding="utf-8").read()
+
+
+print("\nit cannot trade")
+ok("the live switch defaults OFF", S.SIGNALS_LIVE is False)
+ok("and it fails off - the default is 'false', not a truthy fallback",
+   'os.getenv("OPPORTUNITY_SIGNALS_LIVE", "false")' in SRC)
+tree = ast.parse(GRID)
+cycle = None
+for n in ast.walk(tree):
+    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "run_grid_branch_cycle":
+        cycle = ast.get_source_segment(GRID, n)
+ok("the per-branch trading cycle never mentions the scorer",
+   cycle is not None and "signals." not in cycle and "score_total" not in cycle,
+   "a score that reaches the branch cycle can influence a trade")
+fleet = GRID.split("async def run_grid_branches_cycle")[1].split("\nasync def ")[0]
+ok("scoring runs AFTER every branch has decided",
+   fleet.index("_score_short_term_opportunities") > fleet.index("run_grid_branch_cycle(session, branch)"))
+ok("the scoring pass cannot break the cycle",
+   "except Exception" in fleet.split("_score_short_term_opportunities")[1][:400])
+ok("no execution path reads a score",
+   "score_total" not in GRID.split("def _score_short_term_opportunities")[0])
+
+
+print("\nwould_trade is arithmetic, never the score")
+def econ(net_edge, slice_usd=6.92):
+    """Stand in for crypto_nine_coin_scanner.evaluate_grid_step's detail."""
+    return {"net_edge_pct": net_edge, "slice_usd": slice_usd}
+
+
+hot = dict(closes=[100]*40, highs=[101]*40, lows=[99]*40, volumes=[50]*40,
+           spread_pct=0.02, bid_depth_usd=9e5, ask_depth_usd=9e5,
+           atr_pct=2.0, rsi=55, economics=econ(0.21))
+# THE ECONOMICS COME FROM THE GATE, and these assert that the score cannot
+# overrule them. An earlier draft priced cost here as fees + spread +
+# adverse, a second copy of a formula crypto_nine_coin_scanner already owns;
+# two copies drift and the unwatched one drifts first.
+r = S.score(**hot)
+ok("a positive net edge from the gate -> would_trade True",
+   r["would_trade"] is True, f"net={r['expected_net_edge_pct']}")
+ok("net edge is taken from the gate verbatim, not recomputed",
+   r["expected_net_edge_pct"] == 0.21)
+r_neg = S.score(**dict(hot, economics=econ(-0.39)))
+ok("a NEGATIVE gate edge -> False, however good the setup looks",
+   r_neg["would_trade"] is False)
+ok("  and its score is not low, so the score plainly did not decide",
+   (r_neg["score_total"] or 0) > 40, f"score={r_neg['score_total']}")
+r_blind = S.score(**dict(hot, economics=None))
+ok("a gate that could not price it -> False, and net edge stays None",
+   r_blind["would_trade"] is False and r_blind["expected_net_edge_pct"] is None,
+   "BLOCKED is not REJECT; the ledger records the difference")
+ok("cost is BACKED OUT of the gate's edge, never re-derived here",
+   abs(r["cost_assumed_pct"] - (r["expected_move_pct"] - 0.21)) < 1e-9,
+   f"cost={r['cost_assumed_pct']}")
+ok("the adverse constant is a LABEL, not arithmetic",
+   "ADVERSE_PCT_ASSUMED" in SRC and "ADVERSE_PCT_ASSUMED +" not in SRC
+   and "+ ADVERSE_PCT" not in SRC)
+ok("expected move is HALF of ATR, not the whole range",
+   r["expected_move_pct"] == 1.0 and r["expected_move_pct"] < hot["atr_pct"],
+   "a real order captures part of a swing, not its extremes")
+thin = dict(hot, atr_pct=0.5)
+r2 = S.score(**thin)
+
+print("\na missing reading is not a zero")
+blind = dict(hot, bid_depth_usd=None, ask_depth_usd=None, volumes=[])
+rb = S.score(**blind)
+ok("an unreadable book yields None for liquidity, not 0",
+   rb["score_liquidity"] is None)
+ok("no volume history yields None, not a fabricated 1.0x",
+   rb["volume_ratio"] is None and rb["score_volume"] is None)
+ok("the total averages only what was measured",
+   rb["components_measured"] < r["components_measured"] and rb["score_total"] is not None)
+ok("and it does not drag the total toward zero",
+   rb["score_total"] > 40,
+   "scoring an unknown as zero makes a venue hiccup look like a bad setup")
+
+
+print("\nthe signals compute what they claim")
+rising = [100 + i * 0.5 for i in range(40)]
+ok("momentum reads the 5/15/30m returns off 5-minute bars",
+   S.momentum(rising)["ret_15m_pct"] > 0 and S.momentum(rising)["ret_30m_pct"] >
+   S.momentum(rising)["ret_15m_pct"])
+ok("volume_ratio is above 1 when recent volume rises",
+   S.volume_ratio([10]*24 + [30]*3) > 2.5)
+ok("and below 1 when it falls", S.volume_ratio([10]*24 + [3]*3) < 0.5)
+ok("volume_ratio returns None on a short series, never 1.0",
+   S.volume_ratio([10]*5) is None)
+
+# impulse 100 -> 110, then a retrace to ~105: the textbook shape.
+# At least look+2 bars, or the function correctly refuses to read a window
+# it does not have - which is what the first draft of this fixture hit.
+imp_c = [100]*8 + [110]*3 + [105]*3
+imp_h = [100]*8 + [110]*3 + [110, 107, 106]
+imp_l = [100]*8 + [104]*3 + [104.5]*3
+pb = S.pullback_quality(imp_c, imp_h, imp_l)
+ok("a half retrace off a real impulse scores high", pb is not None and pb > 0.7, f"got {pb}")
+flat = S.pullback_quality([100]*14, [100.2]*14, [99.9]*14)
+ok("an impulse smaller than a round trip costs is None, not 0",
+   flat is None,
+   "zero claims a bad setup where there is simply no setup")
+
+
+print("\nthe ledger runs, and the verdict refuses a thin sample")
+
+
+async def _runtime():
+    from database import Base, get_engine, get_session_factory
+    import models
+    from sqlalchemy import select
+    async with get_engine().begin() as c:
+        await c.run_sync(Base.metadata.create_all)
+
+    await S.record("TIA-USD", "crypto_grid_7", 0.50, S.score(**hot))
+    s0 = await S.summary()
+    ok("a scored row is recorded", s0["scored"] == 1 and s0["resolved"] == 0)
+    ok("the summary reports the live switch", s0["live"] is False)
+
+    # Backdate past the 30m horizon, then resolve with price UP 2%.
+    async with get_session_factory()() as db:
+        for row in (await db.execute(select(models.ShortTermSignal))).scalars().all():
+            row.scored_at = dt.datetime.utcnow() - dt.timedelta(minutes=31)
+        await db.commit()
+
+    async def price_for(pid):
+        return 0.51                      # +2.0% from 0.50
+
+    n = await S.resolve(None, price_for)
+    ok("the horizon resolves", n == 1)
+    async with get_session_factory()() as db:
+        row = (await db.execute(select(models.ShortTermSignal))).scalars().all()[0]
+    ok("all three horizons filled", None not in (row.actual_move_5m_pct,
+                                                 row.actual_move_15m_pct,
+                                                 row.actual_move_30m_pct))
+    ok("actual move is measured against the scored price",
+       abs(row.actual_move_30m_pct - 2.0) < 0.01, row.actual_move_30m_pct)
+    ok("a +2.0%% move beat the 1.0%% prediction -> materialized",
+       row.materialized is True)
+    ok("time-to-target is recorded", row.minutes_to_target is not None)
+    # THE POINT. 2.0% realised against a 1.39% cost nets +0.61%.
+    ok("net_after_costs is the realised move MINUS the full cost",
+       abs(row.net_after_costs_pct - (2.0 - row.cost_assumed_pct)) < 0.01,
+       f"net={row.net_after_costs_pct} cost={row.cost_assumed_pct}")
+    ok("  and it is priced against the BEST the move reached, which flatters it",
+       "flatters the signal on purpose" in SRC,
+       "if it loses under a perfect exit, no execution fix rescues it")
+
+    s1 = await S.summary()
+    ok("the report states its cost basis is ASSUMED, not measured",
+       "ASSUMED" in s1["cost_basis"] and "adverse selection" in s1["cost_basis"])
+    ok("results are reported PER COIN, the decision the fleet can act on",
+       "per_coin" in s1 and "TIA-USD" in s1["per_coin"])
+    f = s1["per_coin"]["TIA-USD"]
+    ok("  the funnel is detected -> reached -> profitable after costs",
+       set(("detected", "reached_target", "profitable_after_costs",
+            "median_minutes_to_target", "net_expectancy_pct")) <= set(f))
+    ok("  expectancy averages EVERY resolved setup, not just the winners",
+       "not only the ones that" in SRC)
+    ok("the verdict refuses to speak on one row",
+       "not enough data" in s1["verdict"], s1["verdict"])
+    ok("results are bucketed by score, not averaged into one number",
+       set(s1["buckets"]) == {"0-40", "40-60", "60-80", "80+"},
+       "'does a HIGH score mean anything' cannot be answered by one mean")
+
+    # A directionally-right signal that still loses money - the whole thesis.
+    # Scored at the LIVE cost, not the cheap fixture above: gate edge -0.39
+    # on a 1.0% expected move backs out to the real 1.39% round trip.
+    await S.record("BONK-USD", "crypto_grid_3", 100.0,
+                   S.score(**dict(hot, economics=econ(-0.39))))
+    async with get_session_factory()() as db:
+        rows = (await db.execute(select(models.ShortTermSignal))).scalars().all()
+        rows[-1].scored_at = dt.datetime.utcnow() - dt.timedelta(minutes=31)
+        await db.commit()
+    await S.resolve(None, lambda pid: _ret(100.8))      # +0.8%: up, but small
+    async with get_session_factory()() as db:
+        row2 = (await db.execute(select(models.ShortTermSignal))).scalars().all()[-1]
+    ok("a move that went the RIGHT way but too small nets negative",
+       row2.actual_move_30m_pct > 0 and row2.net_after_costs_pct < 0,
+       f"move={row2.actual_move_30m_pct} net={row2.net_after_costs_pct}")
+    ok("  and it is correctly marked as NOT materialized",
+       row2.materialized is False)
+
+
+async def _ret(v):
+    return v
+
+asyncio.run(_runtime())
+print(f"\n{_passed} passed, {_failed} failed")
+sys.exit(1 if _failed else 0)
