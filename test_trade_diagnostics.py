@@ -96,5 +96,26 @@ ok("a missing value writes None, never 0",
    "a zero would read as 'never moved' and silently corrupt the later test")
 
 
+
+print("\nentry_atr_pct is actually POPULATED, not just declared")
+ok("it is written when the slice is created",
+   "entry_atr_pct=((_atr / filled_price)" in CYCLE,
+   "a declared-but-never-written column is worse than no column: it looks "
+   "like data and is always NULL")
+ok("it is normalised to a fraction of price, not raw dollars",
+   "_atr / filled_price" in CYCLE,
+   "raw ATR is not comparable across BTC at $84k and BONK at $0.0000037")
+ok("a missing ATR writes None, never 0",
+   "if _atr and filled_price else None" in CYCLE)
+ok("it reuses the cycle's existing volatility read, no extra API call",
+   CYCLE.count("await engine.get_price_and_volatility(") == 1,
+   "count the CALL, not mentions - a comment naming the function is not a call")
+
+print("\nno column is declared without a writer")
+import re as _re
+_written = {c for c in _re.findall(r"(\w+)=", CYCLE)}
+for _c in ("entry_atr_pct", "entry_fee_rate", "entry_expected_price"):
+    ok(f"CryptoGridSlice.{_c} has a writer in the cycle", _c in _written)
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

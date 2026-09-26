@@ -4752,6 +4752,15 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
             db.add(CryptoGridSlice(bot_name=branch.bot_name, product_id=branch.product_id,
                                    entry_price=filled_price, qty=filled_qty,
                                    entry_fee_rate=buy_leg_fee,
+                                   # Volatility at the moment of entry, as a
+                                   # fraction of price. Without it, comparing a
+                                   # fixed 8% stop against an ATR-scaled one is
+                                   # impossible after the fact - the whole point
+                                   # of recording MAE beside it. _atr comes from
+                                   # the same get_price_and_volatility() call
+                                   # this cycle already made to get `price`.
+                                   entry_atr_pct=((_atr / filled_price)
+                                                  if _atr and filled_price else None),
                                    # `price` is the live price this cycle read
                                    # BEFORE deciding to buy - what the bot
                                    # believed it would pay. Stored beside what
