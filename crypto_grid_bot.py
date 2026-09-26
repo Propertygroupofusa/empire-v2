@@ -3538,6 +3538,16 @@ async def money_check() -> dict:
       action    - the endpoint that fixes it, or None when nothing can
       basis     - what the claim is measured against; never a forecast
     """
+    def _money(v):
+        """-$381.47, never $-381.47. A minus wedged after the currency
+        symbol reads as part of the amount, and on this panel the one
+        figure that most needed to be legible was the negative one."""
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return "unknown"
+        return ("-$" if v < 0 else "$") + f"{abs(v):,.2f}"
+
     status = await get_grid_status()
     branches = status.get("branches") or []
     free_cash = status.get("real_free_cash_usd")
@@ -3551,9 +3561,48 @@ async def money_check() -> dict:
     # invested while 100% of the money is cash - which is exactly what was
     # on screen: "$553.84 working" against a Coinbase balance of $572.60
     # USD and no crypto at all.
-    deployed = sum((b.get("allocated_usd") or 0.0) for b in branches if b.get("open_slices"))
+    # ...and the same is true ONE LEVEL DOWN, which this function got wrong
+    # until 2026-09-26. Summing allocated_usd over branches that hold a
+    # slice is still an earmark: a 3-level branch with one slice open has
+    # spent a THIRD of its allocation on coin and is still holding the
+    # rest as cash. On the live fleet that read "$276.92 genuinely in
+    # coin" when the real figure was $93.07 - the panel built to stop an
+    # earmark being reported as an investment was doing it itself.
+    #
+    # The coin is what the slices cost: entry_price x qty. One definition,
+    # shared with allocation_backing so the two can never drift apart.
+    try:
+        import allocation_backing
+        _slice_cost = allocation_backing.slice_cost
+    except Exception:
+        def _slice_cost(sl):
+            try:
+                return float(sl.get("entry_price")) * float(sl.get("qty"))
+            except (TypeError, ValueError, AttributeError):
+                return None
+
+    deployed = 0.0
+    unpriced_slices = 0
+    for b in branches:
+        for sl in (b.get("slices") or []):
+            cost = _slice_cost(sl)
+            if cost is None:
+                unpriced_slices += 1
+            else:
+                deployed += cost
+
+    # What those same branches have EARMARKED, which is the bigger number
+    # and the one that was being printed as coin. Kept and labelled rather
+    # than dropped - the gap between the two is the point.
+    holding_branches = [b for b in branches if b.get("open_slices")]
+    earmarked_behind_slices = sum((b.get("allocated_usd") or 0.0) for b in holding_branches)
     earmarked_idle = max(0.0, allocated - deployed)
-    total_idle = earmarked_idle + (free_cash or 0.0)
+
+    # free_cash goes NEGATIVE when branch reserves exceed the wallet. Adding
+    # a negative to an earmark produced "-$104.55 sitting in cash", a
+    # composite of two real numbers that describes nothing. Idle cash is
+    # only meaningful when there is cash.
+    total_idle = earmarked_idle + max(0.0, free_cash or 0.0)
 
     findings = []
 
@@ -3561,10 +3610,11 @@ async def money_check() -> dict:
         findings.append({
             "kind": "nothing_deployed",
             "usd": round(total_idle, 2),
+            "severity": "warn",
             "action": None,
             "detail": (f"Every branch is flat, so nothing is invested in any coin right now. "
-                       f"${allocated:,.2f} is EARMARKED to branches and ${(free_cash or 0.0):,.2f} is "
-                       f"loose - but all ${total_idle:,.2f} of it is sitting in the USD wallet "
+                       f"{_money(allocated)} is EARMARKED to branches and {_money(free_cash or 0.0)} is "
+                       f"loose - but all {_money(total_idle)} of it is sitting in the USD wallet "
                        f"earning nothing until a dip triggers a buy."),
             "basis": "branches holding zero open slices hold zero coin - an earmark is not an investment",
         })
@@ -3572,38 +3622,60 @@ async def money_check() -> dict:
         findings.append({
             "kind": "deployed",
             "usd": round(deployed, 2),
+            "severity": "ok",
             "action": None,
-            "detail": (f"${deployed:,.2f} is genuinely in coin across "
-                       f"{sum(1 for b in branches if b.get('open_slices'))} branch(es). "
-                       f"${total_idle:,.2f} is still cash waiting on a trigger."),
-            "basis": "allocation behind branches that actually hold an open slice",
+            "detail": (f"{_money(deployed)} is genuinely in coin across "
+                       f"{len(holding_branches)} branch(es) - that is what the open slices "
+                       f"cost, entry price times quantity. Those same branches have "
+                       f"{_money(earmarked_behind_slices)} earmarked, so "
+                       f"{_money(earmarked_behind_slices - deployed)} of their own allocation "
+                       f"is still unspent cash waiting on the next level."
+                       + (f" {unpriced_slices} slice(s) could not be priced and are not counted."
+                          if unpriced_slices else "")),
+            "basis": "entry_price x qty on every open slice - NOT the allocation behind them",
         })
 
     # ── cash above the reserve ──────────────────────────────────────────
     if free_cash is None:
         findings.append({
-            "kind": "cash_unknown", "usd": None, "action": None,
+            "kind": "cash_unknown", "usd": None, "action": None, "severity": "warn",
             "detail": "The real Coinbase balance could not be read, so idle cash cannot be judged.",
             "basis": "unknown cash is never treated as deployable",
+        })
+    elif free_cash < 0:
+        # Not an idle-cash question at all. The branches have reserved more
+        # than the wallet holds, and the old code ran this through the
+        # "committed" branch, which printed a calm green tick over it.
+        findings.append({
+            "kind": "cash_overdrawn",
+            "usd": round(free_cash, 2),
+            "severity": "bad",
+            "action": None,
+            "detail": (f"Branch reserves exceed the wallet by {_money(abs(free_cash))}. This is not "
+                       f"idle cash and it is not a reserve - it is {_money(allocated)} earmarked "
+                       f"against money that is not in the account. Nothing can be deployed until "
+                       f"real cash covers it; new buys are refused by the fee reserve until then."),
+            "basis": "real wallet balance minus branch reserves - a negative means the earmark is unfunded",
         })
     else:
         deployable = free_cash - GRID_CASH_RESERVE_USD
         if deployable >= GRID_AUTO_DEPLOY_AMOUNT_USD:
             findings.append({
-                "kind": "idle_cash", "usd": round(deployable, 2),
+                "kind": "idle_cash", "usd": round(deployable, 2), "severity": "warn",
                 "action": "/grid-status/spread-evenly",
-                "detail": (f"${deployable:,.2f} sits above the ${GRID_CASH_RESERVE_USD:,.2f} reserve - "
-                           f"enough for at least one more ${GRID_AUTO_DEPLOY_AMOUNT_USD:,.2f} branch."),
+                "detail": (f"{_money(deployable)} sits above the {_money(GRID_CASH_RESERVE_USD)} reserve - "
+                           f"enough for at least one more {_money(GRID_AUTO_DEPLOY_AMOUNT_USD)} branch."),
                 "basis": "free cash minus the reserve that funds open branches' remaining levels",
             })
         else:
             findings.append({
                 "kind": "cash_committed", "usd": round(max(0.0, deployable), 2),
+                "severity": "ok",
                 "action": None,
-                "detail": (f"${free_cash:,.2f} is loose, but ${GRID_CASH_RESERVE_USD:,.2f} of it is the "
+                "detail": (f"{_money(free_cash)} is loose, but {_money(GRID_CASH_RESERVE_USD)} of it is the "
                            f"reserve backing open branches' remaining levels, leaving "
-                           f"${max(0.0, deployable):,.2f} spare - under the "
-                           f"${GRID_AUTO_DEPLOY_AMOUNT_USD:,.2f} a new branch needs. Committed is not the "
+                           f"{_money(max(0.0, deployable))} spare - under the "
+                           f"{_money(GRID_AUTO_DEPLOY_AMOUNT_USD)} a new branch needs. Committed is not the "
                            f"same as invested: this money is spoken for, and it is still cash."),
                 "basis": "free cash minus GRID_CASH_RESERVE_USD - NOT free cash against zero",
             })
@@ -3666,7 +3738,10 @@ async def money_check() -> dict:
     actionable = [f for f in findings if f.get("action")]
     return {
         "allocated_usd": round(allocated, 2),
+        # COIN, at what the slices cost. Not the allocation behind them.
         "deployed_usd": round(deployed, 2),
+        "earmarked_behind_slices_usd": round(earmarked_behind_slices, 2),
+        "unpriced_slices": unpriced_slices,
         "idle_usd": round(total_idle, 2),
         "working_usd": round(deployed, 2),
         "free_cash_usd": round(free_cash, 2) if free_cash is not None else None,

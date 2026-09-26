@@ -4222,8 +4222,8 @@ function renderMoneyCheck(d) {
                         background:${act ? 'var(--gold-bg)' : 'var(--bg)'};
                         border-radius:6px; padding:10px 12px; margin-bottom:8px;">
                 <div style="display:flex; justify-content:space-between; gap:10px; align-items:baseline; flex-wrap:wrap;">
-                    <strong style="font-size:0.88em;">${act ? '⚡' : '✅'} ${f.kind.replace(/_/g, ' ')}</strong>
-                    ${f.usd != null ? `<span style="font-variant-numeric:tabular-nums; font-weight:700;">${fmtUsd(f.usd)}</span>` : ''}
+                    <strong style="font-size:0.88em;">${moneyIcon(f, act)} ${f.kind.replace(/_/g, ' ')}</strong>
+                    ${f.usd != null ? `<span style="font-variant-numeric:tabular-nums; font-weight:700;">${fmtSignedUsd(f.usd)}</span>` : ''}
                 </div>
                 <div style="font-size:0.82em; margin-top:4px; line-height:1.5;">${f.detail}</div>
                 <div style="font-size:0.7em; color:var(--text-dim); margin-top:5px;">
@@ -4242,16 +4242,28 @@ function renderMoneyCheck(d) {
 
         wrap.innerHTML = head
             + `<div style="font-size:0.74em; color:var(--text-dim); margin-bottom:10px; font-variant-numeric:tabular-nums;">
-                 <strong style="color:${d.deployed_usd > 0 ? 'var(--green)' : 'var(--red)'};">${fmtUsd(d.deployed_usd)}</strong> actually in coin
-                 · <strong>${fmtUsd(d.idle_usd)}</strong> sitting in cash
-                 · ${fmtUsd(d.allocated_usd)} earmarked to branches
-                 · ${fmtUsd(d.reserve_usd)} of the cash is reserve</div>`
+                 <strong style="color:${d.deployed_usd > 0 ? 'var(--green)' : 'var(--red)'};">${fmtSignedUsd(d.deployed_usd)}</strong> actually in coin
+                 · <strong>${fmtSignedUsd(d.free_cash_usd)}</strong> real cash
+                 · ${fmtSignedUsd(d.allocated_usd)} earmarked to branches
+                 · ${fmtSignedUsd(d.reserve_usd)} of the cash is reserve</div>`
             + actionable.map(f => card(f, true)).join('')
             + idle.map(f => card(f, false)).join('')
             + `<div style="font-size:0.7em; color:var(--text-dim); margin-top:8px; line-height:1.5;">${d.note || ''}</div>`;
     } catch (e) {
         wrap.innerHTML = `<div class="coin-history-empty">Could not render the money check (${e.message}).</div>`;
     }
+}
+
+// A finding with no button is not the same as a finding that is FINE.
+// The panel used to print a green tick on anything it could not offer a
+// one-tap fix for, so "cash committed $0.00" - a wallet overdrawn against
+// its own branch reserves - was rendered as a pass. The server says how
+// bad each finding is; this only picks the glyph.
+function moneyIcon(f, actionable) {
+    if (f && f.severity === 'bad') return '\u26a0\ufe0f';
+    if (actionable) return '\u26a1';
+    if (f && f.severity === 'warn') return '\u2139\ufe0f';
+    return '\u2705';
 }
 
 // Runs one whitelisted, non-spending fix, then re-runs the check so the
