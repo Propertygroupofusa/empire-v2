@@ -39,6 +39,20 @@ directionally right and still lose money, because the cost is per trip and
 not per percent. That is the failure mode the whole session has been about,
 and it is the one an indicator dashboard hides.
 
+UNITS: PERCENT, EVERYWHERE IN THIS MODULE
+
+Every percentage here is a real percent - 1.37 means 1.37%. That has to be
+said out loud because the code this reads from does the opposite:
+engine._atr_pct_from_candles returns a FRACTION despite the _pct in its
+name, and crypto_nine_coin_scanner speaks fractions too (it prints
+net_edge_pct * 100).
+
+The caller converts at the boundary. Mixing them is silent: the first live
+read showed "0.001% ATR", clamped every volatility sub-score to zero, and -
+far worse - had materialized comparing a percent against a fraction and
+net_after_costs subtracting one from the other. Numbers that are confident
+and mean nothing.
+
 WHAT IT DELIBERATELY DOES NOT DO
 
 It does not gate, trigger, size or veto a trade. OPPORTUNITY_SIGNALS_LIVE
@@ -51,6 +65,8 @@ It also does not lower a standard because nothing is happening. There is no
 "trade something" floor and no path that spends capital because capital is
 idle - the same rule opportunity_scanner.py already holds.
 """
+
+UNITS = "percent"   # see the module docstring
 
 import logging
 import os

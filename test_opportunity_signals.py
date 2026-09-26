@@ -230,5 +230,33 @@ async def _ret(v):
     return v
 
 asyncio.run(_runtime())
+
+print("\nunits: percent in this module, fractions in what it reads from")
+GRIDSRC = GRID
+ok("the module declares its unit", S.UNITS == "percent")
+ok("the boundary converts ATR from fraction to percent",
+   "atr_frac * 100.0" in GRIDSRC,
+   "_atr_pct_from_candles returns atr/price despite the _pct in its name")
+ok("and converts the gate's net edge the same way",
+   'detail["net_edge_pct"] * 100.0' in GRIDSRC)
+ok("but hands the gate a FRACTION, which is what it speaks",
+   "atr_frac * 0.5, swing" in GRIDSRC,
+   "converting the input too would double-scale the step")
+ok("REGRESSION: the raw fraction is never scored directly",
+   "atr_pct=atr_frac" not in GRIDSRC)
+
+# The bug, as arithmetic: a realistic 0.9% ATR arrives as 0.009 from the
+# engine. Scored raw it lands at the bottom of every band and, worse,
+# materialized then compares a percent move against a fraction target.
+raw = S.score(**dict(hot, atr_pct=0.009, economics=econ(0.21)))
+good = S.score(**dict(hot, atr_pct=0.9, economics=econ(0.21)))
+ok("a fraction scores volatility at zero; a percent does not",
+   raw["score_volatility"] == 0.0 and good["score_volatility"] > 0,
+   f"raw={raw['score_volatility']} pct={good['score_volatility']}")
+ok("and the prediction differs by 100x, which is the silent half",
+   abs(good["expected_move_pct"] / raw["expected_move_pct"] - 100) < 1e-6,
+   "materialized would compare a percent move to a fraction target and "
+   "always say yes")
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

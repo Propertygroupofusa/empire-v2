@@ -6060,19 +6060,39 @@ async def _score_short_term_opportunities(session, branches):
             if bid is None or ask is None:
                 continue
             mid = (bid + ask) / 2.0
-            atr_pct = engine._atr_pct_from_candles(closes, highs, lows)
+            # UNITS. This is the boundary, and it has already bitten once.
+            # _atr_pct_from_candles returns a FRACTION (atr / price) despite
+            # the _pct in its name, and crypto_nine_coin_scanner speaks
+            # fractions throughout too - it prints net_edge_pct * 100. But
+            # opportunity_signals works in PERCENT: its bands, its 1.37%
+            # pullback threshold, its momentum returns and the resolver's
+            # realised moves are all percent.
+            #
+            # Mixed, the first live read showed BTC at "0.001% ATR", every
+            # volatility sub-score clamped to zero, and - worse, because it
+            # is silent - materialized comparing a percent against a fraction
+            # and net_after_costs subtracting one from the other. Confident,
+            # meaningless numbers.
+            #
+            # So: convert to percent HERE, once, and convert back only when
+            # handing a step to the gate.
+            atr_frac = engine._atr_pct_from_candles(closes, highs, lows)
+            atr_pct = atr_frac * 100.0 if atr_frac else None
             slice_usd = (branch.allocated_usd or 0) / max(branch.num_levels or 1, 1)
 
             # Ask the LIVE gate about a step the size of the move we expect to
             # capture. Not a re-implementation of it - the function itself.
             economics = None
-            if atr_pct:
+            if atr_frac:
                 swing = await engine.get_average_hourly_swing_pct(session, pid)
                 _ok, _why, detail = _scan.evaluate_grid_step(
-                    pid, atr_pct * 0.5, swing, best_bid=bid, best_ask=ask,
+                    pid, atr_frac * 0.5, swing, best_bid=bid, best_ask=ask,
                     bid_depth_usd=bid_depth, ask_depth_usd=ask_depth,
                     slice_usd=slice_usd, fee_round_trip=fee_rt)
-                economics = dict(detail or {}, slice_usd=slice_usd)
+                detail = dict(detail or {})
+                if detail.get("net_edge_pct") is not None:
+                    detail["net_edge_pct"] = detail["net_edge_pct"] * 100.0
+                economics = dict(detail, slice_usd=slice_usd)
 
             scored = signals.score(
                 closes=closes, highs=highs, lows=lows, volumes=volumes,
