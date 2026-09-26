@@ -310,6 +310,51 @@ GRID_AUTO_DEPLOY_AMOUNT_USD = float(os.getenv("GRID_AUTO_DEPLOY_AMOUNT_USD", "70
 # changes nothing and simply stops being luck.
 GRID_CASH_RESERVE_USD = float(os.getenv("GRID_CASH_RESERVE_USD", "88.0"))
 
+
+def spendable_for_slice(slice_usd, real_balance, reserve=None, min_trade=None):
+    """How much of the wallet a single grid slice may actually spend.
+
+    Returns (spend, reason). `spend` is 0.0 when the buy must not happen,
+    and `reason` says which limit bound it, so the caller can log a number
+    rather than a shrug.
+
+    THE BUG THIS EXISTS FOR, 2026-09-26. Every path that PLANS a spend
+    holds back GRID_CASH_RESERVE_USD - redistribute_grid_cash (line ~2684),
+    get_grid_spend_ceiling_usd, _auto_deploy_idle_free_cash. The path that
+    actually BUYS did not: it sized a slice as
+    `min(slice_usd, real_balance)` straight against the whole wallet. So
+    the reserve was real in every projection and decorative at the only
+    moment it mattered.
+
+    Live account when this was found: wallet $79.36 against an $88.00
+    reserve, with a branch holding a $69.23 allocation. The old sizing
+    would happily spend $69.23 of it and leave $10.13 - and
+    redistribute_grid_cash's own docstring already spells out why that is
+    the failure case: "Fees settle out of the USD balance, and an account
+    with nothing spare cannot pay one - a rejected fee is a stuck
+    position."
+
+    The reserve is subtracted, never the slice shrunk below the real
+    minimum: a sub-minimum spend is refused outright rather than sent as a
+    dust order that pays a full fee for a position too small to exit.
+    """
+    if reserve is None:
+        reserve = GRID_CASH_RESERVE_USD
+    if min_trade is None:
+        min_trade = MIN_TRADE_USD
+    if real_balance is None:
+        return 0.0, "real balance unavailable"
+    deployable = real_balance - max(0.0, reserve)
+    if deployable <= 0:
+        return 0.0, (f"wallet ${real_balance:,.2f} is at or below the "
+                     f"${reserve:,.2f} fee reserve - nothing is deployable")
+    spend = min(slice_usd, deployable)
+    if spend < min_trade:
+        return 0.0, (f"${spend:,.2f} spendable (wallet ${real_balance:,.2f} less the "
+                     f"${reserve:,.2f} fee reserve) is below the ${min_trade:,.2f} minimum")
+    bound = "branch allocation" if slice_usd <= deployable else "wallet less the fee reserve"
+    return round(spend, 2), f"${spend:,.2f}, bounded by {bound}"
+
 # Caps how many NEW branches one single sweep can create - real,
 # deliberate friction against a large, sudden cash windfall (or a bug)
 # spinning up dozens of tiny branches in one shot. A real surplus above
@@ -4869,9 +4914,11 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
         if real_balance is None:
             log.warning(f"[GRID] {branch.bot_name}: real balance unavailable ({real_balance_err}) - skipping this cycle")
             return
-        spend = min(slice_usd, real_balance)
-        if spend < MIN_TRADE_USD:
-            log.info(f"[GRID] {branch.bot_name}: only ${spend:.2f} real spendable for a new slice (below ${MIN_TRADE_USD:.2f} minimum) - waiting")
+        spend, spend_reason = spendable_for_slice(slice_usd, real_balance)
+        if spend <= 0:
+            log.info(f"[GRID] {branch.bot_name}: no buy - {spend_reason}")
+            await _record_gate_decision(branch.bot_name, branch.product_id, "CASH_RESERVE",
+                                        spend_reason)
             return
 
         _gate_detail = {}
