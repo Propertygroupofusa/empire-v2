@@ -2499,8 +2499,14 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
                         ? `<br><span style="color:var(--gold); font-size:0.85em;" title="This branch's own real recent trades have adjusted its spacing multiplier away from the validated default (1.5x) - widens after a rough real stretch, eases back after a strong one.">📐 self-tuned ${b.self_tuned_multiplier}x</span>`
                         : '';
                     const slicesStr = b.open_slices > 0
-                        ? `${b.open_slices} / ${b.num_levels} <span style="color:var(--text-dim);">(ref ${fmtUsd(b.reference_price)})</span>${selfTuneBadge}`
-                        : `<span style="color:var(--text-dim);">flat (ref ${fmtUsd(b.reference_price)})</span>${selfTuneBadge}`;
+                        // fmtCoinPrice, not fmtUsd. A reference is a COIN PRICE and
+                        // fmtUsd is a balance formatter fixed at 2dp, so FLOKI at
+                        // $0.00002965 and BONK at $0.00000376 both rendered as
+                        // "(ref $0.00)" on the live page - two of six branches showing
+                        // no reference at all while the chart underneath printed it
+                        // correctly. Same bug already fixed once in the proximity panel.
+                        ? `${b.open_slices} / ${b.num_levels} <span style="color:var(--text-dim);">(ref ${fmtCoinPrice(b.reference_price)})</span>${selfTuneBadge}`
+                        : `<span style="color:var(--text-dim);">flat (ref ${fmtCoinPrice(b.reference_price)})</span>${selfTuneBadge}`;
                     // The headline figure is for THIS BRANCH ON THIS COIN.
                     //
                     // It used to be the branch's lifetime total, printed in a row
