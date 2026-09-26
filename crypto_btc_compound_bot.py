@@ -1554,6 +1554,7 @@ def summarise_fills(fills: list) -> dict:
     per, buy_usd, sell_usd, fees = {}, 0.0, 0.0, 0.0
     maker = taker = 0
     quote_sized = 0
+    all_orders = set()
     for f in fills:
         try:
             size = float(f.get("size") or 0)
@@ -1589,8 +1590,17 @@ def summarise_fills(fills: list) -> dict:
             taker += 1
         p = per.setdefault(pid, {"product_id": pid, "fills": 0, "bought_usd": 0.0,
                                  "sold_usd": 0.0, "bought_qty": 0.0, "sold_qty": 0.0,
-                                 "commission_usd": 0.0})
+                                 "commission_usd": 0.0, "orders": set()})
         p["fills"] += 1
+        # DISTINCT ORDERS, not fills. One order can fill in many pieces, so
+        # "fills / 2 = round trips" overstates activity by however much
+        # partial filling is happening - and that arithmetic was used to
+        # claim three quarters of executions had gone unrecorded. An order
+        # is the thing a bot places and the thing a ledger row represents.
+        oid = f.get("order_id")
+        if oid:
+            p["orders"].add(oid)
+            all_orders.add(oid)
         p["commission_usd"] += comm
         fees += comm
         if side == "BUY":
@@ -1603,10 +1613,16 @@ def summarise_fills(fills: list) -> dict:
         p["qty_left_over"] = round(p["bought_qty"] - p["sold_qty"], 10)
         for k in ("bought_usd", "sold_usd", "commission_usd"):
             p[k] = round(p[k], 2)
+        # The set is for counting, not for serialising.
+        p["orders"] = len(p.pop("orders", ()) or ())
         rows.append(p)
     rows.sort(key=lambda r: r["net_usd"])
     return {
         "fills": len(fills),
+        # The honest denominator for "how much trading happened". A single
+        # order can fill in many pieces; counting fills and halving them
+        # invents activity that never occurred.
+        "orders": len(all_orders),
         "products": rows,
         "bought_usd": round(buy_usd, 2),
         "sold_usd": round(sell_usd, 2),
