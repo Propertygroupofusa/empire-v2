@@ -258,5 +258,27 @@ ok("and the prediction differs by 100x, which is the silent half",
    "materialized would compare a percent move to a fraction target and "
    "always say yes")
 
+
+print("\nit cannot stall or crash the live loop")
+ok("a wall-clock budget exists on the telemetry pass",
+   "TELEMETRY_BUDGET_SECONDS" in GRID,
+   "3 reads x 6 coins x 15s = 270s against a 180s lease window")
+ok("the budget is checked BEFORE each coin, not after",
+   GRID.index("if deadline is not None and time.time() >= deadline")
+   < GRID.index("candles = await signals.fetch_candles_with_volume"))
+ok("resolution takes the same deadline", "deadline=_deadline" in GRID)
+ok("and stops mid-pass rather than running over",
+   "deadline is not None and time.time() >= deadline" in SRC and "break" in SRC)
+ok("the budget is comfortably inside the lease window",
+   float(os.getenv("GRID_TELEMETRY_BUDGET_SECONDS", "25")) < 180)
+ok("every telemetry builder in the status payload is wrapped",
+   GRID.count("await _never_fails(") == 3,
+   "a None reaching round() used to propagate out of get_grid_fleet_status")
+ok("the wrapper returns a shape callers can read, not a raise",
+   '"available": False' in GRID.split("async def _never_fails")[1][:700])
+ok("a failed builder is logged at WARNING, not swallowed",
+   "log.warning" in GRID.split("async def _never_fails")[1][:700])
+ok("_latest survives an empty list", S._latest([]) == {})
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

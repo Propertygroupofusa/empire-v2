@@ -5585,10 +5585,12 @@ async def run_grid_branches_cycle():
         # whose horizons have come due. The point is to find out whether a
         # high score means anything BEFORE it is allowed to mean anything.
         try:
-            await _score_short_term_opportunities(session, branches)
-            await signals.resolve(
-                session,
-                lambda pid: _mid_price(session, pid))
+            _deadline = time.time() + TELEMETRY_BUDGET_SECONDS
+            await _score_short_term_opportunities(session, branches, _deadline)
+            if time.time() < _deadline:
+                await signals.resolve(
+                    session, lambda pid: _mid_price(session, pid),
+                    deadline=_deadline)
         except Exception as e:
             log.debug(f"[SIGNAL] scoring pass skipped: {type(e).__name__}: {e}")
 
@@ -5878,14 +5880,14 @@ async def get_grid_status() -> dict:
         # The theoretical figure above is step - (fees + adverse selection).
         # This is the same question answered from real fills, so the page can
         # stop presenting an estimate in the voice of a measurement.
-        "realized_edge": await get_realized_edge(),
+        "realized_edge": await _never_fails(get_realized_edge, "realized_edge"),
         # The ledger of trades that did NOT happen: what price did after each
         # cancelled post-only order. The skip COUNT above says what this mode
         # costs; this says whether that cost bought anything.
-        "maker_expiry_drift": await get_maker_expiry_drift(),
+        "maker_expiry_drift": await _never_fails(get_maker_expiry_drift, "maker_expiry_drift"),
         # Short-horizon opportunity scoring, and whether it has predicted
         # anything yet. Observation only - see opportunity_signals.
-        "short_term_signals": await signals.summary(),
+        "short_term_signals": await _never_fails(signals.summary, "short_term_signals"),
         "floor_priced_against": ("maker (the market fallback is removed)"
                                  if _maker_only and _cached_real_maker_fee_rate is not None
                                  else "taker (an unfilled maker order still becomes a market order)"),
@@ -6033,7 +6035,23 @@ async def _mid_price(session, product_id: str):
         return None
 
 
-async def _score_short_term_opportunities(session, branches):
+# Wall-clock ceiling for the whole telemetry pass, and it is load-bearing.
+#
+# Scoring costs three network reads per coin (candles, book, hourly swing)
+# and resolution costs one per unresolved product. Each carries a 15s
+# timeout. Six coins is 18 reads = up to 270s, plus up to 120s of resolution,
+# against a GRID_LEASE_STALE_SECONDS of 180 - so one bad-network cycle could
+# hold the loop past its own lease while another process decided the owner
+# had died.
+#
+# Nothing here is urgent. Any coin not scored this cycle is scored on the
+# next one ~37s later, and any horizon not resolved stays pending. So the
+# pass simply stops when the budget is spent. A partial pass is correct; a
+# stalled trading loop is not.
+TELEMETRY_BUDGET_SECONDS = float(os.getenv("GRID_TELEMETRY_BUDGET_SECONDS", "25"))
+
+
+async def _score_short_term_opportunities(session, branches, deadline=None):
     """Score each branch's coin once per cycle and write the prediction down.
 
     The ECONOMICS come from crypto_nine_coin_scanner.evaluate_grid_step - the
@@ -6050,6 +6068,9 @@ async def _score_short_term_opportunities(session, branches):
     import crypto_nine_coin_scanner as _scan
     fee_rt = (await worst_case_leg_fee_rate()) * 2
     for branch in branches:
+        if deadline is not None and time.time() >= deadline:
+            log.debug("[SIGNAL] budget spent; remaining coins score next cycle")
+            return
         pid = getattr(branch, "product_id", None)
         try:
             candles = await signals.fetch_candles_with_volume(session, pid)
@@ -6104,6 +6125,25 @@ async def _score_short_term_opportunities(session, branches):
         except Exception as e:
             log.debug(f"[SIGNAL] {pid or '?'} not scored: "
                       f"{type(e).__name__}: {e}")
+
+
+
+async def _never_fails(fn, label: str) -> dict:
+    """Run a telemetry builder, or report why it could not run.
+
+    Every one of these had its DB read inside a try and its arithmetic
+    outside it, so a None reaching a round() or an empty sequence reaching a
+    max() would propagate out of get_grid_fleet_status() and take down the
+    whole payload - the dashboard, the runner panel and the watch - over a
+    diagnostic nobody trades on.
+
+    Telemetry may be absent. It may not be load-bearing.
+    """
+    try:
+        return await fn()
+    except Exception as e:
+        log.warning(f"[GRID] {label} unavailable this cycle: {type(e).__name__}: {e}")
+        return {"available": False, "error": f"{type(e).__name__}: {e}"}
 
 
 async def close_all_grid_slices() -> dict:

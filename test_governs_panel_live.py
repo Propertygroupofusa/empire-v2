@@ -134,8 +134,14 @@ print("\ntheoretical and realized are separated, not blended")
 BOT_FN = BOT.split("def _edge_cohort")[1].split("\nasync def ")[0]
 ok("the backend measures realized edge from the closed book",
    "async def get_realized_edge" in BOT)
+# Served through _never_fails: the builder's DB read was guarded but its
+# arithmetic was not, and a raise there propagated out of
+# get_grid_fleet_status() and took the whole payload - dashboard, runner
+# panel and watch - down with it, over a diagnostic nobody trades on.
 ok("it is served in the grid-status payload",
-   '"realized_edge": await get_realized_edge()' in BOT)
+   '"realized_edge": await _never_fails(get_realized_edge' in BOT)
+ok("and it is served through the guard, so telemetry cannot break the payload",
+   "async def _never_fails" in BOT and BOT.count("await _never_fails(") == 3)
 ok("gross and net share ONE denominator (notional-weighted)",
    'gross / notional' in BOT_FN and 'net / notional' in BOT_FN,
    "an unweighted mean of percentages beside a weighted total yields an "

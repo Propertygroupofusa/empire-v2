@@ -70,6 +70,7 @@ UNITS = "percent"   # see the module docstring
 
 import logging
 import os
+import time
 from datetime import datetime, timedelta
 
 from sqlalchemy import select
@@ -334,7 +335,7 @@ async def record(product_id: str, bot_name: str, price: float, scored: dict):
                   f"{type(e).__name__}: {e}")
 
 
-async def resolve(session, price_for, max_rows: int = 8):
+async def resolve(session, price_for, max_rows: int = 8, deadline=None):
     """Mark the predictions whose horizons have come due. Never raises.
 
     `price_for` is an async callable taking a product_id and returning the
@@ -356,6 +357,12 @@ async def resolve(session, price_for, max_rows: int = 8):
                 return 0
             prices, done = {}, 0
             for row in rows:
+                # Each unresolved product costs one book read at up to 15s.
+                # Stopping mid-pass is free: an unfilled horizon stays
+                # pending and is picked up next cycle. Holding the loop past
+                # its lease is not.
+                if deadline is not None and time.time() >= deadline:
+                    break
                 age_min = ((now - row.scored_at).total_seconds() / 60.0) if row.scored_at else 0
                 due = [h for h in HORIZONS_MIN
                        if age_min >= h and getattr(row, f"actual_move_{h}m_pct") is None]
@@ -447,6 +454,8 @@ def _funnel(rows) -> dict:
 def _latest(rows) -> dict:
     """Newest reading for one coin: how much movement there is, how much of
     it is expected to be capturable, and how far that lands from paying."""
+    if not rows:
+        return {}
     r = max(rows, key=lambda x: x.scored_at or datetime.min)
     return {
         "scored_at": r.scored_at.isoformat() + "Z" if r.scored_at else None,
@@ -484,6 +493,10 @@ async def summary(min_rows: int = 30) -> dict:
         return {"available": False, "scored": 0,
                 "note": "no opportunity has been scored yet"}
 
+    # From here down is arithmetic over rows that are already in memory, but
+    # it is still wrapped by the caller (_never_fails) rather than trusted:
+    # this dict is served in the live status payload, and a diagnostic must
+    # never be able to take the dashboard down with it.
     resolved = [r for r in rows if r.resolved_at is not None]
     coins = sorted({r.product_id for r in rows if r.product_id})
     out = {
