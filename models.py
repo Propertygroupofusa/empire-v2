@@ -1202,6 +1202,47 @@ class ShortTermSignal(Base):
     net_after_costs_pct = Column(Float, nullable=True)
     resolved_at = Column(DateTime, nullable=True, index=True)
 
+    # --- THE HORIZON GATE. Observation only; nothing here can place an order.
+    #
+    # NOT "shadow mode". crypto_grid_bot already imports a SHADOW_MODE_ENABLED
+    # trade observer from stage2.orchestration, which logs REAL orders for
+    # learning validation. These columns log a gate that never places one.
+    # The first draft of this called itself shadow_*, which put two unrelated
+    # meanings of the word in one file; the name is horizon_gate for that
+    # reason and should stay that way.
+    #
+    # The live gate above compares a THIRTY-MINUTE predicted move against the
+    # cost of a whole round trip. Those are not the same kind of quantity:
+    # the cost is paid once, whenever the rung fills, and the rung has no
+    # deadline. horizon_study.py measured what that mismatch costs - 10.2% of
+    # entries clear the round trip inside 30 minutes, 49.4% inside six hours.
+    #
+    # So this column set runs the IDENTICAL arithmetic over a six-hour
+    # horizon and records what it would have said. Nothing else moves: the
+    # same 1.37% assumed cost including the full 0.67% adverse-selection
+    # term, the same 0.5 haircut, the same spread, the same margin. One
+    # variable, which is the only way the answer means anything.
+    #
+    # It is written beside the live decision rather than replacing it because
+    # a gate that passes more is not automatically better. The column that
+    # decides is horizon_gate_paid, not horizon_gate_would_trade: a loosened threshold
+    # passes more and pays WORSE, and if that is what this turns out to be,
+    # these columns are the evidence that kills it.
+    horizon_gate_move_pct = Column(Float, nullable=True)
+    # The same six-hour question answered from trailing RANGE rather than
+    # direction, kept for the same reason expected_move_atr_pct is kept: the
+    # study that motivated this whole column set used the range estimator,
+    # and quoting its pass rates for a gate running a different estimator
+    # would be presenting one measurement as evidence for another.
+    horizon_gate_move_range_pct = Column(Float, nullable=True)
+    horizon_gate_edge_pct = Column(Float, nullable=True)
+    horizon_gate_would_trade = Column(Boolean, index=True, nullable=True)
+    horizon_gate_mfe_pct = Column(Float, nullable=True)   # best over SIX hours
+    horizon_gate_mae_pct = Column(Float, nullable=True)
+    horizon_gate_net_pct = Column(Float, nullable=True)
+    horizon_gate_paid = Column(Boolean, nullable=True)           # MFE(6h) cleared the round trip
+    horizon_gate_resolved_at = Column(DateTime, nullable=True, index=True)
+
 
 class RegimeCrossing(Base):
     """The moment a coin crossed between "not worth trading" and "viable".

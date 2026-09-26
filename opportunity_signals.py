@@ -127,6 +127,18 @@ GRID_STOP_PCT_LABEL = float(os.getenv("GRID_STOP_LOSS_PCT", "0.08")) * 100
 # does not carry it, and interpolating one would be inventing a reading.
 HORIZONS_MIN = (5, 15, 30)
 
+# THE HORIZON GATE'S WINDOW. Six hours, in minutes, because everything the ledger
+# above measures is bounded by HORIZONS_MIN[-1] and that bound is the thing
+# under test. horizon_study.py measured the gap it creates: 10.2% of entries
+# clear a 1.37% round trip inside thirty minutes, 49.4% inside six hours.
+#
+# Six rather than twenty-four deliberately. At 24h the same simulation passed
+# 85% of scans, and a gate that passes almost everything has stopped being a
+# gate - it discriminates no better than no gate at all. Six hours still
+# refused BTC on 95% of scans while passing NEAR on 92%, which is the
+# behaviour of something that is still deciding.
+HORIZON_GATE_MIN = int(os.getenv("GRID_HORIZON_GATE_MINUTES", "360"))
+
 # The adverse-selection figure the net-edge gate prices with. NOT used for
 # arithmetic here - the gate owns that, and a second copy would drift. It is
 # kept as a LABEL, so every report can say plainly that the cost side still
@@ -231,6 +243,23 @@ def momentum(closes):
         out[f"ret_{mins}m_pct"] = (_pct(closes[-1], closes[-1 - bars])
                                    if len(closes) > bars else None)
     return out
+
+
+def trailing_excursion_pct(highs, lows, bars: int):
+    """High-to-low range over the last `bars` candles, as a percent of the low.
+
+    Looks BACKWARD only. A predictor built from bars after the entry is not a
+    predictor, and this is the function most likely to be quietly handed a
+    forward slice by a later edit, so it takes a bar count and slices from
+    the end rather than taking indices.
+    """
+    if not highs or not lows or bars < 1:
+        return None
+    h, l = highs[-bars:], lows[-bars:]
+    if not h or not l:
+        return None
+    hi, lo = max(h), min(l)
+    return ((hi / lo) - 1.0) * 100.0 if lo else None
 
 
 def volume_ratio(volumes, recent: int = 3, baseline: int = 24):
@@ -390,6 +419,33 @@ def score(*, closes, highs, lows, volumes, spread_pct, bid_depth_usd,
     cost = (round(expected_move - net_edge, 4)
             if expected_move is not None and net_edge is not None else None)
 
+    # THE HORIZON GATE. One variable moved, and it is not the bar.
+    #
+    # The live gate above asks whether a THIRTY-MINUTE predicted move clears
+    # the cost of a whole round trip. The cost is paid once, whenever the
+    # rung fills, and a rung has no deadline - so the two sides of that
+    # comparison are not the same kind of quantity. This runs the identical
+    # arithmetic over six hours instead.
+    #
+    # Everything else is held fixed ON PURPOSE: the same cost, including the
+    # full 0.67% adverse-selection assumption that horizon_study.py has since
+    # measured at roughly zero; the same 0.5 haircut; the same "> 0" rule.
+    # The cost does not get a longer horizon because a round trip does not
+    # cost more for being held longer, and moving a second variable would
+    # make any result unattributable.
+    #
+    # Nothing downstream reads horizon_gate_would_trade. It exists to be marked
+    # against horizon_gate_paid, and the way it earns promotion is by passing MORE
+    # and paying BETTER. A lowered threshold passes more and pays worse; if
+    # that is what this is, these columns are what will show it.
+    _bars = max(1, HORIZON_GATE_MIN // 5)
+    _hg_mom = _pct(closes[-1], closes[-1 - _bars]) if len(closes) > _bars else None
+    hg_move = round(abs(_hg_mom) * 0.5, 4) if _hg_mom is not None else None
+    _hg_range = trailing_excursion_pct(highs, lows, _bars)
+    hg_move_range = round(_hg_range * 0.5, 4) if _hg_range is not None else None
+    hg_edge = (round(hg_move - cost, 4)
+                   if hg_move is not None and cost is not None else None)
+
     return {
         **parts,
         "score_total": total,
@@ -412,6 +468,11 @@ def score(*, closes, highs, lows, volumes, spread_pct, bid_depth_usd,
         "cost_assumed_pct": cost,
         # The arithmetic, alone. Never the score.
         "would_trade": bool(net_edge is not None and net_edge > 0),
+        "horizon_gate_move_pct": hg_move,
+        "horizon_gate_move_range_pct": hg_move_range,
+        "horizon_gate_edge_pct": hg_edge,
+        # Same rule as would_trade, one line above. Same ">", same cost.
+        "horizon_gate_would_trade": bool(hg_edge is not None and hg_edge > 0),
         # WHY not, in the gate's own words and in one word.
         "reject_reason": gate_reason,
         "reject_category": categorise_reject(
@@ -510,7 +571,9 @@ async def record(product_id: str, bot_name: str, price: float, scored: dict):
                     "bid_depth_usd", "ask_depth_usd", "expected_move_pct",
                     "expected_move_atr_pct",
                     "expected_net_edge_pct", "cost_assumed_pct", "would_trade",
-                    "reject_category", "reject_reason")}))
+                    "reject_category", "reject_reason",
+                    "horizon_gate_move_pct", "horizon_gate_move_range_pct",
+                    "horizon_gate_edge_pct", "horizon_gate_would_trade")}))
             await db.commit()
             return True
     except Exception as e:
@@ -619,6 +682,138 @@ async def resolve(session, candles_for, max_rows: int = 8, deadline=None):
     except Exception as e:
         log.debug(f"[SIGNAL] resolve pass failed (ignored): {type(e).__name__}: {e}")
         return 0
+
+
+async def resolve_horizon_gate(candles_for, max_rows: int = 8, deadline=None):
+    """Mark the HORIZON-GATE predictions whose six-hour horizon has come due.
+
+    Separate from resolve() because the two horizons come due at different
+    times: a row is finished for the live ledger at 30 minutes and still has
+    five and a half hours to run here. Folding them together would either
+    hold the live row open for six hours - delaying every number the panel
+    already shows - or close the horizon-gate row early, which is the exact
+    measurement error this whole column set exists to correct.
+
+    Reads candle HIGHS AND LOWS with ordering, same as resolve(), so a
+    position stopped out before its peak is not credited with the peak.
+
+    Never raises. Returns the number of rows marked.
+    """
+    if deadline is not None and time.time() >= deadline:
+        return 0
+    try:
+        now = datetime.utcnow()
+        cutoff = now - timedelta(minutes=HORIZON_GATE_MIN)
+        async with get_session_factory()() as db:
+            rows = (await db.execute(
+                select(ShortTermSignal)
+                .where(ShortTermSignal.horizon_gate_resolved_at.is_(None))
+                .where(ShortTermSignal.scored_at <= cutoff)
+                .where(ShortTermSignal.horizon_gate_move_pct.isnot(None))
+                .order_by(ShortTermSignal.scored_at.asc())
+                .limit(max_rows))).scalars().all()
+            if not rows:
+                return 0
+            series, done = {}, 0
+            for row in rows:
+                if deadline is not None and time.time() >= deadline:
+                    break
+                if not row.scored_at or not row.price_at_score:
+                    continue
+                if row.product_id not in series:
+                    try:
+                        series[row.product_id] = await candles_for(row.product_id)
+                    except Exception:
+                        series[row.product_id] = None
+                c = series.get(row.product_id)
+                if not c:
+                    continue
+                times, _closes, highs, lows, _v = c
+                t0 = int(row.scored_at.replace(tzinfo=timezone.utc).timestamp())
+                exc = window_excursion(times, highs, lows, t0, row.price_at_score,
+                                       until_epoch=t0 + HORIZON_GATE_MIN * 60)
+                if exc is None:
+                    continue
+                mfe, _mfe_at, mae, _mae_at = exc
+                row.horizon_gate_mfe_pct, row.horizon_gate_mae_pct = mfe, mae
+                if row.cost_assumed_pct is not None:
+                    row.horizon_gate_net_pct = round(mfe - row.cost_assumed_pct, 4)
+                    # THE COLUMN THAT DECIDES. Not "did it pass" - passing is
+                    # free. Whether the move it passed on actually covered a
+                    # round trip, priced against the SAME assumed cost the
+                    # live gate refused it with.
+                    row.horizon_gate_paid = bool(mfe >= row.cost_assumed_pct)
+                row.horizon_gate_resolved_at = now
+                done += 1
+            await db.commit()
+            return done
+    except Exception as e:
+        log.debug(f"[SIGNAL] shadow resolve pass failed (ignored): "
+                  f"{type(e).__name__}: {e}")
+        return 0
+
+
+def horizon_gate_summary(rows) -> dict:
+    """Did the longer horizon pass MORE, and did it pay BETTER?
+
+    Both halves are required. Passing more is what any loosened threshold
+    does; paying better is the thing a loosened threshold cannot do. A
+    verdict is withheld under MIN_RESOLVED, on the same rule the regime
+    monitor already uses - an alert is worth answering only once its hit
+    rate is known.
+    """
+    MIN_RESOLVED = 10
+    live_pass = sum(1 for r in rows if r.would_trade)
+    horizon_pass = sum(1 for r in rows if r.horizon_gate_would_trade)
+    scored = len(rows)
+
+    # Paid rates are computed over RESOLVED rows only, and the live and
+    # shadow denominators are different populations, so both are named.
+    live_res = [r for r in rows if r.resolved_at is not None
+                and r.net_after_costs_pct is not None]
+    live_hit = [r for r in live_res if r.would_trade]
+    sh_res = [r for r in rows if r.horizon_gate_resolved_at is not None
+              and r.horizon_gate_paid is not None]
+    sh_hit = [r for r in sh_res if r.horizon_gate_would_trade]
+
+    def _rate(sub, attr):
+        return (round(100.0 * sum(1 for r in sub if getattr(r, attr)) / len(sub), 1)
+                if sub else None)
+
+    out = {
+        "horizon_minutes": HORIZON_GATE_MIN,
+        "scored": scored,
+        "live_pass": live_pass,
+        "horizon_pass": horizon_pass,
+        "live_pass_pct": round(100.0 * live_pass / scored, 1) if scored else None,
+        "horizon_pass_pct": round(100.0 * horizon_pass / scored, 1) if scored else None,
+        "horizon_resolved": len(sh_res),
+        "horizon_passed_and_resolved": len(sh_hit),
+        "horizon_paid_pct": _rate(sh_hit, "horizon_gate_paid"),
+        "live_paid_pct": (round(100.0 * sum(1 for r in live_hit
+                                            if (r.net_after_costs_pct or 0) > 0) / len(live_hit), 1)
+                          if live_hit else None),
+        "cost_held_fixed": True,
+        "basis": (f"Same cost, same 0.5 haircut, same '>0' rule as the live gate. "
+                  f"ONLY the prediction horizon differs: {HORIZON_GATE_MIN}m against "
+                  f"{HORIZONS_MIN[-1]}m. Observation only - nothing reads horizon_gate_would_trade."),
+    }
+    if len(sh_hit) < MIN_RESOLVED:
+        out["verdict"] = (f"not enough data ({len(sh_hit)}/{MIN_RESOLVED} horizon-gate crossings "
+                          f"resolved) - passing more proves nothing until the paid rate is known")
+    elif out["horizon_paid_pct"] is None:
+        out["verdict"] = "resolved rows carry no paid flag - cost was unpriceable"
+    elif out["horizon_paid_pct"] >= 50.0:
+        out["verdict"] = (f"the longer horizon passes {out['horizon_pass_pct']}% of scans against "
+                          f"{out['live_pass_pct']}%, and {out['horizon_paid_pct']}% of what it "
+                          f"passed covered a round trip. Passing more AND paying - that is a "
+                          f"units fix, not a looser bar.")
+    else:
+        out["verdict"] = (f"the longer horizon passes {out['horizon_pass_pct']}% of scans but only "
+                          f"{out['horizon_paid_pct']}% of what it passed covered a round trip. "
+                          f"Passing more and paying worse is what a lowered threshold looks like. "
+                          f"Do not promote it.")
+    return out
 
 
 def _funnel(rows) -> dict:
@@ -1132,6 +1327,11 @@ async def summary(min_rows: int = 30) -> dict:
         "window": (f"most recent {SUMMARY_MAX_ROWS} scores"
                    if len(rows) >= SUMMARY_MAX_ROWS else "all scores"),
         "resolved": len(resolved),
+        # The same gate, over a horizon that matches how long the position is
+        # actually held. Observation only, and reported here rather than in a
+        # panel of its own so it can never be read apart from the live
+        # numbers it is being compared against.
+        "horizon_gate": horizon_gate_summary(rows),
         # Stated on every report. The cost side still carries an ESTIMATE
         # that no completed trade on this configuration has checked, so
         # net_after_costs and net_expectancy are assumption-dependent and

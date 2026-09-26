@@ -5594,14 +5594,27 @@ async def run_grid_branches_cycle():
             _deadline = time.time() + TELEMETRY_BUDGET_SECONDS
             await _score_short_term_opportunities(session, branches, _deadline)
             if time.time() < _deadline:
-                await signals.resolve(
-                    session, lambda pid: signals.fetch_candles_full(session, pid),
-                    deadline=_deadline)
+                # ONE fetch per coin per pass, shared by all three resolvers.
+                # They were each calling fetch_candles_full independently, so
+                # a coin appearing in two of them was fetched twice for the
+                # identical 300 bars - against a 25-second budget where a
+                # single fetch is allowed 15. The memo is per-pass, so the
+                # candles are never stale by more than one cycle.
+                _candles = {}
+
+                async def _candles_for(pid):
+                    if pid not in _candles:
+                        _candles[pid] = await signals.fetch_candles_full(session, pid)
+                    return _candles[pid]
+
+                await signals.resolve(session, _candles_for, deadline=_deadline)
                 # Candles, not mid samples: wicks count, and the ORDER of
                 # the two extremes decides whether an MFE was collectable.
-                await signals.resolve_crossings(
-                    lambda pid: signals.fetch_candles_full(session, pid),
-                    deadline=_deadline)
+                await signals.resolve_crossings(_candles_for, deadline=_deadline)
+                # The six-hour horizon-gate window. Comes due five and a half
+                # hours after the live ledger has finished with the same row,
+                # which is why it is a separate pass and not a longer one.
+                await signals.resolve_horizon_gate(_candles_for, deadline=_deadline)
         except Exception as e:
             log.debug(f"[SIGNAL] scoring pass skipped: {type(e).__name__}: {e}")
 

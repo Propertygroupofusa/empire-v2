@@ -3280,6 +3280,33 @@ function renderGridOpportunityPanel(d) {
                     `${sig.cost_basis}</div>`;
         }
 
+        // THE HORIZON GATE. Sits directly under the funnel because it is
+        // the same funnel's gate, re-run over the window the position is
+        // actually held for. Observation only - nothing acts on it.
+        const hg = sig.horizon_gate || {};
+        if (hg.scored) {
+            html += `<div style="margin-top:10px; padding-top:8px; border-top:1px solid var(--rule, rgba(128,128,128,.25));">`;
+            html += `<div style="font-weight:600; margin-bottom:4px;">The same gate, over ${(hg.horizon_minutes || 0) / 60}h instead of 30m</div>`;
+            html += `<div>Live gate passed <strong>${n(hg.live_pass)}</strong> of ${n(hg.scored)} ` +
+                    `(${n(hg.live_pass_pct)}%). Over ${(hg.horizon_minutes || 0) / 60}h the same arithmetic ` +
+                    `passes <strong>${n(hg.horizon_pass)}</strong> (${n(hg.horizon_pass_pct)}%).</div>`;
+            // Passing more is what a lowered threshold does too. This is the
+            // line that separates the two, so it is never omitted.
+            html += `<div style="margin-top:4px;">Of those, <strong>${n(hg.horizon_passed_and_resolved)}</strong> ` +
+                    `have resolved and <strong>${hg.horizon_paid_pct == null ? '&mdash;' : hg.horizon_paid_pct + '%'}</strong> ` +
+                    `covered a round trip.</div>`;
+            if (hg.verdict) {
+                const bad = /Do not promote/.test(hg.verdict);
+                html += `<div style="margin-top:6px; padding:6px 8px; border-left:3px solid ` +
+                        `${bad ? '#ef4444' : 'var(--rule, rgba(128,128,128,.4))'}; color:var(--text-dim);">` +
+                        `<em>${hg.verdict}</em></div>`;
+            }
+            if (hg.basis) {
+                html += `<div style="margin-top:5px; color:var(--text-dim); font-size:.92em;">${hg.basis}</div>`;
+            }
+            html += `</div>`;
+        }
+
         // HORIZON. Everything above this line was measured inside a
         // thirty-minute window, because that is all the telemetry budget can
         // afford to look at. This block is the same question asked over
