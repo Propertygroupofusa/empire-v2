@@ -251,5 +251,36 @@ ok("POSITIVE is defined on screen as 'cancelling helped'",
 ok("the drift block is served in the payload", '"maker_expiry_drift"' in BOT)
 ok("the card renders all four horizons", "['1m','3m','5m','10m']" in CARD_CODE)
 
+
+print("\nthe opportunity pipeline reaches the dashboard, not just the payload")
+PANEL2 = code(HTML.split("function renderGridOpportunityPanel")[1].split("\nfunction ")[0])
+ok("the panel exists and is mounted",
+   'id="grid-opportunity-panel"' in HTML and "renderGridOpportunityPanel(data)" in HTML,
+   "a payload block nothing renders is telemetry nobody reads")
+ok("it renders the whole funnel, not a summary of it",
+   all(f"p.{k}" in PANEL2 for k in
+       ("scans", "qualified", "attempted", "filled", "expired", "completed")))
+ok("a missing source shows a dash, never a zero",
+   "'&mdash;' : v" in PANEL2,
+   "'no data' and 'none happened' are different answers")
+ok("the bottleneck is named on screen, not left to be inferred",
+   "p.bottleneck" in PANEL2)
+ok("the rejection breakdown is shown as shares",
+   "p.rejected_by" in PANEL2)
+ok("attempted is labelled as spanning both configs",
+   "attempted_basis" in PANEL2 and "both configs" in PANEL2,
+   "fill counters predate the config epoch; scans and completed do not")
+ok("the regime block answers 'what changed', with the margin stated",
+   "rg.viable_now" in PANEL2 and "margin_required_pct" in PANEL2)
+ok("closest_to_viable turns 'none' into a distance",
+   "closest_to_viable" in PANEL2 and "short_by_pct" in PANEL2)
+ok("the actionability verdict is surfaced",
+   "alert_actionability" in PANEL2)
+ok("and the ASSUMED cost basis travels with the numbers",
+   "cost_basis" in PANEL2,
+   "adverse selection is still an estimate no completed cycle has checked")
+ok("the panel cannot break the page",
+   "catch (e)" in PANEL2 and "could not render" in PANEL2)
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

@@ -941,6 +941,7 @@
     <div id="grid-governs-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
     <div id="grid-fee-rate-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-maker-orders-toggle" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
+    <div id="grid-opportunity-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
     <div id="grid-maker-only-toggle" class="maker-only-card"></div>
     <div class="panel" id="grid-panel">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:8px;">
@@ -2328,6 +2329,7 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
     renderGridGovernsPanel(data);
     renderGridFeeRateBadge(data);
     renderGridMakerOrdersToggle(data);
+    renderGridOpportunityPanel(data);
     renderGridMakerOnlyToggle(data);
 
     document.getElementById('grid-total-allocated').textContent =
@@ -3195,6 +3197,96 @@ async function toggleGridMakerOrders(enable) {
 // down honestly, and what makes the live 2.00% step profitable instead of
 // 0.17% short. The panel prints the floor the server actually computed
 // rather than restating the theory, so if the two ever disagree it shows.
+// The opportunity pipeline, end to end. Everything else on this page reports
+// what the fleet HAS - branches, capital, fees. This reports what it is
+// FINDING, and where that search stops.
+//
+// The funnel is the point. "Zero trades" is not a diagnosis, and six
+// scattered numbers do not become one either. Scans -> qualified ->
+// attempted -> filled -> completed, with the stage that is actually losing
+// opportunities named rather than left to be inferred.
+//
+// Nothing here can trade. The scorer is observation-only and the score never
+// overrides the net-edge gate; this panel is a window onto a measurement.
+function renderGridOpportunityPanel(d) {
+    const el = document.getElementById('grid-opportunity-panel');
+    if (!el || d == null) return;
+    try {
+        const p = d.pipeline || {};
+        const rg = d.regime || {};
+        const sig = d.short_term_signals || {};
+        // A missing source reads as a dash, never a zero. "No data" and "none
+        // happened" are different answers and this page must not merge them.
+        const n = v => (v === null || v === undefined) ? '&mdash;' : v;
+
+        const stage = (label, value, note) =>
+            `<div style="display:flex; gap:8px; padding:3px 0; align-items:baseline;">` +
+            `<span style="min-width:8em; color:var(--text-dim);">${label}</span>` +
+            `<span><strong>${n(value)}</strong>` +
+            (note ? ` <span style="color:var(--text-dim);">${note}</span>` : '') +
+            `</span></div>`;
+
+        let html = `<div class="panel" style="padding:10px 12px;">`;
+        html += `<div style="font-weight:600; margin-bottom:6px;">What it is finding</div>`;
+
+        html += stage('Scans', p.scans, 'short-term setups scored');
+        html += stage('Qualified', p.qualified, 'cleared the live net-edge gate');
+        html += stage('Attempted', p.attempted,
+                      p.attempted_basis ? '&mdash; all-time, both configs' : '');
+        html += stage('Filled', p.filled, '');
+        html += stage('Expired', p.expired, 'post-only orders cancelled unfilled');
+        html += stage('Completed', p.completed, 'round trips on THIS config');
+
+        if (p.bottleneck) {
+            html += `<div style="margin-top:8px; padding-top:8px; border-top:1px solid var(--rule, rgba(128,128,128,.25));">` +
+                    `<span style="color:var(--text-dim);">Bottleneck:</span> <strong>${p.bottleneck}</strong></div>`;
+        }
+        if (p.rejected_by && Object.keys(p.rejected_by).length) {
+            const total = Object.values(p.rejected_by).reduce((a, b) => a + b, 0);
+            html += `<div style="margin-top:6px; color:var(--text-dim);">Refused by: ` +
+                Object.entries(p.rejected_by).map(([k, v]) =>
+                    `${k} ${(v / total * 100).toFixed(0)}%`).join(' &middot; ') + `</div>`;
+        }
+
+        // REGIME. The only block here that answers "what changed" rather than
+        // "what is true", which is the question that prompts action.
+        html += `<div style="margin-top:10px; padding-top:8px; border-top:1px solid var(--rule, rgba(128,128,128,.25));">`;
+        html += `<div style="font-weight:600; margin-bottom:4px;">Worth trading right now</div>`;
+        if (rg.viable_now && rg.viable_now.length) {
+            html += `<div style="color:#10b981;"><strong>${rg.viable_now.join(', ')}</strong> ` +
+                    `clears cost by more than the ${rg.margin_required_pct}% margin.</div>`;
+        } else if (rg.closest_to_viable) {
+            const c = rg.closest_to_viable;
+            html += `<div>None. Closest is <strong>${c.product_id}</strong>, short by ` +
+                    `<strong>${(c.short_by_pct || 0).toFixed(3)}%</strong> ` +
+                    `(net edge ${(c.net_edge_pct || 0).toFixed(3)}%).</div>`;
+        } else {
+            html += `<div style="color:var(--text-dim);">Nothing scored yet.</div>`;
+        }
+        const act = rg.alert_actionability || {};
+        if (rg.crossings_into_viable) {
+            html += `<div style="margin-top:4px; color:var(--text-dim);">` +
+                    `${rg.crossings_into_viable} crossing(s) recorded, ${rg.crossings_resolved} resolved.` +
+                    (act.verdict ? ` ${act.verdict}` : '') + `</div>`;
+        }
+        if (rg.verdict) {
+            html += `<div style="margin-top:4px; color:var(--text-dim);"><em>${rg.verdict}</em></div>`;
+        }
+        html += `</div>`;
+
+        // The caveat that has to travel with every number above it.
+        if (sig.cost_basis) {
+            html += `<div style="margin-top:8px; color:var(--text-dim); font-size:.92em;">` +
+                    `${sig.cost_basis}</div>`;
+        }
+        html += `</div>`;
+        el.innerHTML = html;
+    } catch (e) {
+        el.innerHTML = `<div class="panel" style="padding:10px 12px; color:var(--text-dim);">` +
+            `What it is finding: could not render (${e.message})</div>`;
+    }
+}
+
 function renderGridMakerOnlyToggle(data) {
     const el = document.getElementById('grid-maker-only-toggle');
     if (!el || data == null) return;
