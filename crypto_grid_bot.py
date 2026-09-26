@@ -6108,11 +6108,22 @@ async def _score_short_term_opportunities(session, branches, deadline=None):
 
             # Ask the LIVE gate about a step the size of the move we expect to
             # capture. Not a re-implementation of it - the function itself.
+            #
+            # The step asked about is the MOMENTUM estimate, not ATR: a grid
+            # needs to know whether a move continues, which is a question
+            # about direction, and ATR is undirected. score() computes the
+            # same number and records the ATR alternative beside it, so the
+            # ledger can say later which one was closer. Computed here too,
+            # from the same closes, because the gate has to be asked before
+            # score() runs.
+            _r15 = signals.momentum(closes).get("ret_15m_pct")
+            _step_pct = abs(_r15) * 0.5 if _r15 is not None else (
+                (atr_frac or 0) * 100.0 * 0.5)
             economics = None
-            if atr_frac:
+            if _step_pct > 0:
                 swing = await engine.get_average_hourly_swing_pct(session, pid)
                 _ok, _why, detail = _scan.evaluate_grid_step(
-                    pid, atr_frac * 0.5, swing, best_bid=bid, best_ask=ask,
+                    pid, _step_pct / 100.0, swing, best_bid=bid, best_ask=ask,
                     bid_depth_usd=bid_depth, ask_depth_usd=ask_depth,
                     slice_usd=slice_usd, fee_round_trip=fee_rt)
                 detail = dict(detail or {})

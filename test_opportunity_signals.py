@@ -69,6 +69,14 @@ ok("no execution path reads a score",
 
 
 print("\nwould_trade is arithmetic, never the score")
+# Closes whose last 3 bars (15 minutes) rise exactly 2.00%, so the momentum
+# estimator predicts |2.00| * 0.5 = 1.00%. `hot` below is deliberately FLAT -
+# it exercises the other signals - so anything asserting a prediction has to
+# supply movement explicitly. That is the estimator change made visible: no
+# momentum now means no predicted move, where ATR would have invented one.
+MOVER = [100.0] * 37 + [100.0, 101.0, 102.0]
+
+
 def econ(net_edge, slice_usd=6.92):
     """Stand in for crypto_nine_coin_scanner.evaluate_grid_step's detail."""
     return {"net_edge_pct": net_edge, "slice_usd": slice_usd}
@@ -101,8 +109,8 @@ ok("cost is BACKED OUT of the gate's edge, never re-derived here",
 ok("the adverse constant is a LABEL, not arithmetic",
    "ADVERSE_PCT_ASSUMED" in SRC and "ADVERSE_PCT_ASSUMED +" not in SRC
    and "+ ADVERSE_PCT" not in SRC)
-ok("expected move is HALF of ATR, not the whole range",
-   r["expected_move_pct"] == 1.0 and r["expected_move_pct"] < hot["atr_pct"],
+ok("the ATR estimate is HALF of ATR, not the whole range",
+   r["expected_move_atr_pct"] == 1.0 and r["expected_move_atr_pct"] < hot["atr_pct"],
    "a real order captures part of a swing, not its extremes")
 thin = dict(hot, atr_pct=0.5)
 r2 = S.score(**thin)
@@ -211,7 +219,7 @@ async def _runtime():
     # Scored at the LIVE cost, not the cheap fixture above: gate edge -0.39
     # on a 1.0% expected move backs out to the real 1.39% round trip.
     await S.record("BONK-USD", "crypto_grid_3", 100.0,
-                   S.score(**dict(hot, economics=econ(-0.39))))
+                   S.score(**dict(hot, closes=MOVER, economics=econ(-0.39))))
     async with get_session_factory()() as db:
         rows = (await db.execute(select(models.ShortTermSignal))).scalars().all()
         rows[-1].scored_at = dt.datetime.utcnow() - dt.timedelta(minutes=31)
@@ -240,23 +248,61 @@ ok("the boundary converts ATR from fraction to percent",
 ok("and converts the gate's net edge the same way",
    'detail["net_edge_pct"] * 100.0' in GRIDSRC)
 ok("but hands the gate a FRACTION, which is what it speaks",
-   "atr_frac * 0.5, swing" in GRIDSRC,
-   "converting the input too would double-scale the step")
+   "_step_pct / 100.0, swing" in GRIDSRC,
+   "the step is momentum-derived now; the conversion is what matters")
 ok("REGRESSION: the raw fraction is never scored directly",
    "atr_pct=atr_frac" not in GRIDSRC)
 
 # The bug, as arithmetic: a realistic 0.9% ATR arrives as 0.009 from the
 # engine. Scored raw it lands at the bottom of every band and, worse,
 # materialized then compares a percent move against a fraction target.
-raw = S.score(**dict(hot, atr_pct=0.009, economics=econ(0.21)))
-good = S.score(**dict(hot, atr_pct=0.9, economics=econ(0.21)))
+raw = S.score(**dict(hot, closes=MOVER, atr_pct=0.009, economics=econ(0.21)))
+good = S.score(**dict(hot, closes=MOVER, atr_pct=0.9, economics=econ(0.21)))
 ok("a fraction scores volatility at zero; a percent does not",
    raw["score_volatility"] == 0.0 and good["score_volatility"] > 0,
    f"raw={raw['score_volatility']} pct={good['score_volatility']}")
-ok("and the prediction differs by 100x, which is the silent half",
-   abs(good["expected_move_pct"] / raw["expected_move_pct"] - 100) < 1e-6,
+ok("and the ATR prediction differs by 100x, which is the silent half",
+   abs(good["expected_move_atr_pct"] / raw["expected_move_atr_pct"] - 100) < 1e-6,
    "materialized would compare a percent move to a fraction target and "
    "always say yes")
+ok("  while the momentum prediction is unaffected, being price-derived",
+   good["expected_move_pct"] == raw["expected_move_pct"] == 1.0,
+   "one more reason to carry both: they fail differently")
+
+
+
+print("\nmomentum is the primary estimator, ATR is kept to check it")
+# closes rising 0.5/bar: ret_15m over 3 bars off 100+ is about +1.5%
+rising40 = [100 + i * 0.5 for i in range(40)]
+rm = S.score(**dict(hot, closes=rising40, atr_pct=2.0))
+_r15 = S.momentum(rising40)["ret_15m_pct"]
+ok("expected_move comes from |ret_15m| / 2",
+   abs(rm["expected_move_pct"] - abs(_r15) * 0.5) < 1e-4,
+   f"got {rm['expected_move_pct']} from ret_15m {_r15:.3f}")
+ok("and it is labelled as momentum-based", rm["expected_move_basis"] == "momentum_15m")
+ok("the ATR estimate is recorded BESIDE it, not instead of it",
+   rm["expected_move_atr_pct"] == 1.0 and
+   rm["expected_move_atr_pct"] != rm["expected_move_pct"],
+   "one identical realised move scores both, so the ledger decides")
+ok("both carry the SAME 0.5 discount, isolating range-vs-direction",
+   abs(rm["expected_move_pct"] / abs(_r15) - 0.5) < 1e-3
+   and rm["expected_move_atr_pct"] / 2.0 == 0.5,
+   f"momentum {rm['expected_move_pct']} from {_r15:.3f}, atr {rm['expected_move_atr_pct']}")
+flat40 = [100.0] * 40
+rf = S.score(**dict(hot, closes=flat40, atr_pct=2.0))
+ok("no momentum -> a near-zero expected move, not an ATR number",
+   rf["expected_move_pct"] == 0.0)
+ok("  which correctly refuses the trade rather than inventing movement",
+   rf["would_trade"] is False or rf["expected_net_edge_pct"] is not None)
+short = S.score(**dict(hot, closes=[100.0]*3, atr_pct=2.0))
+ok("too few bars for a 15m return falls back to ATR, and says so",
+   short["expected_move_basis"] == "atr_fallback"
+   and short["expected_move_pct"] == short["expected_move_atr_pct"])
+ok("the gate is asked about the MOMENTUM step, not the ATR one",
+   "_step_pct / 100.0, swing" in GRID and "abs(_r15) * 0.5" in GRID)
+ok("and the step is converted back to a fraction for the gate",
+   "_step_pct / 100.0" in GRID,
+   "the gate speaks fractions; this module speaks percent")
 
 
 print("\nit cannot stall or crash the live loop")

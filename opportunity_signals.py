@@ -291,11 +291,27 @@ def score(*, closes, highs, lows, volumes, spread_pct, bid_depth_usd,
     measured = [v for v in parts.values() if v is not None]
     total = round(sum(measured) / len(measured), 1) if measured else None
 
-    # THE PREDICTION. Expected capturable move is deliberately NOT the full
-    # recent range: a real order captures a fraction of a swing, not its
-    # extremes. Half of ATR is the honest starting estimate, and the resolver
-    # exists to find out whether even that is optimistic.
-    expected_move = round(atr_pct * 0.5, 4) if atr_pct is not None else None
+    # THE PREDICTION, and there are two of them on purpose.
+    #
+    # ATR is undirected: it says how far this thing typically travels, not
+    # which way. A grid buys a dip and sells a bounce, so what it actually
+    # needs to know is whether the move CONTINUES - and that is a question
+    # about direction, which recent momentum answers and range does not.
+    # So momentum is the primary estimator.
+    #
+    # Both are guesses, and swapping one unvalidated guess for another proves
+    # nothing. So the ATR estimate is recorded beside it and scored against
+    # the SAME realised move, and summary() reports which one was closer. The
+    # ledger decides, not the argument.
+    #
+    # The same 0.5 discount applies to both, so the comparison isolates the
+    # one thing that differs - range versus direction - rather than the
+    # aggressiveness of the estimate. A real order captures a fraction of a
+    # move, not its extremes; whether even half is optimistic is exactly what
+    # actual_mfe_pct is for.
+    expected_move_atr = round(atr_pct * 0.5, 4) if atr_pct is not None else None
+    _mom = m.get("ret_15m_pct")
+    expected_move = round(abs(_mom) * 0.5, 4) if _mom is not None else expected_move_atr
     # Straight from the gate. None when the gate could not price it, which is
     # BLOCKED, not REJECT - would_trade stays False either way, but the
     # ledger records the difference.
@@ -315,6 +331,8 @@ def score(*, closes, highs, lows, volumes, spread_pct, bid_depth_usd,
         "bid_depth_usd": bid_depth_usd,
         "ask_depth_usd": ask_depth_usd,
         "expected_move_pct": expected_move,
+        "expected_move_atr_pct": expected_move_atr,
+        "expected_move_basis": "momentum_15m" if _mom is not None else "atr_fallback",
         "expected_net_edge_pct": net_edge,
         # Named "assumed" because it still contains an ESTIMATED adverse
         # selection term that no completed trade on this configuration has
@@ -354,6 +372,7 @@ async def record(product_id: str, bot_name: str, price: float, scored: dict):
                     "score_total", "ret_5m_pct", "ret_15m_pct", "ret_30m_pct",
                     "rsi", "atr_pct", "volume_ratio", "spread_pct",
                     "bid_depth_usd", "ask_depth_usd", "expected_move_pct",
+                    "expected_move_atr_pct",
                     "expected_net_edge_pct", "cost_assumed_pct", "would_trade")}))
             await db.commit()
             return True
@@ -490,6 +509,8 @@ def _latest(rows) -> dict:
         "score_total": r.score_total,
         "atr_pct": round(r.atr_pct, 3) if r.atr_pct is not None else None,
         "expected_move_pct": r.expected_move_pct,
+        "expected_move_basis": "momentum_15m",
+        "expected_move_atr_pct": r.expected_move_atr_pct,
         "expected_net_edge_pct": r.expected_net_edge_pct,
         "cost_assumed_pct": r.cost_assumed_pct,
         "spread_pct": round(r.spread_pct, 4) if r.spread_pct is not None else None,
@@ -560,6 +581,39 @@ async def summary(min_rows: int = 30) -> dict:
             "profitable_share_pct": (round(sum(1 for v in nets if v > 0) / len(nets) * 100, 1)
                                      if nets else None),
         }
+
+    # WHICH ESTIMATOR PREDICTS? Both targets are compared against one
+    # identical actual_mfe_pct, so the difference is the estimator and
+    # nothing else. reached is the hit rate; mean_abs_error is how far each
+    # was from the move that actually happened, which is the sharper measure
+    # - an estimator can hit often by predicting almost nothing.
+    def _est(field):
+        rows_ = [r for r in resolved
+                 if getattr(r, field) is not None and r.actual_mfe_pct is not None]
+        if not rows_:
+            return {"n": 0}
+        return {
+            "n": len(rows_),
+            "reached_pct": round(sum(1 for r in rows_
+                                     if r.actual_mfe_pct >= getattr(r, field))
+                                 / len(rows_) * 100, 1),
+            "mean_predicted_pct": round(sum(getattr(r, field) for r in rows_) / len(rows_), 4),
+            "mean_actual_mfe_pct": round(sum(r.actual_mfe_pct for r in rows_) / len(rows_), 4),
+            "mean_abs_error": round(sum(abs(getattr(r, field) - r.actual_mfe_pct)
+                                        for r in rows_) / len(rows_), 4),
+        }
+
+    out["estimators"] = {"momentum_15m": _est("expected_move_pct"),
+                         "atr_half": _est("expected_move_atr_pct")}
+    mom, atr = out["estimators"]["momentum_15m"], out["estimators"]["atr_half"]
+    if mom.get("n", 0) >= 20 and atr.get("n", 0) >= 20:
+        out["estimator_verdict"] = (
+            f"momentum is closer (abs err {mom['mean_abs_error']} vs {atr['mean_abs_error']})"
+            if mom["mean_abs_error"] < atr["mean_abs_error"] else
+            f"ATR is closer (abs err {atr['mean_abs_error']} vs {mom['mean_abs_error']}) - "
+            f"momentum is the primary estimator and the data disagrees with it")
+    else:
+        out["estimator_verdict"] = "not enough resolved rows to compare estimators"
 
     if len(resolved) < min_rows:
         out["verdict"] = (f"not enough data ({len(resolved)}/{min_rows} resolved) - "

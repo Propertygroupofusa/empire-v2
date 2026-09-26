@@ -1169,7 +1169,16 @@ class ShortTermSignal(Base):
     ask_depth_usd = Column(Float, nullable=True)
 
     # --- the prediction
+    # The PRIMARY prediction, from momentum: price has moved this much
+    # recently and directionally, so this much is the estimate of what the
+    # next move offers. This is the one the gate is asked about and the one
+    # would_trade turns on.
     expected_move_pct = Column(Float, nullable=True)
+    # The SAME question answered from ATR - undirected recent range - kept
+    # so the two estimators can be scored against one identical realised
+    # move. Swapping one unvalidated guess for another proves nothing;
+    # recording both and letting actual_mfe_pct settle it costs one column.
+    expected_move_atr_pct = Column(Float, nullable=True)
     expected_net_edge_pct = Column(Float, nullable=True)
     cost_assumed_pct = Column(Float, nullable=True)  # fees + spread + adverse, at score time
     would_trade = Column(Boolean, nullable=True)     # what the HARD gate said, not the score
