@@ -778,6 +778,53 @@ async def get_crypto_coinbase_status():
     }
 
 
+@router.get("/account-census")
+async def get_account_census(db: AsyncSession = Depends(get_db)):
+    """Every asset Coinbase reports, priced, against what the bots track.
+
+    Read-only. Places no order and writes nothing.
+
+    On 2026-09-26 every page in this repository put the Coinbase account at
+    $572.47 while it held $11,219.28. real_crypto_net_worth sums USD cash
+    plus coin held by tree branches plus coin held by grid branches, and the
+    other 56 assets belong to no branch - so the figure could not see them,
+    and real_crypto_net_worth_missing returned [] because it only checks
+    what it already knows about.
+
+    This asks the venue for everything and reports the DIFFERENCE as the
+    headline, because the difference is the part no existing page could show.
+    """
+    try:
+        import account_census
+        import crypto_btc_compound_bot as engine
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"census unavailable: {e}")
+
+    # What the bot-facing figure believes, built the same way it is built:
+    # USD cash plus coin the branches themselves hold.
+    tracked = None
+    try:
+        from models import CryptoGridBranch, CryptoGridSlice
+        slices = (await db.execute(select(CryptoGridSlice))).scalars().all()
+        grid_coin = sum((s.entry_price or 0) * (s.qty or 0) for s in slices)
+        cash = 0.0
+        if crypto_grid_bot_module is not None:
+            try:
+                cash = float(await crypto_grid_bot_module.get_real_free_cash_usd() or 0)
+            except Exception:
+                cash = 0.0
+        tracked = grid_coin + cash
+    except Exception as e:
+        log.warning(f"[census] tracked figure unavailable: {type(e).__name__}: {e}")
+
+    try:
+        async with engine.aiohttp.ClientSession() as session:
+            out = await account_census.census(session, tracked_usd=tracked)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"census failed: {type(e).__name__}: {e}")
+    return out
+
+
 @router.get("/coinbase-statement")
 async def get_coinbase_statement(start: str, end: str,
                                  db: AsyncSession = Depends(get_db)):

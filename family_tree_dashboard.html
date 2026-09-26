@@ -1017,6 +1017,7 @@
     <div id="grid-governs-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
     <div id="grid-fee-rate-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-maker-orders-toggle" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
+    <div id="account-census-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
     <div id="grid-opportunity-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
     <div id="grid-maker-only-toggle" class="maker-only-card"></div>
     <div class="panel" id="grid-panel">
@@ -2406,6 +2407,7 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
     renderGridFeeRateBadge(data);
     renderGridMakerOrdersToggle(data);
     renderGridOpportunityPanel(data);
+    renderAccountCensus();
     renderGridMakerOnlyToggle(data);
 
     document.getElementById('grid-total-allocated').textContent =
@@ -3457,6 +3459,82 @@ async function toggleGridMakerOrders(enable) {
 //
 // Nothing here can trade. The scorer is observation-only and the score never
 // overrides the net-edge gate; this panel is a window onto a measurement.
+
+// WHAT THE VENUE SAYS IS THERE, against what the bots count.
+//
+// Every figure on this page used to come from real_crypto_net_worth: USD
+// cash plus coin held by tree branches plus coin held by grid branches. On
+// 2026-09-26 that read $572.47 while Coinbase held $11,219.28, because the
+// other 56 assets belong to no branch and a branch-shaped number cannot see
+// them. Its companion field reported nothing missing, since it only checks
+// assets it already knows about.
+//
+// This panel leads with the DIFFERENCE, because the difference is the part
+// no other element here can show. It fetches on its own rather than riding
+// the status payload: the census prices dozens of assets and must never sit
+// in the path of the page that shows whether trading is alive.
+async function renderAccountCensus() {
+    const el = document.getElementById('account-census-panel');
+    if (!el) return;
+    let d;
+    try {
+        const r = await fetch('/api/trading-dashboard/account-census');
+        d = await r.json();
+    } catch (e) {
+        el.innerHTML = '';
+        return;
+    }
+    if (!d || !d.available) { el.innerHTML = ''; return; }
+    const usd = v => (v === null || v === undefined) ? '&mdash;'
+        : '$' + Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    let h = '<div class="panel" style="padding:10px 12px;">';
+    h += '<div style="font-weight:600; margin-bottom:6px;">Whole account, from the venue</div>';
+    // The warning goes ABOVE the total. A census that priced half the
+    // account and printed a confident number is the original bug.
+    if (d.warning) {
+        h += `<div style="margin-bottom:7px; padding:6px 8px; border-left:3px solid #f59e0b;
+              background:rgba(245,158,11,.10); color:var(--text-dim);">${d.warning}</div>`;
+    }
+    h += `<div style="display:flex; flex-wrap:wrap; gap:4px 22px; font-variant-numeric:tabular-nums;">`
+       + `<span><span style="color:var(--text-dim);">Coinbase total</span> <strong>${usd(d.total_usd)}</strong></span>`
+       + `<span><span style="color:var(--text-dim);">cash</span> ${usd(d.cash_usd)}</span>`
+       + `<span><span style="color:var(--text-dim);">coin</span> ${usd(d.coin_usd)}</span>`
+       + `<span><span style="color:var(--text-dim);">assets</span> ${d.assets_priced}`
+       + (d.assets_unpriced ? ` <span style="color:#f59e0b;">+${d.assets_unpriced} unpriced</span>` : '')
+       + `</span></div>`;
+    if (d.untracked_usd != null) {
+        h += `<div style="margin-top:7px; padding:6px 8px; border-left:3px solid #ef4444;
+              background:rgba(239,68,68,.08);">`
+           + `<strong>${usd(d.untracked_usd)}</strong> of this belongs to no branch `
+           + `<span style="color:var(--text-dim);">&mdash; the bots count ${usd(d.tracked_usd)}, `
+           + `${d.tracked_share_pct}% of the account. Nothing monitors, prices or stops the rest.</span></div>`;
+    }
+    if (d.holdings && d.holdings.length) {
+        h += `<div class="table-scroll" style="margin-top:8px;"><table style="width:100%; font-size:0.92em; border-collapse:collapse;">`
+           + `<thead><tr style="text-align:left; color:var(--text-dim);">`
+           + `<th style="padding:3px 8px 3px 0;">Asset</th><th style="text-align:right; padding:3px 8px;">Units</th>`
+           + `<th style="text-align:right; padding:3px 8px;">Price</th><th style="text-align:right; padding:3px 0;">USD</th>`
+           + `</tr></thead><tbody>`;
+        for (const r of d.holdings.slice(0, 15)) {
+            h += `<tr><td style="padding:2px 8px 2px 0;">${r.asset}</td>`
+               + `<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">${Number(r.units).toLocaleString(undefined,{maximumFractionDigits:6})}</td>`
+               + `<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">${r.price}</td>`
+               + `<td style="text-align:right; padding:2px 0; font-variant-numeric:tabular-nums;"><strong>${usd(r.usd)}</strong></td></tr>`;
+        }
+        h += `</tbody></table></div>`;
+        const more = d.holdings.length - 15;
+        if (more > 0 || d.dust_assets) {
+            h += `<div style="margin-top:4px; color:var(--text-dim); font-size:.92em;">`
+               + (more > 0 ? `${more} more above dust. ` : '')
+               + (d.dust_assets ? `${d.dust_assets} dust holdings totalling ${usd(d.dust_usd)}.` : '')
+               + `</div>`;
+        }
+    }
+    h += `<div style="margin-top:6px; color:var(--text-dim); font-size:.92em;">`
+       + `Read straight from Coinbase at ${d.as_of}. Read-only.</div></div>`;
+    el.innerHTML = h;
+}
+
 function renderGridOpportunityPanel(d) {
     const el = document.getElementById('grid-opportunity-panel');
     if (!el || d == null) return;
