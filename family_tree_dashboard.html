@@ -1137,6 +1137,19 @@
         <div id="money-check-wrap"><div class="coin-history-empty">Not run yet - tap the button above.</div></div>
     </div>
 
+    <div class="section-title">🔎 Where the money went</div>
+    <div class="panel">
+        <div class="panel-sub">The negative cash figure at the top of this page is not money that went somewhere -
+            it is the branches claiming more than the wallet holds. This is the other question, answered from
+            <strong>Coinbase's own fill record</strong> rather than from the bot's books: what was bought, what was
+            sold, what commission was taken, and how much of that ever reached our ledger at all. Cash that became
+            coin is not a loss; commission is.</div>
+        <div style="margin:10px 0;">
+            <button id="money-trace-btn" class="unlock-btn" style="margin-top:0;" onclick="runMoneyTrace()">🔎 Trace the cash</button>
+        </div>
+        <div id="money-trace-wrap"><div class="coin-history-empty">Not run yet - tap the button above. Reads the exchange's own record for the last 60 days.</div></div>
+    </div>
+
     <div class="section-title">🧭 What's coming up next</div>
     <div class="panel">
         <div class="panel-sub">Each branch measured against every USD pair on the venue - can it move further
@@ -4607,6 +4620,92 @@ function escText(v) {
         out = out.split(pairs[i][0]).join(pairs[i][1]);
     }
     return out;
+}
+
+// Where the cash actually went, from the venue record rather than our own.
+//
+// The page showed a negative cash figure and nothing else, and the
+// question it prompts every time is "where did that money go". The honest
+// answer has two halves and the dashboard was showing neither: cash that
+// became coin is still there and is not a loss, while commission is gone
+// for good. And the reconciliation line is the one that matters most - a
+// round trip is two fills, so a fill count far above twice our recorded
+// trades means real executions never reached our books.
+function renderMoneyTrace(d) {
+    const wrap = document.getElementById('money-trace-wrap');
+    if (!wrap) return;
+    if (!d || d.available === false) {
+        wrap.innerHTML = `<div class="coin-history-empty">Could not read the exchange record
+            (${escText((d && (d.error || d.detail)) || 'unavailable')}).</div>`;
+        return;
+    }
+    const st = d.statement || {};
+    const ours = d.our_ledgers || {};
+    const usd = n => (Number(n) < 0 ? '-$' : '$') + Math.abs(Number(n) || 0)
+        .toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    const line = (label, value, sub, colour) => `
+        <div style="display:flex; justify-content:space-between; gap:12px; padding:7px 0;
+                    border-bottom:1px solid var(--border); align-items:baseline;">
+            <div style="font-size:0.82em;">${label}
+                ${sub ? `<div style="font-size:0.84em; color:var(--text-dim); margin-top:2px;">${sub}</div>` : ''}</div>
+            <div style="font-variant-numeric:tabular-nums; font-weight:700; white-space:nowrap;
+                        color:${colour || 'var(--text)'};">${value}</div>
+        </div>`;
+
+    // A round trip is two fills. Far more fills than that means executions
+    // the ledger never saw.
+    const implied = Math.floor((st.fills || 0) / 2);
+    const recorded = ours.combined_trades || 0;
+    const missing = Math.max(0, implied - recorded);
+    const missPct = implied ? (missing / implied * 100) : 0;
+
+    wrap.innerHTML =
+        `<div style="font-size:0.72em; color:var(--text-dim); margin-bottom:8px;">
+            ${escText((d.window || {}).start || '')} to ${escText((d.window || {}).end || '')}
+            \u00b7 ${st.fills} fills \u00b7 ${d.source ? escText(d.source) : ''}</div>`
+        + line('Bought', usd(st.bought_usd), 'cash out, became coin')
+        + line('Sold', usd(st.sold_usd), 'coin out, became cash')
+        + line('Commission', usd(-Math.abs(st.commission_usd || 0)),
+               'taken by the exchange - this is the only part that is gone', 'var(--red)')
+        + line('Net cash flow', usd(st.net_cash_flow_usd),
+               'negative means cash became coin, which is still held - not a loss by itself',
+               Number(st.net_cash_flow_usd) < 0 ? 'var(--text-dim)' : 'var(--green)')
+        + `<div style="font-size:0.78em; font-weight:700; margin:14px 0 4px;">What our books caught</div>`
+        + line('Fills at the exchange', String(st.fills || 0), 'two fills make one round trip')
+        + line('Round trips we recorded', String(recorded),
+               `tree ${ours.tree_trades || 0} \u00b7 grid ${ours.grid_trades || 0}`)
+        + (missing > 0
+            ? line('Never reached our ledger', `~${missing}`,
+                   `about ${missPct.toFixed(0)}% of implied round trips - our books describe a fraction of what really happened`,
+                   'var(--red)')
+            : '')
+        + line('Realized, our books', usd(ours.combined_realized_pnl),
+               `tree ${usd(ours.tree_realized_pnl)} \u00b7 grid ${usd(ours.grid_realized_pnl)}`,
+               Number(ours.combined_realized_pnl) < 0 ? 'var(--red)' : 'var(--green)')
+        + `<div style="font-size:0.72em; color:var(--text-dim); margin-top:10px; line-height:1.5;">
+             ${escText(st.note || '')}</div>`
+        + (d.truncated ? `<div style="font-size:0.74em; color:var(--red); margin-top:6px;">
+             The record was truncated - there are more fills than were read, so these totals are a floor.</div>` : '');
+}
+
+async function runMoneyTrace() {
+    const btn = document.getElementById('money-trace-btn');
+    const wrap = document.getElementById('money-trace-wrap');
+    const original = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '\u23f3 Reading the exchange record\u2026'; }
+    const end = new Date();
+    const start = new Date(end.getTime() - 60 * 24 * 3600 * 1000);
+    const iso = dt => dt.toISOString().replace(/\.\d+Z$/, 'Z');
+    try {
+        renderMoneyTrace(await apiGet(
+            `/coinbase-statement?start=${iso(start)}&end=${iso(end)}`, 120000));
+        if (btn) btn.textContent = '\u2705 Traced';
+    } catch (e) {
+        if (wrap) wrap.innerHTML = `<div class="coin-history-empty">Could not trace the cash (${escText(e.message)}).</div>`;
+        if (btn) btn.textContent = '\u26a0\ufe0f ' + e.message;
+    }
+    setTimeout(() => { if (btn) { btn.textContent = original; btn.disabled = false; } }, 3000);
 }
 
 // The fleet against the whole venue, and what could replace what is
