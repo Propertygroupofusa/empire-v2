@@ -778,6 +778,48 @@ async def get_crypto_coinbase_status():
     }
 
 
+@router.get("/write-guard")
+async def get_write_guard_status():
+    """Is the write guard armed? Presence only - never the token.
+
+    This exists because of a specific, repeated failure on this deployment:
+    CRYPTO_STRATEGY_MODE was corrected six times through the Railway UI on
+    2026-09-25 and the running process kept reading the old value. A guard
+    whose arming cannot be checked is a guard nobody can trust, and the
+    natural way to test it - POST something and see if it is refused -
+    means firing a real order at a live account to find out.
+
+    So: presence, length band, and the header name. Never the value, never
+    a prefix, never enough to narrow a guess.
+    """
+    import write_guard
+    tok = (os.getenv(write_guard.TOKEN_ENV) or "").strip()
+    armed = bool(tok)
+    return {
+        "armed": armed,
+        "env_var": write_guard.TOKEN_ENV,
+        "header": write_guard.HEADER,
+        # A band, not a length. An exact length is a real narrowing of the
+        # search space for anyone brute-forcing it.
+        "token_length_band": (None if not armed else
+                              "short (<16) - use a longer one" if len(tok) < 16 else
+                              "adequate (16-31)" if len(tok) < 32 else "strong (32+)"),
+        "protected_prefixes": list(write_guard.PROTECTED_PREFIXES),
+        "protected_methods": sorted(write_guard.MUTATING),
+        "reads_protected": False,
+        "status": (
+            "ARMED - state-changing requests require the header."
+            if armed else
+            f"NOT ARMED - every state-changing request is being REFUSED "
+            f"(503) because {write_guard.TOKEN_ENV} is not set in THIS "
+            f"process's environment. Setting it on your own machine has no "
+            f"effect; it must be set where the server runs."),
+        "note": ("Reads are NOT protected. /account-census and "
+                 "/coinbase/balances still return full holdings to anyone "
+                 "with the URL."),
+    }
+
+
 @router.get("/account-census")
 async def get_account_census(db: AsyncSession = Depends(get_db)):
     """Every asset Coinbase reports, priced, against what the bots track.

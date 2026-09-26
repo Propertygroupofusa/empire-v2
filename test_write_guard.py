@@ -105,5 +105,22 @@ ok("and records that reads are still exposed",
    "WHAT IS NOT COVERED" in SRC and "still return the full holdings" in SRC,
    "an unfixed hole must be written down, not implied")
 
+print("\nthe arming can be checked without firing a real order")
+DASH = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "routers", "trading_dashboard.py"), encoding="utf-8").read()
+ok("a status endpoint exists", '@router.get("/write-guard")' in DASH)
+ok("it never returns the token",
+   "os.getenv(write_guard.TOKEN_ENV)" in DASH and '"token":' not in DASH.split('"/write-guard"')[1][:2000])
+ok("nor a prefix or an exact length - a band only",
+   '"token_length_band"' in DASH and "len(tok) < 32" in DASH,
+   "an exact length narrows a brute-force search")
+ok("it says plainly that a local variable does nothing",
+   "must be set where the server runs" in DASH)
+ok("and repeats that reads are unprotected",
+   '"reads_protected": False' in DASH)
+ok("the reason it exists is recorded",
+   "corrected six times through the Railway UI" in DASH,
+   "a guard whose arming cannot be checked is a guard nobody can trust")
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
