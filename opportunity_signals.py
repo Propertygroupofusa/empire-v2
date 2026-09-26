@@ -85,6 +85,22 @@ log = logging.getLogger(__name__)
 # OFF, because an unreadable switch must not start steering real money.
 SIGNALS_LIVE = os.getenv("OPPORTUNITY_SIGNALS_LIVE", "false").strip().lower() == "true"
 
+# Minimum gap between two scores of the SAME coin. Candles are 5 minutes,
+# so the cycle's ~37s cadence was writing ~8 rows per candle from identical
+# inputs - 45 rows a minute across the fleet, 65,000 a day, none of the
+# duplicates carrying information the first one did not.
+#
+# One observation per candle is the most the data can actually support, and
+# it also makes the ledger honest: 8 copies of one setup would have counted
+# as 8 independent predictions in every hit rate computed from it.
+SCORE_MIN_GAP_SECONDS = int(os.getenv("GRID_SCORE_MIN_GAP_SECONDS", "300"))
+
+# How much history a report reads. summary() used to load the WHOLE table on
+# every grid-status call, which at 65k rows a day is an endpoint that gets
+# slower until it stops. Bounded here; the ledger keeps everything, the
+# report reads a window.
+SUMMARY_MAX_ROWS = int(os.getenv("GRID_SIGNAL_SUMMARY_ROWS", "5000"))
+
 # Candles are 5 minutes, so these are the horizons the data can actually
 # support. A 1-minute return was asked for and is not offered: the series
 # does not carry it, and interpolating one would be inventing a reading.
@@ -317,9 +333,19 @@ def _slice_of(economics):
 
 
 async def record(product_id: str, bot_name: str, price: float, scored: dict):
-    """Write one prediction. Never raises."""
+    """Write one prediction, at most once per candle per coin. Never raises.
+
+    Returns True if written, False if skipped as a duplicate of a score
+    taken inside the same candle.
+    """
     try:
         async with get_session_factory()() as db:
+            recent = (await db.execute(
+                select(ShortTermSignal.scored_at)
+                .where(ShortTermSignal.product_id == product_id)
+                .order_by(ShortTermSignal.scored_at.desc()).limit(1))).scalar_one_or_none()
+            if recent is not None and (datetime.utcnow() - recent).total_seconds() < SCORE_MIN_GAP_SECONDS:
+                return False
             db.add(ShortTermSignal(
                 product_id=product_id, bot_name=bot_name, price_at_score=price,
                 **{k: scored.get(k) for k in (
@@ -330,9 +356,11 @@ async def record(product_id: str, bot_name: str, price: float, scored: dict):
                     "bid_depth_usd", "ask_depth_usd", "expected_move_pct",
                     "expected_net_edge_pct", "cost_assumed_pct", "would_trade")}))
             await db.commit()
+            return True
     except Exception as e:
         log.debug(f"[SIGNAL] record failed for {product_id} (ignored): "
                   f"{type(e).__name__}: {e}")
+        return False
 
 
 async def resolve(session, price_for, max_rows: int = 8, deadline=None):
@@ -486,7 +514,10 @@ async def summary(min_rows: int = 30) -> dict:
     """
     try:
         async with get_session_factory()() as db:
-            rows = (await db.execute(select(ShortTermSignal))).scalars().all()
+            rows = (await db.execute(
+                select(ShortTermSignal)
+                .order_by(ShortTermSignal.scored_at.desc())
+                .limit(SUMMARY_MAX_ROWS))).scalars().all()
     except Exception as e:
         return {"available": False, "error": f"{type(e).__name__}: {e}"}
     if not rows:
@@ -503,6 +534,8 @@ async def summary(min_rows: int = 30) -> dict:
         "available": True,
         "live": SIGNALS_LIVE,
         "scored": len(rows),
+        "window": (f"most recent {SUMMARY_MAX_ROWS} scores"
+                   if len(rows) >= SUMMARY_MAX_ROWS else "all scores"),
         "resolved": len(resolved),
         # Stated on every report. The cost side still carries an ESTIMATE
         # that no completed trade on this configuration has checked, so

@@ -104,6 +104,38 @@ async def main():
     ok("  its funnel reads zeros, not an exception",
        r["per_coin"]["JUNK-USD"]["detected"] == 1)
 
+
+    print("\nthe ledger cannot grow into a slow query")
+    import datetime as _dt
+    from sqlalchemy import select as _sel, func as _fn
+    async with S.get_session_factory()() as db:
+        n0 = (await db.execute(_sel(_fn.count(models.ShortTermSignal.id)))).scalar()
+    sc = S.score(closes=[100]*40, highs=[101]*40, lows=[99]*40, volumes=[50]*40,
+                 spread_pct=0.02, bid_depth_usd=9e5, ask_depth_usd=9e5,
+                 atr_pct=2.0, rsi=55, economics={"net_edge_pct": 0.2, "slice_usd": 6.92})
+    wrote = [await S.record("RATE-USD", "b", 1.0, sc) for _ in range(5)]
+    ok("five scores inside one candle write exactly ONE row",
+       wrote.count(True) == 1 and wrote.count(False) == 4,
+       f"{wrote}")
+    async with S.get_session_factory()() as db:
+        n1 = (await db.execute(_sel(_fn.count(models.ShortTermSignal.id)))).scalar()
+    ok("  and the table grew by one, not five", n1 - n0 == 1)
+    # Backdate past the gap and it writes again - the throttle is a gap, not a cap.
+    async with S.get_session_factory()() as db:
+        r = (await db.execute(_sel(models.ShortTermSignal)
+             .where(models.ShortTermSignal.product_id == "RATE-USD"))).scalars().all()[0]
+        r.scored_at = _dt.datetime.utcnow() - _dt.timedelta(seconds=S.SCORE_MIN_GAP_SECONDS + 5)
+        await db.commit()
+    ok("once the candle has turned over, the next score IS written",
+       await S.record("RATE-USD", "b", 1.0, sc) is True)
+    ok("the throttle is one candle period, matching the data's resolution",
+       S.SCORE_MIN_GAP_SECONDS == 300)
+    ok("the report reads a bounded window, never the whole table",
+       S.SUMMARY_MAX_ROWS > 0 and ".limit(SUMMARY_MAX_ROWS)" in
+       open("opportunity_signals.py").read())
+    r2 = await S.summary()
+    ok("  and it says which window it read", "window" in r2)
+
     print(f"\n{P} passed, {F} failed")
     sys.exit(1 if F else 0)
 

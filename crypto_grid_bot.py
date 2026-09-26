@@ -1031,7 +1031,12 @@ async def get_maker_expiry_drift() -> dict:
     """
     try:
         async with get_session_factory()() as db:
-            rows = (await db.execute(select(GridMakerExpiry))).scalars().all()
+            # Bounded for the same reason summary() is: this is served in a
+            # live status payload and must not grow into a slow query.
+            rows = (await db.execute(
+                select(GridMakerExpiry)
+                .order_by(GridMakerExpiry.expired_at.desc())
+                .limit(5000))).scalars().all()
     except Exception as e:
         return {"available": False, "error": f"{type(e).__name__}: {e}"}
     if not rows:
