@@ -215,6 +215,13 @@ ok("the summary uses Coinbase's real commission, not an assumed rate",
    'f.get("commission")' in CMP)
 ok("and keeps the maker/taker split Coinbase reports",
    'liquidity_indicator' in CMP)
+ok("size_in_quote is honoured, not assumed away",
+   'f.get("size_in_quote")' in CMP and "qty = (size / price)" in CMP,
+   "a USD-denominated size multiplied by price reported $96.5M of BTC on a $1,000 account")
+ok("and the count of quote-sized fills is reported, so the handling is checkable",
+   '"quote_sized_fills"' in CMP)
+ok("the endpoint returns untouched raw fills alongside its arithmetic",
+   '"raw_sample"' in DASH)
 ok("net cash flow is labelled CASH, not profit",
    "is CASH, not profit" in CMP,
    "coin bought and still held reads as cash out with nothing back")

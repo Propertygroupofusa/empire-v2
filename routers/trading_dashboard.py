@@ -865,6 +865,12 @@ async def get_coinbase_statement(start: str, end: str,
         "pages_read": raw.get("pages_read"),
         "truncated": raw.get("truncated", False),
         "statement": statement,
+        # Two untouched fills, exactly as Coinbase returned them. The first
+        # version of this endpoint reported $96.5M of BTC on a $1,000
+        # account because it assumed `size` was always the base quantity;
+        # a raw sample makes the next such assumption checkable from the
+        # response instead of needing another deploy to find out.
+        "raw_sample": raw["fills"][:2],
         "our_ledgers": {
             "error": ledger_error,
             "tree_realized_pnl": round(tree_pnl or 0.0, 2), "tree_trades": tree_n or 0,

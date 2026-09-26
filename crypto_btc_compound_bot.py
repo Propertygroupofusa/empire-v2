@@ -1553,6 +1553,7 @@ def summarise_fills(fills: list) -> dict:
     """
     per, buy_usd, sell_usd, fees = {}, 0.0, 0.0, 0.0
     maker = taker = 0
+    quote_sized = 0
     for f in fills:
         try:
             size = float(f.get("size") or 0)
@@ -1562,7 +1563,25 @@ def summarise_fills(fills: list) -> dict:
             continue
         pid = f.get("product_id") or "?"
         side = (f.get("side") or "").upper()
-        value = size * price
+        # SIZE IS NOT ALWAYS THE BASE QUANTITY.
+        #
+        # Coinbase sets size_in_quote when `size` is denominated in the QUOTE
+        # currency - USD - which is what a market order placed by dollar
+        # amount returns. Multiplying that by price counts the dollars once
+        # and then again at the coin's own price.
+        #
+        # The first live call did exactly that and reported $96,544,199.94 of
+        # BTC bought on a $1,000 account, from 1,175 "BTC" that were really
+        # 1,175 dollars. A number that absurd is easy to catch; the same bug
+        # on a $40 fill would have quietly passed for a statement.
+        in_quote = bool(f.get("size_in_quote"))
+        if in_quote:
+            quote_sized += 1
+            value = size
+            qty = (size / price) if price else 0.0
+        else:
+            value = size * price
+            qty = size
         liq = (f.get("liquidity_indicator") or "").upper()
         if liq == "MAKER":
             maker += 1
@@ -1575,9 +1594,9 @@ def summarise_fills(fills: list) -> dict:
         p["commission_usd"] += comm
         fees += comm
         if side == "BUY":
-            p["bought_usd"] += value; p["bought_qty"] += size; buy_usd += value
+            p["bought_usd"] += value; p["bought_qty"] += qty; buy_usd += value
         elif side == "SELL":
-            p["sold_usd"] += value; p["sold_qty"] += size; sell_usd += value
+            p["sold_usd"] += value; p["sold_qty"] += qty; sell_usd += value
     rows = []
     for p in per.values():
         p["net_usd"] = round(p["sold_usd"] - p["bought_usd"] - p["commission_usd"], 2)
@@ -1597,6 +1616,9 @@ def summarise_fills(fills: list) -> dict:
         "net_cash_flow_usd": round(sell_usd - buy_usd - fees, 2),
         "maker_fills": maker,
         "taker_fills": taker,
+        # Surfaced so the size_in_quote handling above is verifiable from the
+        # response rather than taken on trust.
+        "quote_sized_fills": quote_sized,
         "note": ("net_cash_flow_usd is CASH, not profit. Coin bought and still "
                  "held reads as cash out with nothing back; compare against the "
                  "value of what is still held before calling it a loss."),
@@ -1716,6 +1738,9 @@ async def get_recent_fills_summary(session, limit: int = 250) -> dict:
         "non_spot_fills_skipped": skipped_non_spot,
         "maker_fills": maker,
         "taker_fills": taker,
+        # Surfaced so the size_in_quote handling above is verifiable from the
+        # response rather than taken on trust.
+        "quote_sized_fills": quote_sized,
         "unclassified_fills": unknown,
         "maker_rate": round(maker / classified, 4) if classified else None,
         "real_leg_fee_rate": round(real_leg_rate, 6) if real_leg_rate is not None else None,
