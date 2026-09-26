@@ -6264,6 +6264,138 @@ async def get_coinbase_balances():
         raise HTTPException(status_code=502, detail=f"Failed to fetch balances: {str(e)}")
 
 
+class PartialSellRequest(BaseModel):
+    """Sell a dollar amount of a holding that belongs to no branch."""
+    asset: str                      # e.g. "ZEC"
+    usd_amount: float               # e.g. 400
+    confirm: bool = False           # nothing is placed until this is true
+    quote: str = "USD"
+
+
+@router.post("/coinbase/sell-amount")
+async def sell_amount_of_holding(req: PartialSellRequest):
+    """Sell about `usd_amount` of `asset`, and never more.
+
+    Built 2026-09-26 because "sell $400 of ZEC" could not be expressed:
+    /coinbase/sell only knows positions a bot opened (ZEC belongs to no
+    branch, so it 404s) and /api/crypto/withdraw market-sells the FULL
+    balance - on ZEC that was $2,822 against a $400 instruction.
+
+    Two independent brakes, deliberately:
+      * `confirm` defaults FALSE. The default call prices the sale and
+        places nothing, so the size can be read before any money moves.
+      * the write guard still applies, as it does to every POST here.
+
+    Sizing lives in sell_amount.plan_sale and rounds DOWN throughout -
+    below the target, onto the product's increment, and capped at the
+    balance actually available to sell. An overshoot can only be undone by
+    buying back at a worse price and paying two more fees.
+    """
+    import sell_amount
+    try:
+        import account_census
+        import crypto_coinbase_bot
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"crypto modules unavailable: {exc}")
+
+    asset = (req.asset or "").strip().upper()
+    if not asset:
+        raise HTTPException(status_code=400, detail="asset is required")
+    product_id = f"{asset}-{(req.quote or 'USD').strip().upper()}"
+
+    async with aiohttp.ClientSession() as session:
+        # AVAILABLE balance only. account_census sums available + hold
+        # because it is valuing the account; held units cannot be sold, and
+        # sizing against them would produce an order the venue rejects.
+        available = None
+        try:
+            path = "/api/v3/brokerage/accounts"
+            async with session.get(
+                f"https://api.coinbase.com{path}?limit=250",
+                headers=account_census._auth_headers("GET", path), timeout=25
+            ) as r:
+                if r.status != 200:
+                    raise HTTPException(status_code=502,
+                                        detail=f"accounts HTTP {r.status}: {(await r.text())[:200]}")
+                body = await r.json()
+            for a in body.get("accounts") or []:
+                if a.get("currency") == asset:
+                    available = float((a.get("available_balance") or {}).get("value") or 0)
+                    break
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"balance read failed: {exc}")
+
+        if available is None:
+            raise HTTPException(status_code=404, detail=f"no {asset} account at this venue")
+
+        price, price_source = await account_census._price_one(session, asset)
+        if not price:
+            raise HTTPException(status_code=502, detail=f"no price for {product_id}")
+
+        # The product's own size grid. Unavailable -> the conservative
+        # 8-decimal default in plan_sale, never a guessed coarser one.
+        increment, min_size = "0.00000001", None
+        try:
+            ppath = f"/api/v3/brokerage/products/{product_id}"
+            async with session.get(f"https://api.coinbase.com{ppath}",
+                                   headers=account_census._auth_headers("GET", ppath),
+                                   timeout=20) as r:
+                if r.status == 200:
+                    meta = await r.json()
+                    increment = meta.get("base_increment") or increment
+                    min_size = meta.get("base_min_size") or None
+        except Exception as exc:
+            log.warning(f"[SELL] {product_id}: product meta unavailable ({exc}) - using defaults")
+
+        plan = sell_amount.plan_sale(req.usd_amount, price, available,
+                                     base_increment=increment, base_min_size=min_size)
+        plan["asset"] = asset
+        plan["product_id"] = product_id
+        plan["price_source"] = price_source
+        plan["base_increment"] = increment
+        plan["base_min_size"] = min_size
+        plan["available_to_sell"] = available
+
+        if not plan.get("ok"):
+            return {"placed": False, "plan": plan, "detail": plan.get("reason")}
+
+        if not req.confirm:
+            return {"placed": False, "preview": True, "plan": plan,
+                    "detail": (f"Preview only - nothing was sent. This would sell "
+                               f"{plan['base_size']} {asset} (~${plan['est_usd']:,.2f}, "
+                               f"{plan['pct_of_holding']}% of the holding). Send the same "
+                               f"request with confirm=true to place it.")}
+
+        order = {
+            "client_order_id": str(uuid.uuid4()),
+            "product_id": product_id,
+            "side": "SELL",
+            "order_configuration": {"market_market_ioc": {"base_size": plan["base_size"]}},
+        }
+        opath = "/api/v3/brokerage/orders"
+        try:
+            async with session.post(
+                f"https://api.coinbase.com{opath}",
+                headers=crypto_coinbase_bot._auth_headers("POST", opath),
+                json=order, timeout=30
+            ) as r:
+                result = await r.json()
+                if r.status not in (200, 201) or not result.get("success", True):
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"order rejected: {result.get('error_response', result)}")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"order failed: {exc}")
+
+        log.warning(f"[SELL] placed market SELL {plan['base_size']} {product_id} "
+                    f"(~${plan['est_usd']:,.2f}) - {plan['pct_of_holding']}% of the holding")
+        return {"placed": True, "plan": plan, "order": result}
+
+
 class CoinbaseSellRequest(BaseModel):
     symbol: str
     qty: float = None  # If None, sell full position
