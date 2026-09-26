@@ -1487,6 +1487,122 @@ async def _place_and_confirm(session, path: str, order: dict):
     return None
 
 
+async def fetch_fills_between(session, start_iso: str, end_iso: str,
+                              max_pages: int = 40, page_size: int = 250) -> dict:
+    """Every fill Coinbase recorded in a window. GROUND TRUTH, read-only.
+
+    The bots' own ledgers cannot answer where money went. On 2026-09-26 an
+    audit found 11 of 167 coin-history rows unable to reproduce their own
+    P&L from their own columns, a real +$178.44 round trip missing from the
+    grid ledger entirely, and a 16-day hole in the equity record covering
+    most of a $473 decline. Every one of those is a record the account
+    wrote about itself.
+
+    This asks the exchange instead. Coinbase returns, per fill: side, size,
+    price, the real `commission` charged, and `liquidity_indicator`
+    (MAKER/TAKER). None of it is inferred and none of it is ours.
+
+    Paginated with a hard page cap, because an unbounded cursor loop
+    against a rate-limited endpoint is its own outage. Returns whatever it
+    got plus `truncated` when the cap was hit - a partial statement that
+    says it is partial beats a complete-looking one that is not.
+
+    Never raises and never trades.
+    """
+    fills, cursor, pages, truncated = [], None, 0, False
+    base = ("/api/v3/brokerage/orders/historical/fills"
+            f"?limit={int(page_size)}"
+            f"&start_sequence_timestamp={start_iso}"
+            f"&end_sequence_timestamp={end_iso}")
+    try:
+        while pages < max_pages:
+            path = base + (f"&cursor={cursor}" if cursor else "")
+            async with session.get(COINBASE_BASE_URL + path,
+                                   headers=_auth_headers("GET", path),
+                                   timeout=30) as r:
+                if r.status != 200:
+                    return {"available": False,
+                            "error": f"Coinbase returned {r.status}",
+                            "detail": (await r.text())[:300],
+                            "fills": fills, "pages_read": pages}
+                body = await r.json()
+            batch = body.get("fills") or []
+            fills.extend(batch)
+            pages += 1
+            cursor = body.get("cursor") or None
+            if not cursor or not batch:
+                break
+        else:
+            truncated = True
+    except Exception as e:
+        return {"available": False, "error": f"{type(e).__name__}: {e}",
+                "fills": fills, "pages_read": pages}
+    return {"available": True, "fills": fills, "pages_read": pages,
+            "truncated": truncated,
+            "window": {"start": start_iso, "end": end_iso}}
+
+
+def summarise_fills(fills: list) -> dict:
+    """Turn raw fills into a statement: what was bought, sold and paid.
+
+    NET CASH FLOW is the number the whole exercise is for. Sells bring USD
+    in, buys take it out, commission always goes out. Summed over a window
+    it says what the account's USD balance did because of trading - which
+    can then be set against what the balance ACTUALLY did, and any gap is
+    something trading did not cause.
+    """
+    per, buy_usd, sell_usd, fees = {}, 0.0, 0.0, 0.0
+    maker = taker = 0
+    for f in fills:
+        try:
+            size = float(f.get("size") or 0)
+            price = float(f.get("price") or 0)
+            comm = float(f.get("commission") or 0)
+        except (TypeError, ValueError):
+            continue
+        pid = f.get("product_id") or "?"
+        side = (f.get("side") or "").upper()
+        value = size * price
+        liq = (f.get("liquidity_indicator") or "").upper()
+        if liq == "MAKER":
+            maker += 1
+        elif liq == "TAKER":
+            taker += 1
+        p = per.setdefault(pid, {"product_id": pid, "fills": 0, "bought_usd": 0.0,
+                                 "sold_usd": 0.0, "bought_qty": 0.0, "sold_qty": 0.0,
+                                 "commission_usd": 0.0})
+        p["fills"] += 1
+        p["commission_usd"] += comm
+        fees += comm
+        if side == "BUY":
+            p["bought_usd"] += value; p["bought_qty"] += size; buy_usd += value
+        elif side == "SELL":
+            p["sold_usd"] += value; p["sold_qty"] += size; sell_usd += value
+    rows = []
+    for p in per.values():
+        p["net_usd"] = round(p["sold_usd"] - p["bought_usd"] - p["commission_usd"], 2)
+        p["qty_left_over"] = round(p["bought_qty"] - p["sold_qty"], 10)
+        for k in ("bought_usd", "sold_usd", "commission_usd"):
+            p[k] = round(p[k], 2)
+        rows.append(p)
+    rows.sort(key=lambda r: r["net_usd"])
+    return {
+        "fills": len(fills),
+        "products": rows,
+        "bought_usd": round(buy_usd, 2),
+        "sold_usd": round(sell_usd, 2),
+        "commission_usd": round(fees, 2),
+        # Sells in, buys out, commission out. What trading did to the USD
+        # balance over the window, before any coin still held is marked.
+        "net_cash_flow_usd": round(sell_usd - buy_usd - fees, 2),
+        "maker_fills": maker,
+        "taker_fills": taker,
+        "note": ("net_cash_flow_usd is CASH, not profit. Coin bought and still "
+                 "held reads as cash out with nothing back; compare against the "
+                 "value of what is still held before calling it a loss."),
+    }
+
+
 async def get_recent_fills_summary(session, limit: int = 250) -> dict:
     """What Coinbase itself says every recent fill actually cost.
 

@@ -778,6 +778,89 @@ async def get_crypto_coinbase_status():
     }
 
 
+@router.get("/coinbase-statement")
+async def get_coinbase_statement(start: str, end: str,
+                                 db: AsyncSession = Depends(get_db)):
+    """What COINBASE says happened, set against what the bots recorded.
+
+    Read-only. Places no order and writes nothing.
+
+    This exists because the account's own records could not answer where
+    $473 went between 2026-09-04 and 2026-09-26. The coin-history ledger
+    had 11 rows that could not reproduce their own P&L, the grid ledger was
+    missing a real +$178.44 round trip that the activity feed recorded, and
+    the equity series had a 16-day hole across the period most of the
+    decline happened in. Those are three independent self-reports, and they
+    disagree with each other.
+
+    So this asks the exchange. Coinbase returns every fill with its real
+    size, price and COMMISSION - none of it inferred, none of it written by
+    code in this repository - and the endpoint sets the resulting cash flow
+    beside what each ledger claims for the same window. Where they differ,
+    Coinbase is right and we are wrong.
+
+    Dates are ISO-8601, e.g. ?start=2026-09-04T00:00:00Z&end=2026-09-26T23:59:59Z
+    """
+    if crypto_btc_compound_bot_module is None:
+        raise HTTPException(status_code=500,
+                            detail="crypto_btc_compound_bot not importable - no Coinbase auth available")
+    mod = crypto_btc_compound_bot_module
+    try:
+        async with mod.aiohttp.ClientSession() as session:
+            raw = await mod.fetch_fills_between(session, start, end)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"fills fetch failed: {type(e).__name__}: {e}")
+    if not raw.get("available"):
+        return {"available": False, "window": {"start": start, "end": end},
+                "error": raw.get("error"), "detail": raw.get("detail"),
+                "hint": ("A 401 means this process has no usable Coinbase key; "
+                         "a 400 usually means the timestamps are not ISO-8601 UTC.")}
+
+    statement = mod.summarise_fills(raw["fills"])
+
+    # What OUR records claim for the same window, so the two can be compared
+    # rather than each being believed on its own.
+    tree_q = await db.execute(
+        select(func.sum(CryptoCoinTradeHistory.pnl), func.count(CryptoCoinTradeHistory.id))
+        .where(CryptoCoinTradeHistory.closed_at >= start.replace("Z", ""))
+        .where(CryptoCoinTradeHistory.closed_at <= end.replace("Z", "")))
+    tree_pnl, tree_n = tree_q.one()
+    # Imported locally, matching how every other CryptoGrid* model is reached
+    # in this module - the top-level models import does not carry them.
+    from models import CryptoGridTradeHistory
+    grid_q = await db.execute(
+        select(func.sum(CryptoGridTradeHistory.pnl), func.count(CryptoGridTradeHistory.id))
+        .where(CryptoGridTradeHistory.closed_at >= start.replace("Z", ""))
+        .where(CryptoGridTradeHistory.closed_at <= end.replace("Z", "")))
+    grid_pnl, grid_n = grid_q.one()
+    ledger_total = round((tree_pnl or 0.0) + (grid_pnl or 0.0), 2)
+
+    return {
+        "available": True,
+        "window": raw["window"],
+        "source": "Coinbase /orders/historical/fills - the exchange's own record",
+        "pages_read": raw.get("pages_read"),
+        "truncated": raw.get("truncated", False),
+        "statement": statement,
+        "our_ledgers": {
+            "tree_realized_pnl": round(tree_pnl or 0.0, 2), "tree_trades": tree_n or 0,
+            "grid_realized_pnl": round(grid_pnl or 0.0, 2), "grid_trades": grid_n or 0,
+            "combined_realized_pnl": ledger_total,
+            "combined_trades": (tree_n or 0) + (grid_n or 0),
+        },
+        "reconciliation": {
+            "coinbase_fills": statement["fills"],
+            "our_recorded_round_trips": (tree_n or 0) + (grid_n or 0),
+            "coinbase_commission_usd": statement["commission_usd"],
+            "basis": ("A round trip is two fills, so roughly half the fill count "
+                      "should appear as recorded trades. A large shortfall means "
+                      "real executions never reached our ledger at all - which is "
+                      "the failure mode already confirmed for the ARB close on "
+                      "2026-09-23."),
+        },
+    }
+
+
 def _resolved_crypto_mode() -> str:
     """Which crypto loop is ACTUALLY running, not which one the env var names.
 

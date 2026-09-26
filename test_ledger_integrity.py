@@ -198,5 +198,31 @@ ok("family_tree_loop_running keys off the resolved mode",
    '"family_tree_loop_running": _resolved_crypto_mode() == "family_tree"' in DASH,
    "keying it off the env var reported a correct deployment as a fault")
 
+print("\nthe statement comes from Coinbase, not from us")
+CMP = open(os.path.join(HERE, "crypto_btc_compound_bot.py"), encoding="utf-8").read()
+ok("there is a windowed fills fetcher", "async def fetch_fills_between(" in CMP)
+ok("it reads Coinbase's own fills endpoint",
+   "/api/v3/brokerage/orders/historical/fills" in CMP)
+ok("bounded by the window, not by a row limit",
+   "start_sequence_timestamp" in CMP and "end_sequence_timestamp" in CMP)
+ok("pagination has a hard cap and SAYS when it hit it",
+   "max_pages" in CMP and '"truncated"' in CMP,
+   "a partial statement that says it is partial beats a complete-looking one that is not")
+ok("it never raises", "return {\"available\": False" in CMP)
+ok("and it places no order",
+   "place_market" not in CMP.split("async def fetch_fills_between")[1].split("async def")[0])
+ok("the summary uses Coinbase's real commission, not an assumed rate",
+   'f.get("commission")' in CMP)
+ok("and keeps the maker/taker split Coinbase reports",
+   'liquidity_indicator' in CMP)
+ok("net cash flow is labelled CASH, not profit",
+   "is CASH, not profit" in CMP,
+   "coin bought and still held reads as cash out with nothing back")
+ok("the endpoint exists and is a GET", '@router.get("/coinbase-statement")' in DASH)
+ok("it sets our ledgers beside the exchange's record",
+   '"our_ledgers"' in DASH and '"reconciliation"' in DASH)
+ok("and states which side is authoritative",
+   "Coinbase is right and we are wrong" in DASH)
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
