@@ -346,7 +346,8 @@ def score(*, closes, highs, lows, volumes, spread_pct, bid_depth_usd,
         # WHY not, in the gate's own words and in one word.
         "reject_reason": gate_reason,
         "reject_category": categorise_reject(
-            gate_reason, bool(net_edge is not None and net_edge > 0)),
+            gate_reason, bool(net_edge is not None and net_edge > 0),
+            expected_move),
     }
 
 
@@ -394,10 +395,19 @@ _REJECT_PATTERNS = (
 )
 
 
-def categorise_reject(reason: str, qualified: bool) -> str:
-    """One word for why this scan did not become a trade."""
+def categorise_reject(reason: str, qualified: bool, expected_move=None) -> str:
+    """One word for why this scan did not become a trade.
+
+    A missing reason is not automatically unknown. When the expected move is
+    zero the gate was never asked - there was no step to price - and that is
+    the most specific answer available, not the least. BONK returned exactly
+    this on the first categorised scan and was filed as "unknown", which
+    reads as a failure to classify rather than as a flat market.
+    """
     if qualified:
         return "qualified"
+    if expected_move is not None and expected_move <= 0:
+        return "no_movement"
     if not reason:
         return "unknown"
     low = reason.lower()

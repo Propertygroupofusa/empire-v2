@@ -327,8 +327,12 @@ ok("and the gate's raw words are kept verbatim beside the category",
    S.score(**dict(hot, gate_reason="thin book - whatever"))["reject_reason"]
    == "thin book - whatever")
 ok("the category is carried onto the row",
-   S.score(**dict(hot, economics=econ(-0.4),
+   S.score(**dict(hot, closes=MOVER, economics=econ(-0.4),
                   gate_reason="thin book - x"))["reject_category"] == "liquidity")
+ok("  and no_movement outranks the gate's text when there was no move at all",
+   S.score(**dict(hot, economics=econ(-0.4),
+                  gate_reason="thin book - x"))["reject_category"] == "no_movement",
+   "flat closes mean the gate was never asked; the text is left over")
 ok("  but a row the gate PASSED is 'qualified' whatever the text says",
    S.score(**dict(hot, gate_reason="thin book - x"))["reject_category"] == "qualified",
    "a positive net edge is not a rejection, however the reason reads")
@@ -362,6 +366,24 @@ ok("and says so plainly when nothing is categorised yet",
 ok("the funnel labels which stages are all-time vs current-config",
    "attempted_basis" in GRID and "predate the config epoch" in GRID,
    "fill mix and skip counters span both cohorts; scans and completed do not")
+
+ok("zero expected move is 'no_movement', not 'unknown'",
+   S.categorise_reject(None, False, expected_move=0.0) == "no_movement",
+   "the gate was never asked because there was no step to price - that is "
+   "the most specific answer available, not the least")
+ok("  and a missing reason WITH movement is still unknown",
+   S.categorise_reject(None, False, expected_move=1.0) == "unknown")
+ok("the per-coin execution counts are bounded to the current config",
+   "row.opened_at >= epoch" in GRID and "row.closed_at >= epoch" in GRID
+   and "row.expired_at >= epoch" in GRID)
+ok("filled counts slices that opened, whether or not they have closed",
+   "counting only closed ones" in GRID and "as an execution problem" in GRID,
+   "matched across the docstring's line wrap, not as one phrase")
+ok("REGRESSION: the execution counts are awaited ONCE, not per coin",
+   "_exec_counts = await _per_coin_execution()" in GRID
+   and "**_exec_counts.get(c" in GRID
+   and "(await _per_coin_execution()).get" not in GRID,
+   "inside the comprehension it ran six full table scans for one answer")
 
 
 print("\nit cannot stall or crash the live loop")

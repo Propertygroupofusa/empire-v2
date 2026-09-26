@@ -6167,6 +6167,45 @@ async def _never_fails(fn, label: str) -> dict:
 
 
 
+async def _per_coin_execution() -> dict:
+    """Orders, fills, expiries and completions PER COIN, current config only.
+
+    The fleet-wide fill_mix and skip counters cannot answer this: they are
+    single totals spanning both cohorts. These come from rows that each
+    carry their own product_id and timestamp, so they can be split by coin
+    and bounded to the current configuration - which is what makes the
+    matrix comparable across coins instead of one number repeated six times.
+
+    filled counts slices that actually opened: the ones still open plus the
+    ones that have since closed. A fill is a fill whether or not it has
+    found its exit yet, and counting only closed ones would report the exit
+    problem as an execution problem.
+    """
+    epoch = _config_epoch()
+    out = {}
+    try:
+        async with get_session_factory()() as db:
+            for row in (await db.execute(select(CryptoGridSlice))).scalars().all():
+                if row.opened_at and row.opened_at >= epoch and row.product_id:
+                    e = out.setdefault(row.product_id, {"filled": 0, "expired": 0, "completed": 0})
+                    e["filled"] += 1
+            for row in (await db.execute(select(CryptoGridTradeHistory))).scalars().all():
+                if row.closed_at and row.closed_at >= epoch and row.product_id:
+                    e = out.setdefault(row.product_id, {"filled": 0, "expired": 0, "completed": 0})
+                    e["completed"] += 1
+                    e["filled"] += 1
+            for row in (await db.execute(select(GridMakerExpiry))).scalars().all():
+                if row.expired_at and row.expired_at >= epoch and row.product_id:
+                    e = out.setdefault(row.product_id, {"filled": 0, "expired": 0, "completed": 0})
+                    e["expired"] += 1
+    except Exception as e:
+        log.debug(f"[GRID] per-coin execution counts unavailable: {type(e).__name__}: {e}")
+        return {}
+    for e in out.values():
+        e["attempted"] = e["filled"] + e["expired"]
+    return out
+
+
 async def get_pipeline_funnel() -> dict:
     """Where the opportunity pipeline actually leaks, end to end.
 
@@ -6198,6 +6237,7 @@ async def get_pipeline_funnel() -> dict:
     as an idle one.
     """
     sig = await signals.summary()
+    _exec_counts = await _per_coin_execution()
     skips = await get_maker_only_skips()
     mix = (await get_fill_mix() or {}).get("overall") or {}
     edge = await get_realized_edge()
@@ -6217,6 +6257,13 @@ async def get_pipeline_funnel() -> dict:
         "expired": expired,
         "attempted_basis": "all-time (fill mix and skip counters predate the config epoch)",
         "completed": (edge.get("current") or {}).get("trades") if edge.get("available") else None,
+        # The matrix: one row per coin, current configuration only, so the
+        # stage that is losing opportunities can be read per coin rather
+        # than inferred from a fleet total.
+        "per_coin": {
+            c: dict(f, **_exec_counts.get(c, {}))
+            for c, f in (sig.get("per_coin") or {}).items()
+        } if sig.get("available") else {},
         "top_rejection": sig.get("top_rejection"),
         "rejected_by": sig.get("rejected_by"),
         # The stage that is actually blocking, named rather than inferred by
