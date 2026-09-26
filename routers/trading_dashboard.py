@@ -2118,6 +2118,23 @@ async def get_newsroom(anchor: str = "Delfine", window_days: int = 30,
                                          window_days=league_days,
                                          account_total_usd=total)
 
+    # The whole-account desk. Read best-effort: a newsroom missing one
+    # segment is better than a newsroom that will not go on air.
+    try:
+        import account_census
+        async with crypto_btc_compound_bot_module.aiohttp.ClientSession() as _s:
+            _census = await account_census.census(_s, tracked_usd=0.0)
+    except Exception as e:
+        log.debug(f"[newsroom] census unavailable: {type(e).__name__}: {e}")
+        _census = {}
+    _pipeline = {}
+    try:
+        if crypto_grid_bot_module is not None:
+            _pipeline = await crypto_grid_bot_module.get_pipeline_funnel() or {}
+    except Exception as e:
+        log.debug(f"[newsroom] pipeline unavailable: {type(e).__name__}: {e}")
+    brief["account"] = newsroom_brief.account_desk(_census, _pipeline)
+
     import copy_desk
     brief["copy_desk"] = copy_desk.check(brief, watch)
     brief["served_from_cache"] = False

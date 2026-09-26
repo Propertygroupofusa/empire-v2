@@ -190,5 +190,52 @@ print("\nthe disclaimer survives all the way to the screen")
 ok("the brief carries it", "not stop-loss orders" in (b["disclaimer"] or ""))
 ok("and the page renders it", 'id="disclaimer"' in HTML and '$("disclaimer")' in HTML)
 
+
+print("\nTHE WHOLE-ACCOUNT DESK LEADS WITH WHAT IS MANAGED, NOT THE TOTAL")
+
+import newsroom_brief as _N
+a = _N.account_desk(
+    {"total_usd": 11259.04, "cash_usd": 66.46, "coin_usd": 11192.59,
+     "assets_held": 57, "assets_unpriced": 3, "untracked_usd": 11560.35,
+     "warning": "3 of 57 could not be priced"},
+    {"scans": 1068, "qualified": 0, "completed": 0,
+     "bottleneck": "qualification: 1068 scans, 0 cleared the net-edge gate."})
+ok("the headline is what no branch owns",
+   "belongs to no branch" in a["headline"], a["headline"])
+ok("and says nothing rotates it",
+   "Nothing buys it, sells it or rotates it" in a["headline"])
+ok("holding is distinguished from managing",
+   "Holding is not managing" in a["note"])
+ok("and a level is distinguished from a sale",
+   "does not sell it" in a["note"],
+   "a wall screen must not let a watch read as management")
+ok("it reports the funnel", "1,068 setups scored, 0 cleared" in a["funnel"])
+ok("and the bottleneck verbatim", "net-edge gate" in (a["bottleneck"] or ""))
+ok("managed_usd can be NEGATIVE and is not clamped",
+   a["managed_usd"] < 0,
+   "allocations exceeding backing is a real state and hiding it is the bug")
+ok("an empty census does not raise",
+   _N.account_desk({}, {})["headline"] == "Account total unreadable.")
+ok("no scans says so rather than showing 0%",
+   _N.account_desk({"total_usd": 1}, {})["funnel"] == "No scans recorded yet.")
+
+print("\nTV MODE: one segment at a time, big enough to read from a couch")
+
+ok("TV mode is opt-in by query string", "has('tv')" in HTML)
+ok("it scales the type up", "body.tv{font-size:20px}" in HTML)
+ok("and the lead story most of all", "body.tv .story{font-size:30px" in HTML)
+ok("only the active segment shows", "body.tv .seg{display:none}" in HTML)
+ok("every desk is a segment", HTML.count('class="desk span2 seg"') + HTML.count('class="desk seg"') == 8)
+ok("the account desk is one of them", 'data-seg="account"' in HTML)
+ok("it cycles on a timer", "setInterval(() => showSegment(segIdx + 1), 12000)" in HTML)
+ok("twelve seconds, not two - a wall is read slowly", "12000" in HTML)
+ok("arrow keys step through by hand", "ArrowRight" in HTML and "ArrowLeft" in HTML)
+ok("a segment bar shows where you are", 'id="segbar"' in HTML)
+ok("the index wraps rather than running off the end",
+   "% SEGMENTS.length) + SEGMENTS.length)" in HTML)
+ok("WITHOUT ?tv the page is unchanged",
+   "if (TV) {" in HTML and "document.body.classList.add('tv')" in HTML,
+   "the normal newsroom must not become a slideshow for everyone")
+
 print(f"\n{_passed}/{_passed + _failed} checks passed")
 raise SystemExit(1 if _failed else 0)

@@ -121,6 +121,31 @@
   .corr .f{color:var(--red);font-size:10px;letter-spacing:.12em}
   .corr .n{color:var(--dim);font-size:12px}
   .clear{color:var(--green);font-size:12px}
+  /* TV MODE. A wall screen is read from across a room, so type scales up
+     and the page stops trying to fit everything at once - it cycles. */
+  body.tv{font-size:20px}
+  body.tv .wrap{max-width:none;padding:22px 30px}
+  body.tv .brand{font-size:34px}
+  body.tv .desk>h2{font-size:15px;padding:12px 16px}
+  body.tv .body{padding:18px}
+  body.tv .story{font-size:30px;line-height:1.45}
+  body.tv .ticker .run{padding:12px 0;font-size:20px}
+  body.tv .ticker .tag{font-size:15px;padding:10px 16px}
+  body.tv table{font-size:19px}
+  body.tv th{font-size:14px}
+  body.tv .kpi .v{font-size:40px}
+  body.tv .kpi .l{font-size:13px}
+  body.tv .kpi .s{font-size:14px}
+  body.tv .script p{font-size:24px;line-height:1.6}
+  body.tv .desknote,body.tv .caveat{font-size:15px}
+  /* Cycling: only the active segment is shown, so each gets the whole wall. */
+  body.tv .seg{display:none}
+  body.tv .seg.on{display:flex}
+  body.tv #segbar{display:flex}
+  #segbar{display:none;gap:8px;flex-wrap:wrap;margin:10px 0 0;font-size:12px}
+  #segbar b{padding:4px 10px;border:1px solid var(--line);color:var(--dim);
+            letter-spacing:.1em;font-weight:400}
+  #segbar b.on{color:var(--amber);border-color:var(--amber)}
   .script p{margin:0 0 9px}
   .script p:first-child{color:var(--amber)}
   .caveat{border:1px solid #3a2a12;background:#161005;color:var(--amber);
@@ -147,8 +172,10 @@
 
   <div id="err"></div>
 
+  <div id="segbar"></div>
+
   <div class="grid">
-    <section class="desk span2">
+    <section class="desk span2 seg" data-seg="studio">
       <h2><span>MAIN STUDIO</span><em id="asof"></em></h2>
       <div class="body">
         <div class="who">REPORTER <b id="anchor">—</b> &nbsp;·&nbsp; NETWORK Empire Crypto News</div>
@@ -156,7 +183,7 @@
       </div>
     </section>
 
-    <section class="desk">
+    <section class="desk seg" data-seg="quant">
       <h2><span>QUANT DESK</span><em>score = headroom · steadiness · weight</em></h2>
       <div class="body">
         <table><thead><tr>
@@ -165,7 +192,7 @@
       </div>
     </section>
 
-    <section class="desk">
+    <section class="desk seg" data-seg="risk">
       <h2><span>RISK DESK</span><em>alert levels, not orders</em></h2>
       <div class="body">
         <table><thead><tr>
@@ -174,12 +201,12 @@
       </div>
     </section>
 
-    <section class="desk">
+    <section class="desk seg" data-seg="notes">
       <h2><span>PRODUCER NOTES</span><em>ranked by dollars at stake</em></h2>
       <div class="body" id="notes"></div>
     </section>
 
-    <section class="desk">
+    <section class="desk seg" data-seg="capital">
       <h2><span>CAPITAL FLOW DESK</span><em>the book, as it is</em></h2>
       <div class="body">
         <div class="kpis" id="kpis"></div>
@@ -190,7 +217,16 @@
       </div>
     </section>
 
-    <section class="desk span2">
+    <section class="desk span2 seg" data-seg="account">
+      <h2><span>WHOLE ACCOUNT</span><em>what any code is actually managing</em></h2>
+      <div class="body">
+        <div class="kpis" id="acctkpis"></div>
+        <div class="caveat" id="accthead" style="margin-top:12px"></div>
+        <div class="desknote" id="acctnote"></div>
+      </div>
+    </section>
+
+    <section class="desk span2 seg" data-seg="league">
       <h2><span>EMPIRE EXCELLENCE LEAGUE</span><em id="leaguewin"></em></h2>
       <div class="body" id="league"></div>
     </section>
@@ -200,7 +236,7 @@
       <div class="body" id="copy"></div>
     </section>
 
-    <section class="desk span2">
+    <section class="desk span2 seg" data-seg="script">
       <h2><span>REPORTER SCRIPT</span><em>read aloud</em></h2>
       <div class="body script" id="script"></div>
     </section>
@@ -227,7 +263,47 @@ const pct = (n, d) => (n == null ? "—" : Number(n).toFixed(d == null ? 2 : d) 
 const RISK_CLASS = {CRITICAL:"c-crit", HIGH:"c-high", CONCENTRATION:"c-high",
   MEDIUM:"c-med", LOW:"c-low", UNKNOWN:"c-un", STRANDED:"c-un", UNMEASURED:"c-un"};
 
+const SEGMENTS = [
+  ['account','WHOLE ACCOUNT'], ['studio','MAIN STUDIO'], ['risk','RISK DESK'],
+  ['league','LEAGUE'], ['quant','QUANT DESK'], ['notes','PRODUCER NOTES'],
+  ['capital','CAPITAL FLOW'], ['script','REPORTER SCRIPT'],
+];
+const TV = new URLSearchParams(location.search).has('tv');
+let segIdx = 0;
+
+function showSegment(i){
+  const segs = document.querySelectorAll('.seg');
+  if(!segs.length) return;
+  segIdx = ((i % SEGMENTS.length) + SEGMENTS.length) % SEGMENTS.length;
+  const want = SEGMENTS[segIdx][0];
+  segs.forEach(el => el.classList.toggle('on', el.dataset.seg === want));
+  const bar = $('segbar');
+  if(bar) bar.innerHTML = SEGMENTS.map((sg, n) =>
+      `<b class="${n === segIdx ? 'on' : ''}">${esc(sg[1])}</b>`).join('');
+}
+
+function renderAccount(a){
+  if(!a){ return; }
+  $('acctkpis').innerHTML = `
+    <div class="kpi"><div class="l">ACCOUNT TOTAL</div><div class="v">${usd(a.total_usd)}</div>
+      <div class="s">${usd(a.coin_usd)} coin \u00b7 ${usd(a.cash_usd)} cash</div></div>
+    <div class="kpi"><div class="l">MANAGED BY CODE</div>
+      <div class="v" style="color:${(a.untracked_pct||0) > 50 ? 'var(--red)' : 'var(--ink)'}">
+        ${a.untracked_pct == null ? '\u2014' : (100 - a.untracked_pct).toFixed(1) + '%'}</div>
+      <div class="s">${usd(a.managed_usd)} of ${usd(a.total_usd)}</div></div>
+    <div class="kpi"><div class="l">SETUPS SCORED</div><div class="v">${(a.scans||0).toLocaleString()}</div>
+      <div class="s">${a.qualified} cleared the gate</div></div>
+    <div class="kpi"><div class="l">TRADES COMPLETED</div>
+      <div class="v">${a.completed == null ? '\u2014' : a.completed}</div>
+      <div class="s">${a.unpriced ? a.unpriced + ' assets unpriced' : 'all assets priced'}</div></div>`;
+  $('accthead').textContent = a.headline || '';
+  $('acctnote').innerHTML = esc(a.note || '') +
+      (a.bottleneck ? '<br><br>' + esc(a.bottleneck) : '') +
+      (a.unpriced_note ? '<br><br>' + esc(a.unpriced_note) : '');
+}
+
 function render(d){
+  renderAccount(d.account);
   $("anchor").textContent = d.anchor || "—";
   $("airtext").textContent = d.on_air ? "ON AIR" : "OFF AIR";
   $("story").textContent = d.current_story || "—";
@@ -387,6 +463,20 @@ async function load(){
     $("clock").textContent = "last attempt " + new Date().toLocaleTimeString();
   }
 }
+if (TV) {
+  document.body.classList.add('tv');
+  showSegment(0);
+  // One segment at a time, twelve seconds each - long enough to read from
+  // across a room, short enough that the wall never goes stale.
+  setInterval(() => showSegment(segIdx + 1), 12000);
+}
+// Arrow keys and a tap step through the segments by hand.
+document.addEventListener('keydown', e => {
+  if (!TV) return;
+  if (e.key === 'ArrowRight') showSegment(segIdx + 1);
+  if (e.key === 'ArrowLeft') showSegment(segIdx - 1);
+});
+
 load();
 setInterval(load, 15 * 60 * 1000);   // broadcast cycle: every 15 minutes
 </script>

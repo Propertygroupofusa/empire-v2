@@ -250,6 +250,51 @@ def current_story(watch: dict) -> str:
     return lead["headline"] + ". " + lead["detail"] + (f" Also developing: {second}." if second else "")
 
 
+def account_desk(census: dict, pipeline: dict) -> dict:
+    """The whole account and the funnel, as two honest headlines.
+
+    The number that leads is NOT the total. It is the share of the account
+    any code is actually managing, because that is the fact a screen on a
+    wall will otherwise quietly misrepresent: a big total next to a live
+    ticker reads as "this is working", and $11,192 of coin that no branch
+    owns is not being worked at all. It is being held.
+    """
+    c = census or {}
+    p = pipeline or {}
+    total = _f(c.get("total_usd"), 0.0) or 0.0
+    untracked = _f(c.get("untracked_usd"), 0.0) or 0.0
+    scans = int(p.get("scans") or 0)
+    qualified = int(p.get("qualified") or 0)
+    return {
+        "total_usd": round(total, 2),
+        "cash_usd": round(_f(c.get("cash_usd"), 0.0) or 0.0, 2),
+        "coin_usd": round(_f(c.get("coin_usd"), 0.0) or 0.0, 2),
+        "assets": c.get("assets_held"),
+        "unpriced": c.get("assets_unpriced"),
+        "unpriced_note": c.get("warning"),
+        "untracked_usd": round(untracked, 2),
+        "untracked_pct": (round(100.0 * untracked / total, 1) if total else None),
+        "managed_usd": round(total - untracked, 2),
+        "scans": scans,
+        "qualified": qualified,
+        "qualified_pct": (round(100.0 * qualified / scans, 2) if scans else None),
+        "headline": (
+            f"{round(100.0 * untracked / total, 1)}% of the account belongs to no "
+            f"branch. Nothing buys it, sells it or rotates it."
+            if total else "Account total unreadable."),
+        "funnel": (
+            f"{scans:,} setups scored, {qualified} cleared the gate."
+            if scans else "No scans recorded yet."),
+        "bottleneck": p.get("bottleneck"),
+        "top_rejection": p.get("top_rejection"),
+        "completed": p.get("completed"),
+        "is_managed": False if untracked and total and untracked / total > 0.5 else None,
+        "note": ("Holding is not managing. A level on a coin says where it would "
+                 "be sold; it does not sell it. Nothing in this system currently "
+                 "buys or sells any of the untracked holdings."),
+    }
+
+
 def build(watch: dict, anchor: str = "Delfine") -> dict:
     """The whole broadcast, from one live watch payload."""
     rows = [r for r in (watch.get("rows") or [])
