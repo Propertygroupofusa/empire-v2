@@ -1112,6 +1112,73 @@ class CryptoGridSlice(Base):
     entry_expected_price = Column(Float, nullable=True)
 
 
+class GridMakerExpiry(Base):
+    """One post-only order that rested its whole window, filled nothing, and
+    was cancelled with NO market order behind it.
+
+    This is the ledger of the trades that did not happen, and it exists
+    because the trades that did happen cannot answer the question it asks.
+    Maker-ONLY mode buys a cheaper fee with missed cycles; the count of those
+    misses was already kept, but a count cannot say whether missing was good
+    or bad. Only what the price did next can.
+
+    So each row is anchored at the moment of cancellation and then resolved
+    at four horizons. The sign convention is fixed once, in
+    cancel_benefit_pct, so the answer never depends on remembering which way
+    round a buy is: POSITIVE means cancelling helped.
+
+        cancelled BUY  -> we did not buy. Price falling afterwards is GOOD
+                          (the same dip is available cheaper).
+        cancelled SELL -> we still hold. Price rising afterwards is GOOD
+                          (the slice is worth more than the exit we skipped).
+
+    A persistently positive mean says the 240-second timeout is protecting
+    the account. A persistently negative one says it is too aggressive and is
+    handing back fills that were about to come good. Either way it is
+    measured rather than argued.
+
+    Nothing here is read by any trading decision. It is evidence for a later
+    one.
+    """
+    __tablename__ = "grid_maker_expiry"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot_name = Column(String, index=True, nullable=True)
+    product_id = Column(String, index=True)
+    side = Column(String)                            # "buy" | "sell"
+    wait_seconds = Column(Integer, nullable=True)    # how long it rested before being given up on
+
+    # The anchor. Mid is used at BOTH ends so drift is one instrument
+    # measured twice, never a bid compared against an ask - that spread
+    # would be read as a move the market never made.
+    bid_at_expiry = Column(Float, nullable=True)
+    ask_at_expiry = Column(Float, nullable=True)
+    price_at_expiry = Column(Float)
+    expired_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    # Four horizons rather than one, because "too aggressive" and
+    # "protective" can be the same row at different distances: a fill that
+    # comes good in 60s and rolls over by 10 minutes is a real pattern and a
+    # single horizon would report only half of it. Each resolves
+    # independently and stays NULL until its moment arrives, so a row is
+    # usable while still filling in.
+    price_1m = Column(Float, nullable=True)
+    price_3m = Column(Float, nullable=True)
+    price_5m = Column(Float, nullable=True)
+    price_10m = Column(Float, nullable=True)
+    drift_1m_pct = Column(Float, nullable=True)
+    drift_3m_pct = Column(Float, nullable=True)
+    drift_5m_pct = Column(Float, nullable=True)
+    drift_10m_pct = Column(Float, nullable=True)
+    # Side-corrected: positive = cancelling helped. See the class docstring.
+    cancel_benefit_1m_pct = Column(Float, nullable=True)
+    cancel_benefit_3m_pct = Column(Float, nullable=True)
+    cancel_benefit_5m_pct = Column(Float, nullable=True)
+    cancel_benefit_10m_pct = Column(Float, nullable=True)
+    # Set once the 10-minute horizon is in, so the resolver can stop looking.
+    resolved_at = Column(DateTime, nullable=True, index=True)
+
+
 class CryptoGridTradeHistory(Base):
     """One completed real grid-slice round trip (a real buy, later
     matched with a real FIFO sell) - the direct grid-branch counterpart

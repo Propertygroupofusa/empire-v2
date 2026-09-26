@@ -51,7 +51,7 @@ import crypto_btc_compound_bot as engine
 import crypto_mean_reversion_bot as mean_reversion_engine
 import coin_rotation as rotation
 from database import get_session_factory
-from models import CryptoGridBranch, CryptoGridSlice, CryptoGridTradeHistory, TradingBotState, CryptoTreeBranch, BotPosition
+from models import CryptoGridBranch, CryptoGridSlice, CryptoGridTradeHistory, GridMakerExpiry, TradingBotState, CryptoTreeBranch, BotPosition
 
 # ── SHADOW MODE INTEGRATION ────────────────────────────────────────────────
 # Non-invasive learning validation: observes every trade without affecting execution
@@ -856,7 +856,7 @@ async def get_fill_mix() -> dict:
     return out
 
 
-async def grid_buy(session, usd_amount: float, product_id: str):
+async def grid_buy(session, usd_amount: float, product_id: str, bot_name: str = None):
     """Real grid BUY: maker first (cheap, may not fill), market fallback
     (always fills, costs more) - unless maker-ONLY mode has removed that
     fallback, in which case an unfilled maker order simply means no buy
@@ -880,6 +880,7 @@ async def grid_buy(session, usd_amount: float, product_id: str):
             log.info(f"[GRID] {product_id}: maker buy did not fill and maker-ONLY mode is on - "
                      f"passing this cycle rather than paying the taker leg")
             await _record_maker_only_skip(GRID_MAKER_ONLY_SKIP_BUY_KEY)
+            await _record_maker_expiry(session, product_id, "buy", bot_name)
             return None
     fill = await engine.place_market_buy(session, usd_amount, product_id)
     if not fill:
@@ -889,7 +890,7 @@ async def grid_buy(session, usd_amount: float, product_id: str):
     return qty, price, (await get_effective_round_trip_fee_rate()) / 2
 
 
-async def grid_sell(session, qty: float, product_id: str):
+async def grid_sell(session, qty: float, product_id: str, bot_name: str = None):
     """Real grid SELL: maker first, market fallback - unless maker-ONLY
     mode has removed the fallback. Returns (filled_qty, price,
     leg_fee_rate) or None.
@@ -914,6 +915,7 @@ async def grid_sell(session, qty: float, product_id: str):
             log.info(f"[GRID] {product_id}: maker sell did not fill and maker-ONLY mode is on - "
                      f"holding the slice rather than paying the taker leg out of its own profit")
             await _record_maker_only_skip(GRID_MAKER_ONLY_SKIP_SELL_KEY)
+            await _record_maker_expiry(session, product_id, "sell", bot_name)
             return None
     fill = await engine.place_market_sell(session, qty, product_id)
     if not fill:
@@ -921,6 +923,146 @@ async def grid_sell(session, qty: float, product_id: str):
     filled_qty, price = fill
     await _record_fill_leg(GRID_FILL_MIX_SELL_KEY, False)
     return filled_qty, price, (await get_effective_round_trip_fee_rate()) / 2
+
+
+
+# Horizons for the post-expiry drift experiment, in seconds. Four rather than
+# one because "protective" and "too aggressive" can be the same order at
+# different distances - a price that comes back in 60s and rolls over by 10
+# minutes is a real shape, and a single horizon reports half of it.
+_EXPIRY_HORIZONS = ((60, "1m"), (180, "3m"), (300, "5m"), (600, "10m"))
+
+# Resolving costs one book read per product per cycle, so it is capped. The
+# backlog is tiny by construction (this fleet expires a handful of orders a
+# day) and anything not resolved this cycle is resolved on the next one.
+_EXPIRY_RESOLVE_MAX_PER_CYCLE = int(os.getenv("GRID_EXPIRY_RESOLVE_MAX", "8"))
+
+
+async def _record_maker_expiry(session, product_id: str, side: str, bot_name: str = None):
+    """Anchor one cancelled post-only order. Never raises - this is
+    instrumentation and must not be able to stop the thing it measures.
+
+    Called ONLY where maker-only actually cancelled with nothing behind it.
+    Deliberately NOT called on the maker-first path, where an unfilled order
+    becomes a market order: that trade happened, so "what did we miss" has no
+    meaning there, and mixing the two would put filled cycles in the ledger
+    of unfilled ones.
+    """
+    try:
+        bid, ask = await engine.get_best_bid_ask(session, product_id)
+        if bid is None or ask is None:
+            log.debug(f"[GRID] expiry anchor skipped for {product_id}: no book")
+            return
+        async with get_session_factory()() as db:
+            db.add(GridMakerExpiry(
+                bot_name=bot_name, product_id=product_id, side=side,
+                wait_seconds=await maker_wait_seconds(),
+                bid_at_expiry=bid, ask_at_expiry=ask,
+                # Mid at BOTH ends, so drift is one instrument measured
+                # twice. Anchoring on the bid and resolving on the mid would
+                # book half the spread as a move the market never made.
+                price_at_expiry=(bid + ask) / 2.0,
+            ))
+            await db.commit()
+    except Exception as e:
+        log.debug(f"[GRID] expiry anchor failed for {product_id} (ignored): "
+                  f"{type(e).__name__}: {e}")
+
+
+async def _resolve_maker_expiries(session):
+    """Fill in whichever horizons have come due. Never raises.
+
+    Each horizon resolves independently and only once, so a row is usable
+    while still filling in, and a restart mid-flight loses nothing.
+    """
+    try:
+        now = datetime.utcnow()
+        async with get_session_factory()() as db:
+            rows = (await db.execute(
+                select(GridMakerExpiry)
+                .where(GridMakerExpiry.resolved_at.is_(None))
+                .order_by(GridMakerExpiry.expired_at)
+                .limit(_EXPIRY_RESOLVE_MAX_PER_CYCLE))).scalars().all()
+            if not rows:
+                return
+            prices = {}
+            for row in rows:
+                age = (now - row.expired_at).total_seconds() if row.expired_at else 0
+                due = [(sec, tag) for sec, tag in _EXPIRY_HORIZONS
+                       if age >= sec and getattr(row, f"price_{tag}") is None]
+                if not due:
+                    continue
+                if row.product_id not in prices:
+                    try:
+                        bid, ask = await engine.get_best_bid_ask(session, row.product_id)
+                        prices[row.product_id] = ((bid + ask) / 2.0
+                                                  if bid is not None and ask is not None else None)
+                    except Exception:
+                        prices[row.product_id] = None
+                price = prices.get(row.product_id)
+                if price is None or not row.price_at_expiry:
+                    continue
+                drift = (price / row.price_at_expiry - 1.0) * 100.0
+                # THE SIGN CONVENTION, fixed in exactly one place.
+                # A cancelled BUY did not buy, so a fall afterwards is good.
+                # A cancelled SELL still holds, so a rise afterwards is good.
+                benefit = -drift if row.side == "buy" else drift
+                for sec, tag in due:
+                    setattr(row, f"price_{tag}", price)
+                    setattr(row, f"drift_{tag}_pct", round(drift, 4))
+                    setattr(row, f"cancel_benefit_{tag}_pct", round(benefit, 4))
+                if row.price_10m is not None:
+                    row.resolved_at = now
+            await db.commit()
+    except Exception as e:
+        log.debug(f"[GRID] expiry resolution pass failed (ignored): "
+                  f"{type(e).__name__}: {e}")
+
+
+async def get_maker_expiry_drift() -> dict:
+    """Did cancelling help? Measured, per horizon, sign-corrected.
+
+    POSITIVE mean benefit = the timeout protected the account. NEGATIVE =
+    it is too aggressive and is handing back fills that were about to come
+    good. The verdict field stays "not enough data" until there are enough
+    resolved rows to mean anything, because the temptation to read three
+    samples as a finding is exactly how the 50-trade history got misread.
+    """
+    try:
+        async with get_session_factory()() as db:
+            rows = (await db.execute(select(GridMakerExpiry))).scalars().all()
+    except Exception as e:
+        return {"available": False, "error": f"{type(e).__name__}: {e}"}
+    if not rows:
+        return {"available": False, "expiries": 0,
+                "note": "no post-only order has expired unfilled yet"}
+
+    out = {"available": True, "expiries": len(rows),
+           "buy": sum(1 for r in rows if r.side == "buy"),
+           "sell": sum(1 for r in rows if r.side == "sell"),
+           "horizons": {}}
+    for _sec, tag in _EXPIRY_HORIZONS:
+        vals = [getattr(r, f"cancel_benefit_{tag}_pct") for r in rows
+                if getattr(r, f"cancel_benefit_{tag}_pct") is not None]
+        out["horizons"][tag] = {
+            "n": len(vals),
+            "mean_benefit_pct": round(sum(vals) / len(vals), 4) if vals else None,
+            "helped": sum(1 for v in vals if v > 0),
+            "hurt": sum(1 for v in vals if v < 0),
+        }
+    ten = out["horizons"]["10m"]
+    # 20 is not a magic number with a derivation behind it - it is simply the
+    # point below which this says nothing, chosen so the field cannot be read
+    # as a finding while it is still noise.
+    if (ten["n"] or 0) < 20:
+        out["verdict"] = f"not enough data ({ten['n']}/20 resolved at 10m)"
+    elif ten["mean_benefit_pct"] > 0:
+        out["verdict"] = ("the 240s timeout looks PROTECTIVE - price moved "
+                          "against us after cancelling, on average")
+    else:
+        out["verdict"] = ("the 240s timeout looks TOO AGGRESSIVE - price moved "
+                          "in our favour after cancelling, on average")
+    return out
 
 
 async def slice_round_trip_fee_rate(slice_row, exit_leg_rate: float = None) -> float:
@@ -3256,7 +3398,7 @@ async def force_one_buy(bot_name: str, amount_usd: float = None) -> dict:
 
         log.warning(f"[GRID] 🔬 FORCED BUY on {bot_name} ({branch.product_id}) for ${spend:.2f} "
                     f"- measuring whether the maker path fills")
-        fill = await grid_buy(session, spend, branch.product_id)
+        fill = await grid_buy(session, spend, branch.product_id, branch.bot_name)
 
     if not fill:
         reason = engine._last_order_error.get(branch.product_id, "no reason reported")
@@ -4751,7 +4893,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
         except Exception as e:
             log.warning(f"[LEARN] {branch.bot_name}: memory unavailable ({e}) - trading anyway")
 
-        fill = await grid_buy(session, spend, branch.product_id)
+        fill = await grid_buy(session, spend, branch.product_id, branch.bot_name)
         if not fill:
             reason = engine._last_order_error.get(branch.product_id, "no reason reported")
             log.warning(f"[GRID] {branch.bot_name}: real grid buy into {branch.product_id} did not fill - will retry next cycle")
@@ -4954,7 +5096,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                     f"profit at this price - holding every slice, waiting for a genuinely profitable one"
                 )
                 return
-        fill = await grid_sell(session, oldest.qty, branch.product_id)
+        fill = await grid_sell(session, oldest.qty, branch.product_id, branch.bot_name)
         if not fill:
             log.warning(f"[GRID] {branch.bot_name}: real grid sell of {branch.product_id} did not fill - will retry next cycle")
             return
@@ -5425,6 +5567,11 @@ async def run_grid_branches_cycle():
                 log.error(f"[GRID] {branch.bot_name} cycle error: {e}")
             await asyncio.sleep(0.5)
 
+        # Fill in any post-expiry horizons that have come due. Inside the
+        # session so it reuses the connection, after the branches so it can
+        # never delay a trading decision, and capped per cycle.
+        await _resolve_maker_expiries(session)
+
     # Real, periodic automatic idle-cash rotation - throttled here (not
     # inside run_grid_auto_rotate_sweep itself) via a plain in-process
     # timestamp, same pattern crypto_family_tree_bot.py's own scheduled-
@@ -5712,6 +5859,10 @@ async def get_grid_status() -> dict:
         # This is the same question answered from real fills, so the page can
         # stop presenting an estimate in the voice of a measurement.
         "realized_edge": await get_realized_edge(),
+        # The ledger of trades that did NOT happen: what price did after each
+        # cancelled post-only order. The skip COUNT above says what this mode
+        # costs; this says whether that cost bought anything.
+        "maker_expiry_drift": await get_maker_expiry_drift(),
         "floor_priced_against": ("maker (the market fallback is removed)"
                                  if _maker_only and _cached_real_maker_fee_rate is not None
                                  else "taker (an unfilled maker order still becomes a market order)"),
@@ -5720,41 +5871,100 @@ async def get_grid_status() -> dict:
 
 
 
+# When the CURRENT configuration began. Everything closed before this is a
+# different experiment wearing the same ledger.
+#
+# The 50 completed round trips in this book were taken on DOGE/ETH/STX/WIF/
+# ETC/LINK/LTC/ATOM/AAVE/ARB/BCH, at a 2.00% step, with the market fallback
+# still active - none of those coins is in the fleet now, the step is 2.50%,
+# and maker-ONLY has removed the fallback. Pooled with the current six they
+# produced a confident "+1.95% realized per cycle" for a configuration that
+# has completed ZERO cycles. That is not a stale label, it is a number that
+# actively misleads: it is green, it is large, and it describes nothing that
+# is running.
+#
+# Tunable because it must be re-baselined the next time the step, the fee
+# path or the coin list changes. A cohort boundary that is not moved when the
+# configuration moves becomes the same bug again.
+GRID_CONFIG_EPOCH = os.getenv("GRID_CONFIG_EPOCH", "2026-09-26T02:45:00Z")
+
+
+def _config_epoch() -> datetime:
+    try:
+        return datetime.fromisoformat(GRID_CONFIG_EPOCH.replace("Z", "")).replace(tzinfo=None)
+    except Exception:
+        log.warning(f"[GRID] GRID_CONFIG_EPOCH={GRID_CONFIG_EPOCH!r} is unparseable; "
+                    f"treating every trade as RETIRED so nothing stale can be "
+                    f"reported as current")
+        # Fail toward "none of it is current". The failure that matters is
+        # old trades being counted as new, so an unreadable epoch must never
+        # widen the current cohort.
+        return datetime.max
+
+
+def _edge_cohort(rows) -> dict:
+    """Realized edge for one set of completed round trips.
+
+    Notional-weighted: gross and net share ONE denominator, total entry
+    notional. An unweighted mean of percentages beside a weighted total
+    produces an "implied cost" that is not any real cost - on this book the
+    two framings differ by half a point.
+    """
+    usable = [r for r in rows
+              if None not in (r.entry_price, r.exit_price, r.qty, r.pnl)
+              and r.entry_price and r.qty]
+    if not usable:
+        return {"trades": 0}
+    notional = sum(r.entry_price * r.qty for r in usable)
+    gross = sum((r.exit_price - r.entry_price) * r.qty for r in usable)
+    net = sum(r.pnl for r in usable)
+    closes = sorted(r.closed_at for r in usable if r.closed_at)
+    span = ((closes[-1] - closes[0]).total_seconds() / 86400) if len(closes) > 1 else 0.0
+    return {
+        "trades": len(usable),
+        "coins": sorted({r.product_id for r in usable if r.product_id}),
+        "notional_usd": round(notional, 2),
+        "mean_slice_usd": round(notional / len(usable), 2),
+        "gross_pct": round(gross / notional * 100, 3),
+        "net_pct": round(net / notional * 100, 3),
+        "net_usd": round(net, 2),
+        # Named "implied", never "measured adverse selection". It is computed
+        # over COMPLETED round trips, and adverse selection is precisely the
+        # cost that lands on the ones that never complete - a slice bought
+        # into a move that kept going sits open and contributes nothing here.
+        # A realized cost BELOW the assumption is survivorship, not good news.
+        "implied_cost_pct": round((gross - net) / notional * 100, 3),
+        "closes_per_day": round(len(closes) / span, 2) if span >= 1 else None,
+        # Clamped at 0: a close timestamped slightly ahead of this clock
+        # (a DB written by another process, a skewed container) would
+        # otherwise render as "-0d since the last close", which reads as a
+        # glitch on the one figure that has to be trusted at a glance.
+        "days_since_last_close": max(0.0, round(
+            (datetime.utcnow() - closes[-1]).total_seconds() / 86400, 1)) if closes else None,
+        "stop_loss_closes": sum(1 for r in usable if r.exit_reason == "stop_loss"),
+    }
+
+
 async def get_realized_edge(days: int = None) -> dict:
-    """What the closed book ACTUALLY earned, beside what the step theoretically
-    clears. The two are different questions and the page conflated them.
+    """What the closed book actually earned - split into the configuration
+    running NOW and the one that is not.
 
-    The theoretical figure is step - (fees + adverse selection): today
-    2.50% - (0.70% + 0.67%) = +1.13%. Every term after the step is an
-    estimate, and the 0.67% in particular is a measured-once constant. This
-    function answers the same question from real fills instead.
+    Three things this deliberately does not do.
 
-    THREE THINGS IT DELIBERATELY DOES NOT DO.
-
-    It does not weight by trade. Gross and net share ONE denominator - total
-    entry notional - because an unweighted mean of percentages beside a
-    weighted total produces an "implied cost" that is not any real cost. On
-    this book those two framings differ by half a point.
+    It does not pool the cohorts. See GRID_CONFIG_EPOCH: pooled, the retired
+    book reports +1.95% per cycle for a fleet that has completed none.
 
     It does not present implied_cost_pct as a better adverse-selection
-    estimate, and the caller must not either. It is measured over COMPLETED
-    round trips only, and adverse selection is precisely the cost that shows
-    up on the ones that never complete - a slice bought into a move that kept
-    going sits open and contributes nothing here. On the live book this reads
-    ~0.91% against the 1.37% assumed, and that gap is survivorship, not good
-    news. Conditioning the estimate on completion removes the phenomenon
-    being estimated.
+    estimate, and no caller may either - it is conditioned on completion,
+    which removes the phenomenon being estimated.
 
-    It does not call a positive number success. Per-completed-cycle margin
-    can stay healthily positive while the account goes nowhere, because the
-    losers stay open and out of this table. That is why closes_per_day and
-    days_since_last_close are returned beside the margin and not underneath
-    it: this fleet realised +1.95% per cycle over 50 cycles and has closed
-    nothing in the 17 days since. Margin was never the binding constraint.
+    It does not call a positive margin success. Per-cycle margin can stay
+    healthy while the account goes nowhere, because the losers stay open and
+    out of this table entirely. That is why days_since_last_close sits beside
+    the margin and not underneath it: this fleet realised +1.95% a cycle at
+    6.25 closes a day for eight days, then closed nothing for seventeen.
     """
-    since = None
-    if days:
-        since = datetime.utcnow() - timedelta(days=days)
+    since = datetime.utcnow() - timedelta(days=days) if days else None
     try:
         async with get_session_factory()() as db:
             q = select(CryptoGridTradeHistory)
@@ -5764,41 +5974,28 @@ async def get_realized_edge(days: int = None) -> dict:
     except Exception as e:
         return {"available": False, "error": f"{type(e).__name__}: {e}"}
 
-    usable = [r for r in rows
-              if None not in (r.entry_price, r.exit_price, r.qty, r.pnl)
-              and r.entry_price and r.qty]
-    if not usable:
-        return {"available": False, "trades": 0,
-                "note": "no completed round trips yet - nothing realised to compare against"}
-
-    notional = sum(r.entry_price * r.qty for r in usable)
-    gross = sum((r.exit_price - r.entry_price) * r.qty for r in usable)
-    net = sum(r.pnl for r in usable)
-    closes = sorted(r.closed_at for r in usable if r.closed_at)
-    span_days = ((closes[-1] - closes[0]).total_seconds() / 86400) if len(closes) > 1 else 0.0
-    stops = [r for r in usable if r.exit_reason == "stop_loss"]
-
+    epoch = _config_epoch()
+    current = [r for r in rows if r.closed_at and r.closed_at >= epoch]
+    retired = [r for r in rows if not r.closed_at or r.closed_at < epoch]
+    cur = _edge_cohort(current)
     return {
         "available": True,
-        "trades": len(usable),
-        "notional_usd": round(notional, 2),
-        "mean_slice_usd": round(notional / len(usable), 2),
-        "gross_pct": round(gross / notional * 100, 3),
-        "net_pct": round(net / notional * 100, 3),
-        "net_usd": round(net, 2),
-        # Named "implied", never "measured adverse selection" - see docstring.
-        "implied_cost_pct": round((gross - net) / notional * 100, 3),
+        "config_epoch": GRID_CONFIG_EPOCH,
+        # The cohort that describes what is running. Everything a decision
+        # should be based on comes from here.
+        "current": cur,
+        # Kept, because it is real evidence about grids in general. Labelled,
+        # because it is not evidence about this one.
+        "retired": _edge_cohort(retired),
+        "current_has_baseline": cur["trades"] >= 20,
+        "headline": (
+            f"current configuration: {cur['trades']} completed cycle"
+            f"{'' if cur['trades'] == 1 else 's'}"
+            + (" - no baseline yet, nothing here describes what this fleet earns"
+               if cur["trades"] < 20 else "")),
         "survivorship_warning": (
             "completed round trips only; slices still open are not here, and "
             "those are where adverse selection actually lands"),
-        # The denominator that matters. Margin per cycle is not a return.
-        "closes_per_day": round(len(closes) / span_days, 2) if span_days >= 1 else None,
-        "days_since_last_close": round(
-            (datetime.utcnow() - closes[-1]).total_seconds() / 86400, 1) if closes else None,
-        # Once the stop starts firing, net_pct SHOULD fall: losers that used
-        # to stay open forever begin entering this table. That is the number
-        # becoming honest, not the strategy getting worse.
-        "stop_loss_closes": len(stops),
     }
 
 

@@ -128,7 +128,10 @@ ok("REGRESSION: it no longer sends the operator to a 'crypto-trading service'",
 
 
 print("\ntheoretical and realized are separated, not blended")
-BOT_FN = BOT.split("async def get_realized_edge")[1].split("\nasync def ")[0]
+# These assert the per-cohort maths, which lives in _edge_cohort - the
+# cohort split moved it out of get_realized_edge. Repointed rather than
+# deleted: the claims are unchanged, only their address is.
+BOT_FN = BOT.split("def _edge_cohort")[1].split("\nasync def ")[0]
 ok("the backend measures realized edge from the closed book",
    "async def get_realized_edge" in BOT)
 ok("it is served in the grid-status payload",
@@ -140,7 +143,7 @@ ok("gross and net share ONE denominator (notional-weighted)",
 ok("the cost it derives is named 'implied', never 'measured'",
    '"implied_cost_pct"' in BOT_FN and '"measured_adverse' not in BOT_FN)
 ok("it ships the survivorship warning with the number",
-   "survivorship_warning" in BOT_FN,
+   "survivorship_warning" in BOT,
    "completed round trips only - the slices that never come back are "
    "exactly where adverse selection lands")
 ok("velocity is returned BESIDE the margin, not omitted",
@@ -152,13 +155,89 @@ ok("stop-loss closes are counted separately",
 ok("the card labels the theoretical figure as theoretical",
    "in theory" in CARD_CODE)
 ok("the card shows the realized figure from the payload",
-   "data.realized_edge" in CARD_CODE and "re.net_pct" in CARD_CODE)
+   "data.realized_edge" in CARD_CODE and "re.current.net_pct" in CARD_CODE)
 ok("it prints the realized cost against the ASSUMED one",
-   "assumed" in CARD_CODE and "re.implied_cost_pct" in CARD_CODE)
+   "assumed cost" in CARD_CODE and "re.current.implied_cost_pct" in CARD_CODE)
 ok("it warns on screen that the realized cost is understated",
-   "UNDERSTATES" in CARD_CODE)
+   "is understated" in CARD_CODE)
 ok("it shows days-since-last-close, the number margin cannot answer",
-   "days_since_last_close" in CARD_CODE and "not a return" in CARD_CODE)
+   "days_since_last_close" in CARD_CODE and "since ANY completed cycle" in CARD_CODE)
+
+
+print("\ncohorts are split, never pooled")
+EDGE = BOT.split("async def get_realized_edge")[1].split("\nasync def ")[0]
+COH = BOT.split("def _edge_cohort")[1].split("\nasync def ")[0]
+ok("a configuration epoch exists and is tunable",
+   "GRID_CONFIG_EPOCH" in BOT and 'os.getenv("GRID_CONFIG_EPOCH"' in BOT,
+   "it must be re-baselined whenever step, fee path or coins change")
+ok("the payload separates current from retired",
+   '"current":' in EDGE and '"retired":' in EDGE)
+ok("REGRESSION: there is no single pooled net_pct at the top level",
+   '"net_pct": round' not in EDGE,
+   "pooled, 50 retired trades reported +1.95% for a fleet with zero cycles")
+ok("an unparseable epoch fails toward RETIRED, never toward current",
+   "datetime.max" in BOT,
+   "the failure that matters is old trades counted as new")
+ok("a baseline threshold is stated, not implied",
+   "current_has_baseline" in EDGE)
+ok("the headline says plainly when there is no baseline",
+   "no baseline yet" in EDGE)
+ok("cohort math stays notional-weighted", "gross / notional" in COH and "net / notional" in COH)
+ok("the survivorship warning survives the refactor", "survivorship_warning" in EDGE)
+
+ok("the card leads with the CURRENT cohort", "re.current" in CARD_CODE)
+ok("the retired cohort is labelled as not representative",
+   "RETIRED configuration" in CARD_CODE and "not representative" in CARD_CODE)
+ok("with zero current cycles the card says the theory is not a result",
+   "arithmetic, not a result" in CARD_CODE)
+ok("days-since-close is in the headline row, not a footnote",
+   "since ANY completed cycle" in CARD_CODE)
+
+
+print("\npost-expiry drift: the ledger of trades that did NOT happen")
+REC = BOT.split("async def _record_maker_expiry")[1].split("\nasync def ")[0]
+RES = BOT.split("async def _resolve_maker_expiries")[1].split("\nasync def ")[0]
+DRIFT = BOT.split("async def get_maker_expiry_drift")[1].split("\nasync def ")[0]
+MODELS = open(os.path.join(HERE, "models.py"), encoding="utf-8").read()
+
+ok("a table records each cancelled post-only order", "class GridMakerExpiry" in MODELS)
+ok("four horizons, not one",
+   all(f"price_{t} = Column" in MODELS for t in ("1m","3m","5m","10m")),
+   "protective at 1m and too-aggressive at 10m is a real shape a single "
+   "horizon reports half of")
+ok("every resolved column is nullable, so a row is usable while filling in",
+   MODELS.split("class GridMakerExpiry")[1].split("\nclass ")[0].count("nullable=True") >= 12)
+
+ok("it is anchored only where maker-only actually cancelled",
+   '_record_maker_expiry(session, product_id, "buy"' in BOT
+   and '_record_maker_expiry(session, product_id, "sell"' in BOT)
+ok("NOT on the maker-first path, where a market order still traded",
+   BOT.count('_record_maker_expiry(session, product_id, "') == 2,
+   "an order that fell back to market DID trade; it has no 'what did we miss'")
+ok("mid price at BOTH ends, so the spread is not booked as a move",
+   "(bid + ask) / 2.0" in REC and "(bid + ask) / 2.0" in RES)
+
+ok("the sign convention is fixed in exactly one place",
+   RES.count('-drift if row.side == "buy" else drift') == 1)
+ok("a cancelled BUY counts a FALL as the benefit",
+   '-drift if row.side == "buy"' in RES,
+   "we did not buy, so a cheaper price afterwards is the gain")
+ok("recording can never break trading", "log.debug" in REC and "except Exception" in REC)
+ok("resolution can never break trading", "log.debug" in RES and "except Exception" in RES)
+ok("resolution is capped per cycle", "_EXPIRY_RESOLVE_MAX_PER_CYCLE" in BOT and ".limit(" in RES)
+ok("it runs AFTER the branch loop, so it cannot delay a trade",
+   BOT.index("await _resolve_maker_expiries(session)")
+   > BOT.index("await run_grid_branch_cycle(session, branch)"))
+ok("each horizon resolves once and only once",
+   'getattr(row, f"price_{tag}") is None' in RES)
+
+ok("the verdict refuses to speak on a small sample",
+   "not enough data" in DRIFT and "< 20" in DRIFT,
+   "reading three samples as a finding is how the 50-trade book got misread")
+ok("POSITIVE is defined on screen as 'cancelling helped'",
+   "moved against us after cancelling" in CARD_CODE)
+ok("the drift block is served in the payload", '"maker_expiry_drift"' in BOT)
+ok("the card renders all four horizons", "['1m','3m','5m','10m']" in CARD_CODE)
 
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

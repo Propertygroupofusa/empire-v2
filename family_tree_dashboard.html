@@ -3222,6 +3222,7 @@ function renderGridMakerOnlyToggle(data) {
     // stop looking like the same number disagreeing with itself.
     const ADVERSE = 0.67;
     const re = data.realized_edge;
+    const drift = data.maker_expiry_drift;
     const mix = (data.fill_mix || {}).overall || {};
     const makerFee = (mix.maker_round_trip_fee_rate != null
                       ? mix.maker_round_trip_fee_rate
@@ -3250,39 +3251,74 @@ function renderGridMakerOnlyToggle(data) {
           `<div><b style="color:${net >= 0 ? '#10b981' : '#ef4444'}">${net >= 0 ? '+' : ''}${net.toFixed(2)}%</b>` +
             `${net >= 0 ? 'it clears — in theory' : 'it loses — so nothing trades'}</div>` +
         `</div>` +
-        // THEORETICAL vs REALIZED. Everything above is step minus an
-        // ESTIMATE: the 0.67% adverse-selection term is a measured-once
-        // constant, not a live reading. This row is the same question
-        // answered from real fills, and the two are labelled so the estimate
-        // stops being read in the voice of a measurement.
+        // THEORETICAL vs REALIZED vs WHICH CONFIGURATION.
         //
-        // The warnings are not decoration. Realized margin here is measured
-        // over COMPLETED round trips, and the slices that never come back
-        // are absent - which is exactly where adverse selection lands - so a
-        // realized figure BETTER than theory is survivorship, not a win.
-        // And margin is not a return: this fleet realised +1.95% a cycle and
-        // then closed nothing for 17 days. Velocity is printed beside it for
-        // that reason.
+        // Everything above is step minus an ESTIMATE - the 0.67%
+        // adverse-selection term is a measured-once constant, not a reading.
+        // Below is the same question answered from real fills, split into the
+        // configuration running NOW and the one that is not.
+        //
+        // The split is the point. Pooled, this book reported "+1.95%
+        // realized per cycle" for a fleet that has completed ZERO cycles:
+        // those 50 trades were DOGE/ETH/STX/WIF/ETC/... at a 2.00% step with
+        // the market fallback still active. Green, large, and describing
+        // nothing that is running. So CURRENT leads, RETIRED is labelled and
+        // recessive, and the two are never added together.
+        //
+        // Days-since-last-close sits in the headline row because this fleet
+        // demonstrated the failure it catches: +1.95% a cycle, an 86% win
+        // rate, and seventeen days without a single close. Margin looked
+        // perfect throughout. Margin is not a return.
         (re && re.available
             ? `<div class="mo-math" style="margin-top:8px; border-top:1px solid rgba(128,128,128,.25); padding-top:8px">` +
-                `<div><b style="color:${re.net_pct >= 0 ? '#10b981' : '#ef4444'}">` +
-                  `${re.net_pct >= 0 ? '+' : ''}${re.net_pct.toFixed(2)}%</b>` +
-                  `realized, ${re.trades} completed cycles` +
-                  `<br><span style="font-weight:400; opacity:.75">$${re.net_usd.toFixed(2)} on ` +
-                  `$${re.notional_usd.toFixed(2)} traded · mean slice $${re.mean_slice_usd.toFixed(2)}</span></div>` +
-                `<div><b>${re.implied_cost_pct.toFixed(2)}%</b>cost actually charged` +
-                  `<br><span style="font-weight:400; opacity:.75">vs ${cost.toFixed(2)}% assumed — ` +
-                  `completed trips only, so this UNDERSTATES it</span></div>` +
-                `<div><b style="color:${(re.days_since_last_close || 0) > 3 ? '#ef4444' : '#10b981'}">` +
-                  `${re.days_since_last_close != null ? re.days_since_last_close.toFixed(0) + 'd' : '—'}</b>` +
-                  `since the last close` +
+                `<div><b style="color:${re.current.trades ? (re.current.net_pct >= 0 ? '#10b981' : '#ef4444') : '#f59e0b'}">` +
+                  `${re.current.trades ? (re.current.net_pct >= 0 ? '+' : '') + re.current.net_pct.toFixed(2) + '%' : '—'}</b>` +
+                  `realized, CURRENT config` +
+                  `<br><span style="font-weight:400; opacity:.75">${re.current.trades} completed cycle` +
+                  `${re.current.trades === 1 ? '' : 's'}${re.current_has_baseline ? '' : ' — no baseline yet'}</span></div>` +
+                `<div><b style="color:${(re.retired.days_since_last_close || 0) > 3 ? '#ef4444' : '#10b981'}">` +
+                  `${(re.current.days_since_last_close != null ? re.current.days_since_last_close
+                      : re.retired.days_since_last_close) != null
+                     ? (re.current.days_since_last_close != null ? re.current.days_since_last_close
+                        : re.retired.days_since_last_close).toFixed(0) + 'd' : '—'}</b>` +
+                  `since ANY completed cycle` +
+                  `<br><span style="font-weight:400; opacity:.75">the number a healthy margin cannot answer</span></div>` +
+                `<div><b>${cost.toFixed(2)}%</b>assumed cost` +
                   `<br><span style="font-weight:400; opacity:.75">` +
-                  `${re.closes_per_day != null ? re.closes_per_day.toFixed(2) + ' closes/day when active' : 'velocity not yet measurable'}` +
-                  ` · ${re.stop_loss_closes} by stop</span></div>` +
+                  `${re.current.trades ? re.current.implied_cost_pct.toFixed(2) + '% actually charged'
+                                       : 'nothing realized yet to check it against'}</span></div>` +
               `</div>` +
-              `<p class="why" style="margin:8px 0 0">Margin per cycle is not a return. ` +
-              `A healthy number here with no closes earns nothing.</p>`
+              (re.current.trades
+                 ? ''
+                 : `<p class="why" style="margin:8px 0 0"><strong>This configuration has completed no cycles.</strong> ` +
+                   `The theoretical +${net.toFixed(2)}% above is arithmetic, not a result.</p>`) +
+              `<p class="why" style="margin:8px 0 0; opacity:.7">` +
+              `<strong>RETIRED configuration</strong> (before ${re.config_epoch}): ` +
+              `${re.retired.trades} cycles, ` +
+              `${re.retired.trades ? (re.retired.net_pct >= 0 ? '+' : '') + re.retired.net_pct.toFixed(2) + '% net on $'
+                 + re.retired.notional_usd.toFixed(0) + ', mean slice $' + re.retired.mean_slice_usd.toFixed(2) : '—'}. ` +
+              `Different coins, 2.00% step, market fallback active — <strong>not representative of the fleet running now</strong>. ` +
+              `And measured over completed trips only: the slices that never came back are absent, which is exactly where ` +
+              `adverse selection lands, so that cost is understated.</p>`
             : '') +
+        // The ledger of trades that did NOT happen. The skip count says what
+        // maker-only costs; this says whether that cost bought anything.
+        // Sign convention: POSITIVE benefit = cancelling helped.
+        (drift && drift.available
+            ? `<p class="why" style="margin:8px 0 0"><strong>After we cancelled</strong> ` +
+              `(${drift.expiries} expired order${drift.expiries === 1 ? '' : 's'}: ` +
+              `${drift.buy} buy / ${drift.sell} sell) — mean benefit of cancelling: ` +
+              ['1m','3m','5m','10m'].map(t => {
+                  const h = drift.horizons[t];
+                  return h && h.mean_benefit_pct != null
+                      ? `${t} <strong style="color:${h.mean_benefit_pct >= 0 ? '#10b981' : '#ef4444'}">` +
+                        `${h.mean_benefit_pct >= 0 ? '+' : ''}${h.mean_benefit_pct.toFixed(3)}%</strong> (${h.n})`
+                      : `${t} —`;
+              }).join(' · ') +
+              `. Positive means price moved against us after cancelling, so the timeout protected the account. ` +
+              `<em>${drift.verdict || ''}</em></p>`
+            : `<p class="why" style="margin:8px 0 0; opacity:.7"><strong>After we cancelled:</strong> ` +
+              `no post-only order has expired unfilled yet, so there is nothing to say about the 240s timeout.</p>`) +
         (floor != null
             ? `<p class="why" style="margin-bottom:10px">Fee floor now <strong>${(floor * 100).toFixed(2)}%</strong>` +
               (data.floor_priced_against ? ` — priced against ${data.floor_priced_against}.` : '.') +
