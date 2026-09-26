@@ -779,7 +779,7 @@ async def get_crypto_coinbase_status():
 
 
 @router.get("/fee-watch")
-async def get_fee_watch(days: int = 30):
+async def get_fee_watch(days: int = 7, account_usd: float = None):
     """What trading is costing, on a clock, as a share of the account.
 
     Read-only. On 2026-09-06 this account paid $1,426.39 in commission in
@@ -802,9 +802,25 @@ async def get_fee_watch(days: int = 30):
             # Size the thresholds against the WHOLE account, not the slice
             # with branches attached. A percentage of $572 and a percentage
             # of $11,121 are different alarms, and only one of them is real.
-            cen = await account_census.census(session)
+            #
+            # Run CONCURRENTLY, and default to 7 days rather than 30. The
+            # first version awaited a 57-asset census and then a month of
+            # paginated fills one after the other, and Railway's gateway
+            # returned 502 before either finished. An endpoint that times
+            # out is a monitor that reports nothing.
+            #
+            # ?account_usd= skips the census entirely, for a caller that
+            # already knows the size and wants only the fee figures.
+            if account_usd is not None:
+                return await fee_watch.watch(session, account_usd=account_usd, days=days)
+            cen_task = asyncio.create_task(account_census.census(session))
+            watch_task = asyncio.create_task(fee_watch.watch(session, account_usd=None, days=days))
+            cen, base = await asyncio.gather(cen_task, watch_task)
             acct = cen.get("total_usd") if cen.get("available") else None
-            return await fee_watch.watch(session, account_usd=acct, days=days)
+            if acct and base.get("available"):
+                # Re-derive only the percentages; the fills are already in hand.
+                return fee_watch.rescale(base, acct)
+            return base
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"fee watch failed: {type(e).__name__}: {e}")
 

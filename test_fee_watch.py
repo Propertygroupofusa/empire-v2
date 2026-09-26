@@ -123,5 +123,20 @@ ok("a malformed commission is skipped, not fatal",
    isinstance(run([{"trade_time": "2026-09-26T00:00:00Z", "commission": "x",
                     "product_id": "BTC-USD"}]), dict))
 
+print("\nrescale exists so the census and the fills can run concurrently")
+base = run([fill(2, 500.0)], account=None)
+ok("without an account size there is no percentage",
+   base["windows"]["24h"]["pct_of_account"] is None)
+ok("and no verdict is invented", base["day_verdict"] == "unknown")
+r = F.rescale(dict(base), 11121.07)
+ok("rescale fills the percentages in", r["windows"]["24h"]["pct_of_account"] > 4,
+   str(r["windows"]["24h"]["pct_of_account"]))
+ok("and re-derives the verdict", r["day_verdict"] == "ALARM", r["day_verdict"])
+ok("dropping a stale alarm when the number no longer warrants one",
+   "alarm" not in F.rescale(dict(run([fill(2, 0.10)], account=None)), 11121.07))
+ok("it does not refetch anything - the fills were already in hand",
+   "def rescale(result: dict" in open(os.path.join(
+       os.path.dirname(os.path.abspath(__file__)), "fee_watch.py")).read())
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

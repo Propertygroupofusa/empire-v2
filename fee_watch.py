@@ -150,3 +150,33 @@ async def watch(session, account_usd: float = None, days: int = 30) -> dict:
             f"similar, not the spot strategy. That is the shape of the "
             f"September 6 session.")
     return out
+
+
+def rescale(result: dict, account_usd: float) -> dict:
+    """Recompute the percentages against a known account size.
+
+    The fills are already fetched; only the denominator was unknown. This
+    exists so the census and the fill pagination can run CONCURRENTLY -
+    awaiting one and then the other took longer than Railway's gateway
+    allows, and a monitor that 502s reports nothing at all.
+    """
+    if not result.get("available") or not account_usd:
+        return result
+    result["account_usd"] = round(account_usd, 2)
+    for w in result.get("windows", {}).values():
+        w["pct_of_account"] = round(100.0 * w["commission_usd"] / account_usd, 3)
+    d = result["windows"].get("24h", {})
+    wk = result["windows"].get("7d", {})
+    result["day_verdict"] = _verdict(d.get("pct_of_account"), DAY_WARN_PCT, DAY_ALARM_PCT)
+    result["week_verdict"] = _verdict(wk.get("pct_of_account"), WEEK_WARN_PCT, WEEK_ALARM_PCT)
+    result["status"] = ("ALARM" if "ALARM" in (result["day_verdict"], result["week_verdict"])
+                        else "elevated" if "elevated" in (result["day_verdict"], result["week_verdict"])
+                        else "ok")
+    if result["status"] == "ALARM":
+        result["alarm"] = (
+            f"Fees are running at {d.get('pct_of_account')}% of the account in 24h "
+            f"and {wk.get('pct_of_account')}% over 7 days. For reference, "
+            f"2026-09-06 cost 12.8% in one day and went unnoticed for 20.")
+    else:
+        result.pop("alarm", None)
+    return result
