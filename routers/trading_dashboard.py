@@ -1845,6 +1845,71 @@ async def _load_coin_history_rows(db):
     return rows
 
 
+@router.get("/trading-profile")
+async def get_trading_profile_status():
+    """Which gate set is in force, what it changes, and what it cannot.
+
+    Read-only GET so it answers before anyone has a token. Leads with the
+    cash check, because that is usually the real answer: the reserve gate
+    runs first on every buy and returns zero while the wallet is under it,
+    so the profile decides nothing at all until there is money.
+    """
+    import trading_profile
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot not importable")
+    g = crypto_grid_bot_module
+    try:
+        profile = await g.get_trading_profile()
+    except Exception as e:
+        raise HTTPException(status_code=500,
+                            detail=f"profile unreadable: {type(e).__name__}: {e}")
+    wallet = None
+    try:
+        wallet = float(await g.get_real_free_cash_usd() or 0)
+    except Exception as e:
+        log.debug(f"[profile] wallet unreadable: {type(e).__name__}: {e}")
+    out = trading_profile.describe(profile)
+    out["cash"] = (trading_profile.blocked_by_cash(
+        wallet, g.GRID_CASH_RESERVE_USD, g.MIN_TRADE_USD)
+        if wallet is not None else
+        {"known": False, "note": "wallet balance unreadable - no claim made"})
+    out["profiles"] = list(trading_profile.PROFILES)
+    out["how_to_switch"] = ("POST /api/trading-dashboard/trading-profile "
+                            "?profile=aug2026&confirm=yes with the "
+                            "x-dashboard-token header.")
+    return out
+
+
+@router.post("/trading-profile")
+async def set_trading_profile_endpoint(profile: str, confirm: str = ""):
+    """Switch the gate set. Behind write_guard AND needs confirm=yes.
+
+    Turning the economic gates off means real buys are placed without
+    checking whether the step clears its own fee. That is a deliberate
+    experiment with a measured basis, not a convenience, so holding the
+    token is not by itself enough to do it by accident.
+    """
+    import trading_profile
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot not importable")
+    wanted = trading_profile.normalise(profile)
+    if wanted != str(profile or "").strip().lower():
+        raise HTTPException(
+            status_code=400,
+            detail=(f"unknown profile {profile!r}. Known: "
+                    f"{', '.join(trading_profile.PROFILES)}. Refusing rather "
+                    f"than resolving a typo to a setting you did not ask for."))
+    if confirm != "yes":
+        raise HTTPException(
+            status_code=400,
+            detail=("refusing to change the gate set without confirm=yes. "
+                    "GET this endpoint first - it says what the change does."))
+    stored = await crypto_grid_bot_module.set_trading_profile(wanted)
+    out = trading_profile.describe(stored)
+    out["changed_to"] = stored
+    return out
+
+
 @router.get("/alert-queue")
 async def get_alert_queue(limit: int = 50, db: AsyncSession = Depends(get_db)):
     """The alarm's own health. Read-only.

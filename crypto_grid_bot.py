@@ -4574,6 +4574,57 @@ async def is_net_edge_gate_active() -> bool:
         return bool(row.base_capital and row.base_capital >= 1.0)
 
 
+TRADING_PROFILE_KEY = "grid_trading_profile"
+
+
+async def get_trading_profile() -> str:
+    """Which gate set is in force. DB-persisted, defaults to guarded.
+
+    Stored as a number on TradingBotState like every other toggle here
+    (1.0 = aug2026, anything else = guarded) rather than as a string,
+    because that is the column that exists and inventing a parallel
+    settings table for one flag is how two sources of truth start.
+
+    Never raises. An unreadable setting resolves to GUARDED - the direction
+    that keeps the economic checks on, because the failure mode of
+    fail-open here is money committed without its economics being checked.
+    """
+    import trading_profile
+    try:
+        async with get_session_factory()() as db:
+            result = await db.execute(select(TradingBotState).where(
+                TradingBotState.bot_name == TRADING_PROFILE_KEY))
+            row = result.scalar_one_or_none()
+            if row is None:
+                return trading_profile.GUARDED
+            return (trading_profile.AUG2026
+                    if (row.base_capital and row.base_capital >= 1.0)
+                    else trading_profile.GUARDED)
+    except Exception as e:
+        log.warning(f"[GRID] trading profile unreadable, staying guarded: "
+                    f"{type(e).__name__}: {e}")
+        return trading_profile.GUARDED
+
+
+async def set_trading_profile(name: str) -> str:
+    """Switch the gate set, durably. Returns the profile actually stored."""
+    import trading_profile
+    p = trading_profile.normalise(name)
+    async with get_session_factory()() as db:
+        result = await db.execute(select(TradingBotState).where(
+            TradingBotState.bot_name == TRADING_PROFILE_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = TradingBotState(bot_name=TRADING_PROFILE_KEY,
+                                  base_capital=0.0, starting_capital=0.0)
+            db.add(row)
+        row.base_capital = 1.0 if p == trading_profile.AUG2026 else 0.0
+        await db.commit()
+    log.warning(f"[GRID] TRADING PROFILE set to {p.upper()} - "
+                f"economic gates {'OFF' if p == trading_profile.AUG2026 else 'ON'}")
+    return p
+
+
 async def set_net_edge_gate_active(enabled: bool):
     """Turn the net-edge gate on or off, durably."""
     async with get_session_factory()() as db:
@@ -4691,6 +4742,15 @@ async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd
     GRID_NET_EDGE_GATE_ENABLED no longer disables it - see
     is_net_edge_gate_active() for why that changed.
     """
+    # THE PROFILE CAN TURN THIS OFF; IT CANNOT TURN OFF A STOP.
+    # aug2026 reproduces the trading rate of the window that actually
+    # traded, and this is one of exactly two gates it reaches. The reserve
+    # gate above it, the adaptive stops and maker-only are not switchable
+    # from there by design - see trading_profile.ALWAYS_ON.
+    import trading_profile as _tp
+    _profile = await get_trading_profile()
+    if not _tp.net_edge_gate_enabled(_profile):
+        return True, f"profile {_profile}: economic gates off"
     if not await is_net_edge_gate_active():
         # RECORDED, not silent. A disabled gate used to return here writing
         # nothing, which made "switched off" and "never reached" look
@@ -5051,10 +5111,12 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
         # thing that quietly halts trading.
         try:
             import grid_learning
+            import trading_profile as _tp
             memo = await grid_learning.check_before_buy(branch.product_id)
             if memo.get("trades"):
                 log.info(f"[LEARN] {branch.bot_name}: {memo['lesson']}")
-            if not memo.get("allow", True):
+            if not memo.get("allow", True) and _tp.learning_veto_enabled(
+                    await get_trading_profile()):
                 log.warning(f"[GRID] {branch.bot_name}: 🧠 memory blocked this buy - {memo['lesson']}")
                 await _log_activity_safe(branch.bot_name, branch.product_id, "LESSON_BLOCK",
                                          f"🧠 buy blocked by the fleet's own record: {memo['lesson']}")

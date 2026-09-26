@@ -1137,6 +1137,19 @@
         <div id="money-check-wrap"><div class="coin-history-empty">Not run yet - tap the button above.</div></div>
     </div>
 
+    <div class="section-title">🎚️ Trading profile</div>
+    <div class="panel">
+        <div class="panel-sub">Between <strong>2026-08-26 and 2026-09-24</strong> the fleet placed 230 spot
+            orders and completed 104 round trips, for <strong>-$86.83</strong> against
+            <strong>$148.53</strong> of commission. Maker-only was not running then, so those trades paid
+            1.50% a round trip instead of today's 0.70% - at today's fees the same 104 closes would have cost
+            $69.31 and read <strong>-$7.61</strong>. Ninety-one percent of that loss was the fee tier, not the
+            strategy. This switch reproduces that trading rate at today's cost, by turning off the two
+            <em>economic</em> gates - "is this step worth its fee" and "has this coin lost before".
+            It cannot reach a stop, the cash reserve, or maker-only.</div>
+        <div id="trading-profile-wrap"><div class="coin-history-empty">Loading…</div></div>
+    </div>
+
     <div class="section-title">🛡️ Every coin you hold, and where its level is</div>
     <div class="panel">
         <div class="panel-sub">The six branches above are the only coins this bot manages. The account holds
@@ -4956,6 +4969,77 @@ async function runLeague() {
     }
 }
 
+async function loadTradingProfile() {
+    const wrap = document.getElementById('trading-profile-wrap');
+    if (!wrap) return;
+    try {
+        const r = await fetch('/api/trading-dashboard/trading-profile', { cache: 'no-store' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        const guarded = d.profile === 'guarded';
+        const c = d.cash || {};
+
+        // The cash line goes FIRST. The reserve gate runs before anything
+        // this switch controls, so at $79.30 against an $88 reserve the
+        // profile decides nothing at all - and a panel that buries that
+        // sends someone to wait for trades that cannot come.
+        const cashBanner = c.known
+            ? (c.can_trade
+                ? `<div style="border:1px solid var(--green); background:rgba(16,185,129,0.06);
+                        border-radius:8px; padding:9px 11px; margin-bottom:10px; font-size:0.78em;">
+                     ✓ ${_wUSD(c.deployable_usd)} is deployable. The profile below decides
+                     whether a given buy passes.</div>`
+                : `<div style="border:1px solid var(--red); background:rgba(239,68,68,0.07);
+                        border-radius:8px; padding:9px 11px; margin-bottom:10px; font-size:0.78em;
+                        line-height:1.55;"><strong>NO PROFILE WILL TRADE.</strong>
+                     Wallet ${_wUSD(c.wallet_usd)} against a ${_wUSD(c.reserve_usd)} reserve, so the
+                     first gate on the buy path returns zero. <strong>${_wUSD(c.shortfall_usd)}</strong>
+                     more cash is needed before this switch changes anything.</div>`)
+            : `<div style="font-size:0.76em; color:var(--text-dim); margin-bottom:10px;">
+                 Wallet balance unreadable - making no claim about whether anything can trade.</div>`;
+
+        const gates = Object.entries(d.economic_gates || {}).map(([k, on]) => `
+            <div style="display:flex; justify-content:space-between; padding:5px 0;
+                        border-bottom:1px solid var(--border); font-size:0.8em;">
+                <div>${escText(k.replace(/_/g, ' '))}</div>
+                <div style="font-weight:700; color:${on ? 'var(--green)' : 'var(--red)'};">
+                    ${on ? 'ON' : 'OFF'}</div></div>`).join('');
+
+        const always = (d.always_on || []).map(g => `
+            <div style="display:flex; justify-content:space-between; padding:5px 0;
+                        border-bottom:1px solid var(--border); font-size:0.8em;">
+                <div>${escText(g.gate.replace(/_/g, ' '))}
+                    <div style="font-size:0.84em; color:var(--text-dim); margin-top:2px;">
+                        ${escText(g.why)}</div></div>
+                <div style="font-weight:700; color:var(--text-dim); white-space:nowrap;">ALWAYS ON</div>
+            </div>`).join('');
+
+        wrap.innerHTML = cashBanner
+            + `<div style="display:flex; align-items:baseline; gap:10px; margin-bottom:8px;">
+                 <div style="font-size:1.05em; font-weight:700;
+                             color:${guarded ? 'var(--green)' : 'var(--amber, #f0b429)'};">
+                   ${escText(String(d.profile).toUpperCase())}</div>
+                 <div style="font-size:0.72em; color:var(--text-dim);">
+                   ${d.is_default ? 'the default' : 'not the default'}</div></div>`
+            + `<div style="font-size:0.78em; line-height:1.55; margin-bottom:10px;">
+                 ${escText(d.summary || '')}</div>`
+            + `<div style="font-size:0.78em; font-weight:700; margin:12px 0 2px;">Economic gates
+                 <span style="font-weight:400; color:var(--text-dim);">- what this switch controls</span></div>`
+            + gates
+            + `<div style="font-size:0.78em; font-weight:700; margin:14px 0 2px;">Not switchable
+                 <span style="font-weight:400; color:var(--text-dim);">- a trading-rate switch must not reach a stop</span></div>`
+            + always
+            + `<div style="font-size:0.72em; color:var(--text-dim); margin-top:12px; line-height:1.55;">
+                 ${escText(d.measured_basis || '')}<br><br>${escText(d.will_not_fix || '')}
+                 <br><br>Changing it needs the write token and confirm=yes:
+                 <code>${escText(d.how_to_switch || '')}</code></div>`;
+    } catch (e) {
+        wrap.innerHTML = `<div class="coin-history-empty" style="color:var(--red);">
+            Could not read the profile: ${escText(e.message)}. Which gate set is in force is
+            unknown, which is not the same as guarded.</div>`;
+    }
+}
+
 async function loadAlertQueue() {
     const wrap = document.getElementById('alert-queue-wrap');
     if (!wrap) return;
@@ -7054,11 +7138,13 @@ loadCombinedProgress();
 // it costs one cheap DB read, and an alarm you have to remember to check is
 // the thing this whole section exists to replace.
 loadAlertQueue();
+loadTradingProfile();
 setInterval(refresh, 15000);
 setInterval(loadTicker, 15000);
 setInterval(loadActivityFeed, 5000);
 setInterval(loadCombinedProgress, 60000);
 setInterval(loadAlertQueue, 60000);
+setInterval(loadTradingProfile, 60000);
 // The panels that should visibly move, on their own fast loops.
 setInterval(refreshProximityOnly, 6000);
 setInterval(tickProximityAge, 1000);
