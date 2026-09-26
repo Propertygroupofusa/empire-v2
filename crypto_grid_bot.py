@@ -4880,7 +4880,11 @@ _HEARTBEAT_STAGES = {"entered": 1.0, "no_active_branches": 2.0, "cycled": 3.0,
                      # same as one that merely "entered" and is still working.
                      # Conflating them is what made a 40-minute stall on
                      # 2026-09-26 read as ordinary progress.
-                     "lease_refused": 4.0}
+                     "lease_refused": 4.0,
+                     # Master switch off. Distinct from lease_refused: one is
+                     # "another process is doing the work", the other is "no
+                     # process will". Both previously read as "entered".
+                     "bot_inactive": 5.0}
 
 # --- THE OWNERSHIP LEASE --------------------------------------------------
 # Who is allowed to run the grid loop right now.
@@ -5178,6 +5182,20 @@ async def run_grid_branches_cycle():
         log.warning(f"[GRID] {why}")
 
     if not await is_grid_bot_active():
+        # The master switch being OFF is a DECISION, and a decision that
+        # stops all trading must be legible. This return had no log and no
+        # heartbeat stage at all, so the loop kept stamping "entered" on
+        # schedule and the dashboard kept serving live prices while nothing
+        # traded. On 2026-09-26 that read as healthy for ~2.5 hours.
+        #
+        # is_grid_bot_active() DEFAULTS to True, so False means a row was
+        # explicitly written. Somebody or something switched the fleet off;
+        # that is worth a warning, not silence.
+        log.warning("[GRID] not cycling: the grid master switch is OFF "
+                    "(crypto_grid_bot_active). Nothing will trade until it is "
+                    "switched back on. This flag defaults to ON, so it was set "
+                    "off deliberately by someone or something.")
+        await _record_grid_heartbeat("bot_inactive")
         return
     branches = [b for b in await get_grid_branches() if b.active]
     if not branches:
