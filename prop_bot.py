@@ -1109,9 +1109,28 @@ async def get_account_cash(session):
         return None
 
 
-async def get_account_buying_power(session):
+async def get_account_buying_power(session, detail_out: dict = None):
     """Real Alpaca buying power. Returns buying power or None on failure.
-    Used for hard margin safety checks to prevent over-leverage."""
+    Used for hard margin safety checks to prevent over-leverage.
+
+    `detail_out`, when given, is filled with the account fields that EXPLAIN
+    a low number. This function used to read one field and throw the rest
+    away, so the kill condition could say buying power was $77.08 and
+    nothing about why - and the causes have completely different remedies:
+
+        unsettled funds        transient, clears on its own in a day
+        held for open orders   clears when they fill or cancel
+        PDT restriction        persistent on an account under $25k, and no
+                               amount of waiting fixes it
+        cash account hold      a deposit that has not cleared
+
+    Alpaca returns all of these on the same call that returns buying_power.
+    Not capturing them meant the one log line that fires when trading STOPS
+    was the least informative line in the file.
+
+    The signature stays (session) -> float|None; detail_out is optional, so
+    no existing caller changes behaviour.
+    """
     try:
         url = f"{get_base_url()}/v2/account"
         async with session.get(url, headers=get_headers()) as r:
@@ -1124,10 +1143,60 @@ async def get_account_buying_power(session):
                 return None
             data = await r.json()
             bp = float(data.get("buying_power", 0))
+            if detail_out is not None:
+                for k in ("cash", "equity", "last_equity", "multiplier",
+                          "regt_buying_power", "daytrading_buying_power",
+                          "non_marginable_buying_power", "pattern_day_trader",
+                          "daytrade_count", "accrued_fees", "pending_transfer_in",
+                          "trading_blocked", "account_blocked", "transfers_blocked",
+                          "shorting_enabled"):
+                    if k in data:
+                        detail_out[k] = data[k]
             return bp
     except Exception as e:
         log.warning(f"Could not fetch buying power for margin safety: {e}")
         return None
+
+
+def explain_low_buying_power(bp, detail: dict) -> str:
+    """Name the most likely reason buying power is low, from the account's
+    own fields. Returns a short phrase, never raises.
+
+    Ranked by how differently you would respond, not by likelihood: a PDT
+    restriction on a small account is the one that does not resolve itself,
+    so it is checked first and said plainly.
+    """
+    try:
+        if not detail:
+            return "no account detail captured"
+        d = detail
+        bits = []
+        if str(d.get("account_blocked")).lower() == "true":
+            return "the ACCOUNT IS BLOCKED at Alpaca - nothing else matters until that clears"
+        if str(d.get("trading_blocked")).lower() == "true":
+            return "TRADING IS BLOCKED at Alpaca - not a capital problem"
+        equity = float(d.get("equity") or 0)
+        if str(d.get("pattern_day_trader")).lower() == "true" and equity < 25000:
+            return (f"flagged PATTERN DAY TRADER with equity ${equity:,.2f}, under the "
+                    f"$25,000 minimum - buying power stays restricted until the flag "
+                    f"clears or equity rises. Waiting does not fix this one.")
+        cash = float(d.get("cash") or 0)
+        if cash - bp > 1.0:
+            bits.append(f"${cash - bp:,.2f} of the ${cash:,.2f} cash is not available "
+                        f"to trade")
+        pending = float(d.get("pending_transfer_in") or 0)
+        if pending > 0:
+            bits.append(f"${pending:,.2f} is still transferring in")
+        mult = d.get("multiplier")
+        if str(mult) in ("1", "1.0"):
+            bits.append("this is a CASH account (multiplier 1), so unsettled sale "
+                        "proceeds count as cash but cannot be traded until they settle")
+        dtc = d.get("daytrade_count")
+        if dtc is not None:
+            bits.append(f"day-trade count {dtc}")
+        return "; ".join(bits) if bits else "no single field explains it"
+    except Exception as e:
+        return f"could not explain ({type(e).__name__})"
 
 
 async def get_account_shorting_enabled(session):
@@ -1789,7 +1858,8 @@ async def run_prop_cycle():
 
         # MANDATE: Check kill conditions before trading
         if equity is not None:
-            buying_power = await get_account_buying_power(session)
+            bp_detail = {}
+            buying_power = await get_account_buying_power(session, bp_detail)
             should_halt, halt_reason = check_kill_conditions(
                 buying_power=buying_power,
                 equity=equity,
@@ -1797,7 +1867,14 @@ async def run_prop_cycle():
                 open_position_count=len(open_prop_positions)
             )
             if should_halt:
-                log.critical(f"[KILL CONDITION] Halting bot: {halt_reason}")
+                # Say WHY, not just what. A halt with no diagnosis is a line
+                # that repeats every cycle and tells the operator nothing
+                # about whether to wait it out or go fix something.
+                why = (explain_low_buying_power(buying_power, bp_detail)
+                       if buying_power is not None and "Buying power" in (halt_reason or "")
+                       else None)
+                log.critical(f"[KILL CONDITION] Halting bot: {halt_reason}"
+                             + (f" | {why}" if why else ""))
                 return
 
         global _last_auto_backtest_at
