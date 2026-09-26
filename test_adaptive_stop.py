@@ -223,5 +223,42 @@ ok("a zero stop on a branch holding slices is logged at WARNING",
 ok("the stop-loss log reports the distance that actually fired",
    "{_stop_pct * 100:.1f}% stop" in cyc_src)
 
+print("\nthe policy in force is readable, so 'did it take' is answerable")
+
+pol = A.policy()
+for field in ("mode", "vol_multiple", "vol_window_days", "floor_pct", "cap_pct",
+              "overrides", "measured_coins"):
+    ok(f"policy() reports {field}", field in pol, pol)
+ok("mode is one of the two real values", pol["mode"] in ("fixed", "adaptive"))
+
+os.environ[A.MODE_ENV] = "adaptive"
+os.environ[A.OVERRIDES_ENV] = "NEAR-USD:0"
+pol = A.policy()
+ok("a live mode change shows up in policy()", pol["mode"] == "adaptive", pol)
+ok("and so does an override", pol["overrides"] == {"NEAR-USD": 0.0}, pol)
+os.environ.pop(A.MODE_ENV, None)
+os.environ.pop(A.OVERRIDES_ENV, None)
+
+print("\nthe read side never pays for a month of candles")
+
+A._VOL_CACHE.clear()
+calls.clear()
+got = asyncio.run(A.measure_daily_vol(object(), "Z-USD",
+                                      fetcher=counting_fetcher({"Z-USD": noisy}),
+                                      cached_only=True))
+ok("cached_only with an empty cache fetches nothing", calls == [], calls)
+ok("and returns None rather than a number it did not measure", got is None)
+ok("which resolves to the fixed stop, the honest answer",
+   A.resolve("Z-USD", 0.08, got, overrides={}, mode_override="adaptive")["stop_pct"] == 0.08)
+A._VOL_CACHE.clear()
+
+import ast as _ast
+_src = open("crypto_grid_bot.py").read()
+_tree = _ast.parse(_src)
+_st = next(n for n in _ast.walk(_tree)
+           if isinstance(n, _ast.AsyncFunctionDef) and n.name == "_resolve_branch_stop")
+ok("the status reporter asks for cached_only",
+   "cached_only=True" in (_ast.get_source_segment(_src, _st) or ""))
+
 print(f"\n{_passed}/{_passed + _failed} checks passed")
 raise SystemExit(1 if _failed else 0)

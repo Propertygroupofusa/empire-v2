@@ -5898,6 +5898,39 @@ async def run_grid_branches_cycle():
             log.error(f"[MR] Cycle error (non-fatal): {type(e).__name__}: {e}")
 
 
+async def _resolve_branch_stop(session, product_id):
+    """The stop this branch trades under right now, for reporting only.
+
+    cached_only: a dashboard poll must never pay for a month of candles
+    per coin. The trading cycle fills the cache; until it has, this
+    reports the fixed stop, which is genuinely what would be used.
+    """
+    try:
+        import adaptive_stop
+        vol = await adaptive_stop.measure_daily_vol(session, product_id, cached_only=True)
+        r = adaptive_stop.resolve(product_id, GRID_STOP_LOSS_PCT, vol)
+        r["daily_vol_pct"] = round(vol, 4) if vol is not None else None
+        return r
+    except Exception as exc:
+        log.warning(f"[GRID] stop report failed for {product_id}: {exc}")
+        return {"stop_pct": GRID_STOP_LOSS_PCT, "source": "fixed",
+                "reason": f"stop report failed ({exc}); the fixed stop stands",
+                "daily_vol_pct": None}
+
+
+def _stop_policy_block():
+    """Never reports a policy it could not read."""
+    try:
+        import adaptive_stop
+        p = adaptive_stop.policy()
+        p["fixed_default_pct"] = GRID_STOP_LOSS_PCT
+        return p
+    except Exception as exc:
+        log.warning(f"[GRID] stop policy unreadable: {exc}")
+        return {"mode": "unknown", "detail": f"{exc}",
+                "fixed_default_pct": GRID_STOP_LOSS_PCT}
+
+
 def _allocation_backing_block(branches, wallet_cash):
     """Never lets a reporting problem look like a clean balance sheet."""
     try:
@@ -5943,6 +5976,9 @@ async def get_grid_status() -> dict:
             wallet_cash_usd, _wallet_err = await engine.get_usd_balance(session)
         except Exception as exc:
             log.warning(f"[GRID] status: wallet balance unreadable ({exc})")
+        stop_by_product = {}
+        for product_id in distinct_products:
+            stop_by_product[product_id] = await _resolve_branch_stop(session, product_id)
 
     out = []
     total_allocated = 0.0
@@ -6020,6 +6056,13 @@ async def get_grid_status() -> dict:
             # one). See _maybe_self_tune_branch_spacing.
             "self_tuned_multiplier": round(b.self_tuned_multiplier, 2) if b.self_tuned_multiplier is not None else None,
             "effective_spacing_multiplier": round(b.self_tuned_multiplier, 2) if b.self_tuned_multiplier is not None else AVG_SWING_SPACING_MULTIPLIER,
+            # The stop distance THIS branch trades under, and where it came
+            # from - fixed, per-coin override, or scaled to its own
+            # volatility. stop_pct 0.0 means the branch has no stop at all.
+            "stop_pct": (stop_by_product.get(b.product_id) or {}).get("stop_pct"),
+            "stop_source": (stop_by_product.get(b.product_id) or {}).get("source"),
+            "stop_reason": (stop_by_product.get(b.product_id) or {}).get("reason"),
+            "stop_daily_vol_pct": (stop_by_product.get(b.product_id) or {}).get("daily_vol_pct"),
         })
 
     # Real grand total across EVERY branch's own "if sold right now" figure
@@ -6068,6 +6111,10 @@ async def get_grid_status() -> dict:
         # found the gap by underlining a subtitle - it gets its own field
         # now. See allocation_backing.py for the arithmetic.
         "allocation_backing": _allocation_backing_block(out, wallet_cash_usd),
+        # The stop configuration actually in force, and what it resolves to
+        # per branch. Exposed because "did that environment variable take"
+        # was otherwise only answerable by watching an uptime counter.
+        "stop_policy": _stop_policy_block(),
         "min_required_roi_pct": MIN_REQUIRED_ROI_PCT,
         # The REAL round-trip fee every P&L figure above is priced against,
         # plus whether it was genuinely observed from Coinbase or is still

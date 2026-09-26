@@ -119,12 +119,17 @@ VOL_CACHE_SECONDS = float(os.getenv("GRID_STOP_VOL_CACHE_SECONDS", str(6 * 3600)
 _VOL_CACHE = {}
 
 
-async def measure_daily_vol(session, product_id, days=None, fetcher=None, now=None):
+async def measure_daily_vol(session, product_id, days=None, fetcher=None, now=None,
+                            cached_only=False):
     """Daily volatility over a window long enough to mean something.
 
     Cached per product. Returns None when the history will not load or is
     too thin, which resolve() reads as "keep the existing stop" - never as
     "no stop".
+
+    cached_only=True never fetches. A dashboard poll must not pay for a
+    month of candles per coin just to display a number; the trading cycle
+    populates the cache and the read side uses whatever is there.
     """
     import time as _time
     days = int(days or VOL_WINDOW_DAYS)
@@ -133,6 +138,8 @@ async def measure_daily_vol(session, product_id, days=None, fetcher=None, now=No
     hit = _VOL_CACHE.get(product_id)
     if hit and (now - hit[0]) < VOL_CACHE_SECONDS:
         return hit[1]
+    if cached_only:
+        return None
 
     if fetcher is None:
         import crypto_selection_backtest as CSB
@@ -267,3 +274,23 @@ def resolve(product_id, fixed_pct, daily_vol_pct=None, overrides=None,
 
     return {"stop_pct": fixed, "source": "fixed",
             "reason": f"{fixed * 100:.2f}% fixed stop for {pid}"}
+
+
+def policy():
+    """The stop configuration actually in force, for reporting.
+
+    A safety setting nobody can read is one being trusted on faith - this
+    exists so "did the environment variable take" is answerable without
+    guessing from an uptime counter.
+    """
+    return {
+        "mode": mode(),
+        "fixed_default_pct": None,          # filled by the caller that owns the constant
+        "vol_multiple": _env_float(MULTIPLE_ENV, DEFAULT_MULTIPLE),
+        "vol_window_days": VOL_WINDOW_DAYS,
+        "floor_pct": _env_float(FLOOR_ENV, DEFAULT_FLOOR),
+        "cap_pct": _env_float(CAP_ENV, DEFAULT_CAP),
+        "overrides": parse_overrides(),
+        "vol_cache_seconds": VOL_CACHE_SECONDS,
+        "measured_coins": sorted(_VOL_CACHE),
+    }
