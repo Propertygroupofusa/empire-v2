@@ -2562,5 +2562,6 @@ class AutoTrimAction(Base):
     decided_at = Column(DateTime, default=datetime.utcnow, index=True)
     placed_at = Column(DateTime, index=True)    # set ONLY when accepted
     order_id = Column(String)
+    kind = Column(String, index=True)           # TRIM / CONSOLIDATE / the tier that refused
     skipped_reason = Column(String, index=True)
     detail = Column(String)

@@ -62,6 +62,24 @@ MAX_DAILY_TRIM_USD = 1500.0
 MAX_POSITION_SHARE_PCT = 35.0   # never sell more than this much of one holding at once
 COOLDOWN_HOURS = 24.0     # one trim per asset per day
 
+# --- the tail ---------------------------------------------------------
+# Consolidation sells a WHOLE position, so it is bounded by count rather
+# than by size: three a pass, which clears eighteen tail positions over
+# six passes instead of emptying the tail in one burst that nobody sees
+# until it is done. It shares the daily dollar budget with trimming, so
+# the two together can never exceed MAX_DAILY_TRIM_USD.
+MAX_CONSOLIDATE_PER_PASS = 3
+
+# Consolidation uses the VENUE's floor, not MIN_TRIM_USD.
+#
+# The $25 trim floor exists so a trivial adjustment does not pay a fee to
+# chase a rounding edge. Applied to the tail it does the opposite: a $23
+# position can never clear a $25 bar, so it sits there forever - which is
+# precisely the state consolidation was built to end. Selling $23 whole
+# costs about eight cents at the maker rate. The only floor that belongs
+# here is the smallest amount the venue will actually sell.
+MIN_CONSOLIDATE_USD = 5.0
+
 # --- the switch -------------------------------------------------------
 MODE_OBSERVE = "observe"
 MODE_ARM = "arm"
@@ -284,3 +302,98 @@ def summarise(plans, mode):
         "headline": headline,
         "plans": plans,
     }
+
+
+def plan_actions(holdings, total_usd, *, now, history=(), unpriced=(),
+                 limit_pct=LIMIT_PCT, buffer_pct=BUFFER_PCT,
+                 max_trim_usd=MAX_TRIM_USD, max_daily_usd=MAX_DAILY_TRIM_USD,
+                 min_trim_usd=MIN_TRIM_USD, cooldown_hours=COOLDOWN_HOURS,
+                 max_consolidate=MAX_CONSOLIDATE_PER_PASS,
+                 min_consolidate_usd=MIN_CONSOLIDATE_USD):
+    """Every action available right now, across every tier - not just the ceiling.
+
+    plan_trims answers "what is over 20%", which on this book is two
+    positions out of forty-seven. This answers the question the owner
+    actually asked: what rule applies to each of the others, and which of
+    those rules can act today.
+
+    Trims are planned FIRST and consolidations spend what is left of the
+    daily budget. That ordering is deliberate: a $671 anchor trim reduces
+    real risk, and an $8 tail sale tidies the book. If only one of them
+    fits in a day's budget it should be the first.
+
+    Returns the same shape plan_trims returns, with an added `kind` of
+    "TRIM" or "CONSOLIDATE" on the rows that act.
+    """
+    import position_rules
+
+    trims = plan_trims(holdings, total_usd, now=now, history=history,
+                       limit_pct=limit_pct, buffer_pct=buffer_pct,
+                       max_trim_usd=max_trim_usd, max_daily_usd=max_daily_usd,
+                       min_trim_usd=min_trim_usd, cooldown_hours=cooldown_hours)
+    for r in trims:
+        if r.get("act"):
+            r["kind"] = "TRIM"
+
+    book = position_rules.book(holdings, total_usd, unpriced=unpriced)
+    by_asset = {r["asset"]: r for r in book["rows"]}
+    for r in trims:
+        tier = (by_asset.get(r["asset"]) or {}).get("tier")
+        if tier:
+            r["tier"] = tier
+
+    spent = sum(r.get("trim_usd") or 0.0 for r in trims if r.get("act"))
+    budget_left = max((_num(max_daily_usd) or 0.0) - spent_today(history, now) - spent, 0.0)
+
+    # Largest tail position first: it is the one whose stop and dashboard
+    # line cost the most to keep, and the one most likely to clear the
+    # minimum cleanly.
+    tail = sorted([r for r in book["rows"] if r["action"] == position_rules.CONSOLIDATE],
+                  key=lambda r: -(r["usd"] or 0))
+    placed = 0
+    for row in tail:
+        rec = {"asset": row["asset"], "usd": row["usd"], "share_pct": row["share_pct"],
+               "tier": row["tier"], "kind": "CONSOLIDATE", "act": False, "trim_usd": 0.0}
+        amount = _num(row["usd"]) or 0.0
+        floor = _num(min_consolidate_usd) or 0.0
+
+        last = last_trim_at(history, row["asset"])
+        if last is not None and isinstance(now, datetime):
+            hrs = (now - last).total_seconds() / 3600.0
+            if hrs < (_num(cooldown_hours) or 0.0):
+                rec.update(reason="COOLDOWN",
+                           detail=f"sold {hrs:.1f}h ago; one action per asset per "
+                                  f"{cooldown_hours:.0f}h")
+                trims.append(rec); continue
+        if placed >= (max_consolidate or 0):
+            rec.update(reason="PASS_LIMIT",
+                       detail=f"only {max_consolidate} tail positions are cleared per pass, "
+                              f"so the tail empties over days and stays visible while it does")
+            trims.append(rec); continue
+        if amount < floor:
+            rec.update(reason="BELOW_VENUE_MINIMUM",
+                       detail=f"${amount:,.2f} is under the ${floor:,.2f} the venue will "
+                              f"sell - there is no action available, at any price")
+            trims.append(rec); continue
+        if amount > budget_left:
+            rec.update(reason="BUDGET",
+                       detail=f"${amount:,.2f} does not fit in the ${budget_left:,.2f} "
+                              f"left in today's budget after trimming")
+            trims.append(rec); continue
+
+        rec.update(act=True, trim_usd=round(amount, 2), reason="TAIL",
+                   detail=(f"{row['share_pct']}% of the account - too small to change it "
+                           f"whatever it does; selling the whole ${amount:,.2f} into cash"))
+        budget_left -= amount
+        placed += 1
+        trims.append(rec)
+
+    # One row per asset. The ceiling pass emits a WITHIN_LIMIT row for
+    # every holding, including the tail ones, and leaving both in means a
+    # reader sees FLOKI twice saying two different things. The tail rule
+    # is the one that applies, so it supersedes.
+    tail_assets = {r["asset"] for r in trims if r.get("kind") == "CONSOLIDATE"}
+    return [r for r in trims
+            if not (r.get("kind") != "CONSOLIDATE"
+                    and r["asset"] in tail_assets
+                    and r.get("reason") == "WITHIN_LIMIT")]

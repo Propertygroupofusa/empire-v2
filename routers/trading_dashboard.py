@@ -9200,9 +9200,25 @@ async def auto_trim_status():
         raise HTTPException(status_code=502,
                             detail=f"account unreadable: {census.get('error')}")
 
-    plans = auto_trim.plan_trims(census.get("holdings") or [],
-                                 census.get("total_usd"), now=now, history=history)
+    import position_rules
+    holdings = census.get("holdings") or []
+    unpriced = census.get("unpriced") or []
+
+    # plan_actions covers EVERY tier. The worker deliberately still runs
+    # plan_trims, which covers the ceiling only - so rows here marked
+    # CONSOLIDATE are what the tail rule WOULD do, not what is scheduled.
+    # The distinction is carried in `consolidation_is_preview_only` rather
+    # than left for a reader to infer.
+    plans = auto_trim.plan_actions(holdings, census.get("total_usd"),
+                                   now=now, history=history, unpriced=unpriced)
     out = auto_trim.summarise(plans, mode)
+    out["rule_book"] = position_rules.book(holdings, census.get("total_usd"),
+                                           unpriced=unpriced)
+    out["consolidation_is_preview_only"] = True
+    out["consolidation_note"] = (
+        "The worker trims the concentration ceiling only. Tail consolidation "
+        "is sized and shown here but nothing places it - wiring it into the "
+        "worker is a separate decision.")
     out.update({
         "is_a_preview_not_an_order": True,
         "as_of": census.get("as_of"),
