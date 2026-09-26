@@ -1137,6 +1137,30 @@
         <div id="money-check-wrap"><div class="coin-history-empty">Not run yet - tap the button above.</div></div>
     </div>
 
+    <div class="panel" style="margin-bottom:14px;">
+        <div id="token-bar"></div>
+    </div>
+
+    <div class="section-title">💵 Raise cash from a holding</div>
+    <div class="panel">
+        <div class="panel-sub">Sells a DOLLAR AMOUNT of a coin that belongs to no branch, and never more.
+            Two taps: the first prices it against the live book and places nothing, the second places it.
+            Sizing rounds DOWN throughout - selling $649.94 when $650 was asked is a rounding artifact,
+            selling $650.06 is selling more of your position than you authorised, and the only undo is
+            buying it back at a worse price and paying two more fees.
+            <br><br><strong>ZEC is 25.35% of the account against the 20% rule you set.</strong>
+            Selling moves value from coin to cash inside the same account, so the denominator barely
+            moves - $560 lands at 20.36% and $600 at 20.01%. <strong>$650 takes it to 19.56%</strong>,
+            with enough room that one ordinary day's move does not put it straight back over.</div>
+        <div style="margin:10px 0; display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="unlock-btn" style="margin-top:0;"
+                    onclick="previewSale('ZEC', 650)">💵 Sell $650 of ZEC</button>
+            <button class="unlock-btn" style="margin-top:0; opacity:0.75;"
+                    onclick="previewSale('ZEC', 400)">Sell $400 instead</button>
+        </div>
+        <div id="sell-amount-wrap"></div>
+    </div>
+
     <div class="section-title">🎚️ Trading profile</div>
     <div class="panel">
         <div class="panel-sub">Between <strong>2026-08-26 and 2026-09-24</strong> the fleet placed 230 spot
@@ -1432,7 +1456,7 @@ async function apiGet(path, timeoutMs) {
     let res;
     try {
         res = await fetch(API_BASE + path, {
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
             signal: controller.signal,
         });
     } catch (e) {
@@ -1769,7 +1793,7 @@ async function sellBranch(botName, btn) {
     try {
         const res = await fetch(API_BASE + '/family-tree-status/close/' + encodeURIComponent(botName), {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -1789,7 +1813,7 @@ async function emergencyCloseBranch(botName, btn) {
     try {
         const res = await fetch(API_BASE + '/family-tree-status/emergency-close/' + encodeURIComponent(botName), {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -1809,7 +1833,7 @@ async function closeFlatBranch(botName, coin, amount, btn) {
     try {
         const res = await fetch(API_BASE + '/family-tree-status/emergency-close/' + encodeURIComponent(botName), {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -1829,7 +1853,7 @@ async function takeRootProfit(btn) {
     try {
         const res = await fetch(API_BASE + '/family-tree-status/root-take-profit', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -1854,7 +1878,7 @@ async function addCashToBranch(botName, btn) {
     try {
         const res = await fetch(API_BASE + '/family-tree-status/add-cash/' + encodeURIComponent(botName), {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
             body: JSON.stringify({ amount }),
         });
         const data = await res.json();
@@ -1889,7 +1913,7 @@ async function rootPartialSell(btn) {
     try {
         const res = await fetch(API_BASE + '/family-tree-status/root-partial-sell', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
             body: JSON.stringify({ amount_usd: amount }),
         });
         const data = await res.json();
@@ -1917,7 +1941,7 @@ async function rootWithdrawAll(btn, currentBalanceUsd) {
     try {
         const res = await fetch(API_BASE + '/family-tree-status/root-partial-sell', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
             body: JSON.stringify({ amount_usd: currentBalanceUsd }),
         });
         const data = await res.json();
@@ -2018,7 +2042,7 @@ async function confirmUnlockProfit() {
     try {
         const res = await fetch(API_BASE + '/family-tree-status/unlock-profit', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
             body: JSON.stringify({ amount, bot_name: botName }),
         });
         const data = await res.json();
@@ -2136,7 +2160,7 @@ async function confirmReallocateCash() {
     try {
         const res = await fetch(API_BASE + '/family-tree-status/reallocate-cash', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
             body: JSON.stringify({ from_bot_name: fromBot, to_bot_name: toBot, amount }),
         });
         const data = await res.json();
@@ -2247,7 +2271,7 @@ async function confirmFundGrid() {
         if (toGridBotName) body.to_grid_bot_name = toGridBotName;
         const res = await fetch(API_BASE + '/grid-status/fund-from-tree', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
             body: JSON.stringify(body),
         });
         const data = await res.json();
@@ -2419,7 +2443,7 @@ async function confirmMoveGridCash() {
         if (toBot) body.to_bot_name = toBot;
         const res = await fetch(API_BASE + '/grid-status/move-cash', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
             body: JSON.stringify(body),
         });
         const data = await res.json();
@@ -3040,7 +3064,7 @@ async function closeAllGridSlices(btn) {
     try {
         const res = await fetch(API_BASE + '/grid-status/close-all', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -3516,7 +3540,7 @@ async function toggleGridMakerOrders(enable) {
     try {
         const res = await fetch(API_BASE + '/grid-status/maker-orders', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
             body: JSON.stringify({ enabled: enable }),
         });
         const data = await res.json();
@@ -4017,7 +4041,7 @@ async function toggleGridMakerOnly(enable) {
     try {
         const res = await fetch(API_BASE + '/grid-status/maker-only', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
             body: JSON.stringify({ enabled: enable }),
         });
         const data = await res.json();
@@ -4293,7 +4317,7 @@ async function backfillLessons(btn) {
     try {
         const res = await fetch(API_BASE + '/grid-status/lessons/backfill', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
         });
         const body = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
@@ -4412,7 +4436,7 @@ async function runMoneyAction(action, btn) {
         // server has no such gate; this endpoint takes no key at all.
         const res = await fetch(API_BASE + action, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
         });
         const body = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
@@ -4966,6 +4990,165 @@ async function runLeague() {
             Could not build the standings: ${escText(e.message)}.</div>`;
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = original; }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// THE WRITE TOKEN, AND WHY EVERY BUTTON ON THIS PAGE WAS BROKEN
+//
+// write_guard refuses every POST/PUT/PATCH/DELETE without an
+// x-dashboard-token header. It was added for a good reason - an
+// unauthenticated POST /api/crypto/withdraw would liquidate a position -
+// but no page was ever updated to SEND the header. So all 36 write buttons
+// on this dashboard have been returning 503 and showing "HTTP 503" in an
+// alert(), with nothing explaining that a token is the missing piece.
+//
+// One field fixes all of them at once.
+//
+// sessionStorage, not localStorage: this is the key that moves real money,
+// and it should not outlive the browser tab on a phone that might be lost
+// or handed to someone. The cost is retyping it after a full browser
+// restart, which is the right trade for a credential.
+//
+// It is never logged, never put in a URL, and never sent anywhere but this
+// origin's own API.
+// ---------------------------------------------------------------------------
+const TOKEN_KEY = 'empire_write_token';
+
+function getWriteToken() {
+    try { return sessionStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; }
+}
+
+function setWriteToken(v) {
+    try {
+        if (v) { sessionStorage.setItem(TOKEN_KEY, v); }
+        else { sessionStorage.removeItem(TOKEN_KEY); }
+    } catch (e) { /* private mode - the header still works for this page load */ }
+    renderTokenBar();
+}
+
+/** Headers for any write. One place, so no call site can forget the token. */
+function writeHeaders() {
+    const h = { 'Content-Type': 'application/json' };
+    const t = getWriteToken();
+    if (t) h['x-dashboard-token'] = t;
+    return h;
+}
+
+/** Every write on this page goes through here, so none can forget the header. */
+async function postGuarded(url, body) {
+    const tok = getWriteToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (tok) headers['x-dashboard-token'] = tok;
+    const res = await fetch(url, {
+        method: 'POST', headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    let data = {};
+    try { data = await res.json(); } catch (e) { /* non-JSON error body */ }
+    if (res.status === 503 && (data.guard === 'write_guard')) {
+        throw new Error('This deployment has no DASHBOARD_WRITE_TOKEN set at all. '
+            + 'Set it in Railway on this service and redeploy - Railway only injects '
+            + 'variables when a container starts.');
+    }
+    if (res.status === 401 || res.status === 403) {
+        throw new Error('The token was refused. Check it matches DASHBOARD_WRITE_TOKEN exactly.');
+    }
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    return data;
+}
+
+function renderTokenBar() {
+    const el = document.getElementById('token-bar');
+    if (!el) return;
+    const has = !!getWriteToken();
+    el.innerHTML = has
+        ? `<div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+             <span style="color:var(--green); font-weight:700; font-size:0.82em;">\u{1F513} UNLOCKED</span>
+             <span style="font-size:0.74em; color:var(--text-dim);">
+               Write actions on this page will send your token. It is held for this
+               browser tab only and is never stored on the server.</span>
+             <button class="unlock-btn" style="margin:0; padding:4px 10px; font-size:0.78em;"
+                     onclick="setWriteToken('')">Lock again</button></div>`
+        : `<div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+             <span style="color:var(--amber, #f0b429); font-weight:700; font-size:0.82em;">\u{1F512} LOCKED</span>
+             <input id="token-input" type="password" placeholder="paste DASHBOARD_WRITE_TOKEN"
+                    autocomplete="off" spellcheck="false"
+                    style="flex:1; min-width:180px; padding:6px 9px; font-size:0.8em;
+                           background:var(--panel2, #111); color:var(--text);
+                           border:1px solid var(--border); border-radius:6px;">
+             <button class="unlock-btn" style="margin:0; padding:5px 12px; font-size:0.8em;"
+                     onclick="setWriteToken(document.getElementById('token-input').value.trim())">Unlock</button>
+             <div style="font-size:0.72em; color:var(--text-dim); width:100%; line-height:1.5;">
+               This is not a link and not something to copy from the code - it is a
+               password you invent, set as <code>DASHBOARD_WRITE_TOKEN</code> in Railway
+               on this service, then redeploy. Every write button on this page needs it.</div></div>`;
+}
+
+// ---------------------------------------------------------------------------
+// SELL A DOLLAR AMOUNT OF A HOLDING NO BRANCH OWNS
+//
+// Two taps, and the first one places nothing: confirm=false returns the
+// sized plan against the LIVE price, which matters because ZEC moves ~6.7%
+// a day and a plan computed an hour ago is sized against a price that is
+// gone.
+//
+// Everything rounds DOWN (see sell_amount.plan_sale). Selling $649.94 when
+// $650 was asked is a rounding artifact; selling $650.06 is selling more of
+// someone's position than they authorised, and the only undo is buying back
+// at a worse price and paying two more fees.
+// ---------------------------------------------------------------------------
+let _pendingSale = null;
+
+async function previewSale(asset, usd) {
+    const wrap = document.getElementById('sell-amount-wrap');
+    wrap.innerHTML = `<div class="coin-history-empty">Pricing …</div>`;
+    try {
+        const d = await postGuarded('/api/trading-dashboard/coinbase/sell-amount',
+                                    { asset, usd_amount: usd, confirm: false });
+        const p = d.plan || d;
+        _pendingSale = { asset, usd };
+        wrap.innerHTML =
+            `<div style="border:1px solid var(--amber, #f0b429); background:rgba(240,180,41,0.07);
+                         border-radius:8px; padding:11px 13px;">
+               <div style="font-weight:700; margin-bottom:6px;">
+                 Sell ${escText(p.base_size)} ${escText(asset)}</div>
+               <div style="font-size:0.8em; line-height:1.6; color:var(--text-dim);">
+                 ${escText(p.note || '')}</div>
+               <div style="margin-top:10px;">
+                 <button class="unlock-btn" style="margin:0;"
+                         onclick="executeSale()">✅ Place this order</button>
+                 <button class="unlock-btn" style="margin:0 0 0 8px; opacity:0.7;"
+                         onclick="document.getElementById('sell-amount-wrap').innerHTML='';_pendingSale=null;">Cancel</button>
+               </div>
+               <div style="font-size:0.72em; color:var(--text-dim); margin-top:8px;">
+                 Nothing has been placed. This is the plan only.</div></div>`;
+    } catch (e) {
+        _pendingSale = null;
+        wrap.innerHTML = `<div class="coin-history-empty" style="color:var(--red);">
+            ${escText(e.message)}</div>`;
+    }
+}
+
+async function executeSale() {
+    if (!_pendingSale) return;
+    const { asset, usd } = _pendingSale;
+    const wrap = document.getElementById('sell-amount-wrap');
+    wrap.innerHTML = `<div class="coin-history-empty">Placing …</div>`;
+    try {
+        const d = await postGuarded('/api/trading-dashboard/coinbase/sell-amount',
+                                    { asset, usd_amount: usd, confirm: true });
+        _pendingSale = null;
+        wrap.innerHTML = `<div style="border:1px solid var(--green);
+                 background:rgba(16,185,129,0.06); border-radius:8px; padding:11px 13px;
+                 font-size:0.84em; line-height:1.6;">
+               <strong>Order placed.</strong><br>${escText(JSON.stringify(d).slice(0, 500))}</div>`;
+        refresh();
+        loadTradingProfile();
+renderTokenBar();
+    } catch (e) {
+        wrap.innerHTML = `<div class="coin-history-empty" style="color:var(--red);">
+            ${escText(e.message)}</div>`;
     }
 }
 
@@ -5566,7 +5749,7 @@ async function toggleGridMode() {
     try {
         const res = await fetch(API_BASE + '/grid-status/mode', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
             body: JSON.stringify({ enabled: enabling }),
         });
         const data = await res.json();
@@ -5582,7 +5765,7 @@ async function toggleGridBranchActive(botName, newActive) {
     try {
         const res = await fetch(API_BASE + `/grid-status/${botName}/active`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
             body: JSON.stringify({ active: newActive }),
         });
         const data = await res.json();
@@ -5604,7 +5787,7 @@ async function toggleGridBranchLocked(botName, newLocked) {
     try {
         const res = await fetch(API_BASE + `/grid-status/${botName}/lock`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
             body: JSON.stringify({ locked: newLocked }),
         });
         const data = await res.json();
@@ -5664,7 +5847,7 @@ async function confirmWithdrawGridBranch() {
     try {
         const res = await fetch(API_BASE + `/grid-status/${botName}/withdraw`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
             body: JSON.stringify({ amount }),
         });
         const data = await res.json();
@@ -5707,7 +5890,7 @@ async function gridQuickBuy(btn) {
     try {
         const res = await fetch(API_BASE + '/grid-status/quick-buy', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
             body: JSON.stringify({ amount_usd: 20 }),
         });
         const data = await res.json();
@@ -5747,7 +5930,7 @@ async function switchToScaleBot() {
     try {
         const res = await fetch(API_BASE + endpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -5785,7 +5968,7 @@ async function switchToGridBot() {
     try {
         const res = await fetch(API_BASE + '/grid-status/switch-to-grid-bot', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -5884,7 +6067,7 @@ async function confirmCreateGridBranch() {
     try {
         const res = await fetch(API_BASE + '/grid-status/create-branch', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
             body: JSON.stringify({ product_id: productId, allocated_usd: amount }),
         });
         const data = await res.json();
@@ -5973,7 +6156,7 @@ async function confirmCreateMultipleGridBranches() {
     try {
         const res = await fetch(API_BASE + '/grid-status/create-multiple-branches', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
             body: JSON.stringify({ count: count, amount_per_branch: amount }),
         });
         const data = await res.json();
@@ -6333,7 +6516,7 @@ async function previewReconcile(currency) {
     try {
         const res = await fetch(API_BASE + `/family-tree-status/reconcile-asset/${encodeURIComponent(currency)}?dry_run=true`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -6370,7 +6553,7 @@ async function executeReconcile(currency) {
     try {
         const res = await fetch(API_BASE + `/family-tree-status/reconcile-asset/${encodeURIComponent(currency)}?dry_run=false`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -6425,7 +6608,7 @@ async function toggleReversalTrade(enable) {
     try {
         const res = await fetch(API_BASE + '/family-tree-status/set-reversal-trade', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
             body: JSON.stringify({ enabled: enable }),
         });
         const data = await res.json();
@@ -6611,7 +6794,7 @@ async function confirmSpreadEvenly() {
     let plan;
     try {
         const res = await fetch(API_BASE + '/grid-status/spread-evenly?target_branches=7&dry_run=true', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: writeHeaders(),
         });
         plan = await res.json();
         if (!res.ok) throw new Error(plan.detail || `HTTP ${res.status}`);
@@ -6644,7 +6827,7 @@ async function confirmSpreadEvenly() {
 
     try {
         const res = await fetch(API_BASE + '/grid-status/spread-evenly?target_branches=7&dry_run=false', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: writeHeaders(),
         });
         const done = await res.json();
         if (!res.ok) throw new Error(done.detail || `HTTP ${res.status}`);
@@ -6668,7 +6851,7 @@ async function confirmCloseBtcCompound() {
     let plan;
     try {
         const res = await fetch(API_BASE + '/btc-compound/close-position?dry_run=true', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: writeHeaders(),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -6691,7 +6874,7 @@ async function confirmCloseBtcCompound() {
 
     try {
         const res = await fetch(API_BASE + '/btc-compound/close-position?dry_run=false', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: writeHeaders(),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -6717,7 +6900,7 @@ async function confirmResumeCryptoTrading() {
     try {
         const res = await fetch(API_BASE + '/family-tree-status/resume-active-trading', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -6743,7 +6926,7 @@ async function confirmLiquidateAndBuyBtc() {
     try {
         const res = await fetch(API_BASE + '/family-tree-status/liquidate-and-buy-btc', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -6772,7 +6955,7 @@ async function previewConsolidate() {
     try {
         const res = await fetch(API_BASE + '/family-tree-status/consolidate-branches?dry_run=true', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -6806,7 +6989,7 @@ async function executeConsolidate() {
     try {
         const res = await fetch(API_BASE + '/family-tree-status/consolidate-branches?dry_run=false', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: writeHeaders(),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
