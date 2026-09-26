@@ -43,7 +43,7 @@ import zlib
 import random
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import select, func, case, desc
 
@@ -5708,10 +5708,97 @@ async def get_grid_status() -> dict:
         "maker_only_source": ("environment " + MAKER_ONLY_ENV_VAR
                               if maker_only_env_override() is not None else "database toggle"),
         "maker_only_skipped_cycles": await get_maker_only_skips(),
+        # The theoretical figure above is step - (fees + adverse selection).
+        # This is the same question answered from real fills, so the page can
+        # stop presenting an estimate in the voice of a measurement.
+        "realized_edge": await get_realized_edge(),
         "floor_priced_against": ("maker (the market fallback is removed)"
                                  if _maker_only and _cached_real_maker_fee_rate is not None
                                  else "taker (an unfilled maker order still becomes a market order)"),
         "branches": out,
+    }
+
+
+
+async def get_realized_edge(days: int = None) -> dict:
+    """What the closed book ACTUALLY earned, beside what the step theoretically
+    clears. The two are different questions and the page conflated them.
+
+    The theoretical figure is step - (fees + adverse selection): today
+    2.50% - (0.70% + 0.67%) = +1.13%. Every term after the step is an
+    estimate, and the 0.67% in particular is a measured-once constant. This
+    function answers the same question from real fills instead.
+
+    THREE THINGS IT DELIBERATELY DOES NOT DO.
+
+    It does not weight by trade. Gross and net share ONE denominator - total
+    entry notional - because an unweighted mean of percentages beside a
+    weighted total produces an "implied cost" that is not any real cost. On
+    this book those two framings differ by half a point.
+
+    It does not present implied_cost_pct as a better adverse-selection
+    estimate, and the caller must not either. It is measured over COMPLETED
+    round trips only, and adverse selection is precisely the cost that shows
+    up on the ones that never complete - a slice bought into a move that kept
+    going sits open and contributes nothing here. On the live book this reads
+    ~0.91% against the 1.37% assumed, and that gap is survivorship, not good
+    news. Conditioning the estimate on completion removes the phenomenon
+    being estimated.
+
+    It does not call a positive number success. Per-completed-cycle margin
+    can stay healthily positive while the account goes nowhere, because the
+    losers stay open and out of this table. That is why closes_per_day and
+    days_since_last_close are returned beside the margin and not underneath
+    it: this fleet realised +1.95% per cycle over 50 cycles and has closed
+    nothing in the 17 days since. Margin was never the binding constraint.
+    """
+    since = None
+    if days:
+        since = datetime.utcnow() - timedelta(days=days)
+    try:
+        async with get_session_factory()() as db:
+            q = select(CryptoGridTradeHistory)
+            if since is not None:
+                q = q.where(CryptoGridTradeHistory.closed_at >= since)
+            rows = (await db.execute(q)).scalars().all()
+    except Exception as e:
+        return {"available": False, "error": f"{type(e).__name__}: {e}"}
+
+    usable = [r for r in rows
+              if None not in (r.entry_price, r.exit_price, r.qty, r.pnl)
+              and r.entry_price and r.qty]
+    if not usable:
+        return {"available": False, "trades": 0,
+                "note": "no completed round trips yet - nothing realised to compare against"}
+
+    notional = sum(r.entry_price * r.qty for r in usable)
+    gross = sum((r.exit_price - r.entry_price) * r.qty for r in usable)
+    net = sum(r.pnl for r in usable)
+    closes = sorted(r.closed_at for r in usable if r.closed_at)
+    span_days = ((closes[-1] - closes[0]).total_seconds() / 86400) if len(closes) > 1 else 0.0
+    stops = [r for r in usable if r.exit_reason == "stop_loss"]
+
+    return {
+        "available": True,
+        "trades": len(usable),
+        "notional_usd": round(notional, 2),
+        "mean_slice_usd": round(notional / len(usable), 2),
+        "gross_pct": round(gross / notional * 100, 3),
+        "net_pct": round(net / notional * 100, 3),
+        "net_usd": round(net, 2),
+        # Named "implied", never "measured adverse selection" - see docstring.
+        "implied_cost_pct": round((gross - net) / notional * 100, 3),
+        "survivorship_warning": (
+            "completed round trips only; slices still open are not here, and "
+            "those are where adverse selection actually lands"),
+        # The denominator that matters. Margin per cycle is not a return.
+        "closes_per_day": round(len(closes) / span_days, 2) if span_days >= 1 else None,
+        "days_since_last_close": round(
+            (datetime.utcnow() - closes[-1]).total_seconds() / 86400, 1) if closes else None,
+        # Once the stop starts firing, net_pct SHOULD fall: losers that used
+        # to stay open forever begin entering this table. That is the number
+        # becoming honest, not the strategy getting worse.
+        "stop_loss_closes": len(stops),
     }
 
 

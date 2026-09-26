@@ -3221,6 +3221,7 @@ function renderGridMakerOnlyToggle(data) {
     // shown above it - that one is fees alone. Labelled below so the two
     // stop looking like the same number disagreeing with itself.
     const ADVERSE = 0.67;
+    const re = data.realized_edge;
     const mix = (data.fill_mix || {}).overall || {};
     const makerFee = (mix.maker_round_trip_fee_rate != null
                       ? mix.maker_round_trip_fee_rate
@@ -3246,8 +3247,42 @@ function renderGridMakerOnlyToggle(data) {
             `<br><span style="font-weight:400; opacity:.75">` +
             `${(on ? makerFee : takerFee).toFixed(2)}% fees + ${ADVERSE.toFixed(2)}% adverse selection` +
             `</span></div>` +
-          `<div><b style="color:${net >= 0 ? '#10b981' : '#ef4444'}">${net >= 0 ? '+' : ''}${net.toFixed(2)}%</b>${net >= 0 ? 'it clears' : 'it loses — so nothing trades'}</div>` +
+          `<div><b style="color:${net >= 0 ? '#10b981' : '#ef4444'}">${net >= 0 ? '+' : ''}${net.toFixed(2)}%</b>` +
+            `${net >= 0 ? 'it clears — in theory' : 'it loses — so nothing trades'}</div>` +
         `</div>` +
+        // THEORETICAL vs REALIZED. Everything above is step minus an
+        // ESTIMATE: the 0.67% adverse-selection term is a measured-once
+        // constant, not a live reading. This row is the same question
+        // answered from real fills, and the two are labelled so the estimate
+        // stops being read in the voice of a measurement.
+        //
+        // The warnings are not decoration. Realized margin here is measured
+        // over COMPLETED round trips, and the slices that never come back
+        // are absent - which is exactly where adverse selection lands - so a
+        // realized figure BETTER than theory is survivorship, not a win.
+        // And margin is not a return: this fleet realised +1.95% a cycle and
+        // then closed nothing for 17 days. Velocity is printed beside it for
+        // that reason.
+        (re && re.available
+            ? `<div class="mo-math" style="margin-top:8px; border-top:1px solid rgba(128,128,128,.25); padding-top:8px">` +
+                `<div><b style="color:${re.net_pct >= 0 ? '#10b981' : '#ef4444'}">` +
+                  `${re.net_pct >= 0 ? '+' : ''}${re.net_pct.toFixed(2)}%</b>` +
+                  `realized, ${re.trades} completed cycles` +
+                  `<br><span style="font-weight:400; opacity:.75">$${re.net_usd.toFixed(2)} on ` +
+                  `$${re.notional_usd.toFixed(2)} traded · mean slice $${re.mean_slice_usd.toFixed(2)}</span></div>` +
+                `<div><b>${re.implied_cost_pct.toFixed(2)}%</b>cost actually charged` +
+                  `<br><span style="font-weight:400; opacity:.75">vs ${cost.toFixed(2)}% assumed — ` +
+                  `completed trips only, so this UNDERSTATES it</span></div>` +
+                `<div><b style="color:${(re.days_since_last_close || 0) > 3 ? '#ef4444' : '#10b981'}">` +
+                  `${re.days_since_last_close != null ? re.days_since_last_close.toFixed(0) + 'd' : '—'}</b>` +
+                  `since the last close` +
+                  `<br><span style="font-weight:400; opacity:.75">` +
+                  `${re.closes_per_day != null ? re.closes_per_day.toFixed(2) + ' closes/day when active' : 'velocity not yet measurable'}` +
+                  ` · ${re.stop_loss_closes} by stop</span></div>` +
+              `</div>` +
+              `<p class="why" style="margin:8px 0 0">Margin per cycle is not a return. ` +
+              `A healthy number here with no closes earns nothing.</p>`
+            : '') +
         (floor != null
             ? `<p class="why" style="margin-bottom:10px">Fee floor now <strong>${(floor * 100).toFixed(2)}%</strong>` +
               (data.floor_priced_against ? ` — priced against ${data.floor_priced_against}.` : '.') +

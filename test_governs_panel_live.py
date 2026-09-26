@@ -126,5 +126,39 @@ ok("REGRESSION: it no longer sends the operator to a 'crypto-trading service'",
    "change it on the crypto-trading service" not in CARD_CODE,
    "the loop lease is held by web:1 - that service is not running the fleet")
 
+
+print("\ntheoretical and realized are separated, not blended")
+BOT_FN = BOT.split("async def get_realized_edge")[1].split("\nasync def ")[0]
+ok("the backend measures realized edge from the closed book",
+   "async def get_realized_edge" in BOT)
+ok("it is served in the grid-status payload",
+   '"realized_edge": await get_realized_edge()' in BOT)
+ok("gross and net share ONE denominator (notional-weighted)",
+   'gross / notional' in BOT_FN and 'net / notional' in BOT_FN,
+   "an unweighted mean of percentages beside a weighted total yields an "
+   "implied cost that is not any real cost")
+ok("the cost it derives is named 'implied', never 'measured'",
+   '"implied_cost_pct"' in BOT_FN and '"measured_adverse' not in BOT_FN)
+ok("it ships the survivorship warning with the number",
+   "survivorship_warning" in BOT_FN,
+   "completed round trips only - the slices that never come back are "
+   "exactly where adverse selection lands")
+ok("velocity is returned BESIDE the margin, not omitted",
+   "closes_per_day" in BOT_FN and "days_since_last_close" in BOT_FN,
+   "margin per completed cycle is not a return")
+ok("stop-loss closes are counted separately",
+   "stop_loss_closes" in BOT_FN)
+
+ok("the card labels the theoretical figure as theoretical",
+   "in theory" in CARD_CODE)
+ok("the card shows the realized figure from the payload",
+   "data.realized_edge" in CARD_CODE and "re.net_pct" in CARD_CODE)
+ok("it prints the realized cost against the ASSUMED one",
+   "assumed" in CARD_CODE and "re.implied_cost_pct" in CARD_CODE)
+ok("it warns on screen that the realized cost is understated",
+   "UNDERSTATES" in CARD_CODE)
+ok("it shows days-since-last-close, the number margin cannot answer",
+   "days_since_last_close" in CARD_CODE and "not a return" in CARD_CODE)
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
