@@ -1844,6 +1844,85 @@ async def _load_coin_history_rows(db):
     return rows
 
 
+@router.get("/holdings-watch")
+async def get_holdings_watch(window_days: int = 30):
+    """Alert levels for every coin in the account, including the unwatched.
+
+    Read-only, and a GET on purpose: this is most needed exactly when
+    DASHBOARD_WRITE_TOKEN is unset and nothing can trade, so it must work
+    without it.
+
+    IT IS NOT A STOP-LOSS ORDER. Nothing here rests at the exchange and
+    nothing will sell. It computes where a stop WOULD go and how close each
+    holding is, using the same 2.5x-daily-volatility sizing the six live
+    branches already use. The response says so on every call.
+
+    The high-water mark comes from candle history rather than a stored
+    value, so there is no state to write, none to go stale, and none to
+    drift out of sync when an updater stops running.
+    """
+    import account_census
+    import holdings_watch
+    import horizon_study
+    import adaptive_stop
+    if crypto_btc_compound_bot_module is None:
+        raise HTTPException(status_code=500,
+                            detail="crypto_btc_compound_bot not importable - no Coinbase auth")
+    mod = crypto_btc_compound_bot_module
+    try:
+        async with mod.aiohttp.ClientSession() as session:
+            census = await account_census.census(session, tracked_usd=0.0)
+            if not census.get("available"):
+                raise HTTPException(status_code=502,
+                                    detail=f"census unavailable: {census.get('error')}")
+            holdings = [h for h in census.get("holdings") or []
+                        if h.get("asset") != "USD"]
+            cash = float(census.get("cash_usd") or 0.0)
+            total = float(census.get("total_usd") or 0.0)
+
+            rows = []
+            for h in holdings:
+                asset = h.get("asset")
+                pid = f"{asset}-USD"
+                price, usd = h.get("price"), h.get("usd")
+                vol = peak = None
+                # Only reach for history on positions big enough to act on.
+                # 42 assets x two history calls is a lot of requests to make
+                # on behalf of a $1.32 position that cannot be sold anyway,
+                # and a rate limit written down as "no data" is a mistake
+                # this account has already made once.
+                if price is not None and (usd or 0) >= holdings_watch.MIN_EXITABLE_USD:
+                    try:
+                        vol = await adaptive_stop.measure_daily_vol(session, pid)
+                    except Exception as e:
+                        log.debug(f"[watch] vol failed for {pid}: {type(e).__name__}: {e}")
+                    try:
+                        hist = await horizon_study.fetch_history(
+                            session, pid, days=window_days, granularity=3600)
+                        if hist:
+                            peak = holdings_watch.peak_from_highs(hist[2])
+                    except Exception as e:
+                        log.debug(f"[watch] history failed for {pid}: {type(e).__name__}: {e}")
+                rows.append(holdings_watch.assess(
+                    asset, h.get("units"), price, usd, peak, vol,
+                    account_total_usd=total))
+            for u in census.get("unpriced") or []:
+                rows.append(holdings_watch.assess(
+                    u.get("asset"), u.get("units"), None, None, None, None,
+                    account_total_usd=total))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502,
+                            detail=f"watch failed: {type(e).__name__}: {e}")
+
+    out = holdings_watch.summarise(rows, cash_usd=cash)
+    out["window_days"] = window_days
+    out["stop_policy"] = adaptive_stop.policy()
+    out["as_of"] = census.get("as_of")
+    return out
+
+
 @router.get("/ledger-correction/preview")
 async def preview_ledger_correction(scope: str = "inconsistent",
                                     db: AsyncSession = Depends(get_db)):
