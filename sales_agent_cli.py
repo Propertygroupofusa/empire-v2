@@ -5,14 +5,14 @@ import json
 import sys
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from database import AsyncSessionLocal, engine
+from database import get_session_factory, get_engine
 from models import Lead, Outreach, LeadStatus, LeadSource
 from sales_agent import process_new_leads, process_followups, generate_daily_report
 
 async def add_lead(first_name: str, last_name: str, email: str, company: str,
                    product: str = "video_production", size: str = None, industry: str = None):
     """Add a single lead"""
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         lead = Lead(
             first_name=first_name,
             last_name=last_name,
@@ -31,7 +31,7 @@ async def add_lead(first_name: str, last_name: str, email: str, company: str,
 async def import_leads_csv(filepath: str):
     """Import leads from CSV (name, email, company, product)"""
     import csv
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         with open(filepath, 'r') as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -51,7 +51,7 @@ async def import_leads_csv(filepath: str):
 
 async def list_leads(status: str = None, limit: int = 20):
     """List leads"""
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         stmt = select(Lead)
         if status:
             stmt = stmt.where(Lead.status == status)
@@ -67,19 +67,19 @@ async def list_leads(status: str = None, limit: int = 20):
 
 async def process_leads(limit: int = 50):
     """Trigger lead research and outreach"""
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         await process_new_leads(db, limit)
     print(f"✓ Processed up to {limit} leads")
 
 async def process_followups_cli():
     """Trigger follow-up emails"""
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         await process_followups(db)
     print("✓ Processed follow-ups")
 
 async def daily_report():
     """Show today's report"""
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         report = await generate_daily_report(db)
     print(json.dumps(report, indent=2))
 

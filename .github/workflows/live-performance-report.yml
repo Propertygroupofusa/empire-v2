@@ -13,6 +13,14 @@ on:
         description: "How many days back to pull (use 1 for 'just today')"
         required: false
         default: "1"
+      base_url:
+        description: "Which Alpaca account to read"
+        required: false
+        default: "https://api.alpaca.markets"
+        type: choice
+        options:
+          - "https://api.alpaca.markets"
+          - "https://paper-api.alpaca.markets"
 
 jobs:
   report:
@@ -31,6 +39,11 @@ jobs:
         env:
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
           ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
-          ALPACA_BASE_URL: https://api.alpaca.markets
+          # A key pair authenticates against exactly one of these; the other
+          # returns 401. Selectable rather than hardcoded because a 401 here
+          # does not distinguish "revoked key" from "paper key pointed at
+          # live", and guessing between those two wastes a round trip each
+          # time. The report is read-only against either.
+          ALPACA_BASE_URL: ${{ github.event.inputs.base_url }}
           REPORT_DAYS: ${{ github.event.inputs.report_days }}
         run: python scripts/live_performance_report.py

@@ -43,9 +43,23 @@ TOKEN_EXPIRE_DAYS = 30          # students, not admins - a longer session is fin
 # secret otherwise appears only as an opaque 500 the first time somebody
 # tries to log in, which is exactly when you least want to be diagnosing
 # configuration.
+#
+# The urgency depends on whether the study feature is actually serving
+# traffic. STUDY_GENERATION_ENABLED defaults to false (see routers/study.py),
+# and with it off nothing reaches these endpoints, so a missing secret breaks
+# nothing yet - warning that requests "will fail with 500" in that state is
+# untrue and trains the reader to scroll past it. Read the same flag here
+# (by env var, not by importing routers.study, which would be circular) and
+# say which situation this actually is. The 500 itself is deliberate and
+# stays: see require_study_auth below.
 if not os.getenv("STUDY_JWT_SECRET"):
-    log.warning("STUDY_JWT_SECRET not configured - study signup/login will fail "
-                "with 500 until it is set in Railway Variables")
+    if os.getenv("STUDY_GENERATION_ENABLED", "false").strip().lower() == "true":
+        log.warning("STUDY_JWT_SECRET not configured but STUDY_GENERATION_ENABLED=true "
+                    "- every study signup/login WILL fail with 500 (auth fails closed "
+                    "by design) until the secret is set in Railway Variables")
+    else:
+        log.info("STUDY_JWT_SECRET not set; study generation is also disabled, so "
+                 "nothing is affected. Set both to enable the study feature.")
 
 # bcrypt truncates silently at 72 BYTES. Rejecting longer input is better
 # than accepting a password whose tail never mattered - a user who set a

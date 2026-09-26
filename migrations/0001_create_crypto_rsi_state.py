@@ -5,13 +5,13 @@ This table is defined in models.py but may not have been created during init_db(
 if the async engine wasn't fully initialized. This migration creates it explicitly.
 """
 import asyncio
-from database import engine
+from database import get_engine
 from sqlalchemy import text, inspect
 
 async def migrate():
     """Create crypto_rsi_state table if it doesn't exist."""
 
-    async with engine.begin() as conn:
+    async with get_engine().begin() as conn:
         # Check if table already exists
         inspector = await conn.run_sync(inspect)
         tables = await conn.run_sync(lambda c: inspect(c).get_table_names())

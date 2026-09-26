@@ -133,15 +133,29 @@ class YouTubeMonetizationTracker:
                 # Application Default Credentials, which aren't configured
                 # here, then stalls until it times out. Build with the same
                 # OAuth credentials used for Analytics instead.
-                self.youtube_service = build('youtube', 'v3', credentials=credentials)
+                # cache_discovery=False: build() defaults it to True, which
+                # sends discovery_cache.autodetect() looking for a file cache
+                # that needs oauth2client<4.0.0. This project pins
+                # google-auth-oauthlib instead and has no oauth2client at all,
+                # so that import always raises and the library logs
+                # "file_cache is only supported with oauth2client<4.0.0" once
+                # per build(). The cache can never work here, so asking for it
+                # only buys a failed import and a confusing log line.
+                self.youtube_service = build(
+                    'youtube', 'v3', credentials=credentials, cache_discovery=False
+                )
                 self.youtube_analytics_service = build(
-                    'youtubeAnalytics', 'v2', credentials=credentials
+                    'youtubeAnalytics', 'v2', credentials=credentials,
+                    cache_discovery=False
                 )
                 log.info("YouTube Analytics service initialized")
             else:
                 # No refresh token: fall back to API-key-only access, which
                 # only supports public (non-"mine") lookups.
-                self.youtube_service = build('youtube', 'v3', developerKey=self.youtube_api_key)
+                self.youtube_service = build(
+                    'youtube', 'v3', developerKey=self.youtube_api_key,
+                    cache_discovery=False
+                )
                 log.warning("No YOUTUBE_REFRESH_TOKEN — 'mine' queries (channel/top videos) will fail")
         except Exception as e:
             log.warning(f"YouTube service initialization: {e}")

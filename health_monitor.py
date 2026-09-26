@@ -7,6 +7,7 @@ All data persisted to database for complete audit trail
 import asyncio
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Any
 import os
 import sys
@@ -33,8 +34,8 @@ class ComprehensiveHealthMonitor:
     async def _load_history(self):
         """Load all historical data from database"""
         try:
-            from database import engine
-            async with engine.begin() as conn:
+            from database import get_engine
+            async with get_engine().begin() as conn:
                 # Load errors
                 result = await conn.execute(
                     text("SELECT * FROM monitor_errors ORDER BY detected_at DESC LIMIT 1000")
@@ -153,8 +154,8 @@ class ComprehensiveHealthMonitor:
     async def _check_database(self) -> Dict[str, Any]:
         """Check database connectivity and health"""
         try:
-            from database import engine
-            async with engine.begin() as conn:
+            from database import get_engine
+            async with get_engine().begin() as conn:
                 await conn.execute(text("SELECT 1"))
             return {"ok": True, "status": "connected"}
         except Exception as e:
@@ -196,12 +197,20 @@ class ComprehensiveHealthMonitor:
         return results
 
     async def _check_routers(self) -> Dict[str, Dict[str, Any]]:
-        """Check if all routers can be imported"""
-        routers = [
-            'workers', 'clients', 'jobs', 'bookings', 'payments',
-            'admin', 'whitelabel', 'auth', 'partners', 'labeling',
-            'revenue_automation', 'social_dashboard'
-        ]
+        """Check that every router module on disk can be imported.
+
+        This used to be a hardcoded list, which drifted: it still named
+        workers, jobs and bookings long after those modules were deleted,
+        so every cycle logged three severity-high "No module named
+        routers.X" errors for routers main.py no longer mounts. Reading
+        the directory keeps the check honest as routers come and go.
+        """
+        router_dir = Path(__file__).parent / "routers"
+        routers = sorted(
+            path.stem
+            for path in router_dir.glob("*.py")
+            if not path.stem.startswith("_")
+        )
         
         results = {}
         for router_name in routers:
@@ -328,8 +337,8 @@ class ComprehensiveHealthMonitor:
     async def _check_data_integrity(self) -> Dict[str, Dict[str, Any]]:
         """Check database data integrity"""
         try:
-            from database import engine
-            async with engine.begin() as conn:
+            from database import get_engine
+            async with get_engine().begin() as conn:
                 # Check if monitor tables exist and have data
                 result = await conn.execute(
                     text("SELECT COUNT(*) FROM monitor_errors")
@@ -352,8 +361,8 @@ class ComprehensiveHealthMonitor:
     async def _save_errors_to_db(self, errors: List[Dict]):
         """Persist errors to database"""
         try:
-            from database import engine
-            async with engine.begin() as conn:
+            from database import get_engine
+            async with get_engine().begin() as conn:
                 for error in errors:
                     await conn.execute(
                         text("""
@@ -373,8 +382,8 @@ class ComprehensiveHealthMonitor:
     async def _save_fix_to_db(self, issue_name: str):
         """Persist fixed issue to database"""
         try:
-            from database import engine
-            async with engine.begin() as conn:
+            from database import get_engine
+            async with get_engine().begin() as conn:
                 await conn.execute(
                     text("""
                         INSERT INTO monitor_fixed_issues (issue_name, fixed_at, status)
@@ -392,9 +401,9 @@ class ComprehensiveHealthMonitor:
     async def _save_metrics_to_db(self, metrics: Dict[str, Any]):
         """Save performance metrics to database"""
         try:
-            from database import engine
+            from database import get_engine
             import json
-            async with engine.begin() as conn:
+            async with get_engine().begin() as conn:
                 await conn.execute(
                     text("""
                         INSERT INTO monitor_performance (metric_data, checked_at)

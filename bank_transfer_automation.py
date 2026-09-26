@@ -25,7 +25,7 @@ import aiohttp
 import json
 from datetime import datetime
 from typing import Optional, Dict, Tuple
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import BankTransferLog
 from sqlalchemy import select, and_
 
@@ -201,7 +201,7 @@ class BankTransferManager:
     async def _log_transfer(self, transfer_id: str, step: str, amount: float, external_id: str, status: str):
         """Log transfer step to database for audit trail."""
         try:
-            async with AsyncSessionLocal() as session:
+            async with get_session_factory()() as session:
                 # Check if BankTransferLog table exists, if not, skip logging
                 transfer_log = BankTransferLog(
                     transfer_id=transfer_id,
@@ -222,7 +222,7 @@ class BankTransferManager:
         Shows which steps have been completed.
         """
         try:
-            async with AsyncSessionLocal() as session:
+            async with get_session_factory()() as session:
                 result = await session.execute(
                     select(BankTransferLog).where(
                         BankTransferLog.transfer_id == transfer_id

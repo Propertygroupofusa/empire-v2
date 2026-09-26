@@ -30,7 +30,28 @@ if ALPACA_CLIENT_ID and ALPACA_CLIENT_SECRET:
 else:
     broker_client = None
     ALPACA_AVAILABLE = False
-    log.warning("⚠️  Alpaca Broker API credentials not configured")
+    # Half-configured is a real mistake and gets a real warning: somebody
+    # set one variable and meant to enable this. The old single `else`
+    # reported that identically to "neither is set", so the operator saw
+    # "not configured" while looking at a variable they had just filled in.
+    _missing = [name for name, value in (
+        ("ALPACA_BROKER_CLIENT_ID", ALPACA_CLIENT_ID),
+        ("ALPACA_BROKER_CLIENT_SECRET", ALPACA_CLIENT_SECRET),
+    ) if not value]
+    if len(_missing) == 1:
+        log.warning(f"⚠️  Alpaca Broker API is half-configured: {_missing[0]} is empty "
+                    f"while the other credential is set. Auto-funding stays OFF "
+                    f"(endpoints return 503) until both are present.")
+    else:
+        # Neither set: this integration is optional and simply not in use.
+        # Every endpoint in this router already guards on ALPACA_AVAILABLE and
+        # returns 503, so nothing is broken and nothing silently half-works.
+        # Warning on every boot for a feature nobody turned on is noise, and
+        # noise is what buries the warnings that matter.
+        log.info("Alpaca Broker auto-funding is off (optional). Set "
+                 "ALPACA_BROKER_CLIENT_ID and ALPACA_BROKER_CLIENT_SECRET to enable "
+                 "funding worker accounts from job earnings; ALPACA_SANDBOX defaults "
+                 "to true. This is separate from the trading bot's own Alpaca keys.")
 
 
 @router.post("/auto-fund/{worker_email}", summary="Auto-fund trading account from earnings")

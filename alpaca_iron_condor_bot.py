@@ -516,6 +516,23 @@ class IronCondorBot:
                 if order.get("status") == "filled":
                     trade["status"] = "closed"
                     trade["closed_at"] = order.get("filled_at")
+                    # Realized P&L, from the REAL exit fill where Alpaca
+                    # reports one, falling back to the debit that triggered
+                    # the exit. The x100 contract multiplier is applied here
+                    # and nowhere else, so it cannot be applied twice or
+                    # forgotten - forgetting it is what turned a -$215 loser
+                    # into a -$2.50 one in the simulator this bot was being
+                    # compared against.
+                    entry_credit = Decimal(trade["entry_credit"])
+                    filled = order.get("filled_avg_price")
+                    exit_debit = (
+                        abs(Decimal(str(filled))) if filled not in (None, "")
+                        else Decimal(trade.get("exit_debit_at_signal", "0"))
+                    )
+                    trade["exit_debit"] = str(exit_debit)
+                    trade["realized_pnl"] = str(money(
+                        (entry_credit - exit_debit) * Decimal("100")
+                        * Decimal(trade["contracts"])))
                     changed = True
                 elif order.get("status") in FINAL_ORDER_STATUSES:
                     trade["status"] = "active"
@@ -538,6 +555,100 @@ class IronCondorBot:
         return money(
             short_call.ask + short_put.ask - long_call.bid - long_put.bid
         )
+
+    def readiness(self) -> Dict[str, Any]:
+        """Can this account actually place one iron condor? Read-only.
+
+        place_entry_order enforces a 2% max-loss cap and an options
+        buying-power check, and RAISES when either fails. That is correct,
+        but from the outside it is indistinguishable from the bot simply
+        doing nothing - so this states the position before an order is ever
+        attempted.
+
+        The arithmetic that matters, and the one a simulator is most likely
+        to get wrong: a $5-wide spread is $5 x 100 = $500 of risk per
+        contract, not $5. At a 2% cap that requires roughly $23,000 of
+        equity to hold a single contract.
+        """
+        width = ENTRY_RULES["spread_width"]
+        credit = (ENTRY_RULES["target_credit_min"] + ENTRY_RULES["target_credit_max"]) / 2
+        risk = money((width - credit) * Decimal("100") * int(ENTRY_RULES["position_size"]))
+        try:
+            account = self._validate_account()
+            equity = Decimal(str(account["equity"]))
+            obp = Decimal(str(account.get("options_buying_power") or 0))
+        except Exception as e:
+            return {"can_trade": False, "reason": f"account unreadable: {e}",
+                    "max_loss_per_contract": str(risk)}
+
+        cap = equity * ENTRY_RULES["max_risk_pct"]
+        required_equity = money(risk / ENTRY_RULES["max_risk_pct"])
+        blockers = []
+        if risk > cap:
+            blockers.append(
+                f"max loss ${risk} per contract is over the "
+                f"{ENTRY_RULES['max_risk_pct'] * 100:.0f}% risk cap (${money(cap)}). "
+                f"That cap needs ${required_equity} of equity for one contract; "
+                f"this account has ${money(equity)}.")
+        if risk > obp:
+            blockers.append(f"max loss ${risk} is over options buying power ${money(obp)}")
+
+        return {
+            "can_trade": not blockers,
+            "blockers": blockers,
+            "equity": str(money(equity)),
+            "options_buying_power": str(money(obp)),
+            "spread_width": str(width),
+            "assumed_credit": str(money(credit)),
+            "max_loss_per_contract": str(risk),
+            "risk_cap_pct": str(ENTRY_RULES["max_risk_pct"] * 100),
+            "risk_cap_usd": str(money(cap)),
+            "equity_required_for_one_contract": str(required_equity),
+        }
+
+    def performance(self) -> Dict[str, Any]:
+        """Realized results from this bot's OWN closed trades. Read-only.
+
+        Every figure comes from a trade that actually opened and closed.
+        Nothing is assumed, and there is no win-rate input - a backtest
+        whose win rate is typed in by the operator is not measuring
+        anything, it is drawing the picture it was asked for.
+
+        Profit factor is None rather than infinite when nothing has lost
+        yet, for the same reason it is elsewhere in this codebase: an early
+        run of winners is not a proven edge.
+        """
+        closed = [t for t in self.state.get("trades", [])
+                  if t.get("status") == "closed" and t.get("realized_pnl") is not None]
+        if not closed:
+            return {"closed_trades": 0, "net_pnl": None, "win_rate_pct": None,
+                    "profit_factor": None, "avg_winner": None, "avg_loser": None,
+                    "note": ("No iron condor has opened and closed yet. Every figure "
+                             "here stays empty until one does.")}
+
+        pnls = [Decimal(t["realized_pnl"]) for t in closed]
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p < 0]
+        loss_sum = sum(abs(p) for p in losses)
+        n = len(pnls)
+        return {
+            "closed_trades": n,
+            "net_pnl": str(money(sum(pnls))),
+            "win_rate_pct": round(len(wins) / n * 100, 1),
+            "profit_factor": (str(money(sum(wins) / loss_sum)) if loss_sum else None),
+            "profit_factor_note": (None if loss_sum else
+                                   "undefined - nothing has lost yet, so there is "
+                                   "nothing to divide by"),
+            "avg_winner": (str(money(sum(wins) / len(wins))) if wins else None),
+            "avg_loser": (str(money(-loss_sum / len(losses))) if losses else None),
+            "worst_trade": str(money(min(pnls))),
+            "by_reason": {r: sum(1 for t in closed if t.get("exit_reason") == r)
+                          for r in {t.get("exit_reason") for t in closed}},
+            "note": (None if n >= 30 else
+                     f"{n} closed trade(s). Iron condors lose rarely and lose big, so a "
+                     f"run of winners is the NORMAL early shape and proves nothing - "
+                     f"the tail is what decides whether this is profitable."),
+        }
 
     def check_exit_conditions(self) -> None:
         self._reconcile_orders()
@@ -574,6 +685,11 @@ class IronCondorBot:
             trade["exit_order_id"] = order["id"]
             trade["exit_reason"] = reason
             trade["status"] = "exit_pending"
+            # The debit that triggered the exit, stored so realized P&L can
+            # be computed after the close. Before this, P&L existed only in
+            # a log line and vanished the moment the trade closed - which is
+            # why this bot's record could never be measured, only asserted.
+            trade["exit_debit_at_signal"] = str(close_debit)
             self._save_state()
             log.info("[EXIT] Submitted %s close order: %s", reason, order["id"])
 

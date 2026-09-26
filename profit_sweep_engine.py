@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta
 from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import Payment, SweepProposal, SweepAuditLog, TradingBotState
 
 logger = logging.getLogger(__name__)
@@ -131,7 +131,7 @@ async def propose_sweep(target_bot_name: str = "prop_bot") -> dict | None:
     Returns:
         Proposal dict with id, amount, status, snapshots, or None if not eligible
     """
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         try:
             # Calculate
             calc = await calculate_eligible_amount(session)
@@ -207,7 +207,7 @@ async def propose_sweep(target_bot_name: str = "prop_bot") -> dict | None:
 
 async def approve_sweep(proposal_id: int) -> dict | None:
     """Mark a proposed sweep as approved (human approval)."""
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         try:
             stmt = select(SweepProposal).where(SweepProposal.id == proposal_id)
             result = await session.execute(stmt)
@@ -243,7 +243,7 @@ async def approve_sweep(proposal_id: int) -> dict | None:
 
 async def mark_sweep_funded(proposal_id: int) -> dict | None:
     """Mark a sweep as funded (ACH landed in Alpaca account)."""
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         try:
             stmt = select(SweepProposal).where(SweepProposal.id == proposal_id)
             result = await session.execute(stmt)
@@ -294,7 +294,7 @@ async def apply_sweep_to_bot(proposal_id: int) -> dict | None:
     - TradingBotState.base_capital += sweep.amount
     - Log audit events
     """
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         try:
             # Fetch sweep
             sweep_stmt = select(SweepProposal).where(SweepProposal.id == proposal_id)
@@ -365,7 +365,7 @@ async def apply_sweep_to_bot(proposal_id: int) -> dict | None:
 
 async def reject_sweep(proposal_id: int, reason: str = "") -> dict | None:
     """Reject/cancel a sweep proposal."""
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         try:
             stmt = select(SweepProposal).where(SweepProposal.id == proposal_id)
             result = await session.execute(stmt)
@@ -396,7 +396,7 @@ async def reject_sweep(proposal_id: int, reason: str = "") -> dict | None:
 
 async def get_sweep_history(limit: int = 50) -> list[dict]:
     """Fetch audit trail of all sweep events."""
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         try:
             stmt = select(SweepAuditLog).order_by(SweepAuditLog.created_at.desc()).limit(limit)
             result = await session.execute(stmt)
@@ -410,7 +410,7 @@ async def get_sweep_history(limit: int = 50) -> list[dict]:
 
 async def get_proposal_status(proposal_id: int) -> dict | None:
     """Fetch proposal with its audit trail."""
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         try:
             prop_stmt = select(SweepProposal).where(SweepProposal.id == proposal_id)
             prop_result = await session.execute(prop_stmt)
@@ -437,7 +437,7 @@ async def get_proposal_status(proposal_id: int) -> dict | None:
 
 async def list_pending_proposals() -> list[dict]:
     """Fetch all proposed/approved (not yet funded/applied) proposals."""
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         try:
             stmt = select(SweepProposal).where(
                 SweepProposal.status.in_(["proposed", "approved"])

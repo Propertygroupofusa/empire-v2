@@ -25,6 +25,12 @@ log = logging.getLogger("alpaca_mean_reversion")
 # DUAL-DIRECTION EXIT DECISION ENGINE (STOCKS)
 # ============================================================================
 
+# Alpaca's real round trip, both legs. prop_bot.ALPACA_ROUND_TRIP_COST_PCT
+# uses the same figure; kept local so this module stays importable on its
+# own (the backtest imports it without prop_bot).
+ALPACA_ROUND_TRIP_PCT = 0.0012
+
+
 def should_exit_position(
     symbol: str,
     entry_price: float,
@@ -39,7 +45,8 @@ def should_exit_position(
     rsi_profit_threshold_short: float = 40,  # Take profit on bounce
     peak_pnl_pct: float = 0.0,  # highest unrealized % this position has ever reached - caller persists this (see BotPosition.peak_pct)
     breakeven_trigger_pct: float = 0.01,  # once peak reaches +1%, the stop can no longer go below breakeven
-    max_giveback_pct: float = 0.005,  # once ANY real profit has been reached, cap how much of the peak can be given back before forcing an exit
+    max_giveback_pct: float = 0.005,  # once a REAL profit has been reached, cap how much of the peak can be given back before forcing an exit
+    min_peak_to_arm_pct: float = None,  # the giveback rule stays disarmed until the peak clears a round trip; None = compute from the fee floor
     log_prefix: str = "",
 ) -> Tuple[bool, str, str, float]:
     """
@@ -106,8 +113,34 @@ def should_exit_position(
     # misses: up 1.8%, never quite reaching the 2% target, then reversing
     # hard - previously rode all the way down to -stop_loss_pct, giving
     # back the entire gain plus more.
+    # ARMING THRESHOLD, added 2026-09-25. The condition was
+    # `new_peak_pnl_pct > 0` - ANY positive peak, however small. A position
+    # that ticked up 0.01% and then fell 0.52% exited here, logged as
+    # "locking in gains", at -0.51%. Real lines from the live replay:
+    #
+    #   gave back 0.95% from a 0.11% peak  ->  closed at -0.84%
+    #   gave back 1.17% from a 0.04% peak  ->  closed at -1.13%
+    #   gave back 0.52% from a 0.01% peak  ->  closed at -0.51%
+    #
+    # On the tree's last 20 completed trades PEAK PROFIT GIVEBACK was the
+    # single worst exit category: 5 trades, -$28.27, -$5.65 each. A rule
+    # named for protecting gains was the biggest loser in the book, because
+    # it was firing on positions that never had a gain and closing them
+    # BEFORE the stop would have - converting noise into realised losses.
+    #
+    # A giveback exit only makes sense once there is something to give
+    # back. The peak must clear what a round trip costs; below that there
+    # was never a real gain, and the stop loss owns the exit.
+    min_peak_to_arm = min_peak_to_arm_pct
+    if min_peak_to_arm is None:
+        try:
+            import fee_floor
+            min_peak_to_arm = fee_floor.fee_floor_pct(ALPACA_ROUND_TRIP_PCT)
+        except Exception:
+            min_peak_to_arm = ALPACA_ROUND_TRIP_PCT + 0.002
+
     peak_giveback = new_peak_pnl_pct - unrealized_pnl_pct
-    if new_peak_pnl_pct > 0 and peak_giveback >= max_giveback_pct:
+    if new_peak_pnl_pct >= min_peak_to_arm and peak_giveback >= max_giveback_pct:
         reason = f"Peak profit giveback: gave back {peak_giveback*100:.2f}% from a {new_peak_pnl_pct*100:.2f}% peak (limit: {max_giveback_pct*100:.2f}%)"
         log.info(f"  💰 {log_prefix}{symbol} ({direction.upper()}): {reason}")
         return True, reason, "trail", new_peak_pnl_pct
@@ -173,6 +206,18 @@ def should_exit_position_momentum(
     new_peak_pnl_pct = max(peak_pnl_pct, unrealized_pnl_pct)
     trailing_stop_pct = new_peak_pnl_pct - trail_pct
 
+    # DELIBERATELY NOT GIVEN THE ARMING THRESHOLD that
+    # should_exit_position's giveback rule got on 2026-09-25.
+    #
+    # They look like the same rule and are not. There, the giveback sits
+    # alongside a real stop loss, so refusing to fire at a tiny peak hands
+    # the exit back to the stop - which is the correct owner. Here the
+    # trail IS this path's only risk control: there is no separate stop
+    # loss, just this and the max-hold timer. Disarming it at a low peak
+    # would leave a losing position with nothing but a clock.
+    #
+    # At peak 0 the trail sits at -trail_pct, which is exactly a stop. That
+    # is the intended behaviour, not the noise-into-losses bug fixed above.
     if unrealized_pnl_pct <= trailing_stop_pct:
         reason = (
             f"Momentum trailing stop: pulled back to {unrealized_pnl_pct*100:.2f}% from a "

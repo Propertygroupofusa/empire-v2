@@ -16,14 +16,14 @@ import asyncio
 import requests
 import time
 from datetime import datetime
-from database import AsyncSessionLocal
+from database import get_session_factory
 from sqlalchemy import select
 from models import Payment, Worker
 
 
 async def check_pending_payments():
     """Check how many payments are pending"""
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         result = await session.execute(
             select(Worker).where(Worker.email == "bot@pgusa.local")
         )
@@ -83,7 +83,7 @@ async def monitor_payout_status(check_interval=10, max_checks=30):
     for i in range(max_checks):
         await asyncio.sleep(check_interval)
 
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             result = await session.execute(
                 select(Worker).where(Worker.email == "bot@pgusa.local")
             )
@@ -169,7 +169,7 @@ async def main():
     print("📊 FINAL REPORT")
     print("=" * 80)
 
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         result = await session.execute(
             select(Worker).where(Worker.email == "bot@pgusa.local")
         )

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import asyncio
 from datetime import datetime
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import Client, Job, Payment
 import uuid
 
@@ -11,7 +11,7 @@ async def create_test_jobs_for_payout():
     print("📋 CREATING NEW TEST JOBS FOR PAYOUT TESTING")
     print("=" * 80)
     
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         # Create unique test client
         unique_id = uuid.uuid4().hex[:8]
         test_client = Client(

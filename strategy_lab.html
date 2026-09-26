@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Strategy Lab</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --line:#232a35; --ink:#e6edf3; --dim:#8b949e;
+    --good:#3fb950; --bad:#f85149; --warn:#d29922; --accent:#58a6ff;
+    --pad: env(safe-area-inset-top,0px);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+       padding:calc(12px + var(--pad)) 16px calc(24px + env(safe-area-inset-bottom,0px))}
+  h1{font-size:1.35rem;margin:0 0 2px}
+  .sub{color:var(--dim);margin:0 0 16px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+         padding:14px;margin-bottom:14px}
+  button{background:var(--accent);color:#06121f;border:0;border-radius:8px;
+         padding:10px 16px;font-weight:600;font-size:0.95rem;cursor:pointer}
+  button:disabled{opacity:.5;cursor:default}
+  button.ghost{background:transparent;color:var(--accent);border:1px solid var(--line);font-weight:500}
+  input,select{background:#0d1117;color:var(--ink);border:1px solid var(--line);
+               border-radius:8px;padding:8px 10px;font-size:0.9rem}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .bar{height:8px;background:#0d1117;border-radius:99px;overflow:hidden;margin:10px 0 6px}
+  .bar > i{display:block;height:100%;background:var(--accent);width:0;transition:width .4s}
+  .mono{font-variant-numeric:tabular-nums}
+  table{width:100%;border-collapse:collapse;font-size:0.85rem}
+  th,td{text-align:right;padding:7px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+  th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
+  th{color:var(--dim);font-weight:600;font-size:0.78rem;text-transform:uppercase;letter-spacing:.04em}
+  tbody tr{cursor:pointer}
+  tbody tr:hover{background:#1b2230}
+  .good{color:var(--good)} .bad{color:var(--bad)} .warn{color:var(--warn)} .dim{color:var(--dim)}
+  .scroll{overflow-x:auto}
+  .pill{display:inline-block;padding:1px 8px;border-radius:99px;font-size:0.75rem;
+        border:1px solid var(--line)}
+  .pill.lucky{color:var(--bad);border-color:#5c2626;background:#2a1212}
+  .pill.real{color:var(--good);border-color:#1f4429;background:#11251a}
+  pre{background:#0d1117;border:1px solid var(--line);border-radius:8px;padding:12px;
+      overflow-x:auto;font-size:0.78rem;white-space:pre;margin:10px 0 0}
+  .note{color:var(--dim);font-size:0.82rem;margin-top:8px}
+  .verdict{border-left:3px solid var(--warn);padding-left:12px;margin-top:10px}
+  #detail{display:none}
+</style>
+</head>
+<body>
+
+<h1>Strategy Lab</h1>
+<p class="sub">432 variants per coin, split 70/30, ranked out-of-sample — against a random control that trades exactly as often.</p>
+
+<div class="panel">
+  <div class="row">
+    <button id="run" onclick="runBatch()">Run batch</button>
+    <select id="gran">
+      <option value="86400">Daily candles</option>
+      <option value="3600">Hourly candles</option>
+    </select>
+    <select id="sizing">
+      <option value="full">Full equity (upper bound)</option>
+      <option value="vol_target">Volatility-sized</option>
+      <option value="fixed_fraction">Fixed 25%</option>
+    </select>
+    <select id="days">
+      <option value="730">2 years</option>
+      <option value="365">1 year</option>
+      <option value="1095">3 years</option>
+    </select>
+    <span id="state" class="dim"></span>
+  </div>
+  <div class="bar"><i id="fill"></i></div>
+  <div id="prog" class="dim mono">Not started.</div>
+  <div id="verdict"></div>
+</div>
+
+<div class="panel">
+  <div class="row">
+    <input id="coin" placeholder="filter coin, e.g. BTC" oninput="loadResults()" style="flex:1;min-width:120px">
+    <button class="ghost" onclick="downloadCsv()">Download CSV</button>
+    <select id="sort" onchange="loadResults()">
+      <option value="oos">Rank by out-of-sample return</option>
+      <option value="sharpe">Rank by Sharpe</option>
+      <option value="drawdown">Rank by smallest drawdown</option>
+      <option value="trades">Rank by trade count</option>
+      <option value="in_sample">Rank by in-sample return</option>
+    </select>
+  </div>
+  <div class="scroll"><table>
+    <thead><tr>
+      <th>Coin</th><th>Strategy</th><th>Out-of-sample</th><th>In-sample</th>
+      <th>Win vs break-even</th><th>Trades</th><th>Sharpe</th><th>Max DD</th>
+      <th>On $10k</th><th>vs control</th><th>Real?</th>
+    </tr></thead>
+    <tbody id="rows"><tr><td colspan="11" class="dim">No results yet — press Run batch.</td></tr></tbody>
+  </table></div>
+  <div class="note" id="tnote"></div>
+</div>
+
+<div class="panel" id="detail">
+  <div class="row" style="justify-content:space-between">
+    <strong id="dtitle"></strong>
+    <button class="ghost" onclick="document.getElementById('detail').style.display='none'">Close</button>
+  </div>
+  <div id="dbody" class="note"></div>
+  <div class="row" style="margin-top:10px">
+    <button class="ghost" id="pinebtn" onclick="loadPine()">Export to TradingView (Pine)</button>
+    <button class="ghost" id="copybtn" onclick="copyPine()" style="display:none">Copy</button>
+  </div>
+  <pre id="pine" style="display:none"></pre>
+</div>
+
+<script>
+const API = '/api/trading-dashboard';
+let POLL = null, SEL = null;
+
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const pct = v => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(2) + '%';
+const cls = v => v == null ? 'dim' : (v > 0 ? 'good' : (v < 0 ? 'bad' : 'dim'));
+const usd = v => v == null ? '—' : '$' + Number(v).toLocaleString(undefined, {maximumFractionDigits: 0});
+
+async function runBatch() {
+  const btn = document.getElementById('run');
+  btn.disabled = true; btn.textContent = 'Starting…';
+  try {
+    const r = await fetch(API + '/strategy-lab/run-batch', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        granularity: Number(document.getElementById('gran').value),
+        days: Number(document.getElementById('days').value),
+        sizing: document.getElementById('sizing').value
+      })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+    if (d.status === 'already_running') alert('A sweep is already running.');
+    startPolling();
+  } catch (e) {
+    alert('Could not start: ' + e.message);
+    btn.disabled = false; btn.textContent = 'Run batch';
+  }
+}
+
+function startPolling() { if (!POLL) POLL = setInterval(poll, 2000); poll(); }
+
+async function poll() {
+  let d;
+  try { d = await (await fetch(API + '/strategy-lab/progress')).json(); }
+  catch (e) { return; }
+  const running = d.state === 'fetching' || d.state === 'running';
+  document.getElementById('run').disabled = running;
+  document.getElementById('run').textContent = running ? 'Running…' : 'Run batch';
+  document.getElementById('state').textContent = d.state === 'idle' ? '' : d.state;
+  document.getElementById('fill').style.width = (d.pct || 0) + '%';
+
+  let line;
+  if (d.state === 'idle') line = 'Not started.';
+  else if (d.state === 'error') line = 'Failed: ' + esc(d.error || 'unknown');
+  else if (d.state === 'fetching') line = 'Loading candles' + (d.current ? ' — ' + esc(d.current) : '') + '…';
+  else line = `${d.done} of ${d.total} tested` +
+       (d.current ? ' — ' + esc(d.current) : '') +
+       (d.elapsed_seconds != null ? ` · ${d.elapsed_seconds}s` : '');
+  document.getElementById('prog').textContent = line;
+
+  loadResults();
+  if (!running && POLL) { clearInterval(POLL); POLL = null; }
+}
+
+async function loadResults() {
+  const coin = document.getElementById('coin').value.trim();
+  const sort = document.getElementById('sort').value;
+  let d;
+  try {
+    d = await (await fetch(`${API}/strategy-lab/results?coin=${encodeURIComponent(coin)}&sort_by=${sort}&limit=60`)).json();
+  } catch (e) { return; }
+
+  const tb = document.getElementById('rows');
+  if (!d.rows || !d.rows.length) {
+    tb.innerHTML = '<tr><td colspan="11" class="dim">No results yet — press Run batch.</td></tr>';
+  } else {
+    tb.innerHTML = d.rows.map((r, i) => {
+      const p = Object.entries(r.params || {}).map(([k, v]) => `${k}=${v}`).join(' ');
+      // The column that stops a ranking from being a recommendation: with
+      // thousands of variants, something tops the table by luck alone.
+      const real = r.above_noise_floor === null ? '<span class="pill dim">—</span>'
+        : (r.above_noise_floor ? '<span class="pill real">above luck</span>'
+                               : '<span class="pill lucky">within luck</span>');
+      return `<tr onclick="showDetail(${i})">
+        <td>${esc(r.coin)}</td>
+        <td>${esc(r.strategy)} <span class="dim">${esc(p)}</span></td>
+        <td class="mono ${cls(r.oos_return_pct)}">${pct(r.oos_return_pct)}</td>
+        <td class="mono ${cls(r.in_sample_return_pct)}">${pct(r.in_sample_return_pct)}</td>
+        <td class="mono ${r.edge_points == null ? 'dim' : (r.edge_points > 0 ? 'good' : 'bad')}">${
+            r.break_even_win_rate_pct == null
+              ? r.oos_win_rate + '%'
+              : r.oos_win_rate + '% vs ' + r.break_even_win_rate_pct + '%'}</td>
+        <td class="mono">${r.oos_trades}</td>
+        <td class="mono">${r.oos_sharpe == null ? '—' : r.oos_sharpe}</td>
+        <td class="mono warn">${r.oos_max_drawdown_pct}%</td>
+        <td class="mono">${usd(r.oos_final_balance)}</td>
+        <td class="mono dim">${esc(r.beat_control || '—')}</td>
+        <td>${real}</td></tr>`;
+    }).join('');
+    window.__rows = d.rows;
+  }
+  document.getElementById('tnote').innerHTML =
+    [d.note, d.sizing_caveat, d.execution_caveat].filter(Boolean)
+      .map(t => '<div style="margin-top:6px">' + esc(t) + '</div>').join('');
+  const v = document.getElementById('verdict');
+  v.innerHTML = d.fleet_verdict
+    ? `<div class="verdict"><strong>Verdict across every coin:</strong> ${esc(d.fleet_verdict)}</div>` : '';
+}
+
+function showDetail(i) {
+  const r = (window.__rows || [])[i];
+  if (!r) return;
+  SEL = r;
+  const p = Object.entries(r.params || {}).map(([k, v]) => `${k}=${v}`).join(' ');
+  document.getElementById('dtitle').textContent = `${r.strategy} ${p} — ${r.coin}`;
+  const gap = r.overfit_gap_pct;
+  document.getElementById('dbody').innerHTML = `
+    In-sample <strong class="${cls(r.in_sample_return_pct)}">${pct(r.in_sample_return_pct)}</strong>,
+    out-of-sample <strong class="${cls(r.oos_return_pct)}">${pct(r.oos_return_pct)}</strong>
+    — a ${Number(gap).toFixed(1)}-point gap. ${Math.abs(gap) > 40
+      ? 'A collapse that size means the parameters describe the fitting window, not the market.'
+      : 'The two periods broadly agree, which is what a real edge looks like.'}<br>
+    ${r.split_label ? 'Out-of-sample begins <strong>' + esc(r.split_label) + '</strong>. ' : ''}
+    Beat its matched random control ${esc(r.beat_control || '—')} of the time.
+    Luck at this search width reaches ${pct(r.noise_floor_p95)} out-of-sample;
+    buy-and-hold returned ${pct(r.buy_and_hold_oos_pct)} and paid one fee.<br>
+    On $10,000 this ended at <strong>${usd(r.oos_final_balance)}</strong>
+    after a worst drawdown of <strong class="warn">${r.oos_max_drawdown_pct}%</strong>,
+    at full-equity sizing — real sizing gives a smaller return and a much smaller drawdown.
+    <br><br><strong>Where the money came from.</strong>
+    Average winner <strong>${r.avg_win_pct == null ? '—' : r.avg_win_pct + '%'}</strong>,
+    average loser <strong>${r.avg_loss_pct == null ? '—' : r.avg_loss_pct + '%'}</strong>.
+    ${r.break_even_win_rate_pct == null ? '' :
+      `At those sizes it had to win <strong>${r.break_even_win_rate_pct}%</strong> of trades just to break even,
+       and it won <strong>${r.oos_win_rate}%</strong> —
+       <strong class="${r.edge_points > 0 ? 'good' : 'bad'}">${r.edge_points > 0 ? '+' : ''}${r.edge_points} points</strong>.
+       That gap, compounded ${r.oos_trades} times, is the entire result.`}
+    ${r.profit_factor == null ? '' : ` Profit factor ${r.profit_factor}.`}
+    ${r.win_uniformity == null ? '' : (r.win_uniformity > 0.8
+      ? ` Winners are uniform (${r.win_uniformity}) — many small edges compounding, not a few outliers.`
+      : ` Winners are uneven (${r.win_uniformity}) — a few outliers carry this record, so missing them erases it.`)}`;
+  document.getElementById('pine').style.display = 'none';
+  document.getElementById('copybtn').style.display = 'none';
+  document.getElementById('detail').style.display = 'block';
+  document.getElementById('detail').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+
+async function loadPine() {
+  if (!SEL) return;
+  const btn = document.getElementById('pinebtn');
+  btn.disabled = true; btn.textContent = 'Building…';
+  try {
+    const q = `strategy=${encodeURIComponent(SEL.strategy)}&coin=${encodeURIComponent(SEL.coin)}` +
+              `&params=${encodeURIComponent(JSON.stringify(SEL.params || {}))}`;
+    const r = await fetch(API + '/strategy-lab/pine?' + q);
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+    const pre = document.getElementById('pine');
+    pre.textContent = d.pine;
+    pre.style.display = 'block';
+    document.getElementById('copybtn').style.display = 'inline-block';
+  } catch (e) {
+    alert('Could not export: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Export to TradingView (Pine)';
+  }
+}
+
+function downloadCsv() {
+  const coin = document.getElementById('coin').value.trim();
+  const sort = document.getElementById('sort').value;
+  window.location = `${API}/strategy-lab/results.csv?coin=${encodeURIComponent(coin)}&sort_by=${sort}&limit=2000`;
+}
+
+function copyPine() {
+  const t = document.getElementById('pine').textContent;
+  navigator.clipboard.writeText(t).then(
+    () => { const b = document.getElementById('copybtn'); b.textContent = 'Copied'; setTimeout(() => b.textContent = 'Copy', 1500); },
+    () => alert('Copy failed — select the text and copy manually.'));
+}
+
+poll();
+</script>
+</body>
+</html>

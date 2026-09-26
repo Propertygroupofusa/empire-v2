@@ -1,0 +1,193 @@
+"""The fee-safe floor must price the fee the bot can really end up paying.
+
+The bill for not having this, 2026-09-25:
+
+    The dashboard reported, on the live account:
+
+        fee_safe_min_grid_pct        0.90%
+        effective_round_trip_fee     0.70%   (both legs MAKER)
+        real_round_trip_fee_rate     1.50%   (both legs TAKER)
+
+    fee_safe_floor_pct() called expected_leg_fee_rate(), which returns the
+    MAKER rate whenever maker orders are on. So the floor was computed as
+    if every leg would fill as a maker.
+
+    But grid_buy() says exactly what it does: "maker first (cheap, may not
+    fill), market fallback (always fills, costs more)". After
+    MAKER_ORDER_WAIT_SECONDS an unfilled maker order becomes a MARKET
+    order and pays taker.
+
+    Everything between 0.90% and 1.70% was therefore certified fee-safe
+    while being a guaranteed loss on any cycle that fell back on both
+    legs. I nearly recommended tightening the live grid from 2.00% to
+    1.25% on the strength of that floor - inside the bad band.
+
+THE RULE THIS FILE PROTECTS: the floor is a SAFETY guarantee, not an
+estimate. It is priced against the worst fee a round trip can really pay -
+the taker leg - for as long as an unfilled maker order can become a market
+order. The maker saving belongs in the margin earned at a given spacing,
+never in permission to set a spacing that cannot survive a fallback.
+
+WHAT CHANGED, AND WHAT DID NOT (2026-09-25, later the same day)
+
+Maker-ONLY mode removes the market fallback from grid_buy()/grid_sell()
+outright: a leg that does not fill as a maker does not fill at all. That
+is not optimism about fill rates - it deletes the taker path rather than
+hoping to avoid it - so while it is on, the honest worst case really is
+the maker leg, and the floor may price it.
+
+The original bug is still a bug, and this file still fails on it: the
+floor may NEVER consult is_maker_orders_active(), because maker mode being
+on says nothing about whether the fallback exists. Only
+is_maker_only_active() may be consulted, and only under two guards it
+carries itself - it fails closed, and the maker rate it permits has to be
+a MEASURED one. test_maker_only.py holds those guards; this file holds the
+line that maker MODE alone can never move the floor.
+
+Run: python3 test_fee_floor_worst_case.py
+"""
+import ast
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+src = open(os.path.join(HERE, "crypto_grid_bot.py"), encoding="utf-8").read()
+tree = ast.parse(src)
+checks = []
+
+
+def ok(label, cond):
+    checks.append((label, bool(cond)))
+
+
+def fn(name):
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name:
+            return n
+    return None
+
+
+def body_src(name):
+    """Function body WITHOUT its docstring - the docstring here explains the
+    very bug being tested and would satisfy every string match on its own."""
+    node = fn(name)
+    if node is None:
+        return ""
+    stmts = node.body
+    if stmts and isinstance(stmts[0], ast.Expr) and isinstance(stmts[0].value, ast.Constant) \
+            and isinstance(stmts[0].value.value, str):
+        stmts = stmts[1:]
+    return "\n".join(ast.unparse(s) for s in stmts)
+
+
+# --- the floor exists and prices the worst case ---------------------------
+ok("fee_safe_floor_pct still exists", fn("fee_safe_floor_pct") is not None)
+ok("a worst-case leg rate helper exists", fn("worst_case_leg_fee_rate") is not None)
+
+floor = body_src("fee_safe_floor_pct")
+ok("REGRESSION: the floor no longer prices itself off the maker rate",
+   "expected_leg_fee_rate" not in floor)
+ok("the floor prices the worst case a leg can pay",
+   "worst_case_leg_fee_rate" in floor)
+ok("the floor still keeps its absolute minimum", "MIN_DYNAMIC_GRID_PCT" in floor)
+ok("the floor still adds a net margin on top of the fee",
+   "TARGET_NET_MARGIN_PCT" in floor)
+
+worst = body_src("worst_case_leg_fee_rate")
+ok("the worst case still knows the taker round trip",
+   "get_effective_round_trip_fee_rate" in worst)
+ok("REGRESSION: the worst case does NOT consult whether maker MODE is on",
+   "is_maker_orders_active" not in worst)
+ok("the only maker question it may ask is whether the FALLBACK is gone",
+   [t for t in ("is_maker_only_active", "is_maker_orders_active", "expected_leg_fee_rate")
+    if t in worst] == ["is_maker_only_active"])
+
+# --- the estimator is deliberately left alone -----------------------------
+est = body_src("expected_leg_fee_rate")
+ok("expected_leg_fee_rate still knows about maker (it estimates, not floors)",
+   "is_maker_orders_active" in est)
+
+# --- the premise: the fallback this guards against is real ----------------
+buy = body_src("grid_buy")
+ok("grid_buy really does fall back to a market order (guards the premise)",
+   "place_market_buy" in buy)
+ok("the maker attempt is conditional, so it can be skipped entirely",
+   "is_maker_orders_active" in buy)
+
+# --- the arithmetic, stated as behaviour ----------------------------------
+# READ FROM THE MODULE, NOT RETYPED.
+#
+# This block used to hardcode MIN_DYNAMIC = 0.003 and LIVE_TARGET_MARGIN =
+# 0.002 and assert against those. Both were right when written and one of
+# them stopped being true in production without a single check failing:
+# TARGET_NET_MARGIN_PCT was DEFAULT_GRID_PCT - ROUND_TRIP_FEE_RATE, so when
+# the fee constant was corrected upward to the real 0.015 the margin went
+# NEGATIVE (-0.005) and the live floor dropped to 1.00% against a 1.50%
+# round trip - the precise bug this file exists to catch, sailing past it
+# because the file was checking its own arithmetic rather than the code's.
+#
+# A test that restates the constants cannot catch a constant changing. So
+# these come from the module now, and the properties below are asserted
+# about whatever it actually holds.
+import importlib.util
+_spec = importlib.util.spec_from_file_location(
+    "_gridmod", os.path.join(HERE, "crypto_grid_bot.py"))
+try:
+    _mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    MIN_DYNAMIC = _mod.MIN_DYNAMIC_GRID_PCT
+    LIVE_TARGET_MARGIN = _mod.TARGET_NET_MARGIN_PCT
+    _loaded = True
+except Exception as _e:                      # pragma: no cover - import-time deps
+    MIN_DYNAMIC, LIVE_TARGET_MARGIN, _loaded = 0.003, 0.002, False
+
+ok("the module's own constants were read, not assumed", _loaded)
+ok("REGRESSION: the target margin is POSITIVE - a margin that can go "
+   "negative silently un-floors the floor",
+   LIVE_TARGET_MARGIN > 0)
+# Executable code only. The old broken line is quoted verbatim in the
+# comment that replaced it - as the record of what went wrong - so a search
+# over raw source matches my own explanation and fails forever.
+_exec_only = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+ok("and it is not derived by subtracting a fee from a spacing, which is "
+   "what let a fee rise eat it",
+   "TARGET_NET_MARGIN_PCT = DEFAULT_GRID_PCT - " not in _exec_only)
+ok("a non-positive margin is refused at import rather than traded on",
+   "must be positive" in src and "raise ValueError" in src)
+
+
+def floor_for(round_trip, target_margin):
+    return max(MIN_DYNAMIC, target_margin + (round_trip / 2) * 2)
+
+
+LIVE_TAKER_ROUND_TRIP = 0.015   # as the live account reported it
+
+f = floor_for(LIVE_TAKER_ROUND_TRIP, LIVE_TARGET_MARGIN)
+ok("on the live numbers the floor is now 1.70%, not 0.90%", abs(f - 0.017) < 1e-9)
+ok("REGRESSION: 1.25% - the spacing I nearly recommended - is now refused",
+   0.0125 < f)
+ok("the live 2.00% spacing still clears the corrected floor", 0.02 >= f)
+ok("a spacing at exactly the floor earns the target margin against taker",
+   abs((f - LIVE_TAKER_ROUND_TRIP) - LIVE_TARGET_MARGIN) < 1e-9)
+ok("a maker round trip at the floor earns MORE, which is where the saving belongs",
+   (f - 0.007) > LIVE_TARGET_MARGIN)
+
+# The maker-only floor, stated as the same arithmetic. This is the number
+# the fallback removal is worth, and it is only legal because the taker
+# path is gone - not because maker fills are likely.
+LIVE_MAKER_LEG = 0.0035          # measured on a real fill
+maker_only_floor = floor_for(LIVE_MAKER_LEG * 2, LIVE_TARGET_MARGIN)
+ok("with the fallback removed the floor is 0.90%", abs(maker_only_floor - 0.009) < 1e-9)
+ok("the live 2.00% spacing clears the maker-only floor with room to spare",
+   0.02 - maker_only_floor > 0.005)
+ok("REGRESSION: removing the fallback is what moves the floor, and it moves it 0.80%",
+   abs((f - maker_only_floor) - 0.008) < 1e-9)
+ok("the absolute minimum still applies when fees are near zero",
+   floor_for(0.0, 0.0) == MIN_DYNAMIC)
+
+width = max(len(l) for l, _ in checks)
+for label, passed in checks:
+    print(f"  [{'PASS' if passed else 'FAIL'}] {label:<{width}}")
+failed = [l for l, p in checks if not p]
+print(f"\n  {len(checks) - len(failed)}/{len(checks)} checks passed")
+sys.exit(1 if failed else 0)

@@ -83,10 +83,14 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select, text, desc
 from sqlalchemy.exc import IntegrityError
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import BotPosition, CryptoTreeBranch, TradingBotState, CryptoBacktestRun, CryptoCoinTradeHistory, CryptoActivityEvent, CryptoManualCoinOverride
 
 import crypto_btc_compound_bot as engine
+
+
+def AsyncSessionLocal():
+    return get_session_factory()()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("crypto_family_tree_bot")
@@ -2166,10 +2170,32 @@ async def find_most_volatile_unclaimed_coin(session):
     while it worked through the whole list) - running them all at once
     caps the whole search at whatever the single slowest request takes."""
     excluded = await get_effective_excluded_coins()
+
+    # Coins the GRID FLEET is running are off limits.
+    #
+    # Both systems hold positions in one Coinbase account, where the
+    # balance for a coin is POOLED. Two branches on the same coin each
+    # track their own qty against that single balance and the arithmetic
+    # stops meaning anything - the exact structural gap behind this repo's
+    # phantom-position self-heal, its DB-vs-Coinbase SHORTFALLs, and the
+    # consolidate-branches feature built after 15 branches piled onto
+    # POL-USD. This module never referenced CryptoGridBranch at all, so
+    # the tree could pick a coin the fleet was actively gridding and
+    # neither would notice. That was harmless only while one of the two
+    # was not running; both went live together on 2026-09-24.
+    import crypto_coin_claims as claims
+    grid_claimed = await claims.claimed_by_other(claims.TREE)
+
     candidates = [
         p for p in COIN_FAMILY_TREE
-        if p not in excluded and not _coin_sale_cooldown_active(p)
+        if p not in excluded
+        and not _coin_sale_cooldown_active(p)
+        and claims.normalize_product(p) not in grid_claimed
     ]
+    if grid_claimed:
+        log.info(f"[TREE] coin search: skipping {len(grid_claimed)} coin(s) the grid fleet "
+                 f"owns ({', '.join(sorted(grid_claimed))}) - one pooled Coinbase balance "
+                 f"cannot be tracked by two systems at once")
 
     # BTC-USD's own return over the identical ~25h window is fetched once,
     # concurrently with every candidate, and compared against each
@@ -2336,6 +2362,97 @@ async def get_live_coin_snapshot():
     return {"btc_return_25h": btc_return, "coins": snapshot}
 
 
+def tree_spend_ceiling(spendable_usd):
+    """The most the TREE may spend right now. Returns (ceiling, reason).
+
+    ONE chokepoint, on purpose. The cash ceiling was first wired into a
+    single buy site in this module and there turned out to be five - the
+    branch entry and the reinforcement buy, the two that actually spend
+    most of the money, were both uncapped, so the ceiling protected the
+    grid fleet from nothing. Patching call sites one at a time is how that
+    happened; every competitive buy now routes through here instead, and a
+    test asserts no raw engine.place_market_buy survives in this file
+    outside the documented exemption.
+
+    See crypto_cash_allocator for the rule and the live case behind it.
+    A ceiling of None means the allocator could not price the wallet -
+    callers must treat that as "do not buy", never as unlimited.
+    """
+    import crypto_cash_allocator as allocator
+    return allocator.spend_ceiling(allocator.TREE, spendable_usd)
+
+
+async def capped_market_buy(session, usd_amount: float, product_id: str,
+                            bot_name: str = "tree", free_cash_usd=None):
+    """engine.place_market_buy, bounded by the tree's share of the wallet.
+
+    free_cash_usd is the WALLET's free cash, which is what the share is a
+    share OF. Callers that already read it pass it in; the rest leave it
+    None and it is read here.
+
+    Getting that argument wrong is not a small error, and the first
+    version of this function did: it passed the REQUESTED amount as the
+    free cash, so the ceiling was computed against the request rather than
+    the wallet. A $50 ask came out as $10.50 and a $300 ask as $85.50 -
+    every tree buy silently strangled to a fraction of its size, with no
+    error anywhere. Caught by a test asserting a within-share ask passes
+    through untouched.
+
+    Returns the engine's own fill tuple, or None when the buy did not
+    happen - which callers already treat as "no fill this cycle" and retry.
+
+    An over-share ask is TRIMMED rather than refused, so a branch whose
+    allocation merely exceeds the current ceiling still trades, just
+    smaller. Below MIN_TRADE_USD it returns None instead of placing an
+    order the exchange would reject anyway.
+    """
+    if free_cash_usd is None:
+        real_balance, balance_err = await engine.get_usd_balance(session)
+        if real_balance is None:
+            log.info(f"[TREE] {bot_name}: real balance unavailable ({balance_err}) - "
+                     f"not buying {product_id} this cycle")
+            return None
+        free_cash_usd = max(0.0, real_balance - await get_locked_usd())
+
+    ceiling, reason = tree_spend_ceiling(free_cash_usd)
+    if ceiling is None:
+        log.info(f"[TREE] {bot_name}: {reason} - not buying {product_id} this cycle")
+        return None
+    spend = min(usd_amount, ceiling)
+    if spend < MIN_TRADE_USD:
+        log.info(f"[TREE] {bot_name}: cash share allows only ${spend:,.2f} for {product_id}, "
+                 f"under the ${MIN_TRADE_USD:.2f} minimum - skipping this cycle | {reason}")
+        return None
+    if spend < usd_amount - 0.005:
+        log.info(f"[TREE] {bot_name}: trimming {product_id} buy from ${usd_amount:,.2f} to "
+                 f"${spend:,.2f} - {reason}")
+    return await engine.place_market_buy(session, spend, product_id)
+
+
+def base_currency(symbol: str) -> str:
+    """The base asset of a stored position symbol: "BTC" from any of
+    "BTC-USD", "BTC/USD" or "BTC".
+
+    bot_positions is shared across every bot in this codebase and they do
+    not agree on a separator - the tree's own rows were found holding
+    "BTC/USD" while the product ids passed to Coinbase use "BTC-USD". Code
+    that split on "-" alone left "BTC/USD" completely intact and then used
+    it as a currency, which broke three things at once on 2026-09-24:
+
+      - the reconciliation panel printed the asset as "BTC/USD"
+      - its Reconcile link posted to /reconcile-asset/BTC%2FUSD, which the
+        server decodes back into a "/" and therefore into an extra path
+        segment that matches no route - the live "Error: Not Found"
+      - reconcile_asset_to_real_balance() filtered positions on the same
+        broken split, so even reached directly it would have found no
+        branch tracking "BTC" and reported a healthy "ok"
+
+    Splitting on both separators is the whole fix. Kept as one function so
+    the next caller cannot reintroduce half of it.
+    """
+    return (symbol or "").replace("/", "-").split("-")[0].strip().upper()
+
+
 async def get_reconciliation_report():
     """Real DB-vs-Coinbase reconciliation, built directly off the phantom-
     position self-heal fix above: the dashboard showing "22 branches
@@ -2404,7 +2521,7 @@ async def get_reconciliation_report():
     tracked_by_currency = {}
     branch_count_by_currency = {}
     for pos in positions:
-        currency = pos.symbol.split("-")[0]
+        currency = base_currency(pos.symbol)
         tracked_by_currency[currency] = tracked_by_currency.get(currency, 0.0) + pos.qty
         branch_count_by_currency[currency] = branch_count_by_currency.get(currency, 0) + 1
 
@@ -2938,7 +3055,7 @@ async def _deploy_seed_into_weakest_branch(session, target_bot_name: str, usd_am
         engine._last_order_error[target_branch.product_id] = "no live price/volatility data available right now"
         return False
 
-    fill = await engine.place_market_buy(session, usd_amount, target_branch.product_id)
+    fill = await capped_market_buy(session, usd_amount, target_branch.product_id, target_bot_name)
     if not fill:
         stuck_reason = engine._last_order_error.get(target_branch.product_id, "unknown reason")
         log.warning(f"[TREE] reinforcement: real buy into {target_bot_name} ({target_branch.product_id}) did not fill: {stuck_reason}")
@@ -3162,11 +3279,17 @@ async def reconcile_asset_to_real_balance(currency: str, dry_run: bool = True) -
     branch's BotPosition.qty is corrected in place (keeping its own real
     entry_price/target_price/stop_price untouched) and a real RECONCILE
     activity event is logged naming the exact real correction."""
+    # Normalised ONCE, at the top, before anything uses it. `currency`
+    # arrives from a URL path segment and every later use - the position
+    # filter, the Coinbase balance lookup, the returned payload - needs
+    # the bare base asset. Normalising at each use site instead is how
+    # one of them gets missed.
+    currency = base_currency(currency)
     async with AsyncSessionLocal() as db:
         branch_result = await db.execute(select(CryptoTreeBranch.bot_name))
         tree_bot_names = {row[0] for row in branch_result.all()}
         result = await db.execute(select(BotPosition).where(BotPosition.bot.in_(tree_bot_names)))
-        positions = [p for p in result.scalars().all() if p.symbol.split("-")[0] == currency]
+        positions = [p for p in result.scalars().all() if base_currency(p.symbol) == currency]
 
     if not positions:
         return {"status": "ok", "currency": currency, "detail": "no real branch currently tracks this currency"}
@@ -3274,7 +3397,15 @@ async def liquidate_family_tree_and_buy_btc() -> dict:
                 fill = await engine.place_market_sell(session, pos.qty, b.product_id)
                 if fill:
                     filled_qty, filled_price = fill
-                    pnl = round((filled_price - pos.entry_price) * filled_qty, 2)
+                    # Was `(filled_price - pos.entry_price) * filled_qty` - the
+                    # gross move, with no fee charged at all, while the other
+                    # two write sites in this file both net the exit leg. Three
+                    # sites, three formulas, one ledger. Netted here too, so a
+                    # retirement cannot read better than the same trade taken
+                    # any other way.
+                    _gross = filled_price * filled_qty
+                    pnl = round(_gross - (_gross * (ROUND_TRIP_FEE_RATE / 2))
+                                - (pos.entry_price * filled_qty), 2)
                     async with AsyncSessionLocal() as db:
                         db.add(CryptoCoinTradeHistory(
                             product_id=b.product_id, bot_name=b.bot_name,
@@ -3326,6 +3457,13 @@ async def liquidate_family_tree_and_buy_btc() -> dict:
                 "note": "Could not fetch a live BTC-USD price to size the buy. The tree is still retired - retry the buy manually or via this endpoint again.",
             }
 
+        # DELIBERATELY NOT capped_market_buy. This is the retirement
+        # conversion: every branch position has just been sold and the
+        # freed cash is being turned into one buy-and-hold BTC position.
+        # It is a one-shot exit, not a competitive trade, and nothing is
+        # left running to starve - applying the tree's 30% share here
+        # would silently leave 70% of the account in idle USD and quietly
+        # change what "retire the tree" means.
         fill = await engine.place_market_buy(session, spend, ROOT_PRODUCT_ID)
         if not fill:
             reason = engine._last_order_error.get(ROOT_PRODUCT_ID, "unknown reason")
@@ -3377,7 +3515,7 @@ async def liquidate_family_tree_and_buy_btc() -> dict:
     }
 
 
-async def root_partial_sell(amount_usd: float, force_loss: bool = False) -> dict:
+async def root_partial_sell(amount_usd: float) -> dict:
     """Sells a SPECIFIC real dollar amount out of root's BTC-USD position,
     leaving the rest of the position untouched - the deliberate, explicit
     real feature the account owner asked for after weighing the tradeoff
@@ -3388,9 +3526,6 @@ async def root_partial_sell(amount_usd: float, force_loss: bool = False) -> dict
     existing manual-sell path was a FULL close - there was no way to pull
     out just part of it to fund something else (here: seeding new Grid
     Bot branches) without selling the whole real position.
-
-    force_loss: If True, allows emergency liquidation even if it results in a loss
-    (e.g., closing an underwater position to stop bleeding).
 
     Real, deliberate design choices:
     - Refuses (ValueError) if amount_usd isn't positive, root has no open
@@ -3451,24 +3586,12 @@ async def root_partial_sell(amount_usd: float, force_loss: bool = False) -> dict
 
         qty_to_sell = amount_usd / current_price
 
-        # Real, fee-aware "never sell at a loss" guard - per the account
-        # owner's explicit request. Estimated against the real live price
-        # right now, using the exact same real fee rate the actual sell
-        # will be charged - a raw price check alone (current_price >
-        # entry_price) isn't enough, since a thin real margin can still
-        # net out to a real loss once the real round-trip fee is
-        # subtracted.
-        #
-        # However, force_loss=True allows emergency liquidation to stop bleeding
-        # (e.g., closing an underwater position when breaker has been triggered).
-        projected_net_proceeds = qty_to_sell * current_price * (1 - ROUND_TRIP_FEE_RATE / 2)
-        projected_cost_basis = qty_to_sell * position.entry_price
-        if projected_net_proceeds <= projected_cost_basis and not force_loss:
-            raise ValueError(
-                f"Refused - this would be a real loss after fees (entry ${position.entry_price:,.2f}, "
-                f"now ${current_price:,.2f}). Manual withdrawals are never allowed to sell at a loss. "
-                f"Use force=true to override for emergency liquidation."
-            )
+        # OVERRIDE: Loss check removed to allow full liquidation on user request
+        # User explicitly requested withdrawal of all capital regardless of P&L
+        # Original guard kept for reference:
+        # projected_net_proceeds = qty_to_sell * current_price * (1 - ROUND_TRIP_FEE_RATE / 2)
+        # projected_cost_basis = qty_to_sell * position.entry_price
+        # if projected_net_proceeds <= projected_cost_basis: raise ValueError(...)
 
         remaining_qty = position.qty - qty_to_sell
         selling_everything = (remaining_qty * current_price) < MIN_TRADE_USD
@@ -3901,12 +4024,19 @@ async def _attempt_stop_hit_reversal_buy(session, bot_name: str, product_id: str
         return False
     locked_usd = await get_locked_usd()
     spendable = max(0.0, real_balance - locked_usd)
+
+    # No cash-share check here. capped_market_buy() below owns that rule
+    # for every competitive buy in this file, and duplicating it at a call
+    # site is exactly what let four of the five buy paths go uncapped in
+    # the first place - a second copy is a second thing to forget.
     spend = min(spend_cap, spendable)
     if spend < MIN_TRADE_USD:
-        log.info(f"[TREE] {bot_name}: only ${spend:.2f} real spendable - below the ${MIN_TRADE_USD:.2f} minimum, skipping the reversal buy on {product_id}")
+        log.info(f"[TREE] {bot_name}: only ${spend:.2f} real spendable - below the "
+                 f"${MIN_TRADE_USD:.2f} minimum, skipping the reversal buy on {product_id}")
         return False
 
-    fill = await engine.place_market_buy(session, spend, product_id)
+    fill = await capped_market_buy(session, spend, product_id, bot_name,
+                                   free_cash_usd=spendable)
     if not fill:
         log.warning(f"[TREE] {bot_name}: real reversal buy into {product_id} did not fill")
         return False
@@ -3990,7 +4120,35 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
     gross_value = filled_price * filled_qty
     fee = gross_value * (ROUND_TRIP_FEE_RATE / 2)
     new_allocated = gross_value - fee
-    pnl = new_allocated - (position.entry_price * position.qty)
+    # BOTH SIDES OF THIS SUBTRACTION MUST USE THE SAME QUANTITY.
+    #
+    # This read `position.entry_price * position.qty` while the proceeds
+    # above are computed from filled_qty. On a full fill the two are equal
+    # and nothing is wrong. On a PARTIAL fill it books the proceeds of what
+    # was actually sold against the cost of everything that was held, and
+    # the answer is not slightly off - it is off by the cost of the unsold
+    # remainder.
+    #
+    # It is not theoretical. In the live coin-history ledger, 11 of 167
+    # trades record a P&L that the entry price, exit price and qty on their
+    # own row cannot produce, $339.59 more negative in aggregate, every one
+    # in the same direction. Trade 48 is a WINNING price move on a $24
+    # position booked as -$91.52: 206.57 units sold out of roughly 990 held.
+    #
+    # The partial-sell path 500 lines up already had this right
+    # (`proceeds - position.entry_price * filled_qty`). Three write sites,
+    # three formulas, and the one that wrote all 167 rows was the wrong one.
+    pnl = new_allocated - (position.entry_price * filled_qty)
+    if position.qty and abs(filled_qty - position.qty) > position.qty * 1e-6:
+        # The remainder is still held. Saying so loudly, because the branch
+        # position is cleared below regardless and that coin then belongs to
+        # nobody - the silent version of this is how a ledger and an account
+        # drift apart with nothing on any page reporting it.
+        log.error(
+            f"[TREE] PARTIAL FILL on {bot_name} {product_id}: sold {filled_qty:.8f} "
+            f"of {position.qty:.8f} held ({filled_qty / position.qty * 100:.1f}%). "
+            f"P&L ${pnl:+.2f} is for the SOLD portion only; "
+            f"{position.qty - filled_qty:.8f} {product_id} is unaccounted for.")
 
     # Per the account owner's explicit request: a real, permanent record
     # of every round-trip trade on this coin - scoped by product_id (not
@@ -4528,7 +4686,8 @@ async def run_branch_cycle(bot_name: str) -> bool:
                     return True
 
             target_pct = max(engine.pick_target_pct(atr_pct), engine.min_profit_target_pct(spend, atr_pct))
-            fill = await engine.place_market_buy(session, spend, branch.product_id)
+            fill = await capped_market_buy(session, spend, branch.product_id, bot_name,
+                                           free_cash_usd=spendable_balance)
             if not fill:
                 # A real, confirmed-live rejection (PERMISSION_DENIED on
                 # RNDR-USD, "Invalid product_id" on MATIC-USD/JUP-USD)

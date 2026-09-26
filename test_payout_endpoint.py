@@ -42,9 +42,9 @@ async def process_pending_payouts():
 
     try:
         # Import here to avoid startup issues
-        from database import AsyncSessionLocal
+        from database import get_session_factory
 
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             # Get all pending payments
             result = await session.execute(
                 select(Payment).where(Payment.payout_status == "pending")

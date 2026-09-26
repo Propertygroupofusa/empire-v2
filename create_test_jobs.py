@@ -14,7 +14,7 @@ This script:
 
 import asyncio
 from datetime import datetime
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import Client, Job, Payment
 import uuid
 
@@ -25,7 +25,7 @@ async def create_test_jobs_for_payout():
     print("📋 CREATING TEST JOBS FOR LIVE PAYOUT TESTING")
     print("=" * 80)
 
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         # Create a test client
         test_client = Client(
             email="test_client@payouts.local",

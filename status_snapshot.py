@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import TradingBotState
 
 log = logging.getLogger("status_snapshot")
@@ -49,13 +49,13 @@ async def _build_crypto_section() -> str:
     except Exception as e:
         return f"## 🌳 Crypto Family Tree\n\n_Could not load: {e}_\n"
 
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         try:
             status = await td.get_family_tree_status(db=db)
         except Exception as e:
             return f"## 🌳 Crypto Family Tree\n\n_Could not fetch: {e}_\n"
 
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         try:
             coin_history = await td.get_coin_trade_history(db=db)
         except Exception as e:
@@ -153,7 +153,7 @@ async def _build_alpaca_section() -> str:
     except Exception as e:
         return f"## 📈 Alpaca (Stocks/Futures)\n\n_Could not load: {e}_\n"
 
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         try:
             data = await td.get_alpaca_overview(db=db)
         except Exception as e:
@@ -176,7 +176,7 @@ async def _build_alpaca_section() -> str:
     # guaranteed exact original deposit.
     alpaca_starting_capital = None
     try:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name.like(f"{td.BOT_PREFIX}%")))
             bot_rows = list(result.scalars().all())
         if bot_rows:

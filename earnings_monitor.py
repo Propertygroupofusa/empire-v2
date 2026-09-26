@@ -11,7 +11,7 @@ import httpx
 import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import VideoQuoteOrder, Payment
 from sqlalchemy import select, func
 
@@ -31,7 +31,7 @@ async def check_bot_earnings():
 async def check_order_metrics():
     """Query order and payment metrics from database"""
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             # Order counts
             order_result = await session.execute(select(func.count(VideoQuoteOrder.id)))
             total_orders = order_result.scalar() or 0

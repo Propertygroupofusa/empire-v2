@@ -41,11 +41,11 @@ async def test_full_transfer_flow():
 
     # Import after logging is set up
     from bank_transfer_automation import transfer_manager
-    from database import Base, engine
+    from database import Base, get_engine
     from models import BankTransferLog
 
     # Create tables if they don't exist
-    async with engine.begin() as conn:
+    async with get_engine().begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
     log.info("✓ Database tables created/verified")
@@ -119,11 +119,11 @@ async def test_full_transfer_flow():
     log.info("TEST 4: Verify Transfer Logs in Database")
     log.info("=" * 70)
 
-    from database import AsyncSessionLocal
+    from database import get_session_factory
     from sqlalchemy import select
 
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             result = await session.execute(
                 select(BankTransferLog).where(
                     BankTransferLog.transfer_id == transfer_id
@@ -165,7 +165,7 @@ async def test_full_transfer_flow():
     log.info("=" * 70)
 
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             from models import CryptoSupplementalCapital
             from sqlalchemy import func
 

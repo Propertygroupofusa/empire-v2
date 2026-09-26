@@ -3,7 +3,7 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.pool import NullPool
-from sqlalchemy import event
+from sqlalchemy import event, inspect, text
 import os
 import traceback
 import logging
@@ -54,15 +54,27 @@ if not _HAS_GREENLET:
 if DATABASE_URL.startswith("postgresql+asyncpg://"):
     _engine_kwargs["connect_args"] = {"timeout": 10}
 
-engine = create_async_engine(DATABASE_URL, **_engine_kwargs)
-
-# Create session factory
-AsyncSessionLocal = sessionmaker(
-    engine, class_=AsyncSession, expire_on_commit=False
-)
-
-# Declarative base for all models (models.py imports this)
+# Lazy initialization: don't connect until first use
+# This prevents Railway app from crashing on startup if DB is unavailable
+engine = None
+AsyncSessionLocal = None
 Base = declarative_base()
+
+def get_engine():
+    """Lazy engine initialization - connect only when needed"""
+    global engine
+    if engine is None:
+        engine = create_async_engine(DATABASE_URL, **_engine_kwargs)
+    return engine
+
+def get_session_factory():
+    """Lazy session factory initialization"""
+    global AsyncSessionLocal
+    if AsyncSessionLocal is None:
+        AsyncSessionLocal = sessionmaker(
+            get_engine(), class_=AsyncSession, expire_on_commit=False
+        )
+    return AsyncSessionLocal
 
 async def init_db():
     """Initialize database - create tables if needed"""
@@ -72,16 +84,58 @@ async def init_db():
         print("[DB] Starting database initialization...")
         print("[DB] Calling Base.metadata.create_all()...")
 
-        async with engine.begin() as conn:
+        db_engine = get_engine()
+        async with db_engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
         print("[DB] ✅ Base.metadata.create_all() completed successfully")
     except Exception as e:
-        print(f"[DB] ❌ Base.metadata.create_all() failed: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"[DB] ⚠️  Base.metadata.create_all() failed (non-critical): {e}")
+        # Don't crash on DB failure - trading can run without persistent storage
+
+
+async def ensure_grid_status_schema():
+    """Add columns required by the read-only Grid status path first.
+
+    The full model-registry migration can exceed the startup timeout on
+    production Postgres. These columns must exist before a full ORM select of
+    Grid branches or slices can report live unrealized P&L.
+    """
+    import models  # noqa: F401  (registers model classes on Base.metadata)
+
+    required_columns = {
+        "crypto_grid_branches": ("self_tuned_multiplier",),
+        "crypto_grid_slices": ("entry_fee_rate",),
+    }
+    db_engine = get_engine()
+
+    for table_name, column_names in required_columns.items():
+        table = Base.metadata.tables[table_name]
+        async with db_engine.begin() as conn:
+            table_names = await conn.run_sync(lambda sync_conn: inspect(sync_conn).get_table_names())
+            if table_name not in table_names:
+                continue
+
+            existing_columns = {
+                column["name"]
+                for column in await conn.run_sync(
+                    lambda sync_conn, name=table_name: inspect(sync_conn).get_columns(name)
+                )
+            }
+            for column_name in column_names:
+                if column_name in existing_columns:
+                    continue
+                column = table.c[column_name]
+                ddl_type = column.type.compile(dialect=conn.dialect)
+                await conn.execute(text(
+                    f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {ddl_type}'
+                ))
+                log.info("Priority migration OK: %s.%s", table_name, column_name)
 
 async def get_db():
     """Get database session"""
-    async with AsyncSessionLocal() as session:
+    factory = get_session_factory()
+    if factory is None:
+        return
+    async with factory() as session:
         yield session

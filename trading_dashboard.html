@@ -64,6 +64,23 @@
             font-size: 0.95em;
         }
 
+        .deployment-badge {
+            display: inline-block;
+            background: linear-gradient(135deg, #009845 0%, #00a85f 100%);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.8em;
+            font-weight: 600;
+            margin-top: 8px;
+            box-shadow: 0 2px 8px rgba(0, 152, 69, 0.3);
+        }
+
+        .deployment-badge.paused {
+            background: linear-gradient(135deg, #c9860a 0%, #e0a825 100%);
+            box-shadow: 0 2px 8px rgba(201, 134, 10, 0.3);
+        }
+
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -491,6 +508,7 @@
         <div class="header">
             <h1>🤖 LIVE TRADING DASHBOARD</h1>
             <p>Bare Metal Builders - Automated Trading Bot</p>
+            <div class="deployment-badge" id="deploymentStatus">✅ System Deployed & Active</div>
         </div>
 
         <div class="narrative" id="narrative">Loading account summary…</div>

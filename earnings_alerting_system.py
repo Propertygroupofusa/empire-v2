@@ -14,7 +14,7 @@ import asyncio
 import httpx
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import VideoQuoteOrder, Payment
 from sqlalchemy import select, func
 
@@ -53,7 +53,7 @@ class EarningsAlertSystem:
                 earnings = resp.json()
 
             # Get order metrics from database
-            async with AsyncSessionLocal() as session:
+            async with get_session_factory()() as session:
                 # Paid orders
                 paid_result = await session.execute(
                     select(func.count(VideoQuoteOrder.id)).where(VideoQuoteOrder.paid == True)
@@ -125,7 +125,7 @@ class EarningsAlertSystem:
 
         # ALERT 2: Stuck Payouts ❌
         if current_state["pending_payouts"] > 0:
-            async with AsyncSessionLocal() as session:
+            async with get_session_factory()() as session:
                 stuck_result = await session.execute(
                     select(Payment).where(
                         Payment.payout_status == "pending",
@@ -151,7 +151,7 @@ class EarningsAlertSystem:
 
         # ALERT 3: Failed Video Generation ❌
         if current_state["paid_orders"] > current_state["videos_ready"]:
-            async with AsyncSessionLocal() as session:
+            async with get_session_factory()() as session:
                 failed_result = await session.execute(
                     select(VideoQuoteOrder).where(
                         VideoQuoteOrder.paid == True,

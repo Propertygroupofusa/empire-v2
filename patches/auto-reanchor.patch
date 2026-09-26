@@ -1,0 +1,118 @@
+--- a/crypto_grid_bot.py
++++ b/crypto_grid_bot.py
+@@ -1060,8 +1060,54 @@
+ # Applied as a one-directional floor, like every other spacing rule here: a
+ # branch below it is raised, a branch above it is left alone.
+ FLEET_MIN_STEP_PCT = float(os.getenv("GRID_FLEET_MIN_STEP_PCT", "0.025"))
+
+
++# ---- Auto re-anchor: a FLAT branch's reference follows the market ----
++#
++# reference_price is written exactly twice: when a branch is created, and
++# thereafter only on a real fill. Nothing moves it toward the market. So a
++# flat branch that has not traded through a rally measures its next buy from
++# a level the market already left - and because no fill means no re-anchor,
++# a rising market makes the next fill HARDER, not easier. Self-tightening.
++#
++# Measured live on 2026-09-25 at a 2.50% step: six flat branches were
++# waiting on falls of 2.89% to 4.80%. ARB needed 4.80%, nearly twice its
++# own spacing.
++#
++# Two throttles, because the naive version ("re-anchor whenever price is
++# above reference") fires every cycle - ~37s - for every flat branch, and
++# commits a database write for a fraction of a basis point:
++#
++#   DRIFT    ignore anything smaller than this. Every case that actually
++#            stranded a branch was 2.89%+, so 0.50% catches all of them
++#            and none of the noise.
++#   SECONDS  and never more than once per branch inside this window, so a
++#            coin ticking either side of the threshold cannot write in a
++#            loop.
++#
++# Together these turn ~580 writes/hour into a handful, same recovery.
++REANCHOR_MIN_DRIFT_PCT = float(os.getenv("GRID_REANCHOR_MIN_DRIFT_PCT", "0.005"))
++REANCHOR_MIN_SECONDS = float(os.getenv("GRID_REANCHOR_MIN_SECONDS", "60"))
++
++# bot_name -> time.monotonic() of that branch's last re-anchor. Deliberately
++# in memory: after a restart every branch is eligible again, which is
++# exactly what a restart should do, and it needs no migration.
++_LAST_REANCHOR_AT = {}
++
++
++def auto_reanchor_enabled() -> bool:
++    """Whether a FLAT branch's reference follows the market. ON unless off.
++
++    Defaults ON because the alternative is the self-tightening trap above:
++    a branch that has not filled drifts further from ever filling, and the
++    only cure was a human noticing a dashboard card and pressing a button.
++    A button is a one-shot - references go stale the moment prices move.
++    Set GRID_AUTO_REANCHOR=false to go back to manual.
++    """
++    raw = (os.getenv("GRID_AUTO_REANCHOR") or "").strip().strip('"').strip("'").lower()
++    return raw not in {"0", "false", "no", "off"}
++
++
+ def auto_widen_enabled() -> bool:
+     """Whether spacing may widen to clear the gate. ON unless switched off.
+
+@@ -4505,6 +4551,60 @@
+     if new_grid_pct is not None:
+         grid_pct = branch.grid_pct
+
++    # ---- Keep a FLAT branch's reference near the market ----
++    #
++    # Same safety rules as reanchor_flat_grid_branches_now(), the dashboard
++    # button, enforced here rather than inherited from it:
++    #
++    #   1. FLAT branches only. With a slice open the reference is ALSO the
++    #      sell trigger (price >= reference * (1 + step)), so moving it
++    #      would move the exit on a live position. Re-checked in the write.
++    #   2. UPWARD only. A lower reference is a LOWER buy trigger, i.e.
++    #      further from the market. A branch already trading below its
++    #      reference is nearer a fill than a fresh anchor would leave it.
++    #   3. reference_price is the ONLY field written. Spacing, levels,
++    #      allocation and active flags are untouched.
++    #   4. Places no order, spends nothing, sells nothing. The ordinary dip
++    #      test below still decides whether to buy, and every gate - net
++    #      edge, fee floor, drawdown breaker - still applies to it.
++    #   5. Fails soft. A failure leaves the branch on its old reference,
++    #      which costs a delayed entry and nothing else.
++    if (auto_reanchor_enabled() and not slices and price
++            and branch.reference_price and price > branch.reference_price):
++        _drift = (price / branch.reference_price) - 1
++        _last = _LAST_REANCHOR_AT.get(branch.bot_name)
++        _throttled = (_last is not None
++                      and (time.monotonic() - _last) < REANCHOR_MIN_SECONDS)
++        if _drift >= REANCHOR_MIN_DRIFT_PCT and not _throttled:
++            _old = branch.reference_price
++            try:
++                # Re-read slices inside the write path: a fill may have
++                # landed between the read at the top of this cycle and now,
++                # and a branch that is no longer flat must not be moved.
++                if not await get_grid_slices(branch.bot_name):
++                    async with get_session_factory()() as db:
++                        result = await db.execute(
++                            select(CryptoGridBranch).where(
++                                CryptoGridBranch.bot_name == branch.bot_name))
++                        row = result.scalar_one_or_none()
++                        if row is not None:
++                            row.reference_price = price
++                            await db.commit()
++                            branch.reference_price = price
++                            _LAST_REANCHOR_AT[branch.bot_name] = time.monotonic()
++                            log.info(
++                                f"[GRID] {branch.bot_name}: re-anchored "
++                                f"{branch.product_id} {_old:,.6f} -> {price:,.6f} "
++                                f"({_drift*100:.2f}% drift). Its next buy now "
++                                f"sits one {grid_pct*100:.2f}% step below the "
++                                f"live market instead of "
++                                f"{(_drift + grid_pct)*100:.2f}% below it."
++                            )
++            except Exception as e:
++                log.warning(
++                    f"[GRID] {branch.bot_name}: re-anchor failed ({e}) - left on "
++                    f"its old reference, which only costs a delayed entry")
++
+     # ---- Real dip: buy a new slice (skipped while drawdown-breached) ----
+     if drawdown_breached:
+         log.info(

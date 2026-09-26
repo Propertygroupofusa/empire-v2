@@ -41,6 +41,8 @@ Both are handled here (see _load_signing_key) since which one gets
 issued isn't something this code controls.
 """
 import base64
+import hashlib
+import hmac
 import os
 import asyncio
 import json
@@ -56,7 +58,7 @@ import jwt as pyjwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select, func
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import BotPosition, TradingBotState, CryptoRSIState, CryptoTradeLog, CryptoSupplementalCapital
 from bot_mandates import CRYPTO_MANDATE
 from network_config import get_cached_response, cache_response, NETWORK_ENV_CONFIG
@@ -102,8 +104,12 @@ except ImportError:
 PRICE_CACHE = {}  # {symbol: {"price": float, "rsi": float, "atr": float, "timestamp": datetime}}
 CACHE_TTL_SECONDS = 1800  # 30 minutes
 
-COINBASE_API_KEY_NAME = os.getenv("COINBASE_API_KEY_NAME", "")
-COINBASE_API_PRIVATE_KEY = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\n", "\n")
+# Dual-auth support: CDP JWT (new) or HMAC/Basic Auth (legacy)
+COINBASE_API_KEY_NAME = os.getenv("COINBASE_API_KEY_NAME") or os.getenv("COINBASE_API_KEY_NAME_BOT") or ""
+COINBASE_API_PRIVATE_KEY = (os.getenv("COINBASE_API_PRIVATE_KEY") or os.getenv("COINBASE_API_PRIVATE_KEY_BOT") or "").replace("\\n", "\n")
+COINBASE_API_KEY = os.getenv("COINBASE_API_KEY") or os.getenv("COINBASE_API_KEY_BOT") or ""
+COINBASE_SECRET_KEY = os.getenv("COINBASE_SECRET_KEY") or os.getenv("COINBASE_SECRET_KEY_BOT") or ""
+COINBASE_PASSPHRASE = os.getenv("COINBASE_PASSPHRASE") or os.getenv("COINBASE_PASSPHRASE_BOT") or ""
 COINBASE_HOST = "api.coinbase.com"
 COINBASE_BASE_URL = f"https://{COINBASE_HOST}"
 FMP_API_KEY = os.getenv("FMP_API_KEY", "")
@@ -168,14 +174,65 @@ def _build_jwt(method: str, path: str) -> str:
         "iss": "cdp",
         "nbf": now,
         "exp": now + 120,
-        "uri": f"{method} {COINBASE_HOST}{path}",
+        # The URI claim must NOT carry the query string. Coinbase signs
+        # "GET host/api/v3/brokerage/product_book", not
+        # "GET host/api/v3/brokerage/product_book?product_id=BTC-USD&limit=1",
+        # so including it makes every parameterised request fail the
+        # signature check and return 401.
+        #
+        # What that cost, live: get_best_bid_ask() passes
+        # "...product_book?product_id=X&limit=1". It 401'd on every call and
+        # returned (None, None) - and place_maker_buy/place_maker_sell open
+        # with "if bid is None: return None", so they fell straight through
+        # to place_market_buy/sell. Not one maker order was ever placed.
+        # Every fill paid the 1.50% taker round trip instead of 0.70%,
+        # which pinned the fee floor at 1.70%, which pinned the grid step at
+        # 2.00%, which is why the fleet trades a few times a week.
+        # get_recent_market_trades() and the order-reconciliation fill
+        # lookup were failing the same way, silently.
+        "uri": f"{method} {COINBASE_HOST}{path.split('?', 1)[0]}",
     }
     headers = {"kid": COINBASE_API_KEY_NAME, "nonce": secrets.token_hex(16)}
     return pyjwt.encode(payload, private_key, algorithm=algorithm, headers=headers)
 
 
-def _auth_headers(method: str, path: str) -> dict:
-    return {"Authorization": f"Bearer {_build_jwt(method, path)}", "Content-Type": "application/json"}
+def _build_hmac_signature(method: str, path: str, body: str = "") -> str:
+    """Coinbase HMAC/Basic Auth signature (legacy method). Creates a signature
+    for Coinbase Advanced Trade API using HMAC-SHA256."""
+    timestamp = str(time.time())
+    message = timestamp + method + path + body
+    signature = base64.b64encode(
+        hmac.new(
+            COINBASE_SECRET_KEY.encode(),
+            message.encode(),
+            hashlib.sha256
+        ).digest()
+    ).decode()
+    return signature, timestamp
+
+
+def _auth_headers(method: str, path: str, body: str = "") -> dict:
+    """Return auth headers - try CDP JWT first, fall back to HMAC if JWT unavailable."""
+    # Try CDP JWT authentication first (new method)
+    if COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY:
+        try:
+            return {"Authorization": f"Bearer {_build_jwt(method, path)}", "Content-Type": "application/json"}
+        except Exception as e:
+            log.warning(f"CDP JWT auth failed, trying HMAC: {e}")
+
+    # Fall back to HMAC/Basic Auth (legacy method)
+    if COINBASE_API_KEY and COINBASE_SECRET_KEY and COINBASE_PASSPHRASE:
+        signature, timestamp = _build_hmac_signature(method, path, body)
+        return {
+            "CB-ACCESS-KEY": COINBASE_API_KEY,
+            "CB-ACCESS-SIGN": signature,
+            "CB-ACCESS-TIMESTAMP": timestamp,
+            "CB-ACCESS-PASSPHRASE": COINBASE_PASSPHRASE,
+            "Content-Type": "application/json"
+        }
+
+    # No credentials available - error
+    raise ValueError("No Coinbase API credentials configured. Set either CDP (COINBASE_API_KEY_NAME + COINBASE_API_PRIVATE_KEY) or HMAC (COINBASE_API_KEY + COINBASE_SECRET_KEY + COINBASE_PASSPHRASE)")
 
 
 # STATE-BASED RSI ENTRY SYSTEM for profit-only trading
@@ -284,7 +341,7 @@ TIER_STATE_KEY = "crypto_coinbase_tier_highwater"
 
 async def get_tier_highwater() -> float:
     try:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == TIER_STATE_KEY))
             row = result.scalar_one_or_none()
             return row.base_capital if row else 0.0
@@ -295,7 +352,7 @@ async def get_tier_highwater() -> float:
 
 async def set_tier_highwater(value: float):
     try:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == TIER_STATE_KEY))
             row = result.scalar_one_or_none()
             if row:
@@ -306,14 +363,32 @@ async def set_tier_highwater(value: float):
     except Exception as e:
         log.error(f"[CRYPTO] Failed to persist tier high-water mark: {e}")
 
-# Coinbase trading cost: 0.40% total round-trip assumption = 0.20% entry + 0.20% exit
-# This is used only to size the profit target sensibly, not charged/simulated here
-# (the real fee is already reflected in Coinbase's fill price/balance).
+# The real Coinbase round trip on this account: 0.75% per leg taker, so
+# 1.50% both ways. Measured on 2026-09-25 from Coinbase's own fill records
+# (liquidity_indicator + commission per fill), not assumed.
+#
+# WHAT THE OLD 0.4% COST
+#
+# This constant is not decorative - three live exit conditions below read
+# it directly:
+#
+#     rsi_exit = rsi > RSI_SELL_ABOVE and unrealized_pct > CRYPTO_ROUND_TRIP_FEE_RATE
+#
+# "sell when unrealized profit clears the round trip". At 0.4% that fired
+# on a 0.5% gain, which pays 1.50% in fees and books a real -1.00% LOSS
+# while logging it as a profitable exit. That is exactly the pattern that
+# cost the retired family tree $102.60 across 26 "TARGET HIT" trades -
+# wins that lost money.
+#
+# An earlier pass this session added FEE_FLOOR_ROUND_TRIP_PCT at the real
+# rate for the dollar profit target, and deliberately left this one alone
+# because other exit logic read it. Leaving it was the wrong call: the
+# other exit logic reading it was the problem, not a reason to keep it.
 try:
-    CRYPTO_ROUND_TRIP_FEE_RATE = _safe_float_env("CRYPTO_ROUND_TRIP_FEE_RATE", "0.004")
+    CRYPTO_ROUND_TRIP_FEE_RATE = _safe_float_env("CRYPTO_ROUND_TRIP_FEE_RATE", "0.015")
 except (ValueError, TypeError):
-    log.warning("Invalid CRYPTO_ROUND_TRIP_FEE_RATE value, using default: 0.004")
-    CRYPTO_ROUND_TRIP_FEE_RATE = 0.004
+    log.warning("Invalid CRYPTO_ROUND_TRIP_FEE_RATE value, using default: 0.015")
+    CRYPTO_ROUND_TRIP_FEE_RATE = 0.015
 
 # DEPRECATED: Fixed 37% target replaced with tiered system (see CRYPTO_TIER_LEVELS above)
 # The old fixed target was mathematically unsound: 18.5:1 reward/risk meant the bot held
@@ -368,6 +443,14 @@ TAKER_FEE_RATE = 0.006
 # Tier 2: Exit 1/3 at 6-10% (second profit zone, move stop to breakeven)
 # Tier 3: Remaining 1/3 trails at trailing stop (let winners run with protection)
 # This replaces the fixed 37% target which caused the bot to hold indefinitely
+# The round trip the FEE FLOOR prices against. Now the same 1.50% as
+# CRYPTO_ROUND_TRIP_FEE_RATE above - kept as its own name because a floor
+# and an exit threshold are different jobs and may need to diverge again.
+# A floor must price the worst case the trade can pay: an unfilled maker
+# order becomes a market order, so taker is the honest rate.
+# Matches crypto_grid_bot and crypto_mean_reversion_bot.
+FEE_FLOOR_ROUND_TRIP_PCT = _safe_float_env("CRYPTO_ROUND_TRIP_FEE_PCT", "0.015")
+
 CRYPTO_TIER_LEVELS = [0.05, 0.08, 0.15]  # 3-tier exit: 5% (lock), 8%, 15% (trailing)
 CRYPTO_TIER_FRACTIONS = [1/3, 1/3, 1/3]   # Exit 1/3 of position at each tier
 CRYPTO_TRAILING_STOP_PCT = 0.05  # Trail final position by 5% from recent high (protection while letting winners run)
@@ -391,7 +474,7 @@ async def load_open_positions():
     while the positions are still open for real on Coinbase, and the bot
     can never take profit or cut losses on them again (see BotPosition)."""
     try:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             result = await db.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME, BotPosition.side == "long"))
             rows = result.scalars().all()
             for row in rows:
@@ -412,7 +495,7 @@ async def load_all_rsi_states():
     on Coinbase API calls. Moving to startup + in-memory + batch-flush unblocks the event loop."""
     global RSI_STATE_CACHE
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             result = await session.execute(select(CryptoRSIState))
             states = result.scalars().all()
 
@@ -494,7 +577,7 @@ async def _retry_with_backoff(async_func, max_attempts: int = None):
 
 async def _db_save_open(symbol: str, side: str, entry: float, qty: float):
     try:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             db.add(BotPosition(bot=BOT_NAME, symbol=symbol, side=side, entry_price=entry, qty=qty))
             await db.commit()
     except Exception as e:
@@ -503,7 +586,7 @@ async def _db_save_open(symbol: str, side: str, entry: float, qty: float):
 
 async def _db_delete_open(symbol: str, side: str = None):
     try:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             query = select(BotPosition).where(BotPosition.bot == BOT_NAME, BotPosition.symbol == symbol)
             if side:
                 query = query.where(BotPosition.side == side)
@@ -556,7 +639,7 @@ async def get_supplemental_capital() -> float:
 
     Returns total allocated amount, or 0 on any error."""
     try:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             from sqlalchemy import func
             result = await db.execute(select(func.sum(CryptoSupplementalCapital.amount_usd)))
             total = result.scalar() or 0.0
@@ -1172,7 +1255,7 @@ async def log_trade_entry(symbol: str, entry_rsi: float, entry_price: float, qty
     try:
         trade_id = str(uuid.uuid4())[:8]  # Unique trade ID
 
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             trade = CryptoTradeLog(
                 symbol=symbol,
                 strategy_version="SMA200_RSI_CROSSOVER_SWING_V2",  # UPGRADED: 200-day SMA + RSI cross-above + swing-based stops
@@ -1222,7 +1305,7 @@ async def flush_rsi_state_cache():
     only in the in-memory cache now. But if the table doesn't exist, it gracefully skips."""
     global RSI_STATE_CACHE
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             changed_count = 0
             for symbol, cache_entry in RSI_STATE_CACHE.items():
                 if not cache_entry.get("changed", False):
@@ -1278,7 +1361,7 @@ async def log_trade_exit(symbol: str, exit_price: float, exit_reason: str, reali
                         partial_exit_count: int = 0, trailing_stop_triggered: bool = False):
     """Log when a trade exits (EXIT) and record to measurement system."""
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             # Find the most recent unclosed trade for this symbol
             stmt = select(CryptoTradeLog).where(
                 CryptoTradeLog.symbol == symbol,
@@ -1638,9 +1721,35 @@ async def run_crypto_cycle():
             should_exit = False
             reason = None
 
-            # PROFIT TAKING: Close trades with $10+ profit when balance > $1,001
+            # PROFIT TAKING: close on a fixed DOLLAR gain when balance > $1,001.
+            #
+            # THE FEE FLOOR, wired 2026-09-25. A fixed dollar target hides
+            # the defect a percentage shows plainly: $2.50 is 5.00% on a $50
+            # position and 0.25% on a $1,000 one - the same number, fine at
+            # one size and a guaranteed loss at another. Against the real
+            # 1.50% round trip it only clears on positions up to $147.06.
+            # Above that, "taking profit" books a loss.
+            #
+            # 0.25% is also, exactly, the target on the retired
+            # bot_config.json scalper - reached here completely
+            # independently, which is why this needs a floor and not a
+            # bigger constant.
             dollar_profit = unrealized_pnl
-            profit_take_exit = should_take_profits and dollar_profit >= TARGET_TRADE_PROFIT
+            _min_profit = TARGET_TRADE_PROFIT
+            try:
+                import fee_floor
+                _position_usd = abs(qty * entry) if qty and entry else 0.0
+                # Both constants are now the real measured 1.50%, so this
+                # no longer differs from CRYPTO_ROUND_TRIP_FEE_RATE. Kept
+                # explicit because a floor must never quietly inherit
+                # whatever an exit threshold happens to be set to.
+                _floor_usd = fee_floor.min_profit_usd(
+                    _position_usd, FEE_FLOOR_ROUND_TRIP_PCT)
+                if _floor_usd > _min_profit:
+                    _min_profit = _floor_usd
+            except Exception as _e:
+                logger.warning(f"fee floor check skipped for {product_id}: {_e}")
+            profit_take_exit = should_take_profits and dollar_profit >= _min_profit
 
             # PRIORITY 1: Hard stop loss (swing-based, professional risk management)
             if stop_hit:
@@ -1986,16 +2095,24 @@ def run():
     log.info("🔴 LIVE TRADING - Coinbase has no free paper-trading sandbox for Advanced Trade")
     log.info("=" * 80)
 
-    # Diagnostic: check credential availability
-    key_name_present = bool(COINBASE_API_KEY_NAME)
-    key_secret_present = bool(COINBASE_API_PRIVATE_KEY)
-    log.info(f"[STARTUP] COINBASE_API_KEY_NAME: {'✓ configured' if key_name_present else '❌ MISSING'}")
-    log.info(f"[STARTUP] COINBASE_API_PRIVATE_KEY: {'✓ configured' if key_secret_present else '❌ MISSING'}")
+    # Diagnostic: check credential availability (supports both CDP JWT and HMAC/Basic Auth)
+    cdp_configured = bool(COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY)
+    hmac_configured = bool(COINBASE_API_KEY and COINBASE_SECRET_KEY and COINBASE_PASSPHRASE)
 
-    if not (COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY):
-        log.error("🛑 CRYPTO BOT STARTUP FAILED: Missing Coinbase API credentials (COINBASE_API_KEY_NAME and/or COINBASE_API_PRIVATE_KEY)")
-        log.error("   Set these environment variables in Railway to enable crypto trading bot")
+    log.info(f"[STARTUP] CDP Auth (COINBASE_API_KEY_NAME + COINBASE_API_PRIVATE_KEY): {'✓ configured' if cdp_configured else '❌ not set'}")
+    log.info(f"[STARTUP] HMAC Auth (COINBASE_API_KEY + COINBASE_SECRET_KEY + COINBASE_PASSPHRASE): {'✓ configured' if hmac_configured else '❌ not set'}")
+
+    if not (cdp_configured or hmac_configured):
+        log.error("🛑 CRYPTO BOT STARTUP FAILED: No Coinbase API credentials configured")
+        log.error("   Set EITHER CDP auth (COINBASE_API_KEY_NAME + COINBASE_API_PRIVATE_KEY)")
+        log.error("   OR HMAC auth (COINBASE_API_KEY + COINBASE_SECRET_KEY + COINBASE_PASSPHRASE)")
+        log.error("   in Railway Variables to enable crypto trading bot")
         return
+
+    if cdp_configured:
+        log.info("   → Using CDP JWT authentication method")
+    elif hmac_configured:
+        log.info("   → Using HMAC/Basic Auth authentication method")
 
     # Run pre-flight connectivity test
     loop = asyncio.new_event_loop()

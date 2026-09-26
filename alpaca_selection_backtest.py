@@ -146,6 +146,28 @@ def _replay_symbol(
     return trades
 
 
+async def _live_strategy_family() -> str:
+    """The entry family the live bot is actually running.
+
+    Falls back to "mean_reversion" - the historical default - if prop_bot
+    cannot be reached, so a lookup failure can never silently switch which
+    strategy a backtest scores.
+    """
+    try:
+        import prop_bot
+        return await prop_bot.get_live_strategy_family()
+    except Exception as e:
+        log.warning("could not read the live strategy family (%s) - scoring as mean_reversion", e)
+        return "mean_reversion"
+
+
+def _replay_for_live_family(closes, ticker, strategy_family):
+    """Replay whichever entry the live bot runs, on the same real bars."""
+    if strategy_family == "momentum":
+        return _replay_symbol_momentum(closes)
+    return _replay_symbol(closes, symbol=ticker)
+
+
 async def run_full_backtest(contract_codes=None, days: int = BACKTEST_DAYS, max_concurrent: int = 6) -> dict:
     """Real entry point - pulls real Alpaca history concurrently (capped
     by max_concurrent) for every symbol in prop_bot.py's FUTURES universe
@@ -153,6 +175,10 @@ async def run_full_backtest(contract_codes=None, days: int = BACKTEST_DAYS, max_
     exit rules, and ranks by real backtested ROI. Never places an order."""
     codes = contract_codes or list(FUTURES.keys())
     tickers = [(code, FUTURES[code]["symbol"]) for code in codes]
+
+    # Read ONCE, outside the per-symbol fan-out, so every symbol in a run
+    # is scored against the same strategy.
+    strategy_family = await _live_strategy_family()
 
     semaphore = asyncio.Semaphore(max_concurrent)
     results = []
@@ -165,9 +191,31 @@ async def run_full_backtest(contract_codes=None, days: int = BACKTEST_DAYS, max_
                 if closes is None:
                     skipped.append({"product_id": ticker, "reason": err})
                     return
-                trades = _replay_symbol(closes, symbol=ticker)
+                # REPLAY THE STRATEGY THAT IS ACTUALLY RUNNING.
+                #
+                # This called _replay_symbol() unconditionally - the
+                # MEAN-REVERSION entry (`if rsi < RSI_LONG_THRESHOLD`,
+                # buy weakness). The live bot has run MOMENTUM since the
+                # head-to-head that switched it (`rsi > 55 and price >
+                # sma`, buy strength). Two opposite entries.
+                #
+                # prop_bot.get_effective_excluded_symbols() gates live
+                # entries on the ROI these runs persist, so symbols were
+                # being barred from MOMENTUM entries because a
+                # MEAN-REVERSION replay lost money on them. On the 30-day
+                # data that mostly happened to agree - four of the six
+                # excluded lose under momentum too - but QQQ was barred
+                # while earning +$5.58 over 7 momentum trades, and the
+                # agreement was luck, not design.
+                #
+                # Falls back to mean-reversion only if the family cannot
+                # be read, matching the live default.
+                trades = _replay_for_live_family(closes, ticker, strategy_family)
                 if not trades:
-                    skipped.append({"product_id": ticker, "reason": "no trades produced (RSI never dipped below threshold)"})
+                    skipped.append({
+                        "product_id": ticker,
+                        "reason": f"no trades produced under the live {strategy_family} entry",
+                    })
                     return
                 wins = [t for t in trades if t["pnl_usd"] > 0]
                 total_pnl = sum(t["pnl_usd"] for t in trades)

@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 import uuid
 from sqlalchemy import select, desc, func, case
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import BotPosition, Payment, AlpacaBacktestRun, TradingBotState, AlpacaBranch, AlpacaBranchTradeHistory
 import bot_mandates
 from bot_mandates import APEX_MANDATE, validate_entry, MOMENTUM_ENTRY, MEAN_REVERSION_ENTRY
@@ -43,6 +43,7 @@ ET = ZoneInfo("America/New_York")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("prop_bot")
+AsyncSessionLocal = get_session_factory()
 
 def _safe_float_env(name: str, default: str) -> float:
     """Parse a Railway env var as float, falling back to the numeric default
@@ -164,7 +165,8 @@ FUTURES = {
     # exists for these, so the ETF ticker is used as both the key and the
     # traded symbol.
     "SH":  {"name": "Short S&P 500 (inverse of SPY)",   "qty": 1, "symbol": "SH"},
-    "PSQ": {"name": "Short Nasdaq (inverse of QQQ)",    "qty": 1, "symbol": "PSQ"},
+    # "PSQ": DISABLED Sept 10 - 25% win rate, -$427 loss on 4 trades. Performance filter for edge optimization.
+    # "PSQ": {"name": "Short Nasdaq (inverse of QQQ)",    "qty": 1, "symbol": "PSQ"},
     "DOG": {"name": "Short Dow 30 (inverse of DIA)",    "qty": 1, "symbol": "DOG"},
     "RWM": {"name": "Short Russell 2000 (inverse of IWM)", "qty": 1, "symbol": "RWM"},
     # Individual mega-cap tech equities - per the account owner's explicit
@@ -219,14 +221,83 @@ def get_dynamic_max_positions(scale: float) -> int:
 # At $1K: aim for $1-2 per trade (0.75% targets on $130-170 positions)
 # At $5K: aim for $5-15 per trade (1% targets on $500+ positions)
 # At $25K: aim for $50-100 per trade (1% targets on $5,000+ positions)
+# Retuned 2026-09-25, per the account owner's request to make Alpaca take
+# profit faster. The low tiers did not implement the intent documented
+# three lines above them ("At $1K: aim for $1-2 per trade, 0.75% targets").
+#
+# What the old numbers actually demanded at this account's real size:
+# MAX_RISK_PERCENT caps total notional at 50% of equity, spread across up
+# to get_dynamic_max_positions() slots. At ~$1,006 equity that is ~$503
+# deployed over 8 slots - roughly $63 a position.
+#
+#     old $3.00 target on a $63 position = a 4.8% move
+#
+# A 4.8% move in SPY, QQQ or GLD is weeks of waiting, not days. So the
+# EXIT was the binding constraint on turnover, not the entry: capital sat
+# in a position waiting for a move that rarely came, instead of being
+# recycled into the next setup. Speeding up entries without this change
+# would just have filled all 8 slots faster and then stalled.
+#
+# The low tiers now sit near 1.5% of a real position at that tier, which
+# these instruments genuinely move in a day or two. Spread is not a threat
+# at this size - SPY's bid-ask is about a cent on a ~$769 share, under
+# 0.002% - and Alpaca equities are commission-free, so frequent round
+# trips cost almost nothing here. That is NOT true on the Coinbase side,
+# where a 1% round-trip fee makes small targets unprofitable.
+#
+# Upper tiers unchanged: they were never the constraint, and at $25K a
+# position is large enough that the old dollar targets are already ~1%.
 PROFIT_TARGET_DOLLARS_MILESTONES = [
-    (0,     1.50),      # Under $500: $1.50 target (fast compounding)
-    (500,   2.00),      # $500-$1K: $2 target
-    (1000,  3.00),      # $1K-$5K: $3 target (current account level)
-    (5000,  10.00),     # $5K-$10K: $10 target
-    (10000, 25.00),     # $10K-$25K: $25 target
-    (25000, 75.00),     # $25K+: $75 target
+    (0,     0.50),      # Under $500: ~1.5% of a real position at that size
+    (500,   0.75),      # $500-$1K
+    (1000,  1.00),      # $1K-$5K: ~1.6% on a ~$63 position (was $3.00 = 4.8%)
+    (5000,  5.00),      # $5K-$10K: ~1.6% on a ~$310 position (was $10.00)
+    (10000, 25.00),     # $10K-$25K: unchanged
+    (25000, 75.00),     # $25K+: unchanged
 ]
+
+# Absolute override, no deploy needed: set PROP_PROFIT_TARGET_DOLLARS to a
+# positive number and it wins over every tier above. It exists because the
+# tiers are REASONED from position size, not MEASURED from fills - so the
+# first real week of trading should tune this, not another estimate.
+PROFIT_TARGET_DOLLARS_OVERRIDE = _safe_float_env("PROP_PROFIT_TARGET_DOLLARS", "0")
+
+# --- THE FEE GUARANTEE ----------------------------------------------------
+# Per the account owner, 2026-09-25: fees must never be a recurring
+# conversation. The code guarantees that whatever target is in force - a
+# tier, an override, anything chosen later - always clears the real cost of
+# a round trip with margin left over. A target that cannot beat its own
+# costs is unreachable BY CONSTRUCTION, not by remembering to check.
+#
+# crypto_grid_bot.fee_safe_floor_pct() is the Coinbase counterpart:
+#     max(MIN_DYNAMIC_GRID_PCT, TARGET_NET_MARGIN_PCT + leg_fee * 2)
+# This is the same guarantee in dollars rather than percent, because Alpaca
+# targets are dollar-denominated.
+#
+# Alpaca equity commissions are zero, so the real cost of a round trip here
+# is SPREAD and slippage, crossed twice. SPY's bid-ask is about a cent on a
+# ~$769 share (~0.0013%), but the wider names in alpaca_swing_bot's universe
+# (USO, SLV, the inverse ETFs) run meaningfully worse - so the default is
+# set to cover the whole universe rather than the best case in it.
+ALPACA_ROUND_TRIP_COST_PCT = _safe_float_env("PROP_ROUND_TRIP_COST_PCT", "0.0012")
+
+# The profit that must survive AFTER those costs - what makes a trade worth
+# doing at all rather than merely break-even.
+ALPACA_MIN_NET_MARGIN_PCT = _safe_float_env("PROP_MIN_NET_MARGIN_PCT", "0.004")
+
+
+def fee_safe_target_dollars(position_notional: float) -> float:
+    """Smallest dollar target on `position_notional` that still nets a profit.
+
+    cost_pct is DOUBLED: a round trip crosses the spread entering and again
+    exiting. Counting it once is the single most common way a "profitable"
+    strategy turns out to be a losing one - it is precisely what made the
+    pasted 64%-win-rate scalper read +352% on paper while losing 0.48% per
+    real trade.
+    """
+    if not position_notional or position_notional <= 0:
+        return 0.0
+    return position_notional * (ALPACA_ROUND_TRIP_COST_PCT * 2 + ALPACA_MIN_NET_MARGIN_PCT)
 
 # Crypto-specific LOWER profit targets for fast compounding & high frequency
 # Crypto trades faster, so close positions sooner to reinvest quicker
@@ -256,13 +327,45 @@ TIER_LEVELS = [0.50, 1.00, 1.50]  # multipliers of profit target
 
 def get_profit_target_dollars(equity, is_crypto=False):
     """Get profit target based on account equity. Crypto uses lower targets for fast compounding."""
-    milestones = CRYPTO_PROFIT_TARGET_MILESTONES if is_crypto else PROFIT_TARGET_DOLLARS_MILESTONES
-    if equity is None:
-        return milestones[0][1]
-    target = milestones[0][1]
-    for threshold, t in milestones:
-        if equity >= threshold:
-            target = t
+    # An explicit override wins over the tiers - a number the operator set
+    # by hand is a decision, not a suggestion. It does NOT win over the fee
+    # guarantee below, because no decision makes a losing trade profitable.
+    if PROFIT_TARGET_DOLLARS_OVERRIDE > 0:
+        target = PROFIT_TARGET_DOLLARS_OVERRIDE
+    else:
+        milestones = (CRYPTO_PROFIT_TARGET_MILESTONES if is_crypto
+                      else PROFIT_TARGET_DOLLARS_MILESTONES)
+        target = milestones[0][1]
+        if equity is not None:
+            for threshold, t in milestones:
+                if equity >= threshold:
+                    target = t
+
+    # THE FEE GUARANTEE. Whatever chose the number above - a tier, an
+    # override, something added later - it is raised here if it cannot clear
+    # a round trip with margin. This is why fees do not need to be discussed
+    # when tuning targets: a target too small to be profitable cannot take
+    # effect.
+    #
+    # Position size is derived the same way the sizer does it: total notional
+    # is capped at MAX_RISK_PERCENT of equity, spread over the slots
+    # available at this scale.
+    if equity is not None and equity > 0:
+        try:
+            slots = max(1, get_dynamic_max_positions(1.0))
+            position_notional = (equity * MAX_RISK_PERCENT) / slots
+            floor = fee_safe_target_dollars(position_notional)
+            if target < floor:
+                log.warning(
+                    f"Profit target ${target:.2f} is below the fee-safe floor "
+                    f"${floor:.2f} on a ~${position_notional:.2f} position - that round "
+                    f"trip cannot clear its own costs. Using the floor."
+                )
+                target = floor
+        except Exception as e:
+            # Never let the guard break target selection; a target that is
+            # merely too large only trades less, it does not lose money.
+            log.debug(f"fee-safe target floor skipped: {type(e).__name__}: {e}")
     return target
 
 # Track profitable days for APEX 7-day rule
@@ -288,8 +391,45 @@ BOT_NAME = "prop_apex"
 # closes every open position immediately and halts new entries until equity
 # is back above it — same mechanism as the daily circuit breaker, just keyed
 # to the account's all-time high instead of today's start.
-EQUITY_FLOOR_TIER = _safe_float_env("PROP_EQUITY_FLOOR_TIER", "1000")
+# Tier reduced from $1,000 to $100 on 2026-09-25. The tier exists only to
+# make the floor a tidy number in the logs, but rounding DOWN to $1,000
+# swallows the floor entirely on a small account: at equity $1,007.74 the
+# headroom target is $906.97, which rounds to $0 - no protection at all.
+# $100 keeps the number readable and the floor real at every size.
+EQUITY_FLOOR_TIER = _safe_float_env("PROP_EQUITY_FLOOR_TIER", "100")
 EQUITY_FLOOR_BASE = _safe_float_env("PROP_EQUITY_FLOOR_BASE", "500")
+
+# A fixed $1,000 tier does not scale, and on this account it became a hair
+# trigger. Measured live 2026-09-25: equity $1,007.74, floor $1,000,
+# headroom $7.74 - 0.77%. Breaching it closes EVERY position and halts all
+# new entries until equity recovers, so one ordinary down day would have
+# stopped the account dead. The old form rounded equity DOWN to a tier and
+# took whatever was left, which is zero whenever equity lands just above a
+# clean multiple - and the ratchet guarantees equity lands there, because
+# crossing $1,000 is exactly what sets the floor to $1,000.
+#
+# So the floor never sits closer to equity than
+# EQUITY_FLOOR_MIN_HEADROOM_PCT of it. Headroom is taken FIRST and the tier
+# rounding applied second, which is what makes the room real rather than
+# incidental. The ratchet itself is unchanged: still computed from real
+# equity, still only ever moves up.
+#
+# Same fix, same reasoning as crypto_btc_compound_bot.compute_equity_floor.
+EQUITY_FLOOR_MIN_HEADROOM_PCT = _safe_float_env(
+    "PROP_EQUITY_FLOOR_MIN_HEADROOM_PCT", "0.10")
+
+
+def compute_equity_floor(equity: float) -> float:
+    """Floor a fixed percentage below equity, rounded down to a tier.
+
+    Taking the headroom first and rounding second guarantees the room
+    exists. Returns a CANDIDATE - the caller still only ever raises the
+    stored floor, never lowers it.
+    """
+    if equity is None or equity <= 0:
+        return 0.0
+    target = equity * (1.0 - EQUITY_FLOOR_MIN_HEADROOM_PCT)
+    return max(0.0, math.floor(target / EQUITY_FLOOR_TIER) * EQUITY_FLOOR_TIER)
 EQUITY_FLOOR_STATE_KEY = "prop_apex_equity_floor"
 equity_floor = EQUITY_FLOOR_BASE
 
@@ -969,9 +1109,28 @@ async def get_account_cash(session):
         return None
 
 
-async def get_account_buying_power(session):
+async def get_account_buying_power(session, detail_out: dict = None):
     """Real Alpaca buying power. Returns buying power or None on failure.
-    Used for hard margin safety checks to prevent over-leverage."""
+    Used for hard margin safety checks to prevent over-leverage.
+
+    `detail_out`, when given, is filled with the account fields that EXPLAIN
+    a low number. This function used to read one field and throw the rest
+    away, so the kill condition could say buying power was $77.08 and
+    nothing about why - and the causes have completely different remedies:
+
+        unsettled funds        transient, clears on its own in a day
+        held for open orders   clears when they fill or cancel
+        PDT restriction        persistent on an account under $25k, and no
+                               amount of waiting fixes it
+        cash account hold      a deposit that has not cleared
+
+    Alpaca returns all of these on the same call that returns buying_power.
+    Not capturing them meant the one log line that fires when trading STOPS
+    was the least informative line in the file.
+
+    The signature stays (session) -> float|None; detail_out is optional, so
+    no existing caller changes behaviour.
+    """
     try:
         url = f"{get_base_url()}/v2/account"
         async with session.get(url, headers=get_headers()) as r:
@@ -984,10 +1143,60 @@ async def get_account_buying_power(session):
                 return None
             data = await r.json()
             bp = float(data.get("buying_power", 0))
+            if detail_out is not None:
+                for k in ("cash", "equity", "last_equity", "multiplier",
+                          "regt_buying_power", "daytrading_buying_power",
+                          "non_marginable_buying_power", "pattern_day_trader",
+                          "daytrade_count", "accrued_fees", "pending_transfer_in",
+                          "trading_blocked", "account_blocked", "transfers_blocked",
+                          "shorting_enabled"):
+                    if k in data:
+                        detail_out[k] = data[k]
             return bp
     except Exception as e:
         log.warning(f"Could not fetch buying power for margin safety: {e}")
         return None
+
+
+def explain_low_buying_power(bp, detail: dict) -> str:
+    """Name the most likely reason buying power is low, from the account's
+    own fields. Returns a short phrase, never raises.
+
+    Ranked by how differently you would respond, not by likelihood: a PDT
+    restriction on a small account is the one that does not resolve itself,
+    so it is checked first and said plainly.
+    """
+    try:
+        if not detail:
+            return "no account detail captured"
+        d = detail
+        bits = []
+        if str(d.get("account_blocked")).lower() == "true":
+            return "the ACCOUNT IS BLOCKED at Alpaca - nothing else matters until that clears"
+        if str(d.get("trading_blocked")).lower() == "true":
+            return "TRADING IS BLOCKED at Alpaca - not a capital problem"
+        equity = float(d.get("equity") or 0)
+        if str(d.get("pattern_day_trader")).lower() == "true" and equity < 25000:
+            return (f"flagged PATTERN DAY TRADER with equity ${equity:,.2f}, under the "
+                    f"$25,000 minimum - buying power stays restricted until the flag "
+                    f"clears or equity rises. Waiting does not fix this one.")
+        cash = float(d.get("cash") or 0)
+        if cash - bp > 1.0:
+            bits.append(f"${cash - bp:,.2f} of the ${cash:,.2f} cash is not available "
+                        f"to trade")
+        pending = float(d.get("pending_transfer_in") or 0)
+        if pending > 0:
+            bits.append(f"${pending:,.2f} is still transferring in")
+        mult = d.get("multiplier")
+        if str(mult) in ("1", "1.0"):
+            bits.append("this is a CASH account (multiplier 1), so unsettled sale "
+                        "proceeds count as cash but cannot be traded until they settle")
+        dtc = d.get("daytrade_count")
+        if dtc is not None:
+            bits.append(f"day-trade count {dtc}")
+        return "; ".join(bits) if bits else "no single field explains it"
+    except Exception as e:
+        return f"could not explain ({type(e).__name__})"
 
 
 async def get_account_shorting_enabled(session):
@@ -1075,7 +1284,7 @@ TOP_N_ELIGIBLE_SYMBOLS = _safe_int_env("PROP_TOP_N_SYMBOLS", "5")
 # genuinely, persistently losing money on its own terms (not just "not
 # top-5 right now"), that's real evidence worth acting on and this
 # exemption doesn't shield it from that.
-INDEX_HEDGE_SYMBOLS = {"SH", "PSQ", "DOG", "RWM"}
+INDEX_HEDGE_SYMBOLS = {"SH", "DOG", "RWM"}  # PSQ removed Sept 10: 25% win rate, -$427/4 trades
 
 
 async def _compute_top_ranked_symbols():
@@ -1259,11 +1468,67 @@ async def reconcile_positions_with_broker(session):
         await _db_save_open(contract, side, entry, abs(qty))
         log.warning(f"[APEX_589296] 🔧 Adopted orphaned {side} {contract} position found on Alpaca but not tracked (entry ${entry:.2f}, qty {abs(qty)}) - stop-loss/profit-target now apply to it")
 
+    # A just-opened position may not appear in /v2/positions yet. Never
+    # drop anything younger than this, or the bot can forget a real
+    # position it opened seconds ago and stop managing its stop-loss.
+    _grace = timedelta(minutes=5)
+    _now = datetime.now(timezone.utc)
+
+    def _too_new(pos):
+        t = pos.get("open_time")
+        if t is None:
+            return False
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return (_now - t) < _grace
+
     for contract in list(open_prop_positions.keys()):
-        if contract not in broker_by_contract:
+        if contract not in broker_by_contract and not _too_new(open_prop_positions[contract]):
             log.warning(f"[APEX_589296] 🔧 Tracked {contract} position no longer exists on Alpaca (closed outside the bot) - dropping from tracking")
             open_prop_positions.pop(contract, None)
             await _db_delete_open(contract)
+
+    # ── the two dicts nothing was reconciling ───────────────────────────
+    #
+    # check_margin_safety sums open_prop_positions PLUS
+    # _total_alpaca_branch_notional() PLUS _total_opening_bar_notional().
+    # Only the first was ever reconciled here. The other two are cleared
+    # exclusively inside `if filled:` after the bot's own sell, so a
+    # position closed any other way - manually, by a broker stop, by
+    # liquidation, or a sell that did not fill - stays in the dict
+    # forever and keeps counting against the risk cap.
+    #
+    # Live on 2026-09-25: the check reported "$630.09 > 50% of $1007.47
+    # equity" and blocked every META entry, on an account whose real
+    # positions were about $197 (equity $1,007.47 against $810.64 cash).
+    # Roughly $433 of the risk budget was phantom, and APEX could not open
+    # anything at all.
+    for contract in list(open_opening_bar_positions.keys()):
+        if contract not in broker_by_contract and not _too_new(open_opening_bar_positions[contract]):
+            log.warning(f"[OPENING-BAR] 🔧 Tracked {contract} no longer exists on Alpaca - dropping (it was still counting against the margin cap)")
+            open_opening_bar_positions.pop(contract, None)
+
+    if open_alpaca_branch_positions:
+        # This dict is keyed by BRANCH NAME and carries no contract, so
+        # the mapping has to come from the branch table.
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(AlpacaBranch.bot_name, AlpacaBranch.contract))
+                branch_contract = {row[0]: row[1] for row in result.all()}
+        except Exception as e:
+            log.warning(f"[ALPACA-BRANCH] could not read branch contracts for reconciliation: {e}")
+            branch_contract = {}
+        for bot_name in list(open_alpaca_branch_positions.keys()):
+            contract = branch_contract.get(bot_name)
+            if contract is None:
+                continue          # unknown mapping - never drop on a guess
+            if contract not in broker_by_contract and not _too_new(open_alpaca_branch_positions[bot_name]):
+                log.warning(f"[ALPACA-BRANCH] 🔧 {bot_name} ({contract}) no longer exists on Alpaca - dropping (it was still counting against the margin cap)")
+                open_alpaca_branch_positions.pop(bot_name, None)
+                try:
+                    await _db_delete_branch_open(bot_name, contract)
+                except Exception:
+                    pass
 
 
 # Floor on a single position's dollar size. Below this, a position is too
@@ -1279,10 +1544,18 @@ MIN_POSITION_NOTIONAL = _safe_float_env("PROP_MIN_POSITION_NOTIONAL", "50")  # R
 # This is still conservative (don't deploy 100%), but allows actual trading
 MIN_BUYING_POWER_BUFFER = _safe_float_env("PROP_MIN_BUYING_POWER_BUFFER", "150")
 
-# Maximum percentage of account equity that can be at risk in open positions
-# Lowered from 50% to 20% for micro-account safety - 50% risk-at-once was
-# sized for a much larger evaluation account, not a ~$1K live account.
-MAX_RISK_PERCENT = _safe_float_env("PROP_MAX_RISK_PERCENT", "0.20")  # 20% max
+# Maximum percentage of account equity that can be at risk in open positions.
+#
+# 2026-09-24: raised 20% -> 50% at the operator's instruction, to put idle
+# cash to work. This is the TOTAL budget shared with alpaca_swing_bot.py -
+# both bots trade the same real Alpaca account, and this check sums EVERY
+# open position, not just this bot's. Keep the two in step: the swing bot
+# reads this same PROP_MAX_RISK_PERCENT env var.
+#
+# It was lowered to 20% earlier for micro-account safety (50% risk-at-once
+# was sized for a much larger evaluation account, not a ~$1K live account),
+# so 50% is the aggressive end of the range this account has run at.
+MAX_RISK_PERCENT = _safe_float_env("PROP_MAX_RISK_PERCENT", "0.50")  # 50% max
 
 # Buying power threshold to STOP opening new positions (emergency brake)
 CRITICAL_BUYING_POWER_THRESHOLD = _safe_float_env("PROP_CRITICAL_BP_THRESHOLD", "100")
@@ -1381,9 +1654,22 @@ def check_margin_safety(buying_power, equity, open_positions_count, extra_open_n
         return False, f"CRITICAL: Buying power ${buying_power:.2f} near zero — halting new positions"
 
     # Total open position risk can't exceed max % of equity
-    total_open_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in open_prop_positions.values()) + extra_open_notional
+    prop_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in open_prop_positions.values())
+    total_open_notional = prop_notional + extra_open_notional
     if equity > 0 and total_open_notional > (equity * MAX_RISK_PERCENT):
-        return False, f"Risk limit exceeded: ${total_open_notional:.2f} > {MAX_RISK_PERCENT*100:.0f}% of ${equity:.2f} equity"
+        # Name where the notional came from. This block ran every cycle for
+        # hours on 2026-09-25 reporting "$630.09 > 50% of $1007.47" while
+        # the real account held about $197 (equity $1,007.47, cash
+        # $810.64) - roughly $433 of it phantom, left in dicts that only
+        # cleared on the bot's own sell and were never reconciled against
+        # the broker. The message said the limit was hit; it did not say
+        # the number was stale, so it read as correct risk management for
+        # as long as anyone cared to look.
+        return False, (f"Risk limit exceeded: ${total_open_notional:.2f} > "
+                       f"{MAX_RISK_PERCENT*100:.0f}% of ${equity:.2f} equity "
+                       f"(prop ${prop_notional:.2f} + other ${extra_open_notional:.2f}; "
+                       f"if this exceeds equity minus cash, tracking has drifted "
+                       f"from the broker)")
 
     return True, "OK"
 
@@ -1416,6 +1702,44 @@ async def broadcast_signal_to_subscribers(session, contract, action, price, rsi,
         return False
 
 
+def format_order_qty(qty):
+    """Alpaca-safe quantity string. Returns (qty_str, is_fractional).
+
+    Returns (None, False) for anything unusable, so a caller never posts a
+    quantity the API will reject or, worse, misread.
+
+    Three things str(qty) gets wrong on this account's real numbers:
+
+      * Scientific notation. str(1e-05) is "1e-05", which Alpaca rejects.
+        Dollar-based sizing on a high-priced ticker produces exactly this.
+      * Excess precision. Fractional equity quantities are limited to 9
+        decimal places; a float like 12.3456789012 is over it.
+      * Whole numbers wearing a decimal point. str(3.0) is "3.0", which
+        reads as fractional and therefore drags the DAY-only restriction
+        onto an order that did not need it.
+
+    is_fractional is derived from the SAME normalised value that gets
+    sent, deliberately. Deciding time-in-force from the raw float while
+    sending a rounded string is how the two drift apart and the rejection
+    comes back.
+    """
+    try:
+        value = float(qty)
+    except (TypeError, ValueError):
+        return None, False
+    if value <= 0 or value != value or value in (float("inf"), float("-inf")):
+        return None, False
+
+    # 9 dp is Alpaca's limit for fractional equities.
+    rounded = round(value, 9)
+    if rounded <= 0:
+        return None, False
+    if rounded == int(rounded):
+        return str(int(rounded)), False
+    # Fixed-point, never scientific, with trailing zeros trimmed.
+    return f"{rounded:.9f}".rstrip("0").rstrip("."), True
+
+
 async def execute_futures_trade(session, contract, action, qty, price, rsi, trend, stop_loss=None, target=None):
     """Place a real order via Alpaca. `action` is the literal order side
     ("BUY" or "SELL") - what that *means* (open a long, open a short, close
@@ -1428,13 +1752,39 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
     symbol = FUTURES[contract]["symbol"]
     side = "buy" if action == "BUY" else "sell"
 
-    # Use GTC (Good Till Canceled) for profit-taking sells to let orders persist until profit target hits
-    # Use DAY for entry buys to avoid holding stale orders overnight
-    time_in_force = "gtc" if action == "SELL" else "day"
+    qty_str, is_fractional = format_order_qty(qty)
+    if qty_str is None:
+        log.error(f"❌ Refusing to order {qty!r} of {contract} ({symbol}) - not a usable "
+                  f"quantity. No order was placed.")
+        return False
+
+    # DAY, always.
+    #
+    # This line used to read `"gtc" if action == "SELL" else "day"`, and
+    # it broke every exit this bot tried to make. Alpaca rejects a
+    # FRACTIONAL quantity with anything but DAY - "fractional orders must
+    # be DAY orders" - and this bot sizes positions in dollars, so its
+    # quantities are fractional nearly always. Every SELL therefore
+    # failed: target exits, stop exits and max-hold exits alike, retried
+    # forever, which is what the RECOVERY loop detector was reacting to.
+    # Confirmed live on 2026-09-24: "SH: Max hold time exceeded: 90505s
+    # >= 86400s" followed immediately by the rejection, leaving a position
+    # open more than a day past its own exit rule.
+    #
+    # The GTC it replaced was justified as letting a sell "persist until
+    # profit target hits", which a MARKET order does not do - a market
+    # order executes at the next opportunity regardless of
+    # time-in-force. So nothing is lost by dropping it, and DAY is what
+    # every other live Alpaca path in this repo already sends.
+    #
+    # is_fractional is unused in the decision now, and kept because it
+    # makes the constraint visible: any future limit or GTC path here has
+    # to reckon with it rather than rediscover it in production.
+    time_in_force = "day"
 
     order = {
         "symbol": symbol,
-        "qty": str(qty),
+        "qty": qty_str,
         "side": side,
         "type": "market",
         "time_in_force": time_in_force,
@@ -1450,7 +1800,17 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
                 await broadcast_signal_to_subscribers(session, contract, action, price, rsi, trend, stop_loss, target)
                 return True
             else:
-                log.error(f"❌ Futures order failed: {result.get('message', result)}")
+                # Name the order alongside the rejection. The bare message
+                # on its own ("fractional orders must be DAY orders") gave
+                # no way to tell WHICH order, which side, or what quantity
+                # provoked it, and that rejection sat in the logs for over
+                # a day next to an exit that never happened.
+                log.error(
+                    f"❌ Futures order REJECTED (HTTP {r.status}): "
+                    f"{result.get('message', result)} | {action} {qty_str} {contract} "
+                    f"({symbol}) type=market tif={time_in_force} "
+                    f"fractional={is_fractional} | nothing was filled"
+                )
                 return False
     except Exception as e:
         log.error(f"Futures trade error: {e}")
@@ -1498,7 +1858,8 @@ async def run_prop_cycle():
 
         # MANDATE: Check kill conditions before trading
         if equity is not None:
-            buying_power = await get_account_buying_power(session)
+            bp_detail = {}
+            buying_power = await get_account_buying_power(session, bp_detail)
             should_halt, halt_reason = check_kill_conditions(
                 buying_power=buying_power,
                 equity=equity,
@@ -1506,7 +1867,14 @@ async def run_prop_cycle():
                 open_position_count=len(open_prop_positions)
             )
             if should_halt:
-                log.critical(f"[KILL CONDITION] Halting bot: {halt_reason}")
+                # Say WHY, not just what. A halt with no diagnosis is a line
+                # that repeats every cycle and tells the operator nothing
+                # about whether to wait it out or go fix something.
+                why = (explain_low_buying_power(buying_power, bp_detail)
+                       if buying_power is not None and "Buying power" in (halt_reason or "")
+                       else None)
+                log.critical(f"[KILL CONDITION] Halting bot: {halt_reason}"
+                             + (f" | {why}" if why else ""))
                 return
 
         global _last_auto_backtest_at
@@ -1880,8 +2248,51 @@ async def run_prop_cycle():
         # as the new floor and can never go back down, even across restarts.
         global equity_floor
         if equity is not None and equity >= EQUITY_FLOOR_TIER:
-            candidate_floor = math.floor(equity / EQUITY_FLOOR_TIER) * EQUITY_FLOOR_TIER
-            if candidate_floor > equity_floor:
+            candidate_floor = compute_equity_floor(equity)
+
+            # ONE-WAY RATCHET, WITH ONE EXCEPTION: an unsafe stored floor.
+            #
+            # The ratchet only ever raises, which is right - a floor you can
+            # talk yourself out of is not a floor. But it produced a trap.
+            # Crossing $1,000 set the floor to $1,000, which is exactly when
+            # equity is barely above $1,000, and the floor then never moved.
+            # Measured live: equity $1,007.74, floor $1,000, headroom $7.74
+            # (0.77%). Breaching it closes EVERY position and halts all
+            # entries, so an ordinary down day would have stopped the
+            # account - and the ratchet guaranteed it stayed that way.
+            #
+            # A floor that halts on a 0.77% move is not protection, it is a
+            # scheduled outage. So when the STORED floor leaves less than
+            # half the minimum headroom, it is corrected DOWN to a safe
+            # level, once, loudly, and persisted. This is deliberately not
+            # silent and deliberately not gradual: it is a repair of a bad
+            # stored value, not a licence to drift the floor down over time.
+            # Raising remains the only other way it ever moves.
+            min_safe_headroom = equity * (EQUITY_FLOOR_MIN_HEADROOM_PCT / 2.0)
+            if equity_floor > 0 and (equity - equity_floor) < min_safe_headroom:
+                unsafe_floor = equity_floor
+                equity_floor = max(EQUITY_FLOOR_BASE, candidate_floor)
+                await save_equity_floor(equity_floor)
+                log.warning(
+                    f"[APEX_589296] 🪜 EQUITY FLOOR CORRECTED ${unsafe_floor:,.0f} -> "
+                    f"${equity_floor:,.0f}: it sat ${equity - unsafe_floor:,.2f} "
+                    f"({(equity - unsafe_floor) / equity * 100:.2f}%) below equity "
+                    f"${equity:,.2f}, which would halt the account on an ordinary move. "
+                    f"Minimum headroom is {EQUITY_FLOOR_MIN_HEADROOM_PCT * 100:.0f}%."
+                )
+                send_trade_alert(
+                    f"🪜 EQUITY FLOOR CORRECTED — ${equity_floor:,.0f}",
+                    f"The locked floor of ${unsafe_floor:,.0f} sat only "
+                    f"{(equity - unsafe_floor) / equity * 100:.2f}% below equity of "
+                    f"${equity:,.2f}.\n\n"
+                    f"At that distance any ordinary down move would breach it, closing "
+                    f"every position and halting all new entries.\n\n"
+                    f"Corrected to ${equity_floor:,.0f}, keeping "
+                    f"{EQUITY_FLOOR_MIN_HEADROOM_PCT * 100:.0f}% of room. The floor still "
+                    f"only ratchets UP from here.\n\n"
+                    f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
+                )
+            elif candidate_floor > equity_floor:
                 equity_floor = candidate_floor
                 await save_equity_floor(equity_floor)
                 log.info(f"[APEX_589296] 🪜 EQUITY FLOOR RAISED to ${equity_floor:,.0f} — will not trade below this again")
@@ -3435,7 +3846,14 @@ def run():
             log.warning("STOP_TRADING=true — prop bot paused")
             time.sleep(60)
             continue
-        if loop.run_until_complete(is_alpaca_passive_mode()):
+        try:
+            passive_mode = loop.run_until_complete(is_alpaca_passive_mode())
+        except Exception as e:
+            log.error(f"[APEX_589296] Passive-mode check failed; skipping this cycle: {e}")
+            log.error(f"Traceback: {traceback.format_exc()}")
+            time.sleep(60)
+            continue
+        if passive_mode:
             log.info("Alpaca passive mode active - active trading retired, holding a real buy-and-hold SPY position only")
             time.sleep(300)
             continue
@@ -3454,39 +3872,40 @@ def run():
             log.error(f"Traceback: {traceback.format_exc()}")
 
         # Real Alpaca branches (see the ALPACA BRANCHES section above) -
+        # DISABLED for Coinbase-only bot. Uncomment if using Alpaca.
         # a true no-op unless explicitly turned on. Run right after the
         # whole-account scan, in the same real event loop/single-threaded
         # design as everything else in this file.
-        try:
-            loop.run_until_complete(run_alpaca_branches_cycle())
-        except RuntimeError as e:
-            if "attached to a different loop" in str(e):
-                log.warning(f"[ALPACA-BRANCH] Event loop mismatch detected: {e} - recreating event loop")
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            else:
-                log.error(f"Alpaca branch cycle error: {e}")
-                log.error(f"Traceback: {traceback.format_exc()}")
-        except Exception as e:
-            log.error(f"Alpaca branch cycle error: {e}")
-            log.error(f"Traceback: {traceback.format_exc()}")
+        # try:
+        #     loop.run_until_complete(run_alpaca_branches_cycle())
+        # except RuntimeError as e:
+        #     if "attached to a different loop" in str(e):
+        #         log.warning(f"[ALPACA-BRANCH] Event loop mismatch detected: {e} - recreating event loop")
+        #         loop = asyncio.new_event_loop()
+        #         asyncio.set_event_loop(loop)
+        #     else:
+        #         log.error(f"Alpaca branch cycle error: {e}")
+        #         log.error(f"Traceback: {traceback.format_exc()}")
+        # except Exception as e:
+        #     log.error(f"Alpaca branch cycle error: {e}")
+        #     log.error(f"Traceback: {traceback.format_exc()}")
 
-        # Real opening-bar live trading (see that section above) - a true
-        # no-op unless explicitly turned on. Run right after the Alpaca
+        # Real opening-bar live trading (see that section above) - DISABLED for Coinbase-only bot.
+        # a true no-op unless explicitly turned on. Run right after the Alpaca
         # branches cycle, same real event loop/single-threaded design.
-        try:
-            loop.run_until_complete(run_opening_bar_live_cycle())
-        except RuntimeError as e:
-            if "attached to a different loop" in str(e):
-                log.warning(f"[OPENING-BAR] Event loop mismatch detected: {e} - recreating event loop")
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            else:
-                log.error(f"Opening-bar live cycle error: {e}")
-                log.error(f"Traceback: {traceback.format_exc()}")
-        except Exception as e:
-            log.error(f"Opening-bar live cycle error: {e}")
-            log.error(f"Traceback: {traceback.format_exc()}")
+        # try:
+        #     loop.run_until_complete(run_opening_bar_live_cycle())
+        # except RuntimeError as e:
+        #     if "attached to a different loop" in str(e):
+        #         log.warning(f"[OPENING-BAR] Event loop mismatch detected: {e} - recreating event loop")
+        #         loop = asyncio.new_event_loop()
+        #         asyncio.set_event_loop(loop)
+        #     else:
+        #         log.error(f"Opening-bar live cycle error: {e}")
+        #         log.error(f"Traceback: {traceback.format_exc()}")
+        # except Exception as e:
+        #     log.error(f"Opening-bar live cycle error: {e}")
+        #     log.error(f"Traceback: {traceback.format_exc()}")
 
         time.sleep(30)
 

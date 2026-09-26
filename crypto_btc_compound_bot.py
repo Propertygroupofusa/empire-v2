@@ -34,6 +34,8 @@ that module's own in-memory state or its RSI/tiered-exit logic - the two
 strategies are meant to be swapped, not blended.
 """
 import base64
+import hashlib
+import hmac
 import math
 import os
 import asyncio
@@ -49,7 +51,7 @@ import jwt as pyjwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import BotPosition
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -74,16 +76,164 @@ def _safe_int_env(name: str, default: str) -> int:
         return int(default)
 
 
-COINBASE_API_KEY_NAME = os.getenv("COINBASE_API_KEY_NAME", "")
-COINBASE_API_PRIVATE_KEY = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\n", "\n")
+# Dual-auth support: CDP JWT (new) or HMAC/Basic Auth (legacy)
+COINBASE_API_KEY_NAME = os.getenv("COINBASE_API_KEY_NAME") or os.getenv("COINBASE_API_KEY_NAME_BOT") or ""
+COINBASE_API_PRIVATE_KEY = (os.getenv("COINBASE_API_PRIVATE_KEY") or os.getenv("COINBASE_API_PRIVATE_KEY_BOT") or "").replace("\\n", "\n")
+COINBASE_API_KEY = os.getenv("COINBASE_API_KEY") or os.getenv("COINBASE_API_KEY_BOT") or ""
+COINBASE_SECRET_KEY = os.getenv("COINBASE_SECRET_KEY") or os.getenv("COINBASE_SECRET_KEY_BOT") or ""
+COINBASE_PASSPHRASE = os.getenv("COINBASE_PASSPHRASE") or os.getenv("COINBASE_PASSPHRASE_BOT") or ""
 COINBASE_HOST = "api.coinbase.com"
 COINBASE_BASE_URL = f"https://{COINBASE_HOST}"
 PRODUCT_ID = "BTC-USD"
 SYMBOL = "BTC/USD"
 BOT_NAME = "crypto_btc_compound"
 
+# Startup validation - check for both auth methods
+cdp_configured = bool(COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY)
+hmac_configured = bool(COINBASE_API_KEY and COINBASE_SECRET_KEY and COINBASE_PASSPHRASE)
+
+if cdp_configured:
+    log.info(f"✓ CDP Auth configured: COINBASE_API_KEY_NAME={COINBASE_API_KEY_NAME[:15]}...")
+    if COINBASE_API_PRIVATE_KEY.startswith("-----BEGIN"):
+        log.info(f"  └─ Private key format: PEM (ECDSA, {len(COINBASE_API_PRIVATE_KEY)} chars)")
+    else:
+        log.info(f"  └─ Private key format: base64 (Ed25519, {len(COINBASE_API_PRIVATE_KEY)} chars)")
+
+if hmac_configured:
+    log.info(f"✓ HMAC Auth configured: COINBASE_API_KEY={COINBASE_API_KEY[:15]}...")
+
+if not (cdp_configured or hmac_configured):
+    log.error("⚠️  No Coinbase API credentials configured - bot will fail to start")
+
 CYCLE_SECONDS = _safe_int_env("BTC_COMPOUND_CYCLE_SECONDS", "30")
 MIN_TRADE_USD = _safe_float_env("BTC_COMPOUND_MIN_TRADE_USD", "5.00")
+
+# Ceiling on how much of the USD balance a single entry may use. The bot
+# otherwise deploys 100% of available cash every time, so money moved into
+# the account for any other purpose - a reserve held back while a strategy
+# is still being measured, proceeds from liquidating other coins - gets
+# swept into the next buy automatically.
+#
+# 0 means no cap, which is the historical behaviour and stays the default:
+# setting this is opt-in and nothing changes for anyone who does not.
+# Capital above the cap simply stays as cash; it is not reserved, tracked
+# or spent, and it still counts toward equity for the floor ratchet, which
+# is correct - it is real money at risk of nothing.
+# Money held out of every entry. The bot deploys the whole balance above
+# this line and never touches the line itself.
+#
+# This replaced a ceiling (BTC_COMPOUND_MAX_DEPLOY_USD, "deploy at most
+# $X"), which protected the same dollars but froze position size: once the
+# balance passed the cap every win landed in idle cash and the next entry
+# still deployed the cap, so a compounding bot stopped compounding. A floor
+# protects the same amount and lets everything above it grow - $500 held
+# back either way, but the traded pool goes $582 -> $681 over ten wins
+# instead of staying at $582 while $589 sits dead.
+RESERVE_USD = _safe_float_env("BTC_COMPOUND_RESERVE_USD", "500.00")
+
+# The retired ceiling. Reading it only to say it is being ignored, because
+# an env var that silently stops applying is worse than one that never
+# existed.
+if os.getenv("BTC_COMPOUND_MAX_DEPLOY_USD"):
+    log.warning(
+        "BTC_COMPOUND_MAX_DEPLOY_USD is set but no longer used - it was a "
+        "deploy CEILING and froze position size. Use BTC_COMPOUND_RESERVE_USD "
+        "(currently $%.2f held back) instead, and remove the old variable.",
+        RESERVE_USD,
+    )
+
+
+def deployable_usd(balance: float) -> float:
+    """Everything above the reserve. Grows with the account, unlike a cap."""
+    if RESERVE_USD <= 0:
+        return balance
+    return max(0.0, balance - RESERVE_USD)
+
+
+# Profit skim. On a winning exit, this fraction of the REALIZED net profit
+# is moved into a locked ledger and permanently excluded from deployment,
+# so a gain that has already been banked cannot be handed back by a later
+# losing trade. It does not make the account profitable - nothing does -
+# it only stops profit that was genuinely made from being re-risked.
+#
+# Default 10%, set on the account owner's explicit instruction ("set the
+# skim to 10%"), given after the request that realized profit must stop
+# being handed back by later losing trades.
+#
+# This deliberately reverses an earlier instruction from the same owner,
+# recorded at crypto_family_tree_bot.PROFIT_SKIM_PCT: "take away the lock
+# profit, I don't want that anymore for any of my stuff, I want all my
+# money to be making money." That one still governs the family tree, which
+# remains at 0.0 and is untouched here. Only this bot skims. The two
+# settings disagreeing is intentional, not drift - if the tree should skim
+# too, TREE_PROFIT_SKIM_PCT is its own switch.
+PROFIT_SKIM_PCT = _safe_float_env("BTC_COMPOUND_PROFIT_SKIM_PCT", "0.10")
+LOCKED_PROFIT_STATE_KEY = "crypto_btc_compound_locked_usd"
+
+
+async def get_locked_usd() -> float:
+    """Profit already skimmed out of the compounding loop. 0.0 if unreadable
+    - a DB hiccup must not make locked money look spendable, but it also
+    must not stop the bot, so the conservative read is combined with the
+    caller only ever SUBTRACTING this from what it may deploy."""
+    try:
+        from models import TradingBotState
+        async with get_session_factory()() as db:
+            result = await db.execute(
+                select(TradingBotState).where(
+                    TradingBotState.bot_name == LOCKED_PROFIT_STATE_KEY))
+            row = result.scalar_one_or_none()
+            return float(row.base_capital) if row and row.base_capital else 0.0
+    except Exception as e:
+        log.warning(f"[BTC-COMPOUND] Could not read locked profit ({e}) - treating as $0")
+        return 0.0
+
+
+async def add_locked_usd(amount: float) -> None:
+    """Move realized profit permanently out of the compounding loop.
+
+    Only ever called with a positive amount after a winning exit. There is
+    no automatic path back: releasing locked profit is a deliberate manual
+    action, the same convention the family tree uses.
+    """
+    if amount <= 0:
+        return
+    try:
+        from models import TradingBotState
+        async with get_session_factory()() as db:
+            result = await db.execute(
+                select(TradingBotState).where(
+                    TradingBotState.bot_name == LOCKED_PROFIT_STATE_KEY))
+            row = result.scalar_one_or_none()
+            if row:
+                row.base_capital = (row.base_capital or 0.0) + amount
+            else:
+                db.add(TradingBotState(bot_name=LOCKED_PROFIT_STATE_KEY,
+                                       base_capital=amount, starting_capital=0.0))
+            await db.commit()
+    except Exception as e:
+        log.error(f"[BTC-COMPOUND] Failed to lock ${amount:.2f} of profit: {e}")
+
+
+def tracked_equity(balance: float, position_value):
+    """The capital the equity floor should watch: what is actually at risk.
+
+    Without a reserve this is the whole account, unchanged. With one, money
+    the reserve holds back is not trading and must not drag the floor up
+    behind it - otherwise a reserve makes the floor rise while the traded
+    capital stays the same size, and a drawdown that only ever touched the
+    traded portion trips a floor set against money that never moved.
+
+    Flat, the trading pool is everything above the reserve. Holding a
+    position, every deployable dollar is already in it, so the idle cash IS
+    the reserve and the position's own market value is the pool.
+    """
+    pos = position_value or 0.0
+    if RESERVE_USD <= 0:
+        return balance + pos
+    if position_value is not None:
+        return pos
+    return max(0.0, balance - RESERVE_USD)
 STOP_LOSS_PCT = _safe_float_env("BTC_COMPOUND_STOP_LOSS_PCT", "0.02")  # -2% default
 
 # Breakeven stop ratchet, per the account owner: a fresh position keeps the
@@ -121,11 +271,51 @@ ENTRY_MAX_RSI = _safe_float_env("BTC_COMPOUND_ENTRY_MAX_RSI", "65")
 #   ATR% >= VOL_HIGH_THRESHOLD         -> TARGET_HIGH_PCT  (volatile)
 VOL_LOW_THRESHOLD = _safe_float_env("BTC_COMPOUND_VOL_LOW_THRESHOLD", "0.01")   # 1% ATR
 VOL_HIGH_THRESHOLD = _safe_float_env("BTC_COMPOUND_VOL_HIGH_THRESHOLD", "0.02")  # 2% ATR
-TARGET_LOW_PCT = _safe_float_env("BTC_COMPOUND_TARGET_LOW_PCT", "0.015")   # 1.5%
+# TARGET_LOW_PCT was 1.5% against a 2% stop - the quiet-market tier risked
+# more than it stood to make, before fees. Observed live on 2026-09-24:
+# entry $84,455.82, target $85,722.66 (+1.5%), stop $82,766.70 (-2%), which
+# needs an 80% win rate to break even once the ~0.8% round trip is paid.
+# Raised so a target is never smaller than the stop it is paired with. It
+# stays the SMALLEST of the three tiers - a quiet market really does offer
+# less - and when even this tier cannot clear the bar below, the honest
+# answer is not to trade at all, which is what the entry gate enforces.
+TARGET_LOW_PCT = _safe_float_env("BTC_COMPOUND_TARGET_LOW_PCT", "0.021")   # 2.1%
 TARGET_MED_PCT = _safe_float_env("BTC_COMPOUND_TARGET_MED_PCT", "0.025")   # 2.5%
 TARGET_HIGH_PCT = _safe_float_env("BTC_COMPOUND_TARGET_HIGH_PCT", "0.04")  # 4%
 
-ROUND_TRIP_FEE_RATE = _safe_float_env("BTC_COMPOUND_ROUND_TRIP_FEE_RATE", "0.008")  # ~0.4% each way, taker
+# The real Coinbase round trip: 0.75% per leg taker = 1.50% both ways,
+# measured 2026-09-25 from Coinbase's own fill records (liquidity_indicator
+# and commission per fill), not assumed. The old 0.008 was documented as
+# "~0.4% each way, taker" and was roughly half the truth.
+#
+# crypto_family_tree_bot re-exports this as its own ROUND_TRIP_FEE_RATE and
+# prices exit fees with it, and the dashboard shows a per-trade fee
+# estimate from it - so every one of those understated the cost of getting
+# out. Live order execution reads the OBSERVED rate via
+# get_effective_round_trip_fee_rate(), which is unaffected either way.
+ROUND_TRIP_FEE_RATE = _safe_float_env("BTC_COMPOUND_ROUND_TRIP_FEE_RATE", "0.015")
+
+# The most an entry is allowed to demand of the win rate before this bot
+# refuses to place it.
+#
+# There is no target/stop pair that cannot lose, and it is worth being
+# exact about why, because the intuition that a bigger target or a tighter
+# stop fixes this is wrong. For a bracket order on a driftless price, the
+# chance of touching +T before -S is S/(T+S), so the expectancy works out
+# to exactly -fee for EVERY choice of T and S - the wider target pays more
+# per win and is hit proportionally less often, and the two cancel with
+# nothing left over. Target and stop do not create edge; they only decide
+# how an edge, or the absence of one, gets expressed. What they CAN do is
+# be arithmetically self-defeating, which is what a target below its own
+# stop is.
+#
+# So the enforceable version of "don't take losing trades" is not a magic
+# ratio - it is declining the entries whose own arithmetic needs a win
+# rate nobody here has produced. At the default 0.8% taker round trip that
+# admits only the volatile tier; switching to maker orders halves the fee
+# and admits the normal tier too, which is the real lever and the reason
+# the fee rate is a variable rather than a constant.
+MAX_BREAKEVEN_WIN_RATE = _safe_float_env("BTC_COMPOUND_MAX_BREAKEVEN_WIN_RATE", "0.55")
 
 # Per the account owner: a percentage-only target can "hit" on a small
 # position and still barely clear the real sell-side fee, or lose to it
@@ -194,6 +384,40 @@ def min_profit_target_pct(spend_usd: float, atr_pct: float) -> float:
 # make each individual trade risk-free.
 EQUITY_FLOOR_TIER = _safe_float_env("BTC_COMPOUND_EQUITY_FLOOR_TIER", "50")
 EQUITY_FLOOR_BASE = _safe_float_env("BTC_COMPOUND_EQUITY_FLOOR_BASE", "0")
+
+# A fixed $50 tier does not scale, and at a small account it strangles the
+# strategy it is meant to protect. On $582 the floor lands at $550, leaving
+# $32 of room - three stop-outs. Worse, two winning trades ratchet it to
+# $600 against equity of $602, leaving $2.31: the very next loss breaches
+# and halts the bot. The same $50 on a $10,000 account is 0.5% and barely
+# felt. The tier was sized for the larger account.
+#
+# So the floor never sits closer to equity than EQUITY_FLOOR_MIN_HEADROOM_PCT
+# of it. Below that the tier is widened proportionally, which keeps roughly
+# the same number of stop-outs of room at every account size instead of
+# tightening as the account grows. The ratchet is unchanged: it is still
+# computed from real equity and still only ever moves up.
+EQUITY_FLOOR_MIN_HEADROOM_PCT = _safe_float_env(
+    "BTC_COMPOUND_EQUITY_FLOOR_MIN_HEADROOM_PCT", "0.10")
+
+
+def compute_equity_floor(equity: float) -> float:
+    """Floor a fixed percentage below equity, rounded down to a tier.
+
+    Taking the headroom first and rounding second is what guarantees the
+    room actually exists. The old form rounded equity down to a $50 tier and
+    took whatever was left, which is zero whenever equity lands on a clean
+    multiple - at exactly $650, $1,000 or $10,000 the floor equalled equity
+    and the next tick of any size halted the bot.
+
+    Rounding to EQUITY_FLOOR_TIER afterwards keeps the floor a tidy number
+    to read in the logs, and only ever adds headroom, never removes it.
+    Returns a candidate; the caller still only ever raises the stored floor.
+    """
+    if equity <= 0:
+        return 0.0
+    target = equity * (1.0 - EQUITY_FLOOR_MIN_HEADROOM_PCT)
+    return max(0.0, math.floor(target / EQUITY_FLOOR_TIER) * EQUITY_FLOOR_TIER)
 EQUITY_FLOOR_STATE_KEY = "crypto_btc_compound_equity_floor"
 equity_floor = EQUITY_FLOOR_BASE
 
@@ -207,9 +431,12 @@ daily_pnl = 0.0
 def _load_signing_key():
     raw = COINBASE_API_PRIVATE_KEY.strip()
     if not raw:
+        log.error("COINBASE_API_PRIVATE_KEY not set or empty - check Railway environment variables")
         raise ValueError("COINBASE_API_PRIVATE_KEY not set")
     if raw.startswith("-----BEGIN"):
+        log.debug(f"Using PEM format private key (ES256 algorithm), key starts with: {raw[:50]}...")
         return serialization.load_pem_private_key(raw.encode(), password=None), "ES256"
+    log.debug(f"Using base64 format Ed25519 key (EdDSA algorithm), key starts with: {raw[:50]}...")
     decoded = base64.b64decode(raw, validate=True)
     if len(decoded) != 64:
         raise ValueError(f"Ed25519 key must be 64 bytes decoded, got {len(decoded)}")
@@ -217,6 +444,10 @@ def _load_signing_key():
 
 
 def _build_jwt(method: str, path: str) -> str:
+    if not COINBASE_API_KEY_NAME:
+        log.error("COINBASE_API_KEY_NAME not set - check Railway environment variables")
+        raise ValueError("COINBASE_API_KEY_NAME not set")
+
     private_key, algorithm = _load_signing_key()
     now = int(time.time())
     payload = {
@@ -224,14 +455,66 @@ def _build_jwt(method: str, path: str) -> str:
         "iss": "cdp",
         "nbf": now,
         "exp": now + 120,
-        "uri": f"{method} {COINBASE_HOST}{path}",
+        # The URI claim must NOT carry the query string. Coinbase signs
+        # "GET host/api/v3/brokerage/product_book", not
+        # "GET host/api/v3/brokerage/product_book?product_id=BTC-USD&limit=1",
+        # so including it makes every parameterised request fail the
+        # signature check and return 401.
+        #
+        # What that cost, live: get_best_bid_ask() passes
+        # "...product_book?product_id=X&limit=1". It 401'd on every call and
+        # returned (None, None) - and place_maker_buy/place_maker_sell open
+        # with "if bid is None: return None", so they fell straight through
+        # to place_market_buy/sell. Not one maker order was ever placed.
+        # Every fill paid the 1.50% taker round trip instead of 0.70%,
+        # which pinned the fee floor at 1.70%, which pinned the grid step at
+        # 2.00%, which is why the fleet trades a few times a week.
+        # get_recent_market_trades() and the order-reconciliation fill
+        # lookup were failing the same way, silently.
+        "uri": f"{method} {COINBASE_HOST}{path.split('?', 1)[0]}",
     }
     headers = {"kid": COINBASE_API_KEY_NAME, "nonce": secrets.token_hex(16)}
-    return pyjwt.encode(payload, private_key, algorithm=algorithm, headers=headers)
+    jwt_token = pyjwt.encode(payload, private_key, algorithm=algorithm, headers=headers)
+    log.debug(f"Built JWT for {method} {path} using algorithm {algorithm}, sub={COINBASE_API_KEY_NAME}")
+    return jwt_token
 
 
-def _auth_headers(method: str, path: str) -> dict:
-    return {"Authorization": f"Bearer {_build_jwt(method, path)}", "Content-Type": "application/json"}
+def _build_hmac_signature(method: str, path: str, body: str = "") -> tuple:
+    """Coinbase HMAC/Basic Auth signature (legacy method)."""
+    timestamp = str(time.time())
+    message = timestamp + method + path + body
+    signature = base64.b64encode(
+        hmac.new(
+            COINBASE_SECRET_KEY.encode(),
+            message.encode(),
+            hashlib.sha256
+        ).digest()
+    ).decode()
+    return signature, timestamp
+
+
+def _auth_headers(method: str, path: str, body: str = "") -> dict:
+    """Return auth headers - try CDP JWT first, fall back to HMAC if JWT unavailable."""
+    # Try CDP JWT authentication first (new method)
+    if COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY:
+        try:
+            return {"Authorization": f"Bearer {_build_jwt(method, path)}", "Content-Type": "application/json"}
+        except Exception as e:
+            log.warning(f"CDP JWT auth failed, trying HMAC: {e}")
+
+    # Fall back to HMAC/Basic Auth (legacy method)
+    if COINBASE_API_KEY and COINBASE_SECRET_KEY and COINBASE_PASSPHRASE:
+        signature, timestamp = _build_hmac_signature(method, path, body)
+        return {
+            "CB-ACCESS-KEY": COINBASE_API_KEY,
+            "CB-ACCESS-SIGN": signature,
+            "CB-ACCESS-TIMESTAMP": timestamp,
+            "CB-ACCESS-PASSPHRASE": COINBASE_PASSPHRASE,
+            "Content-Type": "application/json"
+        }
+
+    # No credentials available - error
+    raise ValueError("No Coinbase API credentials configured. Set either CDP (COINBASE_API_KEY_NAME + COINBASE_API_PRIVATE_KEY) or HMAC (COINBASE_API_KEY + COINBASE_SECRET_KEY + COINBASE_PASSPHRASE)")
 
 
 async def get_asset_balance(session, currency: str) -> tuple:
@@ -244,9 +527,19 @@ async def get_asset_balance(session, currency: str) -> tuple:
             params = {"limit": 250}
             if cursor:
                 params["cursor"] = cursor
-            async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path), params=params, timeout=15) as r:
+            try:
+                headers = _auth_headers("GET", path)
+            except ValueError as e:
+                log.error(f"Failed to build auth headers for {currency}: {e}")
+                return None, f"Auth header build failed: {str(e)}"
+
+            async with session.get(COINBASE_BASE_URL + path, headers=headers, params=params, timeout=15) as r:
                 if r.status != 200:
                     body = (await r.text())[:300]
+                    if r.status == 401:
+                        log.error(f"HTTP 401 Unauthorized fetching {currency}: {body}. API key name: {COINBASE_API_KEY_NAME[:10] if COINBASE_API_KEY_NAME else 'NOT SET'}...")
+                    else:
+                        log.warning(f"HTTP {r.status} fetching {currency}: {body}")
                     return None, f"HTTP {r.status}: {body}"
                 data = await r.json()
                 for account in data.get("accounts", []):
@@ -261,6 +554,7 @@ async def get_asset_balance(session, currency: str) -> tuple:
     except aiohttp.ClientError as e:
         return None, f"Coinbase connection failed: {type(e).__name__}"
     except Exception as e:
+        log.exception(f"Exception in get_asset_balance for {currency}")
         return None, f"{type(e).__name__}: {str(e)[:150]}"
 
 
@@ -279,13 +573,23 @@ async def get_all_asset_balances(session) -> tuple:
     cursor = None
     balances = {}
     try:
+        try:
+            headers = _auth_headers("GET", path)
+        except ValueError as e:
+            log.error(f"Failed to build auth headers for get_all_asset_balances: {e}")
+            return None, f"Auth header build failed: {str(e)}"
+
         while True:
             params = {"limit": 250}
             if cursor:
                 params["cursor"] = cursor
-            async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path), params=params, timeout=15) as r:
+            async with session.get(COINBASE_BASE_URL + path, headers=headers, params=params, timeout=15) as r:
                 if r.status != 200:
                     body = (await r.text())[:300]
+                    if r.status == 401:
+                        log.error(f"HTTP 401 Unauthorized fetching all balances: {body}. API key name: {COINBASE_API_KEY_NAME[:10] if COINBASE_API_KEY_NAME else 'NOT SET'}...")
+                    else:
+                        log.warning(f"HTTP {r.status} fetching all balances: {body}")
                     return None, f"HTTP {r.status}: {body}"
                 data = await r.json()
                 for account in data.get("accounts", []):
@@ -301,6 +605,7 @@ async def get_all_asset_balances(session) -> tuple:
     except aiohttp.ClientError as e:
         return None, f"Coinbase connection failed: {type(e).__name__}"
     except Exception as e:
+        log.exception(f"Exception in get_all_asset_balances")
         return None, f"{type(e).__name__}: {str(e)[:150]}"
 
 
@@ -672,6 +977,29 @@ def pick_target_pct(atr_pct: float) -> float:
     return TARGET_HIGH_PCT
 
 
+def breakeven_win_rate(target_pct: float, stop_pct: float = None,
+                       fee_rate: float = None) -> float:
+    """The win rate this target/stop/fee combination needs just to break even.
+
+    A win nets target minus the round trip; a loss costs the stop PLUS the
+    same round trip, because the fee is paid either way. Solving
+    p*net_win == (1-p)*net_loss gives the rate below which the setup loses
+    money however well it is executed.
+
+    Returns 1.0 - unachievable, refuse it - when the target does not clear
+    the fee at all. That case is not a near miss: a "winning" trade that
+    nets zero or less has no win rate that rescues it, and expressing it as
+    a ratio would understate it.
+    """
+    stop = STOP_LOSS_PCT if stop_pct is None else stop_pct
+    fee = ROUND_TRIP_FEE_RATE if fee_rate is None else fee_rate
+    net_win = target_pct - fee
+    net_loss = stop + fee
+    if net_win <= 0:
+        return 1.0
+    return net_loss / (net_win + net_loss)
+
+
 async def place_market_buy(session, usd_amount: float, product_id: str = PRODUCT_ID):
     """Spends usd_amount on product_id at market. Returns (filled_qty, filled_price) or None.
 
@@ -801,6 +1129,75 @@ async def get_best_bid_ask(session, product_id: str = PRODUCT_ID):
     except Exception as e:
         log.warning(f"[BTC-COMPOUND] {product_id}: real order-book fetch failed: {type(e).__name__}: {e}")
         return None, None
+
+
+async def get_book_top_and_depth(session, product_id: str = PRODUCT_ID, levels: int = 5):
+    """Top of book plus cumulative USD depth on each side.
+
+    get_best_bid_ask() above fetches limit=1, which answers "what price"
+    but not "how much is there" - and those are different questions. An
+    order sized at or above the visible depth does not trade AT the top of
+    book, it trades THROUGH it, and its exit then finds nothing to sell
+    into. Sizing needs the second number.
+
+    Depth is summed as price x size over the first `levels` entries on each
+    side, which is the quantity a marketable order would actually consume.
+
+    Returns (bid, ask, bid_depth_usd, ask_depth_usd), any element None on a
+    real failure - never a fabricated number, so a caller can fail closed
+    on a book it could not read rather than sizing against a guess.
+    """
+    path = f"/api/v3/brokerage/product_book?product_id={product_id}&limit={max(1, levels)}"
+    try:
+        async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path), timeout=15) as r:
+            if r.status != 200:
+                return None, None, None, None
+            book = (await r.json()).get("pricebook", {})
+            bids, asks = book.get("bids") or [], book.get("asks") or []
+
+            def _depth(side):
+                total = 0.0
+                for entry in side[:levels]:
+                    try:
+                        total += float(entry["price"]) * float(entry["size"])
+                    except (KeyError, TypeError, ValueError):
+                        # One malformed level is not a reason to discard the
+                        # rest; it just does not count toward the total,
+                        # which errs toward reporting LESS depth than exists.
+                        continue
+                return total
+
+            bid = float(bids[0]["price"]) if bids else None
+            ask = float(asks[0]["price"]) if asks else None
+            return bid, ask, (_depth(bids) if bids else None), (_depth(asks) if asks else None)
+    except Exception as e:
+        log.warning(f"[BTC-COMPOUND] {product_id}: real book depth fetch failed: {type(e).__name__}: {e}")
+        return None, None, None, None
+
+
+async def get_recent_market_trades(session, product_id: str = PRODUCT_ID, limit: int = 50):
+    """The last `limit` REAL trades printed on this product, newest first.
+
+    The book says what is WAITING; this says what actually traded, and each
+    print carries the side that crossed the spread. That is the difference
+    between resting intent - which can be pulled the instant an order comes
+    for it - and committed flow, which cannot.
+
+    Returns a list of trade dicts, or None on any failure. None rather than
+    [] deliberately: an empty tape and an unreachable endpoint mean
+    opposite things to a caller weighing pressure, and [] would quietly
+    report the market as balanced.
+    """
+    path = f"/api/v3/brokerage/products/{product_id}/ticker?limit={max(1, limit)}"
+    try:
+        async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path), timeout=15) as r:
+            if r.status != 200:
+                return None
+            trades = (await r.json()).get("trades")
+            return trades if isinstance(trades, list) else None
+    except Exception as e:
+        log.warning(f"[BTC-COMPOUND] {product_id}: real market trades fetch failed: {type(e).__name__}: {e}")
+        return None
 
 
 async def cancel_order(session, order_id: str) -> bool:
@@ -1045,8 +1442,376 @@ async def _place_and_confirm(session, path: str, order: dict):
                     return filled_size, filled_value / filled_size
         except Exception:
             continue
-    log.warning(f"[BTC-COMPOUND] Order {order_id} placed but fill not confirmed within 10s")
+
+    # An accepted market order can execute even when the order-detail endpoint
+    # is briefly stale or unavailable. Reconcile by order ID before reporting
+    # failure so callers never submit a duplicate order or leave a real fill
+    # open in local state.
+    fills_path = f"/api/v3/brokerage/orders/historical/fills?order_id={order_id}"
+    try:
+        async with session.get(
+            COINBASE_BASE_URL + fills_path,
+            headers=_auth_headers("GET", fills_path),
+            timeout=15,
+        ) as r:
+            if r.status == 200:
+                fills = (await r.json()).get("fills", [])
+                matching_fills = [
+                    fill for fill in fills
+                    if str(fill.get("order_id", order_id)) == str(order_id)
+                ]
+                filled_size = sum(float(fill.get("size", 0) or 0) for fill in matching_fills)
+                filled_value = sum(
+                    float(fill.get("size", 0) or 0) * float(fill.get("price", 0) or 0)
+                    for fill in matching_fills
+                )
+                if filled_size > 0:
+                    if product_id:
+                        _last_order_error.pop(product_id, None)
+                    log.info(
+                        "[BTC-COMPOUND] Reconciled accepted order %s from fill history",
+                        order_id,
+                    )
+                    return filled_size, filled_value / filled_size
+    except Exception as e:
+        log.warning(
+            "[BTC-COMPOUND] Fill-history reconciliation failed for order %s: %s",
+            order_id,
+            e,
+        )
+
+    reason = f"accepted order {order_id} not confirmed by order detail or fill history"
+    if product_id:
+        _last_order_error[product_id] = reason
+    log.warning(f"[BTC-COMPOUND] {reason}")
     return None
+
+
+async def fetch_fills_between(session, start_iso: str, end_iso: str,
+                              max_pages: int = 40, page_size: int = 250) -> dict:
+    """Every fill Coinbase recorded in a window. GROUND TRUTH, read-only.
+
+    The bots' own ledgers cannot answer where money went. On 2026-09-26 an
+    audit found 11 of 167 coin-history rows unable to reproduce their own
+    P&L from their own columns, a real +$178.44 round trip missing from the
+    grid ledger entirely, and a 16-day hole in the equity record covering
+    most of a $473 decline. Every one of those is a record the account
+    wrote about itself.
+
+    This asks the exchange instead. Coinbase returns, per fill: side, size,
+    price, the real `commission` charged, and `liquidity_indicator`
+    (MAKER/TAKER). None of it is inferred and none of it is ours.
+
+    Paginated with a hard page cap, because an unbounded cursor loop
+    against a rate-limited endpoint is its own outage. Returns whatever it
+    got plus `truncated` when the cap was hit - a partial statement that
+    says it is partial beats a complete-looking one that is not.
+
+    Never raises and never trades.
+    """
+    fills, cursor, pages, truncated = [], None, 0, False
+    base = ("/api/v3/brokerage/orders/historical/fills"
+            f"?limit={int(page_size)}"
+            f"&start_sequence_timestamp={start_iso}"
+            f"&end_sequence_timestamp={end_iso}")
+    try:
+        while pages < max_pages:
+            path = base + (f"&cursor={cursor}" if cursor else "")
+            async with session.get(COINBASE_BASE_URL + path,
+                                   headers=_auth_headers("GET", path),
+                                   timeout=30) as r:
+                if r.status != 200:
+                    return {"available": False,
+                            "error": f"Coinbase returned {r.status}",
+                            "detail": (await r.text())[:300],
+                            "fills": fills, "pages_read": pages}
+                body = await r.json()
+            batch = body.get("fills") or []
+            fills.extend(batch)
+            pages += 1
+            cursor = body.get("cursor") or None
+            if not cursor or not batch:
+                break
+        else:
+            truncated = True
+    except Exception as e:
+        return {"available": False, "error": f"{type(e).__name__}: {e}",
+                "fills": fills, "pages_read": pages}
+    return {"available": True, "fills": fills, "pages_read": pages,
+            "truncated": truncated,
+            "window": {"start": start_iso, "end": end_iso}}
+
+
+def summarise_fills(fills: list) -> dict:
+    """Turn raw fills into a statement: what was bought, sold and paid.
+
+    NET CASH FLOW is the number the whole exercise is for. Sells bring USD
+    in, buys take it out, commission always goes out. Summed over a window
+    it says what the account's USD balance did because of trading - which
+    can then be set against what the balance ACTUALLY did, and any gap is
+    something trading did not cause.
+    """
+    per, buy_usd, sell_usd, fees = {}, 0.0, 0.0, 0.0
+    maker = taker = 0
+    quote_sized = 0
+    for f in fills:
+        try:
+            size = float(f.get("size") or 0)
+            price = float(f.get("price") or 0)
+            comm = float(f.get("commission") or 0)
+        except (TypeError, ValueError):
+            continue
+        pid = f.get("product_id") or "?"
+        side = (f.get("side") or "").upper()
+        # SIZE IS NOT ALWAYS THE BASE QUANTITY.
+        #
+        # Coinbase sets size_in_quote when `size` is denominated in the QUOTE
+        # currency - USD - which is what a market order placed by dollar
+        # amount returns. Multiplying that by price counts the dollars once
+        # and then again at the coin's own price.
+        #
+        # The first live call did exactly that and reported $96,544,199.94 of
+        # BTC bought on a $1,000 account, from 1,175 "BTC" that were really
+        # 1,175 dollars. A number that absurd is easy to catch; the same bug
+        # on a $40 fill would have quietly passed for a statement.
+        in_quote = bool(f.get("size_in_quote"))
+        if in_quote:
+            quote_sized += 1
+            value = size
+            qty = (size / price) if price else 0.0
+        else:
+            value = size * price
+            qty = size
+        liq = (f.get("liquidity_indicator") or "").upper()
+        if liq == "MAKER":
+            maker += 1
+        elif liq == "TAKER":
+            taker += 1
+        p = per.setdefault(pid, {"product_id": pid, "fills": 0, "bought_usd": 0.0,
+                                 "sold_usd": 0.0, "bought_qty": 0.0, "sold_qty": 0.0,
+                                 "commission_usd": 0.0})
+        p["fills"] += 1
+        p["commission_usd"] += comm
+        fees += comm
+        if side == "BUY":
+            p["bought_usd"] += value; p["bought_qty"] += qty; buy_usd += value
+        elif side == "SELL":
+            p["sold_usd"] += value; p["sold_qty"] += qty; sell_usd += value
+    rows = []
+    for p in per.values():
+        p["net_usd"] = round(p["sold_usd"] - p["bought_usd"] - p["commission_usd"], 2)
+        p["qty_left_over"] = round(p["bought_qty"] - p["sold_qty"], 10)
+        for k in ("bought_usd", "sold_usd", "commission_usd"):
+            p[k] = round(p[k], 2)
+        rows.append(p)
+    rows.sort(key=lambda r: r["net_usd"])
+    return {
+        "fills": len(fills),
+        "products": rows,
+        "bought_usd": round(buy_usd, 2),
+        "sold_usd": round(sell_usd, 2),
+        "commission_usd": round(fees, 2),
+        # Sells in, buys out, commission out. What trading did to the USD
+        # balance over the window, before any coin still held is marked.
+        "net_cash_flow_usd": round(sell_usd - buy_usd - fees, 2),
+        "maker_fills": maker,
+        "taker_fills": taker,
+        # Surfaced so the size_in_quote handling above is verifiable from the
+        # response rather than taken on trust.
+        "quote_sized_fills": quote_sized,
+        "note": ("net_cash_flow_usd is CASH, not profit. Coin bought and still "
+                 "held reads as cash out with nothing back; compare against the "
+                 "value of what is still held before calling it a loss."),
+    }
+
+
+async def get_recent_fills_summary(session, limit: int = 250,
+                                   want_classified: int = 40,
+                                   max_pages: int = 12) -> dict:
+    """What Coinbase itself says every recent fill actually cost.
+
+    Exists to settle one question with ground truth instead of inference:
+    is this account's grid getting MAKER fills or TAKER fills?
+
+    It matters more than any other single number here. The spacing floor
+    prices the taker round trip (1.50%), because a post-only order that
+    does not fill inside its wait becomes a market order - so the floor is
+    1.70% and no step below that can profit. At maker (0.70% round trip)
+    the floor is 0.90%, and a 1.25% step nets +0.55% instead of -0.25%.
+    That single fact is the difference between a fleet that trades a few
+    times a week and one that trades several times a day.
+
+    Everything else available locally is inference: P&L recorded against
+    an assumed leg rate, or a fill-mix counter that only began counting
+    today. Coinbase returns `liquidity_indicator` (MAKER/TAKER) and the
+    real `commission` charged on every fill. That is the actual answer.
+
+    Read-only. Returns {} on any failure rather than raising - a
+    diagnostic must never be able to disturb live trading.
+    """
+    # PAGE UNTIL THERE ARE ENOUGH SPOT FILLS, not until 250 fills of any kind.
+    #
+    # This asked for one page and hoped. On this account that was the wrong
+    # bet: 237 of 250 fills came back Kalshi event contracts, which the loop
+    # below correctly discards - leaving 13 spot fills and a truthful but
+    # useless "NOT ENOUGH EVIDENCE". The filter was never the problem. The
+    # SAMPLE was: 95% of it was thrown away and nothing went back for more.
+    #
+    # Kalshi is not evenly spread either - 712 of 925 of its fills landed on
+    # a single day, 2026-09-06 - so how much of a page survives depends
+    # entirely on where in the history the page happens to fall. A fixed
+    # page size cannot be sized around that; paging to a target can.
+    #
+    # Capped at max_pages so an account that is ALL non-spot terminates
+    # instead of walking its entire history. pages_read and
+    # non_spot_fills_skipped are both returned, so a starved sample says so
+    # rather than looking like a quiet account.
+    fills, cursor, pages = [], None, 0
+    try:
+        while pages < max_pages:
+            path = ("/api/v3/brokerage/orders/historical/fills"
+                    f"?limit={int(limit)}" + (f"&cursor={cursor}" if cursor else ""))
+            async with session.get(
+                COINBASE_BASE_URL + path,
+                headers=_auth_headers("GET", path),
+                timeout=20,
+            ) as r:
+                if r.status != 200:
+                    if fills:
+                        break      # keep what we have; a partial sample beats none
+                    return {"error": f"HTTP {r.status}", "detail": (await r.text())[:300]}
+                body = await r.json()
+            batch = body.get("fills") or []
+            fills.extend(batch)
+            pages += 1
+            cursor = body.get("cursor") or None
+            # Count only what this function can actually use: spot fills that
+            # Coinbase labelled MAKER or TAKER.
+            usable = sum(
+                1 for f in fills
+                if (f.get("product_id") or "").endswith("-USD")
+                and "KALSHI" not in (f.get("product_id") or "").upper()
+                and (f.get("liquidity_indicator") or "").upper() in ("MAKER", "TAKER"))
+            if usable >= want_classified or not cursor or not batch:
+                break
+    except Exception as e:
+        if not fills:
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    by_side = {}
+    per_product = {}
+    maker = taker = unknown = 0
+    commission_total = 0.0
+    notional_total = 0.0
+    oldest = newest = None
+    skipped_non_spot = 0
+    # Counted here as well as in summarise_fills. A str.replace that matched
+    # the return dict of BOTH functions added this key to this one without
+    # the variable behind it - a NameError that took /fee-reality to a 500
+    # and was invisible to every test, because the tests read the source and
+    # the source looked right.
+    quote_sized = 0
+
+    for f in fills:
+        pid_raw = f.get("product_id") or "?"
+        # This endpoint returns EVERY fill on the account, and this account
+        # also trades Kalshi event contracts (KXBTC15M-...-KALSHI). They are
+        # a different product class with a different fee schedule - observed
+        # here between 2.3% and 10.3% per leg - and they carry no
+        # liquidity_indicator at all. Averaged in, they made the "real" fee
+        # rate meaningless. Only spot crypto pairs answer the question this
+        # function exists to answer.
+        if not pid_raw.endswith("-USD") or "KALSHI" in pid_raw.upper():
+            skipped_non_spot += 1
+            continue
+
+        liq = (f.get("liquidity_indicator") or "").upper()
+        size = float(f.get("size") or 0)
+        price = float(f.get("price") or 0)
+        comm = float(f.get("commission") or 0)
+        # size_in_quote means `size` is ALREADY the USD amount. Multiplying
+        # it by price again reported 3 BTC-USD fills as $48,816,593 of
+        # notional on an account holding $572, which dragged the computed
+        # fee rate to 0.0002% and produced a confident "the floor can come
+        # down" verdict from arithmetic that was pure nonsense.
+        if f.get("size_in_quote"):
+            quote_sized += 1
+            notional = size
+        else:
+            notional = size * price
+        ts = f.get("trade_time") or f.get("sequence_timestamp")
+        if ts:
+            oldest = ts if oldest is None or ts < oldest else oldest
+            newest = ts if newest is None or ts > newest else newest
+
+        if liq == "MAKER":
+            maker += 1
+        elif liq == "TAKER":
+            taker += 1
+        else:
+            unknown += 1
+
+        # Only a fill Coinbase actually labelled MAKER or TAKER can speak
+        # to what a round trip really costs.
+        if liq in ("MAKER", "TAKER"):
+            commission_total += comm
+            notional_total += notional
+
+        pid = pid_raw
+        p = per_product.setdefault(pid, {"maker": 0, "taker": 0, "unknown": 0,
+                                         "commission": 0.0, "notional": 0.0})
+        p["maker" if liq == "MAKER" else ("taker" if liq == "TAKER" else "unknown")] += 1
+        if liq in ("MAKER", "TAKER"):
+            p["commission"] += comm
+            p["notional"] += notional
+
+        side = (f.get("side") or "?").upper()
+        b = by_side.setdefault(side, {"maker": 0, "taker": 0, "unknown": 0})
+        b["maker" if liq == "MAKER" else ("taker" if liq == "TAKER" else "unknown")] += 1
+
+    classified = maker + taker
+    # The rate an average LEG really paid, straight from the commission
+    # Coinbase charged - not from any rate this codebase assumed.
+    real_leg_rate = (commission_total / notional_total) if notional_total > 0 else None
+
+    for pid, p in per_product.items():
+        p["maker_rate"] = round(p["maker"] / (p["maker"] + p["taker"]), 4) if (p["maker"] + p["taker"]) else None
+        p["real_leg_fee_rate"] = round(p["commission"] / p["notional"], 6) if p["notional"] > 0 else None
+        p["commission"] = round(p["commission"], 4)
+        p["notional"] = round(p["notional"], 2)
+
+    return {
+        "pages_read": pages,
+        "fills_returned": len(fills),
+        "fills_examined": len(fills) - skipped_non_spot,
+        "non_spot_fills_skipped": skipped_non_spot,
+        "maker_fills": maker,
+        "taker_fills": taker,
+        # Surfaced so the size_in_quote handling above is verifiable from the
+        # response rather than taken on trust.
+        "quote_sized_fills": quote_sized,
+        "unclassified_fills": unknown,
+        "maker_rate": round(maker / classified, 4) if classified else None,
+        "real_leg_fee_rate": round(real_leg_rate, 6) if real_leg_rate is not None else None,
+        "real_round_trip_fee_rate": round(real_leg_rate * 2, 6) if real_leg_rate is not None else None,
+        "total_commission_usd": round(commission_total, 4),
+        "total_notional_usd": round(notional_total, 2),
+        "by_side": by_side,
+        "per_product": per_product,
+        "oldest_fill": oldest,
+        "newest_fill": newest,
+        "classified_fills": classified,
+        "enough_to_conclude": classified >= 20,
+        # So a starved sample reads as starved rather than as a quiet account.
+        "sample_note": (f"{skipped_non_spot} of {len(fills)} fills across {pages} page(s) "
+                        f"were non-spot (Kalshi event contracts) and were discarded - "
+                        f"they carry no liquidity_indicator and a different fee schedule. "
+                        f"{classified} spot fills carried a MAKER/TAKER label."),
+        "note": ("liquidity_indicator and commission come from Coinbase, not from this "
+                 "codebase's assumptions. real_round_trip_fee_rate is what an average round "
+                 "trip ACTUALLY cost across these fills, and it is the number the spacing "
+                 "floor should be priced against."),
+    }
 
 
 async def load_equity_floor():
@@ -1055,7 +1820,7 @@ async def load_equity_floor():
     global equity_floor
     try:
         from models import TradingBotState
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == EQUITY_FLOOR_STATE_KEY))
             row = result.scalar_one_or_none()
             if row and row.base_capital is not None:
@@ -1069,7 +1834,7 @@ async def save_equity_floor(new_floor: float):
     """Persist a raised equity floor so it survives restarts."""
     try:
         from models import TradingBotState
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == EQUITY_FLOOR_STATE_KEY))
             row = result.scalar_one_or_none()
             if row:
@@ -1082,13 +1847,13 @@ async def save_equity_floor(new_floor: float):
 
 
 async def load_position():
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         result = await session.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
         return result.scalar_one_or_none()
 
 
 async def save_position(entry_price: float, qty: float, target_price: float, stop_price: float):
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         session.add(BotPosition(
             bot=BOT_NAME, symbol=SYMBOL, side="long",
             entry_price=entry_price, qty=qty,
@@ -1101,7 +1866,7 @@ async def save_position(entry_price: float, qty: float, target_price: float, sto
 async def _raise_stop_to_breakeven(entry_price: float):
     """Only ever moves the open position's stop UP to its own entry price -
     never down, never past entry. See BREAKEVEN_TRIGGER_PCT."""
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         result = await session.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
         pos = result.scalar_one_or_none()
         if pos and pos.stop_price is not None and pos.stop_price < entry_price:
@@ -1110,7 +1875,7 @@ async def _raise_stop_to_breakeven(entry_price: float):
 
 
 async def clear_position():
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         result = await session.execute(select(BotPosition).where(BotPosition.bot == BOT_NAME))
         pos = result.scalar_one_or_none()
         if pos:
@@ -1134,12 +1899,69 @@ async def _sell_and_settle(session, position, reason: str):
     net_pnl = gross_pnl - fees
     daily_pnl += net_pnl
     await clear_position()
+
+    # Skim only on a genuine win, and only from the realized net figure -
+    # never from gross, which would lock money the fees already consumed.
+    skim = round(net_pnl * PROFIT_SKIM_PCT, 2) if net_pnl > 0 else 0.0
+    if skim > 0:
+        await add_locked_usd(skim)
+
     log.info(
         f"[BTC-COMPOUND] SOLD {filled_qty:.8f} BTC @ ${filled_price:,.2f} ({reason}) | "
         f"entry ${position.entry_price:,.2f} -> exit ${filled_price:,.2f} | "
         f"P&L: {'+' if net_pnl >= 0 else ''}${net_pnl:.2f} after est. fees"
+        + (f" | locked ${skim:.2f} ({PROFIT_SKIM_PCT*100:.0f}%) out of the "
+           f"compounding loop" if skim > 0 else "")
     )
     return True
+
+
+# Waiting for capital is a normal operating state, not an incident - the
+# loop never stops over it, it simply has nothing to deploy yet. Logging
+# that every cycle would print 2,880 identical lines a day at a 30s cycle
+# and bury the messages that do matter, so the state is announced on entry,
+# repeated sparingly while it lasts, and announced again the moment capital
+# returns. Nothing about the retry behaviour changes; only how loudly.
+WAITING_LOG_INTERVAL_SECONDS = _safe_float_env(
+    "BTC_COMPOUND_WAITING_LOG_INTERVAL_SECONDS", "900")
+_waiting_for_capital_since = None
+_waiting_last_logged_at = 0.0
+
+
+def _note_waiting_for_capital(balance):
+    """Entering or continuing the wait. Keeps cycling either way."""
+    global _waiting_for_capital_since, _waiting_last_logged_at
+    now = time.time()
+    if _waiting_for_capital_since is None:
+        _waiting_for_capital_since = now
+        _waiting_last_logged_at = now
+        log.info(
+            f"[BTC-COMPOUND] Balance ${balance:.2f} is below the ${MIN_TRADE_USD:.2f} "
+            f"minimum trade size - waiting for capital. Still checking every "
+            f"{CYCLE_SECONDS}s; this will not stop the bot or need a restart."
+        )
+    elif now - _waiting_last_logged_at >= WAITING_LOG_INTERVAL_SECONDS:
+        _waiting_last_logged_at = now
+        waited = now - _waiting_for_capital_since
+        log.info(
+            f"[BTC-COMPOUND] Still waiting for capital after "
+            f"{waited/60:.0f} min - balance ${balance:.2f}, need "
+            f"${MIN_TRADE_USD:.2f}. Checking every {CYCLE_SECONDS}s."
+        )
+
+
+def _note_capital_available(balance):
+    """Capital came back. Announced once, so the wait has a visible end."""
+    global _waiting_for_capital_since, _waiting_last_logged_at
+    if _waiting_for_capital_since is None:
+        return
+    waited = time.time() - _waiting_for_capital_since
+    log.info(
+        f"[BTC-COMPOUND] Capital available again: ${balance:.2f} after waiting "
+        f"{waited/60:.0f} min - resuming entries."
+    )
+    _waiting_for_capital_since = None
+    _waiting_last_logged_at = 0.0
 
 
 async def run_cycle():
@@ -1162,10 +1984,13 @@ async def run_cycle():
         # next cycle when both are available again.
         equity = None
         if balance is not None:
-            equity = balance + (position.qty * price if position is not None and price is not None else 0.0)
+            equity = tracked_equity(
+                balance,
+                position.qty * price if position is not None and price is not None else None,
+            )
 
         if equity is not None and equity >= EQUITY_FLOOR_TIER:
-            candidate_floor = math.floor(equity / EQUITY_FLOOR_TIER) * EQUITY_FLOOR_TIER
+            candidate_floor = compute_equity_floor(equity)
             if candidate_floor > equity_floor:
                 equity_floor = candidate_floor
                 await save_equity_floor(equity_floor)
@@ -1192,14 +2017,64 @@ async def run_cycle():
                 log.warning(f"[BTC-COMPOUND] Balance unavailable ({balance_err}) - skipping this cycle")
                 return
             if balance < MIN_TRADE_USD:
-                log.info(f"[BTC-COMPOUND] Balance ${balance:.2f} below minimum trade size ${MIN_TRADE_USD:.2f} - waiting")
+                _note_waiting_for_capital(balance)
                 return
+            _note_capital_available(balance)
             if price is None:
                 log.warning("[BTC-COMPOUND] Could not fetch BTC price/volatility - skipping this cycle")
                 return
 
-            target_pct = max(pick_target_pct(atr_pct), min_profit_target_pct(balance, atr_pct))
-            fill = await place_market_buy(session, balance)
+            # Everything from here sizes off `deploy`, not `balance`. Anything
+            # above the cap stays as cash and is deliberately left alone.
+            # Locked profit is real USD sitting in the same account, so it
+            # has to be subtracted before sizing or the skim would be
+            # re-risked on the very next entry and lock nothing at all.
+            locked = await get_locked_usd()
+            deploy = deployable_usd(max(0.0, balance - locked))
+            if locked > 0:
+                log.info(f"[BTC-COMPOUND] ${locked:,.2f} of banked profit is locked and "
+                         f"excluded from this entry")
+            if deploy < MIN_TRADE_USD:
+                log.warning(
+                    f"[BTC-COMPOUND] Only ${deploy:,.2f} is deployable (${balance:,.2f} "
+                    f"balance less ${RESERVE_USD:,.2f} reserve"
+                    + (f" and ${locked:,.2f} locked profit" if locked > 0 else "")
+                    + f"), below the ${MIN_TRADE_USD:.2f} minimum trade size - no entry "
+                    f"can be placed. Lower BTC_COMPOUND_RESERVE_USD or add funds."
+                )
+                return
+            if deploy < balance:
+                log.info(f"[BTC-COMPOUND] Deploying ${deploy:,.2f} of ${balance:,.2f} available; "
+                         f"${RESERVE_USD:,.2f} reserve"
+                         + (f" + ${locked:,.2f} locked profit" if locked > 0 else "")
+                         + " held back")
+
+            target_pct = max(pick_target_pct(atr_pct), min_profit_target_pct(deploy, atr_pct))
+
+            # Refuse an entry whose own arithmetic needs a win rate this
+            # account has never produced. Checked against the real target
+            # actually about to be used - not the tier constant - because
+            # min_profit_target_pct() can raise it, and a gate that judges
+            # a number the order will not use is decoration.
+            #
+            # Deliberately placed BEFORE place_market_buy: once filled,
+            # the money is committed and the only ways out are the target,
+            # the stop or a manual sale. Refusing costs one idle cycle and
+            # the bot re-checks on the next one, when volatility - and so
+            # the tier, and so the arithmetic - may well have changed.
+            needed = breakeven_win_rate(target_pct)
+            if needed > MAX_BREAKEVEN_WIN_RATE:
+                log.warning(
+                    f"[BTC-COMPOUND] NO ENTRY: +{target_pct*100:.2f}% target against a "
+                    f"-{STOP_LOSS_PCT*100:.2f}% stop needs a {needed*100:.1f}% win rate to break "
+                    f"even after the {ROUND_TRIP_FEE_RATE*100:.2f}% round trip, over the "
+                    f"{MAX_BREAKEVEN_WIN_RATE*100:.1f}% limit. ATR {atr_pct*100:.2f}%. Holding cash - "
+                    f"this trade loses money on average. Maker orders would halve the fee and "
+                    f"may clear it; otherwise wait for volatility to widen the target."
+                )
+                return
+
+            fill = await place_market_buy(session, deploy)
             if not fill:
                 log.warning("[BTC-COMPOUND] Buy did not fill - will retry next cycle")
                 return
@@ -1208,7 +2083,8 @@ async def run_cycle():
             stop_price = filled_price * (1 - STOP_LOSS_PCT)
             await save_position(filled_price, filled_qty, target_price, stop_price)
             log.info(
-                f"[BTC-COMPOUND] BOUGHT {filled_qty:.8f} BTC @ ${filled_price:,.2f} (${balance:.2f} deployed) | "
+                f"[BTC-COMPOUND] BOUGHT {filled_qty:.8f} BTC @ ${filled_price:,.2f} (${deploy:.2f} deployed"
+                f"{f' of ${balance:.2f}' if deploy < balance else ''}) | "
                 f"ATR volatility: {atr_pct*100:.2f}% -> target +{target_pct*100:.2f}% (${target_price:,.2f}, min ${pick_min_profit_usd(atr_pct):.2f} net) | "
                 f"stop -{STOP_LOSS_PCT*100:.2f}% (${stop_price:,.2f}) | floor ${equity_floor:,.2f}"
             )

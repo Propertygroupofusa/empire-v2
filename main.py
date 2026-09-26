@@ -18,26 +18,61 @@ from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from datetime import datetime
 import os
 import sys
+import time
 import asyncio
 import uvicorn
 import logging
+
+# Wall-clock at import, i.e. when THIS process started. /health subtracts
+# it to report uptime, which is how an "is the variable wrong or did the
+# process never restart to re-read it?" ambiguity gets resolved from
+# outside. Module scope on purpose: it must be bound once at process
+# start, never per request.
+_PROCESS_STARTED_AT = time.time()
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
+from crypto_strategy_config import get_crypto_strategy_mode
 
-# Load .env file to make credentials available to background bots
-load_dotenv(override=True)
+# Load .env to make credentials available to background bots in local
+# development. override=False (the default) is deliberate and load-bearing:
+# the real process environment WINS over the file.
+#
+# This was override=True, which inverts that. On Railway every setting -
+# CRYPTO_STRATEGY_MODE, SERVICE_ROLE, the Coinbase credentials - arrives as
+# a real environment variable, so a stray .env reaching the image would
+# silently beat every one of them, and beat them invisibly: the Railway UI
+# would show the correct value while the process used the file's. Hunting a
+# variable that "won't take" is already this deployment's most expensive
+# recurring failure (it cost most of 2026-09-25), and override=True is a
+# loaded version of exactly that trap.
+#
+# .env is gitignored, so it is not in the image today. That is the only
+# reason this was harmless, and it is one `git add -f` away from not being.
+# Real environment first is also the conventional precedence.
+load_dotenv()
 
 # CRITICAL: Ensure greenlet is available for SQLAlchemy async support
 try:
     import greenlet
     assert greenlet.__version__, "greenlet module loaded"
 except (ImportError, AssertionError) as e:
-    logging.error(f"FATAL: greenlet not available - async database will fail: {e}")
-    raise
+    logging.warning(f"⚠️  greenlet not available - will use thread executor mode: {e}")
 
-from database import init_db, engine
-from initialize_bot_worker import initialize_bot_worker
+# Import database module with graceful fallback
+try:
+    from database import init_db, ensure_grid_status_schema, get_engine
+except Exception as e:
+    logging.warning(f"⚠️  Database import failed (non-critical): {e}")
+    init_db = None
+    ensure_grid_status_schema = None
+    engine = None
+
+try:
+    from initialize_bot_worker import initialize_bot_worker
+except Exception as e:
+    logging.warning(f"⚠️  Bot worker import failed: {e}")
+    initialize_bot_worker = None
 
 
 # Pydantic request models for Hermes Phase 1 endpoints
@@ -190,22 +225,25 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import status_snapshot: {e}")
 
-crypto_grid_bot_module = None
-try:
-    import crypto_grid_bot
-    crypto_grid_bot_module = crypto_grid_bot
-except Exception as e:
-    logging.warning(f"Failed to import crypto_grid_bot: {e}")
-
 # Which Coinbase strategy actually runs - "family_tree" (multiple branches,
 # each the same single-position adaptive-target engine, growing one new
 # coin at a time as branches cross $1,000), "btc_compound" (that same
-# engine, BTC-only, no branching), or "multi_pair" (crypto_coinbase_bot.py's
-# original 28-pair RSI strategy). Only one runs at a time; all three share
-# the same real Coinbase account/balance, so running more than one together
-# would have them fight over the same funds. Revert to either earlier mode
-# by setting this Railway variable and redeploying - no code change needed.
-CRYPTO_STRATEGY_MODE = os.getenv("CRYPTO_STRATEGY_MODE", "family_tree")
+# engine, BTC-only, no branching), "multi_pair" (crypto_coinbase_bot.py's
+# original 28-pair RSI strategy), or "grid_fleet" (owned by the dedicated
+# crypto-trading service). Only one runs at a time because all modes share
+# the same real Coinbase account and balance.
+CRYPTO_STRATEGY_MODE = get_crypto_strategy_mode()
+
+# What this process ACTUALLY started in, once the DB override is applied.
+# CRYPTO_STRATEGY_MODE above is only the ENVIRONMENT's opinion, and the two
+# can legitimately differ: on 2026-09-25 the env var was stuck reading
+# 'delfina_scalping' through six correction attempts, so the real mode now
+# comes from the database instead. Reporting only the env value answers the
+# wrong question - which is exactly how a full day passed with the mode
+# looking broken while the actual fix was somewhere else entirely.
+# Assigned once, in lifespan(), after resolution.
+RESOLVED_CRYPTO_MODE = None
+
 # Real production bug found live: Railway's raw env-var editor will happily
 # store literal quote characters if they're pasted as part of the value
 # (e.g. entering `"family_tree"` instead of `family_tree`) - os.getenv()
@@ -218,8 +256,6 @@ CRYPTO_STRATEGY_MODE = os.getenv("CRYPTO_STRATEGY_MODE", "family_tree")
 # lines above never fired, proving this was a value-mismatch, not a real
 # import failure. Stripped here so a quoted value in the dashboard can't
 # silently disable the whole coordinator thread again.
-CRYPTO_STRATEGY_MODE = CRYPTO_STRATEGY_MODE.strip().strip('"').strip("'").strip()
-
 alpaca_swing_bot_module = None
 try:
     import alpaca_swing_bot
@@ -265,7 +301,7 @@ async def create_monitor_tables():
     # AUTOINCREMENT is SQLite-only syntax; Postgres needs SERIAL. Pick the
     # right primary-key clause for whichever DATABASE_URL is actually in use.
     pk = "SERIAL PRIMARY KEY" if engine.dialect.name == "postgresql" else "INTEGER PRIMARY KEY AUTOINCREMENT"
-    async with engine.begin() as conn:
+    async with get_engine().begin() as conn:
         try:
             await conn.execute(text(f"""
                 CREATE TABLE IF NOT EXISTS monitor_errors (
@@ -409,7 +445,7 @@ async def run_migrations():
     from database import Base
 
     # CRITICAL: Ensure crypto_rsi_state table exists for bot RSI state machine
-    async with engine.begin() as conn:
+    async with get_engine().begin() as conn:
         try:
             existing_tables = await conn.run_sync(lambda c: inspect(c).get_table_names())
             if "crypto_rsi_state" not in existing_tables:
@@ -477,7 +513,7 @@ async def run_migrations():
         # connection), checking and migrating 40+ tables can exceed that
         # 60s window. When the timeout cancels this coroutine mid-loop,
         # the cancellation propagates out through whatever `async with
-        # engine.begin()` block is currently open - and if that block
+        # get_engine().begin()` block is currently open - and if that block
         # wraps the ENTIRE loop, its __aexit__ sees the cancellation as an
         # exception and rolls back the WHOLE transaction, undoing every
         # table already migrated in this run, including ones that had
@@ -488,7 +524,7 @@ async def run_migrations():
         # the 60s timeout fired further down the loop. A transaction
         # scoped to one table can only ever lose THAT table's work to a
         # timeout, never anything already committed for tables before it.
-        async with engine.begin() as conn:
+        async with get_engine().begin() as conn:
             try:
                 raw_columns = await conn.run_sync(
                     lambda sync_conn, t=table_name: inspect(sync_conn).get_columns(t)
@@ -700,7 +736,7 @@ async def validate_foreign_keys():
     if engine.dialect.name != "postgresql":
         return  # Foreign key checks are for PostgreSQL only
 
-    async with engine.begin() as conn:
+    async with get_engine().begin() as conn:
         inspector = inspect.__call__(conn.sync_conn)
         existing_tables = {t.lower() for t in inspector.get_table_names()}
 
@@ -732,7 +768,7 @@ async def initialize_bot():
     Raises on failure. It used to swallow its own exceptions into a
     warning while the caller logged "Bot worker initialized" regardless,
     which is how the failure below survived unnoticed for months."""
-    from database import AsyncSessionLocal
+    from database import get_session_factory
     from models import Worker
     # bcrypt's own API, not passlib's CryptContext. passlib was never in
     # requirements.txt, so this import raised ModuleNotFoundError and took
@@ -768,7 +804,7 @@ async def initialize_bot():
     # than a fatal error, fixes both: idempotent regardless of why the
     # batch check missed a row, and one bot's conflict can't block another.
     created = 0
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         for i in range(1, 3):
             bot_email = f"bot{i if i > 1 else ''}@pgusa.local"
             result = await session.execute(select(Worker).where(Worker.email == bot_email))
@@ -817,7 +853,7 @@ async def process_payouts_periodically():
     before doing that."""
     try:
         import stripe
-        from database import AsyncSessionLocal
+        from database import get_session_factory
         from models import Payment, Worker
         from sqlalchemy import select, update as sa_update
 
@@ -860,7 +896,7 @@ async def process_payouts_periodically():
 
         while True:
             try:
-                async with AsyncSessionLocal() as session:
+                async with get_session_factory()() as session:
                     # stripe_transfer_id IS NULL is a second, independent
                     # guard against paying twice. The idempotency key below
                     # is the primary one, but Stripe expires keys after 24
@@ -986,9 +1022,15 @@ async def lifespan(app: FastAPI):
     log.info("PGUSA Platform starting...")
     print("[LIFESPAN] Initializing database...", flush=True)
     try:
-        await asyncio.wait_for(init_db(), timeout=30.0)
-        print("[LIFESPAN] ✓ Database initialized", flush=True)
-        log.info("Database initialized")
+        if init_db is not None:
+            await asyncio.wait_for(init_db(), timeout=30.0)
+            print("[LIFESPAN] ✓ Database initialized", flush=True)
+            log.info("Database initialized")
+            if ensure_grid_status_schema is not None:
+                await asyncio.wait_for(ensure_grid_status_schema(), timeout=15.0)
+                log.info("Grid status schema ready")
+        else:
+            print("[LIFESPAN] ⚠️  Database module not available - skipping init", flush=True)
     except asyncio.TimeoutError:
         print(f"[LIFESPAN] ✗ Database init TIMEOUT (30s) - continuing startup", flush=True)
         log.warning(f"Database init timed out - app will start but DB features may be unavailable")
@@ -1050,8 +1092,11 @@ async def lifespan(app: FastAPI):
                   f"[{type(e).__name__}] {e}", exc_info=True)
 
     try:
-        await asyncio.wait_for(initialize_bot_worker(), timeout=30.0)
-        log.info("✅ Earnings bot worker initialized (for /payments/bot/earnings)")
+        if initialize_bot_worker is not None:
+            await asyncio.wait_for(initialize_bot_worker(), timeout=30.0)
+            log.info("✅ Earnings bot worker initialized (for /payments/bot/earnings)")
+        else:
+            log.warning("Earnings bot worker not available - skipping initialization")
     except asyncio.TimeoutError:
         log.warning(f"Earnings bot worker initialization TIMEOUT")
     except Exception as e:
@@ -1123,23 +1168,68 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Prop bot failed to start: {e}")
 
+    # A DB-persisted strategy override wins over the environment variable.
+    # See crypto_grid_bot.get_db_strategy_override for why: the env var was
+    # the one control that could not be corrected through the UI, and it
+    # stayed wrong through six attempts on 2026-09-25 while every
+    # DB-persisted control flipped instantly.
+    # A DISTINCT local name, never a rebind of the module-level constant.
+    # Writing `CRYPTO_STRATEGY_MODE = ... = CRYPTO_STRATEGY_MODE` here made
+    # the name local for the whole function, so the right-hand read raised
+    # UnboundLocalError, the lifespan died, and the app returned 502 with no
+    # commit at all. Shipped and caught in production within minutes on
+    # 2026-09-25. Assigning to a global inside a function needs `global`, or
+    # a different name - and a different name is the safer of the two.
+    global RESOLVED_CRYPTO_MODE   # assigning a module global REQUIRES this
+    crypto_mode = CRYPTO_STRATEGY_MODE
+    try:
+        import crypto_grid_bot as _grid_cfg
+        _db_mode = await _grid_cfg.get_db_strategy_override()
+        if _db_mode:
+            log.warning(
+                f"🗄️ DB strategy override active: {_db_mode!r} (environment says "
+                f"{crypto_mode!r}). Clear it with POST "
+                f"/api/trading-dashboard/crypto-strategy-override once the "
+                f"environment variable is trustworthy again."
+            )
+            crypto_mode = _db_mode
+    except Exception as e:
+        log.debug(f"DB strategy override check skipped: {type(e).__name__}: {e}")
+    RESOLVED_CRYPTO_MODE = crypto_mode
+    # Tell crypto_strategy_config what actually started, so its stale-env
+    # message stops claiming nothing will trade when something is.
+    #
+    # crypto_mode is deliberately passed through even when it is UNCONFIGURED
+    # - that is the honest answer, and note_runtime_mode() refuses to record
+    # a non-strategy as "running". Before it did, a stale variable with no DB
+    # override registered 'unconfigured' as the live mode and every later log
+    # line read "trading is NOT stopped" while nothing was trading at all.
+    try:
+        import crypto_strategy_config as _strategy_cfg
+        _strategy_cfg.note_runtime_mode(
+            crypto_mode,
+            "a DB strategy override" if crypto_mode != CRYPTO_STRATEGY_MODE
+            else "CRYPTO_STRATEGY_MODE")
+    except Exception as _e:
+        log.warning(f"could not register the running strategy mode: {_e}")
+
     try:
         import threading
-        if CRYPTO_STRATEGY_MODE == "family_tree" and crypto_family_tree_bot_module is not None:
+        if crypto_mode == "family_tree" and crypto_family_tree_bot_module is not None:
             log.info("📡 Starting Crypto (Coinbase) bot daemon thread — family tree strategy (coordinator)...")
             print("[LIFESPAN] Starting crypto bot thread (family_tree)...", flush=True)
             bot_thread = threading.Thread(target=crypto_family_tree_bot_module.run, daemon=True)
             bot_thread.start()
             print("[LIFESPAN] ✓ Crypto bot thread started", flush=True)
             log.info("✓ Crypto (Coinbase) bot thread started | family tree coordinator | BTC root + branches spawn as they cross $1,000 | 24/7 trading")
-        elif CRYPTO_STRATEGY_MODE == "btc_compound" and crypto_btc_compound_bot_module is not None:
+        elif crypto_mode == "btc_compound" and crypto_btc_compound_bot_module is not None:
             log.info("📡 Starting Crypto (Coinbase) bot daemon thread — BTC compounding loop strategy...")
             print("[LIFESPAN] Starting crypto bot thread (btc_compound)...", flush=True)
             bot_thread = threading.Thread(target=crypto_btc_compound_bot_module.run, daemon=True)
             bot_thread.start()
             print("[LIFESPAN] ✓ Crypto bot thread started", flush=True)
             log.info("✓ Crypto (Coinbase) bot thread started | BTC-only | single position | adaptive profit target | 24/7 trading")
-        elif CRYPTO_STRATEGY_MODE == "multi_pair" and crypto_coinbase_bot_module is not None:
+        elif crypto_mode == "multi_pair" and crypto_coinbase_bot_module is not None:
             log.info("📡 Starting Crypto (Coinbase) bot daemon thread — multi-pair RSI strategy...")
             print("[LIFESPAN] Starting crypto bot thread (multi_pair)...", flush=True)
             bot_thread = threading.Thread(target=crypto_coinbase_bot_module.run, daemon=True)
@@ -1147,6 +1237,30 @@ async def lifespan(app: FastAPI):
             print("[LIFESPAN] ✓ Crypto bot thread started", flush=True)
             log.info("✓ Crypto (Coinbase) bot thread started | 28 pairs × 12 positions | 24/7 trading | Capital: $700 USD")
             log.info("💰 Strategy: 24/7 crypto + market hours stock scalping = constant opportunities and taking profits")
+        elif crypto_mode == "grid_fleet":
+            # Normally the dedicated crypto-trading service owns this loop,
+            # and it still does: crypto_grid_bot holds a LEASE, renewed every
+            # cycle, and this thread refuses to trade while that owner is
+            # alive. It only takes over once the lease goes stale, meaning
+            # the dedicated service has actually stopped.
+            #
+            # Before 2026-09-25 this branch only logged "execution is
+            # delegated" and started nothing. That delegation was correct -
+            # two processes on one Coinbase wallet would double-order - but
+            # it left NO fallback: when the dedicated service silently was
+            # not running the loop, the entire fleet was dead with no alarm,
+            # $572 sat idle, and the heartbeat read "never recorded a cycle
+            # on this database" while everything looked configured.
+            #
+            # The lease is what makes a standby safe rather than dangerous.
+            log.info("🔲 Grid Fleet selected; the dedicated crypto-trading service owns this "
+                     "loop. Starting a STANDBY thread that trades only if that owner's lease "
+                     "goes stale.")
+            import crypto_grid_bot as _grid
+            grid_thread = threading.Thread(target=_grid.run, daemon=True)
+            grid_thread.start()
+            log.info("✓ Grid Fleet standby thread started | will not trade while the dedicated "
+                     "service is renewing its lease")
         else:
             # Deliberately NOT worded "failed to import" - the real 2026-08-24
             # incident this covers was a mode-string mismatch (a stray quoted
@@ -1155,8 +1269,8 @@ async def lifespan(app: FastAPI):
             # distinction immediately visible instead of requiring another
             # round of guessing between "bad env value" and "bad import".
             log.warning(
-                f"⚠️ CRYPTO_STRATEGY_MODE={CRYPTO_STRATEGY_MODE!r} did not match any known "
-                f"mode ('family_tree'/'btc_compound'/'multi_pair') - bot will not run | "
+                f"⚠️ crypto_mode={crypto_mode!r} did not match any known "
+                f"mode ('family_tree'/'btc_compound'/'multi_pair'/'grid_fleet') - bot will not run | "
                 f"family_tree module loaded: {crypto_family_tree_bot_module is not None} | "
                 f"btc_compound module loaded: {crypto_btc_compound_bot_module is not None} | "
                 f"multi_pair module loaded: {crypto_coinbase_bot_module is not None}"
@@ -1171,14 +1285,6 @@ async def lifespan(app: FastAPI):
             log.info("📄 Status snapshot thread started (periodic real-status report to a git branch)")
     except Exception as e:
         log.warning(f"Status snapshot thread failed to start: {e}")
-
-    try:
-        if crypto_grid_bot_module is not None:
-            import threading
-            threading.Thread(target=crypto_grid_bot_module.run, daemon=True).start()
-            log.info("🔲 Crypto grid bot thread started (real, opt-in grid-trading branches - see is_grid_bot_active)")
-    except Exception as e:
-        log.warning(f"Crypto grid bot thread failed to start: {e}")
 
     print(f"[LIFESPAN] About to check alpaca_swing_bot_module: {alpaca_swing_bot_module is not None}", flush=True)
     try:
@@ -1406,13 +1512,30 @@ except Exception as e:
     log.warning(f"Failed to load crypto trading router: {e}")
 
 
+# Every dashboard served below is a single HTML file that is REWRITTEN on each deploy,
+# and until 2026-09-25 they were served with no cache headers at all. Browsers
+# are free to reuse a no-header response, and one did: a new control shipped,
+# deployed and verified live was simply absent from the account owner's screen
+# for hours, because the page in front of them predated it. Nothing in the app
+# can tell you that is happening - the API answers correctly, the HTML on the
+# server is correct, and the only wrong copy is the one the person is looking at.
+#
+# These files are small and fetched once per visit, so there is nothing to gain
+# from caching them and a whole class of "I don't see it" to lose.
+_NO_STORE = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
 @app.get("/crypto-dashboard")
 async def serve_crypto_dashboard():
     """Serve the crypto trading dashboard HTML"""
     dashboard_path = os.path.join(os.path.dirname(__file__), "static/crypto_dashboard.html")
     if not os.path.exists(dashboard_path):
         raise HTTPException(status_code=404, detail="Crypto dashboard not found")
-    return FileResponse(dashboard_path, media_type="text/html")
+    return FileResponse(dashboard_path, media_type="text/html", headers=_NO_STORE)
 
 
 @app.get("/dashboard")
@@ -1421,7 +1544,7 @@ async def serve_dashboard():
     dashboard_path = os.path.join(os.path.dirname(__file__), "social_media_dashboard.html")
     if not os.path.exists(dashboard_path):
         raise HTTPException(status_code=404, detail="Dashboard not found")
-    return FileResponse(dashboard_path, media_type="text/html")
+    return FileResponse(dashboard_path, media_type="text/html", headers=_NO_STORE)
 
 
 @app.get("/signals")
@@ -1444,7 +1567,7 @@ async def serve_trading_dashboard():
     dashboard_path = os.path.join(os.path.dirname(__file__), "trading_dashboard.html")
     if not os.path.exists(dashboard_path):
         raise HTTPException(status_code=404, detail="Trading dashboard not found")
-    return FileResponse(dashboard_path, media_type="text/html")
+    return FileResponse(dashboard_path, media_type="text/html", headers=_NO_STORE)
 
 
 @app.get("/live-dashboard")
@@ -1453,7 +1576,7 @@ async def serve_live_dashboard():
     dashboard_path = os.path.join(os.path.dirname(__file__), "live_trading_dashboard.html")
     if not os.path.exists(dashboard_path):
         raise HTTPException(status_code=404, detail="Live dashboard not found")
-    return FileResponse(dashboard_path, media_type="text/html")
+    return FileResponse(dashboard_path, media_type="text/html", headers=_NO_STORE)
 
 
 @app.get("/family-tree-dashboard")
@@ -1466,7 +1589,82 @@ async def serve_family_tree_dashboard():
     dashboard_path = os.path.join(os.path.dirname(__file__), "family_tree_dashboard.html")
     if not os.path.exists(dashboard_path):
         raise HTTPException(status_code=404, detail="Family tree dashboard not found")
-    return FileResponse(dashboard_path, media_type="text/html")
+    return FileResponse(dashboard_path, media_type="text/html", headers=_NO_STORE)
+
+
+@app.get("/card")
+async def serve_status_card():
+    """One phone screen, built to be SCREENSHOTTED rather than read.
+
+    This exists because of a communication failure, not a missing feature.
+    Through 2026-09-25 every diagnostic went: Claude writes a PowerShell
+    command, the operator runs it on a phone, pastes the output back. That
+    path failed repeatedly and expensively - terminal tables wrap into mush
+    at phone width, pastes arrived truncated or empty, and several values
+    were read back as the opposite of what the terminal actually printed.
+    Hours were lost to "BTC flipped" / "mode is family_tree" / "no
+    position" when the output said otherwise.
+
+    Screenshots, meanwhile, came through perfectly every single time.
+
+    So this page answers every question that debugging session kept asking
+    - is the loop running, which commit is live, what do the branches hold,
+    has anything traded today, what does the spread plan say - in large
+    type, one column, no horizontal scroll, with the verdict at the top in
+    plain words. Screenshot it and the whole state transfers at once.
+
+    /live-ops is the richer operational dashboard and stays the better page
+    to actually work from. This is deliberately narrower: it is the page
+    you send someone.
+    """
+    path = os.path.join(os.path.dirname(__file__), "status_card.html")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Status card not found")
+    return FileResponse(path, media_type="text/html")
+
+
+@app.get("/live-ops")
+async def serve_live_ops_dashboard():
+    """Serve the Live Ops page - one screen answering "is it working right
+    now", as opposed to the other dashboards, which answer "what does the
+    account hold".
+
+    The difference matters most right after a deploy. Balances look
+    identical whether the bot is running or has crashed; only its
+    DECISIONS separate the two. So this page leads with a heartbeat driven
+    by real gate verdicts, and shows the settings the process is actually
+    using - which is also the quickest confirmation that the build now
+    serving is the new one.
+
+    Reads /api/trading-dashboard/live-ops, which serves every panel in a
+    single poll with each section carrying its own error, so one venue
+    being unreachable degrades a panel instead of blanking the page."""
+    dashboard_path = os.path.join(os.path.dirname(__file__), "live_ops_dashboard.html")
+    if not os.path.exists(dashboard_path):
+        raise HTTPException(status_code=404, detail="Live Ops dashboard not found")
+    return FileResponse(dashboard_path, media_type="text/html", headers=_NO_STORE)
+
+
+@app.get("/strategy-lab-view")
+async def serve_strategy_lab():
+    """Serve the 432-variant Strategy Lab sweep page.
+
+    SHADOW-MODE ONLY: reads public Coinbase candles, places no orders, and
+    promotes nothing. The sweep runs as a background job because thousands
+    of replays take minutes, and the page polls it so the ranking can be
+    read while it is still filling in.
+
+    The column that matters on that page is the last one. Ranking thousands
+    of variants by out-of-sample return and reading the top row is still
+    selection on out-of-sample: holding back 30% of the data protects one
+    hypothesis, not the best of thousands. So every row is marked against
+    the noise floor for the width of the search that produced it - "above
+    luck" or "within luck" - because a table sorted by return, without that,
+    reads as a recommendation."""
+    page_path = os.path.join(os.path.dirname(__file__), "strategy_lab.html")
+    if not os.path.exists(page_path):
+        raise HTTPException(status_code=404, detail="Strategy Lab page not found")
+    return FileResponse(page_path, media_type="text/html", headers=_NO_STORE)
 
 
 @app.get("/crypto-selection-backtest-view")
@@ -1479,7 +1677,7 @@ async def serve_crypto_selection_backtest():
     page_path = os.path.join(os.path.dirname(__file__), "crypto_selection_backtest.html")
     if not os.path.exists(page_path):
         raise HTTPException(status_code=404, detail="Backtest page not found")
-    return FileResponse(page_path, media_type="text/html")
+    return FileResponse(page_path, media_type="text/html", headers=_NO_STORE)
 
 
 @app.get("/alpaca-selection-backtest-view")
@@ -1494,7 +1692,7 @@ async def serve_alpaca_selection_backtest():
     page_path = os.path.join(os.path.dirname(__file__), "alpaca_selection_backtest.html")
     if not os.path.exists(page_path):
         raise HTTPException(status_code=404, detail="Backtest page not found")
-    return FileResponse(page_path, media_type="text/html")
+    return FileResponse(page_path, media_type="text/html", headers=_NO_STORE)
 
 
 @app.get("/alpaca-dashboard")
@@ -1507,7 +1705,7 @@ async def serve_alpaca_dashboard():
     dashboard_path = os.path.join(os.path.dirname(__file__), "alpaca_dashboard.html")
     if not os.path.exists(dashboard_path):
         raise HTTPException(status_code=404, detail="Alpaca dashboard not found")
-    return FileResponse(dashboard_path, media_type="text/html")
+    return FileResponse(dashboard_path, media_type="text/html", headers=_NO_STORE)
 
 
 @app.get("/api/orchestrator/stats")
@@ -1922,7 +2120,81 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "platform": "pgusa-documents", "version": "v2.1-trading-signals"}
+    """Liveness, plus WHICH COMMIT is actually serving this request.
+
+    The hardcoded "version" below is a build label that has not changed in
+    a long time, so it answered "is it up?" and nothing else. That gap cost
+    real time on 2026-09-25: two fixes (33ddd4b, 8b4153b) sat pushed to
+    origin/main while the running service kept serving the old code, and
+    the only way to notice was to probe a behaviour that differed - reading
+    openapi.json for a query param, or watching for a log line to change.
+
+    Railway injects RAILWAY_GIT_COMMIT_SHA into every deploy, so the
+    running build can just say what it is. `git log --oneline -1` locally
+    versus `commit` here answers "did my push actually deploy?" outright.
+    Falls back to "unknown" off-Railway, where the variable is absent.
+
+    uptime_seconds exists for the OTHER half of that question, which the
+    commit alone cannot answer. An environment-variable change does not
+    change the commit, so when a variable edit appears not to have taken,
+    "is the variable wrong?" and "did the process ever restart to re-read
+    it?" look identical from outside - and os.getenv() is only re-read at
+    process start. That ambiguity stalled the CRYPTO_STRATEGY_MODE fix on
+    2026-09-25 across three consecutive checks.
+
+    With uptime, the two separate cleanly: a large uptime alongside a
+    stale value means the process never restarted (on Railway, typically
+    a staged variable change that was never applied), while a small
+    uptime alongside a stale value means the process DID restart and the
+    variable genuinely is not set on this service.
+
+    crypto_strategy_mode is reported for the same reason - it is the
+    variable this deployment gets wrong most often, and reading it here
+    costs nothing.
+
+    environment and project close the last blind spot. Railway scopes
+    variables to a selected ENVIRONMENT, so editing one the domain does
+    not serve saves correctly and never takes effect - indistinguishable
+    from every other cause without knowing which environment is actually
+    serving. Reporting it turns "my edit did not take" into a comparison
+    against what the Railway UI shows at the top of the page.
+
+    strategy_env_keys lists the NAMES of every environment variable
+    containing "STRATEGY", which catches the duplicate- and misspelled-key
+    case from the server side - the exact failure that cost hours on
+    2026-09-25, where two CRYPTO_STRATEGY_MODE entries existed and the
+    stale one won. Names only, never values, and only keys matching that
+    narrow pattern: this endpoint is public, so it must never become a way
+    to read credentials out of the environment.
+    """
+    sha = (os.getenv("RAILWAY_GIT_COMMIT_SHA")
+           or os.getenv("RAILWAY_GIT_COMMIT")
+           or "")
+    uptime = round(time.time() - _PROCESS_STARTED_AT, 1)
+    # Names only. Never values - /health is unauthenticated.
+    strategy_env_keys = sorted(k for k in os.environ if "STRATEGY" in k.upper())
+    return {
+        "status": "ok",
+        "platform": "pgusa-documents",
+        "version": "v2.1-trading-signals",
+        "commit": sha[:7] if sha else "unknown",
+        "commit_full": sha or "unknown",
+        "branch": os.getenv("RAILWAY_GIT_BRANCH") or "unknown",
+        "deployed_at": os.getenv("RAILWAY_DEPLOYMENT_CREATED_AT") or "unknown",
+        "service": os.getenv("RAILWAY_SERVICE_NAME") or "unknown",
+        "service_role": os.getenv("SERVICE_ROLE") or "unset",
+        "uptime_seconds": uptime,
+        "uptime_human": f"{int(uptime // 3600)}h {int((uptime % 3600) // 60)}m",
+        # The ENVIRONMENT's opinion...
+        "crypto_strategy_mode": os.getenv("CRYPTO_STRATEGY_MODE") or "(unset)",
+        # ...and what this process is ACTUALLY running, which is the one that
+        # matters and can differ (see RESOLVED_CRYPTO_MODE). None means the
+        # lifespan has not finished resolving it yet.
+        "crypto_strategy_mode_running": RESOLVED_CRYPTO_MODE or "(resolving)",
+        "environment": os.getenv("RAILWAY_ENVIRONMENT_NAME") or "unknown",
+        "project": os.getenv("RAILWAY_PROJECT_NAME") or "unknown",
+        "strategy_env_keys": strategy_env_keys,
+    }
 
 
 @app.get("/study-app")
@@ -2211,7 +2483,7 @@ async def telegram_send_test(message: str = "Test message from Hermes Agent 🤖
 async def record_bot_status(request: BotStatusRequest):
     """Record trading bot status (called by bots)"""
     from status_reporter import get_status_reporter
-    from database import AsyncSessionLocal
+    from database import get_session_factory
     from models import BotStatus as BotStatusModel
 
     reporter = get_status_reporter()
@@ -2232,7 +2504,7 @@ async def record_bot_status(request: BotStatusRequest):
         )
 
         # Also persist to database
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             db_status = BotStatusModel(
                 bot_name=request.bot_name,
                 timestamp=datetime.utcnow(),

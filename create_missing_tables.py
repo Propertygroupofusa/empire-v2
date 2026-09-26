@@ -5,13 +5,13 @@ Run this when init_db() fails to create tables on startup.
 """
 import asyncio
 import sys
-from database import engine, Base
+from database import get_engine, Base
 from models import *  # noqa: F401,F403 - imports register models on Base.metadata
 
 async def main():
     print("[DB] Forcing table creation for all models...")
     try:
-        async with engine.begin() as conn:
+        async with get_engine().begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         print("[DB] ✅ All tables created successfully")
         return 0
@@ -21,7 +21,7 @@ async def main():
         traceback.print_exc()
         return 1
     finally:
-        await engine.dispose()
+        await get_engine().dispose()
 
 if __name__ == "__main__":
     exit_code = asyncio.run(main())

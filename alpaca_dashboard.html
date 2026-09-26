@@ -319,7 +319,9 @@
     <div class="kpi-row">
         <div class="kpi profit" id="stat-profit-card"><div class="label">💰 Total Profit</div><div class="value" id="stat-profit">—</div></div>
         <div class="kpi"><div class="label">Equity</div><div class="value" id="stat-equity">—</div></div>
+        <div id="bp-banner" hidden style="grid-column:1/-1; padding:10px 12px; border-radius:6px; background:rgba(200,70,80,.12); border:1px solid rgba(200,70,80,.35); font-size:.9em; line-height:1.5;"></div>
         <div class="kpi"><div class="label">Cash</div><div class="value" id="stat-cash">—</div></div>
+        <div class="kpi"><div class="label">Buying power</div><div class="value" id="stat-bp">—</div></div>
         <div class="kpi"><div class="label">Session P&amp;L</div><div class="value" id="stat-pl">—</div></div>
         <div class="kpi"><div class="label">Scale</div><div class="value" id="stat-scale">—</div></div>
         <div class="kpi"><div class="label">Floor</div><div class="value" id="stat-floor">—</div></div>
@@ -979,6 +981,42 @@ async function refresh() {
         plEl.className = 'value ' + (data.session_pl >= 0 ? 'pos' : 'neg');
         document.getElementById('stat-scale').textContent = data.scale + 'x';
         document.getElementById('stat-floor').textContent = fmtUsd(data.equity_floor);
+
+        // BUYING POWER, AND WHY.
+        //
+        // The prop bot halts when this falls under its floor, and until now
+        // that halt existed only as a CRITICAL line in the Railway logs -
+        // the one place the account owner cannot conveniently read. It
+        // repeated every cycle saying "$77.08 < $150" next to $810.64 of
+        // cash, with no way to tell an unsettled-funds wait from a PDT
+        // restriction that waiting never fixes.
+        const bpEl = document.getElementById('stat-bp');
+        if (data.buying_power != null) {
+            bpEl.textContent = fmtUsd(data.buying_power);
+            // Coloured only when it is actually blocking trading, so the
+            // tile is not permanently alarming on a healthy account.
+            bpEl.className = 'value' + (data.buying_power_halted ? ' neg' : '');
+        } else {
+            bpEl.textContent = '—';
+            bpEl.className = 'value';
+        }
+        const bpBan = document.getElementById('bp-banner');
+        if (bpBan) {
+            if (data.buying_power_halted) {
+                bpBan.hidden = false;
+                bpBan.innerHTML =
+                    `<strong>Trading halted on buying power.</strong> ` +
+                    `${fmtUsd(data.buying_power)} available against a ` +
+                    `${fmtUsd(data.buying_power_floor)} floor, with ` +
+                    `${fmtUsd(data.cash)} cash in the account.` +
+                    (data.buying_power_reason
+                        ? `<br><span style="opacity:.85">${data.buying_power_reason}</span>`
+                        : `<br><span style="opacity:.85">No account field explains it ` +
+                          `&mdash; that is itself worth knowing.</span>`);
+            } else {
+                bpBan.hidden = true;
+            }
+        }
         document.getElementById('stat-locked').textContent = fmtUsd(data.locked_usd || 0);
         currentLockedUsd = data.locked_usd || 0;
         updateUnlockButtonState();

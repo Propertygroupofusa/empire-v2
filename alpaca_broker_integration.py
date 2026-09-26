@@ -8,7 +8,7 @@ import logging
 import base64
 from datetime import datetime
 from typing import Optional, Dict, List
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import Payment, Worker
 from sqlalchemy import select, func, update
 
@@ -97,7 +97,7 @@ class AlpacaBrokerClient:
 async def get_pending_earnings(worker_id: str) -> float:
     """Get total unpaid earnings for a worker (payout_status != 'paid')"""
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             result = await session.execute(
                 select(func.sum(Payment.worker_amount))
                 .where((Payment.worker_id == worker_id) & (Payment.payout_status == "pending"))
@@ -115,7 +115,7 @@ async def mark_payments_transferred(worker_id: str, amount: float) -> int:
     Returns count of payments marked
     """
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             # Get payments in order (oldest first) until we hit the target amount
             payments_result = await session.execute(
                 select(Payment)
@@ -180,7 +180,7 @@ async def auto_fund_trading_account(
 
     try:
         # Step 1: Find worker
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             worker_result = await session.execute(
                 select(Worker).where(Worker.email == worker_email)
             )
@@ -254,7 +254,7 @@ async def bulk_auto_fund_all_workers(
 
     try:
         # Get all workers with pending earnings
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             workers_with_pending = await session.execute(
                 select(Worker.id, Worker.email, func.sum(Payment.worker_amount).label("pending"))
                 .join(Payment, Payment.worker_id == Worker.id)

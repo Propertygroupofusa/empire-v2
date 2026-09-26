@@ -21,15 +21,22 @@ import random
 import uuid
 from datetime import datetime, timezone, timedelta
 
+import json as json_module
 import aiohttp
-from fastapi import APIRouter, Depends, HTTPException
+import strategy_batch
+import strategy_lab
+import strategy_pine_export
+from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import select, func, case, text, delete, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database import get_db, AsyncSessionLocal
+from database import get_db, get_session_factory
 from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory, PricePredictionCalibration, PricePredictionLog, BtcTickerWindowAnchor, AlpacaBranch, CombinedEquitySnapshot, AlpacaBacktestRun
+
+AsyncSessionLocal = get_session_factory()
 
 NUM_BOTS = int(os.getenv("PROP_NUM_BOTS", "8"))
 if NUM_BOTS <= 0:
@@ -85,6 +92,19 @@ try:
 except Exception as e:
     log.warning(f"crypto_grid_bot not importable, /grid-status will report unavailable: {e}")
     crypto_grid_bot_module = None
+
+try:
+    import scaling_coordinator as scaling_coordinator_module
+except Exception as e:
+    log.warning(f"scaling_coordinator not importable, /fleet-status will report unavailable: {e}")
+    scaling_coordinator_module = None
+
+try:
+    import crypto_btc_compound_bot as crypto_btc_compound_bot_module
+except Exception as e:
+    log.warning(f"crypto_btc_compound_bot not importable, /btc-compound/close-position will "
+                f"report unavailable: {e}")
+    crypto_btc_compound_bot_module = None
 
 ALPACA_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
@@ -758,6 +778,136 @@ async def get_crypto_coinbase_status():
     }
 
 
+@router.get("/coinbase-statement")
+async def get_coinbase_statement(start: str, end: str,
+                                 db: AsyncSession = Depends(get_db)):
+    """What COINBASE says happened, set against what the bots recorded.
+
+    Read-only. Places no order and writes nothing.
+
+    This exists because the account's own records could not answer where
+    $473 went between 2026-09-04 and 2026-09-26. The coin-history ledger
+    had 11 rows that could not reproduce their own P&L, the grid ledger was
+    missing a real +$178.44 round trip that the activity feed recorded, and
+    the equity series had a 16-day hole across the period most of the
+    decline happened in. Those are three independent self-reports, and they
+    disagree with each other.
+
+    So this asks the exchange. Coinbase returns every fill with its real
+    size, price and COMMISSION - none of it inferred, none of it written by
+    code in this repository - and the endpoint sets the resulting cash flow
+    beside what each ledger claims for the same window. Where they differ,
+    Coinbase is right and we are wrong.
+
+    Dates are ISO-8601, e.g. ?start=2026-09-04T00:00:00Z&end=2026-09-26T23:59:59Z
+    """
+    if crypto_btc_compound_bot_module is None:
+        raise HTTPException(status_code=500,
+                            detail="crypto_btc_compound_bot not importable - no Coinbase auth available")
+    mod = crypto_btc_compound_bot_module
+    try:
+        async with mod.aiohttp.ClientSession() as session:
+            raw = await mod.fetch_fills_between(session, start, end)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"fills fetch failed: {type(e).__name__}: {e}")
+    if not raw.get("available"):
+        return {"available": False, "window": {"start": start, "end": end},
+                "error": raw.get("error"), "detail": raw.get("detail"),
+                "hint": ("A 401 means this process has no usable Coinbase key; "
+                         "a 400 usually means the timestamps are not ISO-8601 UTC.")}
+
+    statement = mod.summarise_fills(raw["fills"])
+
+    # Parse the window ONCE, into real datetimes. The first version compared
+    # a DateTime column against `start.replace("Z", "")` - a string - which
+    # Postgres would not cast and the endpoint answered 500 instead of
+    # answering the question. A ledger comparison that cannot run is worse
+    # than no comparison, because the statement half still looked fine.
+    def _dt(s):
+        try:
+            return datetime.fromisoformat(str(s).replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            return None
+    t0, t1 = _dt(start), _dt(end)
+
+    # What OUR records claim for the same window, so the two can be compared
+    # rather than each being believed on its own.
+    # Imported locally, matching how every other CryptoGrid* model is reached
+    # in this module - the top-level models import does not carry them.
+    from models import CryptoGridTradeHistory
+    ledger_error = None
+    tree_pnl = tree_n = grid_pnl = grid_n = None
+    if t0 and t1:
+        try:
+            tree_pnl, tree_n = (await db.execute(
+                select(func.sum(CryptoCoinTradeHistory.pnl),
+                       func.count(CryptoCoinTradeHistory.id))
+                .where(CryptoCoinTradeHistory.closed_at >= t0)
+                .where(CryptoCoinTradeHistory.closed_at <= t1))).one()
+            grid_pnl, grid_n = (await db.execute(
+                select(func.sum(CryptoGridTradeHistory.pnl),
+                       func.count(CryptoGridTradeHistory.id))
+                .where(CryptoGridTradeHistory.closed_at >= t0)
+                .where(CryptoGridTradeHistory.closed_at <= t1))).one()
+        except Exception as e:
+            # The exchange half is the point of this endpoint. A failure to
+            # read OUR OWN tables must not take it down with it.
+            ledger_error = f"{type(e).__name__}: {e}"
+    else:
+        ledger_error = "start/end were not parseable as ISO-8601"
+    ledger_total = (round((tree_pnl or 0.0) + (grid_pnl or 0.0), 2)
+                    if ledger_error is None else None)
+
+    return {
+        "available": True,
+        "window": raw["window"],
+        "source": "Coinbase /orders/historical/fills - the exchange's own record",
+        "pages_read": raw.get("pages_read"),
+        "truncated": raw.get("truncated", False),
+        "statement": statement,
+        # Two untouched fills, exactly as Coinbase returned them. The first
+        # version of this endpoint reported $96.5M of BTC on a $1,000
+        # account because it assumed `size` was always the base quantity;
+        # a raw sample makes the next such assumption checkable from the
+        # response instead of needing another deploy to find out.
+        "raw_sample": raw["fills"][:2],
+        "our_ledgers": {
+            "error": ledger_error,
+            "tree_realized_pnl": round(tree_pnl or 0.0, 2), "tree_trades": tree_n or 0,
+            "grid_realized_pnl": round(grid_pnl or 0.0, 2), "grid_trades": grid_n or 0,
+            "combined_realized_pnl": ledger_total,
+            "combined_trades": (tree_n or 0) + (grid_n or 0),
+        },
+        "reconciliation": {
+            "coinbase_fills": statement["fills"],
+            "our_recorded_round_trips": (tree_n or 0) + (grid_n or 0),
+            "coinbase_commission_usd": statement["commission_usd"],
+            "basis": ("A round trip is two fills, so roughly half the fill count "
+                      "should appear as recorded trades. A large shortfall means "
+                      "real executions never reached our ledger at all - which is "
+                      "the failure mode already confirmed for the ARB close on "
+                      "2026-09-23."),
+        },
+    }
+
+
+def _resolved_crypto_mode() -> str:
+    """Which crypto loop is ACTUALLY running, not which one the env var names.
+
+    main.py resolves this at boot - a DB override beats CRYPTO_STRATEGY_MODE -
+    and stashes the answer on RESOLVED_CRYPTO_MODE. Reading the env var here
+    instead reported a stale variable as the live configuration.
+    """
+    try:
+        import main as _main
+        resolved = getattr(_main, "RESOLVED_CRYPTO_MODE", None)
+        if resolved:
+            return resolved
+    except Exception:
+        pass
+    return os.getenv("CRYPTO_STRATEGY_MODE", "") or "(unset)"
+
+
 @router.get("/family-tree-status")
 async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     """Real DB state of every crypto_family_tree_bot.py branch. Unlike
@@ -765,8 +915,17 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     to read here - each branch runs as its own independent thread, so the
     CryptoTreeBranch/BotPosition rows in the database are the only place a
     branch's live state actually exists. Backs family_tree_dashboard.html."""
-    branches_result = await db.execute(select(CryptoTreeBranch).order_by(CryptoTreeBranch.created_at))
-    branches = list(branches_result.scalars().all())
+    try:
+        branches_result = await db.execute(select(CryptoTreeBranch).order_by(CryptoTreeBranch.created_at))
+        branches = list(branches_result.scalars().all())
+    except Exception as e:
+        log.error(f"[dashboard] Failed to fetch branches: {e}")
+        return {
+            "error": "Database unavailable",
+            "status": "degraded",
+            "branches": [],
+            "message": f"Could not fetch trading branches from database: {str(e)}"
+        }
 
     positions_by_bot = {}
     if branches:
@@ -793,27 +952,51 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     real_balance = None
     real_usdc_balance = None
     if crypto_family_tree_bot_module is not None:
-        engine = crypto_family_tree_bot_module.engine
-        async with engine.aiohttp.ClientSession() as session:
-            for bot_name, pos in positions_by_bot.items():
-                price, _atr_pct = await engine.get_price_and_volatility(session, pos.symbol)
-                if price is not None:
-                    current_price_by_bot[bot_name] = price
-            real_balance, _err = await engine.get_usd_balance(session)
-            # Real, read-only visibility into a confirmed-live confusion:
-            # get_usd_balance() (and therefore spendable_for_spawn below)
-            # only ever sees the literal USD account - a real balance
-            # sitting in USDC (Coinbase's own "Earn APY by converting USD
-            # to USDC" feature can put it there) is invisible to it and
-            # can make a genuinely healthy account look like it has $0 or
-            # negative real spendable cash. Never folded into
-            # spendable_for_spawn or any order-execution path - whether a
-            # BTC-USD order can be funded directly from USDC is
-            # unconfirmed from this sandbox, and the account owner's own
-            # documented choice for this exact scenario is to convert it
-            # back to USD by hand. This is purely so that choice can be
-            # made with the real number in front of them.
-            real_usdc_balance, _usdc_err = await engine.get_usdc_balance(session)
+        try:
+            engine = crypto_family_tree_bot_module.engine
+            async with engine.aiohttp.ClientSession() as session:
+                for bot_name, pos in positions_by_bot.items():
+                    price, _atr_pct = await engine.get_price_and_volatility(session, pos.symbol)
+                    if price is not None:
+                        current_price_by_bot[bot_name] = price
+                real_balance, balance_err = await engine.get_usd_balance(session)
+                # Real, read-only visibility into a confirmed-live confusion:
+                # get_usd_balance() (and therefore spendable_for_spawn below)
+                # only ever sees the literal USD account - a real balance
+                # sitting in USDC (Coinbase's own "Earn APY by converting USD
+                # to USDC" feature can put it there) is invisible to it and
+                # can make a genuinely healthy account look like it has $0 or
+                # negative real spendable cash. Never folded into
+                # spendable_for_spawn or any order-execution path - whether a
+                # BTC-USD order can be funded directly from USDC is
+                # unconfirmed from this sandbox, and the account owner's own
+                # documented choice for this exact scenario is to convert it
+                # back to USD by hand. This is purely so that choice can be
+                # made with the real number in front of them.
+                real_usdc_balance, _usdc_err = await engine.get_usdc_balance(session)
+
+                if real_balance is None and balance_err:
+                    log.warning(f"[dashboard] Coinbase USD balance fetch failed: {balance_err}")
+                    if "401" in str(balance_err):
+                        log.error("[dashboard] HTTP 401: Coinbase API credentials may not be set in Railway. Check COINBASE_API_KEY and COINBASE_API_PRIVATE_KEY environment variables.")
+        except Exception as e:
+            log.warning(f"[dashboard] Coinbase API call failed (prices/balances unavailable): {e}")
+
+    # Fetch real Alpaca equity for the dashboard header
+    alpaca_equity = None
+    if ALPACA_KEY and ALPACA_SECRET:
+        try:
+            async with aiohttp.ClientSession() as alpaca_session:
+                async with alpaca_session.get(
+                    f"{ALPACA_BASE_URL}/v2/account",
+                    headers=ALPACA_HEADERS,
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    if resp.status == 200:
+                        alpaca_data = await resp.json()
+                        alpaca_equity = float(alpaca_data.get('equity', 0))
+        except Exception as e:
+            log.warning(f"[dashboard] Alpaca equity fetch failed: {e}")
 
     # Fetched ONCE per request (a real DB read), not per-branch inside the
     # loop below - the same real, live, dashboard-switchable trailing-stop
@@ -990,26 +1173,124 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     # piece is missing this poll; the caller treats that as "this side
     # is unavailable right now", exactly like a hard failure.
     real_crypto_net_worth_usd = None
-    if real_balance is not None and tree_holdings_complete:
-        grid_holdings_value, grid_holdings_complete = 0.0, True
-        if crypto_grid_bot_module is not None:
-            try:
-                grid_holdings_value, grid_holdings_complete = (
-                    await crypto_grid_bot_module.get_grid_holdings_market_value()
-                )
-            except Exception as exc:
-                grid_holdings_complete = False
-                log.warning(f"[dashboard] grid holdings market value unavailable this poll: {exc}")
-        if grid_holdings_complete:
-            real_crypto_net_worth_usd = round(
-                real_balance + tree_holdings_market_value + grid_holdings_value, 2
+    grid_holdings_value, grid_holdings_complete = 0.0, True
+    if crypto_grid_bot_module is not None:
+        try:
+            grid_holdings_value, grid_holdings_complete = (
+                await crypto_grid_bot_module.get_grid_holdings_market_value()
             )
+        except Exception as exc:
+            grid_holdings_complete = False
+            log.warning(f"[dashboard] grid holdings market value unavailable this poll: {exc}")
+    if real_balance is not None and tree_holdings_complete and grid_holdings_complete:
+        real_crypto_net_worth_usd = round(
+            real_balance + tree_holdings_market_value + grid_holdings_value, 2
+        )
+
+    # The TOTAL above stays all-or-nothing: a partial total is a wrong
+    # number, and this codebase does not ship wrong numbers.
+    #
+    # But a lone blank where a figure should be tells the operator only
+    # that SOMETHING is wrong, never WHICH something - which is exactly
+    # the complaint this breakdown answers ("why is this not showing how
+    # much Coinbase is"). Each of the three inputs now reports itself, so
+    # one unreadable piece names itself instead of silently erasing the
+    # two that read fine. Every component is a real number or null with
+    # available:false - never a zero standing in for unknown.
+    #
+    # Note the restructure above: the grid lookup used to sit INSIDE the
+    # `real_balance is not None and tree_holdings_complete` branch, so
+    # whenever an earlier piece failed the grid value was never even
+    # fetched and could not report on itself. It is now gathered
+    # unconditionally, and only the total is gated.
+    real_crypto_net_worth_breakdown = {
+        "usd_wallet": {
+            "usd": round(real_balance, 2) if real_balance is not None else None,
+            "available": real_balance is not None,
+            "label": "Coinbase USD wallet",
+        },
+        "tree_coin": {
+            "usd": round(tree_holdings_market_value, 2) if tree_holdings_complete else None,
+            "available": bool(tree_holdings_complete),
+            "label": "Coin held by tree branches",
+        },
+        "grid_coin": {
+            "usd": round(grid_holdings_value, 2) if grid_holdings_complete else None,
+            "available": bool(grid_holdings_complete),
+            "label": "Coin held by grid branches",
+        },
+    }
+    real_crypto_net_worth_missing = [
+        v["label"] for v in real_crypto_net_worth_breakdown.values() if not v["available"]
+    ]
 
     crypto_passive_mode = await crypto_family_tree_bot_module.is_crypto_passive_mode() if crypto_family_tree_bot_module else False
     rolling_expectancy = await crypto_family_tree_bot_module.get_rolling_expectancy() if crypto_family_tree_bot_module else None
     exit_mode = await crypto_family_tree_bot_module.get_live_exit_mode() if crypto_family_tree_bot_module else "trailing_stop"
     trailing_stop_pct = await crypto_family_tree_bot_module.get_live_trailing_stop_pct() if crypto_family_tree_bot_module else None
     reversal_trade_active = await crypto_family_tree_bot_module.get_reversal_trade_active() if crypto_family_tree_bot_module else False
+
+    # Calculate scale bot metrics for tier visualization
+    # Compute aggregate metrics from all branches
+    total_unrealized = sum(b.get("unrealized_pnl", 0) for b in out if isinstance(b, dict))
+    total_trades = sum(b.get("total_trades", 0) for b in out if isinstance(b, dict))
+    total_wins = sum(b.get("trades_won", 0) for b in out if isinstance(b, dict))
+
+    # Safe calculation with fallbacks
+    win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
+    profit_factor = 1.0  # Neutral default
+
+    # Calculate net P&L and drawdown using equity metrics
+    net_pnl = total_unrealized
+    drawdown_pct = 0.0
+    if real_crypto_net_worth_usd and real_crypto_net_worth_usd > 0:
+        # Use current unrealized P&L as proxy for drawdown
+        if net_pnl < 0:
+            drawdown_pct = abs(net_pnl) / real_crypto_net_worth_usd * 100
+        # Cap drawdown at reasonable max
+        drawdown_pct = min(drawdown_pct, 100.0)
+
+    scale_bot_metrics = {
+        "total_capital": round(real_crypto_net_worth_usd or 0, 2),
+        "current_tier": 1,  # Tier 1 = $0-1k, Tier 2 = $1k-10k, Tier 3 = $10k+
+        "tier_threshold_lower": 0,
+        "tier_threshold_upper": 1000,
+        "capital_at_tier_start": 0,
+        "capital_allocated_pct": round((real_balance or 0) / (real_crypto_net_worth_usd or 1) * 100, 1) if real_crypto_net_worth_usd else 0,
+        "growth_rate_pct": round(((net_pnl / real_crypto_net_worth_usd * 100) if real_crypto_net_worth_usd else 0), 2),
+        "drawdown_pct": round(drawdown_pct, 2),
+        "win_rate": round(win_rate, 1),
+        "profit_factor": round(profit_factor, 2),
+        # get_rolling_expectancy() returns a DICT (expectancy, num_trades,
+        # win_count, ...), not a bare number - see the "rolling_expectancy"
+        # passthrough below, whose consumer reads sub-keys off it. round() on
+        # a dict raises TypeError, and a non-empty dict is truthy so "or 0"
+        # never caught it. Both of that function's return shapes are
+        # non-empty dicts, so this 500'd /family-tree-status on every single
+        # request whenever the bot module was loaded at all - with or
+        # without trades - taking the whole Coinbase Trading page down with
+        # it. Read the per-trade average off its own key; "expectancy" is
+        # None until ROLLING_EXPECTANCY_MIN_TRADES real trades exist, which
+        # "or 0" does handle correctly.
+        "expectancy_per_trade": round((rolling_expectancy or {}).get("expectancy") or 0, 2),
+        "branch_count": len(out),
+        "locked_usd": locked_usd,
+    }
+
+    # Determine tier based on total capital
+    if (real_crypto_net_worth_usd or 0) >= 10000:
+        scale_bot_metrics["current_tier"] = 3
+        scale_bot_metrics["tier_threshold_lower"] = 10000
+        scale_bot_metrics["tier_threshold_upper"] = 50000
+        scale_bot_metrics["capital_at_tier_start"] = 10000
+    elif (real_crypto_net_worth_usd or 0) >= 1000:
+        scale_bot_metrics["current_tier"] = 2
+        scale_bot_metrics["tier_threshold_lower"] = 1000
+        scale_bot_metrics["tier_threshold_upper"] = 10000
+        scale_bot_metrics["capital_at_tier_start"] = 1000
+
+    # Get actual grid bot active state
+    grid_bot_active = await crypto_grid_bot_module.is_grid_bot_active() if crypto_grid_bot_module else True
 
     return {
         "branches": out,
@@ -1029,17 +1310,56 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         # tree AND Grid Bot) - see the block above. This, NOT
         # total_equity_usd, is what the combined $1M tracker uses.
         "real_crypto_net_worth_usd": real_crypto_net_worth_usd,
+        # Present whether or not the total resolved, so a blank total can
+        # always be explained rather than just observed.
+        "real_crypto_net_worth_breakdown": real_crypto_net_worth_breakdown,
+        "real_crypto_net_worth_missing": real_crypto_net_worth_missing,
         "locked_usd": locked_usd,
         "spendable_for_spawn": spendable_for_spawn,
         "seed_usd": seed_usd,
         "can_spawn": can_spawn,
         "crypto_passive_mode": crypto_passive_mode,
+        # Which Coinbase loop this deploy actually starts, and therefore
+        # which half of the tree screen is live.
+        #
+        # main.py starts the family-tree loop ONLY when CRYPTO_STRATEGY_MODE
+        # is "family_tree"; under "grid_fleet" it logs that execution is
+        # delegated to the crypto-trading service and starts nothing here.
+        # The tree's own balances, positions and reconciliation stay real
+        # either way - it still HOLDS coin - but its trading controls
+        # (spawn, exit mode, reversal, trailing stop) drive a loop that is
+        # not running, and a control that silently does nothing is worse
+        # than one that is plainly labelled inert. Surfaced so the page can
+        # say so instead of the operator finding out by pressing it.
+        # THE RESOLVED MODE, not the raw environment variable.
+        #
+        # main.py lets a DB-persisted override WIN over CRYPTO_STRATEGY_MODE,
+        # because on 2026-09-25 that variable could not be corrected through
+        # the Railway UI across six attempts. So the env var can say
+        # 'delfina_scalping' while the process is genuinely running
+        # 'grid_fleet' - which is exactly what it said on 2026-09-26, and it
+        # was read off this panel as "the tree loop is broken" when the real
+        # answer was "the tree loop is deliberately not the running loop".
+        #
+        # Reporting the variable instead of the resolution made a correct
+        # deployment look like a fault. Both are served now: the resolved
+        # mode is what governs, the env var is kept beside it so a stale
+        # variable is still visible rather than hidden by the override.
+        "crypto_strategy_mode": _resolved_crypto_mode(),
+        "crypto_strategy_mode_env": os.getenv("CRYPTO_STRATEGY_MODE", "") or "(unset)",
+        "crypto_strategy_mode_source": ("database override" if _resolved_crypto_mode()
+                                        != (os.getenv("CRYPTO_STRATEGY_MODE", "") or "(unset)")
+                                        else "environment"),
+        "family_tree_loop_running": _resolved_crypto_mode() == "family_tree",
         "rolling_expectancy": rolling_expectancy,
         "exit_mode": exit_mode,
         "trailing_stop_pct": trailing_stop_pct,
         "reversal_trade_active": reversal_trade_active,
         "real_usd_balance": round(real_balance, 2) if real_balance is not None else None,
         "real_usdc_balance": round(real_usdc_balance, 2) if real_usdc_balance is not None else None,
+        "alpaca_equity": round(alpaca_equity, 2) if alpaca_equity is not None else None,
+        "scale_bot_metrics": scale_bot_metrics,
+        "grid_bot_active": grid_bot_active,
     }
 
 
@@ -1370,7 +1690,65 @@ async def get_coin_trade_history(db: AsyncSession = Depends(get_db)):
     for coin in coins:
         coin["trades"] = trades_by_coin.get(coin["product_id"], [])
 
-    return {"coins": coins, "coin_count": len(coins)}
+    # SELF-AUDIT. Every row carries the entry price, the exit price and the
+    # quantity its P&L was computed from, so every row can be asked to
+    # reproduce its own number. A row that cannot is not a rounding
+    # disagreement - it means the figure was computed from something other
+    # than the columns beside it.
+    #
+    # This exists because on 2026-09-26 eleven of 167 rows failed exactly
+    # that check, $339.59 more negative in aggregate and every one in the
+    # same direction, and it took a hand audit to notice. The cause was one
+    # line netting proceeds from filled_qty against a basis from
+    # position.qty (fixed in crypto_family_tree_bot). The check stays
+    # because the next such bug should announce itself here rather than
+    # wait for somebody to go looking.
+    #
+    # The tolerance is deliberately generous - 2% of notional plus 5c -
+    # because the exact fee rate at the time of an old trade is not stored.
+    # Anything flagged is off by far more than a fee.
+    suspect, checked, drift = [], 0, 0.0
+    for t_list in trades_by_coin.values():
+        for t in t_list:
+            e, x, q, p = (t.get("entry_price"), t.get("exit_price"),
+                          t.get("qty"), t.get("pnl"))
+            if None in (e, x, q, p):
+                continue
+            checked += 1
+            gross = (x - e) * q
+            if abs(gross - p) > abs(e * q) * 0.02 + 0.05:
+                drift += p - gross
+                suspect.append({
+                    "id": t.get("id"), "product_id": t.get("product_id"),
+                    "bot_name": t.get("bot_name"), "qty": q,
+                    "notional_usd": round(e * q, 2),
+                    "prices_imply_pnl": round(gross, 2),
+                    "recorded_pnl": round(p, 2),
+                    "gap_usd": round(p - gross, 2),
+                    "closed_at": t.get("closed_at"),
+                })
+    suspect.sort(key=lambda r: abs(r["gap_usd"]), reverse=True)
+
+    return {
+        "coins": coins,
+        "coin_count": len(coins),
+        "integrity": {
+            "rows_checked": checked,
+            "rows_inconsistent": len(suspect),
+            "net_drift_usd": round(drift, 2),
+            "basis": ("Each row's P&L compared against (exit_price - entry_price) * qty "
+                      "from that same row, with 2% of notional + $0.05 allowed for fees. "
+                      "A flagged row's P&L was computed from something other than the "
+                      "columns stored beside it, so neither the row NOR any total "
+                      "containing it can be trusted."),
+            "verdict": ("every row reproduces its own P&L from its own columns"
+                        if not suspect else
+                        f"{len(suspect)} of {checked} rows cannot reproduce their own P&L "
+                        f"from their own columns; recorded totals are off by "
+                        f"${drift:,.2f} against what the stored prices imply"),
+            "rows": suspect[:25],
+        },
+    }
 
 
 @router.get("/family-tree-status/activity-feed")
@@ -2345,7 +2723,148 @@ async def consolidate_family_tree_branches(dry_run: bool = True):
     return await crypto_family_tree_bot_module.consolidate_branches_by_coin(dry_run=dry_run)
 
 
-@router.post("/family-tree-status/reconcile-asset/{currency}")
+@router.post("/btc-compound/close-position")
+async def close_btc_compound_position(dry_run: bool = True):
+    """Sell btc_compound's real BTC position at market, freeing the cash.
+
+    Built for a concrete situation on 2026-09-24: CRYPTO_STRATEGY_MODE was
+    set to an unrecognised value, crypto_strategy_config fell back to
+    btc_compound so the account would not sit idle, and that loop then
+    converted essentially the whole balance into BTC - $576.77 of equity
+    against $0.29 of USD. The grid fleet, deployed and healthy, had nothing
+    to trade with. Nothing in the dashboard could close that position,
+    because /coinbase/sell reads crypto_coinbase_bot's in-memory dict and
+    btc_compound tracks its position in the database instead.
+
+    Uses btc_compound's OWN _sell_and_settle(), not a hand-rolled sell, so
+    the fill, the realized P&L, the profit skim and the position clear all
+    happen exactly as they would on a normal target exit. A separate sell
+    path here would leave the bot still believing it holds BTC.
+
+    dry_run=true (the default) reports what would be sold and at what
+    current price, touching nothing. Only dry_run=false places the order.
+    """
+    if crypto_btc_compound_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_btc_compound_bot module not available")
+    engine = crypto_btc_compound_bot_module
+
+    position = await engine.load_position()
+    if position is None:
+        return {"status": "no_position", "detail": "btc_compound holds no position right now.",
+                "sold": False}
+
+    async with engine.aiohttp.ClientSession() as session:
+        price, _atr = await engine.get_price_and_volatility(session, engine.PRODUCT_ID)
+        est_value = round(price * position.qty, 2) if price is not None else None
+        est_pnl = (round((price - position.entry_price) * position.qty, 2)
+                   if price is not None else None)
+
+        plan = {
+            "product_id": engine.PRODUCT_ID,
+            "qty": position.qty,
+            "entry_price": position.entry_price,
+            "current_price": price,
+            "estimated_value_usd": est_value,
+            "estimated_gross_pnl_usd": est_pnl,
+        }
+        if dry_run:
+            return {"status": "dry_run", "sold": False, "plan": plan,
+                    "note": ("Nothing was sold. Call again with dry_run=false to place the "
+                             "real market sell. Estimated figures use the live price and "
+                             "exclude fees; the real fill decides the actual P&L.")}
+
+        sold = await engine._sell_and_settle(session, position, "manual close from dashboard")
+
+    if not sold:
+        raise HTTPException(
+            status_code=502,
+            detail="The market sell did not fill. Nothing was changed - the position is still "
+                   "open and btc_compound will keep managing it. Retry in a moment.",
+        )
+    log.info(f"[dashboard] 💵 Closed btc_compound's BTC position manually | plan={plan}")
+    return {"status": "sold", "sold": True, "plan": plan,
+            "note": ("The freed USD is now shared wallet cash. What each bot may deploy from it "
+                     "is bounded by crypto_cash_allocator - see the 'Who may spend the wallet' "
+                     "panel on Live Ops.")}
+
+
+@router.post("/family-tree-status/resume-active-trading")
+async def resume_crypto_active_trading():
+    """Clears is_crypto_passive_mode() so the family tree's branches can
+    trade again - the crypto counterpart to
+    /alpaca-overview/resume-active-trading, and the missing half of a
+    switch that until now only had an OFF position.
+
+    WHY THIS DID NOT EXIST: retirement was designed as one-way, and
+    set_crypto_passive_mode(False) had no caller anywhere in the repo. The
+    consequence was that a retired tree could be given a running loop and
+    would still do nothing at all, for ever - is_crypto_passive_mode() is
+    checked at the top of every branch cycle, so every thread, root
+    included, exits immediately. Built at the account owner's explicit
+    request to let the tree trade again.
+
+    WHAT IT DOES NOT DO, and this matters before pressing it:
+
+      * It does NOT undo the liquidation. Retiring sold every branch
+        position except root and bought BTC with the proceeds. Those
+        positions are gone; resuming does not buy them back. Each branch
+        resumes with whatever allocated_usd it currently has, which for a
+        branch liquidated at retirement is whatever was left behind.
+      * It does NOT touch the BTC bought at retirement. That position sits
+        exactly where it is, sellable by hand, same as while passive mode
+        was on.
+      * It does NOT start the loop. Under CRYPTO_STRATEGY_MODE=grid_fleet
+        (or anything but family_tree) main.py never starts the tree
+        threads, so clearing this flag changes nothing until the mode is
+        set. The response says which of the two is still missing, so
+        pressing this and seeing no trading is never a mystery.
+
+    Returns was_passive so a no-op call is distinguishable from a real
+    change - pressing it twice must not read like it worked twice."""
+    if crypto_family_tree_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+
+    was_passive = await crypto_family_tree_bot_module.is_crypto_passive_mode()
+    await crypto_family_tree_bot_module.set_crypto_passive_mode(False)
+
+    # Read it back rather than assuming the write landed. This flag is the
+    # difference between a tree that trades and one that silently does
+    # not, so "we called the setter" is not good enough evidence.
+    still_passive = await crypto_family_tree_bot_module.is_crypto_passive_mode()
+    if still_passive:
+        raise HTTPException(
+            status_code=500,
+            detail="set_crypto_passive_mode(False) did not clear the flag - the tree is still "
+                   "retired. Nothing was changed; check the database write path before retrying.",
+        )
+
+    mode = os.getenv("CRYPTO_STRATEGY_MODE", "") or "(unset)"
+    loop_running = mode == "family_tree"
+    log.info(
+        "[dashboard] 🔓🌳 Family tree active trading resumed (retire flag cleared) | "
+        f"was_passive={was_passive} | CRYPTO_STRATEGY_MODE={mode!r} | "
+        f"tree loop started by this service: {loop_running}"
+    )
+    return {
+        "status": "active_trading_resumed",
+        "was_passive": was_passive,
+        "passive_mode": False,
+        "crypto_strategy_mode": mode,
+        "family_tree_loop_running": loop_running,
+        "next_step": None if loop_running else (
+            f"The retire flag is cleared, but this service runs CRYPTO_STRATEGY_MODE={mode!r}, "
+            f"so the family-tree loop is never started and no branch will trade. Set "
+            f"CRYPTO_STRATEGY_MODE=family_tree on the WEB service to start it. Leave the "
+            f"crypto-trading service on grid_fleet, or its runner exits and the grid fleet stops."
+        ),
+        "note": (
+            "Positions sold at retirement are NOT restored, and the BTC bought at retirement is "
+            "untouched. Branches resume with whatever allocated_usd they currently hold."
+        ),
+    }
+
+
+@router.post("/family-tree-status/reconcile-asset/{currency:path}")
 async def reconcile_asset(currency: str, dry_run: bool = True):
     """Corrects a real SHORTFALL the Reconciliation panel flags - every
     real branch's tracked qty for this currency, summed, exceeds what
@@ -2359,10 +2878,22 @@ async def reconcile_asset(currency: str, dry_run: bool = True):
     dry_run=true (the default - always call this way first) computes and
     returns the real plan without touching the database. Only call with
     dry_run=false once you've reviewed it and want to actually apply the
-    correction."""
+    correction.
+
+    `{currency:path}` rather than `{currency}` deliberately. A caller that
+    sends "BTC/USD" encodes it as BTC%2FUSD, which the server decodes back
+    into a real "/" BEFORE routing - so a plain segment matcher sees an
+    extra path segment, matches no route, and returns a bare 404 "Not
+    Found" with nothing to say which asset failed or why. That is exactly
+    what the live dashboard's Reconcile link hit on 2026-09-24. The bare
+    asset is parsed out below, so both "BTC" and "BTC/USD" now reach the
+    handler and get the same answer. Belt and braces with the
+    base_currency() fix at the source: this one keeps ANY caller - an old
+    cached page, a curl from a phone - from getting a 404 that explains
+    nothing."""
     if crypto_family_tree_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
-    return await crypto_family_tree_bot_module.reconcile_asset_to_real_balance(currency.upper(), dry_run=dry_run)
+    return await crypto_family_tree_bot_module.reconcile_asset_to_real_balance(currency, dry_run=dry_run)
 
 
 @router.post("/family-tree-status/liquidate-and-buy-btc")
@@ -2839,8 +3370,25 @@ async def family_tree_reconciliation():
     crypto_family_tree_bot.get_reconciliation_report() for the full
     reasoning. Read-only, never places an order."""
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
-    return await crypto_family_tree_bot_module.get_reconciliation_report()
+        log.warning("[dashboard] crypto_family_tree_bot module not available - Coinbase credentials may not be set in Railway")
+        return {
+            "error": "Coinbase API unavailable",
+            "status": "unavailable",
+            "message": "crypto_family_tree_bot module not loaded - check that COINBASE_API_KEY and related credentials are set in Railway environment",
+            "branches_reconciled": [],
+            "assets_reconciled": []
+        }
+    try:
+        return await crypto_family_tree_bot_module.get_reconciliation_report()
+    except Exception as e:
+        log.error(f"[dashboard] Reconciliation failed: {e}")
+        return {
+            "error": "Reconciliation failed",
+            "status": "error",
+            "message": f"Failed to reconcile DB against Coinbase: {str(e)}",
+            "branches_reconciled": [],
+            "assets_reconciled": []
+        }
 
 
 @router.post("/crypto-selection-backtest")
@@ -3178,6 +3726,183 @@ async def run_strategy_lab_backtest():
     return await crypto_selection_backtest_module.run_strategy_lab_comparison()
 
 
+# ── The 432-variant sweep, as a job you can watch ────────────────────────
+#
+# SHADOW-MODE ONLY. Reads public Coinbase candles, places no orders, and
+# changes no live setting. Nothing here can promote a strategy: the sweep
+# measures, and every promotion in this codebase is a separate, explicit act.
+
+class StrategyBatchRequest(BaseModel):
+    coins: list = None
+    days: int = 730
+    granularity: int = 86400      # 86400 = daily, 3600 = hourly
+    in_sample_frac: float = 0.7
+    control_draws: int = 10
+    fee_round_trip: float = None
+    # full | fixed_fraction | vol_target. Defaults to full so a sweep run
+    # without thinking about sizing produces the same numbers it always did.
+    sizing: str = "full"
+    fraction: float = 0.25
+    target_vol: float = 0.02
+    vol_window: int = 20
+
+
+async def _default_sweep_coins():
+    """The coins actually being traded, not a hardcoded list.
+
+    A sweep over coins the fleet does not hold answers a question nobody
+    asked. Falls back to a fixed set only when the branch table cannot be
+    read, and says so rather than pretending the default was a choice.
+    """
+    from models import CryptoGridBranch
+    try:
+        async with get_session_factory()() as db:
+            result = await db.execute(select(CryptoGridBranch))
+            coins = [b.product_id for b in result.scalars().all() if b.product_id]
+        if coins:
+            return sorted(set(coins)), "live grid branches"
+    except Exception:
+        pass
+    return (["BTC-USD", "ETH-USD", "DOGE-USD", "LTC-USD"],
+            "fallback - the live branch table could not be read")
+
+
+@router.post("/strategy-lab/run-batch")
+async def strategy_lab_run_batch(payload: StrategyBatchRequest = None):
+    """Start the full sweep in the background and return immediately.
+
+    432 variants per coin across every coin is thousands of replays plus the
+    matched-control draws behind each one - minutes of work, which is longer
+    than a request survives. So it runs as a job and /strategy-lab/progress
+    reports how far it has got; the ranking can be read while it fills in.
+
+    Refuses to start a second sweep over a running one rather than
+    interleaving two sets of results into one table.
+    """
+    payload = payload or StrategyBatchRequest()
+    if payload.sizing not in strategy_lab.SIZING_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"sizing must be one of {list(strategy_lab.SIZING_MODES)}")
+    coins, source = (payload.coins, "requested") if payload.coins else await _default_sweep_coins()
+    out = await strategy_batch.start(
+        coins, days=payload.days, granularity=payload.granularity,
+        in_sample_frac=payload.in_sample_frac,
+        control_draws=payload.control_draws,
+        fee_round_trip=payload.fee_round_trip,
+        sizing=payload.sizing, fraction=payload.fraction,
+        target_vol=payload.target_vol, vol_window=payload.vol_window)
+    out["coin_source"] = source
+    return out
+
+
+@router.get("/strategy-lab/progress")
+async def strategy_lab_progress():
+    """How far the sweep has got. Poll this; it is cheap and safe mid-run."""
+    return strategy_batch.snapshot(include_results=False)
+
+
+@router.get("/strategy-lab/results")
+async def strategy_lab_results(coin: str = "", limit: int = 60, sort_by: str = "oos"):
+    """Every finished variant as one ranked table.
+
+    Ranked by out-of-sample, which is the only ranking worth reading - and
+    still a ranking over thousands of tests, so every row carries the noise
+    floor for the width of the search that produced it. A row above that
+    floor is a candidate to forward-test; a row below it is what luck
+    reaches at this width, however good the number looks.
+    """
+    out = strategy_batch.ranked_rows(coin_filter=coin, limit=limit, sort_by=sort_by)
+    out["job"] = strategy_batch.snapshot(include_results=False)
+    out["fleet_verdict"] = (strategy_batch._JOB.get("fleet") or {}).get("verdict")
+    return out
+
+
+@router.get("/strategy-lab/results.csv")
+async def strategy_lab_results_csv(coin: str = "", limit: int = 2000, sort_by: str = "oos"):
+    """The whole ranked table as CSV, to be read outside this page.
+
+    Every column that makes a row interpretable travels with it - the noise
+    floor for the search width, the trade count, the break-even win rate
+    beside the realised one, the split date, and the engine's own verdict -
+    because a spreadsheet of returns with the context stripped out is how a
+    2-trade fluke becomes somebody's strategy. The caveats ride in a header
+    comment block for the same reason: they are true of every row, and a
+    caveat that lives only on the web page is a caveat that does not travel.
+    """
+    import csv as _csv
+    import io as _io
+
+    data = strategy_batch.ranked_rows(coin_filter=coin, limit=limit, sort_by=sort_by)
+    rows = data["rows"]
+    buf = _io.StringIO()
+    for line in (data.get("note"), data.get("sizing_caveat"), data.get("execution_caveat")):
+        if line:
+            buf.write("# " + line.replace("\n", " ") + "\n")
+    cols = ["coin", "strategy", "params", "oos_return_pct", "in_sample_return_pct",
+            "overfit_gap_pct", "oos_win_rate", "in_sample_win_rate",
+            "break_even_win_rate_pct", "edge_points", "oos_trades", "oos_sharpe",
+            "oos_max_drawdown_pct", "profit_factor", "avg_win_pct", "avg_loss_pct",
+            "win_uniformity", "oos_final_balance", "beat_control",
+            "noise_floor_p95", "above_noise_floor", "buy_and_hold_oos_pct",
+            "split_label", "verdict_short"]
+    w = _csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+    w.writeheader()
+    for r in rows:
+        r = dict(r)
+        r["params"] = " ".join(f"{k}={v}" for k, v in sorted((r.get("params") or {}).items()))
+        w.writerow(r)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    return Response(
+        content=buf.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="strategy-lab-{stamp}.csv"'})
+
+
+@router.get("/strategy-lab/pine")
+async def strategy_lab_pine(strategy: str, coin: str = "", params: str = ""):
+    """The TradingView Pine for one variant, with its execution contract.
+
+    The script carries the fill rule, the fee split, this lab's own measured
+    figures and a list of the reasons TradingView will still print a
+    different number - candle source, per-side fee rounding, bar alignment.
+    That list is the point: a documented divergence read as a broken
+    strategy is how a working strategy gets thrown away.
+    """
+    import json as _json
+    try:
+        parsed = _json.loads(params) if params else {}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"params is not JSON: {e}")
+    if not strategy_pine_export.exportable(strategy):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{strategy} has no Pine body, so there is nothing honest to "
+                    f"export - an approximation under the same name would compare "
+                    f"two different strategies."))
+
+    measured = split = None
+    res = (strategy_batch._JOB.get("per_coin") or {}).get(coin)
+    if res:
+        split = res.get("split_label")
+        for r in res.get("ranked", []):
+            if r["strategy"] == strategy and r["params"] == parsed:
+                measured = r["out_of_sample"]
+                break
+    fee = (strategy_batch._JOB.get("params") or {}).get("fee_round_trip")
+    if fee is None:
+        fee = strategy_lab.BACKTEST_ROUND_TRIP_FEE_RATE
+    gran = (strategy_batch._JOB.get("params") or {}).get("granularity") or 86400
+    tf = {86400: "1D", 3600: "1H", 900: "15m", 300: "5m", 60: "1m"}.get(gran, f"{gran}s")
+
+    return {
+        "strategy": strategy, "params": parsed, "coin": coin,
+        "timeframe": tf,
+        "pine": strategy_pine_export.to_pine(
+            strategy, parsed, fee, coin=coin, timeframe=tf,
+            oos_split_label=split, measured=measured),
+    }
+
+
 @router.post("/crypto-selection-backtest/market-phase-breakdown")
 async def run_market_phase_breakdown_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
@@ -3319,8 +4044,48 @@ async def run_grid_higher_tf_trend_backtest():
     return await crypto_selection_backtest_module.run_grid_higher_tf_trend_comparison()
 
 
+@router.post("/crypto-selection-backtest/short-side")
+async def run_short_side_comparison_endpoint(
+    grid_pct: float = 0.025,
+    num_levels: int = 3,
+    funding_8h: float = None,
+):
+    """SHADOW-MODE ONLY. Would being able to SHORT crypto have made money?
+
+    Direct answer to the account owner's own question: the Alpaca side
+    already profits when the market falls, using inverse ETFs bought long.
+    Coinbase SPOT cannot - nothing there rises when a coin drops - so the
+    only route is perpetual futures on a different venue and a different
+    account. That is a real build, and it should be justified by evidence
+    before anyone opens an account.
+
+    Replays three strategies over the same real candles, defaulting to the
+    config actually promoted live (3 levels, 2.5%): long only (what runs
+    today), short only (the mirror, PAYING perpetual funding on every open
+    slice every bar), and both together.
+
+    Places no orders and touches no account.
+
+    Read the result carefully: a positive short number is not permission to
+    trade it. Funding is modelled; liquidation is not, perp fees are
+    assumed equal to spot, and real funding spikes against the crowded side
+    exactly when a short grid is most exposed. A long slice's loss is
+    capped at its cost; a short slice's is not. The response carries these
+    caveats with it so they cannot be read away from the number.
+
+    Pulls real historical data from Coinbase's public candles endpoint -
+    30-90 seconds depending on that endpoint."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_short_side_comparison(
+        grid_pct=grid_pct, num_levels=num_levels, funding_8h=funding_8h)
+
+
 @router.post("/crypto-selection-backtest/grid-rotation-effectiveness")
-async def run_grid_rotation_effectiveness_backtest_endpoint():
+async def run_grid_rotation_effectiveness_backtest_endpoint(
+    grid_pct: float = None,
+    num_levels: int = None,
+):
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
     Direct answer to the account owner's own question after
     crypto_grid_9 disappeared (reallocated its own idle real cash into
@@ -3336,11 +4101,29 @@ async def run_grid_rotation_effectiveness_backtest_endpoint():
     methodology and its one honest simplification (a BTC-relative-
     strength proxy standing in for the live blended ranking signal).
 
+    grid_pct/num_levels override the grid config both sides of the
+    comparison are replayed at. Left unset they keep this module's
+    historical defaults - 1.0% spacing, 10 levels - which is what every
+    rotation figure quoted to date (baseline +$123.95 vs with-rotation
+    +$638.43) was measured at.
+
+    Those defaults are also the WEAKEST grid family this module's own
+    level/spacing sweep found (+$122.61 - +$132), while 3 levels at 2.5%
+    was the strongest (+$348.21) - measured with rotation OFF. So the two
+    biggest known levers have never been run together. Pass
+    grid_pct=0.025&num_levels=3 to settle whether rotation's gain
+    compounds with the better base config or merely overlaps it.
+
     Pulls real historical data from Coinbase's public candles endpoint -
     can take 30-90 seconds depending on that endpoint's response time."""
     if crypto_selection_backtest_module is None:
         raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
-    return await crypto_selection_backtest_module.run_grid_rotation_effectiveness_backtest()
+    kwargs = {}
+    if grid_pct is not None:
+        kwargs["grid_pct"] = grid_pct
+    if num_levels is not None:
+        kwargs["num_levels"] = num_levels
+    return await crypto_selection_backtest_module.run_grid_rotation_effectiveness_backtest(**kwargs)
 
 
 class SetExitModeRequest(BaseModel):
@@ -3768,6 +4551,49 @@ def _safe_float(v):
         return None
 
 
+
+def _num(v, default=None):
+    """Alpaca returns numeric account fields as JSON strings."""
+    try:
+        return round(float(v), 2)
+    except (TypeError, ValueError):
+        return default
+
+
+def _prop_bp_floor():
+    """The floor the prop bot actually halts at, read from its own mandate
+    rather than repeated here - two copies of a threshold drift, and the one
+    that drifts is the one on the dashboard."""
+    try:
+        from bot_mandates import APEX_MANDATE
+        return float(APEX_MANDATE["capital"]["critical_buying_power"])
+    except Exception:
+        return None
+
+
+def _bp_halted(account) -> bool:
+    """Whether the prop bot is refusing to trade on buying power right now."""
+    bp, floor = _num(account.get("buying_power")), _prop_bp_floor()
+    return bool(bp is not None and floor is not None and bp < floor)
+
+
+def _bp_reason(account):
+    """Why buying power is low, in the bot's own words.
+
+    Delegates to prop_bot.explain_low_buying_power so the dashboard and the
+    log line can never disagree about the diagnosis - a second copy of this
+    reasoning would be a second thing to keep correct.
+    """
+    try:
+        bp = _num(account.get("buying_power"))
+        if bp is None or not _bp_halted(account):
+            return None
+        return prop_bot_module.explain_low_buying_power(bp, dict(account))
+    except Exception as e:
+        log.debug(f"buying-power reason unavailable: {type(e).__name__}: {e}")
+        return None
+
+
 @router.get("/alpaca-overview")
 async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
     """Real Alpaca account snapshot for a focused, at-a-glance dashboard:
@@ -3833,6 +4659,22 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
         "session_pl": round(session_pl, 2),
         "session_pl_pct": round(session_pl_pct, 2),
         "equity_floor": equity_floor,
+        # BUYING POWER, AND WHY IT IS WHAT IT IS.
+        #
+        # The prop bot halts when this drops under its floor, and that halt
+        # was visible only as a CRITICAL log line - in Railway, which is the
+        # one place the account owner cannot conveniently read. On 2026-09-26
+        # it repeated every cycle saying "$77.08 < $150" beside $810.64 of
+        # cash, with no way to tell an unsettled-funds wait from a PDT
+        # restriction that waiting never fixes.
+        #
+        # The account fields that answer it come back on the SAME fetch this
+        # endpoint already makes. Serving them costs nothing and puts the
+        # diagnosis where it is actually read.
+        "buying_power": _num(account.get("buying_power")),
+        "buying_power_floor": _prop_bp_floor(),
+        "buying_power_halted": _bp_halted(account),
+        "buying_power_reason": _bp_reason(account),
         "scale": scale,
         "goal": goal,
         "progress_to_goal_pct": progress_to_goal_pct,
@@ -4689,7 +5531,8 @@ async def manual_open_prop_position(ticker: str):
         pb.APEX_MANDATE["universe"]["futures"] +
         pb.APEX_MANDATE["universe"]["crypto"] +
         pb.APEX_MANDATE["universe"]["commodities"] +
-        pb.APEX_MANDATE["universe"]["inverse_etfs"]
+        pb.APEX_MANDATE["universe"]["inverse_etfs"] +
+        pb.APEX_MANDATE["universe"]["equities"]
     )
     if contract not in approved_universe:
         raise HTTPException(status_code=400, detail=f"{contract} ({ticker}) is not in the approved trading universe")
@@ -4808,11 +5651,19 @@ async def alpaca_entry_eligibility():
         }
 
     excluded_symbols = await pb.get_effective_excluded_symbols()
+    # Must match prop_bot's MANDATE CHECK 1 exactly. ["equities"] was
+    # missing here on 2026-09-25, so this page reported META, NVDA, AAPL,
+    # GOOGL, AMZN and MSFT as "not in the approved trading universe" while
+    # the live bot would have allowed every one of them. Six of sixteen
+    # tickers looked permanently banned for a reason that was only true of
+    # this diagnostic - and on the 30-day momentum replay META was the
+    # single best performer in the book at +$39.06.
     approved_universe = (
         pb.APEX_MANDATE["universe"]["futures"] +
         pb.APEX_MANDATE["universe"]["crypto"] +
         pb.APEX_MANDATE["universe"]["commodities"] +
-        pb.APEX_MANDATE["universe"]["inverse_etfs"]
+        pb.APEX_MANDATE["universe"]["inverse_etfs"] +
+        pb.APEX_MANDATE["universe"]["equities"]
     )
 
     async with aiohttp.ClientSession() as session:
@@ -5371,75 +6222,24 @@ async def manual_sell_coinbase(req: CoinbaseSellRequest):
 async def get_coinbase_usd_balance():
     """Get real-time Coinbase USD cash balance (not holdings, just cash).
     This is the trading capital available for entries."""
-    import jwt
-    import time
-    import base64
-
-    coinbase_key_name = os.getenv("COINBASE_API_KEY_NAME", "")
-    coinbase_private_key = os.getenv("COINBASE_API_PRIVATE_KEY", "").replace("\\n", "\n")
-
-    if not (coinbase_key_name and coinbase_private_key):
-        return {"usd_balance": 0, "status": "unconfigured"}
-
     try:
-        from cryptography.hazmat.primitives import serialization
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-        from cryptography.hazmat.backends import default_backend
-
-        raw = coinbase_private_key.strip()
-        if raw.startswith("-----BEGIN"):
-            private_key = serialization.load_pem_private_key(raw.encode(), password=None, backend=default_backend())
-            algorithm = "ES256"
-        else:
-            decoded = base64.b64decode(raw)
-            private_key = Ed25519PrivateKey.from_private_bytes(decoded[:32])
-            algorithm = "EdDSA"
-
-        now = int(time.time())
-        payload = {
-            "sub": coinbase_key_name,
-            "iss": "cdp",
-            "nbf": now,
-            "exp": now + 120,
-            "uri": "GET api.coinbase.com/api/v3/brokerage/accounts",
-        }
-        import secrets
-        headers_for_jwt = {"kid": coinbase_key_name, "nonce": secrets.token_hex(16)}
-        jwt_token = jwt.encode(payload, private_key, algorithm=algorithm, headers=headers_for_jwt)
-
-        headers = {
-            "Authorization": f"Bearer {jwt_token}",
-            "Content-Type": "application/json",
-        }
-
+        import crypto_coinbase_bot
+        if not (crypto_coinbase_bot.COINBASE_API_KEY_NAME and crypto_coinbase_bot.COINBASE_API_PRIVATE_KEY):
+            return {"usd_balance": 0, "status": "unconfigured"}
         async with aiohttp.ClientSession() as session:
-            async with session.get(
-                "https://api.coinbase.com/api/v3/brokerage/accounts",
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                if resp.status != 200:
-                    log.error(f"Coinbase API returned {resp.status}")
-                    return {"usd_balance": 0, "status": "error", "detail": f"HTTP {resp.status}"}
-
-                data = await resp.json()
-                accounts = data.get("accounts", [])
-
-                usd_account = next(
-                    (a for a in accounts if a.get("currency") == "USD"),
-                    None
-                )
-
-                balance = round(float(usd_account.get("available_balance", {}).get("value", 0)), 2) if usd_account else 0.0
-                return {
-                    "usd_balance": balance,
-                    "status": "ok",
-                    "currency": "USD",
-                    "account_type": "Coinbase Advanced Trade"
-                }
+            balance, error = await crypto_coinbase_bot.get_usd_balance(session)
+        if error:
+            return {"usd_balance": 0, "status": "error", "detail": error}
+        return {
+            "usd_balance": round(float(balance), 2),
+            "status": "ok",
+            "currency": "USD",
+            "account_type": "Coinbase Advanced Trade"
+        }
 
     except Exception as e:
         log.error(f"Coinbase USD balance fetch failed: {e}")
+        return {"usd_balance": 0, "status": "error", "detail": str(e)}
 
 
 def _get_utc_timestamp():
@@ -5481,11 +6281,16 @@ async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
                 expiry = now + td_obj(minutes=1)
                 payload = {
                     "sub": key_name,
-                    "iss": "cdp_service",
+                    # "cdp", not "cdp_service" - the issuer is validated.
+                    "iss": "cdp",
                     "nbf": int(now.timestamp()),
                     "exp": int(expiry.timestamp()),
                     "iat": int(now.timestamp()),
-                    "uri": "/api/v3/brokerage/accounts"
+                    # Must be "METHOD host/path". This was the bare path with
+                    # no method and no host, so the signature never validated
+                    # and the call could only ever return 401. Matches the form
+                    # crypto_btc_compound_bot._build_jwt uses, which works.
+                    "uri": "GET api.coinbase.com/api/v3/brokerage/accounts",
                 }
 
                 try:
@@ -5749,18 +6554,89 @@ async def get_profit_locks():
 # comparison showed Grid Bot as the clear best real performer.
 # ============================================================================
 
+@router.get("/adaptive-capital-fleet-status")
+@router.get("/capital-fleet-status")
 @router.get("/grid-status")
 async def get_grid_status_endpoint():
     if crypto_grid_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
-    return await crypto_grid_bot_module.get_grid_status()
+    data = await crypto_grid_bot_module.get_grid_status()
+    # Force fresh data on every request - prevent browser caching stale grid status
+    return JSONResponse(
+        content=data,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+    )
 
 
 @router.get("/grid-status/trade-history")
 async def get_grid_trade_history_endpoint():
     if crypto_grid_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
-    return await crypto_grid_bot_module.get_grid_trade_history()
+    data = await crypto_grid_bot_module.get_grid_trade_history()
+    # Force fresh data on every request - prevent browser caching stale trade history
+    return JSONResponse(
+        content=data,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+    )
+
+
+class SetCryptoStrategyOverrideRequest(BaseModel):
+    mode: str = None   # None or "" clears the override
+
+
+@router.post("/crypto-strategy-override")
+async def set_crypto_strategy_override_endpoint(payload: SetCryptoStrategyOverrideRequest):
+    """DB-persisted strategy mode, which WINS over the environment variable.
+
+    Exists because CRYPTO_STRATEGY_MODE was the only live control in this
+    system that could be changed exclusively through a Railway environment
+    variable - and on 2026-09-25 it could not be changed at all. It read
+    'delfina_scalping' through roughly six correction attempts: edited in
+    place (reverted), deleted (confirmed "(unset)"), re-added (reverted),
+    across a confirmed restart, in the confirmed production environment,
+    with exactly one key of that name. Every OTHER control - master switch,
+    spacing, auto-rotate, passive mode - flipped instantly, because those
+    live in the database.
+
+    Takes effect on the next process start, since main.py chooses which bot
+    thread to launch at startup. So: set it, then redeploy.
+
+    Pass mode=null (or an empty string) to clear it and fall back to the
+    environment. Only a known strategy is accepted - the same refusal
+    crypto_strategy_config makes, because an unrecognised value must never
+    start a substitute that spends real money."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    mode = (payload.mode or "").strip() or None
+    try:
+        await crypto_grid_bot_module.set_db_strategy_override(mode)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    log.warning(f"[dashboard] 🗄️ DB strategy override set to {mode!r} - takes effect on next restart")
+    return {"status": "updated", "db_strategy_override": mode,
+            "note": "Takes effect on the next process start - redeploy to apply."}
+
+
+@router.get("/crypto-strategy-override")
+async def get_crypto_strategy_override_endpoint():
+    """What the DB-persisted strategy override currently says, and what the
+    environment says, so the two can be compared without reading logs."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    db_mode = await crypto_grid_bot_module.get_db_strategy_override()
+    return {
+        "db_strategy_override": db_mode,
+        "env_crypto_strategy_mode": os.getenv("CRYPTO_STRATEGY_MODE") or "(unset)",
+        "effective_on_next_restart": db_mode or (os.getenv("CRYPTO_STRATEGY_MODE") or "(unset)"),
+    }
 
 
 class SetGridBotModeRequest(BaseModel):
@@ -5779,6 +6655,45 @@ async def set_grid_bot_mode_endpoint(payload: SetGridBotModeRequest):
     await crypto_grid_bot_module.set_grid_bot_active(payload.enabled)
     log.info(f"[dashboard] 🔲 Crypto grid bot mode {'ENABLED - real grid branches are now live' if payload.enabled else 'disabled'}")
     return {"status": "updated", "mode_active": payload.enabled}
+
+
+@router.post("/grid-status/switch-to-scale-bot")
+async def switch_to_scale_bot_endpoint():
+    """Switch from Grid Bot mode to Scale Bot mode. Disables Grid Bot
+    and activates Scale Bot for dynamic capital scaling based on performance.
+    Grid Bot branches remain in the database but don't trade until switched back."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+
+    # Disable Grid Bot
+    await crypto_grid_bot_module.set_grid_bot_active(False)
+    log.info("[dashboard] 📈 SCALE BOT ACTIVATED - Grid Bot disabled for dynamic capital scaling mode")
+
+    return {
+        "status": "switched",
+        "active_bot": "scale_bot",
+        "grid_bot_active": False,
+        "message": "Scale Bot mode is now active. Grid Bot is disabled."
+    }
+
+
+@router.post("/grid-status/switch-to-grid-bot")
+async def switch_to_grid_bot_endpoint():
+    """Switch from Scale Bot mode back to Grid Bot mode. Disables Scale Bot
+    and reactivates Grid Bot for standard grid-trading strategy."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+
+    # Enable Grid Bot
+    await crypto_grid_bot_module.set_grid_bot_active(True)
+    log.info("[dashboard] 🔲 GRID BOT REACTIVATED - Scale Bot disabled, returning to standard grid-trading mode")
+
+    return {
+        "status": "switched",
+        "active_bot": "grid_bot",
+        "grid_bot_active": True,
+        "message": "Grid Bot mode is now active. Scale Bot is disabled."
+    }
 
 
 class SetGridDynamicSpacingRequest(BaseModel):
@@ -5834,7 +6749,7 @@ async def set_grid_maker_orders_endpoint(payload: SetGridMakerOrdersRequest):
     Grid trading is a limit-order strategy by nature - buy X% below, sell
     X% above - but this bot has always placed MARKET orders to do it,
     paying the taker premium for nothing. At Coinbase's real base tier
-    that is roughly 1.2%/leg taker versus 0.6%/leg maker: on a 2.6% grid,
+    measured on this account: 0.75%/leg taker versus 0.35%/leg maker. On a 2.00% grid,
     the difference between keeping ~8% of each trade's gross move and
     keeping ~54% of it.
 
@@ -5849,6 +6764,58 @@ async def set_grid_maker_orders_endpoint(payload: SetGridMakerOrdersRequest):
     await crypto_grid_bot_module.set_maker_orders_active(payload.enabled)
     log.info(f"[dashboard] 💸 Grid Bot maker (post-only limit) orders {'ENABLED' if payload.enabled else 'disabled'}")
     return {"status": "updated", "maker_orders_active": payload.enabled}
+
+
+class SetGridMakerOnlyRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/grid-status/maker-only")
+async def set_grid_maker_only_endpoint(payload: SetGridMakerOnlyRequest):
+    """Remove the market fallback entirely - maker fills or no fill.
+
+    This is the switch that actually changes the arithmetic, and it is
+    worth being exact about why, because "use maker orders" on its own
+    does not.
+
+    Maker-FIRST still ends at a market order, so the spacing floor has to
+    price the taker leg: 1.70%, and a real cost of 2.17% once the measured
+    0.67% of adverse selection is counted. The live 2.00% step loses 0.17%
+    a cycle against that. Maker-ONLY deletes the taker path rather than
+    hoping to avoid it, so the floor honestly prices the MEASURED maker leg
+    - 0.90% - and the real cost falls to 1.37% (0.70% fees + 0.67%
+    adverse), which the same 2.00% step clears by 0.63%. Nothing about the
+    limit price changed; what changed is that there is no longer a more
+    expensive way for the order to end.
+
+    What it costs: missed cycles. An unfilled buy simply does not buy (the
+    dip is still there next cycle, and the cash was never spent), and an
+    unfilled sell holds a slice that _pick_profitable_slice_to_sell has
+    already certified as profitable, so it is never a loss locked in -
+    only a gain deferred. Both are counted, under
+    maker_only_skipped_cycles in grid status, because the cost of this
+    mode is missed trades and an uncounted cost is an assumed one.
+
+    What it does NOT touch: close_all_grid_branches() sells at market
+    directly, so the emergency exit is unaffected, and the drawdown
+    breaker only ever pauses buys. Nothing that must fill is routed
+    through the maker path.
+
+    Turning this on also turns maker orders on, since maker-only without
+    them would mean a bot that cannot trade at all. Takes effect on the
+    live bot's very next cycle, no restart needed."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    await crypto_grid_bot_module.set_maker_only_active(payload.enabled)
+    floor = await crypto_grid_bot_module.fee_safe_floor_pct()
+    log.info(f"[dashboard] 🎯 Grid Bot maker-ONLY mode {'ENABLED - market fallback REMOVED' if payload.enabled else 'disabled - market fallback restored'}; "
+             f"fee-safe spacing floor now {floor * 100:.2f}%")
+    return {
+        "status": "updated",
+        "maker_only_active": payload.enabled,
+        "maker_orders_active": await crypto_grid_bot_module.is_maker_orders_active(),
+        "fee_safe_min_grid_pct": floor,
+    }
 
 
 class SetGridSpacingOverrideRequest(BaseModel):
@@ -6050,6 +7017,370 @@ class MoveCashBetweenGridBranchesRequest(BaseModel):
     product_id: str | None = None
 
 
+class ReallocateAdaptiveFleetRequest(BaseModel):
+    from_bot_name: str
+    amount: float
+
+
+@router.post("/grid-status/reallocate-adaptive-fleet")
+async def reallocate_adaptive_fleet_endpoint(payload: ReallocateAdaptiveFleetRequest):
+    """Atomically split one flat branch reservation across the nine-coin fleet."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    try:
+        return await crypto_grid_bot_module.reallocate_grid_cash_across_adaptive_fleet(
+            payload.from_bot_name, payload.amount,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/grid-status/spread-plan")
+async def get_spread_plan(target_branches: int = 7):
+    """The spread plan as plain text, openable in a phone browser.
+
+    The POST above is dry-run-by-default and returns JSON, which is the
+    right shape for the button but useless when the button appears to do
+    nothing and the operator needs to know WHY. A browser address bar
+    cannot POST, so this exists purely so the plan and every refusal can
+    be read on the device this account is actually operated from.
+
+    Read-only. It never changes anything.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    plan = await crypto_grid_bot_module.spread_capital_evenly(
+        target_branches=target_branches, dry_run=True)
+
+    out = ["SPREAD PLAN (nothing has been changed)", "=" * 46, ""]
+    status = plan.get("status")
+    if status in ("unavailable", "too_thin"):
+        out += [f"REFUSED: {status}", "", plan.get("detail", "")]
+        return Response(content="\n".join(out), media_type="text/plain; charset=utf-8")
+
+    out += [
+        f"  pool            ${plan.get('pool_usd', 0):>10,.2f}   (free cash + every FLAT branch)",
+        f"  reserve held    ${plan.get('reserve_usd', 0):>10,.2f}",
+        f"  distributable   ${plan.get('distributable_usd', 0):>10,.2f}",
+        f"  per branch      ${plan.get('per_branch_usd', 0):>10,.2f}   across {target_branches}",
+        "",
+    ]
+    w = plan.get("withdrawals") or []
+    t = plan.get("top_ups") or []
+    held = plan.get("untouched_holding") or []
+    out.append(f"WITHDRAW FROM ({len(w)})")
+    out += [f"  {x['product_id']:<10} ${x['from_usd']:>9,.2f} -> ${x['to_usd']:>8,.2f}  "
+            f"frees ${x['release_usd']:,.2f}" for x in w] or ["  (none)"]
+    out += ["", f"TOP UP ({len(t)})"]
+    out += [f"  {x['product_id']:<10} ${x['from_usd']:>9,.2f} -> ${x['to_usd']:>8,.2f}  "
+            f"adds ${x['add_usd']:,.2f}" for x in t] or ["  (none)"]
+    out += ["", f"OPEN NEW BRANCHES: {plan.get('new_branch_slots', 0)}"]
+    cands = plan.get("candidate_coins") or []
+    out.append(f"  eligible coins: {', '.join(cands) if cands else 'NONE'}")
+    if plan.get("candidate_note"):
+        out.append(f"  {plan['candidate_note']}")
+    if held:
+        out += ["", "LEFT ALONE (holding open slices, not idle cash)"]
+        out += [f"  {x['product_id']:<10} ${x['allocated_usd']:,.2f}" for x in held]
+    out += ["", "Nothing above has happened. Press the Spread button to apply it."]
+    return Response(content="\n".join(out), media_type="text/plain; charset=utf-8")
+
+
+@router.post("/grid-status/spread-evenly")
+async def spread_grid_capital_evenly(target_branches: int = 7, dry_run: bool = True):
+    """Level the fleet so capital is not stranded in one branch.
+
+    Capital inside a branch's allocated_usd is NOT free cash, and
+    auto-deploy only ever builds new branches from free cash. A fleet with
+    one branch holding nearly everything therefore cannot expand on its
+    own - it has nothing to expand with. Live on 2026-09-24: $578.61 of a
+    $595.28 account sat in a single flat ARB-USD branch while the other
+    six coins had nothing, and no amount of waiting would have changed it.
+
+    Doing this by hand is one withdraw plus six separate branch creations,
+    which is a lot of taps on a phone and easy to half-finish.
+
+    This does not raise expected profit - see spread_capital_evenly's
+    docstring for why splitting fixed capital is roughly profit-neutral.
+    It stops one coin's trend stranding the whole account, and it produces
+    per-coin evidence sooner.
+
+    dry_run=true (the default) returns the exact plan and changes nothing.
+    Only FLAT branches are ever touched; nothing is sold."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    try:
+        return await crypto_grid_bot_module.spread_capital_evenly(
+            target_branches=target_branches, dry_run=dry_run)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/grid-status/rebalance-flat-branches")
+async def rebalance_flat_grid_branches_endpoint():
+    """Retire or rotate flat branches using the live minimum-edge rule."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    return await crypto_grid_bot_module.rebalance_flat_grid_branches_now()
+
+
+class ForceBuyRequest(BaseModel):
+    bot_name: str
+    amount_usd: float = None
+
+
+@router.post("/grid-status/force-buy")
+async def grid_force_buy_endpoint(payload: ForceBuyRequest):
+    """Place ONE real slice now, purely to measure whether a maker order fills.
+
+    Spends real money. It exists because the maker/taker question cannot
+    be answered any other way: the fill-mix counter needs a fill, and
+    until the JWT query-string fix landed, place_maker_buy() returned on
+    its first line every time, so the maker path had never once run.
+
+    It buys at the current price instead of waiting for a dip, which is a
+    slightly worse entry than the grid would take on its own. That is the
+    cost of the measurement. The slice is otherwise ordinary and sells a
+    step above its own entry like any other.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    result = await crypto_grid_bot_module.force_one_buy(payload.bot_name, payload.amount_usd)
+    log.warning(f"[dashboard] 🔬 forced buy on {payload.bot_name}: {result.get('status')}")
+    return result
+
+
+@router.get("/grid-status/fee-reality")
+async def grid_fee_reality_endpoint(limit: int = 250):
+    """What Coinbase says the fills ACTUALLY cost - maker vs taker, and the
+    real commission charged.
+
+    This settles the one question that governs how fast this fleet can
+    trade. The spacing floor prices the TAKER round trip (1.50%) because a
+    post-only order that misses its wait becomes a market order, so the
+    floor is 1.70% and nothing tighter can profit. At maker (0.70%) the
+    floor is 0.90% and a 1.25% step nets +0.55% instead of -0.25% - the
+    difference between trading a few times a week and several times a day.
+
+    Every other local signal is inference: P&L booked against an assumed
+    leg rate, or a fill-mix counter that only started counting today.
+    Coinbase returns liquidity_indicator and the real commission per fill.
+
+    Read-only.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    engine = crypto_grid_bot_module.engine
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        data = await engine.get_recent_fills_summary(session, limit=limit)
+
+    # Put the answer next to the rule it decides.
+    # A verdict here would move the fee floor, which decides whether every
+    # completed round trip nets a gain or a loss. So it is gated hard.
+    #
+    # The first version of this was not, and on its first real call it
+    # returned "maker is real - the floor can come down" off a computed
+    # 0.0002% leg fee - because 237 of 250 fills were Kalshi event
+    # contracts with no liquidity indicator, and three BTC fills reported
+    # size in quote currency, inflating notional to $48.8M on an account
+    # holding $572. Acting on that would have dropped the floor to 0.2%
+    # and made every trade a guaranteed loser.
+    try:
+        import fee_floor
+        rt = data.get("real_round_trip_fee_rate")
+        maker_rate = data.get("maker_rate")
+        classified = data.get("classified_fills") or 0
+        data["current_floor_pct"] = await crypto_grid_bot_module.fee_safe_floor_pct()
+        if rt:
+            data["implied_fee_safe_floor_pct"] = round(fee_floor.fee_floor_pct(rt), 6)
+
+        if not data.get("enough_to_conclude"):
+            data["verdict"] = (
+                f"NOT ENOUGH EVIDENCE - only {classified} spot fills carry a "
+                f"maker/taker label. The floor stays at "
+                f"{data['current_floor_pct'] * 100:.2f}%.")
+        elif maker_rate is not None and maker_rate <= 0.0:
+            data["verdict"] = (
+                f"TAKER on every one of {classified} classified fills. The floor "
+                f"is priced correctly at {data['current_floor_pct'] * 100:.2f}% and "
+                f"must not come down.")
+        elif (data.get("implied_fee_safe_floor_pct") is not None
+              and data["implied_fee_safe_floor_pct"] < data["current_floor_pct"] - 1e-9):
+            data["verdict"] = (
+                f"{maker_rate * 100:.0f}% of {classified} fills were MAKER. The "
+                f"measured round trip implies a "
+                f"{data['implied_fee_safe_floor_pct'] * 100:.2f}% floor versus the "
+                f"{data['current_floor_pct'] * 100:.2f}% in force - worth review, "
+                f"never an automatic change.")
+        else:
+            data["verdict"] = (
+                f"The measured cost does not justify lowering the "
+                f"{data['current_floor_pct'] * 100:.2f}% floor.")
+    except Exception as e:
+        data["floor_comparison_error"] = str(e)
+
+    return JSONResponse(content=data, headers={
+        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+        "Pragma": "no-cache", "Expires": "0"})
+
+
+@router.get("/grid-status/lessons")
+async def grid_lessons_endpoint():
+    """Everything the fleet has learned about each coin, from its own
+    closed round trips. Read-only.
+
+    The durable replacement for bot_learning_engine.py, which stored the
+    same idea in a local JSON file on Railway's ephemeral disk and was
+    imported by nothing.
+    """
+    import grid_learning
+    return JSONResponse(content=await grid_learning.get_all_lessons(), headers={
+        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+        "Pragma": "no-cache", "Expires": "0"})
+
+
+@router.post("/grid-status/lessons/backfill")
+async def grid_lessons_backfill_endpoint():
+    """Replay every round trip already in the ledger into the memory.
+
+    Without this the memory starts empty and re-learns, at real cost,
+    what the fleet already paid to find out across its recorded trades.
+    Rebuilds from the ledger, so it is safe to run more than once.
+    """
+    import grid_learning
+    return await grid_learning.backfill_from_trade_history()
+
+
+class SetLessonEnforcementRequest(BaseModel):
+    active: bool
+
+
+@router.post("/grid-status/lessons/enforce")
+async def set_lesson_enforcement_endpoint(payload: SetLessonEnforcementRequest):
+    """Allow a lesson to actually BLOCK a buy, instead of only informing.
+
+    Defaults OFF, and deliberately so. A memory that stops trading a coin
+    on its own is a capital-stranding mechanism, and this account has
+    already paid for one: on 2026-09-25 auto-rotate retired four EARNING
+    branches on thin evidence and left $276.80 - 64% of the account -
+    sitting idle. Even switched on, a lesson can only block a coin that is
+    down over at least grid_learning.MIN_TRADES_TO_BLOCK closed round
+    trips.
+    """
+    import grid_learning
+    active = await grid_learning.set_enforcement_active(bool(payload.active))
+    log.warning(f"[dashboard] 🧠 lesson enforcement set to {active}")
+    return {"status": "updated", "enforcement_active": active,
+            "min_trades_to_block": grid_learning.MIN_TRADES_TO_BLOCK}
+
+
+@router.get("/grid-status/money-check")
+async def grid_money_check_endpoint():
+    """Every dollar in the fleet that is not currently earning, and the one
+    action that fixes each - read-only, so it can never move money itself.
+
+    Backs the dashboard's "Is any money sitting still?" button. The button
+    exists because the account owner asked for something he could press to
+    make money; a button cannot create edge, but the gap between money
+    that is earning and money that is merely sitting is real, measurable,
+    and was previously only visible by reading four panels and doing the
+    arithmetic by hand.
+
+    It reports "the cash is already at work" just as loudly as it reports
+    an opportunity - the first draft would have called the $88.14 free
+    balance idle, when that is exactly GRID_CASH_RESERVE_USD backing the
+    open branches' remaining levels.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    data = await crypto_grid_bot_module.money_check()
+    return JSONResponse(content=data, headers={
+        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+        "Pragma": "no-cache", "Expires": "0"})
+
+
+@router.get("/grid-status/fill-mix")
+async def get_grid_fill_mix_endpoint():
+    """How grid legs REALLY filled: maker, or fallen back to market (taker).
+
+    The spacing floor prices the taker round trip on purpose, because an
+    unfilled maker order becomes a market order. If maker legs turn out to
+    fill nearly always, that floor is conservative - but nothing measured
+    it until now, so neither answer could be chosen on evidence.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    return await crypto_grid_bot_module.get_fill_mix()
+
+
+class SetNetEdgeGateRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/grid-status/net-edge-gate")
+async def set_net_edge_gate_endpoint(payload: SetNetEdgeGateRequest):
+    """Turn the net-edge gate on or off. Defaults ON.
+
+    The gate refuses a dip-buy whose arithmetic cannot pay even when it
+    goes right - net edge after real fees, whether the target is reachable
+    given how the coin actually moves, and the break-even win rate the
+    geometry demands. With it off, every dip is bought unchecked and each
+    such buy is recorded as GATE_DISABLED.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    await crypto_grid_bot_module.set_net_edge_gate_active(payload.enabled)
+    log.info(f"[dashboard] 🎯 Net-edge gate {'ENABLED' if payload.enabled else 'DISABLED'}")
+    return {"status": "updated", "net_edge_gate_active": payload.enabled}
+
+
+@router.post("/crypto-selection-backtest/exit-distance-and-breaker")
+async def run_exit_distance_and_breaker_endpoint(days: int = 90, num_levels: int = 3,
+                                                 buy_pct: float = 0.020):
+    """SHADOW-MODE. Sweeps the EXIT distance separately from the entry
+    distance, and sweeps the drawdown breaker. Places no orders."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_exit_distance_and_breaker_sweeps(
+        days=days, num_levels=num_levels, buy_pct=buy_pct)
+
+
+@router.post("/grid-status/tune-spacing-per-coin")
+async def tune_spacing_per_coin_endpoint(dry_run: bool = True, min_trips: int = 4,
+                                         min_improvement_usd: float = 1.0,
+                                         days: int = 90):
+    """Pick each branch's step from measured performance on its OWN coin.
+
+    Moves the step in whichever direction the measurement points, not
+    always tighter - the real 30-day data has wider winning on most coins
+    and tighter winning on some. The fee-safe floor is never crossed.
+
+    dry_run=true (the default) changes nothing and returns the plan.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    return await crypto_grid_bot_module.tune_spacing_per_coin(
+        dry_run=dry_run, min_trips=min_trips,
+        min_improvement_usd=min_improvement_usd, days=days)
+
+
+@router.post("/grid-status/reanchor-flat-branches")
+async def reanchor_flat_grid_branches_endpoint():
+    """Move every FLAT branch's reference price to the live market price.
+
+    reference_price is only ever written at branch creation and on a real
+    fill, so a branch that has not traded since a rally waits for a dip
+    measured from a level the market already left. This re-measures it
+    from today. Branches holding open slices are skipped - there the
+    reference is also the sell trigger. Places no orders; writes nothing
+    but reference_price.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    return await crypto_grid_bot_module.reanchor_flat_grid_branches_now()
+
+
 @router.post("/grid-status/move-cash")
 async def move_cash_between_grid_branches_endpoint(payload: MoveCashBetweenGridBranchesRequest):
     """One-step real grid-to-grid cash move - per the account owner's
@@ -6200,3 +7531,670 @@ async def get_scalper_status():
         # Never 500 the dashboard over one panel.
         return {"enabled": False, "live": False, "signals": [], "positions": [],
                 "ran_at": None, "error": f"scalper unavailable: {e}"}
+@router.get("/fleet-status")
+async def get_fleet_status():
+    """Get Scaling Coordinator fleet status - active instances, profit, and scaling progress"""
+    if scaling_coordinator_module is None:
+        raise HTTPException(status_code=500, detail="scaling_coordinator module not available")
+
+    status = await scaling_coordinator_module.get_fleet_status()
+
+    # "unavailable" rather than "$0.00". This line logged a permanent
+    # $0.00 for months because get_primary_bot_profit() read a JSON file
+    # nothing in this repo writes and returned 0 when it was missing - see
+    # scaling_coordinator.get_primary_bot_profit for the full account.
+    def _money(v):
+        return "unavailable" if v is None else f"${v:,.2f}"
+    log.info(f"[dashboard] 📊 Fleet status: Primary profit {_money(status['primary_bot_profit'])}, "
+             f"Fleet total {_money(status['fleet_total_profit'])}, Clones: {status['clones_created']}")
+    return status
+
+
+@router.get("/capital-census")
+async def get_capital_census(json: bool = False):
+    """The capital census, readable in a browser instead of a shell.
+
+    Exactly what `python capital_census.py` prints on this machine, from
+    that module's own code path - it is imported and called here, never
+    reimplemented, so the page and the console can never drift into
+    reporting two different "real" balances.
+
+    Why an endpoint at all: the census only produces real numbers where
+    the Coinbase and Alpaca keys actually live, which is this process.
+    Reaching it previously meant a Railway shell, which is close to
+    unusable from a phone - the device this account is actually operated
+    from. A number nobody can get to is not a number.
+
+    Exposes no data the rest of this router does not already serve
+    unauthenticated (/family-tree-status returns the same real Coinbase
+    balance), and no credential: the census reports which env var each
+    figure came from, never the value.
+
+    The census makes blocking urllib calls, so it runs in a worker thread
+    rather than stalling the event loop for every other dashboard poller
+    while it waits on two venues.
+    """
+    try:
+        import capital_census
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"capital_census module not available: {e}")
+
+    data = await asyncio.to_thread(capital_census.collect)
+    unknown = data["venues_unknown"]
+    if unknown:
+        log.warning(f"[dashboard] capital census INCOMPLETE - no answer from: {', '.join(unknown)}")
+    else:
+        log.info(f"[dashboard] capital census: ${data['verified_usd_cash']:,.2f} verified USD cash, every venue answered")
+
+    if json:
+        return data
+    # Plain text, so a phone browser renders the report as written
+    # rather than as one unreadable line of collapsed whitespace.
+    return Response(
+        content=await asyncio.to_thread(capital_census.build_report, data),
+        media_type="text/plain; charset=utf-8",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Live Ops - one endpoint behind the /live-ops page
+# ---------------------------------------------------------------------------
+#
+# Built to answer one question the account owner asked directly: after a
+# deploy, "is it actually working?" Every other panel in this codebase
+# shows BALANCES - what the account holds. None of them show the bot
+# DECIDING, which is the part that tells you the code that just shipped is
+# running at all.
+#
+# Three design rules, because a status page that lies is worse than none:
+#
+#   1. Nothing is ever fabricated. Every venue figure is either a real
+#      reading or an explicit null with the reason attached. A number that
+#      could not be fetched must never render as 0.
+#   2. Every section reports its own freshness. A stale panel next to a
+#      live one, with nothing to tell them apart, is how a dead bot looks
+#      healthy for a week.
+#   3. One section failing never blanks the page. Each is gathered
+#      independently and carries its own error, because the most useful
+#      moment for this page is exactly when something IS broken.
+
+LIVE_OPS_GATE_EVENTS = ("GATE_PASS", "GATE_BLOCK", "GATE_OBSERVE", "GATE_ERROR",
+                        # A buy allowed through with no economic check is the
+                        # single most important thing this feed can show.
+                        "GATE_DISABLED")
+# Execution outcomes, counted separately from gate decisions: a gate pass
+# says the bot WANTED to buy, these say whether the exchange let it. Kept
+# apart because a healthy pass rate with a rising rejection count is a
+# specific, findable problem that one merged number would hide.
+LIVE_OPS_ORDER_EVENTS = ("ORDER_REJECTED",)
+
+
+async def _live_ops_config():
+    """The settings ACTUALLY in effect in this process, read at call time.
+
+    Deliberately re-read from the environment on every request rather than
+    reported from the module constants: the point of this panel is to show
+    what the running deploy is really using, and a constant captured at
+    import time cannot show a variable that was changed afterwards. It is
+    also the fastest way to confirm a deploy landed - if the risk cap here
+    still reads the old number, the new build is not the one serving.
+    """
+    def _f(name, default):
+        raw = os.getenv(name)
+        if raw is None or not str(raw).strip():
+            return default, "default"
+        try:
+            return float(str(raw).strip()), "env"
+        except (TypeError, ValueError):
+            return default, f"unparseable ({raw!r}) - using default"
+
+    # The gate's real switch lives in the database now. Reading the env
+    # var here is what let the panel report OFF while the code decided
+    # something else - and this panel is the thing operators trust.
+    net_edge_gate_on = True
+    if crypto_grid_bot_module is not None:
+        try:
+            net_edge_gate_on = await crypto_grid_bot_module.is_net_edge_gate_active()
+        except Exception:
+            pass
+
+    risk, risk_src = _f("PROP_MAX_RISK_PERCENT", 0.50)
+    deploy, deploy_src = _f("GRID_AUTO_DEPLOY_AMOUNT_USD", 70.0)
+    reserve, reserve_src = _f("GRID_CASH_RESERVE_USD", 88.0)
+    veto_mode = (os.getenv("GRID_MICROSTRUCTURE_VETO_MODE") or "observe").strip().lower()
+    if veto_mode not in ("observe", "enforce", "off"):
+        veto_mode = "observe (fallback - value not recognised)"
+    return [
+        {"key": "Max risk (both Alpaca bots)", "value": f"{risk * 100:.0f}%",
+         "source": risk_src, "note": "one shared budget - prop_bot and alpaca_swing_bot"},
+        {"key": "Net-edge gate", "source": "db",
+         "value": "ON" if net_edge_gate_on else "OFF",
+         "note": "blocks dip-buys that cannot clear fees, spread and depth"},
+        {"key": "Microstructure veto", "value": veto_mode,
+         "source": "default" if os.getenv("GRID_MICROSTRUCTURE_VETO_MODE") is None else "env",
+         "note": "observe = logs what it would block, blocks nothing"},
+        {"key": "Grid strategy mode", "value": os.getenv("CRYPTO_STRATEGY_MODE", "(unset)"),
+         "source": "env" if os.getenv("CRYPTO_STRATEGY_MODE") else "unset",
+         "note": "bot_runner exits unless this is grid_fleet"},
+        {"key": "Per-branch deploy", "value": f"${deploy:,.2f}", "source": deploy_src, "note": ""},
+        {"key": "Cash reserve", "value": f"${reserve:,.2f}", "source": reserve_src, "note": ""},
+        {"key": "Trading halted", "source": "env" if os.getenv("STOP_TRADING") else "default",
+         "value": "YES - STOP_TRADING is set" if os.getenv("STOP_TRADING", "false").lower() == "true" else "no",
+         "note": ""},
+    ]
+
+
+async def _live_ops_gate_feed(limit: int = 40):
+    """Recent gate verdicts, newest first, plus a rolling tally.
+
+    This is the proof-of-life panel. A gate verdict is only written when a
+    dip actually triggered, so these rows are the bot reaching a real
+    decision point - not a heartbeat that ticks whether or not anything is
+    happening.
+    """
+    from models import CryptoActivityEvent
+    async with get_session_factory()() as db:
+        result = await db.execute(
+            select(CryptoActivityEvent)
+            .where(CryptoActivityEvent.event_type.in_(LIVE_OPS_GATE_EVENTS))
+            .order_by(CryptoActivityEvent.created_at.desc())
+            .limit(limit)
+        )
+        rows = [r.to_dict() for r in result.scalars().all()]
+
+        since = datetime.utcnow() - timedelta(hours=24)
+        tally_result = await db.execute(
+            select(CryptoActivityEvent.event_type, func.count())
+            .where(CryptoActivityEvent.event_type.in_(LIVE_OPS_GATE_EVENTS))
+            .where(CryptoActivityEvent.created_at >= since)
+            .group_by(CryptoActivityEvent.event_type)
+        )
+        tally = {k: v for k, v in tally_result.all()}
+
+    last_at = rows[0]["created_at"] if rows else None
+    age_seconds = None
+    if last_at:
+        try:
+            age_seconds = max(0.0, (datetime.utcnow() - datetime.fromisoformat(last_at)).total_seconds())
+        except (TypeError, ValueError):
+            age_seconds = None
+    return {
+        "events": rows,
+        "tally_24h": {k: tally.get(k, 0) for k in LIVE_OPS_GATE_EVENTS},
+        "last_decision_at": last_at,
+        "last_decision_age_seconds": age_seconds,
+    }
+
+
+async def _live_ops_runner():
+    """Is the thing that trades actually alive and permitted to trade?
+
+    Every panel below this one shows what the bot DID. This one answers
+    whether it can do anything at all, and it is deliberately first:
+    a fleet of healthy-looking branch cards above a runner that exited at
+    boot is the exact failure this page was built to make impossible.
+
+    Each gate is a real precondition read from the running process, not a
+    guess - bot_runner.py exits immediately unless CRYPTO_STRATEGY_MODE is
+    grid_fleet, refuses to trade while STOP_TRADING is set, and cannot
+    place an order without Coinbase credentials. Credentials are reported
+    as present/absent ONLY. No value, prefix or length is ever returned.
+    """
+    from models import CryptoActivityEvent
+
+    mode = (os.getenv("CRYPTO_STRATEGY_MODE") or "").strip()
+    halted = os.getenv("STOP_TRADING", "false").strip().lower() == "true"
+
+    # Read the ENGINE'S OWN verdict rather than re-testing env var names
+    # here. The engine resolves its key from COINBASE_API_KEY_NAME with a
+    # _BOT fallback, and its secret from COINBASE_API_PRIVATE_KEY - a
+    # hand-written check here guessed the wrong secret name and would have
+    # reported "missing" on a perfectly configured account, which is worse
+    # than no check at all. Asking the module that actually authenticates
+    # cannot drift from what actually authenticates.
+    try:
+        import crypto_btc_compound_bot as _engine
+        has_creds = bool(getattr(_engine, "cdp_configured", False))
+    except Exception:
+        has_creds = False
+
+    # Any activity row at all proves the bot process is running and writing,
+    # even in a stretch where no dip reached the gate. Gate verdicts alone
+    # cannot distinguish "quiet market" from "process dead".
+    async with get_session_factory()() as db:
+        result = await db.execute(
+            select(CryptoActivityEvent.created_at)
+            .order_by(CryptoActivityEvent.created_at.desc()).limit(1)
+        )
+        last_any = result.scalar_one_or_none()
+    last_activity_age = (
+        max(0.0, (datetime.utcnow() - last_any).total_seconds()) if last_any else None
+    )
+
+    # CRYPTO_STRATEGY_MODE is read by TWO services that want OPPOSITE
+    # values, and this panel has to reflect that rather than treat one of
+    # them as the only right answer:
+    #
+    #   crypto-trading service (bot_runner.py) exits unless it reads
+    #                          "grid_fleet"
+    #   web service (main.py)  starts the family-tree loop ONLY when it
+    #                          reads "family_tree"
+    #
+    # Railway scopes variables per service, so both loops can run at once
+    # with a different value set on each. The value below is whatever THIS
+    # process reads, which is why the panel names the loop that value
+    # starts instead of asserting a single correct mode. An earlier version
+    # hardcoded `mode == "grid_fleet"` and would have reported a healthy
+    # family-tree deploy as BLOCKED - a status panel confidently wrong
+    # about the one thing it exists to report.
+    known = {"grid_fleet", "family_tree", "btc_compound", "multi_pair"}
+    owner = {
+        "grid_fleet": "the dedicated crypto-trading service (grid fleet)",
+        "family_tree": "this web service (family tree)",
+        "btc_compound": "this web service (BTC compound)",
+        "multi_pair": "this web service (multi-pair RSI)",
+    }.get(mode)
+    # SERVICE_ROLE is the OTHER half, and leaving it out cost a live debugging
+    # session. railway.json starts every service with `python
+    # service_entrypoint.py`, which routes on SERVICE_ROLE alone:
+    #
+    #     SERVICE_ROLE == "crypto-trading"  ->  bot_runner.py  (grid fleet)
+    #     anything else                     ->  main.py        (web app)
+    #
+    # So a crypto-trading service with CRYPTO_STRATEGY_MODE=grid_fleet but no
+    # SERVICE_ROLE runs main.py, which under grid_fleet logs "execution is
+    # delegated to the dedicated crypto-trading service" and starts nothing.
+    # Both services then delegate to each other and NOTHING trades, with no
+    # error anywhere. This panel previously said only "set
+    # CRYPTO_STRATEGY_MODE per service" and sent the reader down a path that
+    # could not work.
+    #
+    # This process cannot read another service's variables, so the gate below
+    # reports what THIS process is, states the requirement for the other one,
+    # and leans on the shared activity heartbeat - which does cross services,
+    # via the database - as the only evidence available here about whether the
+    # grid runner is actually alive.
+    service_role = (os.getenv("SERVICE_ROLE") or "").strip().lower()
+    this_process = "bot_runner.py (grid fleet)" if service_role == "crypto-trading" else "main.py (web app)"
+
+    # THE EVIDENCE THAT OUTRANKS THE ENVIRONMENT.
+    #
+    # Both gates below read variables scoped to THIS process, and on the web
+    # service both are guaranteed to read the wrong half: the grid runner is
+    # a different service. So this panel declared, in red, "The bot cannot
+    # trade until the failing item below is fixed. Nothing under this panel
+    # will move while it fails" - directly above its own live feed showing
+    # the grid deciding 2 seconds ago across 8 branches, and beside a
+    # CRYPTO_STRATEGY_MODE that is a RETIRED name rather than a typo.
+    #
+    # Observed live 2026-09-25: mode 'delfina_scalping', SERVICE_ROLE unset,
+    # both gates red, 48 gate decisions in 24h and a 2.5-second-old cycle.
+    # The panel was not describing a broken bot; it was describing variables
+    # it cannot see, in the voice of a bot that cannot trade.
+    #
+    # crypto_strategy_config already solved this for the LOG, downgrading its
+    # ERROR to a WARNING when note_runtime_mode() proves something is really
+    # running ("A false alarm at ERROR level is not harmless - it teaches the
+    # operator to scroll past the one message that would matter if it were
+    # ever true"). That reasoning holds exactly as well for this panel, and
+    # this panel is what the operator actually reads.
+    #
+    # The grid heartbeat is the cross-service version of that proof. Only
+    # run_grid_branches_cycle() writes it, and that only runs inside
+    # bot_runner.py, so a fresh one is direct evidence that the grid runner
+    # IS wired up and IS looping - stronger evidence than any environment
+    # variable, which only says what was intended. It is read through the
+    # database, so it crosses the service boundary that the variables cannot.
+    #
+    # Stale or unreadable => falls through to the env answer, so this can
+    # only ever clear a gate on positive proof, never hide a real failure.
+    grid_alive = False
+    grid_beat = None
+    if crypto_grid_bot_module is not None:
+        try:
+            grid_beat = await crypto_grid_bot_module.get_grid_heartbeat()
+            grid_alive = bool(grid_beat.get("alive"))
+        except Exception:
+            grid_alive = False
+    beat_age = (grid_beat or {}).get("age_seconds")
+    # "so it is running on its own service" was an inference the heartbeat
+    # cannot support: it proves a cycle happened, not which process ran it.
+    # Live on 2026-09-26 the loop_lease read this_process='web:1' with
+    # held_by_this_process=true - the WEB service is running the fleet, from
+    # the standby thread. The lease is the field that actually names the
+    # owner, so quote it instead of guessing from the heartbeat.
+    lease_owner = None
+    try:
+        if crypto_grid_bot_module is not None:
+            lease_owner = (await crypto_grid_bot_module.read_grid_lease_state()).get("this_process")
+    except Exception:
+        lease_owner = None
+    proof = (f"the grid runner recorded a cycle {beat_age:.0f}s ago"
+             + (f", on {lease_owner}" if lease_owner else "")
+             if grid_alive and beat_age is not None
+             else "the grid runner is recording cycles")
+
+    gates = [
+        {"name": "A crypto loop owns execution", "ok": mode in known or grid_alive,
+         "detail": (f"{mode or '(unset)'} - run by {owner}" if owner
+                    else (f"{mode or '(unset)'} is not a mode THIS process can start, but "
+                          f"{proof}" if grid_alive
+                          else f"{mode or '(unset)'} - matches no known mode")),
+         # Not "family_tree on the web service" any more. All modes share one
+         # Coinbase balance, and grid_fleet is live on it from the other
+         # service, so that instruction now reads as "start a second strategy
+         # on the money the fleet is trading".
+         # Was "...and leave it UNSET on the web service". The web service is
+         # what holds the loop lease here, and it is in grid_fleet mode only
+         # because of a DB override - so unsetting it stands the whole fleet
+         # on one database row. Name the strategy, not a service; grid_fleet
+         # is safe on more than one process because of that same lease.
+         "fix": "set CRYPTO_STRATEGY_MODE=grid_fleet on every service that "
+                "should run the fleet - the lease keeps a second one on "
+                "standby rather than double-ordering. A DIFFERENT mode beside "
+                "a live fleet is what is unsafe: every mode spends the same "
+                "Coinbase balance"},
+        {"name": "Grid runner service is wired up",
+         # Only THIS process's variables can be checked here, so on the web
+         # service they can never say yes. The heartbeat can, and it is the
+         # better evidence: variables say what was intended, a recorded cycle
+         # says what happened.
+         "ok": service_role == "crypto-trading" or grid_alive,
+         "detail": (f"SERVICE_ROLE={service_role or '(unset)'} - this process is {this_process}"
+                    + ("" if service_role == "crypto-trading"
+                       else (f"; the grid runner is a SEPARATE service, and "
+                             f"this page cannot read its variables - but {proof}" if grid_alive
+                             else "; the grid runner is a SEPARATE service, and "
+                                  "this page cannot read its variables, nor has it "
+                                  "recorded any recent cycle"))),
+         "fix": "on the crypto-trading service set BOTH: SERVICE_ROLE=crypto-trading "
+                "AND CRYPTO_STRATEGY_MODE=grid_fleet. Without SERVICE_ROLE, "
+                "service_entrypoint.py launches main.py instead of bot_runner.py "
+                "and the grid never starts"},
+        {"name": "Trading not halted", "ok": not halted,
+         "detail": "STOP_TRADING is set" if halted else "running",
+         "fix": "unset STOP_TRADING"},
+        {"name": "Coinbase credentials present", "ok": has_creds,
+         "detail": "present" if has_creds else "missing",
+         "fix": "set COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY on the bot service"},
+    ]
+
+    # A retired tree starts its threads and then does nothing at all, for
+    # ever: is_crypto_passive_mode() is checked at the top of every branch
+    # cycle and no code path in this repo ever clears it. So under
+    # family_tree this is the difference between "the loop is running" and
+    # "the loop is running and will trade", and it has to be visible -
+    # otherwise flipping the mode looks successful and changes nothing.
+    passive = None
+    if crypto_family_tree_bot_module is not None:
+        try:
+            passive = await crypto_family_tree_bot_module.is_crypto_passive_mode()
+        except Exception:
+            passive = None
+    if mode == "family_tree" and passive:
+        gates.append({
+            "name": "Family tree is not retired", "ok": False,
+            "detail": "retired - every branch cycle exits immediately",
+            "fix": "clear it with the 'Let the tree trade again' button on the family-tree "
+                   "dashboard (POST /family-tree-status/resume-active-trading). It does not "
+                   "buy back anything retirement sold.",
+        })
+
+    return {
+        "gates": gates,
+        "all_clear": all(g["ok"] for g in gates),
+        "strategy_mode": mode or "(unset)",
+        "mode_owner": owner,
+        "tree_retired": passive,
+        "last_activity_at": last_any.isoformat() if last_any else None,
+        "last_activity_age_seconds": last_activity_age,
+        # Surfaced so the page can show WHY a gate cleared on evidence rather
+        # than on configuration - a gate that goes green for an unstated
+        # reason is its own kind of dishonest.
+        "grid_heartbeat": grid_beat,
+        "grid_runner_proven_alive": grid_alive,
+    }
+
+
+@router.get("/live-ops/metrics")
+async def get_fleet_metrics(window_days: float = 1.0,
+                            target_round_trips: float = None,
+                            target_net: float = None,
+                            target_win_rate: float = None):
+    """Per-branch and fleet-wide measurement, for judging the 2.5% config.
+
+    Deliberately separate from /live-ops: that page answers "is it
+    working", this one answers "is it worth keeping". It is heavier (a
+    live price and volatility read per branch) so it is not on the 10s
+    refresh.
+
+    Reports NET P&L, CAPITAL VELOCITY and per-branch edge together,
+    because any one alone misleads. Utilization can read 85% while
+    velocity reads 0.00, which means every dollar is committed and none of
+    it is moving - the exact state a fleet sits in when the grid step is
+    too wide for the coins it holds.
+
+    Metrics this repo cannot compute are listed under `not_captured` with
+    the reason, rather than estimated. Slippage in particular needs the
+    expected price at order time stored next to the fill, and only the
+    fill is stored.
+    """
+    import crypto_fleet_metrics as metrics
+    from models import CryptoGridTradeHistory, CryptoActivityEvent
+
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    engine = crypto_grid_bot_module.engine
+
+    grid = await crypto_grid_bot_module.get_grid_status()
+    branches = grid.get("branches") or []
+
+    window_days = max(0.01, float(window_days))
+    since = datetime.utcnow() - timedelta(days=window_days)
+
+    async with get_session_factory()() as db:
+        rows = (await db.execute(
+            select(CryptoGridTradeHistory).where(CryptoGridTradeHistory.closed_at >= since)
+        )).scalars().all()
+        trades = [{"product_id": r.product_id, "entry_price": r.entry_price,
+                   "exit_price": r.exit_price, "qty": r.qty, "pnl": r.pnl,
+                   "opened_at": r.opened_at, "closed_at": r.closed_at,
+                   "entry_expected_price": r.entry_expected_price,
+                   "exit_expected_price": r.exit_expected_price} for r in rows]
+
+        # Each branch's most recent gate verdict, so the reason a coin is
+        # not trading sits on the same row as the coin.
+        gate_by_product = {}
+        gate_rows = (await db.execute(
+            select(CryptoActivityEvent)
+            .where(CryptoActivityEvent.event_type.in_(LIVE_OPS_GATE_EVENTS))
+            .order_by(CryptoActivityEvent.created_at.desc()).limit(200)
+        )).scalars().all()
+        for ev in gate_rows:
+            gate_by_product.setdefault(ev.product_id, ev.to_dict())
+
+        tally = {k: v for k, v in (await db.execute(
+            select(CryptoActivityEvent.event_type, func.count())
+            .where(CryptoActivityEvent.event_type.in_(LIVE_OPS_GATE_EVENTS))
+            .where(CryptoActivityEvent.created_at >= since)
+            .group_by(CryptoActivityEvent.event_type))).all()}
+
+    realized_by_product = {}
+    for t in trades:
+        slot = realized_by_product.setdefault(t["product_id"], {"total_pnl": 0.0, "trade_count": 0})
+        slot["total_pnl"] += t["pnl"] or 0.0
+        slot["trade_count"] += 1
+
+    # The live fee tier the account really pays - the largest single term
+    # in every edge figure below, so a stale default would skew all of them.
+    fee_round_trip = 0.010
+    try:
+        async with engine.aiohttp.ClientSession() as session:
+            _m, taker, _t, _e = await engine.get_real_fee_tier(session)
+            if taker:
+                fee_round_trip = taker * 2
+            rows_out = []
+            for b in branches:
+                swing = None
+                try:
+                    swing = await engine.get_average_hourly_swing_pct(session, b["product_id"])
+                except Exception:
+                    swing = None
+                rows_out.append(metrics.branch_row(
+                    b, swing_pct=swing, gate=gate_by_product.get(b["product_id"]),
+                    fee_round_trip=fee_round_trip,
+                    realized=realized_by_product.get(b["product_id"])))
+    except Exception as e:
+        # A venue failure must not blank the measurement - the P&L half is
+        # read from the database and does not need the network at all.
+        rows_out = [metrics.branch_row(b, gate=gate_by_product.get(b["product_id"]),
+                                       fee_round_trip=fee_round_trip,
+                                       realized=realized_by_product.get(b["product_id"]))
+                    for b in branches]
+        log.warning(f"[dashboard] fleet metrics: live edge inputs unavailable ({e})")
+
+    # Execution counts. A buy is submitted once the gate passes, so
+    # submitted = passes, and filled is what is left after rejections.
+    async with get_session_factory()() as db:
+        rejected = (await db.execute(
+            select(func.count(CryptoActivityEvent.id))
+            .where(CryptoActivityEvent.event_type.in_(LIVE_OPS_ORDER_EVENTS))
+            .where(CryptoActivityEvent.created_at >= since))).scalar() or 0
+    submitted = tally.get("GATE_PASS", 0)
+    orders = {
+        "submitted": submitted,
+        "rejected": rejected,
+        "filled": max(0, submitted - rejected),
+        "fill_rate_pct": (None if not submitted
+                          else round(max(0, submitted - rejected) / submitted * 100, 1)),
+        "note": ("Submitted is counted as gate passes, since a pass is immediately "
+                 "followed by an order. Rejections are recorded at the point the fill "
+                 "comes back empty."),
+    }
+
+    stats = metrics.round_trip_stats(trades)
+    slippage = metrics.slippage_stats(trades)
+    # Per coin, in the same shape a target profile gets written in, so a
+    # target can be checked line for line instead of by impression. A
+    # fleet total hides the thing worth knowing: six coins doing nothing
+    # and one doing well average to a mediocre fleet, and the answer to
+    # that is more capital on the one, not a tweak to all seven.
+    per_coin = metrics.per_coin_profile(trades, window_hours=window_days * 24)
+    deployed = grid.get("total_allocated_usd")
+    free_cash = grid.get("real_free_cash_usd")
+    equity = (None if deployed is None or free_cash is None else deployed + free_cash)
+    capital = metrics.capital_stats(equity, free_cash, deployed, stats, window_days)
+
+    drawdown = metrics.drawdown_stats(trades, equity_usd=equity)
+    report = metrics.fleet_report(rows_out, stats, capital, tally,
+                                  slippage=slippage, drawdown=drawdown, orders=orders,
+                                  unrealized_net_usd=grid.get("total_unrealized_net_usd"))
+    report["per_coin"] = per_coin
+    if target_round_trips or target_net:
+        report["vs_target"] = metrics.compare_to_target(
+            per_coin,
+            {"round_trips": target_round_trips, "net": target_net,
+             "win_rate_pct": target_win_rate},
+            window_hours=window_days * 24)
+    report["fee_round_trip_pct"] = round(fee_round_trip * 100, 3)
+    report["window_days"] = window_days
+    report["served_at"] = datetime.utcnow().isoformat() + "Z"
+    return report
+
+
+@router.get("/live-ops")
+async def get_live_ops():
+    """Everything needed to see the system working, in one poll.
+
+    Sections are gathered concurrently and each carries its own error, so
+    a venue being down degrades one panel instead of the page. See the
+    block comment above this endpoint for why that matters.
+    """
+    async def _section(name, coro):
+        try:
+            return name, {"ok": True, "data": await coro, "error": None}
+        except Exception as e:
+            return name, {"ok": False, "data": None, "error": f"{type(e).__name__}: {e}"}
+
+    async def _grid():
+        if crypto_grid_bot_module is None:
+            raise RuntimeError("crypto_grid_bot module not available in this process")
+        return await crypto_grid_bot_module.get_grid_status()
+
+    async def _recon():
+        if crypto_family_tree_bot_module is None:
+            raise RuntimeError("crypto_family_tree_bot module not available in this process")
+        return await crypto_family_tree_bot_module.get_reconciliation_report()
+
+    async def _census():
+        import capital_census
+        return await asyncio.to_thread(capital_census.collect)
+
+    async def _trades():
+        if crypto_grid_bot_module is None:
+            raise RuntimeError("crypto_grid_bot module not available in this process")
+        return await crypto_grid_bot_module.get_grid_trade_history(limit_recent=15)
+
+    async def _cash():
+        # Every bot's ceiling on the shared wallet. The point is to make a
+        # starved bot visible BEFORE it starves, rather than inferred later
+        # from an absence of trades.
+        import crypto_cash_allocator as allocator
+        if crypto_grid_bot_module is None:
+            raise RuntimeError("crypto_grid_bot module not available in this process")
+        free_cash = await crypto_grid_bot_module.get_real_free_cash_usd()
+        return allocator.allocation_report(free_cash)
+
+    results = dict(await asyncio.gather(
+        _section("runner", _live_ops_runner()),
+        _section("gate", _live_ops_gate_feed()),
+        _section("grid", _grid()),
+        _section("trades", _trades()),
+        _section("cash", _cash()),
+        _section("reconciliation", _recon()),
+        _section("capital", _census()),
+    ))
+    results["config"] = {"ok": True, "data": await _live_ops_config(), "error": None}
+    results["headline"] = _live_ops_headline(results.get("trades"), results.get("grid"))
+    results["served_at"] = datetime.utcnow().isoformat() + "Z"
+    return results
+
+
+def _live_ops_headline(trades_section, grid_section):
+    """TOTAL P&L, assembled from the two sections that each hold half of it.
+
+    Realized lives in the trade history and unrealized lives in the grid
+    status, and they are fetched independently - so either one can fail on
+    its own. When that happens the total is reported as unmeasurable, NOT
+    as the half that survived. A page that silently renders realized under
+    a "total" label the moment a price fetch times out is worse than one
+    that admits it does not know, because it fails in the flattering
+    direction: realized is positive nearly all of the time (a NORMAL grid
+    exit only sells above its own entry) while the total is the one that
+    reflects open slices too.
+
+    "Nearly all", not "by construction" - that overstatement was corrected
+    on 2026-09-25 against this account's own trade log. Trade id 80 closed
+    DOGE at -$2.27 (entry 0.09112, exit 0.08964) in the 2026-09-09 forced
+    liquidation. A FORCED close - emergency exit, retirement, branch
+    liquidation - ignores the sell-above-entry rule entirely, so realized
+    P&L CAN go negative and the trade log must actually be read rather
+    than assumed clean.
+    """
+    import crypto_fleet_metrics as metrics
+
+    def _leg(section, key):
+        if not section or not section.get("ok"):
+            return None, (section or {}).get("error") or "section unavailable"
+        return (section.get("data") or {}).get(key), None
+
+    realized, realized_err = _leg(trades_section, "total_realized_pnl")
+    unrealized, unrealized_err = _leg(grid_section, "total_unrealized_net_usd")
+    trips, _ = _leg(trades_section, "total_trade_count")
+
+    data = metrics.total_pnl_stats(realized, unrealized, round_trips=trips)
+    data["sources"] = {
+        "realized": realized_err or "grid trade history",
+        "unrealized": unrealized_err or "grid status, marked at the current price",
+    }
+    return {"ok": True, "data": data, "error": None}

@@ -1,0 +1,219 @@
+================================================================================
+  BOT RECOVERY DEPLOYMENT - READY TO EXECUTE
+  De-Risk Status: ✓ CONFIRMED
+  Event Loop Fixes: ✓ APPLIED
+  Allocations: ✓ REDUCED ($2,563.43 → $850.00)
+  Database: ✓ PERSISTED
+================================================================================
+
+QUICK START (Copy & Run in Terminal):
+
+  # Restart the bot with live log monitoring
+  railway down crypto-trading && sleep 3 && railway up crypto-trading && \
+  railway logs crypto-trading --tail 200 --follow
+
+
+OR FOR ADVANCED MONITORING:
+
+  # Run the automated Python monitor (tracks all 3 recovery conditions)
+  python3 /home/user/empire-v2/monitor_recovery.py
+
+
+OR STEP-BY-STEP:
+
+  1. Deploy the service:
+     railway down crypto-trading && sleep 3 && railway up crypto-trading
+
+  2. Watch for Condition 1 (Event Loop & Semaphore Bind):
+     railway logs crypto-trading --tail 50 | grep -E "Event loop|Semaphore|RuntimeError"
+
+  3. Watch for Condition 2 (Order Book Sync):
+     railway logs crypto-trading --tail 100 | grep -E "cancel|reconcil|resized|allocation"
+
+  4. Watch for Condition 3 (Buying Power & Circuit Breaker):
+     railway logs crypto-trading --tail 100 | grep -E "buying.power|equity|PAUSED.*NORMAL"
+
+
+================================================================================
+CURRENT STATE (Before Deployment)
+================================================================================
+
+Account Status:
+  Real equity:        $1,017.48
+  Buying power:       $0.23 ⚠️  CRITICAL
+  Cushion above floor: $17.48 ⚠️  DANGER
+  Leverage ratio:     2.52x ⚠️  OVER-LEVERAGED
+
+Grid Allocations (De-Risked in Database):
+  DOGE-USD:           $135.81 (was $409.58)
+  STX-USD:            $146.34 (was $441.34)
+  ETH-USD:            $277.71 (was $837.51)
+  BTC-USD:            $165.79 (was $500.00)
+  AAVE-USD:           $124.35 (was $375.00)
+  ─────────────────────────────
+  TOTAL:              $850.00 (was $2,563.43)
+
+
+================================================================================
+EXPECTED STATE (After Deployment - T+60 seconds)
+================================================================================
+
+Account Status:
+  Real equity:        $1,017.48 (unchanged)
+  Buying power:       ~$167.48 ✓ RESTORED
+  Cushion above floor: ~$167.48 ✓ SAFE
+  Leverage ratio:     0.84x ✓ SAFE
+
+Circuit Breaker:
+  Status:             NORMAL ✓ (transitioned from PAUSED)
+  New entries:        ENABLED ✓
+  Position sizing:    33% of previous grid levels ✓
+
+Trading Status:
+  Grid orders:        Resized at new allocation levels
+  Mean reversion:     Active at reduced capital
+  Win rate:           Expected 75%+ (sustained from previous)
+  Daily loss limit:   $100 or 10% of equity
+
+
+================================================================================
+RECOVERY VERIFICATION TIMELINE
+================================================================================
+
+T+0-5s:   Bot starts, event loop initializes
+          LOOK FOR: "✓ Event loop initialized (before module imports)"
+
+T+5-10s:  Modules load, Semaphore created
+          LOOK FOR: "✓ Crypto grid bot module loaded"
+          AVOID:    "RuntimeError: bound to a different event loop"
+
+T+10-20s: Order book syncs, old orders canceled
+          LOOK FOR: "canceled pending orders" or "reconcil"
+          AVOID:    "orphaned orders" or "stale orders"
+
+T+20-30s: Grid positions resized to new allocation levels
+          LOOK FOR: "Resized grid" or "allocation updated"
+          SIZE:     ~$135 DOGE, ~$277 ETH, ~$165 BTC, etc.
+
+T+30-45s: First trading cycle at new sizes
+          LOOK FOR: New entry/exit orders at ~33% of previous size
+          AVOID:    Large orders at old $2,563 allocation
+
+T+45-60s: Buying power restored, circuit breaker clears
+          LOOK FOR: "buying.power: $167.48" or "equity: $1,017.48"
+          LOOK FOR: "PAUSED → NORMAL" or "Circuit breaker cleared"
+          AVOID:    "buying.power: $0.23" (old state)
+
+T+60+:    Trading resumes normally at safe leverage
+          Monitor: Win rate, P&L, grid order activity
+
+
+================================================================================
+CRITICAL CHECKPOINTS (DO NOT SKIP)
+================================================================================
+
+CHECKPOINT 1: NO ASYNCIO ERRORS
+  Command: railway logs crypto-trading --tail 20 | grep -i "error\|runtime\|loop"
+  Expected: Empty (no errors)
+  Failure: "RuntimeError: Task is attached to a different loop" → ABORT & FIX
+
+CHECKPOINT 2: ORDER BOOK CLEAN
+  Command: railway logs crypto-trading --tail 100 | grep -E "order.*cancel|reconcil"
+  Expected: Evidence of old orders being canceled/refreshed
+  Failure: No reconciliation → Check if bot actually cycled
+
+CHECKPOINT 3: BUYING POWER RESTORED
+  Command: railway logs crypto-trading --tail 50 | grep "buying.power"
+  Expected: Value > $100 (specifically ~$167.48)
+  Failure: Still shows $0.23 → Bot hasn't recognized new allocations yet
+
+CHECKPOINT 4: CIRCUIT BREAKER CLEAR
+  Command: railway logs crypto-trading --tail 50 | grep -E "PAUSED|NORMAL|circuit"
+  Expected: Transition from PAUSED to NORMAL
+  Failure: Still PAUSED → Margin issue hasn't fully resolved
+
+
+================================================================================
+IF SOMETHING GOES WRONG
+================================================================================
+
+Symptom 1: "RuntimeError: bound to a different event loop"
+  Root:     Semaphore not created lazily
+  Fix:      Verify crypto_selection_backtest.py lines 81-89
+  Then:     Verify bot_runner.py lines 27-36
+  Redeploy: Push fixes to Railway and restart
+
+Symptom 2: Buying power stays at $0.23
+  Root:     Bot hasn't read new allocations from database
+  Check:    sqlite3 empire.db "SELECT SUM(allocated_usd) FROM crypto_grid_branches"
+  If $2,563.43: Re-apply de-risk script
+  If $850.00:   Bot may not have cycled yet (wait 2 min & retry)
+
+Symptom 3: Circuit breaker stays PAUSED
+  Root:     Margin recovery incomplete or bot logic error
+  Check:    railway logs crypto-trading --tail 50 | grep "PAUSED\|equity\|buying"
+  Wait:     Give 2-3 more cycles (60-90 seconds) for margin to fully restore
+  Then:     Manually trigger a bot cycle if possible
+
+Symptom 4: No logs appearing
+  Root:     Service may not have started
+  Fix:      Check service status
+  Command:  railway status crypto-trading
+  Restart:  railway up crypto-trading
+
+
+================================================================================
+POST-RECOVERY MONITORING (Next 50-100 Trades)
+================================================================================
+
+Track these metrics to validate recovery:
+
+1. Win Rate Stability
+   Command: railway logs crypto-trading --tail 200 | grep -E "win.*rate|closed.*trade"
+   Target:  75%+ (consistent with pre-scaling performance)
+
+2. Profit Factor
+   Command: railway logs crypto-trading --tail 200 | grep -E "pf|profit.factor"
+   Target:  > 1.10 (positive expectancy)
+
+3. New Error Rate
+   Command: railway logs crypto-trading --tail 100 | grep -c "ERROR"
+   Target:  0 (no new errors after recovery)
+
+4. Margin Stability
+   Command: railway logs crypto-trading --tail 50 | grep "buying.power"
+   Target:  Stable > $100 (not fluctuating near floor)
+
+5. Order Execution Quality
+   Command: railway logs crypto-trading --tail 100 | grep "filled\|slippage"
+   Target:  Normal execution, no excessive rejections
+
+
+================================================================================
+NEXT STEPS AFTER RECOVERY
+================================================================================
+
+1. ✓ Let the bot trade 50-100 times at new $850 allocation
+2. ✓ Verify win rate stays > 75% and profit factor > 1.10
+3. ✓ Monitor margin stays well above $1,000 floor (expect $1,100+)
+4. ✓ Check for any NEW errors or issues
+5. ✓ Once stable for 100+ trades, consider conservative re-scaling:
+   - Only increase by 5-10% per step
+   - Minimum 50 trades between increases
+   - Never exceed 1.0x leverage (allocation < equity)
+
+
+================================================================================
+QUESTIONS?
+================================================================================
+
+See RECOVERY_COMMANDS.md for detailed commands and troubleshooting.
+See monitor_recovery.py for automated recovery verification.
+
+Deploy command (recommended):
+  python3 monitor_recovery.py
+
+Or manual monitoring:
+  railway logs crypto-trading --tail 200 --follow
+
+================================================================================

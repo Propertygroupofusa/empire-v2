@@ -2,16 +2,126 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+---
+
+# ⚠️ READ FIRST — LIVE TRADING OPERATIONS
+
+**This repository runs real money.** Everything in this section was paid for
+across a full day of debugging on 2026-09-25. Read it before diagnosing
+anything, or you will re-derive it wrong, as that session did.
+
+## The one rule: measure, never infer
+
+Every wrong turn that day came from inferring state from a side effect instead
+of reading it directly:
+
+- **Liveness.** `/grid-status` → `heartbeat` reports whether the grid loop is
+  running (`stage`, `age_seconds`, `alive`). **Use it.** Do NOT infer liveness
+  from a branch's `grid_pct` matching a promoted override — a PAUSED branch
+  never cycles, so its spacing never updates however healthy the loop is. That
+  false test burned most of a day.
+- **Which build is serving.** `/health` → `commit`, `uptime_human`,
+  `environment`, `strategy_env_keys`. An env change does not alter the commit,
+  so `uptime` is how you tell "wrong value" from "never restarted".
+- **Money.** `real_free_cash_usd` (authenticated wallet read), never
+  `allocated_usd` (DB bookkeeping). The Coinbase app is the tiebreaker.
+
+## Nine switches can silently stop crypto trading
+
+All nine produce the identical symptom — nothing happens:
+
+1. `CRYPTO_STRATEGY_MODE` (or `CRYPTO_STRATEGY_MODE_OVERRIDE`) = `grid_fleet`
+   on the crypto-trading service
+2. `SERVICE_ROLE=crypto-trading` — `service_entrypoint.py` routes on this
+   ALONE; `railway.json`'s `services` block is inert decoration
+3. `STOP_TRADING` must not be `true`
+4. `COINBASE_API_KEY_NAME` + `COINBASE_API_PRIVATE_KEY` must be on **that**
+   service, not only the web service (`bot_runner.py:81`)
+5. `is_grid_bot_active()` — DB master switch
+6. Per-branch `active` flag — a paused branch never cycles
+7. `is_crypto_passive_mode()` — the family tree is RETIRED by design
+8. The exclusion layers — see "the coin pool" below
+9. `GRID_MIN_REQUIRED_ROI_PCT` (20%) — only 3 of 35 coins once cleared it
+
+## Which service runs what
+
+- **web service (`Empire-v2`)** — `main.py`: dashboards, every `/api/...`
+  endpoint, and the `prop_bot` + `alpaca_swing_bot` threads. `SERVICE_ROLE`
+  **unset** here is correct.
+- **crypto-trading service** — `bot_runner.py` → `crypto_grid_bot.py`.
+  **The only crypto system placing real orders.** No public domain, so verify
+  it from Railway logs.
+- **`crypto_family_tree_bot.py` is RETIRED but must NOT be deleted** — the grid
+  imports `get_locked_usd()`, `get_effective_excluded_coins()` and
+  `_log_activity()` from it, and the grid's own UI lives in
+  `family_tree_dashboard.html`.
+
+## Fees are a guarantee, not a discussion
+
+Per the account owner: do not raise fees as a concern again. Both platforms
+enforce `target >= round_trip_cost + net margin`, cost counted **twice**
+(entering and exiting):
+
+- Crypto — `fee_safe_floor_pct()`, applied to every spacing source
+- Alpaca — `fee_safe_target_dollars()`, floors every target including overrides
+
+Targets may be tuned freely for speed; the floor catches anything unprofitable.
+
+## Real performance — never promise more than this
+
+- **Lifetime: $19.55 across 82 trades, 75.6% win rate** — about $0.24/trade.
+- September at its best: 4 active branches, $914.81 deployed, **~$2/day**.
+- Best measured config: 3 levels / 2.5% / rotation ON — +$755.36 vs +$314.62
+  baseline, improved 32 of 35 coins.
+- On ~$572 that implies **$2–4/day**. The constraint is CAPITAL, not settings.
+- **The Coinbase USD balance goes DOWN when the grid works** — it converts USD
+  into coins. A high USD balance means it is NOT trading. FLAT is a grid's
+  correct resting state, not a fault.
+
+## Traps that have already burned us
+
+- **Realized P&L CAN go negative.** "A grid only ever sells above its entry" is
+  FALSE — a forced liquidation ignores that rule. Trade id 80 closed at −$2.27.
+- **Paper-mode results almost never charge fees.** A pasted strategy showed
+  +352% (64% win rate, 2.5% target, −3% stop); at the real 1.00% round trip its
+  expectancy is −0.48%/trade and break-even needs 72.7%.
+- **Dashboards reading `bot_session.json` are fiction** — nothing writes it.
+  One showed "$3,002.81 capital" against a real balance of $572.37.
+- **Branch names get reassigned.** `crypto_grid_1` was DOGE in September and is
+  BTC now; old trades under that name are not that coin's results.
+- **A system must own the data it depends on.** Rotation read a table written
+  only by a retired bot, on another service, gated on a broken variable. The
+  grid now refreshes its own ranking hourly.
+
+## The coin pool
+
+`GRID_WORKING_SET` (env; default BTC/ETH/SOL/DOGE/ARB/NEAR/LINK/AVAX) is the
+operator's chosen list. Those coins are judged ONLY on hand exclusions and
+existing claims — automatic layers may re-order them but may not veto them.
+Three stacked filters once produced `eligible coins: NONE` with 35 coins ranked
+and $259 waiting to deploy.
+
+## Test suites — run before pushing
+
+`test_fee_guarantee.py` · `test_working_set.py` · `test_strategy_mode.py` ·
+`test_coinbase_jwt.py` · `test_tree_claims.py` · `test_swing_cadence.py` ·
+`test_cointegration.py` · `test_live_ops.py` · `test_spread.py` ·
+`test_micro_gate.py` · `test_order_qty.py` · `test_iron_condor.py`
+
+---
+
 ## Project Overview
 
-**Empire v2** is a multi-system SaaS platform combining:
-1. **Video Production Service** — Stripe-powered quote form → HeyGen video generation → customer delivery
-2. **Trading Automation** (secondary) — Futures/crypto trading with AI signal confirmation
-3. **Content/Revenue Systems** — Email campaigns, YouTube publishing, data retention
+**Empire v2** is a multi-system platform. **Trading automation is the active,
+revenue-critical system** — it runs real capital daily and is where operator
+attention goes.
 
-**Current Focus:** Video production platform (quote form → Stripe payment → HeyGen generation).
+1. **Trading Automation (PRIMARY)** — Coinbase grid fleet + Alpaca equities
+2. **Video Production Service** — Stripe quote form → HeyGen generation
+3. **Content/Revenue Systems** — Email campaigns, YouTube publishing
 
-**Deployment:** Railway (https://empire-v2-production.up.railway.app)
+**Deployment:** Railway (https://empire-v2-production.up.railway.app) — the web
+service `Empire-v2` plus a separate `crypto-trading` service.
 
 ---
 

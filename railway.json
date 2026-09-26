@@ -4,7 +4,7 @@
     "builder": "DOCKERFILE"
   },
   "deploy": {
-    "startCommand": "python main.py",
+    "startCommand": "python service_entrypoint.py",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 3
   },
@@ -69,6 +69,14 @@
       "startCommand": "python bot_pl_tracker.py",
       "restartPolicyType": "ON_FAILURE",
       "restartPolicyMaxRetries": 10
+    },
+    "crypto-trading": {
+      "build": {
+        "dockerfile": "Dockerfile"
+      },
+      "startCommand": "python bot_runner.py",
+      "restartPolicyType": "ON_FAILURE",
+      "restartPolicyMaxRetries": 5
     }
   }
 }

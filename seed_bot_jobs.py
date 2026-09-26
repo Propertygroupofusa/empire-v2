@@ -5,7 +5,7 @@ Run this once to populate the database with work for the bot to do.
 """
 
 import asyncio
-from database import AsyncSessionLocal, engine, init_db
+from database import get_session_factory, get_engine, init_db
 from models import Client, Job
 from sqlalchemy import select
 import os
@@ -17,7 +17,7 @@ async def seed_jobs():
     # Initialize database
     await init_db()
 
-    async with AsyncSessionLocal() as session:
+    async with get_session_factory()() as session:
         print("🌱 Seeding database with test jobs...")
 
         # Create test client if doesn't exist

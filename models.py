@@ -1062,6 +1062,39 @@ class CryptoGridSlice(Base):
     entry_price = Column(Float)
     qty = Column(Float)
     opened_at = Column(DateTime, default=datetime.utcnow)
+
+    # ---- EXCURSION TRACKING, updated every cycle while the slice is open ----
+    #
+    # The worst and best this position ever got, as a percentage of entry.
+    # Recorded so a future stop-level comparison can be run on the SAME real
+    # entries instead of re-backtesting: a trade whose MAE reached -6.2%
+    # tells you directly whether a 5% stop would have fired on it and a 8%
+    # stop would not. Re-running a backtest to answer that instead changes
+    # the entries too, which is a different experiment.
+    #
+    # Added 2026-09-26 after shipping the 8% stop on two windows of evidence.
+    # Fixed 8% beat ATR x 3 by $0.74 - a tie broken on simplicity, not a
+    # demonstrated edge. These columns are what eventually settles it.
+    mae_pct = Column(Float, nullable=True)   # max adverse excursion, negative
+    mfe_pct = Column(Float, nullable=True)   # max favourable excursion, positive
+    entry_atr_pct = Column(Float, nullable=True)  # volatility at entry, for ATR-scaled comparison
+    # The live bid/ask spread the net-edge gate measured on the real book in
+    # the instant before this order. That is the only moment the system knows
+    # it; afterwards it is unrecoverable. Without it the closed ledger cannot
+    # separate "this entry was expensive" from ordinary variance.
+    entry_spread_pct = Column(Float, nullable=True)
+    # The gate's FULL diagnostic at the moment it approved this entry, as
+    # JSON: spread, net edge, adverse selection, target, hourly swing,
+    # breakeven win rate, the fee it priced against, and its own reason
+    # string. One column rather than ten, so the gate can gain a field
+    # without a migration.
+    #
+    # Strictly telemetry. The gate's boolean is what authorises a trade;
+    # nothing in this blob is ever read back to make a decision. It exists
+    # to answer, later, WHY a set of trades performed the way it did -
+    # which the P&L alone cannot separate from variance.
+    entry_gate_json = Column(Text, nullable=True)
+
     # The REAL per-leg Coinbase fee rate actually paid to open this slice.
     # A maker (resting limit) fill costs roughly half a taker (market) fill,
     # so once maker orders are live the two legs of one round trip can
@@ -1070,6 +1103,283 @@ class CryptoGridSlice(Base):
     # assuming both legs paid the same thing. NULL on rows created before
     # this column existed - callers fall back to the current expected rate.
     entry_fee_rate = Column(Float, nullable=True)
+    # The price the bot SAW when it decided to buy, recorded next to the
+    # price it actually got. Slippage is the gap between them, and it
+    # cannot be reconstructed later from the fill alone - which is why
+    # every earlier attempt to measure it came up empty. Nullable because
+    # every slice opened before this column existed genuinely has no
+    # decision price, and a backfilled guess would be worse than a gap.
+    entry_expected_price = Column(Float, nullable=True)
+
+
+class ShortTermSignal(Base):
+    """One short-horizon opportunity score, and what the market did next.
+
+    THIS IS A PREDICTION LEDGER, NOT A TRIGGER.
+
+    The ask was a scorer for rapid intraday cycling: momentum, volume,
+    pullback quality, spread, liquidity, expected capturable move, rolled
+    into a 0-100 score. Adding indicators is easy and proves nothing. So
+    every score written here is a dated, falsifiable prediction, and the
+    resolver fills in what actually happened at 5, 15 and 30 minutes:
+
+        predicted    expected_move_pct, expected_net_edge_pct
+        happened     actual_move_pct, actual_mfe_pct, actual_mae_pct
+        verdict      materialized (did the move reach the prediction?)
+                     minutes_to_target (how long it took, if it arrived)
+                     net_after_costs_pct (what a real round trip would net)
+
+    That last column is the one that matters. A signal can be directionally
+    right and still lose money, because the cost of a round trip is charged
+    per trip regardless of how small the move was. net_after_costs_pct is
+    the prediction scored the way the account experiences it.
+
+    Nothing here gates a trade while OPPORTUNITY_SIGNALS_LIVE is off, which
+    is the default. The score is deliberately powerless until its own hit
+    rate has been measured - which is the whole point of writing it down
+    before wiring it up.
+    """
+    __tablename__ = "short_term_signal"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(String, index=True)
+    bot_name = Column(String, index=True, nullable=True)
+    scored_at = Column(DateTime, default=datetime.utcnow, index=True)
+    price_at_score = Column(Float)
+
+    # --- the sub-scores, each 0-100, kept separate so a later analysis can
+    # ask which ones carried the signal instead of only whether the blend did
+    score_momentum = Column(Float, nullable=True)
+    score_volume = Column(Float, nullable=True)
+    score_pullback = Column(Float, nullable=True)
+    score_volatility = Column(Float, nullable=True)
+    score_spread = Column(Float, nullable=True)
+    score_liquidity = Column(Float, nullable=True)
+    score_total = Column(Float, index=True, nullable=True)
+
+    # --- the raw readings behind them, so a score can be re-derived later
+    ret_5m_pct = Column(Float, nullable=True)
+    ret_15m_pct = Column(Float, nullable=True)
+    ret_30m_pct = Column(Float, nullable=True)
+    rsi = Column(Float, nullable=True)
+    atr_pct = Column(Float, nullable=True)
+    volume_ratio = Column(Float, nullable=True)     # recent volume vs baseline
+    spread_pct = Column(Float, nullable=True)
+    bid_depth_usd = Column(Float, nullable=True)
+    ask_depth_usd = Column(Float, nullable=True)
+
+    # --- the prediction
+    # The PRIMARY prediction, from momentum: price has moved this much
+    # recently and directionally, so this much is the estimate of what the
+    # next move offers. This is the one the gate is asked about and the one
+    # would_trade turns on.
+    expected_move_pct = Column(Float, nullable=True)
+    # The SAME question answered from ATR - undirected recent range - kept
+    # so the two estimators can be scored against one identical realised
+    # move. Swapping one unvalidated guess for another proves nothing;
+    # recording both and letting actual_mfe_pct settle it costs one column.
+    expected_move_atr_pct = Column(Float, nullable=True)
+    expected_net_edge_pct = Column(Float, nullable=True)
+    cost_assumed_pct = Column(Float, nullable=True)  # fees + spread + adverse, at score time
+    would_trade = Column(Boolean, nullable=True)     # what the HARD gate said, not the score
+    # WHY it was refused. Without this, a scan that produces no trades is a
+    # mystery: "0 qualified" says nothing about whether the movement was
+    # absent, the spread was wide, the book was thin, or the coin could not
+    # be priced at all. Those are four different problems with four
+    # different fixes, and only one of them is about the strategy.
+    reject_category = Column(String, index=True, nullable=True)
+    reject_reason = Column(String, nullable=True)     # the gate's own words, kept verbatim
+
+    # --- what actually happened, filled in later. Nullable so a row is
+    # usable while still resolving, and a restart mid-flight loses nothing.
+    actual_move_5m_pct = Column(Float, nullable=True)
+    actual_move_15m_pct = Column(Float, nullable=True)
+    actual_move_30m_pct = Column(Float, nullable=True)
+    actual_mfe_pct = Column(Float, nullable=True)    # best the move ever got
+    actual_mae_pct = Column(Float, nullable=True)    # worst it got first
+    materialized = Column(Boolean, nullable=True)    # did MFE reach expected_move_pct?
+    minutes_to_target = Column(Float, nullable=True)
+    net_after_costs_pct = Column(Float, nullable=True)
+    resolved_at = Column(DateTime, nullable=True, index=True)
+
+    # --- THE HORIZON GATE. Observation only; nothing here can place an order.
+    #
+    # NOT "shadow mode". crypto_grid_bot already imports a SHADOW_MODE_ENABLED
+    # trade observer from stage2.orchestration, which logs REAL orders for
+    # learning validation. These columns log a gate that never places one.
+    # The first draft of this called itself shadow_*, which put two unrelated
+    # meanings of the word in one file; the name is horizon_gate for that
+    # reason and should stay that way.
+    #
+    # The live gate above compares a THIRTY-MINUTE predicted move against the
+    # cost of a whole round trip. Those are not the same kind of quantity:
+    # the cost is paid once, whenever the rung fills, and the rung has no
+    # deadline. horizon_study.py measured what that mismatch costs - 10.2% of
+    # entries clear the round trip inside 30 minutes, 49.4% inside six hours.
+    #
+    # So this column set runs the IDENTICAL arithmetic over a six-hour
+    # horizon and records what it would have said. Nothing else moves: the
+    # same 1.37% assumed cost including the full 0.67% adverse-selection
+    # term, the same 0.5 haircut, the same spread, the same margin. One
+    # variable, which is the only way the answer means anything.
+    #
+    # It is written beside the live decision rather than replacing it because
+    # a gate that passes more is not automatically better. The column that
+    # decides is horizon_gate_paid, not horizon_gate_would_trade: a loosened threshold
+    # passes more and pays WORSE, and if that is what this turns out to be,
+    # these columns are the evidence that kills it.
+    horizon_gate_move_pct = Column(Float, nullable=True)
+    # The same six-hour question answered from trailing RANGE rather than
+    # direction, kept for the same reason expected_move_atr_pct is kept: the
+    # study that motivated this whole column set used the range estimator,
+    # and quoting its pass rates for a gate running a different estimator
+    # would be presenting one measurement as evidence for another.
+    horizon_gate_move_range_pct = Column(Float, nullable=True)
+    horizon_gate_edge_pct = Column(Float, nullable=True)
+    horizon_gate_would_trade = Column(Boolean, index=True, nullable=True)
+    horizon_gate_mfe_pct = Column(Float, nullable=True)   # best over SIX hours
+    horizon_gate_mae_pct = Column(Float, nullable=True)
+    horizon_gate_net_pct = Column(Float, nullable=True)
+    horizon_gate_paid = Column(Boolean, nullable=True)           # MFE(6h) cleared the round trip
+    horizon_gate_resolved_at = Column(DateTime, nullable=True, index=True)
+
+
+class RegimeCrossing(Base):
+    """The moment a coin crossed between "not worth trading" and "viable".
+
+    Everything else in this telemetry answers "what is true now". This
+    answers "what CHANGED", which is the question that actually prompts
+    action. A fleet sitting at zero trades for a week does not need another
+    reading of how far short it is; it needs to be told the instant one coin
+    stops being short.
+
+    A crossing is defined on the same arithmetic the live gate uses - the
+    expected capturable move against the real cost of a round trip - plus a
+    margin, so a coin does not "become viable" by clearing its costs by a
+    thousandth of a percent and then immediately stop. Both directions are
+    recorded: knowing an opportunity closed matters as much as knowing one
+    opened, and a pair of timestamps is how long the window actually lasted.
+
+    AND EVERY CROSSING IS MARKED.
+
+    into_viable is a prediction, not a profit. The resolution columns say
+    what the coin did in the 30 minutes after the alert fired and what a real
+    round trip entered at that moment would have NETTED after costs. Without
+    that, this is an alarm nobody can tell is worth answering - and an alarm
+    that cries wolf is worse than no alarm, because it trains you to trade
+    the next one.
+    """
+    __tablename__ = "regime_crossing"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(String, index=True)
+    crossed_at = Column(DateTime, default=datetime.utcnow, index=True)
+    direction = Column(String, index=True)          # "into_viable" | "out_of_viable"
+
+    # The state at the moment of the crossing.
+    price_at_cross = Column(Float, nullable=True)
+    net_edge_pct = Column(Float, nullable=True)     # expected move minus real cost
+    expected_move_pct = Column(Float, nullable=True)
+    cost_pct = Column(Float, nullable=True)
+    score_total = Column(Float, nullable=True)
+    spread_pct = Column(Float, nullable=True)
+    margin_required_pct = Column(Float, nullable=True)   # the buffer in force
+
+    # How long the window stayed open, filled in when it closes.
+    window_seconds = Column(Float, nullable=True)
+
+    # Did it mean anything? Same discipline as every other prediction here.
+    actual_move_30m_pct = Column(Float, nullable=True)
+    actual_mfe_pct = Column(Float, nullable=True)
+    # The ADVERSE extreme, not just the favourable one. A crossing whose
+    # price dropped 3% before recovering is a different animal from one that
+    # went straight up, and MFE alone cannot tell them apart - it would score
+    # both as the same win while only one was survivable at this slice size.
+    actual_mae_pct = Column(Float, nullable=True)
+    # WHEN each extreme happened, in minutes from the crossing. Without the
+    # order, MFE and MAE are two unrelated numbers: a move that dumps 4% at
+    # minute 5 and rips 6% by minute 25 has a beautiful MFE and was already
+    # dead. Recorded at 5-minute granularity, which is what the candles give.
+    mfe_at_minutes = Column(Float, nullable=True)
+    mae_at_minutes = Column(Float, nullable=True)
+    # True when the adverse extreme breached the live stop BEFORE the
+    # favourable extreme peaked. Such a crossing did not pay, whatever its
+    # MFE says, because the position no longer existed to collect it.
+    stopped_out_first = Column(Boolean, nullable=True)
+    net_after_costs_pct = Column(Float, nullable=True)
+    paid_off = Column(Boolean, nullable=True)
+    resolved_at = Column(DateTime, nullable=True, index=True)
+
+    # Whether an alert was sent, so the same crossing is never announced
+    # twice across restarts.
+    alerted = Column(Boolean, default=False, index=True)
+
+
+class GridMakerExpiry(Base):
+    """One post-only order that rested its whole window, filled nothing, and
+    was cancelled with NO market order behind it.
+
+    This is the ledger of the trades that did not happen, and it exists
+    because the trades that did happen cannot answer the question it asks.
+    Maker-ONLY mode buys a cheaper fee with missed cycles; the count of those
+    misses was already kept, but a count cannot say whether missing was good
+    or bad. Only what the price did next can.
+
+    So each row is anchored at the moment of cancellation and then resolved
+    at four horizons. The sign convention is fixed once, in
+    cancel_benefit_pct, so the answer never depends on remembering which way
+    round a buy is: POSITIVE means cancelling helped.
+
+        cancelled BUY  -> we did not buy. Price falling afterwards is GOOD
+                          (the same dip is available cheaper).
+        cancelled SELL -> we still hold. Price rising afterwards is GOOD
+                          (the slice is worth more than the exit we skipped).
+
+    A persistently positive mean says the 240-second timeout is protecting
+    the account. A persistently negative one says it is too aggressive and is
+    handing back fills that were about to come good. Either way it is
+    measured rather than argued.
+
+    Nothing here is read by any trading decision. It is evidence for a later
+    one.
+    """
+    __tablename__ = "grid_maker_expiry"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot_name = Column(String, index=True, nullable=True)
+    product_id = Column(String, index=True)
+    side = Column(String)                            # "buy" | "sell"
+    wait_seconds = Column(Integer, nullable=True)    # how long it rested before being given up on
+
+    # The anchor. Mid is used at BOTH ends so drift is one instrument
+    # measured twice, never a bid compared against an ask - that spread
+    # would be read as a move the market never made.
+    bid_at_expiry = Column(Float, nullable=True)
+    ask_at_expiry = Column(Float, nullable=True)
+    price_at_expiry = Column(Float)
+    expired_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    # Four horizons rather than one, because "too aggressive" and
+    # "protective" can be the same row at different distances: a fill that
+    # comes good in 60s and rolls over by 10 minutes is a real pattern and a
+    # single horizon would report only half of it. Each resolves
+    # independently and stays NULL until its moment arrives, so a row is
+    # usable while still filling in.
+    price_1m = Column(Float, nullable=True)
+    price_3m = Column(Float, nullable=True)
+    price_5m = Column(Float, nullable=True)
+    price_10m = Column(Float, nullable=True)
+    drift_1m_pct = Column(Float, nullable=True)
+    drift_3m_pct = Column(Float, nullable=True)
+    drift_5m_pct = Column(Float, nullable=True)
+    drift_10m_pct = Column(Float, nullable=True)
+    # Side-corrected: positive = cancelling helped. See the class docstring.
+    cancel_benefit_1m_pct = Column(Float, nullable=True)
+    cancel_benefit_3m_pct = Column(Float, nullable=True)
+    cancel_benefit_5m_pct = Column(Float, nullable=True)
+    cancel_benefit_10m_pct = Column(Float, nullable=True)
+    # Set once the 10-minute horizon is in, so the resolver can stop looking.
+    resolved_at = Column(DateTime, nullable=True, index=True)
 
 
 class CryptoGridTradeHistory(Base):
@@ -1089,6 +1399,35 @@ class CryptoGridTradeHistory(Base):
     pnl = Column(Float)
     opened_at = Column(DateTime, nullable=True)
     closed_at = Column(DateTime, default=datetime.utcnow)
+    # Decision prices for both legs, carried over from the slice at close
+    # so a completed round trip can be measured without joining back to a
+    # row that has since been deleted. Nullable for the same reason as
+    # CryptoGridSlice.entry_expected_price.
+    entry_expected_price = Column(Float, nullable=True)
+    exit_expected_price = Column(Float, nullable=True)
+
+    # ---- WHAT THIS TRADE WOULD TELL A LATER EXPERIMENT ----
+    #
+    # Carried over from the slice at close. With MAE recorded per trade, the
+    # question "would a 5% stop have beaten the 8% one?" is answerable from
+    # the real closed book, on identical entries, instead of by re-running a
+    # backtest that also changes which trades happened.
+    #
+    # exit_reason separates a sale that hit its profit target from one the
+    # stop forced. Without it the ledger shows a loss and cannot say whether
+    # the stop did its job or the grid sold badly.
+    #
+    # Honest note on the timeline: this fleet completes roughly 0.65 round
+    # trips a day, so the ~250 trades that experiment wants is about a year
+    # of data. Recorded now because the cost is nothing and the data only
+    # accumulates if collection starts before it is needed.
+    exit_reason = Column(String, nullable=True)     # "profit_target" | "stop_loss"
+    entry_spread_pct = Column(Float, nullable=True)  # live spread when the order was placed
+    entry_gate_json = Column(Text, nullable=True)    # the gate's full diagnostic at entry
+    mae_pct = Column(Float, nullable=True)          # worst point of the trade, vs entry
+    mfe_pct = Column(Float, nullable=True)          # best point of the trade, vs entry
+    entry_atr_pct = Column(Float, nullable=True)    # volatility when it was opened
+    stop_pct = Column(Float, nullable=True)         # the stop level in force at the time
 
     def to_dict(self):
         return {
@@ -1101,6 +1440,83 @@ class CryptoGridTradeHistory(Base):
             "pnl": self.pnl,
             "opened_at": (self.opened_at.isoformat() + "Z") if self.opened_at else None,
             "closed_at": (self.closed_at.isoformat() + "Z") if self.closed_at else None,
+            "entry_expected_price": self.entry_expected_price,
+            "exit_expected_price": self.exit_expected_price,
+        }
+
+
+class GridLesson(Base):
+    """What the fleet has learned about one coin, from its own closed trades.
+
+    One row per product_id, rewritten after every completed grid round
+    trip. This is the durable version of bot_learning_engine.py, which
+    kept the same idea in a local bot_learnings.json - a file on Railway's
+    ephemeral disk, wiped on every redeploy, and imported by nothing.
+
+    WHY THE EVIDENCE IS AGGREGATE, NOT PER-TRADE
+
+    The file version wrote a "losing pattern" on the FIRST loss and
+    check_before_trade() returned safe=False on any match, checking losing
+    patterns before winning ones. A coin was therefore blocked forever
+    after a single red trade. This fleet closes 75.6% of its round trips
+    green, so roughly one in four is red BY DESIGN - DOGE is +$12.80 over
+    15 trades and has 4 losses. Wiring that in as written would have shut
+    off every coin within days, each one while profitable.
+
+    So a lesson here is a running tally, and a verdict is only allowed to
+    turn negative once the sample is big enough to mean something.
+    """
+    __tablename__ = "grid_lessons"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(String, unique=True, index=True)
+
+    trades = Column(Integer, default=0)
+    wins = Column(Integer, default=0)
+    losses = Column(Integer, default=0)
+    total_pnl = Column(Float, default=0.0)
+    gross_win_usd = Column(Float, default=0.0)
+    gross_loss_usd = Column(Float, default=0.0)
+
+    # The conditions that actually govern a grid round trip, carried so a
+    # lesson can say something more useful than "this coin lost".
+    last_step_pct = Column(Float, nullable=True)
+    last_pnl = Column(Float, nullable=True)
+    best_trade_usd = Column(Float, nullable=True)
+    worst_trade_usd = Column(Float, nullable=True)
+
+    # "earning" | "watch" | "avoid" - see grid_learning.verdict_for()
+    verdict = Column(String, default="watch", index=True)
+    lesson = Column(String, default="")
+
+    first_seen = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def win_rate(self):
+        return (self.wins / self.trades * 100.0) if self.trades else 0.0
+
+    def avg_pnl(self):
+        return (self.total_pnl / self.trades) if self.trades else 0.0
+
+    def to_dict(self):
+        return {
+            "product_id": self.product_id,
+            "trades": self.trades,
+            "wins": self.wins,
+            "losses": self.losses,
+            "win_rate": round(self.win_rate(), 1),
+            "total_pnl": round(self.total_pnl or 0.0, 2),
+            "avg_pnl": round(self.avg_pnl(), 4),
+            "gross_win_usd": round(self.gross_win_usd or 0.0, 2),
+            "gross_loss_usd": round(self.gross_loss_usd or 0.0, 2),
+            "last_step_pct": self.last_step_pct,
+            "last_pnl": self.last_pnl,
+            "best_trade_usd": self.best_trade_usd,
+            "worst_trade_usd": self.worst_trade_usd,
+            "verdict": self.verdict,
+            "lesson": self.lesson,
+            "first_seen": (self.first_seen.isoformat() + "Z") if self.first_seen else None,
+            "updated_at": (self.updated_at.isoformat() + "Z") if self.updated_at else None,
         }
 
 
@@ -1924,3 +2340,38 @@ class CombinedEquitySnapshot(Base):
             "combined_equity": self.combined_equity,
             "formula_version": self.formula_version if self.formula_version is not None else 1,
         }
+
+
+class HorizonStudyRun(Base):
+    """One run of horizon_study.py, kept whole.
+
+    The study answers a question the live telemetry structurally cannot.
+    opportunity_signals bounds every excursion at t0+30m, so its verdict -
+    "no coin's detected setups pay after costs" - is a statement about a
+    thirty-minute window, on a strategy whose rungs have no deadline at all.
+    Re-asking it needs weeks of candles and about ninety paginated requests,
+    which is three orders of magnitude past the 25-second telemetry budget
+    and would eat the 180-second loop lease alive.
+
+    So the study runs rarely and OUT OF BAND, and the dashboard reads the
+    last stored row instead of computing anything. That makes the as-of date
+    part of the finding rather than a detail: a horizon measurement taken
+    three weeks ago over a market that has since turned is worth exactly as
+    much as the date on it says, and the panel shows the date for that
+    reason.
+
+    Append-only. A superseded run is still the evidence that was in front of
+    us when a decision got made, and re-running the study is how it gets
+    updated, not editing a row.
+    """
+    __tablename__ = "horizon_study_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_at = Column(DateTime, default=datetime.utcnow, index=True)
+    days = Column(Integer)
+    products_csv = Column(String, nullable=True)
+    # The whole study object as returned, summary and caveat included. Stored
+    # whole rather than flattened into columns because the shape is still
+    # moving and a half-migrated schema is a worse record than a blob with a
+    # date on it.
+    payload_json = Column(Text, nullable=True)

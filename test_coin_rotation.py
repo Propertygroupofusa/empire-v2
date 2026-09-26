@@ -1,0 +1,342 @@
+"""Real checks on coin_rotation.py - no network, no database, no account.
+
+The module decides where real capital sits, so every rule that exists to
+stop it losing money gets a test that FAILS if the rule is removed.
+"""
+
+import asyncio
+import os
+import sys
+
+import coin_rotation as R
+
+_passed = _failed = 0
+
+
+def ok(label, cond, detail=""):
+    global _passed, _failed
+    if cond:
+        _passed += 1
+        print(f"  PASS  {label}")
+    else:
+        _failed += 1
+        print(f"  FAIL  {label}" + (f"  -- {detail}" if detail else ""))
+
+
+def series(moves, start=100.0):
+    """Turn a list of multipliers into (highs, lows) where each candle is a point."""
+    price = start
+    highs, lows = [], []
+    for m in moves:
+        price *= m
+        highs.append(price)
+        lows.append(price)
+    return highs, lows
+
+
+print("\ncount_round_trips - it counts OSCILLATION, not profit")
+
+# Down 3%, back up 3% from there: one complete 2.5% round trip.
+h, l = series([1.0, 0.97, 1.03 / 0.97 * 0.97 / 0.97])
+h, l = series([1.0, 0.96, 1.06])
+ok("a dip then a rise books one round trip",
+   R.count_round_trips(h, l, 0.025) == 1,
+   f"got {R.count_round_trips(h, l, 0.025)}")
+
+# Straight up, never dips: a grid never gets an entry.
+h, l = series([1.0] + [1.02] * 40)
+ok("a coin that only rises books ZERO trips (this is the BTC case)",
+   R.count_round_trips(h, l, 0.025) == 0,
+   f"got {R.count_round_trips(h, l, 0.025)}")
+
+# Straight down: it buys, but never gets its rise, so no completed trip.
+h, l = series([1.0] + [0.98] * 40)
+ok("a coin that only falls books ZERO completed trips",
+   R.count_round_trips(h, l, 0.025) == 0,
+   f"got {R.count_round_trips(h, l, 0.025)}")
+
+# A coin that doubles beats a coin that oscillates on PROFIT, and loses
+# on trips. This is the whole reason the module ranks on trips.
+trend_h, trend_l = series([1.0] + [1.05] * 20)
+chop_h, chop_l = series([1.0] + [0.95, 1.06] * 10)
+ok("an oscillating coin outranks a trending one, though the trend made more money",
+   R.count_round_trips(chop_h, chop_l, 0.025) > R.count_round_trips(trend_h, trend_l, 0.025),
+   f"chop={R.count_round_trips(chop_h, chop_l, 0.025)} trend={R.count_round_trips(trend_h, trend_l, 0.025)}")
+
+ok("an empty series is zero, not an exception", R.count_round_trips([], [], 0.025) == 0)
+ok("a zero step is zero, not a division blow-up", R.count_round_trips([1, 2], [1, 2], 0.0) == 0)
+ok("mismatched highs/lows is zero, not an exception",
+   R.count_round_trips([1, 2, 3], [1, 2], 0.025) == 0)
+
+
+print("\nplan_rotations - the rules that stop it losing money")
+
+# These cases test the ranking rules, so they declare an explicit universe.
+# Without one the coin list is locked to what the fleet already holds and
+# nothing is ever proposed - which is its own test, further down.
+os.environ["GRID_COIN_UNIVERSE"] = "BTC-USD,NEAR-USD,DOGE-USD,ONDO-USD,TIA-USD,SUI-USD"
+import importlib
+importlib.reload(R)
+
+BR = [
+    {"bot_name": "g1", "product_id": "BTC-USD", "open_slices": 0},
+    {"bot_name": "g2", "product_id": "NEAR-USD", "open_slices": 1},   # HOLDS
+    {"bot_name": "g3", "product_id": "DOGE-USD", "open_slices": 0},
+]
+SC = {"BTC-USD": 0, "NEAR-USD": 5, "DOGE-USD": 2, "ONDO-USD": 16, "TIA-USD": 11, "SUI-USD": 3}
+
+plans = R.plan_rotations(BR, SC, min_margin=3)
+moved = {p["bot_name"] for p in plans}
+
+ok("a branch HOLDING an open slice is never rotated", "g2" not in moved,
+   f"plans={plans}")
+ok("the worst flat branch moves", "g1" in moved)
+ok("it moves onto the BEST available candidate",
+   next(p["to_product_id"] for p in plans if p["bot_name"] == "g1") == "ONDO-USD")
+ok("the worst incumbent gets first pick",
+   [p["bot_name"] for p in plans][0] == "g1")
+
+targets = [p["to_product_id"] for p in plans]
+ok("no candidate is handed to two branches", len(targets) == len(set(targets)))
+ok("a coin already held by a branch is never a candidate",
+   not any(p["to_product_id"] in {"BTC-USD", "NEAR-USD", "DOGE-USD"} for p in plans),
+   f"targets={targets}")
+
+# Margin is the brake. SUI beats DOGE by only 1 trip.
+thin = R.plan_rotations(
+    [{"bot_name": "g3", "product_id": "DOGE-USD", "open_slices": 0}],
+    {"DOGE-USD": 2, "SUI-USD": 3}, min_margin=3)
+ok("a 1-trip edge does NOT move capital (noise brake)", thin == [], f"got {thin}")
+
+fat = R.plan_rotations(
+    [{"bot_name": "g3", "product_id": "DOGE-USD", "open_slices": 0}],
+    {"DOGE-USD": 2, "SUI-USD": 9}, min_margin=3)
+ok("a 7-trip edge DOES move capital", len(fat) == 1)
+
+# An incumbent we could not measure is not evidence to move.
+unscored = R.plan_rotations(
+    [{"bot_name": "g9", "product_id": "MYSTERY-USD", "open_slices": 0}],
+    {"ONDO-USD": 16}, min_margin=3)
+ok("an UNSCORED incumbent is never rotated (a fetch failure is not evidence)",
+   unscored == [], f"got {unscored}")
+
+# Already on the best coin: nothing to do.
+best = R.plan_rotations(
+    [{"bot_name": "g1", "product_id": "ONDO-USD", "open_slices": 0}],
+    {"ONDO-USD": 16, "TIA-USD": 11}, min_margin=3)
+ok("a branch already on the best coin stays put", best == [], f"got {best}")
+
+# Works on objects, not just dicts - live branches are ORM rows.
+class Row:
+    def __init__(self, bot_name, product_id, open_slices):
+        self.bot_name = bot_name
+        self.product_id = product_id
+        self.open_slices = open_slices
+
+obj = R.plan_rotations([Row("g1", "BTC-USD", 0)], {"BTC-USD": 0, "ONDO-USD": 16}, min_margin=3)
+ok("accepts ORM-style objects as well as dicts", len(obj) == 1)
+
+# `slices` list is the live shape crypto_grid_bot uses.
+held = R.plan_rotations(
+    [{"bot_name": "g1", "product_id": "BTC-USD", "slices": [{"id": 1}]}],
+    {"BTC-USD": 0, "ONDO-USD": 16}, min_margin=3)
+ok("a non-empty `slices` list also counts as holding", held == [], f"got {held}")
+
+
+print("\nthe toggle")
+old = os.environ.get("GRID_AUTO_ROTATE")
+try:
+    for raw, want in (("false", False), ("0", False), ("no", False), ("off", False),
+                      ("true", True), ("", True), ("anything", True)):
+        os.environ["GRID_AUTO_ROTATE"] = raw
+        import importlib
+        importlib.reload(R)
+        ok(f"GRID_AUTO_ROTATE={raw!r} -> {want}", R.auto_rotate_enabled() is want)
+finally:
+    if old is None:
+        os.environ.pop("GRID_AUTO_ROTATE", None)
+    else:
+        os.environ["GRID_AUTO_ROTATE"] = old
+    import importlib
+    importlib.reload(R)
+
+
+print("\nmeasure_universe - a coin that will not load is left OUT, never scored zero")
+
+async def _measure_checks():
+    async def fetcher(session, product_id, start, end, granularity=None):
+        if product_id == "BROKEN-USD":
+            raise RuntimeError("429 rate limited")
+        if product_id == "THIN-USD":
+            return ([1.0] * 5, [1.0] * 5, [1.0] * 5, None)
+        h, l = series([1.0] + [0.95, 1.06] * 400)
+        return (h, h, l, None)
+
+    got = await R.measure_universe(
+        None, ["GOOD-USD", "BROKEN-USD", "THIN-USD"], 0.025, fetcher=fetcher)
+    ok("a coin whose history errors is absent, not zero", "BROKEN-USD" not in got, f"got {got}")
+    ok("a coin with too little history is absent, not zero", "THIN-USD" not in got)
+    ok("a good coin is scored", got.get("GOOD-USD", 0) > 0, f"got {got}")
+
+    # The critical consequence: an unmeasurable coin cannot trigger a move.
+    plans = R.plan_rotations(
+        [{"bot_name": "g1", "product_id": "BROKEN-USD", "open_slices": 0}], got, min_margin=3)
+    ok("an unmeasurable incumbent cannot be rotated away from", plans == [], f"got {plans}")
+
+asyncio.run(_measure_checks())
+
+
+print("\ndescribe - says something true in both states")
+ok("empty plan explains WHY nothing moved",
+   "No rotation" in R.describe([], {"ONDO-USD": 16, "BTC-USD": 0}))
+ok("a real plan names the coins and the counts",
+   "ONDO-USD" in R.describe(
+       R.plan_rotations(BR, SC, min_margin=3), SC))
+
+
+
+
+print("\ntrips_for - the cache the veto depends on")
+
+async def _cache_checks():
+    calls = {"n": 0}
+    async def fetcher(session, product_id, start, end, granularity=None):
+        calls["n"] += 1
+        if product_id == "DEAD-USD":
+            raise RuntimeError("429")
+        h, l = series([1.0] + [0.95, 1.06] * 400)
+        return (h, h, l, None)
+
+    R._TRIPS_CACHE.clear()
+    a = await R.trips_for(["A-USD", "B-USD"], step=0.025, session=object(), fetcher=fetcher)
+    first = calls["n"]
+    b = await R.trips_for(["A-USD", "B-USD"], step=0.025, session=object(), fetcher=fetcher)
+    ok("a second call inside the TTL re-fetches nothing", calls["n"] == first, f"{first} -> {calls['n']}")
+    ok("the cached answer matches the measured one", a == b)
+
+    R._TRIPS_CACHE.clear(); calls["n"] = 0
+    got = await R.trips_for(["A-USD", "DEAD-USD"], step=0.025, session=object(), fetcher=fetcher)
+    ok("an unmeasurable coin is ABSENT from trips_for, never zero",
+       "DEAD-USD" not in got and got.get("A-USD", 0) > 0, f"got {got}")
+    ok("an unmeasurable coin is not cached as a verdict", "DEAD-USD" not in R._TRIPS_CACHE)
+
+    R._TRIPS_CACHE.clear()
+    empty = await R.trips_for([], step=0.025, session=object(), fetcher=fetcher)
+    ok("an empty request is an empty answer, not an exception", empty == {})
+
+asyncio.run(_cache_checks())
+
+
+print("\nthe veto's decision table (as wired into _maybe_rotate_one_grid_branch)")
+
+def veto_blocks(here, there, margin=R.ROTATE_MIN_TRIP_MARGIN):
+    """Mirrors the live condition exactly: block when the gap is too thin."""
+    if here is None or there is None:
+        return False                      # no opinion -> ROI alone decides
+    return (there - here) < margin
+
+ok("ROI's pick with FEWER trips is blocked (the ARB case: +26.7% ROI, 2 trips)",
+   veto_blocks(here=5, there=2) is True)
+ok("ROI's pick with a thin 2-trip edge is blocked", veto_blocks(here=2, there=4) is True)
+ok("ROI's pick with a wide 9-trip edge is allowed", veto_blocks(here=2, there=11) is False)
+ok("exactly the margin is allowed", veto_blocks(here=2, there=5) is False)
+ok("one under the margin is blocked", veto_blocks(here=2, there=4) is True)
+ok("an unmeasurable INCUMBENT leaves ROI in charge", veto_blocks(here=None, there=11) is False)
+ok("an unmeasurable CANDIDATE leaves ROI in charge", veto_blocks(here=2, there=None) is False)
+ok("the veto can never START a rotation - it only returns block/allow",
+   veto_blocks(here=0, there=0) is True and veto_blocks(here=0, there=99) is False)
+
+
+
+print("\nthe locked universe - rotation may never widen the coin list")
+
+old_uni = os.environ.pop("GRID_COIN_UNIVERSE", None)
+import importlib; importlib.reload(R)
+
+HELD = [
+    {"bot_name": "g1", "product_id": "BTC-USD", "open_slices": 0},
+    {"bot_name": "g2", "product_id": "NEAR-USD", "open_slices": 0},
+]
+WIDE = {"BTC-USD": 0, "NEAR-USD": 5, "ONDO-USD": 16, "TIA-USD": 11, "FIL-USD": 7}
+
+ok("unset env -> the universe is the NAMED eight",
+   set(R.universe(["BTC-USD", "NEAR-USD"])) >= set(R.DEFAULT_COIN_UNIVERSE),
+   f"got {R.universe(['BTC-USD', 'NEAR-USD'])}")
+ok("unset env -> the named eight is exactly eight coins, not a scan",
+   len(R.DEFAULT_COIN_UNIVERSE) == 8)
+ok("a coin the fleet HOLDS but which predates the list is never stranded",
+   "WIF-USD" in R.universe(["BTC-USD", "WIF-USD"]))
+
+plans = R.plan_rotations(HELD, WIDE, min_margin=3)
+targets = {p["to_product_id"] for p in plans}
+ok("unset env -> coins OFF the named list are still refused, however good they score",
+   not (targets & {"ONDO-USD", "TIA-USD", "FIL-USD"}),
+   f"ONDO/TIA/FIL scored 16/11/7 and must still be refused; got {targets}")
+
+# The regression this default exists to prevent: after the 2026-09-26 merge
+# the fleet held only BTC, NEAR and ARB - the three worst oscillators it
+# owns. A universe defaulting to "what is held" would have frozen it there.
+post_merge = R.universe(["BTC-USD", "NEAR-USD", "ARB-USD"])
+for coin in ("BONK-USD", "FLOKI-USD", "DOGE-USD", "ETC-USD", "BCH-USD"):
+    ok(f"post-merge, {coin} is still reachable (not frozen out by a 3-coin fleet)",
+       coin in post_merge)
+
+os.environ["GRID_COIN_UNIVERSE"] = "BTC-USD,NEAR-USD,ONDO-USD"
+importlib.reload(R)
+plans = R.plan_rotations(HELD, WIDE, min_margin=3)
+targets = {p["to_product_id"] for p in plans}
+ok("an explicit universe permits ONLY coins on that list",
+   targets <= {"ONDO-USD"}, f"got {targets}")
+ok("TIA and FIL score higher than nothing but are NOT on the list, so are refused",
+   "TIA-USD" not in targets and "FIL-USD" not in targets)
+ok("the permitted coin does move when it clears the margin", "ONDO-USD" in targets)
+
+os.environ["GRID_COIN_UNIVERSE"] = " btc-usd ; near-usd , ondo-usd "
+importlib.reload(R)
+ok("the list tolerates spaces, semicolons and lowercase",
+   set(R.configured_universe()) == {"BTC-USD", "NEAR-USD", "ONDO-USD"},
+   f"got {R.configured_universe()}")
+
+os.environ["GRID_COIN_UNIVERSE"] = "   "
+importlib.reload(R)
+ok("a blank list falls back to held coins, never to 'everything'",
+   R.configured_universe() is None)
+
+if old_uni is None:
+    os.environ.pop("GRID_COIN_UNIVERSE", None)
+else:
+    os.environ["GRID_COIN_UNIVERSE"] = old_uni
+importlib.reload(R)
+
+
+print("\nretry, not substitute - a coin that will not load is pulled again")
+
+async def _retry_checks():
+    attempts = {"n": 0}
+    async def flaky(session, product_id, start, end, granularity=None):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise RuntimeError("429 rate limited")
+        h, l = series([1.0] + [0.95, 1.06] * 400)
+        return (h, h, l, None)
+
+    R._TRIPS_CACHE.clear()
+    got = await R.measure_universe(None, ["FLAKY-USD"], 0.025, fetcher=flaky)
+    ok("a coin that fails twice then succeeds IS scored (retried, not dropped)",
+       got.get("FLAKY-USD", 0) > 0, f"got {got} after {attempts['n']} attempts")
+    ok("it took more than one attempt", attempts["n"] >= 3, f"attempts={attempts['n']}")
+
+    hopeless = {"n": 0}
+    async def dead(session, product_id, start, end, granularity=None):
+        hopeless["n"] += 1
+        raise RuntimeError("404")
+    got2 = await R.measure_universe(None, ["GONE-USD"], 0.025, fetcher=dead)
+    ok("a permanently dead coin is given every attempt before giving up",
+       hopeless["n"] == R.ROTATE_FETCH_ATTEMPTS, f"attempts={hopeless['n']}")
+    ok("and is then absent, not zero, and nothing is pulled in its place",
+       got2 == {}, f"got {got2}")
+
+asyncio.run(_retry_checks())
+
+print(f"\n{_passed} passed, {_failed} failed")
+sys.exit(1 if _failed else 0)

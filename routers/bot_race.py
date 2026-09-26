@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from datetime import datetime, timedelta
 from sqlalchemy import select, func, desc
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import BotPosition, CryptoTradeLog, TradingBotState
 import json
 import logging
@@ -43,7 +43,7 @@ BOT_STATE = {
 async def get_alpaca_metrics():
     """Fetch Alpaca bot metrics from database."""
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             # Get base capital from TradingBotState
             result = await session.execute(
                 select(TradingBotState).where(TradingBotState.bot_name == "alpaca_prop")
@@ -72,7 +72,7 @@ async def get_alpaca_metrics():
 async def get_crypto_metrics():
     """Fetch Coinbase bot metrics from database."""
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_session_factory()() as session:
             # Get open positions
             pos_result = await session.execute(
                 select(func.count(BotPosition.id)).where(BotPosition.bot == "crypto_coinbase")

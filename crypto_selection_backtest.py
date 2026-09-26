@@ -52,11 +52,68 @@ from sqlalchemy import select
 import crypto_btc_compound_bot as engine
 import crypto_grid_bot as grid_engine  # only for its own real constants (TARGET_NET_MARGIN_PCT etc.) - no circular import, crypto_grid_bot never imports this module
 from crypto_family_tree_bot import COIN_FAMILY_TREE, BREAKEVEN_TRIGGER_PCT
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import CryptoTreeBranch, CryptoGridBranch, CryptoCoinTradeHistory
+
+CANDLE_USER_AGENT = os.getenv("BACKTEST_CANDLE_USER_AGENT", "Mozilla/5.0 (compatible; empire-v2-backtest)")
 
 SPEND = 150.0
 BACKTEST_DAYS = 30
+
+# ── WHAT A ROUND TRIP REALLY COSTS ──────────────────────────────────────
+#
+# Every backtest in this file used to charge BACKTEST_ROUND_TRIP_FEE_RATE,
+# which is 0.008 - "~0.4% each way, taker". That number is wrong, and it
+# was wrong in the direction that makes a strategy look profitable.
+#
+# Measured from Coinbase's own fill records on 2026-09-25: the real taker
+# leg is 0.75%, so a taker round trip is 1.50%. The maker leg is 0.35%,
+# so a maker round trip is 0.70%.
+#
+# WHAT THE OLD NUMBER COST
+#
+# A grid's entire edge is (step - fees). Understating fees by 0.70
+# percentage points overstates the edge on EVERY completed round trip:
+#
+#     step    backtest net    real taker net
+#     1.00%        +0.20%            -0.50%
+#     1.25%        +0.45%            -0.25%
+#     2.00%        +1.20%            +0.50%     (2.4x overstated)
+#
+# Every step between 0.80% and 1.50% backtested as profitable and loses
+# money live. That band contains the 0.5% spacing and 0.75% target the
+# retracted GRID_BOT_README recommended, and it is why tighter spacing
+# has always looked good on paper here.
+#
+# Default to TAKER, because that is what an unfilled post-only order
+# becomes, and a backtest must model the worst case it can actually hit -
+# the same rule fee_safe_floor_pct() applies live. Pass the maker rate
+# explicitly to model the maker path.
+REAL_TAKER_ROUND_TRIP_FEE_RATE = float(
+    os.getenv("BACKTEST_TAKER_ROUND_TRIP_FEE_RATE", "0.015"))
+REAL_MAKER_ROUND_TRIP_FEE_RATE = float(
+    os.getenv("BACKTEST_MAKER_ROUND_TRIP_FEE_RATE", "0.007"))
+BACKTEST_ROUND_TRIP_FEE_RATE = REAL_TAKER_ROUND_TRIP_FEE_RATE
+
+
+def fee_floor_for_backtest(round_trip_fee_rate: float = None) -> float:
+    """The smallest step that can clear fees, for whatever rate is in use.
+
+    A backtest that reports a step below this as profitable is reporting
+    an arithmetic impossibility, not a finding.
+    """
+    rate = BACKTEST_ROUND_TRIP_FEE_RATE if round_trip_fee_rate is None else round_trip_fee_rate
+    try:
+        import fee_floor
+        return fee_floor.fee_floor_pct(rate)
+    except Exception:
+        return rate + 0.002
+
+
+def clears_fees(step_pct: float, round_trip_fee_rate: float = None) -> bool:
+    """Whether a completed round trip at this step can net anything."""
+    return step_pct >= fee_floor_for_backtest(round_trip_fee_rate) - 1e-12
+
 # Real, global throttle on Coinbase's public candles endpoint - found from
 # a real, live 429 pileup the account owner hit directly: 15 of 33 coins
 # skipped on a real Strategy Lab run even after the per-page retry below
@@ -76,7 +133,17 @@ BACKTEST_DAYS = 30
 # _fetch_1min_candles_window's own copy below), so no matter how many
 # coins or tools are running at once, at most 2 real requests are ever in
 # flight - a real, process-wide throttle, not just a per-tool one.
-_CANDLE_HTTP_SEMAPHORE = asyncio.Semaphore(2)
+# CRITICAL FIX: Create lazily to avoid "bound to a different event loop" error.
+# Don't create at module import time; create on first use within the running loop.
+_CANDLE_HTTP_SEMAPHORE = None
+
+def _get_candle_semaphore():
+    """Get or create the HTTP semaphore for candle fetching.
+    Must be called from within an async context to bind to the current event loop."""
+    global _CANDLE_HTTP_SEMAPHORE
+    if _CANDLE_HTTP_SEMAPHORE is None:
+        _CANDLE_HTTP_SEMAPHORE = asyncio.Semaphore(2)
+    return _CANDLE_HTTP_SEMAPHORE
 # Real, effective size of the existing live dollar-based giveback cap
 # (MAX_PROFIT_GIVEBACK_USD, $3.75) at the module's own $150 spend size -
 # $3.75 / $150 = 2.5%. Used as the trailing-stop comparison's percentage
@@ -87,7 +154,8 @@ GRANULARITY_SECONDS = 3600  # 1-hour candles
 ATR_WINDOW = 15  # matches _atr_pct_from_candles' 14-period + 1
 
 
-async def fetch_candles_window(session, product_id, start, end, min_candles=ATR_WINDOW + 5, last_error_out=None):
+async def fetch_candles_window(session, product_id, start, end, min_candles=ATR_WINDOW + 5,
+                               last_error_out=None, granularity=None):
     """Paginated pull of real Coinbase historical candles (public,
     unauthenticated endpoint - same one the live bot's own _fetch_candles
     uses) between two explicit real UTC datetimes. Factored out of
@@ -124,20 +192,33 @@ async def fetch_candles_window(session, product_id, start, end, min_candles=ATR_
     completely unaffected), so a future skip can say WHY instead of a
     blanket "not enough historical data" hiding a real rate-limit
     problem."""
+    # granularity defaults to this module's hourly constant, so every
+    # existing caller is byte-for-byte unaffected. It is a parameter now
+    # because the same window is worth pulling at two timeframes: a strategy
+    # that only works on one of them is a strategy that works on a sampling
+    # choice, and that is worth being able to see rather than assume.
+    gran = int(granularity or GRANULARITY_SECONDS)
     all_candles = []
     cursor = start
     last_error = None
     while cursor < end:
-        page_end = min(cursor + timedelta(seconds=GRANULARITY_SECONDS * 299), end)
+        page_end = min(cursor + timedelta(seconds=gran * 299), end)
         url = (
             f"https://api.exchange.coinbase.com/products/{product_id}/candles"
-            f"?granularity={GRANULARITY_SECONDS}&start={cursor.isoformat()}&end={page_end.isoformat()}"
+            f"?granularity={gran}&start={cursor.isoformat()}&end={page_end.isoformat()}"
         )
         page_data = None
         for attempt in range(5):
             try:
-                async with _CANDLE_HTTP_SEMAPHORE:
-                    async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
+                async with _get_candle_semaphore():
+                    async with session.get(url, headers={"Accept": "application/json",
+                                                         # Coinbase's public candles endpoint
+                                                         # answers 403 to a request with no
+                                                         # User-Agent, which reads as "no data"
+                                                         # rather than "blocked" and silently
+                                                         # returned 4 candles instead of 2160.
+                                                         "User-Agent": CANDLE_USER_AGENT},
+                                           timeout=15) as r:
                         if r.status == 429:
                             last_error = f"HTTP 429 rate limited"
                             await asyncio.sleep(min(0.5 * (2 ** attempt), 8.0))
@@ -295,7 +376,7 @@ def backtest_one_coin(closes, highs, lows, entry_gate=None, spend=None, trail_pc
 
         if exit_reason:
             gross = position["qty"] * (price - position["entry"])
-            fee = position["qty"] * (position["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            fee = position["qty"] * (position["entry"] + price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
             net = gross - fee
             trades.append((exit_reason, net))
             position = None
@@ -411,7 +492,7 @@ def _replay_with_exit_mode(closes, highs, lows, mode, entry_gate=None, spend=Non
         exit_reason = None
         if mode == "quick_profit":
             gross = position["qty"] * (price - position["entry"])
-            fee = position["qty"] * (position["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            fee = position["qty"] * (position["entry"] + price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
             net = gross - fee
             if price <= position["stop"]:
                 exit_reason = "STOP"
@@ -430,7 +511,7 @@ def _replay_with_exit_mode(closes, highs, lows, mode, entry_gate=None, spend=Non
 
         if exit_reason:
             gross = position["qty"] * (price - position["entry"])
-            fee = position["qty"] * (position["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            fee = position["qty"] * (position["entry"] + price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
             net = gross - fee
             trades.append((exit_reason, net))
             position = None
@@ -672,7 +753,7 @@ def _replay_partial_then_trail(closes, highs, lows, spend=None, trail_pct=None, 
 
     def _net_leg(qty, entry, exit_price):
         gross = qty * (exit_price - entry)
-        fee = qty * (entry + exit_price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+        fee = qty * (entry + exit_price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
         return gross - fee
 
     while i < n:
@@ -1280,7 +1361,7 @@ def _replay_hourly_momentum(closes, highs, lows, spend=None,
 
         if exit_reason:
             gross = position["qty"] * (price - position["entry"])
-            fee = position["qty"] * (position["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            fee = position["qty"] * (position["entry"] + price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
             trades.append((exit_reason, gross - fee))
             position = None
         i += 1
@@ -1309,7 +1390,7 @@ def _replay_grid_bot(closes, highs, lows, spend=None,
     - The proposal claims a real grid bot pays only the lower 0.40% maker
       fee (limit orders resting in the book) rather than the 0.60% taker
       rate a market order pays - this simulation does NOT assume that
-      more favorable rate. It reuses the exact same engine.ROUND_TRIP_FEE_RATE
+      more favorable rate. It reuses the exact same BACKTEST_ROUND_TRIP_FEE_RATE
       every other strategy in this file uses, for one honest reason: this
       codebase's own live trading engine places MARKET orders everywhere
       (place_market_buy/place_market_sell), and there's no already-
@@ -1357,7 +1438,7 @@ def _replay_grid_bot(closes, highs, lows, spend=None,
         elif price >= reference * (1 + grid_pct) and open_slices:
             slot = open_slices.pop(0)
             gross = slot["qty"] * (price - slot["entry"])
-            fee = slot["qty"] * (slot["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            fee = slot["qty"] * (slot["entry"] + price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
             trades.append(("GRID_CYCLE", gross - fee))
             reference = price
         i += 1
@@ -1375,6 +1456,313 @@ def _replay_grid_bot(closes, highs, lows, spend=None,
     result = _summarize_strategy_trades(trades, spend)
     if result is not None:
         result["open_slices_at_end"] = len(open_slices)
+    return result
+
+
+def _replay_grid_bot_v2(closes, highs, lows, spend=None,
+                        buy_pct=None, sell_pct=None, num_levels=STRATEGY_LAB_GRID_LEVELS,
+                        drawdown_breaker_pct=None, brake_mask=None):
+    """_replay_grid_bot with the two things the live bot does that it does not.
+
+    Built 2026-09-25 to answer two direct questions with measurement
+    rather than argument:
+
+      1. Should the EXIT distance be the same as the ENTRY distance?
+         They are one variable today (grid_pct on both sides), but they
+         do different jobs - entry distance sets how selective the buys
+         are, exit distance sets how long a winner is held. buy_pct and
+         sell_pct are separate here.
+
+      2. Is the 25% drawdown breaker set anywhere near right? Modelled on
+         the live branch it needs a ~30% price collapse to fire, by which
+         point all levels are long since filled and there is nothing left
+         to pause. drawdown_breaker_pct sweeps it.
+
+    TWO CORRECTIONS to _replay_grid_bot, both of which make this STRICTER,
+    not more flattering:
+
+    a. NEVER SELL AT A LOSS. The original pops the oldest slice whenever
+       the rise trigger fires, whatever that slice cost. The live bot
+       refuses - _pick_profitable_slice_to_sell requires the slice being
+       sold to itself be fee-adjusted net-profitable, added after a real
+       DOGE-USD branch booked a genuine loss that way. Without this, a
+       tighter sell_pct scores artificially well precisely because it
+       fires more often on slices that are underwater. Testing a faster
+       exit without modelling the guard that makes a faster exit safe
+       would answer a question nobody asked.
+
+    b. THE DRAWDOWN BREAKER pauses NEW BUYS only, never sells, matching
+       run_grid_branch_cycle. Equity is allocated + unrealized, the same
+       formula _grid_branch_real_equity uses, and peak is tracked from
+       the flat start.
+
+    Everything else - FIFO order, reference updating only on a real fill,
+    hourly closes, the shared round-trip fee - is unchanged, so results
+    stay comparable with the existing sweeps.
+    """
+    spend = spend if spend is not None and spend > 0 else SPEND
+    buy_pct = buy_pct if buy_pct is not None else STRATEGY_LAB_GRID_PCT
+    sell_pct = sell_pct if sell_pct is not None else buy_pct
+    slice_usd = spend / num_levels
+    half_fee = BACKTEST_ROUND_TRIP_FEE_RATE / 2
+
+    n = len(closes)
+    if n < 2:
+        return None
+
+    trades = []
+    open_slices = []
+    reference = closes[0]
+    peak_equity = spend
+    buys_paused_bars = 0
+    braked_bars = 0
+    braked_buys_skipped = 0
+
+    def slice_net(slot, price):
+        gross = slot["qty"] * (price - slot["entry"])
+        fee = slot["qty"] * (slot["entry"] + price) * half_fee
+        return gross - fee
+
+    i = 1
+    while i < n:
+        price = closes[i]
+
+        equity = spend + sum(s["qty"] * (price - s["entry"]) for s in open_slices)
+        if equity > peak_equity:
+            peak_equity = equity
+        breached = (drawdown_breaker_pct is not None and peak_equity > 0
+                    and (peak_equity - equity) / peak_equity >= drawdown_breaker_pct)
+        if breached:
+            buys_paused_bars += 1
+
+        # The risk brake. brake_mask[i] True means "do not open NEW
+        # positions on this bar" - exactly what the drawdown breaker
+        # already does, and exactly what a news signal would be used for.
+        # It never blocks a SELL: an open slice must always be able to
+        # get out, whatever the headline says.
+        braked = bool(brake_mask[i]) if (brake_mask is not None and i < len(brake_mask)) else False
+        if braked:
+            braked_bars += 1
+
+        if price <= reference * (1 - buy_pct) and len(open_slices) < num_levels:
+            if braked:
+                # Counted, because "how often did the brake actually
+                # change a decision" is the only number that says whether
+                # it did anything at all. A brake that never fires on a
+                # bar the bot would have bought is a brake that does
+                # nothing, however clever its signal.
+                braked_buys_skipped += 1
+            elif not breached:
+                open_slices.append({"entry": price, "qty": slice_usd / price})
+                reference = price
+        elif price >= reference * (1 + sell_pct) and open_slices:
+            # Oldest slice that is GENUINELY net-profitable, not simply
+            # the oldest. A rise that finds nothing profitable waits.
+            idx = next((k for k, s in enumerate(open_slices) if slice_net(s, price) > 0), None)
+            if idx is not None:
+                slot = open_slices.pop(idx)
+                trades.append(("GRID_CYCLE", slice_net(slot, price)))
+                reference = price
+        i += 1
+
+    final_price = closes[-1]
+    for slot in open_slices:
+        trades.append(("OPEN_AT_WINDOW_END", slot["qty"] * (final_price - slot["entry"])))
+
+    result = _summarize_strategy_trades(trades, spend)
+    if result is not None:
+        result["open_slices_at_end"] = len(open_slices)
+        result["buys_paused_bars"] = buys_paused_bars
+        result["braked_bars"] = braked_bars
+        result["braked_buys_skipped"] = braked_buys_skipped
+        result["buy_pct"] = buy_pct
+        result["sell_pct"] = sell_pct
+        result["drawdown_breaker_pct"] = drawdown_breaker_pct
+    return result
+
+
+async def run_exit_distance_and_breaker_sweeps(coins=None, days=90, num_levels=3,
+                                               buy_pct=0.020, max_concurrent=6):
+    """SHADOW-MODE. Two questions, one fetch of real candles, no orders.
+
+    A. EXIT DISTANCE. Entry and exit are one variable in the live bot
+       (grid_pct on both sides) though they do different jobs: entry
+       distance sets how selective the buys are, exit distance sets how
+       long a winner is held. Entry is held fixed here and the exit swept
+       from the 1.70% fee floor up to 3.00%.
+
+    B. DRAWDOWN BREAKER. Modelled on a real branch the live 25% setting
+       needs a ~30% price collapse before it fires, by which point every
+       level is filled and there is nothing left to pause. Swept against
+       10/15/20/25% and no breaker at all.
+
+    Uses _replay_grid_bot_v2, which models the live never-sell-at-a-loss
+    guard. That matters most for A: without it a tighter exit scores well
+    precisely by dumping underwater slices, which the live bot refuses to
+    do, and the answer would be flattering and wrong.
+    """
+    coins = coins or ["BTC-USD", "NEAR-USD", "DOGE-USD", "ARB-USD", "ETH-USD", "SOL-USD", "LINK-USD"]
+    exits = [0.017, 0.020, 0.025, 0.030]
+    breakers = [0.10, 0.15, 0.20, 0.25, None]
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async with aiohttp.ClientSession() as session:
+        async def _one(product_id):
+            async with semaphore:
+                candles = await fetch_historical_candles(session, product_id, days=days)
+            if candles is None:
+                return product_id, None, None
+            closes, highs, lows, _t = candles
+            a = {}
+            for e in exits:
+                r = _replay_grid_bot_v2(closes, highs, lows, buy_pct=buy_pct,
+                                        sell_pct=e, num_levels=num_levels)
+                a[f"{e*100:.2f}%"] = {"net": round(r["total_pnl"], 2) if r else None,
+                                      "trips": r["num_trades"] if r else 0}
+            b = {}
+            for bk in breakers:
+                r = _replay_grid_bot_v2(closes, highs, lows, buy_pct=buy_pct,
+                                        sell_pct=buy_pct, num_levels=num_levels,
+                                        drawdown_breaker_pct=bk)
+                b["none" if bk is None else f"{bk*100:.0f}%"] = {
+                    "net": round(r["total_pnl"], 2) if r else None,
+                    "trips": r["num_trades"] if r else 0,
+                    "paused_bars": (r or {}).get("buys_paused_bars", 0)}
+            return product_id, a, b
+
+        outcomes = await asyncio.gather(*(_one(p) for p in coins))
+
+    exit_rows, breaker_rows, skipped = [], [], []
+    exit_tot = {f"{e*100:.2f}%": {"net": 0.0, "trips": 0} for e in exits}
+    bk_tot = {("none" if b is None else f"{b*100:.0f}%"): {"net": 0.0, "trips": 0, "paused_bars": 0}
+              for b in breakers}
+    for pid, a, b in outcomes:
+        if a is None:
+            skipped.append(pid)
+            continue
+        exit_rows.append({"product_id": pid, **a})
+        breaker_rows.append({"product_id": pid, **b})
+        for k, v in a.items():
+            if v["net"] is not None:
+                exit_tot[k]["net"] += v["net"]; exit_tot[k]["trips"] += v["trips"]
+        for k, v in b.items():
+            if v["net"] is not None:
+                bk_tot[k]["net"] += v["net"]; bk_tot[k]["trips"] += v["trips"]
+                bk_tot[k]["paused_bars"] += v["paused_bars"]
+    for d in (exit_tot, bk_tot):
+        for v in d.values():
+            v["net"] = round(v["net"], 2)
+
+    return {
+        "backtest_days": days, "num_levels": num_levels, "buy_pct": buy_pct,
+        "coins_tested": len(exit_rows), "skipped": skipped,
+        "exit_distance": {"per_coin": exit_rows, "totals": exit_tot,
+                          "best": max(exit_tot, key=lambda k: exit_tot[k]["net"]) if exit_tot else None},
+        "drawdown_breaker": {"per_coin": breaker_rows, "totals": bk_tot,
+                             "best": max(bk_tot, key=lambda k: bk_tot[k]["net"]) if bk_tot else None},
+        "note": ("Models the live never-sell-at-a-loss guard. Entry fixed while the exit "
+                 "is swept, so the two distances are measured separately for the first time."),
+    }
+
+
+# A perpetual-futures position pays FUNDING to the other side, typically
+# every 8 hours. On hourly candles that is roughly funding_8h / 8 per bar.
+# 0.01% per 8h is the common neutral baseline on major venues; it swings
+# with sentiment and goes AGAINST the crowded side, so a short pays more
+# when shorting is popular - exactly when a short grid would be busiest.
+PERP_FUNDING_RATE_8H = float(os.getenv("PERP_FUNDING_RATE_8H", "0.0001"))
+
+
+def _replay_grid_bot_short(closes, highs, lows, spend=None,
+                           grid_pct=STRATEGY_LAB_GRID_PCT,
+                           num_levels=STRATEGY_LAB_GRID_LEVELS,
+                           funding_8h=None):
+    """The exact mirror of _replay_grid_bot: SELL high, BUY BACK lower.
+
+    Built to answer one question the account owner asked directly on
+    2026-09-25: the Alpaca side profits when the market falls, via inverse
+    ETFs bought long. Coinbase SPOT cannot do that - there is nothing to
+    buy that rises when a coin drops. The only route is perpetual futures
+    on a different venue and a different account.
+
+    That is a real build, so it should be justified by evidence first.
+    This replays what a SHORT grid would have done over the same real
+    candles the long grid is measured on.
+
+    Mechanics, mirrored exactly so the comparison is fair:
+        long grid   buys  grid_pct BELOW the reference, sells grid_pct above
+        short grid  sells grid_pct ABOVE the reference, buys back below
+
+    Costs that only the short side pays, and that make this NOT a
+    free mirror image:
+
+      FUNDING. A perp position pays funding to the other side, typically
+      every 8 hours, charged on NOTIONAL rather than on profit. Held
+      slices accrue it every bar. Ignoring it is the single easiest way to
+      make a short strategy look profitable when it is not - it is the
+      same class of error as a paper backtest that never charges fees,
+      which on 2026-09-25 turned a -0.48%/trade scalper into a +352%
+      paper result.
+
+      ASYMMETRIC LOSS. A long slice can lose at most its own cost. A
+      short slice's loss is unbounded - price can double. This replay
+      records that honestly rather than capping it.
+
+    NOT modelled, and they matter before any real money moves:
+    liquidation at a maintenance-margin breach, perp fees differing from
+    spot, and funding that spikes against the crowded side precisely when
+    a short grid is most exposed. Treat a positive result here as
+    "worth investigating", never as "deploy".
+    """
+    spend = spend if spend is not None and spend > 0 else SPEND
+    funding = PERP_FUNDING_RATE_8H if funding_8h is None else funding_8h
+    funding_per_bar = funding / 8.0  # hourly candles
+    slice_usd = spend / num_levels
+    trades = []
+    n = len(closes)
+    if n < 2:
+        return None
+
+    i = 1
+    open_slices = []  # FIFO: [{entry, qty}] - each is a SHORT
+    reference = closes[0]
+    funding_paid = 0.0
+
+    while i < n:
+        price = closes[i]
+        # Funding accrues on every open slice, every bar, on notional.
+        for slot in open_slices:
+            funding_paid += slot["qty"] * price * funding_per_bar
+
+        if price >= reference * (1 + grid_pct) and len(open_slices) < num_levels:
+            # Price rose - SELL (open a short) here.
+            open_slices.append({"entry": price, "qty": slice_usd / price})
+            reference = price
+        elif price <= reference * (1 - grid_pct) and open_slices:
+            # Price fell - BUY BACK the oldest short. Profit is the
+            # DROP, so the sign is inverted against the long replay.
+            slot = open_slices.pop(0)
+            gross = slot["qty"] * (slot["entry"] - price)
+            fee = slot["qty"] * (slot["entry"] + price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
+            trades.append(("SHORT_GRID_CYCLE", gross - fee))
+            reference = price
+        i += 1
+
+    final_price = closes[-1]
+    for slot in open_slices:
+        gross = slot["qty"] * (slot["entry"] - final_price)
+        trades.append(("OPEN_AT_WINDOW_END", gross))
+
+    # Funding is booked as one honest line rather than smeared across
+    # trades, so its size is visible instead of hidden in the average.
+    if funding_paid > 0:
+        trades.append(("FUNDING_PAID", -funding_paid))
+
+    result = _summarize_strategy_trades(trades, spend)
+    if result is not None:
+        result["open_shorts_at_end"] = len(open_slices)
+        result["funding_paid_usd"] = round(funding_paid, 4)
+        result["funding_rate_8h"] = funding
     return result
 
 
@@ -1427,7 +1815,7 @@ def _replay_swing_trading(closes, highs, lows, spend=None,
 
         if exit_reason:
             gross = position["qty"] * (price - position["entry"])
-            fee = position["qty"] * (position["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            fee = position["qty"] * (position["entry"] + price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
             trades.append((exit_reason, gross - fee))
             position = None
         i += 1
@@ -1673,7 +2061,7 @@ def _replay_grid_bot_with_drawdown_breaker(closes, highs, lows, spend=None,
         elif price >= reference * (1 + grid_pct) and open_slices:
             slot = open_slices.pop(0)
             gross = slot["qty"] * (price - slot["entry"])
-            fee = slot["qty"] * (slot["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+            fee = slot["qty"] * (slot["entry"] + price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
             pnl = gross - fee
             trades.append(("GRID_CYCLE", pnl))
             allocated += pnl  # matches the live bot's own allocated_usd += pnl on every real sell
@@ -1782,7 +2170,7 @@ def _candidate_label(drawdown_pct):
 # 30-day trailing volume (base -> $10K -> $50K -> $100K -> $1M),
 # expressed as a RATIO against the base tier - deliberately not
 # hardcoded absolute fee percentages, so this backtest stays anchored to
-# this codebase's own existing engine.ROUND_TRIP_FEE_RATE assumption
+# this codebase's own existing BACKTEST_ROUND_TRIP_FEE_RATE assumption
 # (0.8% round trip / 0.4% each way) rather than silently introducing a
 # second, different fee number nothing else in this codebase uses. See
 # crypto_grid_bot.compute_dynamic_grid_pct's own docstring for why the
@@ -1822,7 +2210,7 @@ async def run_grid_fee_tier_spacing_comparison(coins=None, days=BACKTEST_DAYS, m
     coins = coins or COIN_FAMILY_TREE
     tier_grid_pcts = {}
     for tier_name, ratio in GRID_FEE_TIER_RATIOS.items():
-        round_trip = engine.ROUND_TRIP_FEE_RATE * ratio
+        round_trip = BACKTEST_ROUND_TRIP_FEE_RATE * ratio
         tier_grid_pcts[tier_name] = max(grid_engine.MIN_DYNAMIC_GRID_PCT, grid_engine.TARGET_NET_MARGIN_PCT + round_trip)
     semaphore = asyncio.Semaphore(max_concurrent)
 
@@ -1919,7 +2307,7 @@ def _live_matching_grid_pct(closes, highs, lows) -> float:
     check in this file (Strategy Lab's own Grid Bot entry,
     run_grid_level_spacing_comparison's live-default candidate) uses the
     identical real number, never two slightly different guesses at it."""
-    fee_safe_floor = max(grid_engine.MIN_DYNAMIC_GRID_PCT, grid_engine.TARGET_NET_MARGIN_PCT + engine.ROUND_TRIP_FEE_RATE)
+    fee_safe_floor = max(grid_engine.MIN_DYNAMIC_GRID_PCT, grid_engine.TARGET_NET_MARGIN_PCT + BACKTEST_ROUND_TRIP_FEE_RATE)
     avg_swing_pct = _average_hourly_swing_pct(closes, highs, lows)
     return max(fee_safe_floor, avg_swing_pct * grid_engine.AVG_SWING_SPACING_MULTIPLIER)
 
@@ -2298,7 +2686,7 @@ def _grid_step(price: float, reference: float, open_slices: list, slice_usd: flo
         slot = open_slices[0]
         remaining = open_slices[1:]
         gross = slot["qty"] * (price - slot["entry"])
-        fee = slot["qty"] * (slot["entry"] + price) * (engine.ROUND_TRIP_FEE_RATE / 2)
+        fee = slot["qty"] * (slot["entry"] + price) * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
         return price, remaining, gross - fee
     return reference, open_slices, None
 
@@ -2421,7 +2809,127 @@ def _replay_grid_rotation(candidates: dict, btc_series: tuple, start_coin: str, 
     return result
 
 
-async def run_grid_rotation_effectiveness_backtest(coins=None, days=BACKTEST_DAYS, spend=SPEND, max_concurrent=6):
+async def run_short_side_comparison(coins=None, days=BACKTEST_DAYS, max_concurrent=6,
+                                    spend=SPEND, grid_pct=0.025, num_levels=3,
+                                    funding_8h=None):
+    """SHADOW-MODE. Would being able to SHORT crypto have made money?
+
+    Direct answer to the account owner's question on 2026-09-25: the
+    Alpaca side already profits when the market falls, through inverse
+    ETFs bought long. Coinbase SPOT cannot - nothing there rises when a
+    coin drops - so the only route is perpetual futures on a different
+    venue and a different account. That is a real build, and it should be
+    justified by evidence before anyone opens an account.
+
+    Replays three strategies over the SAME real candles, at the config
+    actually promoted live (3 levels, 2.5%):
+
+        LONG ONLY   what runs today - buy dips, sell rallies
+        SHORT ONLY  the mirror - sell rallies, buy back dips, PAYING
+                    perpetual funding on every open slice every bar
+        BOTH        long and short run together on the same coin
+
+    Places no orders, touches no account, reads only public candles.
+
+    Read the result carefully. A positive short number is NOT permission
+    to trade it. Funding is modelled, but liquidation is not, perp fees
+    are assumed equal to spot, and real funding spikes against the
+    crowded side exactly when a short grid is most exposed. And a short
+    loss is unbounded where a long loss is capped at cost. Treat this as
+    "is the idea alive at all", not as a deployment signal.
+    """
+    coins = coins or COIN_FAMILY_TREE
+    semaphore = asyncio.Semaphore(max_concurrent)
+    last_error = {}
+
+    async def _fetch(session, product_id):
+        async with semaphore:
+            candles = await fetch_historical_candles(session, product_id, days=days,
+                                                     last_error_out=last_error)
+        return product_id, candles
+
+    async with aiohttp.ClientSession() as session:
+        results = await asyncio.gather(*[_fetch(session, pid) for pid in coins])
+
+    per_coin, skipped = [], []
+    for pid, candles in results:
+        if candles is None:
+            skipped.append({"product_id": pid,
+                            "reason": last_error.get(pid, "not enough historical data")})
+            continue
+        closes, highs, lows, _times = candles
+        long_r = _replay_grid_bot(closes, highs, lows, spend=spend,
+                                  grid_pct=grid_pct, num_levels=num_levels)
+        short_r = _replay_grid_bot_short(closes, highs, lows, spend=spend,
+                                         grid_pct=grid_pct, num_levels=num_levels,
+                                         funding_8h=funding_8h)
+        long_pnl = (long_r or {}).get("total_pnl", 0.0)
+        short_pnl = (short_r or {}).get("total_pnl", 0.0)
+        per_coin.append({
+            "product_id": pid,
+            "long_only": long_r,
+            "short_only": short_r,
+            "both_combined_pnl": round(long_pnl + short_pnl, 2),
+            "short_helped": short_pnl > 0,
+        })
+
+    if not per_coin:
+        return {"error": "no coin returned enough historical data", "skipped": skipped}
+
+    def _total(key):
+        return round(sum((r[key] or {}).get("total_pnl", 0.0) for r in per_coin), 2)
+
+    long_total = _total("long_only")
+    short_total = _total("short_only")
+    both_total = round(long_total + short_total, 2)
+    funding_total = round(sum((r["short_only"] or {}).get("funding_paid_usd", 0.0)
+                              for r in per_coin), 2)
+    helped = sum(1 for r in per_coin if r["short_helped"])
+
+    if short_total <= 0:
+        verdict = ("SHORTING WOULD HAVE LOST MONEY over this window. A perpetual "
+                   "futures account is not justified by this evidence.")
+    elif both_total > long_total * 1.25:
+        verdict = ("Shorting added real value here. Worth INVESTIGATING a perp "
+                   "venue - not deploying. Liquidation and funding spikes are "
+                   "not modelled, and a short loss is unbounded.")
+    else:
+        verdict = ("Shorting was roughly neutral - it did not clearly beat "
+                   "long-only. The added venue, account and liquidation risk "
+                   "are probably not worth it on this evidence.")
+
+    return {
+        "backtest_days": days,
+        "grid_pct": grid_pct,
+        "num_levels": num_levels,
+        "spend_per_coin": spend,
+        "funding_rate_8h": PERP_FUNDING_RATE_8H if funding_8h is None else funding_8h,
+        "coins_tested": len(per_coin),
+        "skipped": skipped,
+        "long_only_total_pnl": long_total,
+        "short_only_total_pnl": short_total,
+        "both_combined_total_pnl": both_total,
+        "total_funding_paid_usd": funding_total,
+        "coins_where_short_profited": helped,
+        "better": max([("long_only", long_total), ("short_only", short_total),
+                       ("both", both_total)], key=lambda kv: kv[1])[0],
+        "verdict": verdict,
+        "caveats": [
+            "Liquidation at a maintenance-margin breach is NOT modelled.",
+            "Perp fees are assumed equal to spot fees; they usually differ.",
+            "Funding is a flat assumption - real funding spikes against the "
+            "crowded side, which is exactly when a short grid is most exposed.",
+            "A long slice's loss is capped at its cost. A short slice's is not.",
+            "This is a different venue AND a different account - new build, "
+            "new funding, new operational risk.",
+        ],
+        "per_coin": per_coin,
+    }
+
+
+async def run_grid_rotation_effectiveness_backtest(coins=None, days=BACKTEST_DAYS, spend=SPEND, max_concurrent=6,
+                                                   grid_pct=STRATEGY_LAB_GRID_PCT,
+                                                   num_levels=STRATEGY_LAB_GRID_LEVELS):
     """SHADOW-MODE, additive - never touches live trading, never places a
     real order. For each real candidate coin, replays what a single real
     Grid Bot branch STARTING on that coin would have done over the real
@@ -2432,7 +2940,26 @@ async def run_grid_rotation_effectiveness_backtest(coins=None, days=BACKTEST_DAY
     for the live blended ranking signal). Fetches every real candidate's
     full historical series ONCE (shared across every starting-coin
     replay, not re-fetched per coin) - this is O(coins) real API calls,
-    not O(coins²)."""
+    not O(coins²).
+
+    grid_pct/num_levels default to STRATEGY_LAB_GRID_PCT (1.0%) and
+    STRATEGY_LAB_GRID_LEVELS (10), which is what every rotation figure
+    quoted to date was measured at - including the headline
+    baseline +$123.95 -> with-rotation +$638.43.
+
+    That default is the PROBLEM this parameterisation exists to fix. The
+    same module's own level/spacing sweep found 1.0%/10-levels to be the
+    WEAKEST grid family it tested (+$122.61 - +$132), and 3 levels at
+    2.5% the strongest (+$348.21, 278 trades, 76.3% win rate) - but that
+    sweep ran with rotation OFF. So the two largest measured levers have
+    never been measured TOGETHER, and rotation's 5.15x was earned on top
+    of the worst available base config.
+
+    Nobody knows yet whether rotation's gain survives on a 3-level/2.5%
+    base, compounds with it, or partly overlaps it - rotation and wider
+    spacing may both be capturing the same "don't sit in a dead coin"
+    effect. Passing grid_pct=0.025, num_levels=3 answers that directly,
+    against the same real candles, with one run."""
     coins = coins or COIN_FAMILY_TREE
     semaphore = asyncio.Semaphore(max_concurrent)
     last_error = {}
@@ -2457,8 +2984,12 @@ async def run_grid_rotation_effectiveness_backtest(coins=None, days=BACKTEST_DAY
 
     per_coin = []
     for start_coin in candidates:
-        baseline = _replay_grid_rotation(candidates, btc_series, start_coin, spend=spend, rotation_enabled=False)
-        with_rotation = _replay_grid_rotation(candidates, btc_series, start_coin, spend=spend, rotation_enabled=True)
+        baseline = _replay_grid_rotation(candidates, btc_series, start_coin, spend=spend,
+                                         grid_pct=grid_pct, num_levels=num_levels,
+                                         rotation_enabled=False)
+        with_rotation = _replay_grid_rotation(candidates, btc_series, start_coin, spend=spend,
+                                              grid_pct=grid_pct, num_levels=num_levels,
+                                              rotation_enabled=True)
         per_coin.append({"product_id": start_coin, "baseline": baseline, "with_rotation": with_rotation})
 
     def _total(key):
@@ -2474,6 +3005,10 @@ async def run_grid_rotation_effectiveness_backtest(coins=None, days=BACKTEST_DAY
     return {
         "backtest_days": days,
         "spend_per_trade": spend,
+        # Echoed so two runs are never confusable: every rotation figure
+        # quoted before this parameter existed was 1.0%/10 levels.
+        "grid_pct": grid_pct,
+        "num_levels": num_levels,
         "rotation_rank_lookback_hours": ROTATION_RANK_LOOKBACK_HOURS,
         "rotation_cooldown_hours": ROTATION_COOLDOWN_HOURS,
         "coins_tested": len(coins),
@@ -2535,7 +3070,7 @@ async def _get_real_branch_allocations() -> dict:
     through to the same $150 default every other unallocated coin
     already gets - matching this function's own documented contract."""
     allocations = {}
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         tree_result = await db.execute(select(CryptoTreeBranch.product_id, CryptoTreeBranch.allocated_usd))
         for product_id, allocated_usd in tree_result.all():
             allocations[product_id] = allocations.get(product_id, 0.0) + allocated_usd
@@ -2660,7 +3195,7 @@ async def _load_real_exit_events(exit_reasons, limit=STOP_HIT_REVERSAL_EVENT_LIM
     history yet is skipped rather than scored on a truncated window,
     which would understate its real forward return."""
     cutoff = datetime.utcnow() - timedelta(hours=hours_forward)
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         result = await db.execute(
             select(CryptoCoinTradeHistory)
             .where(CryptoCoinTradeHistory.exit_reason.in_(exit_reasons))
@@ -2684,7 +3219,7 @@ def _net_pnl_pct(entry_price, exit_price):
     return, overstating every hypothetical reversal trade's real result
     by the full real round-trip cost."""
     gross_pct = (exit_price - entry_price) / entry_price
-    fee_pct = (entry_price + exit_price) / entry_price * (engine.ROUND_TRIP_FEE_RATE / 2)
+    fee_pct = (entry_price + exit_price) / entry_price * (BACKTEST_ROUND_TRIP_FEE_RATE / 2)
     return gross_pct - fee_pct
 
 
@@ -3346,8 +3881,15 @@ async def _fetch_1min_candles_window(session, product_id: str, days: int = OPENI
         page_data = None
         for attempt in range(5):
             try:
-                async with _CANDLE_HTTP_SEMAPHORE:
-                    async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
+                async with _get_candle_semaphore():
+                    async with session.get(url, headers={"Accept": "application/json",
+                                                         # Coinbase's public candles endpoint
+                                                         # answers 403 to a request with no
+                                                         # User-Agent, which reads as "no data"
+                                                         # rather than "blocked" and silently
+                                                         # returned 4 candles instead of 2160.
+                                                         "User-Agent": CANDLE_USER_AGENT},
+                                           timeout=15) as r:
                         if r.status == 429:
                             last_error = "HTTP 429 rate limited"
                             await asyncio.sleep(min(0.5 * (2 ** attempt), 8.0))

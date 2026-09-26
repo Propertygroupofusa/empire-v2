@@ -7,7 +7,7 @@ Runs every 6 hours to check: bot health, jobs processed, payments, payouts
 import asyncio
 import logging
 from datetime import datetime
-from database import AsyncSessionLocal
+from database import get_session_factory
 from models import Payment, Job, Worker
 from sqlalchemy import select, func
 
@@ -23,7 +23,7 @@ class BotEarningsMonitor:
     async def check_system_health(self):
         """Check overall system health"""
         try:
-            async with AsyncSessionLocal() as session:
+            async with get_session_factory()() as session:
                 # Check bot workers
                 bot_result = await session.execute(
                     select(Worker).where(Worker.email.like("%bot%"))
