@@ -1902,7 +1902,7 @@ async def get_alert_queue(limit: int = 50, db: AsyncSession = Depends(get_db)):
 
 @router.get("/newsroom")
 async def get_newsroom(anchor: str = "Delfine", window_days: int = 30,
-                       league_days: int = 7):
+                       league_days: int = 7, fresh: int = 0):
     """The broadcast: the same watch data, written as news.
 
     Read-only GET, same as the watch it is built on. Every figure on air
@@ -1913,7 +1913,18 @@ async def get_newsroom(anchor: str = "Delfine", window_days: int = 30,
     """
     import newsroom_brief
     import league_table
-    watch = await get_holdings_watch(window_days=window_days)
+    # The league rebuilds a seven-day-ago standing from candles for every
+    # coin, on top of the watch. That is minutes of fetching and Railway's
+    # edge gives up first, so it is cached exactly like the watch.
+    if not fresh:
+        c = _NEWSROOM_CACHE
+        if (c["payload"] is not None and c["key"] == (anchor, window_days, league_days)
+                and (time.time() - c["at"]) < WATCH_CACHE_SECONDS):
+            out = dict(c["payload"])
+            out["served_from_cache"] = True
+            out["cache_age_seconds"] = round(time.time() - c["at"], 1)
+            return out
+    watch = await get_holdings_watch(window_days=window_days, fresh=fresh)
     brief = newsroom_brief.build(watch, anchor=anchor)
 
     rows_now = [r for r in (watch.get("rows") or [])
@@ -1926,6 +1937,10 @@ async def get_newsroom(anchor: str = "Delfine", window_days: int = 30,
 
     import copy_desk
     brief["copy_desk"] = copy_desk.check(brief, watch)
+    brief["served_from_cache"] = False
+    brief["cache_age_seconds"] = 0.0
+    _NEWSROOM_CACHE.update({"at": time.time(), "payload": brief,
+                            "key": (anchor, window_days, league_days)})
     return brief
 
 
@@ -1999,8 +2014,41 @@ def holdings_watch_peak(highs):
     return holdings_watch.peak_from_highs(highs)
 
 
+# THE WATCH IS TOO SLOW TO COMPUTE ON A REQUEST.
+#
+# It measures volatility and a 30-day peak for every holding - two paginated
+# history walks per coin, ~29 coins. That takes minutes, and Railway's edge
+# returns 502 long before it finishes, so the dashboard panel showed "Could
+# not measure: HTTP 502" where the levels should have been.
+#
+# The alert producer already computes this every 15 minutes for its own
+# reasons. So the result is cached in process and served from there, with
+# its age stated. A caller that genuinely needs a fresh read passes
+# ?fresh=1 and waits. Same shape as horizon_study, which stores its run
+# rather than recomputing per request, and for the same reason.
+_WATCH_CACHE = {"at": 0.0, "payload": None, "window_days": None}
+_NEWSROOM_CACHE = {"at": 0.0, "payload": None, "key": None}
+WATCH_CACHE_SECONDS = float(os.getenv("HOLDINGS_WATCH_CACHE_SECONDS", "900"))
+
+
+def _cached_watch(window_days: int):
+    c = _WATCH_CACHE
+    if (c["payload"] is not None and c["window_days"] == window_days
+            and (time.time() - c["at"]) < WATCH_CACHE_SECONDS):
+        out = dict(c["payload"])
+        out["served_from_cache"] = True
+        out["cache_age_seconds"] = round(time.time() - c["at"], 1)
+        return out
+    return None
+
+
+def _store_watch(window_days: int, payload: dict):
+    _WATCH_CACHE.update({"at": time.time(), "payload": payload,
+                         "window_days": window_days})
+
+
 @router.get("/holdings-watch")
-async def get_holdings_watch(window_days: int = 30):
+async def get_holdings_watch(window_days: int = 30, fresh: int = 0):
     """Alert levels for every coin in the account, including the unwatched.
 
     Read-only, and a GET on purpose: this is most needed exactly when
@@ -2020,6 +2068,10 @@ async def get_holdings_watch(window_days: int = 30):
     import holdings_watch
     import horizon_study
     import adaptive_stop
+    if not fresh:
+        cached = _cached_watch(window_days)
+        if cached is not None:
+            return cached
     if crypto_btc_compound_bot_module is None:
         raise HTTPException(status_code=500,
                             detail="crypto_btc_compound_bot not importable - no Coinbase auth")
@@ -2075,6 +2127,10 @@ async def get_holdings_watch(window_days: int = 30):
     out["window_days"] = window_days
     out["stop_policy"] = adaptive_stop.policy()
     out["as_of"] = census.get("as_of")
+    out["served_from_cache"] = False
+    out["cache_age_seconds"] = 0.0
+    out["cache_seconds"] = WATCH_CACHE_SECONDS
+    _store_watch(window_days, out)
     return out
 
 

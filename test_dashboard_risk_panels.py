@@ -145,5 +145,36 @@ print("\nthe copy desk's corrections reach this page too")
 ok("a correction count is surfaced", "c.correction_count" in HTML)
 ok("with the first correction's note", "corrections[0]" in HTML)
 
+
+print("\na cold container is reported as NOT READY, not as broken")
+
+ok("the watch panel distinguishes a gateway timeout",
+   "/50[24]/.test(e.message)" in HTML,
+   "the first computation cannot finish inside an edge timeout")
+ok("and says the background watcher fills it",
+   "background watcher fills" in HTML)
+ok("rather than implying the feature is broken",
+   "Not measured yet" in HTML)
+ok("it still refuses to show a partial book",
+   "partial book as if it were the whole one" in HTML)
+
+print("\nthe panel says how old the reading is")
+
+ok("a cached reading states its age", "served_from_cache" in HTML)
+ok("and a fresh one says so", "measured just now" in HTML)
+
+print("\nthe endpoints cache rather than recomputing per request")
+
+DASH_PY = Path(__file__).with_name("routers").joinpath("trading_dashboard.py").read_text(encoding="utf-8")
+ok("the watch has a cache", "_WATCH_CACHE" in DASH_PY)
+ok("the newsroom has one too", "_NEWSROOM_CACHE" in DASH_PY)
+ok("both are bypassable with ?fresh=1",
+   "fresh: int = 0" in DASH_PY and DASH_PY.count("if not fresh:") >= 2)
+ok("the cache window is configurable", "HOLDINGS_WATCH_CACHE_SECONDS" in DASH_PY)
+ok("the newsroom key includes league_days, so a different window is not served stale",
+   "(anchor, window_days, league_days)" in DASH_PY)
+ok("the comment explains WHY, not just what",
+   "Railway's edge" in DASH_PY and "502" in DASH_PY)
+
 print(f"\n{_passed}/{_passed + _failed} checks passed")
 raise SystemExit(1 if _failed else 0)

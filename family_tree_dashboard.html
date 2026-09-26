@@ -4824,7 +4824,10 @@ function renderHoldingsWatch(d) {
             ${escText(d.disclaimer || '')}</div>`
         + `<div style="font-size:0.72em; color:var(--text-dim); margin-bottom:6px;">
              ${d.assets} holdings · ${_wUSD(d.coin_usd)} in coin · ${_wUSD(d.cash_usd)} cash ·
-             <strong>${_wPCT(d.covered_share_pct, 1)} of coin value now has a level</strong></div>`
+             <strong>${_wPCT(d.covered_share_pct, 1)} of coin value now has a level</strong>
+             ${d.served_from_cache
+                ? ` \u00b7 measured ${Math.round((d.cache_age_seconds || 0) / 60)} min ago`
+                : ` \u00b7 measured just now`}</div>`
         + group('Past its level', breached, 'decide, do not drift')
         + group('Close to its level', near, 'within reach')
         + group('Clear', clear)
@@ -4847,9 +4850,19 @@ async function runHoldingsWatch() {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         renderHoldingsWatch(await r.json());
     } catch (e) {
+        // A 502/504 here is almost always the edge timing out on a COLD
+        // container: the first computation walks two paginated histories per
+        // coin and takes minutes. The background alert producer fills the
+        // same cache every 15 minutes, so the honest thing to say is "not
+        // ready yet", not "broken".
+        const cold = /50[24]/.test(e.message);
         wrap.innerHTML = `<div class="coin-history-empty" style="color:var(--red);">
-            Could not measure: ${escText(e.message)}. Nothing is being shown rather than
-            showing a partial book as if it were the whole one.</div>`;
+            ${cold
+              ? 'Not measured yet. The first run walks 30 days of history for every holding, '
+                + 'which takes longer than the gateway will wait. The background watcher fills '
+                + 'this every 15 minutes - try again shortly, or the panel will be ready on its own.'
+              : 'Could not measure: ' + escText(e.message) + '.'}
+            Nothing is being shown rather than showing a partial book as if it were the whole one.</div>`;
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = original; }
     }
