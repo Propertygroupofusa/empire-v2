@@ -525,6 +525,21 @@
         transition: all 0.3s ease;
     }
     @media (max-width: 640px) {
+        /* THE TAPE. Each print floats once, then is removed - a tape is a
+           sequence of events, not a list that accumulates. */
+        @keyframes tape-float {
+            from { opacity: 0; transform: translateY(14px); }
+            12%  { opacity: 1; }
+            to   { opacity: 0; transform: translateY(-26px); }
+        }
+        .tape-print { animation: tape-float 5.5s linear forwards; }
+        @media (prefers-reduced-motion: reduce) {
+            .tape-print { animation: none; opacity: 1; transform: none; }
+        }
+        .tape-row { display: grid; grid-template-columns: 4.2em 3.6em 1fr 6.2em;
+                    gap: 8px; padding: 4px 0; align-items: baseline;
+                    border-bottom: 1px solid var(--border); font-size: 0.8em;
+                    font-variant-numeric: tabular-nums; }
         .unlock-btn {
             min-height: 48px;
             padding: 10px 16px;
@@ -1139,6 +1154,23 @@
 
     <div class="panel" style="margin-bottom:14px;">
         <div id="token-bar"></div>
+    </div>
+
+    <div class="section-title">📟 The tape</div>
+    <div class="panel">
+        <div class="panel-sub">Every trade printing as it happens on the coins you hold - the same display
+            Kalshi puts beside its price chart, where the floating <strong>+$19 / +$24</strong> are individual
+            trades executing. It is called a <strong>trade tape</strong>, or time &amp; sales. It exists
+            because a price alone tells you where the market is, while the tape tells you whether anything is
+            actually happening at that price - a chart sitting still and a chart sitting still with nothing
+            trading are the same picture and completely different situations.
+            <br><br><strong>These are other people's trades, not yours.</strong> Coinbase publishes every fill
+            on the venue, so this is the whole market's flow on your holdings. This account is not currently
+            placing orders, so a tape of your own fills would be an empty box.</div>
+        <div id="tape-float" style="position:relative; height:70px; overflow:hidden;
+                                    border-bottom:1px solid var(--border); margin-bottom:8px;"></div>
+        <div id="tape-summary" style="font-size:0.74em; color:var(--text-dim); margin-bottom:6px;"></div>
+        <div id="tape-wrap"><div class="coin-history-empty">Loading…</div></div>
     </div>
 
     <div class="section-title">💵 Raise cash from a holding</div>
@@ -5025,6 +5057,7 @@ function setWriteToken(v) {
         else { sessionStorage.removeItem(TOKEN_KEY); }
     } catch (e) { /* private mode - the header still works for this page load */ }
     renderTokenBar();
+loadTape();
 }
 
 /** Headers for any write. One place, so no call site can forget the token. */
@@ -5149,6 +5182,76 @@ renderTokenBar();
     } catch (e) {
         wrap.innerHTML = `<div class="coin-history-empty" style="color:var(--red);">
             ${escText(e.message)}</div>`;
+    }
+}
+
+const _tapeSeen = new Set();
+
+function floatPrint(row) {
+    const box = document.getElementById('tape-float');
+    if (!box) return;
+    const up = row.side === 'buy';
+    const el = document.createElement('div');
+    el.className = 'tape-print';
+    el.style.cssText = `position:absolute; left:${6 + Math.random() * 62}%;
+        bottom:2px; font-size:${Math.min(1.5, 0.78 + Math.log10(Math.max(1, row.usd)) * 0.22)}em;
+        font-weight:700; white-space:nowrap; pointer-events:none;
+        color:${up ? 'var(--green)' : 'var(--red)'};`;
+    el.textContent = `${up ? '+' : '−'}$${Math.round(row.usd).toLocaleString('en-US')} ${row.asset}`;
+    box.appendChild(el);
+    // The animation is 5.5s; remove a little after so the node cannot pile
+    // up on a tab that has been open for hours.
+    setTimeout(() => el.remove(), 6000);
+}
+
+async function loadTape() {
+    const wrap = document.getElementById('tape-wrap');
+    if (!wrap) return;
+    try {
+        const r = await fetch('/api/trading-dashboard/trade-tape?limit=30', { cache: 'no-store' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        const rows = d.rows || [];
+
+        // Float only what is NEW since the last poll. Replaying the whole
+        // window every tick would look like a firehose and mean nothing -
+        // the point of a tape is that each print happened once.
+        const fresh = rows.filter(x => {
+            const k = x.product_id + ':' + x.trade_id;
+            if (_tapeSeen.has(k)) return false;
+            _tapeSeen.add(k);
+            return true;
+        });
+        if (_tapeSeen.size > 4000) _tapeSeen.clear();
+        // Newest last, so they appear in the order they happened.
+        fresh.slice(0, 12).reverse().forEach((x, i) => setTimeout(() => floatPrint(x), i * 220));
+
+        const s = d;
+        document.getElementById('tape-summary').innerHTML =
+            `${s.prints} prints · `
+            + `<span style="color:var(--green);">${s.buy_prints} bought ${_wUSD(s.buy_usd)}</span> · `
+            + `<span style="color:var(--red);">${s.sell_prints} sold ${_wUSD(s.sell_usd)}</span>`
+            + (s.busiest ? ` · busiest <strong>${escText(s.busiest)}</strong>` : '')
+            + (Object.keys(d.errors || {}).length
+                ? ` · <span style="color:var(--amber, #f0b429);">no data for
+                     ${escText(Object.keys(d.errors).join(', '))}</span>` : '');
+
+        wrap.innerHTML = rows.length
+            ? rows.slice(0, 22).map(x => `
+                <div class="tape-row">
+                    <div style="color:var(--text-dim);">${escText(String(x.time || '').slice(11, 19))}</div>
+                    <div style="font-weight:700;">${escText(x.asset)}</div>
+                    <div style="color:${x.side === 'buy' ? 'var(--green)'
+                                        : x.side === 'sell' ? 'var(--red)' : 'var(--text-dim)'};">
+                        ${x.side ? escText(x.side.toUpperCase()) : 'UNKNOWN'}</div>
+                    <div style="text-align:right; font-weight:700;">${_wUSD(x.usd)}</div>
+                </div>`).join('')
+            : `<div class="coin-history-empty">No prints over ${_wUSD(1)} in the last window.
+                 That is quiet, not broken.</div>`;
+    } catch (e) {
+        wrap.innerHTML = `<div class="coin-history-empty" style="color:var(--red);">
+            Tape unavailable: ${escText(e.message)}. Showing nothing rather than
+            a stale window as if it were live.</div>`;
     }
 }
 
@@ -7328,6 +7431,8 @@ setInterval(loadActivityFeed, 5000);
 setInterval(loadCombinedProgress, 60000);
 setInterval(loadAlertQueue, 60000);
 setInterval(loadTradingProfile, 60000);
+// The tape is the one panel that must actually move.
+setInterval(loadTape, 6000);
 // The panels that should visibly move, on their own fast loops.
 setInterval(refreshProximityOnly, 6000);
 setInterval(tickProximityAge, 1000);

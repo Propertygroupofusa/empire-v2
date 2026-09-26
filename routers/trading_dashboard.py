@@ -1845,6 +1845,75 @@ async def _load_coin_history_rows(db):
     return rows
 
 
+@router.get("/trade-tape")
+async def get_trade_tape(assets: str = "", limit: int = 40):
+    """The tape: live market prints on the coins this account holds.
+
+    Read-only, public data, no key. Coinbase publishes every fill on every
+    product, so this is the whole market's flow - other people's trades -
+    on the holdings that matter here. Said plainly in the payload, because
+    a tape someone reads as their OWN activity is worse than no tape, and
+    this account is not currently placing orders.
+
+    Defaults to the largest holdings by value, which is the set worth
+    watching; `assets` overrides with a comma-separated list.
+    """
+    import trade_tape
+    import account_census
+    if crypto_btc_compound_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_btc_compound_bot not importable")
+    mod = crypto_btc_compound_bot_module
+
+    wanted = [a.strip().upper() for a in assets.split(",") if a.strip()]
+    errors = {}
+    try:
+        async with mod.aiohttp.ClientSession() as session:
+            if not wanted:
+                # Biggest holdings first - the coins whose flow actually
+                # moves this account. Falls back to the live fleet rather
+                # than to a hardcoded list if the census cannot be read.
+                try:
+                    census = await account_census.census(session, tracked_usd=0.0)
+                    holdings = sorted(
+                        [h for h in (census.get("holdings") or [])
+                         if h.get("asset") != "USD" and (h.get("usd") or 0) > 25],
+                        key=lambda h: -(h.get("usd") or 0))
+                    wanted = [h["asset"] for h in holdings[:6]]
+                except Exception as e:
+                    errors["census"] = f"{type(e).__name__}: {e}"
+            if not wanted:
+                wanted = ["BTC", "ETH"]
+
+            streams = []
+            for a in wanted[:8]:
+                pid = f"{a}-USD"
+                url = (f"https://api.exchange.coinbase.com/products/{pid}"
+                       f"/trades?limit={max(1, min(100, limit))}")
+                try:
+                    async with session.get(url, timeout=20,
+                                           headers={"Accept": "application/json"}) as r:
+                        if r.status != 200:
+                            # A rate limit written down as "no trades" is a
+                            # mistake this account has already made once.
+                            errors[a] = f"HTTP {r.status}"
+                            continue
+                        streams.append(trade_tape.normalise(pid, await r.json()))
+                except Exception as e:
+                    errors[a] = f"{type(e).__name__}: {e}"
+    except Exception as e:
+        raise HTTPException(status_code=502,
+                            detail=f"tape unavailable: {type(e).__name__}: {e}")
+
+    rows = trade_tape.merge(streams)
+    out = trade_tape.summarise(rows)
+    out["rows"] = rows
+    out["assets"] = wanted[:8]
+    out["errors"] = errors
+    out["source"] = "Coinbase /products/{id}/trades - public, every fill on the venue"
+    out["is_market_flow_not_yours"] = True
+    return out
+
+
 @router.get("/trading-profile")
 async def get_trading_profile_status():
     """Which gate set is in force, what it changes, and what it cannot.
