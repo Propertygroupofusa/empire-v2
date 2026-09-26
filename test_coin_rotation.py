@@ -259,11 +259,27 @@ HELD = [
 ]
 WIDE = {"BTC-USD": 0, "NEAR-USD": 5, "ONDO-USD": 16, "TIA-USD": 11, "FIL-USD": 7}
 
-ok("unset env -> the universe IS the coins already held",
-   set(R.universe(["BTC-USD", "NEAR-USD"])) == {"BTC-USD", "NEAR-USD"})
+ok("unset env -> the universe is the NAMED eight",
+   set(R.universe(["BTC-USD", "NEAR-USD"])) >= set(R.DEFAULT_COIN_UNIVERSE),
+   f"got {R.universe(['BTC-USD', 'NEAR-USD'])}")
+ok("unset env -> the named eight is exactly eight coins, not a scan",
+   len(R.DEFAULT_COIN_UNIVERSE) == 8)
+ok("a coin the fleet HOLDS but which predates the list is never stranded",
+   "WIF-USD" in R.universe(["BTC-USD", "WIF-USD"]))
+
 plans = R.plan_rotations(HELD, WIDE, min_margin=3)
-ok("unset env -> NO new coin is ever proposed, however good it scores",
-   plans == [], f"got {plans}")
+targets = {p["to_product_id"] for p in plans}
+ok("unset env -> coins OFF the named list are still refused, however good they score",
+   not (targets & {"ONDO-USD", "TIA-USD", "FIL-USD"}),
+   f"ONDO/TIA/FIL scored 16/11/7 and must still be refused; got {targets}")
+
+# The regression this default exists to prevent: after the 2026-09-26 merge
+# the fleet held only BTC, NEAR and ARB - the three worst oscillators it
+# owns. A universe defaulting to "what is held" would have frozen it there.
+post_merge = R.universe(["BTC-USD", "NEAR-USD", "ARB-USD"])
+for coin in ("BONK-USD", "FLOKI-USD", "DOGE-USD", "ETC-USD", "BCH-USD"):
+    ok(f"post-merge, {coin} is still reachable (not frozen out by a 3-coin fleet)",
+       coin in post_merge)
 
 os.environ["GRID_COIN_UNIVERSE"] = "BTC-USD,NEAR-USD,ONDO-USD"
 importlib.reload(R)

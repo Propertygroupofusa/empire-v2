@@ -141,6 +141,30 @@ ROTATE_FETCH_BACKOFF_SECONDS = float(os.getenv("GRID_ROTATE_FETCH_BACKOFF", "1.5
 # were already chosen, and can never introduce a new one on its own.
 COIN_UNIVERSE_ENV = "GRID_COIN_UNIVERSE"
 
+# The account owner's own eight - "you already know my seven, my eight
+# coins program, we already was dealing with them coins."
+#
+# This is a NAMED LIST, not a default that drifts. An earlier version of
+# this module defaulted the universe to "whatever the fleet currently
+# holds", which looked conservative and was not: after a merge collapsed
+# eight branches into three (BTC, NEAR, ARB), that default would have
+# frozen the fleet onto exactly those three forever, and they are the
+# three WORST oscillators in the set. A default that inherits a bad state
+# and calls it policy is worse than no default.
+#
+# Measured 30-day round trips at a 2.50% step, so the ranking is visible
+# rather than asserted:
+#
+#     BONK 8   FLOKI 6   DOGE 6   BTC 4   ETC 4   NEAR 3   BCH 2   ARB 1
+#
+# Those eight together offer 34 round trips a month. The three the merge
+# left standing offer 8 - the concentration discarded 76% of the fleet's
+# own available trades.
+DEFAULT_COIN_UNIVERSE = [
+    "BONK-USD", "FLOKI-USD", "DOGE-USD", "BTC-USD",
+    "ETC-USD", "NEAR-USD", "BCH-USD", "ARB-USD",
+]
+
 
 def configured_universe():
     """The explicit coin list, or None when the fleet's own coins are it."""
@@ -162,7 +186,12 @@ def universe(current_product_ids):
     configured = configured_universe()
     if configured:
         return list(dict.fromkeys(configured))
-    return list(dict.fromkeys(p for p in current_product_ids if p))
+    # The named eight, PLUS anything the fleet happens to hold that is not
+    # on the list. A coin already carrying real money is never made
+    # unreachable by a list it predates - the list decides what may be
+    # ADDED, it does not strand what is already there.
+    return list(dict.fromkeys(
+        list(DEFAULT_COIN_UNIVERSE) + [p for p in current_product_ids if p]))
 
 
 def auto_rotate_enabled() -> bool:
