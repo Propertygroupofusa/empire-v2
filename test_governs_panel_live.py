@@ -140,8 +140,14 @@ ok("the backend measures realized edge from the closed book",
 # panel and watch - down with it, over a diagnostic nobody trades on.
 ok("it is served in the grid-status payload",
    '"realized_edge": await _never_fails(get_realized_edge' in BOT)
+# Named, not counted: the count went stale the hour the pipeline funnel was
+# added, and a count would not have caught a NEW builder wired in unwrapped -
+# which is the failure that matters.
 ok("and it is served through the guard, so telemetry cannot break the payload",
-   "async def _never_fails" in BOT and BOT.count("await _never_fails(") == 3)
+   "async def _never_fails" in BOT
+   and all(f"await _never_fails({b}" in BOT for b in
+           ("get_realized_edge", "get_maker_expiry_drift",
+            "signals.summary", "get_pipeline_funnel")))
 ok("gross and net share ONE denominator (notional-weighted)",
    'gross / notional' in BOT_FN and 'net / notional' in BOT_FN,
    "an unweighted mean of percentages beside a weighted total yields an "

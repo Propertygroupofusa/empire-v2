@@ -73,6 +73,8 @@ import os
 import time
 from datetime import datetime, timedelta
 
+from collections import Counter
+
 from sqlalchemy import select
 
 from database import get_session_factory
@@ -230,7 +232,7 @@ def _band(value, lo, hi):
 
 
 def score(*, closes, highs, lows, volumes, spread_pct, bid_depth_usd,
-          ask_depth_usd, atr_pct, rsi, economics=None):
+          ask_depth_usd, atr_pct, rsi, economics=None, gate_reason=None):
     """The 0-100 composite, its components, and the prediction it implies.
 
     THE ECONOMICS ARE NOT COMPUTED HERE.
@@ -341,6 +343,10 @@ def score(*, closes, highs, lows, volumes, spread_pct, bid_depth_usd,
         "cost_assumed_pct": cost,
         # The arithmetic, alone. Never the score.
         "would_trade": bool(net_edge is not None and net_edge > 0),
+        # WHY not, in the gate's own words and in one word.
+        "reject_reason": gate_reason,
+        "reject_category": categorise_reject(
+            gate_reason, bool(net_edge is not None and net_edge > 0)),
     }
 
 
@@ -348,6 +354,57 @@ def _slice_of(economics):
     """Slice size the gate was priced against, so liquidity is scored against
     the order that would really be sent rather than a number chosen here."""
     return (economics or {}).get("slice_usd")
+
+
+# The gate's refusals, grouped into the things you would actually DO about
+# them. Matched on distinctive fragments of crypto_nine_coin_scanner's own
+# strings rather than re-deriving the decision, so this can never disagree
+# with the gate about why it refused.
+#
+# The categories are chosen so that each one points at a different fix:
+#
+#   expected_move  the move is too small for the cost. A strategy problem,
+#                  or a market problem - not an execution one.
+#   spread         paying to cross costs more than the move is worth.
+#   liquidity      the book cannot absorb the slice at this size.
+#   swing_multiple the step is large relative to what this coin does hourly.
+#   unpriceable    the book or a required input could not be read at all.
+#                  BLOCKED, not REJECTED - the absence of an answer.
+#
+# Anything unmatched lands in "other" WITH the raw text, so a new refusal
+# added upstream shows up as itself instead of being silently bucketed.
+# ORDER MATTERS, and so does the conjunction.
+#
+# unpriceable is checked FIRST because "order book unavailable - cannot price
+# the spread" contains the word "spread" and would otherwise be filed as a
+# spread rejection - turning the absence of an answer into a specific one,
+# which is the exact REJECT-versus-BLOCKED confusion the scanner already
+# refuses to make elsewhere. "hourly swing is None - not a usable number" had
+# the same problem against swing_multiple.
+#
+# And each pattern is a conjunction, not a disjunction: a single shared word
+# is not evidence. Matching ANY fragment is what produced both of the above.
+_REJECT_PATTERNS = (
+    ("unpriceable", ("unavailable",)),
+    ("unpriceable", ("not a usable number",)),
+    ("spread", ("spread", "is over")),
+    ("liquidity", ("thin book",)),
+    ("swing_multiple", ("x the", "hourly")),
+    ("expected_move", ("net edge",)),
+)
+
+
+def categorise_reject(reason: str, qualified: bool) -> str:
+    """One word for why this scan did not become a trade."""
+    if qualified:
+        return "qualified"
+    if not reason:
+        return "unknown"
+    low = reason.lower()
+    for name, frags in _REJECT_PATTERNS:
+        if all(f in low for f in frags):
+            return name
+    return "other"
 
 
 async def record(product_id: str, bot_name: str, price: float, scored: dict):
@@ -373,7 +430,8 @@ async def record(product_id: str, bot_name: str, price: float, scored: dict):
                     "rsi", "atr_pct", "volume_ratio", "spread_pct",
                     "bid_depth_usd", "ask_depth_usd", "expected_move_pct",
                     "expected_move_atr_pct",
-                    "expected_net_edge_pct", "cost_assumed_pct", "would_trade")}))
+                    "expected_net_edge_pct", "cost_assumed_pct", "would_trade",
+                    "reject_category", "reject_reason")}))
             await db.commit()
             return True
     except Exception as e:
@@ -489,6 +547,12 @@ def _funnel(rows) -> dict:
         # winning one.
         "net_expectancy_pct": round(sum(nets) / len(nets), 4) if nets else None,
         "would_trade_count": sum(1 for r in rows if r.would_trade),
+        # WHERE THE FUNNEL LEAKS. "0 qualified" is not a diagnosis; this is.
+        # Sorted most-common first so the top line is the bottleneck.
+        "rejected_by": dict(sorted(
+            Counter(r.reject_category or "unknown"
+                    for r in rows if not r.would_trade).items(),
+            key=lambda kv: -kv[1])),
         # The most recent reading, so a funnel of zeros still says something.
         # "0 of 6 would trade" is a verdict with no magnitude; the shortfall
         # is what tells you whether this coin is marginally short of paying
@@ -602,6 +666,15 @@ async def summary(min_rows: int = 30) -> dict:
             "mean_abs_error": round(sum(abs(getattr(r, field) - r.actual_mfe_pct)
                                         for r in rows_) / len(rows_), 4),
         }
+
+    all_rejects = Counter(r.reject_category or "unknown"
+                          for r in rows if not r.would_trade)
+    out["rejected_by"] = dict(sorted(all_rejects.items(), key=lambda kv: -kv[1]))
+    if all_rejects:
+        top, n = max(all_rejects.items(), key=lambda kv: kv[1])
+        out["top_rejection"] = (
+            f"{top} ({n} of {sum(all_rejects.values())} refusals, "
+            f"{n / sum(all_rejects.values()) * 100:.0f}%)")
 
     out["estimators"] = {"momentum_15m": _est("expected_move_pct"),
                          "atr_half": _est("expected_move_atr_pct")}

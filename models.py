@@ -1182,6 +1182,13 @@ class ShortTermSignal(Base):
     expected_net_edge_pct = Column(Float, nullable=True)
     cost_assumed_pct = Column(Float, nullable=True)  # fees + spread + adverse, at score time
     would_trade = Column(Boolean, nullable=True)     # what the HARD gate said, not the score
+    # WHY it was refused. Without this, a scan that produces no trades is a
+    # mystery: "0 qualified" says nothing about whether the movement was
+    # absent, the spread was wide, the book was thin, or the coin could not
+    # be priced at all. Those are four different problems with four
+    # different fixes, and only one of them is about the strategy.
+    reject_category = Column(String, index=True, nullable=True)
+    reject_reason = Column(String, nullable=True)     # the gate's own words, kept verbatim
 
     # --- what actually happened, filled in later. Nullable so a row is
     # usable while still resolving, and a restart mid-flight loses nothing.

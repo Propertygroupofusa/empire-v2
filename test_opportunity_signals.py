@@ -305,6 +305,49 @@ ok("and the step is converted back to a fraction for the gate",
    "the gate speaks fractions; this module speaks percent")
 
 
+print("\nzero trades must name its own bottleneck")
+# Categorised off crypto_nine_coin_scanner's OWN strings, so this can never
+# disagree with the gate about why it refused.
+for reason, want in (
+        ("net edge -0.823% - a 0.23% target cannot clear it", "expected_move"),
+        ("spread 0.812% is over the 0.400% limit", "spread"),
+        ("thin book - bid $412 / ask $388 against a $6.92 slice", "liquidity"),
+        ("target is 4.1x the 0.33% hourly swing", "swing_multiple"),
+        ("order book unavailable - cannot price the spread", "unpriceable"),
+        ("hourly swing is None - not a usable number", "unpriceable")):
+    ok(f"  {want:<15} <- {reason[:42]}",
+       S.categorise_reject(reason, False) == want,
+       f"got {S.categorise_reject(reason, False)}")
+ok("a qualified scan is not a rejection",
+   S.categorise_reject("net edge +0.31% on a 1.10% step", True) == "qualified")
+ok("an UNRECOGNISED refusal lands in 'other', never silently in a bucket",
+   S.categorise_reject("some new gate nobody told us about", False) == "other",
+   "a reason added upstream must show up as itself")
+ok("and the gate's raw words are kept verbatim beside the category",
+   S.score(**dict(hot, gate_reason="thin book - whatever"))["reject_reason"]
+   == "thin book - whatever")
+ok("the category is carried onto the row",
+   S.score(**dict(hot, economics=econ(-0.4),
+                  gate_reason="thin book - x"))["reject_category"] == "liquidity")
+ok("  but a row the gate PASSED is 'qualified' whatever the text says",
+   S.score(**dict(hot, gate_reason="thin book - x"))["reject_category"] == "qualified",
+   "a positive net edge is not a rejection, however the reason reads")
+
+ok("the funnel is assembled from existing counters, not new ones",
+   "await get_maker_only_skips()" in GRID and "await get_fill_mix()" in GRID
+   and "await get_realized_edge()" in GRID,
+   "a second counter drifts from the thing it counts")
+ok("a missing source reads None, never 0",
+   "if sig.get(\"available\") else None" in GRID,
+   "'no data' and 'none happened' are different answers")
+ok("the bottleneck is the EARLIEST blocked stage, not the last empty one",
+   GRID.index('return "execution:') > GRID.index('return ("triggering:')
+   > GRID.index('return (f"qualification:'),
+   "a pipeline blocked at stage 1 is empty at every later stage too")
+ok("and the funnel is served through the crash guard",
+   'await _never_fails(get_pipeline_funnel' in GRID)
+
+
 print("\nit cannot stall or crash the live loop")
 ok("a wall-clock budget exists on the telemetry pass",
    "TELEMETRY_BUDGET_SECONDS" in GRID,
@@ -317,9 +360,21 @@ ok("and stops mid-pass rather than running over",
    "deadline is not None and time.time() >= deadline" in SRC and "break" in SRC)
 ok("the budget is comfortably inside the lease window",
    float(os.getenv("GRID_TELEMETRY_BUDGET_SECONDS", "25")) < 180)
-ok("every telemetry builder in the status payload is wrapped",
-   GRID.count("await _never_fails(") == 3,
-   "a None reaching round() used to propagate out of get_grid_fleet_status")
+# Named rather than counted: a magic number goes stale the moment another
+# builder is added, and it went stale within the hour when the pipeline
+# funnel arrived. Asserting the NAMES also catches the failure that matters -
+# a new builder wired in unwrapped.
+_WRAPPED = ("get_realized_edge", "get_maker_expiry_drift",
+            "signals.summary", "get_pipeline_funnel")
+for _b in _WRAPPED:
+    ok(f"  {_b} is served through the crash guard",
+       f"await _never_fails({_b}" in GRID,
+       "a None reaching round() used to propagate out of get_grid_fleet_status")
+ok("and nothing in the payload calls a telemetry builder directly",
+   all(f'"{k}": await {b}(' not in GRID for k, b in
+       (("realized_edge", "get_realized_edge"),
+        ("maker_expiry_drift", "get_maker_expiry_drift"),
+        ("pipeline", "get_pipeline_funnel"))))
 ok("the wrapper returns a shape callers can read, not a raise",
    '"available": False' in GRID.split("async def _never_fails")[1][:700])
 ok("a failed builder is logged at WARNING, not swallowed",

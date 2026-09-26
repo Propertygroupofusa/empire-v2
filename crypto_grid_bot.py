@@ -5893,6 +5893,9 @@ async def get_grid_status() -> dict:
         # Short-horizon opportunity scoring, and whether it has predicted
         # anything yet. Observation only - see opportunity_signals.
         "short_term_signals": await _never_fails(signals.summary, "short_term_signals"),
+        # The end-to-end funnel, so "zero trades" names its own bottleneck
+        # instead of leaving it to be inferred from six scattered numbers.
+        "pipeline": await _never_fails(get_pipeline_funnel, "pipeline"),
         "floor_priced_against": ("maker (the market fallback is removed)"
                                  if _maker_only and _cached_real_maker_fee_rate is not None
                                  else "taker (an unfilled maker order still becomes a market order)"),
@@ -6120,9 +6123,10 @@ async def _score_short_term_opportunities(session, branches, deadline=None):
             _step_pct = abs(_r15) * 0.5 if _r15 is not None else (
                 (atr_frac or 0) * 100.0 * 0.5)
             economics = None
+            _why = None
             if _step_pct > 0:
                 swing = await engine.get_average_hourly_swing_pct(session, pid)
-                _ok, _why, detail = _scan.evaluate_grid_step(
+                _gate_ok, _why, detail = _scan.evaluate_grid_step(
                     pid, _step_pct / 100.0, swing, best_bid=bid, best_ask=ask,
                     bid_depth_usd=bid_depth, ask_depth_usd=ask_depth,
                     slice_usd=slice_usd, fee_round_trip=fee_rt)
@@ -6136,7 +6140,7 @@ async def _score_short_term_opportunities(session, branches, deadline=None):
                 spread_pct=((ask - bid) / mid * 100.0 if mid else None),
                 bid_depth_usd=bid_depth, ask_depth_usd=ask_depth,
                 atr_pct=atr_pct, rsi=engine._rsi_from_closes(closes),
-                economics=economics)
+                economics=economics, gate_reason=_why)
             await signals.record(pid, branch.bot_name, mid, scored)
         except Exception as e:
             log.debug(f"[SIGNAL] {pid or '?'} not scored: "
@@ -6160,6 +6164,80 @@ async def _never_fails(fn, label: str) -> dict:
     except Exception as e:
         log.warning(f"[GRID] {label} unavailable this cycle: {type(e).__name__}: {e}")
         return {"available": False, "error": f"{type(e).__name__}: {e}"}
+
+
+
+async def get_pipeline_funnel() -> dict:
+    """Where the opportunity pipeline actually leaks, end to end.
+
+    Assembled from what each stage already records rather than a new
+    counter, so it cannot drift from the thing it describes:
+
+        scans        every short-term score written
+        qualified    scans whose NET EDGE cleared, from the live gate
+        attempted    real orders placed - fills plus expiries
+        filled       maker legs that actually filled
+        expired      post-only orders cancelled unfilled
+        completed    round trips closed on this configuration
+
+    Each stage answers a different question, and only one of them is about
+    the strategy:
+
+        many scans, few qualified   -> the movement is not there, or the
+                                       cost model is too strict. rejected_by
+                                       says which.
+        qualified but not attempted -> price never reached a grid trigger.
+                                       The scan and the trigger are separate
+                                       gates and both must open.
+        attempted but not filled    -> maker-only is choking execution.
+        filled but not completed    -> the exit is not being reached.
+
+    Every number here is read, never computed twice. If a source is
+    unavailable it is None, not zero - "no data" and "none happened" are
+    different answers and collapsing them is how a blocked pipeline reads
+    as an idle one.
+    """
+    sig = await signals.summary()
+    skips = await get_maker_only_skips()
+    mix = (await get_fill_mix() or {}).get("overall") or {}
+    edge = await get_realized_edge()
+    expired = (skips or {}).get("total")
+    filled = mix.get("maker_legs")
+    attempted = (filled + expired) if (filled is not None and expired is not None) else None
+    return {
+        "scans": sig.get("scored") if sig.get("available") else None,
+        "qualified": sig.get("would_trade_count") if sig.get("available") else None,
+        "attempted": attempted,
+        "filled": filled,
+        "expired": expired,
+        "completed": (edge.get("current") or {}).get("trades") if edge.get("available") else None,
+        "top_rejection": sig.get("top_rejection"),
+        "rejected_by": sig.get("rejected_by"),
+        # The stage that is actually blocking, named rather than inferred by
+        # whoever reads the numbers.
+        "bottleneck": _funnel_bottleneck(sig, attempted, filled,
+                                         (edge.get("current") or {}).get("trades")),
+    }
+
+
+def _funnel_bottleneck(sig, attempted, filled, completed) -> str:
+    """The first stage that lost everything. Checked in pipeline order, so
+    the answer is the EARLIEST blockage rather than the last empty number -
+    a pipeline blocked at the first stage is also empty at every later one,
+    and reporting the last would send the fix to the wrong place."""
+    if not sig.get("available") or not sig.get("scored"):
+        return "nothing scored yet - the scanner has not run"
+    if not sig.get("would_trade_count"):
+        return (f"qualification: {sig.get('scans') or sig.get('scored')} scans, 0 cleared the "
+                f"net-edge gate. Top refusal: {sig.get('top_rejection') or 'unknown'}")
+    if not attempted:
+        return ("triggering: setups qualified but price never reached a grid "
+                "trigger - the scan and the trigger are separate gates")
+    if not filled:
+        return "execution: orders were placed and none filled - maker-only is choking"
+    if not completed:
+        return "exit: slices filled but none has closed a round trip yet"
+    return "none - the pipeline is completing round trips"
 
 
 async def close_all_grid_slices() -> dict:
