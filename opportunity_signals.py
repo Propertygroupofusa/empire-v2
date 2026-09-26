@@ -78,7 +78,7 @@ from collections import Counter
 from sqlalchemy import select
 
 from database import get_session_factory
-from models import ShortTermSignal
+from models import RegimeCrossing, ShortTermSignal
 
 log = logging.getLogger(__name__)
 
@@ -102,6 +102,14 @@ SCORE_MIN_GAP_SECONDS = int(os.getenv("GRID_SCORE_MIN_GAP_SECONDS", "300"))
 # slower until it stops. Bounded here; the ledger keeps everything, the
 # report reads a window.
 SUMMARY_MAX_ROWS = int(os.getenv("GRID_SIGNAL_SUMMARY_ROWS", "5000"))
+
+# How far past break-even a coin must get before it counts as having become
+# viable. Without a margin, a coin clearing its costs by a thousandth of a
+# percent would raise an alert and stop being viable on the next scan, and
+# the log would fill with crossings that were arithmetic noise around zero
+# rather than a change in the market. This is the "safety buffer" that
+# belongs between expected move and real cost.
+VIABILITY_MARGIN_PCT = float(os.getenv("GRID_VIABILITY_MARGIN_PCT", "0.10"))
 
 # Candles are 5 minutes, so these are the horizons the data can actually
 # support. A 1-minute return was asked for and is not offered: the series
@@ -596,6 +604,228 @@ def _latest(rows) -> dict:
                          if r.expected_net_edge_pct is not None
                          and r.expected_net_edge_pct < 0 else None),
     }
+
+
+
+def is_viable(net_edge_pct, margin: float = None) -> bool:
+    """Whether this reading clears its costs by enough to count.
+
+    None is NOT viable and never "unknown-so-assume-yes": a coin the gate
+    could not price is BLOCKED, and an alert must never fire on the absence
+    of an answer.
+    """
+    if net_edge_pct is None:
+        return False
+    return net_edge_pct > (VIABILITY_MARGIN_PCT if margin is None else margin)
+
+
+async def observe(product_id: str, bot_name: str, price: float, scored: dict):
+    """One observation: detect any crossing, then store the reading.
+
+    These are deliberately ONE call. Detection compares against the newest
+    STORED row, and record() is throttled to one row per candle - so running
+    them independently meant eight detections per stored row, each comparing
+    against the same stale predecessor, and a coin that became viable would
+    re-alert on every cycle for five minutes.
+
+    A crossing is a change between two consecutive OBSERVATIONS. Tying both
+    to the same throttle is what makes that true rather than nearly true.
+
+    Returns the crossing dict if one happened, else None. Never raises.
+    """
+    try:
+        async with get_session_factory()() as db:
+            recent = (await db.execute(
+                select(ShortTermSignal.scored_at)
+                .where(ShortTermSignal.product_id == product_id)
+                .order_by(ShortTermSignal.scored_at.desc()).limit(1))).scalar_one_or_none()
+        if recent is not None and (datetime.utcnow() - recent).total_seconds() < SCORE_MIN_GAP_SECONDS:
+            return None
+    except Exception as e:
+        log.debug(f"[SIGNAL] observe gate failed for {product_id}: {e}")
+        return None
+    crossing = await detect_crossing(product_id, scored, price)
+    await record(product_id, bot_name, price, scored)
+    return crossing
+
+
+async def detect_crossing(product_id: str, scored: dict, price: float):
+    """Compare this reading with the last one and record any transition.
+
+    Call through observe(), not directly: this compares against the newest
+    stored row, so it must only run when a new row is about to be written.
+
+    Hysteresis is deliberate and asymmetric. Becoming viable requires
+    clearing the margin; ceasing to be viable requires falling back below
+    ZERO, not merely below the margin. A single threshold would make a coin
+    hovering at the buffer flap in and out on rounding, and each flap would
+    be an alert.
+
+    Never raises. Returns the crossing dict if one happened, else None.
+    """
+    try:
+        now_viable = is_viable(scored.get("expected_net_edge_pct"))
+        async with get_session_factory()() as db:
+            prev = (await db.execute(
+                select(ShortTermSignal)
+                .where(ShortTermSignal.product_id == product_id)
+                .order_by(ShortTermSignal.scored_at.desc()).limit(1))).scalars().first()
+            if prev is None:
+                return None           # nothing to cross FROM
+
+            # "Already viable" is the STATE of an open window, not a
+            # re-evaluation of the previous reading against the margin.
+            #
+            # Deriving it with is_viable(prev) broke the hysteresis it was
+            # meant to implement: a coin sitting at +0.05 - above zero, below
+            # the margin, and inside a window that was never closed - read as
+            # already-not-viable, so the eventual fall below zero produced no
+            # close at all and the window stayed open forever. The asymmetry
+            # only works if one side is a threshold and the other is a state.
+            open_window = (await db.execute(
+                select(RegimeCrossing)
+                .where(RegimeCrossing.product_id == product_id,
+                       RegimeCrossing.direction == "into_viable",
+                       RegimeCrossing.window_seconds.is_(None))
+                .order_by(RegimeCrossing.crossed_at.desc()).limit(1))).scalars().first()
+            was_viable = open_window is not None
+            edge = scored.get("expected_net_edge_pct")
+            if not was_viable and now_viable:
+                direction = "into_viable"
+            elif was_viable and (edge is None or edge <= 0):
+                direction = "out_of_viable"
+            else:
+                return None
+
+            row = RegimeCrossing(
+                product_id=product_id, direction=direction, price_at_cross=price,
+                net_edge_pct=edge, expected_move_pct=scored.get("expected_move_pct"),
+                cost_pct=scored.get("cost_assumed_pct"),
+                score_total=scored.get("score_total"),
+                spread_pct=scored.get("spread_pct"),
+                margin_required_pct=VIABILITY_MARGIN_PCT, alerted=False)
+            db.add(row)
+
+            # Close the window on the matching open crossing, so how long an
+            # opportunity LASTED is recorded rather than inferred from two
+            # timestamps by whoever reads the table.
+            if direction == "out_of_viable" and open_window is not None \
+                    and open_window.crossed_at:
+                open_window.window_seconds = round(
+                    (datetime.utcnow() - open_window.crossed_at).total_seconds(), 1)
+            await db.commit()
+        log.warning("[REGIME] %s %s - net edge %.3f%% on a %.3f%% expected move "
+                    "against %.3f%% cost",
+                    product_id, direction.upper().replace("_", " "),
+                    edge if edge is not None else float("nan"),
+                    scored.get("expected_move_pct") or float("nan"),
+                    scored.get("cost_assumed_pct") or float("nan"))
+        return {"product_id": product_id, "direction": direction, "net_edge_pct": edge}
+    except Exception as e:
+        log.debug(f"[REGIME] crossing check failed for {product_id} (ignored): "
+                  f"{type(e).__name__}: {e}")
+        return None
+
+
+async def resolve_crossings(price_for, max_rows: int = 8, deadline=None):
+    """Mark what happened in the 30 minutes after each alert. Never raises.
+
+    net_after_costs_pct is priced against the BEST the move reached, which
+    flatters the crossing on purpose - if an alert loses money even assuming
+    a perfect exit, it was not an opportunity and no execution fixes it.
+    """
+    try:
+        import time as _t
+        now = datetime.utcnow()
+        async with get_session_factory()() as db:
+            rows = (await db.execute(
+                select(RegimeCrossing)
+                .where(RegimeCrossing.resolved_at.is_(None),
+                       RegimeCrossing.direction == "into_viable")
+                .order_by(RegimeCrossing.crossed_at).limit(max_rows))).scalars().all()
+            prices = {}
+            for row in rows:
+                if deadline is not None and _t.time() >= deadline:
+                    break
+                if not row.crossed_at or (now - row.crossed_at).total_seconds() < 1800:
+                    continue
+                if row.product_id not in prices:
+                    try:
+                        prices[row.product_id] = await price_for(row.product_id)
+                    except Exception:
+                        prices[row.product_id] = None
+                price = prices.get(row.product_id)
+                if price is None or not row.price_at_cross:
+                    continue
+                move = (price / row.price_at_cross - 1.0) * 100.0
+                row.actual_move_30m_pct = round(move, 4)
+                row.actual_mfe_pct = round(max(move, row.actual_mfe_pct or move), 4)
+                if row.cost_pct is not None:
+                    row.net_after_costs_pct = round(row.actual_mfe_pct - row.cost_pct, 4)
+                    row.paid_off = row.net_after_costs_pct > 0
+                row.resolved_at = now
+            await db.commit()
+    except Exception as e:
+        log.debug(f"[REGIME] crossing resolution failed (ignored): "
+                  f"{type(e).__name__}: {e}")
+
+
+async def regime_summary() -> dict:
+    """How close the fleet is to viable, and whether past crossings paid.
+
+    closest_to_viable is the number to watch on a quiet day: it turns "no
+    opportunities" from a flat zero into a distance that can be seen moving.
+    """
+    try:
+        async with get_session_factory()() as db:
+            rows = (await db.execute(
+                select(RegimeCrossing)
+                .order_by(RegimeCrossing.crossed_at.desc()).limit(500))).scalars().all()
+            latest = (await db.execute(
+                select(ShortTermSignal)
+                .order_by(ShortTermSignal.scored_at.desc()).limit(60))).scalars().all()
+    except Exception as e:
+        return {"available": False, "error": f"{type(e).__name__}: {e}"}
+
+    seen, live = set(), []
+    for r in latest:                       # newest reading per coin
+        if r.product_id not in seen:
+            seen.add(r.product_id)
+            live.append(r)
+    ranked = sorted(
+        (r for r in live if r.expected_net_edge_pct is not None),
+        key=lambda r: -r.expected_net_edge_pct)
+    opens = [r for r in rows if r.direction == "into_viable"]
+    resolved = [r for r in opens if r.resolved_at is not None]
+    paid = [r for r in resolved if r.paid_off]
+    windows = [r.window_seconds for r in opens if r.window_seconds is not None]
+
+    out = {
+        "available": True,
+        "margin_required_pct": VIABILITY_MARGIN_PCT,
+        "viable_now": [r.product_id for r in ranked if is_viable(r.expected_net_edge_pct)],
+        "closest_to_viable": ({"product_id": ranked[0].product_id,
+                               "net_edge_pct": ranked[0].expected_net_edge_pct,
+                               "short_by_pct": round(
+                                   VIABILITY_MARGIN_PCT - ranked[0].expected_net_edge_pct, 4)}
+                              if ranked else None),
+        "crossings_into_viable": len(opens),
+        "crossings_resolved": len(resolved),
+        "median_window_seconds": sorted(windows)[len(windows) // 2] if windows else None,
+    }
+    if len(resolved) < 10:
+        out["verdict"] = (f"not enough data ({len(resolved)}/10 crossings resolved) - "
+                          f"an alert is worth answering only once its hit rate is known")
+    else:
+        nets = [r.net_after_costs_pct for r in resolved if r.net_after_costs_pct is not None]
+        out["paid_off_pct"] = round(len(paid) / len(resolved) * 100, 1)
+        out["mean_net_after_costs_pct"] = (round(sum(nets) / len(nets), 4) if nets else None)
+        out["verdict"] = (
+            f"crossings pay: {out['paid_off_pct']}% of alerts cleared costs"
+            if out["paid_off_pct"] > 50 else
+            f"crossings do NOT pay: only {out['paid_off_pct']}% cleared costs - "
+            f"this alert is crying wolf and should not be traded on")
+    return out
 
 
 async def summary(min_rows: int = 30) -> dict:

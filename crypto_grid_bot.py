@@ -52,7 +52,7 @@ import crypto_mean_reversion_bot as mean_reversion_engine
 import coin_rotation as rotation
 import opportunity_signals as signals
 from database import get_session_factory
-from models import CryptoGridBranch, CryptoGridSlice, CryptoGridTradeHistory, GridMakerExpiry, TradingBotState, CryptoTreeBranch, BotPosition
+from models import CryptoGridBranch, CryptoGridSlice, CryptoGridTradeHistory, GridMakerExpiry, RegimeCrossing, TradingBotState, CryptoTreeBranch, BotPosition
 
 # ── SHADOW MODE INTEGRATION ────────────────────────────────────────────────
 # Non-invasive learning validation: observes every trade without affecting execution
@@ -5596,6 +5596,8 @@ async def run_grid_branches_cycle():
                 await signals.resolve(
                     session, lambda pid: _mid_price(session, pid),
                     deadline=_deadline)
+                await signals.resolve_crossings(
+                    lambda pid: _mid_price(session, pid), deadline=_deadline)
         except Exception as e:
             log.debug(f"[SIGNAL] scoring pass skipped: {type(e).__name__}: {e}")
 
@@ -5896,6 +5898,10 @@ async def get_grid_status() -> dict:
         # The end-to-end funnel, so "zero trades" names its own bottleneck
         # instead of leaving it to be inferred from six scattered numbers.
         "pipeline": await _never_fails(get_pipeline_funnel, "pipeline"),
+        # WHAT CHANGED, rather than what is true. Everything else here reads
+        # the present; this says the moment a coin crossed into or out of
+        # being worth trading, and whether past crossings paid.
+        "regime": await _never_fails(signals.regime_summary, "regime"),
         "floor_priced_against": ("maker (the market fallback is removed)"
                                  if _maker_only and _cached_real_maker_fee_rate is not None
                                  else "taker (an unfilled maker order still becomes a market order)"),
@@ -6141,7 +6147,10 @@ async def _score_short_term_opportunities(session, branches, deadline=None):
                 bid_depth_usd=bid_depth, ask_depth_usd=ask_depth,
                 atr_pct=atr_pct, rsi=engine._rsi_from_closes(closes),
                 economics=economics, gate_reason=_why)
-            await signals.record(pid, branch.bot_name, mid, scored)
+            # One call: detection and recording share the throttle, so a
+            # crossing is a change between consecutive OBSERVATIONS rather
+            # than eight comparisons against the same stale row.
+            await signals.observe(pid, branch.bot_name, mid, scored)
         except Exception as e:
             log.debug(f"[SIGNAL] {pid or '?'} not scored: "
                       f"{type(e).__name__}: {e}")

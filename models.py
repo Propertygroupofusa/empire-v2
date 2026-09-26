@@ -1203,6 +1203,62 @@ class ShortTermSignal(Base):
     resolved_at = Column(DateTime, nullable=True, index=True)
 
 
+class RegimeCrossing(Base):
+    """The moment a coin crossed between "not worth trading" and "viable".
+
+    Everything else in this telemetry answers "what is true now". This
+    answers "what CHANGED", which is the question that actually prompts
+    action. A fleet sitting at zero trades for a week does not need another
+    reading of how far short it is; it needs to be told the instant one coin
+    stops being short.
+
+    A crossing is defined on the same arithmetic the live gate uses - the
+    expected capturable move against the real cost of a round trip - plus a
+    margin, so a coin does not "become viable" by clearing its costs by a
+    thousandth of a percent and then immediately stop. Both directions are
+    recorded: knowing an opportunity closed matters as much as knowing one
+    opened, and a pair of timestamps is how long the window actually lasted.
+
+    AND EVERY CROSSING IS MARKED.
+
+    into_viable is a prediction, not a profit. The resolution columns say
+    what the coin did in the 30 minutes after the alert fired and what a real
+    round trip entered at that moment would have NETTED after costs. Without
+    that, this is an alarm nobody can tell is worth answering - and an alarm
+    that cries wolf is worse than no alarm, because it trains you to trade
+    the next one.
+    """
+    __tablename__ = "regime_crossing"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(String, index=True)
+    crossed_at = Column(DateTime, default=datetime.utcnow, index=True)
+    direction = Column(String, index=True)          # "into_viable" | "out_of_viable"
+
+    # The state at the moment of the crossing.
+    price_at_cross = Column(Float, nullable=True)
+    net_edge_pct = Column(Float, nullable=True)     # expected move minus real cost
+    expected_move_pct = Column(Float, nullable=True)
+    cost_pct = Column(Float, nullable=True)
+    score_total = Column(Float, nullable=True)
+    spread_pct = Column(Float, nullable=True)
+    margin_required_pct = Column(Float, nullable=True)   # the buffer in force
+
+    # How long the window stayed open, filled in when it closes.
+    window_seconds = Column(Float, nullable=True)
+
+    # Did it mean anything? Same discipline as every other prediction here.
+    actual_move_30m_pct = Column(Float, nullable=True)
+    actual_mfe_pct = Column(Float, nullable=True)
+    net_after_costs_pct = Column(Float, nullable=True)
+    paid_off = Column(Boolean, nullable=True)
+    resolved_at = Column(DateTime, nullable=True, index=True)
+
+    # Whether an alert was sent, so the same crossing is never announced
+    # twice across restarts.
+    alerted = Column(Boolean, default=False, index=True)
+
+
 class GridMakerExpiry(Base):
     """One post-only order that rested its whole window, filled nothing, and
     was cancelled with NO market order behind it.
