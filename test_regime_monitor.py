@@ -103,12 +103,22 @@ async def main():
         r.crossed_at = dt.datetime.utcnow() - dt.timedelta(minutes=31)
         r.price_at_cross = 100.0; r.cost_pct = 1.37
         await db.commit()
-    await S.resolve_crossings(lambda p: _v(103.0))       # +3% after the alert
+    # Candles covering the 30 minutes after the cross: a clean run to +3%.
+    T0 = int(dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc).timestamp()) - 1860
+    CLEAN = ([T0 + 300*i for i in range(7)], [100.0]*7,
+             [100.5, 101.0, 101.5, 102.0, 102.5, 103.0, 103.0],
+             [99.8, 100.2, 100.8, 101.4, 102.0, 102.5, 102.5], [1.0]*7)
+    await S.resolve_crossings(lambda p: _v(CLEAN))
     async with get_session_factory()() as db:
         r = (await db.execute(select(models.RegimeCrossing).where(
             models.RegimeCrossing.direction=="into_viable"))).scalars().all()[0]
-    ok("a +3.0%% move after the alert nets 3.0 - 1.37 = +1.63",
+    ok("MFE comes from candle HIGHS, not closes (closes were flat at 100)",
+       abs(r.actual_mfe_pct - 3.0) < 0.01, r.actual_mfe_pct)
+    ok("a +3.0%% peak nets 3.0 - 1.37 = +1.63",
        abs(r.net_after_costs_pct - 1.63) < 0.01, r.net_after_costs_pct)
+    ok("and the timing of each extreme is recorded",
+       r.mfe_at_minutes is not None and r.mae_at_minutes is not None,
+       f"mfe@{r.mfe_at_minutes} mae@{r.mae_at_minutes}")
     ok("  and is marked as having paid off", r.paid_off is True)
 
     g = await S.regime_summary()
@@ -207,6 +217,47 @@ async def main():
     ok("the stop it compares against is the LIVE one, not a literal",
        S.GRID_STOP_PCT_LABEL == 8.0,
        "read from GRID_STOP_LOSS_PCT so the two cannot disagree")
+
+    print("\nwicks count, and so does the ORDER of the extremes")
+    e = S.window_excursion([0, 300, 600], [110.0, 105.0, 100.0], [95.0, 99.0, 100.0],
+                           0, 100.0)
+    ok("MFE reads the highest HIGH, not the highest close",
+       e[0] == 10.0, e)
+    ok("MAE reads the lowest LOW", e[2] == -5.0, e)
+    ok("  and both carry the minute they occurred", (e[1], e[3]) == (0.0, 0.0), e)
+    ok("candles outside the window are excluded",
+       S.window_excursion([0, 300, 99999], [101.0, 101.0, 500.0],
+                          [99.0, 99.0, 99.0], 0, 100.0, until_epoch=600)[0] == 1.0,
+       "a spike an hour later is not this window's excursion")
+    ok("no candles in range returns None, not a fabricated zero",
+       S.window_excursion([0], [100.0], [100.0], 99999, 100.0) is None)
+
+    print("\nstopped out before the peak is NOT a win")
+    async def one(pid): return DUMP_THEN_RIP
+    # -9% at minute 5 (past the 8% stop), then +12% by minute 25.
+    T = int(dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc).timestamp()) - 1860
+    DUMP_THEN_RIP = ([T + 300*i for i in range(7)], [100.0]*7,
+                     [100.2, 100.5, 101.0, 105.0, 110.0, 112.0, 112.0],
+                     [99.0, 91.0, 95.0, 99.0, 104.0, 108.0, 108.0], [1.0]*7)
+    async with get_session_factory()() as db:
+        db.add(models.RegimeCrossing(
+            product_id="SEQ-USD", direction="into_viable",
+            crossed_at=dt.datetime.utcnow() - dt.timedelta(minutes=31),
+            price_at_cross=100.0, cost_pct=1.37))
+        await db.commit()
+    await S.resolve_crossings(one)
+    async with get_session_factory()() as db:
+        sq = (await db.execute(select(models.RegimeCrossing).where(
+            models.RegimeCrossing.product_id == "SEQ-USD"))).scalars().all()[0]
+    ok("MFE is a genuine +12%%", abs(sq.actual_mfe_pct - 12.0) < 0.01, sq.actual_mfe_pct)
+    ok("MAE hit -9%%, past the 8%% stop", abs(sq.actual_mae_pct + 9.0) < 0.01, sq.actual_mae_pct)
+    ok("the drawdown came FIRST", sq.mae_at_minutes < sq.mfe_at_minutes,
+       f"mae@{sq.mae_at_minutes} mfe@{sq.mfe_at_minutes}")
+    ok("so it is marked stopped_out_first", sq.stopped_out_first is True)
+    ok("REGRESSION: and it does NOT count as paid off, despite a +10.6%% net",
+       sq.paid_off is False and sq.net_after_costs_pct > 10,
+       f"net {sq.net_after_costs_pct} paid_off {sq.paid_off} - the position was "
+       f"gone before the peak and could not collect it")
     print(f"\n{P} passed, {F} failed"); sys.exit(1 if F else 0)
 
 async def _v(x): return x

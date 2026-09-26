@@ -71,7 +71,7 @@ UNITS = "percent"   # see the module docstring
 import logging
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from collections import Counter
 
@@ -134,6 +134,64 @@ HORIZONS_MIN = (5, 15, 30)
 # checked. The day expiries and closes are numerous enough to measure it, the
 # measured figure replaces this one and the reports must say which is which.
 ADVERSE_PCT_ASSUMED = float(os.getenv("GRID_ADVERSE_SELECTION_PCT", "0.67"))
+
+
+async def fetch_candles_full(session, product_id: str, granularity: int = 300):
+    """Candles including their TIMESTAMPS, oldest-first.
+
+    fetch_candles_with_volume drops column 0. Excursions need it: bounding a
+    30-minute window and saying WHEN each extreme occurred are both questions
+    about time, and neither can be answered from an unlabelled series.
+
+    Returns (times, closes, highs, lows, volumes) or None. Never raises.
+    """
+    url = (f"https://api.exchange.coinbase.com/products/{product_id}"
+           f"/candles?granularity={granularity}")
+    try:
+        async with session.get(url, headers={"Accept": "application/json"}, timeout=15) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+            if not data:
+                return None
+            c = list(reversed(data))
+            return ([int(x[0]) for x in c], [float(x[4]) for x in c],
+                    [float(x[2]) for x in c], [float(x[1]) for x in c],
+                    [float(x[5]) for x in c])
+    except Exception as e:
+        log.debug(f"[SIGNAL] full candle fetch failed for {product_id}: {e}")
+        return None
+
+
+def window_excursion(times, highs, lows, since_epoch, ref_price, until_epoch=None):
+    """MFE and MAE over a window, from candle HIGHS AND LOWS, with ordering.
+
+    Two things a close-to-close read cannot do.
+
+    WICKS COUNT. A candle that spikes 3% and closes flat still hit 3%, and it
+    still would have hit a stop on the way. Sampling closes - or sampling the
+    mid every 37 seconds, which is what this replaced - misses whatever
+    happened between the samples. Highs and lows are the actual bounds.
+
+    ORDER COUNTS. Returning both extremes without saying which came first
+    makes a move that dumps 4% at minute 5 and rips 6% by minute 25 look like
+    a clean 6% win. It was not; it was a position that had already been
+    stopped out and could not collect the 6%.
+
+    Returns (mfe_pct, mfe_at_min, mae_pct, mae_at_min) or None.
+    """
+    if not (times and highs and lows and ref_price):
+        return None
+    idx = [i for i, t in enumerate(times)
+           if t >= since_epoch and (until_epoch is None or t <= until_epoch)]
+    if not idx:
+        return None
+    hi_i = max(idx, key=lambda i: highs[i])
+    lo_i = min(idx, key=lambda i: lows[i])
+    return (round((highs[hi_i] / ref_price - 1.0) * 100.0, 4),
+            round((times[hi_i] - since_epoch) / 60.0, 1),
+            round((lows[lo_i] / ref_price - 1.0) * 100.0, 4),
+            round((times[lo_i] - since_epoch) / 60.0, 1))
 
 
 async def fetch_candles_with_volume(session, product_id: str, granularity: int = 300):
@@ -828,16 +886,28 @@ async def detect_crossing(product_id: str, scored: dict, price: float):
         return None
 
 
-async def resolve_crossings(price_for, max_rows: int = 8, deadline=None):
-    """Track each alert's price path and mark it at 30 minutes. Never raises.
+async def resolve_crossings(candles_for, max_rows: int = 8, deadline=None):
+    """Track each alert's price PATH from candle highs and lows, and mark it.
 
-    Called every cycle, so MFE and MAE accumulate across ~48 samples rather
-    than being read once at the end - which is the difference between an
-    excursion and an endpoint.
+    `candles_for` is an async callable taking a product_id and returning
+    (times, closes, highs, lows, volumes) or None. Injected rather than
+    imported so this stays testable without a network.
 
-    net_after_costs_pct is priced against the BEST the move reached, which
-    flatters the crossing on purpose - if an alert loses money even assuming
-    a perfect exit, it was not an opportunity and no execution fixes it.
+    This replaced sampling the mid price once per cycle. Two reasons, and the
+    second is a correctness fix rather than a precision one:
+
+      WICKS. A 37-second sampling interval misses whatever happened between
+      samples, and a candle that spikes 3% and closes flat still hit 3% -
+      and still would have hit a stop on the way there. Highs and lows are
+      the real bounds; mid samples are a subset of them.
+
+      ORDER. MFE and MAE without a sequence are two unrelated numbers. A
+      crossing that dumps 4% at minute 5 and rips 6% by minute 25 scores as a
+      clean +6% win under MFE alone, when the position had already been
+      stopped out and could not collect it. paid_off now accounts for that.
+
+    Also cheaper: one candle fetch per product per pass, against one mid read
+    per product per cycle.
     """
     try:
         import time as _t
@@ -848,45 +918,44 @@ async def resolve_crossings(price_for, max_rows: int = 8, deadline=None):
                 .where(RegimeCrossing.resolved_at.is_(None),
                        RegimeCrossing.direction == "into_viable")
                 .order_by(RegimeCrossing.crossed_at).limit(max_rows))).scalars().all()
-            prices = {}
+            series = {}
             for row in rows:
                 if deadline is not None and _t.time() >= deadline:
                     break
-                if not row.crossed_at:
+                if not row.crossed_at or not row.price_at_cross:
                     continue
-                if row.product_id not in prices:
+                if row.product_id not in series:
                     try:
-                        prices[row.product_id] = await price_for(row.product_id)
+                        series[row.product_id] = await candles_for(row.product_id)
                     except Exception:
-                        prices[row.product_id] = None
-                price = prices.get(row.product_id)
-                if price is None or not row.price_at_cross:
+                        series[row.product_id] = None
+                c = series.get(row.product_id)
+                if not c:
                     continue
-                move = (price / row.price_at_cross - 1.0) * 100.0
+                times, _closes, highs, lows, _vols = c
+                t0 = int(row.crossed_at.replace(tzinfo=timezone.utc).timestamp())
+                exc = window_excursion(times, highs, lows, t0, row.price_at_cross,
+                                       until_epoch=t0 + 1800)
+                if exc is None:
+                    continue
+                mfe, mfe_at, mae, mae_at = exc
+                row.actual_mfe_pct, row.mfe_at_minutes = mfe, mfe_at
+                row.actual_mae_pct, row.mae_at_minutes = mae, mae_at
 
-                # SAMPLE ON EVERY VISIT; RESOLVE ONLY AT 30 MINUTES.
-                #
-                # This used to skip every row under 30 minutes old and then
-                # take ONE reading, so actual_mfe_pct and actual_mae_pct were
-                # both that single endpoint wearing the names of two
-                # excursions. The entire point of MAE is the PATH - whether a
-                # winner dipped hard before it paid, which is what decides
-                # whether it could have been held at all. An endpoint cannot
-                # answer that, and it would have reported every winner as
-                # smooth.
-                #
-                # Resolution already runs every cycle (~37s), so accumulating
-                # across visits buys a real excursion path for nothing.
-                row.actual_mfe_pct = round(max(
-                    move, row.actual_mfe_pct if row.actual_mfe_pct is not None else move), 4)
-                row.actual_mae_pct = round(min(
-                    move, row.actual_mae_pct if row.actual_mae_pct is not None else move), 4)
                 if (now - row.crossed_at).total_seconds() < 1800:
                     continue
-                row.actual_move_30m_pct = round(move, 4)
+
+                # THE SEQUENCE CHECK. If the drawdown breached the live stop
+                # before the peak arrived, the position was gone and the MFE
+                # was never collectable. Scoring it as a win would credit the
+                # strategy with money it could not have taken.
+                row.stopped_out_first = bool(
+                    mae <= -GRID_STOP_PCT_LABEL and mae_at < mfe_at)
+                row.actual_move_30m_pct = mfe if mfe_at >= mae_at else mae
                 if row.cost_pct is not None:
-                    row.net_after_costs_pct = round(row.actual_mfe_pct - row.cost_pct, 4)
-                    row.paid_off = row.net_after_costs_pct > 0
+                    row.net_after_costs_pct = round(mfe - row.cost_pct, 4)
+                    row.paid_off = bool(row.net_after_costs_pct > 0
+                                        and not row.stopped_out_first)
                 row.resolved_at = now
             await db.commit()
     except Exception as e:
@@ -970,6 +1039,10 @@ async def regime_summary() -> dict:
         # could have harvested.
         win_maes = sorted(r.actual_mae_pct for r in paid if r.actual_mae_pct is not None)
         out["mae_on_winners"] = _percentiles(win_maes) if win_maes else {"n": 0}
+        # Crossings whose drawdown hit the stop before the peak arrived. Their
+        # MFE is real and was never collectable, so they are excluded from
+        # paid_off and counted here instead of quietly inflating the win rate.
+        out["stopped_out_first"] = sum(1 for r in resolved if r.stopped_out_first)
         if win_maes:
             med = win_maes[len(win_maes) // 2]
             out["holdable"] = (

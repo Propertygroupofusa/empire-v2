@@ -1255,6 +1255,16 @@ class RegimeCrossing(Base):
     # went straight up, and MFE alone cannot tell them apart - it would score
     # both as the same win while only one was survivable at this slice size.
     actual_mae_pct = Column(Float, nullable=True)
+    # WHEN each extreme happened, in minutes from the crossing. Without the
+    # order, MFE and MAE are two unrelated numbers: a move that dumps 4% at
+    # minute 5 and rips 6% by minute 25 has a beautiful MFE and was already
+    # dead. Recorded at 5-minute granularity, which is what the candles give.
+    mfe_at_minutes = Column(Float, nullable=True)
+    mae_at_minutes = Column(Float, nullable=True)
+    # True when the adverse extreme breached the live stop BEFORE the
+    # favourable extreme peaked. Such a crossing did not pay, whatever its
+    # MFE says, because the position no longer existed to collect it.
+    stopped_out_first = Column(Boolean, nullable=True)
     net_after_costs_pct = Column(Float, nullable=True)
     paid_off = Column(Boolean, nullable=True)
     resolved_at = Column(DateTime, nullable=True, index=True)

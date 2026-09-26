@@ -5596,8 +5596,11 @@ async def run_grid_branches_cycle():
                 await signals.resolve(
                     session, lambda pid: _mid_price(session, pid),
                     deadline=_deadline)
+                # Candles, not mid samples: wicks count, and the ORDER of
+                # the two extremes decides whether an MFE was collectable.
                 await signals.resolve_crossings(
-                    lambda pid: _mid_price(session, pid), deadline=_deadline)
+                    lambda pid: signals.fetch_candles_full(session, pid),
+                    deadline=_deadline)
         except Exception as e:
             log.debug(f"[SIGNAL] scoring pass skipped: {type(e).__name__}: {e}")
 
