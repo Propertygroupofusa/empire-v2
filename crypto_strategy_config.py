@@ -23,27 +23,43 @@ UNCONFIGURED = "unconfigured"
 # variable.
 RETIRED_STRATEGY_NAMES = {"delfina_scalping", "scalping", "delfina"}
 
-# What the two services should be set to, as of 2026-09-26.
+# What the services should be set to, corrected 2026-09-26 against the live
+# deployment rather than against the topology this file assumed.
 #
-# "family_tree on the web service" used to be the second half of this
-# sentence. Repeating it would now cost money. Every mode spends the SAME
-# Coinbase balance - main.py: "Only one runs at a time because all modes
-# share the same real Coinbase account and balance" - and grid_fleet is the
-# strategy that is live on it, on the other service. Telling the operator to
-# set family_tree here, to clear a log line, would start a second strategy on
-# the money the fleet is already trading: the 2026-09-25 btc_compound bill
-# again, this time printed as advice.
+# Two versions of this text have now been wrong, in opposite directions:
 #
-# So on the web service the correct value is NO value, and the messages below
-# say so.
+#   "family_tree on the web service" - written when family_tree was the
+#   intent. Every mode spends the SAME Coinbase balance (main.py: "Only one
+#   runs at a time because all modes share the same real Coinbase account and
+#   balance"), so once grid_fleet went live that instruction became "start a
+#   second strategy on the money the fleet is trading", printed as the remedy
+#   for a log line.
+#
+#   "leave CRYPTO_STRATEGY_MODE UNSET on the web service" - its replacement,
+#   written on the assumption that a dedicated crypto-trading service owns the
+#   loop. It does not. /api/trading-dashboard/grid-status reported
+#   loop_lease.this_process='web:1' with held_by_this_process=True and a
+#   5-second-old cycle: the loop is running in the WEB service's standby
+#   thread (the grid_fleet branch of main.py), and it is in that branch only
+#   because a DB strategy override resolves to grid_fleet. Unsetting the
+#   variable therefore leaves the entire fleet hanging on one database row -
+#   clear that row and the standby thread never starts and nothing says so.
+#
+# So the rule is not per-service at all. It is: name the strategy that should
+# run, everywhere it might run. grid_fleet is idempotent across processes
+# because of the lease; a different mode beside it is not.
+
 _WIRING = (
-    "Correct wiring: on the crypto-trading service set BOTH "
-    "CRYPTO_STRATEGY_MODE=grid_fleet AND SERVICE_ROLE=crypto-trading. On the "
-    "web service leave CRYPTO_STRATEGY_MODE UNSET - every mode spends the same "
-    "Coinbase balance, so setting one here would put a second strategy on the "
-    "money the grid fleet is already trading. If the variable cannot be removed "
-    "through the Railway UI, set CRYPTO_STRATEGY_MODE_OVERRIDE instead - it is "
-    "checked first and wins."
+    "Correct wiring: CRYPTO_STRATEGY_MODE=grid_fleet on every service that "
+    "should run the fleet, plus SERVICE_ROLE=crypto-trading on the dedicated "
+    "runner if one is deployed. grid_fleet on more than one process is SAFE: "
+    "crypto_grid_bot holds a lease it renews every cycle, and a second process "
+    "stays on standby until that lease goes stale, so the two cannot "
+    "double-order. What is not safe is a DIFFERENT mode beside a live fleet - "
+    "every mode spends the same Coinbase balance, so family_tree or "
+    "btc_compound would trade the money the fleet is already using. If the "
+    "variable cannot be corrected through the Railway UI, set "
+    "CRYPTO_STRATEGY_MODE_OVERRIDE instead - it is checked first and wins."
 )
 
 
@@ -178,9 +194,11 @@ def get_crypto_strategy_mode() -> str:
     if not any((os.getenv(v) or "").strip()
                for v in ("CRYPTO_STRATEGY_MODE", "CRYPTO_STRATEGY_MODE_OVERRIDE")):
         log.info(
-            "No CRYPTO_STRATEGY_MODE set, so no crypto loop starts from this "
-            "variable. On the web service that is the intended state - the "
-            "grid fleet runs on the crypto-trading service. %s", _WIRING,
+            "No CRYPTO_STRATEGY_MODE set, so nothing starts FROM THIS VARIABLE. "
+            "On a process that should run no crypto loop that is the intended "
+            "state. But if this process IS running the fleet, it is doing so "
+            "from a DB strategy override alone - one row away from a silent "
+            "stop - and the variable should be set to match it. %s", _WIRING,
         )
         return UNCONFIGURED
 

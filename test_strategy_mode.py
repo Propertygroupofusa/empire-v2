@@ -148,8 +148,8 @@ ok("the crypto-trading service is told to set BOTH variables",
 # a message assembled from adjacent string literals has no contiguous form in
 # the file for anything spanning the break. What the operator actually READS
 # is asserted in test_strategy_mode_message.py, off the emitted log record.
-ok("REGRESSION: the web service is told to leave it UNSET, not set family_tree",
-   "CRYPTO_STRATEGY_MODE UNSET" in body and "family_tree on the web" not in body)
+ok("REGRESSION: the advice names the strategy, not a service, and never family_tree",
+   "CRYPTO_STRATEGY_MODE=grid_fleet" in body and "family_tree on the web" not in body)
 ok("and the reason is given, so it is not obeyed blindly",
    "Coinbase balance" in body)
 

@@ -216,10 +216,18 @@ ok("  and it refuses to start the fleet", "return" in _after)
 # balance grid_fleet is trading.
 for label, (l, m, _) in (("retired", observe("delfina_scalping")),
                          ("typo", observe("grid_flee"))):
-    ok(f"the {label} message never tells the web service to set family_tree",
+    ok(f"the {label} message never tells a second service to set family_tree",
        "family_tree on the web" not in m)
-    ok(f"the {label} message tells the web service to leave it UNSET",
-       "CRYPTO_STRATEGY_MODE UNSET" in m)
+    # It used to say "leave CRYPTO_STRATEGY_MODE UNSET on the web service".
+    # Measured on the live deployment, the web service is what holds the grid
+    # loop lease - so unsetting it leaves the fleet standing on the DB
+    # override alone. The advice now names the strategy instead of a service.
+    ok(f"the {label} message names grid_fleet as the value to set",
+       "CRYPTO_STRATEGY_MODE=grid_fleet" in m)
+    ok(f"the {label} message says why two grid_fleet processes are safe",
+       "lease" in m and "standby" in m)
+    ok(f"the {label} message still warns off a DIFFERENT mode beside the fleet",
+       "same Coinbase balance" in m)
 
 importlib.reload(cfg)   # leave the module as we found it
 
