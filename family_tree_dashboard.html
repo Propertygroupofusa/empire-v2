@@ -3065,9 +3065,16 @@ function renderGridGovernsPanel(d) {
         let html = `<div class="panel" style="padding:10px 12px;">`;
         html += `<div style="font-weight:600; margin-bottom:6px;">What governs this fleet</div>`;
 
+        // "taker" was hardcoded here. Under maker-ONLY the floor is priced
+        // against the MAKER leg (fee_safe_floor_pct -> worst_case_leg_fee_rate),
+        // so this row asserted a taker round trip while the maker-only card
+        // twelve lines down correctly reported the opposite, about the same
+        // 0.90%. A 0.90% step cannot clear a 1.50% taker round trip, so the
+        // claim was not just stale wording - it was arithmetically false.
+        // The backend has sent floor_priced_against all along; use it.
         html += row('💵', 'Fee floor', `${(floor * 100).toFixed(2)}%`,
-            `— the smallest step that clears a <em>taker</em> round trip. `
-            + `Nothing may trade below it.`);
+            `— the smallest step that clears a <em>${d.floor_priced_against || 'taker'}</em> `
+            + `round trip. Nothing may trade below it.`);
 
         html += row(below.length ? '🛑' : '✅', 'Every branch',
             below.length
@@ -3199,8 +3206,32 @@ function renderGridMakerOnlyToggle(data) {
     // The two numbers that decide whether the fleet can trade: what a round
     // trip really costs, and what the step earns. Shown side by side because
     // the whole argument is that one is bigger than the other.
-    const takerCost = 2.17, makerCost = 1.37, step = 2.00;
-    const cost = on ? makerCost : takerCost;
+    // These were `const takerCost = 2.17, makerCost = 1.37, step = 2.00`.
+    // Three hardcoded numbers under three labels that read as measurements
+    // ("what the step earns", "what a round trip costs"), sitting directly
+    // below a panel showing the real ones. The step had since moved to 2.50%
+    // and this card still said 2.00%, so it reported +0.63% clearance on a
+    // fleet actually clearing +1.13% - understating the margin by nearly half
+    // on the one screen used to decide whether the spacing is wide enough.
+    //
+    // Fees are read live. ADVERSE stays a constant because nothing in the
+    // payload exposes it: 0.67% is the figure the net-edge gate measured
+    // (crypto_grid_bot.py, "adverse selection 0.67%"), and it is what makes
+    // this card's "cost" a different quantity from the "real round-trip fee"
+    // shown above it - that one is fees alone. Labelled below so the two
+    // stop looking like the same number disagreeing with itself.
+    const ADVERSE = 0.67;
+    const mix = (data.fill_mix || {}).overall || {};
+    const makerFee = (mix.maker_round_trip_fee_rate != null
+                      ? mix.maker_round_trip_fee_rate
+                      : (data.effective_round_trip_fee_rate || 0.007)) * 100;
+    const takerFee = (mix.taker_round_trip_fee_rate != null
+                      ? mix.taker_round_trip_fee_rate : 0.015) * 100;
+    const liveSteps = (data.branches || []).map(b => b.grid_pct).filter(v => v != null);
+    // The NARROWEST live step, not the average: the card asks whether the
+    // fleet clears its cost, and the thinnest branch is the one that decides.
+    const step = liveSteps.length ? Math.min(...liveSteps) * 100 : 2.00;
+    const cost = (on ? makerFee : takerFee) + ADVERSE;
     const net = step - cost;
 
     el.className = 'maker-only-card' + (on ? ' on' : '');
@@ -3211,7 +3242,10 @@ function renderGridMakerOnlyToggle(data) {
             : 'A limit order that does not fill becomes a market order, so every round trip must still be priced as if both legs paid the market fee. That is why the floor sits high and the current step cannot clear it.'}</p>` +
         `<div class="mo-math">` +
           `<div><b>${step.toFixed(2)}%</b>what the step earns</div>` +
-          `<div><b>${cost.toFixed(2)}%</b>what a round trip costs</div>` +
+          `<div><b>${cost.toFixed(2)}%</b>what a round trip costs` +
+            `<br><span style="font-weight:400; opacity:.75">` +
+            `${(on ? makerFee : takerFee).toFixed(2)}% fees + ${ADVERSE.toFixed(2)}% adverse selection` +
+            `</span></div>` +
           `<div><b style="color:${net >= 0 ? '#10b981' : '#ef4444'}">${net >= 0 ? '+' : ''}${net.toFixed(2)}%</b>${net >= 0 ? 'it clears' : 'it loses — so nothing trades'}</div>` +
         `</div>` +
         (floor != null
@@ -3227,7 +3261,8 @@ function renderGridMakerOnlyToggle(data) {
         (envRun
             ? `<p class="why" style="margin:0"><strong>Set by ${data.maker_only_source}.</strong> ` +
               `The button below is disabled because the environment wins over the database toggle — ` +
-              `change it on the crypto-trading service, or remove the variable to hand control back to this page.</p>`
+              `change it on whichever service is running the fleet (the loop lease names it), ` +
+              `or remove the variable to hand control back to this page.</p>`
             : `<button class="mo-btn${on ? ' restore' : ''}" onclick="toggleGridMakerOnly(${!on})">` +
               `${on ? 'Restore the market fallback' : 'Remove the market fallback — let the 2.00% step clear'}</button>`);
 }
