@@ -116,6 +116,50 @@ async def main():
        "not enough data" in g["verdict"], g["verdict"])
     ok("closest_to_viable turns 'no opportunities' into a distance",
        "closest_to_viable" in g)
+
+    print("\nwindow duration: a distribution, not a lone median")
+    ok("empty gives n=0, not a fabricated zero", S._percentiles([])["n"] == 0)
+    q = S._percentiles([60, 120, 300, 600, 3600])
+    ok("p25 / median / p75 are all reported",
+       (q["p25"], q["median"], q["p75"]) == (120, 300, 600), q)
+    ok("min and max bracket it", (q["min"], q["max"]) == (60, 3600))
+    ok("percentiles are NEAREST-RANK, never interpolated",
+       S._percentiles([10, 20])["median"] in (10, 20),
+       "with a handful of windows an interpolated value invents a duration "
+       "that never occurred; these are real observations")
+    # The distinction a median alone cannot make.
+    tight = S._percentiles([3000, 3060, 3120])
+    wide  = S._percentiles([120, 3060, 12000])
+    ok("two worlds with the SAME median are told apart by p25",
+       tight["median"] == 3060 and wide["median"] == 3060
+       and tight["p25"] != wide["p25"],
+       "one is tradeable at an hourly cadence and one is not")
+
+    print("\nfalse alarm is not the complement of the win rate")
+    async with get_session_factory()() as db:
+        for net, cost in ((-0.01, 1.37), (-1.20, 1.37), (0.50, 1.37)):
+            db.add(models.RegimeCrossing(
+                product_id="Z-USD", direction="into_viable",
+                crossed_at=dt.datetime.utcnow(), price_at_cross=1.0,
+                cost_pct=cost, net_after_costs_pct=net, paid_off=net > 0,
+                actual_mae_pct=-2.5, resolved_at=dt.datetime.utcnow()))
+        for _ in range(7):
+            db.add(models.RegimeCrossing(
+                product_id="Z-USD", direction="into_viable",
+                crossed_at=dt.datetime.utcnow(), price_at_cross=1.0,
+                cost_pct=1.37, net_after_costs_pct=0.2, paid_off=True,
+                resolved_at=dt.datetime.utcnow()))
+        await db.commit()
+    g2 = await S.regime_summary()
+    ok("a crossing that missed by 0.01 is NOT a false alarm",
+       g2["false_alarm_pct"] < g2.get("paid_off_pct", 0),
+       f"false {g2['false_alarm_pct']}% vs paid {g2.get('paid_off_pct')}%")
+    ok("  but one whose best price missed half its cost IS",
+       g2["false_alarm_pct"] > 0, g2["false_alarm_pct"])
+    ok("the adverse extreme is reported, not just the favourable one",
+       g2["worst_drawdown_pct"] == -2.5,
+       "MFE alone scores a 3% drawdown that recovered the same as a straight "
+       "line up; only one is survivable at this slice size")
     print(f"\n{P} passed, {F} failed"); sys.exit(1 if F else 0)
 
 async def _v(x): return x

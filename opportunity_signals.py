@@ -607,6 +607,29 @@ def _latest(rows) -> dict:
 
 
 
+def _percentiles(values) -> dict:
+    """p25 / median / p75 / mean over an already-sorted list.
+
+    Computed in Python rather than SQL on purpose. percentile_cont is
+    Postgres-only and this runs against SQLite in every test; a query that
+    works in production and not under test is a query nobody checks. The rows
+    are already in memory for the rest of this summary, so the round trip
+    buys nothing either.
+    """
+    n = len(values)
+    if not n:
+        return {"n": 0}
+
+    def at(q):
+        # Nearest-rank. With a handful of windows an interpolated percentile
+        # invents durations that never occurred; these are real observations.
+        return values[min(n - 1, max(0, int(round(q * (n - 1)))))]
+
+    return {"n": n, "p25": at(0.25), "median": at(0.50), "p75": at(0.75),
+            "mean": round(sum(values) / n, 1),
+            "min": values[0], "max": values[-1]}
+
+
 def is_viable(net_edge_pct, margin: float = None) -> bool:
     """Whether this reading clears its costs by enough to count.
 
@@ -697,6 +720,18 @@ async def detect_crossing(product_id: str, scored: dict, price: float):
             else:
                 return None
 
+            # A second open with no close between them would leave the first
+            # unclosed forever - NULL window_seconds, excluded from every
+            # percentile, and still counted as the open window by the state
+            # query above. Cannot happen while the state check holds, which
+            # is exactly why it is worth closing defensively rather than
+            # trusting an invariant nobody re-checks.
+            if direction == "into_viable" and open_window is not None:
+                log.warning("[REGIME] %s had an unclosed window from %s - closing it "
+                            "before opening a new one", product_id, open_window.crossed_at)
+                open_window.window_seconds = round(
+                    (datetime.utcnow() - open_window.crossed_at).total_seconds(), 1)
+
             row = RegimeCrossing(
                 product_id=product_id, direction=direction, price_at_cross=price,
                 net_edge_pct=edge, expected_move_pct=scored.get("expected_move_pct"),
@@ -760,6 +795,8 @@ async def resolve_crossings(price_for, max_rows: int = 8, deadline=None):
                 move = (price / row.price_at_cross - 1.0) * 100.0
                 row.actual_move_30m_pct = round(move, 4)
                 row.actual_mfe_pct = round(max(move, row.actual_mfe_pct or move), 4)
+                row.actual_mae_pct = round(min(move, row.actual_mae_pct
+                                               if row.actual_mae_pct is not None else move), 4)
                 if row.cost_pct is not None:
                     row.net_after_costs_pct = round(row.actual_mfe_pct - row.cost_pct, 4)
                     row.paid_off = row.net_after_costs_pct > 0
@@ -798,7 +835,7 @@ async def regime_summary() -> dict:
     opens = [r for r in rows if r.direction == "into_viable"]
     resolved = [r for r in opens if r.resolved_at is not None]
     paid = [r for r in resolved if r.paid_off]
-    windows = [r.window_seconds for r in opens if r.window_seconds is not None]
+    windows = sorted(r.window_seconds for r in opens if r.window_seconds is not None)
 
     out = {
         "available": True,
@@ -811,7 +848,14 @@ async def regime_summary() -> dict:
                               if ranked else None),
         "crossings_into_viable": len(opens),
         "crossings_resolved": len(resolved),
-        "median_window_seconds": sorted(windows)[len(windows) // 2] if windows else None,
+        # The DISTRIBUTION, not a lone median. This is the number that decides
+        # whether an alert delivered up to an hour late can ever be acted on,
+        # and a median alone cannot answer it: windows of 2 and 200 minutes
+        # have the same median as windows of 50 and 52, and only one of those
+        # worlds is tradeable at an hourly cadence. p75 is the one to read -
+        # if three quarters of windows close inside the notification delay,
+        # the alert is evidence that opportunities exist and nothing more.
+        "window_seconds": _percentiles(windows),
     }
     if len(resolved) < 10:
         out["verdict"] = (f"not enough data ({len(resolved)}/10 crossings resolved) - "
@@ -820,6 +864,18 @@ async def regime_summary() -> dict:
         nets = [r.net_after_costs_pct for r in resolved if r.net_after_costs_pct is not None]
         out["paid_off_pct"] = round(len(paid) / len(resolved) * 100, 1)
         out["mean_net_after_costs_pct"] = (round(sum(nets) / len(nets), 4) if nets else None)
+        # FALSE ALARM is not the complement of the win rate. A crossing that
+        # nets -0.01% was nearly right; one whose best price never covered
+        # half its cost was never an opportunity at all. Lumping them
+        # together hides the difference between a threshold slightly too
+        # tight and a signal that means nothing.
+        badly_wrong = [r for r in resolved
+                       if r.net_after_costs_pct is not None and r.cost_pct
+                       and r.net_after_costs_pct < -0.5 * r.cost_pct]
+        out["false_alarm_pct"] = round(len(badly_wrong) / len(resolved) * 100, 1)
+        # How deep the drawdown got before any of it paid off.
+        maes = [r.actual_mae_pct for r in resolved if r.actual_mae_pct is not None]
+        out["worst_drawdown_pct"] = min(maes) if maes else None
         out["verdict"] = (
             f"crossings pay: {out['paid_off_pct']}% of alerts cleared costs"
             if out["paid_off_pct"] > 50 else

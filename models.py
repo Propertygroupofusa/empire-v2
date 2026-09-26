@@ -1250,6 +1250,11 @@ class RegimeCrossing(Base):
     # Did it mean anything? Same discipline as every other prediction here.
     actual_move_30m_pct = Column(Float, nullable=True)
     actual_mfe_pct = Column(Float, nullable=True)
+    # The ADVERSE extreme, not just the favourable one. A crossing whose
+    # price dropped 3% before recovering is a different animal from one that
+    # went straight up, and MFE alone cannot tell them apart - it would score
+    # both as the same win while only one was survivable at this slice size.
+    actual_mae_pct = Column(Float, nullable=True)
     net_after_costs_pct = Column(Float, nullable=True)
     paid_off = Column(Boolean, nullable=True)
     resolved_at = Column(DateTime, nullable=True, index=True)
