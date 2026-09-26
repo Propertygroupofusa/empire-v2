@@ -92,6 +92,70 @@ def daily_vol_pct_from_closes(closes, bars_per_day=24):
     return (var ** 0.5) * (float(bars_per_day) ** 0.5) * 100.0
 
 
+# HOW LONG A WINDOW THE VOLATILITY IS MEASURED OVER.
+#
+# The first wiring of this module fed it the ~25 hourly candles the bot
+# already fetches for price. That window is far too short, and the error
+# ran the wrong way. Measured 2026-09-26 against longer windows on the
+# same coins:
+#
+#     coin      25h      7d      30d      60d
+#     BTC     0.49%   1.91%    1.81%    1.90%
+#     NEAR    2.44%   9.59%    7.40%    6.02%
+#     BONK    1.84%   7.46%    5.84%    5.71%
+#
+# The 7, 30 and 60-day figures agree with each other. The 25-hour one
+# reads three to four times lower, because one quiet day is not a sample.
+# Scaled from it, EVERY stop tightened - NEAR would have gone from 8% to
+# 6.14% instead of the 18.5% a 30-day window gives. A stop that tightens
+# because yesterday happened to be calm is a stop that shrinks right
+# before volatility returns, which is precisely backwards.
+VOL_WINDOW_DAYS = int(os.getenv("GRID_STOP_VOL_WINDOW_DAYS", "30") or 30)
+
+# 30 days of hourly candles per branch per cycle would hammer the candle
+# endpoint for a number that barely moves between two five-minute cycles.
+# Same cache shape coin_rotation already uses for its trip counts.
+VOL_CACHE_SECONDS = float(os.getenv("GRID_STOP_VOL_CACHE_SECONDS", str(6 * 3600)))
+_VOL_CACHE = {}
+
+
+async def measure_daily_vol(session, product_id, days=None, fetcher=None, now=None):
+    """Daily volatility over a window long enough to mean something.
+
+    Cached per product. Returns None when the history will not load or is
+    too thin, which resolve() reads as "keep the existing stop" - never as
+    "no stop".
+    """
+    import time as _time
+    days = int(days or VOL_WINDOW_DAYS)
+    now = _time.monotonic() if now is None else now
+
+    hit = _VOL_CACHE.get(product_id)
+    if hit and (now - hit[0]) < VOL_CACHE_SECONDS:
+        return hit[1]
+
+    if fetcher is None:
+        import crypto_selection_backtest as CSB
+        fetcher = CSB.fetch_candles_window
+
+    import datetime as _dt
+    end = _dt.datetime.now(_dt.timezone.utc)
+    start = end - _dt.timedelta(days=days)
+    try:
+        got = await fetcher(session, product_id, start, end, granularity=3600)
+    except Exception:
+        return None
+    if not got or not got[0]:
+        return None
+
+    vol = daily_vol_pct_from_closes(got[0])
+    # Only a real reading is cached. Caching a None would pin a branch to
+    # the fixed stop for six hours over one failed fetch.
+    if vol is not None:
+        _VOL_CACHE[product_id] = (now, vol)
+    return vol
+
+
 def _env_float(name, default):
     raw = (os.getenv(name) or "").strip()
     if not raw:

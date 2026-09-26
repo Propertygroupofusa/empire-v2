@@ -139,6 +139,63 @@ ok("and every one of those keeps the fixed stop",
                  overrides={}, mode_override="adaptive")["stop_pct"] == 0.08
        for bad in ([1, 2, 3], [5.0] * 40, [], None)))
 
+print("\nthe volatility window is long enough to mean something")
+
+import asyncio
+
+ok("the default window is 30 days, not the ~25 candles the price uses",
+   A.VOL_WINDOW_DAYS >= 7, A.VOL_WINDOW_DAYS)
+
+# Measured on the live fleet 2026-09-26. The short window reads 3-4x low
+# and every stop scaled from it came out TIGHTER, which is backwards.
+SHORT = {"BTC-USD": 0.49, "NEAR-USD": 2.44, "BONK-USD": 1.84}
+LONG = {"BTC-USD": 1.81, "NEAR-USD": 7.40, "BONK-USD": 5.84}
+for pid in SHORT:
+    a = A.resolve(pid, 0.08, SHORT[pid], overrides={}, mode_override="adaptive")["stop_pct"]
+    b = A.resolve(pid, 0.08, LONG[pid], overrides={}, mode_override="adaptive")["stop_pct"]
+    ok(f"{pid.replace('-USD',''):5} short window gives a TIGHTER stop than the long one",
+       a < b, f"{a:.4f} vs {b:.4f}")
+ok("and NEAR on the long window is genuinely wider than the fixed 8%",
+   A.resolve("NEAR-USD", 0.08, LONG["NEAR-USD"], overrides={},
+             mode_override="adaptive")["stop_pct"] > 0.08)
+
+calls = []
+
+
+def counting_fetcher(series):
+    async def _f(session, pid, start, end, granularity=3600):
+        calls.append(pid)
+        if pid not in series:
+            raise RuntimeError("HTTP 404")
+        return (series[pid], [], [])
+    return _f
+
+
+random.seed(3)
+noisy = [100.0]
+for _ in range(400):
+    noisy.append(noisy[-1] * (1 + random.gauss(0, 0.01)))
+
+A._VOL_CACHE.clear()
+calls.clear()
+f = counting_fetcher({"A-USD": noisy})
+v1 = asyncio.run(A.measure_daily_vol(object(), "A-USD", fetcher=f))
+v2 = asyncio.run(A.measure_daily_vol(object(), "A-USD", fetcher=f))
+ok("a real reading is returned", v1 is not None and v1 > 0, v1)
+ok("and the second call is served from cache, not a second fetch",
+   len(calls) == 1 and v2 == v1, calls)
+
+A._VOL_CACHE.clear()
+calls.clear()
+bad = asyncio.run(A.measure_daily_vol(object(), "B-USD", fetcher=counting_fetcher({})))
+ok("a failed fetch returns None", bad is None)
+ok("and is NOT cached - one failure must not pin a branch for six hours",
+   "B-USD" not in A._VOL_CACHE, A._VOL_CACHE)
+ok("None from the fetch still keeps the fixed stop",
+   A.resolve("B-USD", 0.08, bad, overrides={}, mode_override="adaptive")["stop_pct"] == 0.08)
+
+A._VOL_CACHE.clear()
+
 print("\nthe live cycle calls it, and cannot lose the stop if it throws")
 
 import ast
@@ -150,6 +207,11 @@ cyc_src = ast.get_source_segment(src, cyc) or ""
 
 ok("the cycle resolves a stop rather than reading the constant directly",
    "adaptive_stop.resolve" in cyc_src)
+ok("it measures volatility over the long cached window",
+   "measure_daily_vol" in cyc_src)
+ok("and NOT from the short candle series the price came from",
+   "daily_vol_pct_from_closes(_stop_closes)" not in cyc_src,
+   "the ~25-candle window reads 3-4x low and tightens every stop")
 ok("the trigger compares against the RESOLVED stop",
    "price <= _entry * (1 - _stop_pct)" in cyc_src)
 ok("the old constant is no longer the trigger",

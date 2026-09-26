@@ -4786,15 +4786,18 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
         log.warning(f"[GRID] {branch.bot_name}: could not fetch a real live price for {branch.product_id} - skipping this cycle")
         return
 
-    # The same candle window the price came from, kept for the stop's own
-    # volatility measure. None when unavailable, which keeps the fixed stop.
-    _stop_closes = None
+    # Volatility for the stop, over a window long enough to mean something
+    # and cached so this does not re-pull 30 days of candles every cycle.
+    # Deliberately NOT the ~25-candle series the price came from: measured
+    # on the live fleet that window read 3-4x lower than 7, 30 and 60-day
+    # windows, which agree with each other, and every stop scaled from it
+    # came out TIGHTER - a stop that shrinks because yesterday was calm.
+    _stop_vol = None
     try:
-        _c = await engine._fetch_candles(session, branch.product_id)
-        if _c:
-            _stop_closes = _c[0]
+        import adaptive_stop as _as
+        _stop_vol = await _as.measure_daily_vol(session, branch.product_id)
     except Exception as exc:
-        log.info(f"[GRID] {branch.bot_name}: no candle series for the stop ({exc}) - "
+        log.info(f"[GRID] {branch.bot_name}: no volatility for the stop ({exc}) - "
                  f"the fixed stop stands")
 
     slices = await get_grid_slices(branch.bot_name)
@@ -5218,8 +5221,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     _stop_pct = GRID_STOP_LOSS_PCT
     try:
         import adaptive_stop
-        _vol = adaptive_stop.daily_vol_pct_from_closes(_stop_closes)
-        _resolved = adaptive_stop.resolve(branch.product_id, GRID_STOP_LOSS_PCT, _vol)
+        _resolved = adaptive_stop.resolve(branch.product_id, GRID_STOP_LOSS_PCT, _stop_vol)
         _stop_pct = _resolved["stop_pct"]
         if _resolved["source"] != "fixed":
             log.info(f"[GRID] {branch.bot_name}: stop - {_resolved['reason']}")
