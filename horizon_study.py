@@ -164,7 +164,8 @@ def excursion_profile(times, highs, lows, closes, horizons=HORIZONS,
 def rung_profile(times, highs, lows, closes, targets=RUNG_TARGETS_PCT,
                  horizons=RUNG_HORIZONS, stride: int = STRIDE_BARS,
                  fees_pct: float = FEES_ONLY_PCT,
-                 all_in_pct: float = ALL_IN_PCT) -> dict:
+                 all_in_pct: float = ALL_IN_PCT,
+                 allow=None) -> dict:
     """A resting limit exit at +X%, which is what a grid rung IS.
 
     The expectancy reported here marks every UNFILLED entry at the horizon's
@@ -178,18 +179,34 @@ def rung_profile(times, highs, lows, closes, targets=RUNG_TARGETS_PCT,
     by_name = dict(HORIZONS)
     n = len(times)
     out = {}
+    # allow(i) -> bool decides whether an entry at bar i is TAKEN. It is how
+    # "sit out a downtrend" gets measured with the same arithmetic as
+    # "trade everything", rather than by a second implementation that could
+    # differ in some detail nobody would find. It must be CAUSAL - see
+    # trend_filter.py, which builds these from closes up to and including i
+    # and never past it. Default None takes every entry, so nothing that
+    # already calls this changes.
     for target in targets:
         for hname in horizons:
             hsec = by_name.get(hname)
             if hsec is None:
                 continue
-            attempts = fills = 0
+            attempts = fills = offered = skipped = 0
             hours_to_fill, mae_before_fill, unfilled_mark = [], [], []
             for i in _entries(times, stride):
                 if times[-1] - times[i] < hsec:
                     break
                 entry = closes[i]
                 if not entry:
+                    continue
+                offered += 1
+                # SITTING OUT IS NOT THE SAME AS LOSING NOTHING, and it is not
+                # the same as winning either. A skipped entry earns exactly
+                # zero, so participation is reported beside expectancy - a
+                # filter that skips 99% of entries can post a beautiful
+                # per-trade number while earning nothing at all.
+                if allow is not None and not allow(i):
+                    skipped += 1
                     continue
                 attempts += 1
                 rung = entry * (1.0 + target / 100.0)
@@ -215,6 +232,9 @@ def rung_profile(times, highs, lows, closes, targets=RUNG_TARGETS_PCT,
                 "target_pct": target,
                 "horizon": hname,
                 "attempts": attempts,
+                "offered": offered,
+                "skipped": skipped,
+                "participation_pct": round(100.0 * attempts / offered, 2) if offered else None,
                 "fill_pct": round(100.0 * fr, 2),
                 "median_hours_to_fill": round(st.median(hours_to_fill), 2) if hours_to_fill else None,
                 "mae_before_fill_p50_pct": round(nearest_rank(mae_before_fill, 0.50), 3) if mae_before_fill else None,
