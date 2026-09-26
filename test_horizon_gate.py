@@ -159,6 +159,18 @@ ok("the basis line says what was held fixed",
 ok("and it says nothing reads the verdict",
    "Observation only" in S.horizon_gate_summary([])["basis"])
 
+print("\nthe gate's verdict is shown with its inputs, not alone")
+ok("_latest carries the gate's own move estimate",
+   '"horizon_gate_move_pct": r.horizon_gate_move_pct' in SRC)
+ok("and the range estimator beside it, since the study used that one",
+   '"horizon_gate_move_range_pct"' in SRC)
+ok("and the edge it computed", '"horizon_gate_edge_pct"' in SRC)
+ok("and the move it would have NEEDED, so a refusal has a number",
+   '"horizon_gate_needs_move_pct"' in SRC and "r.cost_assumed_pct * 2" in SRC,
+   "0 of 90 with no visible inputs cannot be told from a broken gate")
+ok("the needed move is twice the cost, because the 0.5 haircut halves the estimate",
+   "cost_assumed_pct * 2" in SRC)
+
 print("\nthe denominator is rows THIS GATE scored, not every row ever")
 # The bug, reproduced: 318 rows predating the gate, 12 scored by it, 4 of
 # which passed. Dividing by 330 reports 1.2%; dividing by 12 reports 33%.

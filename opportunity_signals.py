@@ -908,6 +908,30 @@ def _latest(rows) -> dict:
         "short_by_pct": (round(-r.expected_net_edge_pct, 4)
                          if r.expected_net_edge_pct is not None
                          and r.expected_net_edge_pct < 0 else None),
+        # THE HORIZON GATE'S OWN INPUTS, per coin.
+        #
+        # The summary reported "0 of 90 passed" with nothing on the page
+        # explaining why, which is the same opacity every other number here
+        # was built to remove. Zero is a legitimate answer - a quiet hour
+        # genuinely produces it - but a verdict whose inputs are invisible
+        # cannot be told apart from a broken one without reading the source.
+        #
+        # Both estimators are carried, because the study that chose six
+        # hours used trailing RANGE and the gate ships MOMENTUM, and those
+        # disagree by a lot: over the same 21 days, 2.5% of BTC scans passed
+        # on momentum against 6.0% on range, and 42.9% of NEAR against 94.2%.
+        # The ledger settles which predicts better; until it has, neither
+        # gets quoted as the gate's expected behaviour.
+        "horizon_gate_move_pct": r.horizon_gate_move_pct,
+        "horizon_gate_move_range_pct": r.horizon_gate_move_range_pct,
+        "horizon_gate_edge_pct": (round(r.horizon_gate_edge_pct, 4)
+                                  if r.horizon_gate_edge_pct is not None else None),
+        "horizon_gate_would_trade": r.horizon_gate_would_trade,
+        # What this coin's 6h move would have to reach to clear the SAME
+        # cost the live gate charges - so "it did not pass" has a number
+        # beside it instead of only a boolean.
+        "horizon_gate_needs_move_pct": (round(r.cost_assumed_pct * 2, 4)
+                                        if r.cost_assumed_pct is not None else None),
     }
 
 
