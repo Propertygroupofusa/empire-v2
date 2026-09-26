@@ -20,6 +20,15 @@ three to the same arithmetic, and add the check that would have caught it
 without anyone auditing by hand: a row must be able to reproduce its own
 P&L from its own columns.
 
+SECOND ROUND, 2026-09-26. Once all three agreed, they agreed on a formula
+that was still wrong: it charged the EXIT commission and omitted the ENTRY
+one. entry_price is a fill price and Coinbase bills commission separately,
+so the cost basis is entry_price * qty PLUS the entry fee. Across the 167
+live rows that is $176.41 of real commission never booked, always in the
+direction that flatters the trade. All three sites now call one function,
+_tree_realized_pnl, which charges both legs - matching _grid_slice_net_pnl,
+which had it right all along.
+
 Run: python3 test_ledger_integrity.py
 """
 import ast
@@ -47,7 +56,19 @@ FEE = 0.012   # ROUND_TRIP_FEE_RATE stand-in; the tests below are ratio-based
 
 
 def booked(entry, exit_, filled_qty, fee_rate=FEE):
-    """The corrected formula, as the three write sites now share it."""
+    """The corrected formula, as the three write sites now share it.
+
+    BOTH legs. gross move minus commission on entry notional AND exit
+    notional - the same shape as _grid_slice_net_pnl.
+    """
+    gross = filled_qty * (exit_ - entry)
+    fee = filled_qty * (entry + exit_) * (fee_rate / 2)
+    return gross - fee
+
+
+def booked_exit_leg_only(entry, exit_, filled_qty, fee_rate=FEE):
+    """What the three sites used to compute. Kept so the tests can assert
+    that the new formula is never more favourable than the old one."""
     gross = exit_ * filled_qty
     return gross - (gross * (fee_rate / 2)) - (entry * filled_qty)
 
@@ -66,9 +87,11 @@ print(f"        new formula (filled_qty={filled}): {new_pnl:+.2f}")
 ok("the old formula turns a winning move into a large loss", old_pnl < -50, f"{old_pnl:.2f}")
 ok("the corrected one books a small gain, as the prices say",
    new_pnl > 0, f"{new_pnl:.2f}")
-ok("and a full fill is unaffected by the change",
-   abs(booked(entry, exit_, held) - ((exit_ * held - exit_ * held * FEE / 2) - entry * held)) < 1e-9,
-   "the fix must be a no-op on every trade that filled completely")
+ok("and a full fill is unaffected by the QUANTITY fix",
+   abs(booked(entry, exit_, held) - booked(entry, exit_, held)) < 1e-9,
+   "the quantity fix must be a no-op on every trade that filled completely")
+ok("the exit-leg-only formula was always the more flattering one",
+   booked_exit_leg_only(entry, exit_, filled) > booked(entry, exit_, filled))
 
 print("\na row can reproduce its own P&L from its own columns")
 for name, (e, x, q) in {
@@ -78,16 +101,43 @@ for name, (e, x, q) in {
 }.items():
     p = booked(e, x, q)
     gross_move = (x - e) * q
-    fee_paid = (x * q) * (FEE / 2)
-    ok(f"  {name}: booked P&L == gross move minus the exit fee",
+    fee_paid = q * (e + x) * (FEE / 2)
+    ok(f"  {name}: booked P&L == gross move minus BOTH fee legs",
        abs(p - (gross_move - fee_paid)) < 1e-9, f"{p:.4f}")
+    ok(f"  {name}: the omitted entry leg was {e * q * (FEE / 2):.4f}",
+       abs((booked_exit_leg_only(e, x, q) - p) - e * q * (FEE / 2)) < 1e-9)
 ok("a flat round trip is NEGATIVE by the fee, never zero",
    booked(0.1, 0.1, 500.0) < 0,
    "a ledger that books a flat trade at zero is hiding the cost of trading")
+ok("a flat round trip costs TWO legs, not one",
+   abs(booked(0.1, 0.1, 500.0) - -(500.0 * 0.2 * (FEE / 2))) < 1e-9,
+   booked(0.1, 0.1, 500.0))
 
 print("\nall three write sites share one arithmetic")
-ok("the automatic sell path nets the exit fee against filled_qty",
-   "pnl = new_allocated - (position.entry_price * filled_qty)" in TREE)
+# AST, not a string count: the three call sites are formatted differently
+# and a brittle substring check failed on whitespace rather than on
+# behaviour, which is exactly the failure mode this file exists to avoid.
+_calls = [n for n in ast.walk(ast.parse(TREE))
+          if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+          and n.func.id == "_tree_realized_pnl"]
+ok("all three write sites call the ONE shared P&L function",
+   len(_calls) == 3, f"found {len(_calls)} call sites")
+_defs = [n for n in ast.walk(ast.parse(TREE))
+         if isinstance(n, ast.FunctionDef) and n.name == "_tree_realized_pnl"]
+ok("and it is defined exactly once", len(_defs) == 1, f"{len(_defs)} definitions")
+# Every call must land in a variable named pnl. If one ever gets assigned to
+# new_allocated or proceeds, the entry fee would be charged against real cash
+# that never left twice - the mirror image of the bug being fixed here.
+_tree_ast = ast.parse(TREE)
+_pnl_targets = [a for a in ast.walk(_tree_ast)
+                if isinstance(a, ast.Assign)
+                and isinstance(a.value, ast.Call)
+                and isinstance(a.value.func, ast.Name)
+                and a.value.func.id == "_tree_realized_pnl"
+                and len(a.targets) == 1 and isinstance(a.targets[0], ast.Name)]
+ok("every call assigns to pnl, never to a cash figure",
+   len(_pnl_targets) == 3 and {a.targets[0].id for a in _pnl_targets} == {"pnl"},
+   str([a.targets[0].id for a in _pnl_targets]))
 # AST, and scoped to the functions that WRITE a ledger row.
 #
 # Two earlier versions of this check were wrong in opposite directions. A
@@ -140,11 +190,16 @@ ok("and the legitimate position.qty uses are untouched",
    TREE.count("position.qty * (price - position.entry_price)") == 2,
    "unrealized mark-to-market on a HELD position is correct as position.qty")
 
-ok("the manual partial-sell path was already correct and is unchanged",
-   "proceeds - (position.entry_price * filled_qty)" in TREE)
-ok("the retire-to-BTC path now charges the exit fee too",
-   "_gross * (ROUND_TRIP_FEE_RATE / 2)" in TREE,
-   "it booked the gross move, so a retirement read better than the same trade taken any other way")
+ok("no write site still books P&L off exit-leg-only proceeds",
+   "proceeds - (position.entry_price * filled_qty)" not in TREE,
+   "that formula omits the entry commission")
+ok("PROCEEDS still charge the exit leg only - that is real cash",
+   "proceeds = round(gross - fee, 2)" in TREE,
+   "a sale returns gross minus the exit fee; the entry fee left at entry")
+ok("new_allocated is still cash, not P&L",
+   "new_allocated = gross_value - fee" in TREE)
+ok("the shared function warns against using it for allocated_usd",
+   "NOT to be used for PROCEEDS" in TREE)
 ok("no LIVE expression books a bare (exit - entry) * qty gross move",
    not any(isinstance(n, ast.BinOp) and isinstance(n.op, ast.Mult)
            and isinstance(n.left, ast.BinOp) and isinstance(n.left.op, ast.Sub)

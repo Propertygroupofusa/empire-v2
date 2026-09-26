@@ -242,6 +242,43 @@ ROLLING_EXPECTANCY_MIN_TRADES = engine._safe_int_env("TREE_ROLLING_EXPECTANCY_MI
 _coin_last_sold_at: dict = {}
 
 
+
+def _tree_realized_pnl(qty: float, entry_price: float, exit_price: float,
+                       round_trip_fee_rate: float = None) -> float:
+    """Realized P&L on one tree round trip, charging BOTH legs.
+
+    Every one of this file's three ledger write sites used to compute
+
+        proceeds = exit_price * qty * (1 - RATE/2)
+        pnl      = proceeds - entry_price * qty
+
+    which charges the EXIT commission and silently omits the ENTRY one.
+    entry_price is the fill price; Coinbase bills commission separately, so
+    the real cost basis is entry_price * qty PLUS the entry commission. The
+    omission is one-directional - it can only ever make a trade look better
+    than it was.
+
+    Measured on the live ledger 2026-09-26: 167 rows, $23,521.21 of entry
+    notional, so $176.41 of commission that was paid and never booked. The
+    tree's recorded -$508.44 is really about -$684.85.
+
+    This mirrors _grid_slice_net_pnl in crypto_grid_bot.py, which has
+    charged both legs all along - the grid's 82 rows are not affected.
+
+        gross = qty * (exit_price - entry_price)
+        fee   = qty * (entry_price + exit_price) * (rate / 2)
+
+    NOT to be used for PROCEEDS or for a branch's new allocated_usd. Those
+    are cash figures: what a sale actually puts back in the account is
+    gross minus the EXIT fee only, because the entry fee left the account
+    at entry. Charging it twice there would understate real money held.
+    """
+    rate = ROUND_TRIP_FEE_RATE if round_trip_fee_rate is None else round_trip_fee_rate
+    gross = qty * (exit_price - entry_price)
+    fee = qty * (entry_price + exit_price) * (rate / 2.0)
+    return round(gross - fee, 2)
+
+
 def _coin_sale_cooldown_active(product_id: str) -> bool:
     last_sold = _coin_last_sold_at.get(product_id)
     if last_sold is None:
@@ -3403,9 +3440,8 @@ async def liquidate_family_tree_and_buy_btc() -> dict:
                     # sites, three formulas, one ledger. Netted here too, so a
                     # retirement cannot read better than the same trade taken
                     # any other way.
-                    _gross = filled_price * filled_qty
-                    pnl = round(_gross - (_gross * (ROUND_TRIP_FEE_RATE / 2))
-                                - (pos.entry_price * filled_qty), 2)
+                    pnl = _tree_realized_pnl(filled_qty, pos.entry_price,
+                                             filled_price)
                     async with AsyncSessionLocal() as db:
                         db.add(CryptoCoinTradeHistory(
                             product_id=b.product_id, bot_name=b.bot_name,
@@ -3606,8 +3642,11 @@ async def root_partial_sell(amount_usd: float) -> dict:
 
         gross = filled_price * filled_qty
         fee = gross * (ROUND_TRIP_FEE_RATE / 2)
+        # PROCEEDS charge the exit leg only - that is the real cash coming
+        # back, and the entry fee left the account at entry.
         proceeds = round(gross - fee, 2)
-        pnl = round(proceeds - (position.entry_price * filled_qty), 2)
+        # P&L charges BOTH legs. Different question, different formula.
+        pnl = _tree_realized_pnl(filled_qty, position.entry_price, filled_price)
 
         async with AsyncSessionLocal() as db:
             db.add(CryptoCoinTradeHistory(
@@ -4138,7 +4177,9 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
     # The partial-sell path 500 lines up already had this right
     # (`proceeds - position.entry_price * filled_qty`). Three write sites,
     # three formulas, and the one that wrote all 167 rows was the wrong one.
-    pnl = new_allocated - (position.entry_price * filled_qty)
+    # new_allocated above is CASH (gross minus the exit leg) and stays that
+    # way. P&L is a different question and charges both legs.
+    pnl = _tree_realized_pnl(filled_qty, position.entry_price, filled_price)
     if position.qty and abs(filled_qty - position.qty) > position.qty * 1e-6:
         # The remainder is still held. Saying so loudly, because the branch
         # position is cleared below regardless and that coin then belongs to
