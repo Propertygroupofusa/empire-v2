@@ -29,6 +29,13 @@ SRC_GUARD = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "write_guard.py"), encoding="utf-8").read()
 
 MONEY_MOVERS = [
+    # The one the prefix list missed. routers/crypto_trading.py mounts at
+    # /api/crypto, the guard listed /api/crypto-trading, and this endpoint
+    # market-sells an asset in full: "Sell all of an asset at market price
+    # immediately. Supports any asset." Unprotected for the first hour the
+    # guard existed.
+    "/api/crypto/withdraw",
+    "/api/crypto/order",
     "/api/trading-dashboard/grid-status/force-buy",
     "/api/trading-dashboard/grid-status/quick-buy",
     "/api/trading-dashboard/grid-status/mode",
@@ -50,8 +57,28 @@ ok("HEAD and OPTIONS pass, so CORS preflight is not broken",
 ok("other money routers are covered",
    all(G.is_protected("POST", p) for p in
        ("/api/sweep/run", "/api/orders/create", "/api/payments/charge",
-        "/api/crypto-trading/buy", "/api/alpaca-funding/transfer")))
-ok("an unrelated path is untouched", not G.is_protected("POST", "/api/study/notes"))
+        "/api/alpaca-funding/transfer")))
+# DENY BY DEFAULT. An allowlist of things to protect was wrong within the
+# hour of being written; a route that moves will not silently fall out of
+# coverage now, and a route invented tomorrow is covered the day it exists.
+ok("a path nobody has written yet is already covered",
+   G.is_protected("POST", "/api/some/route/invented/next/month"))
+ok("a route that MOVES is still covered",
+   G.is_protected("POST", "/api/crypto") and G.is_protected("POST", "/api/crypto-trading/x"))
+ok("there is no list of things to protect - only of exceptions",
+   not hasattr(G, "PROTECTED_PREFIXES") and hasattr(G, "OPEN_PREFIXES"))
+ok("and the exception list is short enough to audit",
+   len(G.OPEN_PREFIXES) + len(G.OPEN_SUFFIXES) <= 4,
+   f"{len(G.OPEN_PREFIXES)} prefixes, {len(G.OPEN_SUFFIXES)} suffixes")
+
+print("\nthe exceptions are the ones that cannot work any other way")
+ok("Stripe webhooks stay open - Stripe cannot send our header",
+   not G.is_protected("POST", "/api/orders/webhook/stripe")
+   and not G.is_protected("POST", "/api/subscriptions/webhook/stripe"))
+ok("but a path merely CONTAINING 'webhook' is not open",
+   G.is_protected("POST", "/api/trading-dashboard/webhook/stripe/../force-buy"))
+ok("the reason each exception exists is written down",
+   "Stripe cannot send our header" in SRC_GUARD and "issues credentials" in SRC_GUARD)
 
 print("\nwith no token set, writes are REFUSED - not allowed")
 os.environ.pop(G.TOKEN_ENV, None)
@@ -90,7 +117,7 @@ ok("login is untouched because /api/auth is out of scope, not exempted",
 ok("and so is every other auth route - one rule, no special cases",
    not G.is_protected("POST", "/api/auth/change-password"))
 ok("the reason is written down",
-   "authentication domain" in SRC_GUARD,
+   "issues credentials" in SRC_GUARD,
    "a shared token in front of login locks everyone out of the thing that issues credentials")
 
 print("\nit is wired as middleware, not as 110 decorators")
@@ -101,6 +128,9 @@ SRC = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "write_guard
            encoding="utf-8").read()
 ok("the file says why middleware beats decorators",
    "110 chances to forget one" in SRC)
+ok("and records the miss that forced deny-by-default",
+   "Sell all of an" in SRC and "25% of the account" in SRC,
+   "an allowlist of things to defend fails silently when a route moves")
 ok("and records that reads are still exposed",
    "WHAT IS NOT COVERED" in SRC and "still return the full holdings" in SRC,
    "an unfixed hole must be written down, not implied")

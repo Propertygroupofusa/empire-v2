@@ -53,31 +53,39 @@ HEADER = "x-dashboard-token"
 QUERY = "token"
 MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 
-# Path prefixes that require the token. Everything that can move money or
-# change what the bots do.
-PROTECTED_PREFIXES = (
-    "/api/trading-dashboard",
-    "/api/crypto-trading",
-    "/api/alpaca-funding",
-    "/api/sweep",
-    "/api/orders",
-    "/api/payments",
-    "/api/admin",
-)
+# EVERY mutating request is protected. There is no list of what to cover.
+#
+# The first version listed prefixes to protect, and it was wrong within the
+# hour. It covered "/api/crypto-trading" - a path that does not exist - and
+# missed "/api/crypto", which is where routers/crypto_trading.py actually
+# mounts. That router holds POST /api/crypto/withdraw: "Sell all of an
+# asset at market price immediately. Supports any asset." One unauthenticated
+# request would have liquidated ZEC, 25% of the account.
+#
+# The lesson is not "add /api/crypto". It is that an allowlist of things to
+# defend fails silently the moment a route moves, and nobody finds out until
+# someone asks the right question. So the default is now DENY for every
+# state-changing request on every path, and the exceptions are enumerated -
+# a short list whose omissions break something visible immediately, instead
+# of a long list whose omissions leave money exposed quietly.
+MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 
-# There is deliberately NO exemption list.
+# The only paths where a write may proceed without the token.
 #
-# The first draft had one - login, register, refresh - and every entry was
-# dead code, because /api/auth is not under a protected prefix to begin
-# with. An allowlist whose entries can never fire is worse than none: it
-# reads as a considered carve-out and protects nothing, and the next person
-# adds a fourth line to it believing that means something.
+# Each entry earns its place by being unable to work any other way:
 #
-# /api/auth is out of scope by design, not by exemption. It is a different
-# authentication domain: those routes establish a USER's identity, and a
-# shared deployment token in front of login would lock everyone out of the
-# thing that issues credentials. If they need protection it is their own
-# session logic, not this.
+#   /api/auth/...      establish a USER's identity. A shared deployment
+#                      token in front of login locks everyone out of the
+#                      thing that issues credentials.
+#   .../webhook/...    Stripe calls these. Stripe cannot send our header,
+#                      and it authenticates itself by signing its payload -
+#                      which is the handler's job to verify, not ours.
+#
+# Anything added here must be something that CANNOT move money in this
+# account. Adding a convenience is how the deny-by-default becomes a list
+# again.
+OPEN_PREFIXES = ("/api/auth/",)
+OPEN_SUFFIXES = ("/webhook/stripe",)
 
 
 def _configured_token() -> str:
@@ -94,9 +102,14 @@ def _presented(request) -> str:
 
 
 def is_protected(method: str, path: str) -> bool:
+    """Deny by default. Only an enumerated exception is let through."""
     if method.upper() not in MUTATING:
         return False
-    return any(path.startswith(p) for p in PROTECTED_PREFIXES)
+    if any(path.startswith(p) for p in OPEN_PREFIXES):
+        return False
+    if any(path.endswith(s) for s in OPEN_SUFFIXES):
+        return False
+    return True
 
 
 def check(method: str, path: str, presented: str):

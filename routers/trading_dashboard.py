@@ -804,7 +804,9 @@ async def get_write_guard_status():
         "token_length_band": (None if not armed else
                               "short (<16) - use a longer one" if len(tok) < 16 else
                               "adequate (16-31)" if len(tok) < 32 else "strong (32+)"),
-        "protected_prefixes": list(write_guard.PROTECTED_PREFIXES),
+        "policy": "deny by default - every state-changing request on every path",
+        "open_prefixes": list(write_guard.OPEN_PREFIXES),
+        "open_suffixes": list(write_guard.OPEN_SUFFIXES),
         "protected_methods": sorted(write_guard.MUTATING),
         "reads_protected": False,
         "status": (
