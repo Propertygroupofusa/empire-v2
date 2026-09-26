@@ -1992,6 +1992,19 @@ class CryptoCoinTradeHistory(Base):
     opened_at = Column(DateTime, nullable=True)
     closed_at = Column(DateTime, default=datetime.utcnow, index=True)
 
+    # CORRECTION TRAIL. This table is append-only by design - rows are never
+    # deleted - but 11 of them recorded a P&L their own columns cannot
+    # produce, and every dashboard in the system reads `pnl`. So `pnl` is
+    # repaired in place and the value that was actually written is preserved
+    # here, never overwritten. pnl_original being non-NULL is what makes the
+    # correction idempotent: a corrected row is never corrected again.
+    #
+    # A row with pnl_original set has been changed by ledger_correction.py.
+    # A row without it is exactly as the bot wrote it.
+    pnl_original = Column(Float, nullable=True)
+    corrected_at = Column(DateTime, nullable=True)
+    correction_reason = Column(String, nullable=True)
+
     def to_dict(self):
         return {
             "id": self.id,
@@ -2001,6 +2014,9 @@ class CryptoCoinTradeHistory(Base):
             "exit_price": self.exit_price,
             "qty": self.qty,
             "pnl": self.pnl,
+            "pnl_original": self.pnl_original,
+            "corrected_at": self.corrected_at.isoformat() + "Z" if self.corrected_at else None,
+            "correction_reason": self.correction_reason,
             "exit_reason": self.exit_reason,
             # + "Z" on both - same real display bug as PricePredictionLog
             # above: a naive datetime.utcnow() value with no timezone

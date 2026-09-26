@@ -1833,6 +1833,114 @@ async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
     }
 
 
+async def _load_coin_history_rows(db):
+    """Every coin-history row as a plain dict, for the correction planner.
+
+    Deliberately NOT limited. The dry run and the real run must see the
+    same rows or the preview is not a preview of anything.
+    """
+    from models import CryptoCoinTradeHistory
+    rows = (await db.execute(select(CryptoCoinTradeHistory))).scalars().all()
+    return rows
+
+
+@router.get("/ledger-correction/preview")
+async def preview_ledger_correction(scope: str = "inconsistent",
+                                    db: AsyncSession = Depends(get_db)):
+    """What a correction WOULD change. Read-only; writes nothing.
+
+    A GET on purpose: this has to be runnable before the write token
+    exists, because deciding whether to apply a correction requires seeing
+    it first. The apply half is a POST and is therefore behind the guard.
+
+    scope=inconsistent  only rows that cannot reproduce their own columns
+    scope=all           also the systematic one-fee-leg understatement
+    """
+    import ledger_correction
+    try:
+        rows = await _load_coin_history_rows(db)
+    except Exception as e:
+        raise HTTPException(status_code=500,
+                            detail=f"could not read the ledger: {type(e).__name__}: {e}")
+    try:
+        return ledger_correction.plan([r.to_dict() for r in rows], scope=scope)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/ledger-correction/apply")
+async def apply_ledger_correction(scope: str = "inconsistent",
+                                  confirm: str = "",
+                                  db: AsyncSession = Depends(get_db)):
+    """Write the corrections. Behind the write guard, and needs confirm=yes.
+
+    Two independent locks, because this rewrites financial history:
+
+      1. write_guard - every POST needs DASHBOARD_WRITE_TOKEN. Not special
+         to this route; it is the deny-by-default the whole app runs under.
+      2. confirm=yes - so that holding the token is not by itself enough to
+         change the ledger by accident.
+
+    Idempotent. A row that already carries pnl_original is skipped, so
+    running this twice changes nothing the second time. The original value
+    is preserved on every row touched and is never overwritten.
+    """
+    import ledger_correction
+    from datetime import datetime as _dt
+    if confirm != "yes":
+        raise HTTPException(
+            status_code=400,
+            detail=("refusing to rewrite ledger history without confirm=yes. "
+                    "Run GET /ledger-correction/preview first."))
+    try:
+        rows = await _load_coin_history_rows(db)
+    except Exception as e:
+        raise HTTPException(status_code=500,
+                            detail=f"could not read the ledger: {type(e).__name__}: {e}")
+    by_id = {r.id: r for r in rows}
+    try:
+        planned = ledger_correction.plan([r.to_dict() for r in rows], scope=scope)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    applied, missing = [], []
+    now = _dt.utcnow()
+    for change in planned["changes"]:
+        row = by_id.get(change["id"])
+        if row is None:
+            missing.append(change["id"])
+            continue
+        # The original is written BEFORE pnl is touched, and only when it
+        # is still NULL. If this were the other way round a retry after a
+        # partial failure would preserve an already-corrected value as if
+        # it were the original.
+        if row.pnl_original is None:
+            row.pnl_original = row.pnl
+        row.pnl = change["pnl_corrected"]
+        row.corrected_at = now
+        row.correction_reason = f"{change['kind']}: {change['reason']}"
+        applied.append(change)
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500,
+                            detail=f"correction rolled back, nothing changed: {type(e).__name__}: {e}")
+    return {
+        "applied": len(applied),
+        "rows_not_found": missing,
+        "scope": scope,
+        "total_delta_usd": planned["total_delta_usd"],
+        "basis_mismatch": planned["basis_mismatch"],
+        "fee_leg": planned["fee_leg"],
+        "changes": applied,
+        "note": ("Originals are preserved in pnl_original and were not "
+                 "overwritten. This corrects the books, not the account - "
+                 "the unsold remainder behind the BASIS_MISMATCH rows is "
+                 "still unaccounted for."),
+    }
+
+
 @router.get("/family-tree-status/coin-history")
 async def get_coin_trade_history(db: AsyncSession = Depends(get_db)):
     """Real per-coin trade history and P&L, per the account owner's
