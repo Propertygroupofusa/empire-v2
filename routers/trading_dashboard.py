@@ -778,6 +778,37 @@ async def get_crypto_coinbase_status():
     }
 
 
+@router.get("/fee-watch")
+async def get_fee_watch(days: int = 30):
+    """What trading is costing, on a clock, as a share of the account.
+
+    Read-only. On 2026-09-06 this account paid $1,426.39 in commission in
+    one day - 12.8% of everything in it - and nobody noticed for twenty
+    days. It was never hidden: Coinbase charged it per fill and reported it
+    per fill. Nothing was looking.
+
+    DETECTION, NOT PREVENTION. That spending came from a process outside
+    this codebase with its own Coinbase credentials. The write guard
+    protects this server's endpoints and has no authority over a script on
+    a desktop. This says when the pace is destructive; it cannot stop it.
+    """
+    try:
+        import fee_watch, account_census
+        import crypto_btc_compound_bot as engine
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"fee watch unavailable: {e}")
+    try:
+        async with engine.aiohttp.ClientSession() as session:
+            # Size the thresholds against the WHOLE account, not the slice
+            # with branches attached. A percentage of $572 and a percentage
+            # of $11,121 are different alarms, and only one of them is real.
+            cen = await account_census.census(session)
+            acct = cen.get("total_usd") if cen.get("available") else None
+            return await fee_watch.watch(session, account_usd=acct, days=days)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"fee watch failed: {type(e).__name__}: {e}")
+
+
 @router.get("/write-guard")
 async def get_write_guard_status():
     """Is the write guard armed? Presence only - never the token.
