@@ -15,6 +15,7 @@ once you've done that - this is bookkeeping, not a real money-movement API.
 """
 
 import os
+import time
 import logging
 import asyncio
 import random
@@ -1845,7 +1846,8 @@ async def _load_coin_history_rows(db):
 
 
 @router.get("/newsroom")
-async def get_newsroom(anchor: str = "Delfine", window_days: int = 30):
+async def get_newsroom(anchor: str = "Delfine", window_days: int = 30,
+                       league_days: int = 7):
     """The broadcast: the same watch data, written as news.
 
     Read-only GET, same as the watch it is built on. Every figure on air
@@ -1855,8 +1857,91 @@ async def get_newsroom(anchor: str = "Delfine", window_days: int = 30):
     the screen nobody measured.
     """
     import newsroom_brief
+    import league_table
     watch = await get_holdings_watch(window_days=window_days)
-    return newsroom_brief.build(watch, anchor=anchor)
+    brief = newsroom_brief.build(watch, anchor=anchor)
+
+    rows_now = [r for r in (watch.get("rows") or [])
+                if r.get("status") in ("OK", "NEAR_STOP", "BREACHED")]
+    total = (watch.get("coin_usd") or 0) + (watch.get("cash_usd") or 0)
+    rows_then = await _standings_as_of(rows_now, league_days, window_days)
+    brief["league"] = league_table.build(rows_now, rows_then,
+                                         window_days=league_days,
+                                         account_total_usd=total)
+
+    import copy_desk
+    brief["copy_desk"] = copy_desk.check(brief, watch)
+    return brief
+
+
+async def _standings_as_of(rows_now, days_back: int, window_days: int):
+    """Rebuild each coin's score inputs as they stood `days_back` ago.
+
+    Movement needs history and this system cannot write one, so the past is
+    RECOMPUTED from candles rather than remembered: the price, the trailing
+    peak and the volatility that existed then, run through the same scorer.
+
+    Unit holdings are assumed unchanged over the window - stated on the
+    league payload because it is load-bearing. Returns None rather than a
+    partial table if the history cannot be fetched, so "we could not
+    compute it" never renders as "nothing moved".
+    """
+    import adaptive_stop
+    import horizon_study
+    if not rows_now or days_back <= 0:
+        return None
+    mod = crypto_btc_compound_bot_module
+    if mod is None:
+        return None
+    cutoff = time.time() - days_back * 86400
+    out, priced_then = [], {}
+    try:
+        async with mod.aiohttp.ClientSession() as session:
+            for r in rows_now:
+                pid = f"{r.get('asset')}-USD"
+                hist = await horizon_study.fetch_history(
+                    session, pid, days=window_days + days_back, granularity=3600)
+                if not hist:
+                    continue
+                times, lows, highs, closes = hist
+                past = [i for i, t in enumerate(times) if t <= cutoff]
+                # Need enough bars BEFORE the cutoff to form a peak and a
+                # volatility estimate. Too few and the coin is simply left
+                # out of the earlier table, which movement() reports as "no
+                # comparable standing" rather than as no change.
+                if len(past) < 48:
+                    continue
+                end = past[-1]
+                price_then = closes[end]
+                peak_then = holdings_watch_peak(highs[:end + 1])
+                vol_then = adaptive_stop.daily_vol_pct_from_closes(closes[:end + 1])
+                if not price_then or not peak_then or vol_then is None:
+                    continue
+                units = r.get("units")
+                priced_then[r.get("asset")] = (units or 0) * price_then
+                out.append({"asset": r.get("asset"), "units": units,
+                            "price": price_then, "peak": peak_then,
+                            "vol": vol_then})
+    except Exception as e:
+        log.debug(f"[league] history unavailable: {type(e).__name__}: {e}")
+        return None
+    if not out:
+        return None
+
+    import holdings_watch
+    book_then = sum(priced_then.values())
+    rows_then = []
+    for o in out:
+        rows_then.append(holdings_watch.assess(
+            o["asset"], o["units"], o["price"], priced_then[o["asset"]],
+            o["peak"], o["vol"], account_total_usd=book_then))
+    return [r for r in rows_then
+            if r.get("status") in ("OK", "NEAR_STOP", "BREACHED")]
+
+
+def holdings_watch_peak(highs):
+    import holdings_watch
+    return holdings_watch.peak_from_highs(highs)
 
 
 @router.get("/holdings-watch")
