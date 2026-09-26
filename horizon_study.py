@@ -332,7 +332,8 @@ def adverse_selection(times, lows, closes, depths=ADVERSE_DEPTHS_PCT,
 
 
 async def fetch_history(session, product_id: str, days: int = DEFAULT_DAYS,
-                        granularity: int = GRANULARITY, pause: float = 0.35):
+                        granularity: int = GRANULARITY, pause: float = 0.35,
+                        end_ts: int = None):
     """Paginated 5-minute candles, oldest-first, deduplicated by timestamp.
 
     opportunity_signals.fetch_candles_full reads the same endpoint but takes
@@ -340,9 +341,17 @@ async def fetch_history(session, product_id: str, days: int = DEFAULT_DAYS,
     and the endpoint caps every response at 300 rows, so the window has to be
     walked backwards explicitly.
 
+    end_ts anchors the window somewhere other than now, which is what makes
+    a FALLING-market run possible at all. Every result this study has
+    produced came from a window ending today, and each one carried the same
+    caveat: the instruments all rose over it, so a positive number is not
+    evidence of an edge. That caveat cannot be discharged without pointing
+    the identical measurement at a window that fell. Defaults to now, so
+    nothing that already calls this changes behaviour.
+
     Returns (times, lows, highs, closes) or None. Never raises.
     """
-    rows, now = {}, int(time.time())
+    rows, now = {}, int(end_ts or time.time())
     end, floor = now, now - days * 86400
     try:
         while end > floor:
@@ -435,12 +444,20 @@ def summarise(per_coin: dict) -> dict:
     return out
 
 
-async def run_study(session, products=None, days: int = DEFAULT_DAYS) -> dict:
-    """Fetch, measure, summarise. Returns the whole study as a dict."""
+async def run_study(session, products=None, days: int = DEFAULT_DAYS,
+                    end_ts: int = None) -> dict:
+    """Fetch, measure, summarise. Returns the whole study as a dict.
+
+    end_ts points the SAME measurement at a past window - see fetch_history.
+    Nothing else changes: same excursion profile, same rung profile, same
+    adverse-selection estimate, same summariser. That is the point. A
+    falling-market result is only comparable if it is not a second
+    implementation of the question.
+    """
     products = products or DEFAULT_PRODUCTS
     per_coin, drift = {}, {}
     for p in products:
-        hist = await fetch_history(session, p, days=days)
+        hist = await fetch_history(session, p, days=days, end_ts=end_ts)
         if not hist:
             log.warning(f"[HORIZON] no usable history for {p}")
             continue
@@ -457,12 +474,23 @@ async def run_study(session, products=None, days: int = DEFAULT_DAYS) -> dict:
     out = {
         "as_of": datetime.now(timezone.utc).isoformat(),
         "days": days,
+        "window_end": (datetime.fromtimestamp(end_ts, timezone.utc).isoformat()
+                       if end_ts else None),
         "granularity_seconds": GRANULARITY,
         "products": list(per_coin),
         "window_returns_pct": drift,
         "per_coin": per_coin,
         "summary": summarise(per_coin),
     }
+    down = [v for v in drift.values() if v is not None and v < 0]
+    if drift and len(down) == len(drift):
+        out["sample_caveat"] = (
+            f"ALL {len(drift)} instruments FELL over this window "
+            f"({min(drift.values()):+.1f}% to {max(drift.values()):+.1f}%). This is the "
+            f"mirror of the usual caveat and it cuts the other way: a long-only "
+            f"resting-rung result that is POSITIVE here is robust, because the sample "
+            f"was hostile. A result that is NEGATIVE here is not proof of no edge - it "
+            f"has not been shown a normal market.")
     up = [v for v in drift.values() if v is not None and v > 0]
     if drift and len(up) == len(drift):
         # Stated on the object rather than in a comment, because every

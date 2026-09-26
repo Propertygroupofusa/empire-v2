@@ -265,5 +265,59 @@ ok("and the measured variable it declares is actually used",
    HTML.count("measuredAdverse") >= 2,
    "a declared-and-unused variable is how _actionability stayed dead for a day")
 
+
+
+# ---------------------------------------------------------------------------
+# REGIME ANCHORING, added 2026-09-26.
+#
+# Every study this fleet produced ended today, and every one carried the
+# caveat that all instruments rose, so a positive number was not evidence of
+# an edge. end_ts is what lets the identical measurement be pointed at a
+# window that fell. These pin that it is genuinely optional and that the
+# mirrored caveat fires.
+# ---------------------------------------------------------------------------
+import ast as _ast
+import inspect as _inspect
+
+print("\nthe study can be anchored to a past window")
+
+_sig = _inspect.signature(H.fetch_history)
+ok("fetch_history takes end_ts", "end_ts" in _sig.parameters)
+ok("and it defaults to None, so existing callers are unchanged",
+   _sig.parameters["end_ts"].default is None)
+_sig2 = _inspect.signature(H.run_study)
+ok("run_study takes end_ts", "end_ts" in _sig2.parameters)
+ok("and it defaults to None", _sig2.parameters["end_ts"].default is None)
+
+_src = _inspect.getsource(H.fetch_history)
+ok("end_ts replaces now as the anchor, not as an extra filter",
+   "int(end_ts or time.time())" in _src, _src[:200])
+
+print("\nboth sample caveats exist and are mirrors of each other")
+
+_run = _inspect.getsource(H.run_study)
+ok("a window where everything ROSE is flagged", "instruments ROSE" in _run)
+ok("a window where everything FELL is flagged too", "instruments FELL" in _run)
+ok("the rising caveat warns that a POSITIVE result proves nothing",
+   "POSITIVE here is not yet evidence" in _run or "NEGATIVE here is rob" in _run)
+ok("the falling caveat warns that a NEGATIVE result proves nothing",
+   "NEGATIVE here is not proof" in _run)
+ok("neither caveat can fire on a mixed window",
+   _run.count("len(down) == len(drift)") == 1
+   and _run.count("len(up) == len(drift)") == 1)
+
+print("\nrun_regime_study picks windows from measured history, not by hand")
+
+_rs = open("run_regime_study.py", encoding="utf-8").read()
+ok("it calls the study's own run_study, not a reimplementation",
+   "HS.run_study(" in _rs and "def rung_profile" not in _rs)
+ok("it includes at least two falling windows",
+   sum(1 for w in _ast.literal_eval(
+       _rs.split("WINDOWS = ")[1].split("]")[0] + "]")
+       if "fell" in w[2]) >= 2)
+ok("and at least one rising window, as a control",
+   any("rose" in w[2] for w in _ast.literal_eval(
+       _rs.split("WINDOWS = ")[1].split("]")[0] + "]")))
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
