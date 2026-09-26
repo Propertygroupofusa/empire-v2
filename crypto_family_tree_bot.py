@@ -3397,7 +3397,15 @@ async def liquidate_family_tree_and_buy_btc() -> dict:
                 fill = await engine.place_market_sell(session, pos.qty, b.product_id)
                 if fill:
                     filled_qty, filled_price = fill
-                    pnl = round((filled_price - pos.entry_price) * filled_qty, 2)
+                    # Was `(filled_price - pos.entry_price) * filled_qty` - the
+                    # gross move, with no fee charged at all, while the other
+                    # two write sites in this file both net the exit leg. Three
+                    # sites, three formulas, one ledger. Netted here too, so a
+                    # retirement cannot read better than the same trade taken
+                    # any other way.
+                    _gross = filled_price * filled_qty
+                    pnl = round(_gross - (_gross * (ROUND_TRIP_FEE_RATE / 2))
+                                - (pos.entry_price * filled_qty), 2)
                     async with AsyncSessionLocal() as db:
                         db.add(CryptoCoinTradeHistory(
                             product_id=b.product_id, bot_name=b.bot_name,
@@ -4112,7 +4120,35 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
     gross_value = filled_price * filled_qty
     fee = gross_value * (ROUND_TRIP_FEE_RATE / 2)
     new_allocated = gross_value - fee
-    pnl = new_allocated - (position.entry_price * position.qty)
+    # BOTH SIDES OF THIS SUBTRACTION MUST USE THE SAME QUANTITY.
+    #
+    # This read `position.entry_price * position.qty` while the proceeds
+    # above are computed from filled_qty. On a full fill the two are equal
+    # and nothing is wrong. On a PARTIAL fill it books the proceeds of what
+    # was actually sold against the cost of everything that was held, and
+    # the answer is not slightly off - it is off by the cost of the unsold
+    # remainder.
+    #
+    # It is not theoretical. In the live coin-history ledger, 11 of 167
+    # trades record a P&L that the entry price, exit price and qty on their
+    # own row cannot produce, $339.59 more negative in aggregate, every one
+    # in the same direction. Trade 48 is a WINNING price move on a $24
+    # position booked as -$91.52: 206.57 units sold out of roughly 990 held.
+    #
+    # The partial-sell path 500 lines up already had this right
+    # (`proceeds - position.entry_price * filled_qty`). Three write sites,
+    # three formulas, and the one that wrote all 167 rows was the wrong one.
+    pnl = new_allocated - (position.entry_price * filled_qty)
+    if position.qty and abs(filled_qty - position.qty) > position.qty * 1e-6:
+        # The remainder is still held. Saying so loudly, because the branch
+        # position is cleared below regardless and that coin then belongs to
+        # nobody - the silent version of this is how a ledger and an account
+        # drift apart with nothing on any page reporting it.
+        log.error(
+            f"[TREE] PARTIAL FILL on {bot_name} {product_id}: sold {filled_qty:.8f} "
+            f"of {position.qty:.8f} held ({filled_qty / position.qty * 100:.1f}%). "
+            f"P&L ${pnl:+.2f} is for the SOLD portion only; "
+            f"{position.qty - filled_qty:.8f} {product_id} is unaccounted for.")
 
     # Per the account owner's explicit request: a real, permanent record
     # of every round-trip trade on this coin - scoped by product_id (not

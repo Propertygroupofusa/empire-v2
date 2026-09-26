@@ -778,6 +778,23 @@ async def get_crypto_coinbase_status():
     }
 
 
+def _resolved_crypto_mode() -> str:
+    """Which crypto loop is ACTUALLY running, not which one the env var names.
+
+    main.py resolves this at boot - a DB override beats CRYPTO_STRATEGY_MODE -
+    and stashes the answer on RESOLVED_CRYPTO_MODE. Reading the env var here
+    instead reported a stale variable as the live configuration.
+    """
+    try:
+        import main as _main
+        resolved = getattr(_main, "RESOLVED_CRYPTO_MODE", None)
+        if resolved:
+            return resolved
+    except Exception:
+        pass
+    return os.getenv("CRYPTO_STRATEGY_MODE", "") or "(unset)"
+
+
 @router.get("/family-tree-status")
 async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     """Real DB state of every crypto_family_tree_bot.py branch. Unlike
@@ -1201,8 +1218,26 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         # not running, and a control that silently does nothing is worse
         # than one that is plainly labelled inert. Surfaced so the page can
         # say so instead of the operator finding out by pressing it.
-        "crypto_strategy_mode": os.getenv("CRYPTO_STRATEGY_MODE", "") or "(unset)",
-        "family_tree_loop_running": os.getenv("CRYPTO_STRATEGY_MODE", "") == "family_tree",
+        # THE RESOLVED MODE, not the raw environment variable.
+        #
+        # main.py lets a DB-persisted override WIN over CRYPTO_STRATEGY_MODE,
+        # because on 2026-09-25 that variable could not be corrected through
+        # the Railway UI across six attempts. So the env var can say
+        # 'delfina_scalping' while the process is genuinely running
+        # 'grid_fleet' - which is exactly what it said on 2026-09-26, and it
+        # was read off this panel as "the tree loop is broken" when the real
+        # answer was "the tree loop is deliberately not the running loop".
+        #
+        # Reporting the variable instead of the resolution made a correct
+        # deployment look like a fault. Both are served now: the resolved
+        # mode is what governs, the env var is kept beside it so a stale
+        # variable is still visible rather than hidden by the override.
+        "crypto_strategy_mode": _resolved_crypto_mode(),
+        "crypto_strategy_mode_env": os.getenv("CRYPTO_STRATEGY_MODE", "") or "(unset)",
+        "crypto_strategy_mode_source": ("database override" if _resolved_crypto_mode()
+                                        != (os.getenv("CRYPTO_STRATEGY_MODE", "") or "(unset)")
+                                        else "environment"),
+        "family_tree_loop_running": _resolved_crypto_mode() == "family_tree",
         "rolling_expectancy": rolling_expectancy,
         "exit_mode": exit_mode,
         "trailing_stop_pct": trailing_stop_pct,
@@ -1542,7 +1577,65 @@ async def get_coin_trade_history(db: AsyncSession = Depends(get_db)):
     for coin in coins:
         coin["trades"] = trades_by_coin.get(coin["product_id"], [])
 
-    return {"coins": coins, "coin_count": len(coins)}
+    # SELF-AUDIT. Every row carries the entry price, the exit price and the
+    # quantity its P&L was computed from, so every row can be asked to
+    # reproduce its own number. A row that cannot is not a rounding
+    # disagreement - it means the figure was computed from something other
+    # than the columns beside it.
+    #
+    # This exists because on 2026-09-26 eleven of 167 rows failed exactly
+    # that check, $339.59 more negative in aggregate and every one in the
+    # same direction, and it took a hand audit to notice. The cause was one
+    # line netting proceeds from filled_qty against a basis from
+    # position.qty (fixed in crypto_family_tree_bot). The check stays
+    # because the next such bug should announce itself here rather than
+    # wait for somebody to go looking.
+    #
+    # The tolerance is deliberately generous - 2% of notional plus 5c -
+    # because the exact fee rate at the time of an old trade is not stored.
+    # Anything flagged is off by far more than a fee.
+    suspect, checked, drift = [], 0, 0.0
+    for t_list in trades_by_coin.values():
+        for t in t_list:
+            e, x, q, p = (t.get("entry_price"), t.get("exit_price"),
+                          t.get("qty"), t.get("pnl"))
+            if None in (e, x, q, p):
+                continue
+            checked += 1
+            gross = (x - e) * q
+            if abs(gross - p) > abs(e * q) * 0.02 + 0.05:
+                drift += p - gross
+                suspect.append({
+                    "id": t.get("id"), "product_id": t.get("product_id"),
+                    "bot_name": t.get("bot_name"), "qty": q,
+                    "notional_usd": round(e * q, 2),
+                    "prices_imply_pnl": round(gross, 2),
+                    "recorded_pnl": round(p, 2),
+                    "gap_usd": round(p - gross, 2),
+                    "closed_at": t.get("closed_at"),
+                })
+    suspect.sort(key=lambda r: abs(r["gap_usd"]), reverse=True)
+
+    return {
+        "coins": coins,
+        "coin_count": len(coins),
+        "integrity": {
+            "rows_checked": checked,
+            "rows_inconsistent": len(suspect),
+            "net_drift_usd": round(drift, 2),
+            "basis": ("Each row's P&L compared against (exit_price - entry_price) * qty "
+                      "from that same row, with 2% of notional + $0.05 allowed for fees. "
+                      "A flagged row's P&L was computed from something other than the "
+                      "columns stored beside it, so neither the row NOR any total "
+                      "containing it can be trusted."),
+            "verdict": ("every row reproduces its own P&L from its own columns"
+                        if not suspect else
+                        f"{len(suspect)} of {checked} rows cannot reproduce their own P&L "
+                        f"from their own columns; recorded totals are off by "
+                        f"${drift:,.2f} against what the stored prices imply"),
+            "rows": suspect[:25],
+        },
+    }
 
 
 @router.get("/family-tree-status/activity-feed")
