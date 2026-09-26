@@ -1845,6 +1845,58 @@ async def _load_coin_history_rows(db):
     return rows
 
 
+@router.get("/alert-queue")
+async def get_alert_queue(limit: int = 50, db: AsyncSession = Depends(get_db)):
+    """The alarm's own health. Read-only.
+
+    Leads with whether a channel is configured at all, because every other
+    number here is meaningless without one: a queue full of `pending` rows
+    with no webhook set is not a backlog, it is an alarm that was never
+    wired to a bell.
+    """
+    import alert_sender
+    import alert_queue
+    from models import NewsroomAlert, AssetAlertState
+    try:
+        rows = (await db.execute(
+            select(NewsroomAlert)
+            .order_by(NewsroomAlert.id.desc())
+            .limit(max(1, min(500, limit))))).scalars().all()
+        counts = {}
+        for st in ("pending", "sent", "failed"):
+            counts[st] = (await db.execute(
+                select(func.count(NewsroomAlert.id))
+                .where(NewsroomAlert.status == st))).scalar() or 0
+        tracked = (await db.execute(
+            select(func.count(AssetAlertState.asset)))).scalar() or 0
+    except Exception as e:
+        raise HTTPException(status_code=500,
+                            detail=f"queue unreadable: {type(e).__name__}: {e}")
+
+    configured = alert_sender.channel_configured()
+    return {
+        "channel_configured": configured,
+        "channel_note": (None if configured else
+                         f"No {alert_sender.WEBHOOK_ENV} is set, so NOTHING is "
+                         f"being delivered. Alerts are still being generated and "
+                         f"held - set the variable and the backlog flushes. They "
+                         f"are not marked sent, because a queue that reports "
+                         f"success with nowhere to send is worse than an empty one."),
+        "webhook_env": alert_sender.WEBHOOK_ENV,
+        "format_env": alert_sender.FORMAT_ENV,
+        "counts": counts,
+        "assets_tracked": tracked,
+        "max_attempts": alert_queue.MAX_ATTEMPTS,
+        "backoff_seconds": list(alert_queue.BACKOFF_SECONDS),
+        "min_alert_usd": alert_queue.MIN_ALERT_USD,
+        "policy": ("Alerts fire on TRANSITIONS, not conditions - a coin "
+                   "becoming breached is news, a coin still being breached is "
+                   "not. Recoveries are reported too, because silence after an "
+                   "alarm reads the same as a broken sender."),
+        "alerts": [r.to_dict() for r in rows],
+    }
+
+
 @router.get("/newsroom")
 async def get_newsroom(anchor: str = "Delfine", window_days: int = 30,
                        league_days: int = 7):

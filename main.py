@@ -1118,6 +1118,26 @@ async def lifespan(app: FastAPI):
     try:
         from routers.trading_dashboard import run_auto_close_periodically
         asyncio.create_task(run_auto_close_periodically())
+
+        # THE ALARM. Two independent loops: one notices, one delivers.
+        #
+        # It writes to the database with DASHBOARD_WRITE_TOKEN unset, and
+        # that is deliberate rather than a gap. write_guard is HTTP
+        # middleware - it stops anyone POSTing an order through the
+        # dashboard. A background task is not a request, so the alarm keeps
+        # working while trading is frozen, which is exactly when an
+        # unmonitored $11,200 most needs watching. Neither loop can place
+        # an order; the only thing they can do is tell someone something.
+        try:
+            import alert_worker
+            from routers.trading_dashboard import get_holdings_watch
+            from database import get_session_factory as _alert_sf
+            asyncio.create_task(alert_worker.run_producer_periodically(
+                get_holdings_watch, _alert_sf))
+            asyncio.create_task(alert_worker.run_sender_periodically(_alert_sf))
+            logger.info("🔔 Newsroom alert queue running (producer + sender)")
+        except Exception as e:
+            logger.warning(f"alert queue not started: {type(e).__name__}: {e}")
         log.info("⏱️ Alpaca auto-close loop started (8% profit target / 10-day max hold, 10% skim to locked profit)")
     except Exception as e:
         log.warning(f"Alpaca auto-close loop startup failed: {e}")

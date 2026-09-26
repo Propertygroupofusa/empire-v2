@@ -2029,6 +2029,81 @@ class CryptoCoinTradeHistory(Base):
         }
 
 
+class NewsroomAlert(Base):
+    """One thing worth waking somebody for, and whether it got out.
+
+    The newsroom computes stop levels every cycle, but a watch you have to
+    LOOK AT is decorative. This is the queue that turns it into an alarm.
+
+    Durable on purpose. If the delivery channel is down, the row stays
+    `pending` with its attempt count rather than evaporating - the failure
+    mode that matters here is an alert that was generated, lost, and never
+    missed by anyone.
+
+    A row is never deleted and never silently retried forever: after
+    MAX_ATTEMPTS it becomes `failed` WITH its last error, which is visible
+    on the queue endpoint. A dead alert you can see beats a live one you
+    cannot.
+    """
+    __tablename__ = "newsroom_alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # BREACH / RECOVERY / CONCENTRATION / BLIND - what kind of story it is.
+    kind = Column(String, index=True)
+    asset = Column(String, index=True, nullable=True)
+    severity = Column(String, index=True)          # CRITICAL / HIGH / INFO
+    message = Column(String)
+    detail = Column(String, nullable=True)
+
+    # IDEMPOTENCY. The producer runs every cycle; without this, one breach
+    # generates an alert every 15 minutes until it recovers, and the person
+    # being alerted learns to ignore the channel - which is worse than no
+    # alarm, because it fails silently and feels like coverage.
+    dedupe_key = Column(String, unique=True, index=True)
+
+    status = Column(String, default="pending", index=True)   # pending/sent/failed
+    attempts = Column(Integer, default=0)
+    last_error = Column(String, nullable=True)
+    next_attempt_at = Column(DateTime, nullable=True, index=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    sent_at = Column(DateTime, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id, "kind": self.kind, "asset": self.asset,
+            "severity": self.severity, "message": self.message,
+            "detail": self.detail, "dedupe_key": self.dedupe_key,
+            "status": self.status, "attempts": self.attempts,
+            "last_error": self.last_error,
+            "next_attempt_at": self.next_attempt_at.isoformat() + "Z" if self.next_attempt_at else None,
+            "created_at": self.created_at.isoformat() + "Z" if self.created_at else None,
+            "sent_at": self.sent_at.isoformat() + "Z" if self.sent_at else None,
+        }
+
+
+class AssetAlertState(Base):
+    """The last status each asset was seen in, so TRANSITIONS can be found.
+
+    Alerting on a condition ("is breached") fires every cycle while it
+    holds. Alerting on a transition ("became breached") fires once. This
+    table is the only reason the second is possible, and it is also what
+    makes a RECOVERY alert possible - silence after an alarm is ambiguous,
+    and "it came back" is information.
+    """
+    __tablename__ = "asset_alert_state"
+
+    asset = Column(String, primary_key=True, index=True)
+    status = Column(String)
+    last_seen_at = Column(DateTime, default=datetime.utcnow)
+    last_changed_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {"asset": self.asset, "status": self.status,
+                "last_seen_at": self.last_seen_at.isoformat() + "Z" if self.last_seen_at else None,
+                "last_changed_at": self.last_changed_at.isoformat() + "Z" if self.last_changed_at else None}
+
+
 class AlpacaBranchTradeHistory(Base):
     """One row per completed real round-trip trade in an Alpaca branch
     (prop_bot.py's ALPACA BRANCHES section) - the direct Alpaca-side
