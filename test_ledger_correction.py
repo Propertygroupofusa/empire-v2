@@ -41,6 +41,7 @@ def legacy(entry, exit_, qty, rate=RATE):
 
 def row(id_=1, qty=500.0, entry=0.10, exit_=0.11, pnl=None, **kw):
     r = {"id": id_, "product_id": "POL-USD", "bot_name": "crypto_tree_pol_usd",
+         "closed_at": "2026-08-25T10:00:00Z",
          "qty": qty, "entry_price": entry, "exit_price": exit_,
          "pnl": legacy(entry, exit_, qty) if pnl is None else pnl}
     r.update(kw)
@@ -78,9 +79,43 @@ ok("by exactly the entry leg",
 
 print("\na row already correct is left alone")
 
-good = row(pnl=LC.correct_pnl(500.0, 0.10, 0.11))
-ok("classified CLEAN", LC.classify(good) == LC.CLEAN, LC.classify(good))
-ok("and planned for nothing", LC.plan_row(good) is None)
+# CLEAN under the rate it was written with.
+good = row(pnl=LC.correct_pnl(500.0, 0.10, 0.11, 0.008))
+ok("classified CLEAN against its own rate",
+   LC.classify(good, 0.008) == LC.CLEAN, LC.classify(good, 0.008))
+
+print("\nthe CUTOVER, because arithmetic cannot tell one leg from two")
+
+# THE AMBIGUITY, stated as a test: one leg at 2r and two legs at r are the
+# same number. Nothing in the row can separate them.
+# Exactly equal when entry == exit, and within roundingeithe side of it.
+# Stated at entry == exit because there the claim is not approximate: the
+# two bookings are the SAME NUMBER and no tolerance is doing any work.
+_flat_one_leg = round(0.10 * 500 - 0.10 * 500 * (0.016 / 2) - 0.10 * 500, 2)
+_flat_two_legs = LC.correct_pnl(500.0, 0.10, 0.10, 0.008)
+ok("one leg at 1.6% and two legs at 0.8% are the SAME number",
+   _flat_one_leg == _flat_two_legs, f"{_flat_one_leg} vs {_flat_two_legs}")
+two_legs_at_0_8 = LC.correct_pnl(500.0, 0.10, 0.11, 0.008)
+ok("and on a real move they are still within two cents",
+   abs(round(0.11 * 500 - 0.11 * 500 * (0.016 / 2) - 0.10 * 500, 2)
+       - two_legs_at_0_8) <= 0.0201)
+
+# So the tiebreak is the deploy, not the numbers.
+after = row(pnl=two_legs_at_0_8, closed_at="2026-09-27T10:00:00Z")
+ok("a row the FIXED bot wrote is never touched",
+   LC.plan_row(after) is None,
+   "without the cutover, every future row gets its fee doubled")
+before = row(pnl=two_legs_at_0_8, closed_at="2026-08-25T10:00:00Z")
+ok("the identical numbers dated BEFORE the fix are still in scope",
+   LC.plan_row(before) is not None)
+ok("a row exactly AT the cutover instant counts as new",
+   LC.plan_row(row(pnl=two_legs_at_0_8,
+                   closed_at=LC.BOTH_LEGS_CUTOVER_ISO)) is None)
+ok("a missing closed_at is treated as OLD, so it is examined not skipped",
+   LC.plan_row(row(pnl=two_legs_at_0_8, closed_at=None)) is not None,
+   "the other default lets a broken timestamp escape correction")
+ok("an unparseable closed_at is also treated as old",
+   LC.plan_row(row(pnl=two_legs_at_0_8, closed_at="not a date")) is not None)
 
 print("\nIDEMPOTENCE - the failure that compounds")
 
@@ -99,9 +134,10 @@ ok("a corrected row is not corrected again",
 # the stronger property - a correction that is not a fixed point would walk
 # the number further every run.
 _unguarded = {k: v for k, v in r.items() if k != "pnl_original"}
-ok("the corrected value is a FIXED POINT - clean on a second look",
-   LC.classify(_unguarded) == LC.CLEAN and LC.plan_row(_unguarded) is None,
-   LC.classify(_unguarded))
+_rate_used = first["fee_rate_used"]
+ok("the corrected value is a FIXED POINT under the rate it was corrected at",
+   LC.classify(_unguarded, _rate_used) == LC.CLEAN,
+   LC.classify(_unguarded, _rate_used))
 # The flag is the belt to that pair of braces: it holds even if the rate
 # used for the correction ever differs from the rate a later run assumes,
 # which would otherwise make every corrected row look like a FEE_LEG case
@@ -178,8 +214,41 @@ ok("it states that money is not recovered",
    plan["note"])
 ok("it names the unaccounted remainder",
    "unaccounted" in plan["note"], plan["note"])
-ok("it records the rate used, so the result is reproducible",
-   plan["round_trip_fee_rate"] == RATE)
+ok("it records the rate MODE, so the result is reproducible",
+   plan["fee_rate_mode"] == "as_written, per row", plan["fee_rate_mode"])
+# These fixtures are written with legacy(..., RATE), so the batch solves
+# back to RATE. The point is that it is derived from the ROWS - on the live
+# ledger the same code returns 0.008, because that is what those rows paid.
+ok("the batch fallback is derived from the rows, not from a constant",
+   abs(plan["batch_fallback_rate"] - RATE) < 0.0005,
+   plan["batch_fallback_rate"])
+ok("and the cutover it honoured", plan["both_legs_cutover"] == LC.BOTH_LEGS_CUTOVER_ISO)
+ok("every change names the rate it used and where that came from",
+   all(c["fee_rate_source"] in ("as_written", "batch_median", "supplied")
+       and c["fee_rate_used"] > 0 for c in plan["changes"]))
+
+print("\nthe rate comes from the ROW, not from today's constant")
+
+# The live ledger was written when the schedule was 0.8%. Correcting it at
+# the current 1.5% proposed -$253.44 across 156 rows; two thirds of that
+# was commission nobody ever paid.
+ok("a 0.8%-era row solves back to 0.8%",
+   abs(LC.rate_as_written(500.0, 0.10, 0.11, legacy(0.10, 0.11, 500.0, 0.008)) - 0.008) < 1e-6,
+   LC.rate_as_written(500.0, 0.10, 0.11, legacy(0.10, 0.11, 500.0, 0.008)))
+ok("a row with no exit notional yields no rate, not zero",
+   LC.rate_as_written(0, 0.1, 0, -1.0) is None)
+ok("an absurd implied rate yields no rate, so a broken row cannot set one",
+   LC.rate_as_written(206.57, 0.11766718719983824, 0.12084, -91.52) is None)
+ok("the batch median ignores the rows that cannot state a rate",
+   abs(LC.batch_rate([row(1, pnl=legacy(0.10, 0.11, 500.0, 0.008)),
+                      row(2, pnl=legacy(0.10, 0.11, 500.0, 0.008)),
+                      row(48, qty=206.57, entry=0.11766718719983824,
+                          exit_=0.12084, pnl=-91.52)]) - 0.008) < 1e-6)
+ok("an all-corrupt batch falls back to the constant, not to zero",
+   LC.batch_rate([row(48, qty=206.57, entry=0.11766718719983824,
+                      exit_=0.12084, pnl=-91.52)]) == LC.DEFAULT_ROUND_TRIP_FEE_RATE)
+ok("an explicit rate still overrides, for what-if questions",
+   LC.plan_row(row(1), round_trip_fee_rate=0.015)["fee_rate_source"] == "supplied")
 
 print("\nthe endpoints: preview reads, apply writes and is guarded")
 

@@ -258,9 +258,12 @@ def _tree_realized_pnl(qty: float, entry_price: float, exit_price: float,
     omission is one-directional - it can only ever make a trade look better
     than it was.
 
-    Measured on the live ledger 2026-09-26: 167 rows, $23,521.21 of entry
-    notional, so $176.41 of commission that was paid and never booked. The
-    tree's recorded -$508.44 is really about -$684.85.
+    Measured on the live ledger 2026-09-26: 156 internally-consistent rows
+    carrying $22,691.03 of entry notional. Solved row by row for the rate
+    each was BOOKED at - a median of 0.00800, not the 0.015 constant in
+    force today - that is $94.97 of commission paid and never booked. An
+    earlier version of this note said $176.41; it applied today's rate to
+    rows written under an 0.8% schedule, which books fees nobody paid.
 
     This mirrors _grid_slice_net_pnl in crypto_grid_bot.py, which has
     charged both legs all along - the grid's 82 rows are not affected.

@@ -18,11 +18,11 @@ There were two separate defects, and they need telling apart:
                   the error has nothing to do with the trade - it is the
                   cost of the UNSOLD remainder, charged to the sold part.
 
-  FEE_LEG         Every row - all 167 - charged commission on the exit leg
-                  only. entry_price is a fill price and Coinbase bills
-                  commission separately, so the real cost basis is
-                  entry_price * qty PLUS the entry commission. $176.41
-                  across the ledger, always flattering.
+  FEE_LEG         Every row charged commission on the exit leg only.
+                  entry_price is a fill price and Coinbase bills commission
+                  separately, so the real cost basis is entry_price * qty
+                  PLUS the entry commission. $94.97 across the 156
+                  otherwise-consistent rows, always flattering.
 
 WHAT A CORRECTION CAN AND CANNOT DO
 
@@ -41,11 +41,24 @@ compute the identical thing rather than two implementations of it.
 """
 from __future__ import annotations
 
-# The rate the tree itself used when these rows were written
-# (crypto_family_tree_bot.ROUND_TRIP_FEE_RATE = engine.ROUND_TRIP_FEE_RATE).
-# Deliberately the bot's own constant and not the 1.1931% blended rate
-# measured from Coinbase fills: a correction has to be reproducible from
-# the row plus a stated rate, and no per-row commission was ever recorded.
+# THE RATE IS NOT A CONSTANT, AND USING TODAY'S WOULD FABRICATE FEES.
+#
+# The obvious implementation charges both legs at the bot's current
+# ROUND_TRIP_FEE_RATE (0.015). Run against the live ledger that proposed
+# -$253.44 across 156 rows. But solving each row for the rate it was
+# actually WRITTEN with gives a median of 0.00800, with 148 of 156 inside
+# 0.05% of it: these rows were booked when the fee schedule was 0.8%.
+#
+#   entry leg omitted, at the rate in force        -$ 90.76
+#   re-rating those same rows 0.8% -> 1.5%         -$162.68
+#                                                  --------
+#   what the naive version proposed                -$253.44
+#
+# Two thirds of that "correction" would have been commission nobody ever
+# paid. A correction that invents charges is not more conservative than
+# one that omits them - it is just wrong in the other direction. So the
+# rate is derived per row from the row itself, and this constant is only
+# the last resort for a row too corrupt to derive one from.
 DEFAULT_ROUND_TRIP_FEE_RATE = 0.015
 
 # A row is "unable to reproduce itself" when the gap between its recorded
@@ -64,6 +77,103 @@ CLEAN = "CLEAN"
 
 # Below this, a correction is rounding noise and the row is left alone.
 MIN_CORRECTION_USD = 0.005
+
+
+
+
+# THE CUTOVER, AND WHY ARITHMETIC ALONE CANNOT REPLACE IT.
+#
+# From (qty, entry, exit, pnl) there is NO way to tell a row that charged
+# ONE leg at rate 2r from one that charged TWO legs at rate r. They are the
+# same number. So a correction that derives its rate from the row will
+# happily "fix" a row that was already right, doubling its fee - and it
+# will do that to every row the fixed bot writes from now on, quietly,
+# forever.
+#
+# The tiebreak has to come from outside the row. crypto_family_tree_bot.py
+# started charging both legs in commit c235ead, 2026-09-26T17:12:42Z. A row
+# closed at or after that instant was written by the corrected code and is
+# already right; a row closed before it was not. That is a fact about the
+# deployment, not about the numbers, which is exactly why it can settle a
+# question the numbers cannot.
+#
+# If the formula changes again, add the new cutover here rather than
+# widening the tolerance - a tolerance wide enough to spare correct rows is
+# also wide enough to spare broken ones.
+BOTH_LEGS_CUTOVER_ISO = "2026-09-26T17:12:42+00:00"
+
+
+def _closed_at_or_after_cutover(row: dict) -> bool:
+    """True when this row was written by code that already charged both legs.
+
+    An unparseable or missing closed_at returns False - it is treated as
+    old, so it stays in scope and gets looked at. The other default would
+    let a row with a broken timestamp silently escape correction.
+    """
+    raw = row.get("closed_at")
+    if not raw:
+        return False
+    try:
+        from datetime import datetime
+        txt = str(raw).replace("Z", "+00:00")
+        when = datetime.fromisoformat(txt)
+        cut = datetime.fromisoformat(BOTH_LEGS_CUTOVER_ISO)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=cut.tzinfo)
+        return when >= cut
+    except Exception:
+        return False
+
+
+def rate_as_written(qty: float, entry_price: float, exit_price: float,
+                    recorded_pnl: float):
+    """The fee rate a row was BOOKED with, solved from the row.
+
+    Every row was written as gross minus an EXIT-leg charge:
+
+        recorded = qty * (exit - entry) - qty * exit * (rate / 2)
+
+    so rate = 2 * (gross - recorded) / (qty * exit). Returns None when the
+    row has no exit notional to divide by, or when the answer is not a
+    plausible fee - a row whose implied rate is negative or enormous is one
+    of the BASIS_MISMATCH rows, and its arithmetic cannot be trusted to
+    tell us anything, least of all what it was charged.
+    """
+    denom = qty * exit_price
+    if not denom:
+        return None
+    gross = qty * (exit_price - entry_price)
+    rate = 2.0 * (gross - recorded_pnl) / denom
+    if rate < 0 or rate > IMPLIED_FEE_CEILING:
+        return None
+    return rate
+
+
+def batch_rate(rows) -> float:
+    """The era's fee rate, from the rows that can still state theirs.
+
+    The BASIS_MISMATCH rows cannot be solved for a rate - that is what
+    makes them mismatches. They are contemporaries of the rows that can be,
+    though, so the median of their neighbours is a far better estimate than
+    a constant from a later fee schedule. Falls back to the constant only
+    when no row in the batch yields a rate at all.
+    """
+    rates = []
+    for row in rows:
+        try:
+            r = rate_as_written(float(row.get("qty") or 0),
+                                float(row.get("entry_price") or 0),
+                                float(row.get("exit_price") or 0),
+                                float(row.get("pnl") or 0))
+        except (TypeError, ValueError):
+            continue
+        if r is not None:
+            rates.append(r)
+    if not rates:
+        return DEFAULT_ROUND_TRIP_FEE_RATE
+    rates.sort()
+    n = len(rates)
+    return rates[n // 2] if n % 2 else (rates[n // 2 - 1] + rates[n // 2]) / 2.0
 
 
 def correct_pnl(qty: float, entry_price: float, exit_price: float,
@@ -116,7 +226,8 @@ def classify(row: dict, round_trip_fee_rate: float = DEFAULT_ROUND_TRIP_FEE_RATE
     return FEE_LEG
 
 
-def plan_row(row: dict, round_trip_fee_rate: float = DEFAULT_ROUND_TRIP_FEE_RATE):
+def plan_row(row: dict, round_trip_fee_rate: float = None,
+             fallback_rate: float = DEFAULT_ROUND_TRIP_FEE_RATE):
     """One row's correction, or None if it needs none.
 
     IDEMPOTENT. A row that already carries pnl_original has been corrected,
@@ -124,6 +235,10 @@ def plan_row(row: dict, round_trip_fee_rate: float = DEFAULT_ROUND_TRIP_FEE_RATE
     would treat the corrected value as a fresh error and correct it again.
     """
     if row.get("pnl_original") is not None:
+        return None
+    # Written by the corrected bot - already charges both legs, and cannot
+    # be distinguished from a one-leg row by arithmetic. Leave it alone.
+    if _closed_at_or_after_cutover(row):
         return None
     try:
         qty = float(row.get("qty") or 0)
@@ -136,10 +251,23 @@ def plan_row(row: dict, round_trip_fee_rate: float = DEFAULT_ROUND_TRIP_FEE_RATE
         # No columns to recompute from. A row like this cannot be repaired
         # by arithmetic and must not be silently zeroed.
         return None
-    kind = classify(row, round_trip_fee_rate)
+    # THE RATE THIS ROW WAS CHARGED, not the rate the bot uses today.
+    # An explicit round_trip_fee_rate overrides, so a caller can ask
+    # "what would these look like at the current schedule" - but that is
+    # never the default, because it would book fees nobody paid.
+    if round_trip_fee_rate is not None:
+        rate = round_trip_fee_rate
+        rate_source = "supplied"
+    else:
+        derived = rate_as_written(qty, entry, exit_, recorded)
+        if derived is None:
+            rate, rate_source = fallback_rate, "batch_median"
+        else:
+            rate, rate_source = derived, "as_written"
+    kind = classify(row, rate)
     if kind == CLEAN:
         return None
-    new = correct_pnl(qty, entry, exit_, round_trip_fee_rate)
+    new = correct_pnl(qty, entry, exit_, rate)
     delta = round(new - recorded, 2)
     if abs(delta) < MIN_CORRECTION_USD:
         return None
@@ -156,6 +284,8 @@ def plan_row(row: dict, round_trip_fee_rate: float = DEFAULT_ROUND_TRIP_FEE_RATE
         "pnl_corrected": new,
         "delta_usd": delta,
         "implied_fee_rate": round(implied_fee_rate(qty, entry, exit_, recorded), 6),
+        "fee_rate_used": round(rate, 6),
+        "fee_rate_source": rate_source,
         "reason": (
             "proceeds were computed from filled_qty against a position.qty "
             "cost basis; recomputed from this row's own columns"
@@ -166,7 +296,7 @@ def plan_row(row: dict, round_trip_fee_rate: float = DEFAULT_ROUND_TRIP_FEE_RATE
 
 
 def plan(rows, scope: str = "inconsistent",
-         round_trip_fee_rate: float = DEFAULT_ROUND_TRIP_FEE_RATE) -> dict:
+         round_trip_fee_rate: float = None) -> dict:
     """The whole correction, as data, before anything is written.
 
     scope="inconsistent"  only rows that cannot reproduce themselves (the 11)
@@ -178,9 +308,13 @@ def plan(rows, scope: str = "inconsistent",
     """
     if scope not in ("inconsistent", "all"):
         raise ValueError(f"scope must be 'inconsistent' or 'all', got {scope!r}")
+    # The era's rate, for the rows too corrupt to state their own. Computed
+    # from THIS batch, so a correction run years apart still uses the fee
+    # schedule its own rows were written under.
+    fallback = batch_rate(rows)
     planned, skipped_fee_leg = [], []
     for row in rows:
-        p = plan_row(row, round_trip_fee_rate)
+        p = plan_row(row, round_trip_fee_rate, fallback_rate=fallback)
         if p is None:
             continue
         if scope == "inconsistent" and p["kind"] != BASIS_MISMATCH:
@@ -197,6 +331,10 @@ def plan(rows, scope: str = "inconsistent",
     return {
         "scope": scope,
         "round_trip_fee_rate": round_trip_fee_rate,
+        "fee_rate_mode": ("supplied" if round_trip_fee_rate is not None
+                          else "as_written, per row"),
+        "both_legs_cutover": BOTH_LEGS_CUTOVER_ISO,
+        "batch_fallback_rate": round(fallback, 6),
         "rows_examined": len(rows),
         "rows_to_change": len(planned),
         "basis_mismatch": {"rows": len(basis), "delta_usd": _tot(basis)},

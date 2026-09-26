@@ -77,13 +77,19 @@ for entry, exit_, qty in ((10, 11, 100), (0.12, 0.117, 6843.84), (1.5, 3.0, 20))
     ok(f"  gap on {entry}->{exit_} is entry_notional * rate/2 = {expected}",
        abs((old - new) - expected) < 0.02, old - new)
 
-print("\nthe live ledger's shortfall reproduces")
+print("\nthe live ledger's shortfall reproduces - AT THE RATE IT WAS BOOKED AT")
 
-# 167 rows, $23,521.21 of entry notional, at the rate the tree used.
-ok("$23,521.21 of entry notional omits $176.41",
-   abs(23521.21 * (0.015 / 2) - 176.41) < 0.01)
-ok("which moves recorded -$508.44 to about -$684.85",
-   abs((-508.44 - 176.41) - (-684.85)) < 0.01)
+# The rows were written under an 0.8% schedule, not the 1.5% constant in
+# force today. Using today's rate here produced $176.41 and would have
+# booked $81 of commission nobody ever paid. The rate has to come from the
+# rows, and the rows say 0.00800.
+ok("$22,691.03 of entry notional at 0.8% omits $90.76",
+   abs(22691.03 * (0.008 / 2) - 90.76) < 0.01,
+   22691.03 * (0.008 / 2))
+ok("at today's 1.5% the same notional would claim $170.18 - nearly double",
+   abs(22691.03 * (0.015 / 2) - 170.18) < 0.01)
+ok("so the wrong rate overstates the correction by about $79",
+   abs((22691.03 * (0.015 / 2)) - (22691.03 * (0.008 / 2)) - 79.42) < 0.05)
 
 print("\nthe rate is overridable, and zero fees means gross")
 
