@@ -5783,6 +5783,16 @@ async def run_grid_branches_cycle():
             log.error(f"[MR] Cycle error (non-fatal): {type(e).__name__}: {e}")
 
 
+def _allocation_backing_block(branches, wallet_cash):
+    """Never lets a reporting problem look like a clean balance sheet."""
+    try:
+        import allocation_backing
+        return allocation_backing.backing(branches, wallet_cash)
+    except Exception as exc:
+        log.warning(f"[GRID] allocation backing check failed: {exc}")
+        return {"verdict": "unknown", "detail": f"backing check failed: {exc}"}
+
+
 async def get_grid_status() -> dict:
     """Real, live status for the dashboard - every branch's own real
     allocation, grid parameters, and currently-open slices, PLUS each
@@ -5805,11 +5815,19 @@ async def get_grid_status() -> dict:
 
     distinct_products = {b.product_id for b in branches}
     live_prices = {}
-    if distinct_products:
-        async with engine.aiohttp.ClientSession() as session:
-            for product_id in distinct_products:
-                price, _atr = await engine.get_price_and_volatility(session, product_id)
-                live_prices[product_id] = price
+    # The real wallet balance, read in the SAME session as the prices so
+    # the backing check below compares two figures taken at one moment
+    # rather than two reads a market move apart. None on failure - the
+    # check reports "unknown" rather than inventing a clean balance sheet.
+    wallet_cash_usd = None
+    async with engine.aiohttp.ClientSession() as session:
+        for product_id in distinct_products:
+            price, _atr = await engine.get_price_and_volatility(session, product_id)
+            live_prices[product_id] = price
+        try:
+            wallet_cash_usd, _wallet_err = await engine.get_usd_balance(session)
+        except Exception as exc:
+            log.warning(f"[GRID] status: wallet balance unreadable ({exc})")
 
     out = []
     total_allocated = 0.0
@@ -5929,6 +5947,12 @@ async def get_grid_status() -> dict:
         "total_allocated_usd": round(total_allocated, 2),
         "total_unrealized_net_usd": total_unrealized_net_usd,
         "real_free_cash_usd": await get_real_free_cash_usd(),
+        # Is the allocated figure above actually backed by anything? A
+        # branch's allocated_usd is a CLAIM; only coin it really bought
+        # and USD really in the wallet stand behind it. The account owner
+        # found the gap by underlining a subtitle - it gets its own field
+        # now. See allocation_backing.py for the arithmetic.
+        "allocation_backing": _allocation_backing_block(out, wallet_cash_usd),
         "min_required_roi_pct": MIN_REQUIRED_ROI_PCT,
         # The REAL round-trip fee every P&L figure above is priced against,
         # plus whether it was genuinely observed from Coinbase or is still

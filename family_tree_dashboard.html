@@ -893,6 +893,7 @@
                 <div id="strip-branches-sub" style="font-size:0.75em; color:var(--text-dim);"></div>
             </div>
         </div>
+        <div id="backing-banner" style="display:none;"></div>
     </div>
 
     <div id="exit-mode-badge" style="display:none; font-size:0.8em; color: var(--text-dim); margin-bottom: 8px;"></div>
@@ -4005,9 +4006,30 @@ function renderStatusStrip(d, history) {
         var cash = Number(d.real_free_cash_usd || 0);
         var unreal = Number(d.total_unrealized_net_usd || 0);
         document.getElementById('strip-total').textContent = '$' + (alloc + cash).toFixed(2);
-        document.getElementById('strip-total-sub').textContent =
-            '$' + cash.toFixed(2) + ' cash · $' + alloc.toFixed(2) + ' working'
-            + (unreal ? ' · ' + (unreal < 0 ? '-$' : '+$') + Math.abs(unreal).toFixed(2) + ' open' : '');
+        // What is REALLY there, said first. The old subtitle paired a
+        // negative cash figure with a much larger "working" figure, and
+        // the only clue that most of the second number was a database
+        // entry with nothing behind it was the minus sign on the first -
+        // the account owner found it by underlining it on a screenshot.
+        // The headline total was always right (cash is already net of
+        // unspent branch reserves); what it sat next to was not legible.
+        //
+        // Do not quote the old string here. It contains the exact
+        // dollar-then-minus sequence test_status_strip forbids this
+        // function from carrying, and that test cannot tell a comment
+        // from a template.
+        renderBackingBanner(d.allocation_backing);
+        var bk = d.allocation_backing || {};
+        if (bk.backed_usd != null) {
+            document.getElementById('strip-total-sub').textContent =
+                '$' + Number(bk.deployed_coin_usd || 0).toFixed(2) + ' in coin · $'
+                + Number(bk.wallet_cash_usd || 0).toFixed(2) + ' cash in the wallet'
+                + (unreal ? ' · ' + (unreal < 0 ? '-$' : '+$') + Math.abs(unreal).toFixed(2) + ' open' : '');
+        } else {
+            document.getElementById('strip-total-sub').textContent =
+                '$' + cash.toFixed(2) + ' cash · $' + alloc.toFixed(2) + ' working'
+                + (unreal ? ' · ' + (unreal < 0 ? '-$' : '+$') + Math.abs(unreal).toFixed(2) + ' open' : '');
+        }
 
         // "Today" is deliberately a DATE comparison, not a count. A running
         // total looks identical whether the bot traded this morning or last
@@ -4466,6 +4488,81 @@ function renderGridPnlByCoin(history) {
     } catch (e) {
         wrap.innerHTML = `<div class="coin-history-empty">Could not draw P&L by coin (${e.message}).</div>`;
     }
+}
+
+// The backing detail is server-composed text, but it is interpolated into
+// innerHTML like everything else on this page, so it gets escaped rather
+// than trusted - a dollar figure never needs markup.
+// Deliberately split/join rather than /"/g and /'/g. test_dashboard_accuracy
+// extracts functions from this file by brace-matching with quote tracking,
+// and a regex literal containing a quote character reads to that scanner as
+// an unterminated string - which silently corrupts its view of every
+// function DEFINED AFTER this one. Written the obvious way, this helper
+// broke three assertions in a renderer thirty lines below it.
+function escText(v) {
+    var out = String(v == null ? '' : v);
+    var pairs = [['&', '&amp;'], ['<', '&lt;'], ['>', '&gt;'],
+                 ['"', '&quot;'], ["'", '&#39;']];
+    for (var i = 0; i < pairs.length; i++) {
+        out = out.split(pairs[i][0]).join(pairs[i][1]);
+    }
+    return out;
+}
+
+// Money the branches SAY they have, against money that is actually
+// there. Placed at the very top because the gap is the single most
+// misleading thing this page can show: every per-branch figure below is
+// computed from a claim, so a claim with nothing behind it makes the
+// whole page read as a working fleet.
+function renderBackingBanner(bk) {
+    const wrap = document.getElementById('backing-banner');
+    if (!wrap) return;
+    // An empty or partial block is NOT a finding. {} is truthy in JS, so
+    // without this an older server sending no verdict drew an amber
+    // banner full of "undefined" - a false alarm, which is the fastest
+    // way to teach someone to ignore this panel.
+    const known = ['backed', 'drifting', 'unbacked', 'unknown'];
+    if (!bk || known.indexOf(bk.verdict) === -1 || bk.verdict === 'backed') {
+        wrap.style.display = 'none';
+        wrap.innerHTML = '';
+        return;
+    }
+    wrap.style.display = 'block';
+
+    if (bk.verdict === 'unknown') {
+        wrap.innerHTML = `
+            <div style="margin-top:10px; padding:10px 12px; border-radius:8px;
+                        border:1px solid var(--border); background:var(--bg);
+                        font-size:0.8em; color:var(--text-dim);">
+                <strong style="color:var(--text);">Backing unchecked.</strong>
+                ${escText(bk.detail || 'The wallet balance could not be read.')}
+            </div>`;
+        return;
+    }
+
+    const bad = bk.verdict === 'unbacked';
+    const colour = bad ? 'var(--red)' : 'var(--gold, #c9860a)';
+    wrap.innerHTML = `
+        <div style="margin-top:10px; padding:12px 14px; border-radius:8px;
+                    border:1px solid ${colour}; background:${bad ? 'rgba(180,35,24,0.07)' : 'rgba(201,134,10,0.07)'};">
+            <div style="font-weight:700; color:${colour}; font-size:0.9em;">
+                ${bad ? '⚠️ The branches are counting money that is not there'
+                      : 'Allocation is drifting from what is really there'}
+            </div>
+            <div style="display:flex; gap:18px; flex-wrap:wrap; margin-top:8px;
+                        font-variant-numeric:tabular-nums; font-size:0.82em;">
+                <span><span style="color:var(--text-dim);">branches claim</span>
+                      <strong> ${fmtUsd(bk.claimed_usd)}</strong></span>
+                <span><span style="color:var(--text-dim);">really there</span>
+                      <strong> ${fmtUsd(bk.backed_usd)}</strong></span>
+                <span><span style="color:var(--text-dim);">unbacked</span>
+                      <strong style="color:${colour};"> ${fmtUsd(bk.unbacked_usd)}</strong>
+                      <span style="color:var(--text-dim);">(${Number(bk.unbacked_pct || 0).toFixed(1)}%)</span></span>
+            </div>
+            <div style="margin-top:8px; font-size:0.78em; color:var(--text-dim); line-height:1.45;">
+                ${escText(bk.detail || '')}
+            </div>
+        </div>`;
 }
 
 // The running total of closed grid profit, trade by trade. Drawn from
