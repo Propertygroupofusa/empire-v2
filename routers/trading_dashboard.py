@@ -7495,6 +7495,26 @@ async def grid_fee_reality_endpoint(limit: int = 250):
         "Pragma": "no-cache", "Expires": "0"})
 
 
+@router.get("/grid-status/universe-scan")
+async def universe_scan_endpoint(fee: float = 0.70, min_notional: float = 750000.0):
+    """Every USD pair on the venue, measured against movement and depth.
+
+    Read-only, and deliberately separate from anything that deploys
+    capital: measuring a coin is not proposing to trade it. The trading
+    universe stays locked to coins a human named - see
+    coin_rotation.universe().
+    """
+    import universe_scan
+    try:
+        data = await universe_scan.scan(fee_pct=fee, min_notional=min_notional)
+    except Exception as exc:
+        log.warning(f"[dashboard] universe scan failed: {exc}")
+        raise HTTPException(status_code=502, detail=f"universe scan failed: {exc}")
+    return JSONResponse(content=data, headers={
+        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+        "Pragma": "no-cache", "Expires": "0"})
+
+
 @router.get("/grid-status/lessons")
 async def grid_lessons_endpoint():
     """Everything the fleet has learned about each coin, from its own
