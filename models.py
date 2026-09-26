@@ -2299,3 +2299,38 @@ class CombinedEquitySnapshot(Base):
             "combined_equity": self.combined_equity,
             "formula_version": self.formula_version if self.formula_version is not None else 1,
         }
+
+
+class HorizonStudyRun(Base):
+    """One run of horizon_study.py, kept whole.
+
+    The study answers a question the live telemetry structurally cannot.
+    opportunity_signals bounds every excursion at t0+30m, so its verdict -
+    "no coin's detected setups pay after costs" - is a statement about a
+    thirty-minute window, on a strategy whose rungs have no deadline at all.
+    Re-asking it needs weeks of candles and about ninety paginated requests,
+    which is three orders of magnitude past the 25-second telemetry budget
+    and would eat the 180-second loop lease alive.
+
+    So the study runs rarely and OUT OF BAND, and the dashboard reads the
+    last stored row instead of computing anything. That makes the as-of date
+    part of the finding rather than a detail: a horizon measurement taken
+    three weeks ago over a market that has since turned is worth exactly as
+    much as the date on it says, and the panel shows the date for that
+    reason.
+
+    Append-only. A superseded run is still the evidence that was in front of
+    us when a decision got made, and re-running the study is how it gets
+    updated, not editing a row.
+    """
+    __tablename__ = "horizon_study_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_at = Column(DateTime, default=datetime.utcnow, index=True)
+    days = Column(Integer)
+    products_csv = Column(String, nullable=True)
+    # The whole study object as returned, summary and caveat included. Stored
+    # whole rather than flattened into columns because the shape is still
+    # moving and a half-migrated schema is a worse record than a blob with a
+    # date on it.
+    payload_json = Column(Text, nullable=True)

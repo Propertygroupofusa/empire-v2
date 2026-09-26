@@ -51,6 +51,7 @@ import crypto_btc_compound_bot as engine
 import crypto_mean_reversion_bot as mean_reversion_engine
 import coin_rotation as rotation
 import opportunity_signals as signals
+import horizon_study
 from database import get_session_factory
 from models import CryptoGridBranch, CryptoGridSlice, CryptoGridTradeHistory, GridMakerExpiry, RegimeCrossing, TradingBotState, CryptoTreeBranch, BotPosition
 
@@ -5604,6 +5605,22 @@ async def run_grid_branches_cycle():
         except Exception as e:
             log.debug(f"[SIGNAL] scoring pass skipped: {type(e).__name__}: {e}")
 
+        # The horizon study - OUT OF BAND, and never awaited here.
+        #
+        # Everything above measures a thirty-minute window, because that is
+        # what a 25-second telemetry budget inside a 180-second lease can
+        # afford to look at. The study asks the same question over weeks, at
+        # about ninety paginated requests and several minutes, which is why
+        # it is spawned rather than called: a fleet that stops trading in
+        # order to measure itself has answered the wrong question twice.
+        #
+        # spawn_if_due() checks its own throttle BEFORE fetching anything
+        # and returns immediately when it is not due.
+        try:
+            horizon_study.spawn_if_due()
+        except Exception as e:
+            log.debug(f"[HORIZON] spawn skipped: {type(e).__name__}: {e}")
+
     # Real, periodic automatic idle-cash rotation - throttled here (not
     # inside run_grid_auto_rotate_sweep itself) via a plain in-process
     # timestamp, same pattern crypto_family_tree_bot.py's own scheduled-
@@ -5905,6 +5922,10 @@ async def get_grid_status() -> dict:
         # the present; this says the moment a coin crossed into or out of
         # being worth trading, and whether past crossings paid.
         "regime": await _never_fails(signals.regime_summary, "regime"),
+        # The same question the signal ledger answers, asked of a horizon the
+        # ledger cannot reach. Reads the last STORED run - the study itself
+        # runs out of band, so this is a database row, not a measurement.
+        "horizon": await _never_fails(horizon_study.latest, "horizon"),
         "floor_priced_against": ("maker (the market fallback is removed)"
                                  if _maker_only and _cached_real_maker_fee_rate is not None
                                  else "taker (an unfilled maker order still becomes a market order)"),

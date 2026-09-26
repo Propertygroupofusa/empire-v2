@@ -478,6 +478,125 @@ async def run_study(session, products=None, days: int = DEFAULT_DAYS) -> dict:
     return out
 
 
+# ---------------------------------------------------------------- storage
+#
+# The study costs about ninety paginated requests and several minutes. The
+# telemetry budget is 25 seconds and the loop lease is 180. Those numbers are
+# not close, so the study never runs on the request path: it runs rarely, out
+# of band, and the dashboard reads the last stored row.
+
+STUDY_INTERVAL_HOURS = float(os.getenv("HORIZON_STUDY_INTERVAL_HOURS", "12"))
+
+# In-process, deliberately. A DB-backed lock would be one more thing that can
+# wedge, and the cost of two web dynos each running the study once a day is a
+# few hundred public candle requests, not a trading decision.
+_last_started_at = 0.0
+_running = False
+
+
+async def persist(study: dict) -> bool:
+    """Append one run. Never raises - a failed write must not kill the task."""
+    try:
+        from database import get_session_factory
+        from models import HorizonStudyRun
+        async with get_session_factory()() as db:
+            db.add(HorizonStudyRun(
+                days=study.get("days"),
+                products_csv=",".join(study.get("products") or []),
+                payload_json=json.dumps(study)))
+            await db.commit()
+        return True
+    except Exception as e:
+        log.warning(f"[HORIZON] could not persist study: {type(e).__name__}: {e}")
+        return False
+
+
+async def latest() -> dict:
+    """The most recent stored run, or a shape that says why there is none.
+
+    Returns the study with `as_of` and `age_hours` attached, because a
+    horizon measurement is only worth the date on it: a window that ended
+    before the market turned is a historical fact, not a current one, and a
+    panel that prints the number without the date invites it to be read as
+    the latter.
+    """
+    try:
+        from sqlalchemy import select
+        from database import get_session_factory
+        from models import HorizonStudyRun
+        async with get_session_factory()() as db:
+            row = (await db.execute(
+                select(HorizonStudyRun)
+                .order_by(HorizonStudyRun.run_at.desc()).limit(1))).scalars().first()
+        if row is None or not row.payload_json:
+            return {"available": False,
+                    "reason": "no run stored yet - the study runs out of band, "
+                              f"at most once every {STUDY_INTERVAL_HOURS:g}h"}
+        study = json.loads(row.payload_json)
+        study["available"] = True
+        study["stored_at"] = row.run_at.isoformat() if row.run_at else None
+        if row.run_at:
+            study["age_hours"] = round(
+                (datetime.utcnow() - row.run_at).total_seconds() / 3600.0, 1)
+        return study
+    except Exception as e:
+        log.warning(f"[HORIZON] could not read stored study: {type(e).__name__}: {e}")
+        return {"available": False, "reason": f"read failed: {type(e).__name__}"}
+
+
+def due() -> bool:
+    """Throttle, checked BEFORE anything is fetched.
+
+    opportunity_signals learned this one the expensive way: a throttle that
+    gates the WRITE instead of the work still makes every request, and the
+    fleet spent about 1,500 wasted candle calls an hour proving it.
+    """
+    if _running:
+        return False
+    return (time.time() - _last_started_at) >= STUDY_INTERVAL_HOURS * 3600
+
+
+def spawn_if_due() -> bool:
+    """Fire the study into the background. Returns whether it was started.
+
+    Fire-and-forget on purpose. The caller is inside the loop lease and must
+    never await this: several minutes of candle pagination inside a 180-second
+    lease is how a fleet stops trading in order to measure itself.
+    """
+    if not due():
+        return False
+    global _last_started_at, _running
+    prev_started = _last_started_at
+    _last_started_at, _running = time.time(), True
+
+    async def _go():
+        global _running
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as s:
+                study = await run_study(s)
+            if study.get("per_coin"):
+                await persist(study)
+                log.info(f"[HORIZON] study stored: {study['summary'].get('horizon_verdict')}")
+            else:
+                log.warning("[HORIZON] study produced no usable coins; nothing stored")
+        except Exception as e:
+            log.warning(f"[HORIZON] background study failed: {type(e).__name__}: {e}")
+        finally:
+            _running = False
+
+    try:
+        asyncio.get_running_loop().create_task(_go())
+        return True
+    except RuntimeError:
+        # No running loop: nothing was started, so the throttle must be given
+        # back. Consuming it here would silently buy twelve hours of silence
+        # for a study that never ran - the failure mode where a panel keeps
+        # showing a stale measurement and nothing anywhere says why.
+        _last_started_at, _running = prev_started, False
+        return False
+
+
 async def main():
     import aiohttp
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -486,6 +605,8 @@ async def main():
     path = os.getenv("HORIZON_STUDY_OUT", "horizon_study.json")
     with open(path, "w") as f:
         json.dump(study, f, indent=1)
+    if study.get("per_coin") and os.getenv("HORIZON_STUDY_PERSIST", "true").lower() == "true":
+        print("stored to the database" if await persist(study) else "NOT stored")
     s = study["summary"]
     print(json.dumps(s, indent=1))
     if "sample_caveat" in study:

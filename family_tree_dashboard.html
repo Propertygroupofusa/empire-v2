@@ -3279,6 +3279,85 @@ function renderGridOpportunityPanel(d) {
             html += `<div style="margin-top:8px; color:var(--text-dim); font-size:.92em;">` +
                     `${sig.cost_basis}</div>`;
         }
+
+        // HORIZON. Everything above this line was measured inside a
+        // thirty-minute window, because that is all the telemetry budget can
+        // afford to look at. This block is the same question asked over
+        // weeks, and it is here rather than in its own panel precisely so
+        // the two cannot be read apart: the "no coin pays" verdict directly
+        // above is true OF THAT WINDOW, and this is the window it stopped at.
+        const hz = d.horizon || {};
+        html += `<div style="margin-top:10px; padding-top:8px; border-top:1px solid var(--rule, rgba(128,128,128,.25));">`;
+        html += `<div style="font-weight:600; margin-bottom:4px;">Does the move exist at a longer horizon?</div>`;
+        if (!hz.available) {
+            html += `<div style="color:var(--text-dim);">${hz.reason || 'Not measured yet.'}</div>`;
+        } else {
+            const hs = hz.summary || {};
+            const a = hs.share_clearing_cost_at_30m_pct, b = hs.share_clearing_cost_at_6h_pct;
+            // One bar per horizon, drawn to the same scale, so the shape of
+            // the answer is visible before any of the numbers are read.
+            const bar = (label, pct) => {
+                const v = (pct === null || pct === undefined) ? 0 : pct;
+                return `<div style="display:flex; align-items:center; gap:8px; padding:2px 0;">` +
+                    `<span style="min-width:3.2em; color:var(--text-dim); text-align:right;">${label}</span>` +
+                    `<span style="flex:1; background:rgba(128,128,128,.18); height:10px; border-radius:2px; overflow:hidden; max-width:220px;">` +
+                    `<span style="display:block; height:100%; width:${Math.max(0, Math.min(100, v)).toFixed(1)}%; background:${v >= 50 ? '#10b981' : '#f59e0b'};"></span></span>` +
+                    `<span style="min-width:3.5em; font-variant-numeric:tabular-nums;">${n(v === 0 && pct == null ? null : v.toFixed(1) + '%')}</span></div>`;
+            };
+            // Averaged across the coins, from the per-coin shares below.
+            const share = h => {
+                const xs = Object.values(hz.per_coin || {})
+                    .map(v => ((v.horizons || {})[h] || {}).share_over_all_in_pct)
+                    .filter(v => v !== null && v !== undefined);
+                return xs.length ? xs.reduce((p, q) => p + q, 0) / xs.length : null;
+            };
+            html += `<div style="color:var(--text-dim); margin-bottom:3px;">Share of entries that ever reach the ` +
+                    `${n(hs.all_in_pct)}% round trip, by how long you wait:</div>`;
+            ['30m', '2h', '6h', '24h', '72h'].forEach(h => { html += bar(h, share(h)); });
+            if (a != null && b != null) {
+                html += `<div style="margin-top:5px;">The ledger above stops looking at <strong>30m</strong>, ` +
+                        `where <strong>${a.toFixed(1)}%</strong> of entries clear cost. At <strong>6h</strong> it is ` +
+                        `<strong>${b.toFixed(1)}%</strong>.</div>`;
+            }
+
+            // The assumption, beside the measurement, never instead of it.
+            if (hs.measured_net_penalty_pct != null) {
+                html += `<div style="margin-top:6px;">Adverse selection: assumed ` +
+                        `<strong>${n(hs.assumed_adverse_pct)}%</strong>, measured ` +
+                        `<strong style="color:#10b981;">${hs.measured_net_penalty_pct.toFixed(3)}%</strong>` +
+                        (hs.measured_continuation_pct != null
+                            ? ` <span style="color:var(--text-dim);">(continuation ` +
+                              `${hs.measured_continuation_pct.toFixed(3)}%, the rest is the limit concession)</span>`
+                            : '') + `</div>`;
+            }
+
+            // The honest half. A resting rung is what the fleet actually
+            // places, and it is far worse than the best-case excursion above.
+            const rb = hs.best_rung_all_in, rf = hs.best_rung_fees_only;
+            if (rb) {
+                html += `<div style="margin-top:6px;">Best resting rung, marked against the unfilled leg too: ` +
+                        `<strong>${rb.product_id} ${rb.rung}</strong> at ` +
+                        `<strong style="color:${rb.expectancy_pct >= 0 ? '#10b981' : '#ef4444'};">` +
+                        `${rb.expectancy_pct >= 0 ? '+' : ''}${rb.expectancy_pct.toFixed(2)}%</strong> per attempt` +
+                        (rf ? ` &middot; ${rf.expectancy_pct >= 0 ? '+' : ''}${rf.expectancy_pct.toFixed(2)}% at fees only` : '') +
+                        `</div>`;
+            }
+
+            // The sample. Loudest thing in the block on purpose: every
+            // favourable number above it was drawn from a window in which
+            // every instrument rose, and a reader who misses that will take
+            // a bull-market artefact for an edge.
+            if (hz.sample_caveat) {
+                html += `<div style="margin-top:7px; padding:6px 8px; border-left:3px solid #f59e0b; ` +
+                        `background:rgba(245,158,11,.08); color:var(--text-dim);">${hz.sample_caveat}</div>`;
+            }
+            html += `<div style="margin-top:5px; color:var(--text-dim); font-size:.92em;">` +
+                    `${n(hz.days)}d of 5-minute candles across ${n((hz.products || []).length)} coins` +
+                    (hz.age_hours != null ? ` &middot; measured ${hz.age_hours}h ago` : '') +
+                    ` &middot; runs out of band, not on this request.</div>`;
+        }
+        html += `</div>`;
+
         html += `</div>`;
         el.innerHTML = html;
     } catch (e) {
@@ -3312,7 +3391,17 @@ function renderGridMakerOnlyToggle(data) {
     // this card's "cost" a different quantity from the "real round-trip fee"
     // shown above it - that one is fees alone. Labelled below so the two
     // stop looking like the same number disagreeing with itself.
+    // Still a constant, and still 0.67. horizon_study.py now MEASURES this
+    // - at roughly -0.09% over 21 days - but that sample contains no falling
+    // market, and a resting bid is flattered by a rising one. Swapping the
+    // constant for one bull-market number would quietly loosen the only
+    // arithmetic on this page that decides whether the fleet may trade. So
+    // the card keeps pricing against the assumption and SHOWS the
+    // measurement next to it; the day the measurement survives a bear leg is
+    // the day it earns the right to replace this.
     const ADVERSE = 0.67;
+    const hzSum = ((data.horizon || {}).summary) || {};
+    const measuredAdverse = hzSum.measured_net_penalty_pct;
     const re = data.realized_edge;
     const drift = data.maker_expiry_drift;
     const mix = (data.fill_mix || {}).overall || {};
@@ -3339,6 +3428,10 @@ function renderGridMakerOnlyToggle(data) {
           `<div><b>${cost.toFixed(2)}%</b>what a round trip costs` +
             `<br><span style="font-weight:400; opacity:.75">` +
             `${(on ? makerFee : takerFee).toFixed(2)}% fees + ${ADVERSE.toFixed(2)}% adverse selection` +
+            (measuredAdverse != null
+                ? `<br>adverse selection now MEASURED at ${measuredAdverse.toFixed(2)}% ` +
+                  `&mdash; not swapped in: that sample never saw a falling market`
+                : '') +
             `</span></div>` +
           `<div><b style="color:${net >= 0 ? '#10b981' : '#ef4444'}">${net >= 0 ? '+' : ''}${net.toFixed(2)}%</b>` +
             `${net >= 0 ? 'it clears — in theory' : 'it loses — so nothing trades'}</div>` +

@@ -200,11 +200,70 @@ called = {n.func.id for n in ast.walk(tree)
           if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
 called |= {n.func.attr for n in ast.walk(tree)
            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+# A module entry point has its caller somewhere else by definition, so the
+# guard looks at the callers too. Checking only inside the module would have
+# forced latest() and spawn_if_due() to be renamed private to pass, which is
+# the test bending to the code instead of the other way round.
+for _f in ("crypto_grid_bot.py", os.path.join("routers", "trading_dashboard.py")):
+    _p = os.path.join(HERE, _f)
+    if os.path.exists(_p):
+        _o = open(_p, encoding="utf-8").read()
+        _t = ast.parse(_o)
+        called |= {n.func.attr for n in ast.walk(_t)
+                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+        called |= {n.func.id for n in ast.walk(_t)
+                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        # A telemetry builder is PASSED to _never_fails, not called - that is
+        # the established shape in this codebase and the whole reason the
+        # crash guard exists. Counting calls alone would mark every guarded
+        # builder dead and push the next one to be wired in unguarded.
+        called |= {n.attr for n in ast.walk(_t) if isinstance(n, ast.Attribute)}
 orphans = [d for d in defs if not d.startswith("_") and d not in called
            and d not in ("main",)]
-ok("every public function has a caller inside the module",
+ok("every public function has a caller, here or in the modules that use it",
    not orphans,
    f"defined and never called: {orphans} - this is how _actionability stayed dead")
+
+print("\nit never runs on the request path")
+GRID = open(os.path.join(HERE, "crypto_grid_bot.py"), encoding="utf-8").read()
+ok("the grid bot spawns the study, it does not await it",
+   "horizon_study.spawn_if_due()" in GRID and "await horizon_study.run_study" not in GRID,
+   "several minutes of pagination inside a 180-second lease stops the fleet trading")
+ok("and the spawn is guarded, so a broken study cannot break a cycle",
+   "except Exception" in GRID.split("horizon_study.spawn_if_due()")[1][:200])
+ok("the payload serves the STORED run through the crash guard",
+   'await _never_fails(horizon_study.latest, "horizon")' in GRID)
+ok("the throttle is checked before anything is fetched",
+   SRC.index("def due()") < SRC.index("async def _go()"),
+   "gating the write instead of the work cost ~1,500 wasted candle calls an hour")
+_before = H._last_started_at
+ok("spawn_if_due returns False rather than raising with no event loop",
+   H.spawn_if_due() is False)
+ok("and a spawn that never started gives the throttle back",
+   H._last_started_at == _before,
+   "consuming it buys 12h of silence for a study that did not run")
+H._running = True
+ok("a study already in flight is not started twice", H.due() is False)
+H._running = False
+ok("and it is due again once that one finishes", H.due() is True)
+ok("a stored run is never served without its date",
+   '"stored_at"' in SRC and '"age_hours"' in SRC)
+
+print("\nthe panel shows the assumption and the measurement together")
+HTML = open(os.path.join(HERE, "family_tree_dashboard.html"), encoding="utf-8").read()
+ok("the opportunity panel reads d.horizon", "const hz = d.horizon || {}" in HTML)
+ok("and renders a per-horizon bar rather than one number",
+   "['30m', '2h', '6h', '24h', '72h'].forEach" in HTML)
+ok("the bull-sample caveat is rendered, not just stored",
+   "hz.sample_caveat" in HTML)
+ok("the measured figure appears beside the assumed one, never instead of it",
+   "measured_net_penalty_pct" in HTML and "const ADVERSE = 0.67;" in HTML,
+   "swapping the constant would loosen the only gate that decides whether the fleet trades")
+ok("the maker-only card says the constant was NOT swapped",
+   "not swapped in" in HTML)
+ok("and the measured variable it declares is actually used",
+   HTML.count("measuredAdverse") >= 2,
+   "a declared-and-unused variable is how _actionability stayed dead for a day")
 
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
