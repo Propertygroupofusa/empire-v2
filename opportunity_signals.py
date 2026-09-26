@@ -763,16 +763,32 @@ def horizon_gate_summary(rows) -> dict:
     rate is known.
     """
     MIN_RESOLVED = 10
-    live_pass = sum(1 for r in rows if r.would_trade)
-    horizon_pass = sum(1 for r in rows if r.horizon_gate_would_trade)
-    scored = len(rows)
+    # THE DENOMINATOR IS NOT len(rows).
+    #
+    # Every row scored before this gate shipped has horizon_gate_move_pct
+    # NULL, and NULL is falsy, so it lands in the "did not pass" bucket. On
+    # the first live read that made the panel say the gate passed 0 of 330 -
+    # a rate of 0.0% computed almost entirely from rows the gate never saw.
+    # The number would have crept up over days as old rows aged out, which
+    # is worse than being wrong: it would have looked like a gate that
+    # barely fires rather than one whose denominator was junk, and there
+    # would have been no way to tell a broken gate from a young one.
+    #
+    # So the comparison runs over rows THIS GATE ACTUALLY SCORED, and the
+    # full count is still reported beside it so the difference is visible
+    # rather than silently corrected.
+    scored_all = len(rows)
+    graded = [r for r in rows if r.horizon_gate_move_pct is not None]
+    scored = len(graded)
+    live_pass = sum(1 for r in graded if r.would_trade)
+    horizon_pass = sum(1 for r in graded if r.horizon_gate_would_trade)
 
     # Paid rates are computed over RESOLVED rows only, and the live and
     # shadow denominators are different populations, so both are named.
-    live_res = [r for r in rows if r.resolved_at is not None
+    live_res = [r for r in graded if r.resolved_at is not None
                 and r.net_after_costs_pct is not None]
     live_hit = [r for r in live_res if r.would_trade]
-    sh_res = [r for r in rows if r.horizon_gate_resolved_at is not None
+    sh_res = [r for r in graded if r.horizon_gate_resolved_at is not None
               and r.horizon_gate_paid is not None]
     sh_hit = [r for r in sh_res if r.horizon_gate_would_trade]
 
@@ -782,7 +798,11 @@ def horizon_gate_summary(rows) -> dict:
 
     out = {
         "horizon_minutes": HORIZON_GATE_MIN,
+        # Rows this gate scored, which is what every rate below divides by.
         "scored": scored,
+        # Every row in the ledger, including those predating the gate. Kept
+        # so a young gate is visibly young rather than looking like a dead one.
+        "scored_all": scored_all,
         "live_pass": live_pass,
         "horizon_pass": horizon_pass,
         "live_pass_pct": round(100.0 * live_pass / scored, 1) if scored else None,
@@ -798,9 +818,14 @@ def horizon_gate_summary(rows) -> dict:
                   f"ONLY the prediction horizon differs: {HORIZON_GATE_MIN}m against "
                   f"{HORIZONS_MIN[-1]}m. Observation only - nothing reads horizon_gate_would_trade."),
     }
-    if len(sh_hit) < MIN_RESOLVED:
+    if scored == 0:
+        out["verdict"] = (f"no scores yet from this gate - {scored_all} row"
+                          f"{'' if scored_all == 1 else 's'} in the ledger predate it, and a rate "
+                          f"over those would be measuring rows the gate never saw")
+    elif len(sh_hit) < MIN_RESOLVED:
         out["verdict"] = (f"not enough data ({len(sh_hit)}/{MIN_RESOLVED} horizon-gate crossings "
-                          f"resolved) - passing more proves nothing until the paid rate is known")
+                          f"resolved, from {scored} scored by this gate) - passing more proves "
+                          f"nothing until the paid rate is known")
     elif out["horizon_paid_pct"] is None:
         out["verdict"] = "resolved rows carry no paid flag - cost was unpriceable"
     elif out["horizon_paid_pct"] >= 50.0:

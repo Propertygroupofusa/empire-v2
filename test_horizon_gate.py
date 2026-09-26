@@ -47,8 +47,15 @@ MODELS = open(os.path.join(HERE, "models.py"), encoding="utf-8").read()
 
 
 class Row:
-    """A ShortTermSignal stand-in. Only the fields the summary reads."""
+    """A ShortTermSignal stand-in. Only the fields the summary reads.
+
+    horizon_gate_move_pct defaults to a NUMBER, because a row the gate
+    scored is the normal case. Rows predating the gate are built with
+    move=None explicitly, and those are the ones the denominator bug was
+    about.
+    """
     def __init__(self, **kw):
+        self.horizon_gate_move_pct = kw.pop("move", 1.0)
         for f in ("would_trade", "horizon_gate_would_trade", "horizon_gate_paid"):
             setattr(self, f, kw.pop(f, None))
         for f in ("resolved_at", "horizon_gate_resolved_at"):
@@ -114,11 +121,15 @@ ok("and models.py says why, so it is not reintroduced",
 ok("the live switch is still off by default", S.SIGNALS_LIVE is False)
 
 print("\npassing is not paying")
+thin_probe = [Row(horizon_gate_would_trade=True, horizon_gate_paid=True,
+                  horizon_gate_resolved_at=datetime.utcnow()) for _ in range(3)]
 # Ten horizon-gate crossings, nine of which paid. A units fix looks like this.
 good = [Row(would_trade=False, horizon_gate_would_trade=True, horizon_gate_paid=(i != 0),
             horizon_gate_resolved_at=datetime.utcnow()) for i in range(10)]
 v = S.horizon_gate_summary(good)
 ok("ten resolved crossings produce a verdict", "not enough data" not in v["verdict"], v["verdict"])
+ok("and the under-10 verdict names the gate's own sample size",
+   "scored by this gate" in S.horizon_gate_summary(thin_probe)["verdict"])
 ok("a high paid rate reads as a units fix, not a looser bar",
    "units fix" in v["verdict"], v["verdict"])
 ok("and the paid rate is over the PASSED-and-resolved rows only",
@@ -147,6 +158,33 @@ ok("the basis line says what was held fixed",
    "ONLY the prediction horizon differs" in S.horizon_gate_summary([])["basis"])
 ok("and it says nothing reads the verdict",
    "Observation only" in S.horizon_gate_summary([])["basis"])
+
+print("\nthe denominator is rows THIS GATE scored, not every row ever")
+# The bug, reproduced: 318 rows predating the gate, 12 scored by it, 4 of
+# which passed. Dividing by 330 reports 1.2%; dividing by 12 reports 33%.
+# The first reads as a gate that barely fires and creeps upward for days.
+old = [Row(move=None, would_trade=False, horizon_gate_would_trade=None) for _ in range(318)]
+new = ([Row(would_trade=False, horizon_gate_would_trade=True) for _ in range(4)]
+       + [Row(would_trade=False, horizon_gate_would_trade=False) for _ in range(8)])
+v = S.horizon_gate_summary(old + new)
+ok("rows predating the gate are excluded from the denominator",
+   v["scored"] == 12, f'scored={v["scored"]} (should be 12, not 330)')
+ok("and the full ledger count is still reported beside it",
+   v["scored_all"] == 330)
+ok("so the pass rate is over what the gate saw",
+   v["horizon_pass_pct"] == 33.3, str(v["horizon_pass_pct"]))
+ok("a NULL column never counts as 'did not pass'",
+   v["horizon_pass"] == 4)
+# All old rows: the gate has scored nothing, and must say so rather than
+# reporting 0.0% of 318.
+v = S.horizon_gate_summary(old)
+ok("a gate that has scored nothing says so, and does not report 0.0%",
+   "no scores yet from this gate" in v["verdict"], v["verdict"])
+ok("and names how many rows predate it", "318 rows" in v["verdict"], v["verdict"])
+ok("its pass rate is None, not zero",
+   v["horizon_pass_pct"] is None, str(v["horizon_pass_pct"]))
+ok("the live gate is compared over the SAME rows, not all of them",
+   S.horizon_gate_summary(old + new)["live_pass"] == 0)
 
 print("\nthe resolver is its own pass, and shares its candles")
 ok("the horizon-gate resolves separately from the live ledger",
