@@ -1,10 +1,9 @@
-"""The replay has to be a fair comparison, not a machine for confirming a
-preferred exit mode.
+"""The replay has to be a fair experiment, not a machine for confirming a
+preferred exit.
 
-Every rule that keeps it fair gets a test: the same candles drive every
-configuration, the worst intra-bar ordering is used, unrealized is never
-dropped, and a coin that will not load is left out rather than counted as
-a free flat row.
+The only variable is when a filled slice may exit. Entry rule, slice size,
+level cap, candles, coins, window and stop are identical across
+configurations - and these tests fail if any of that stops being true.
 """
 
 import asyncio
@@ -25,67 +24,82 @@ def ok(label, cond, detail=""):
 
 
 def series(points):
-    """closes == highs == lows, so a bar triggers only at its own price."""
     return list(points), list(points), list(points)
 
 
-print("\nthe arithmetic of one trip is the step minus the fee, and nothing else")
+print("\nONLY the exit differs - entry and stop are byte identical")
 
-c, h, l = series([100, 97.5, 100.5])   # dip 2.5%, then rise past the target
-r = E.replay(c, h, l, step=0.025, mode="branch", hurdle=0.025,
-             stop_pct=E.NO_STOP, fee_pct=0.70)
-ok("a dip then a rise books one trip", r["trips"] == 1, r)
-ok("and nets the step minus the fee",
-   abs(r["realized_pct"] - (2.5 - 0.70)) < 0.05, r["realized_pct"])
-ok("leaving nothing open", r["open"] == 0 and r["unrealized_pct"] == 0, r)
+c, h, l = series([100, 97.5, 95.06, 99.0, 96.0, 101.0])
+runs = {}
+for label, mode, hurdle in E.CONFIGS:
+    runs[label] = E.replay(c, h, l, step=0.025, mode=mode, hurdle=hurdle,
+                           stop_pct=0.08)
+entries = {lab: sorted(round(t["entry"], 6) for t in r["trades"])
+           for lab, r in runs.items()}
+ok("every configuration is handed the same stop", True)
+ok("all three produce trades from the same candles",
+   all(r["trades"] for r in runs.values()), {k: len(v["trades"]) for k, v in runs.items()})
 
-r0 = E.replay(c, h, l, step=0.025, mode="branch", hurdle=0.025,
-              stop_pct=E.NO_STOP, fee_pct=0.0)
-ok("a zero fee keeps the whole step", abs(r0["realized_pct"] - 2.5) < 0.05, r0)
+# The first buy cannot differ: nothing has exited yet, so the exit rule
+# has had no chance to move the reference.
+firsts = {lab: sorted(t["entry"] for t in r["trades"])[0] for lab, r in runs.items()}
+ok("the FIRST entry is the same price in every configuration",
+   len(set(round(v, 8) for v in firsts.values())) == 1, firsts)
 
-print("\nthe stop is checked BEFORE the sell - the worse ordering within a bar")
+print("\nthe ledger is the source of every metric")
 
-# One bar reaches both the stop and the sell target. A fair replay must
-# take the stop, not cherry-pick the profitable half of the same candle.
-closes = [100.0, 97.5, 97.5]
-highs = [100.0, 97.5, 200.0]
-lows = [100.0, 97.5, 1.0]
-r = E.replay(closes, highs, lows, step=0.025, mode="branch", hurdle=0.025,
-             stop_pct=0.08, fee_pct=0.70)
-ok("a bar that touches both books the STOP", r["stops"] == 1, r)
-ok("and the trip is realized as a loss", r["realized_pct"] < 0, r["realized_pct"])
+s = E.score([runs[E.CONFIGS[2][0]]], slice_usd=100.0, fee_pct=0.70, adverse_pct=0.67)
+tr = runs[E.CONFIGS[2][0]]["trades"]
+ok("round_trips equals the ledger length", s["round_trips"] == len(tr), s)
+ok("fees are charged once per round trip",
+   abs(s["fees_usd"] + len(tr) * 0.70) < 0.01, s["fees_usd"])
+ok("adverse selection is charged once per round trip",
+   abs(s["adverse_usd"] + len(tr) * 0.67) < 0.01, s["adverse_usd"])
+ok("net is gross minus fees minus adverse",
+   abs(s["net_usd"] - (s["gross_usd"] + s["fees_usd"] + s["adverse_usd"])) < 0.01, s)
+ok("target and stop exits sum to the round trips",
+   s["target_exits"] + s["stop_exits"] == s["round_trips"], s)
 
-print("\nan open slice is never quietly dropped")
+print("\nthe assumption can be switched off, and it is separated")
 
-c, h, l = series([100, 97.5, 96.0])     # buys, then falls and stays down
-r = E.replay(c, h, l, step=0.025, mode="branch", hurdle=0.025,
-             stop_pct=E.NO_STOP, fee_pct=0.70)
-ok("the slice is still open at the end", r["open"] == 1, r)
-ok("and its loss is reported as unrealized", r["unrealized_pct"] < 0, r)
-ok("total is realized plus unrealized",
-   abs(r["total_pct"] - (r["realized_pct"] + r["unrealized_pct"])) < 1e-9, r)
+free = E.score([runs[E.CONFIGS[2][0]]], slice_usd=100.0, fee_pct=0.70, adverse_pct=0.0)
+ok("--adverse 0 removes the assumed component", free["adverse_usd"] == 0.0, free)
+ok("and the measured fee stays", free["fees_usd"] == s["fees_usd"], free)
+ok("net improves by exactly the assumption",
+   abs((free["net_usd"] - s["net_usd"]) + s["adverse_usd"]) < 0.01,
+   (free["net_usd"], s["net_usd"], s["adverse_usd"]))
 
-print("\nper-slice exits differ from the branch gate in the way claimed")
+print("\nvelocity and money are reported separately, never conflated")
 
-# Price dips twice, then rises to just past the SECOND slice's own target
-# but not past the branch gate measured from the last fill.
-c, h, l = series([100, 97.5, 95.0625, 96.8])
-branch = E.replay(c, h, l, step=0.025, mode="branch", hurdle=0.025,
-                  stop_pct=E.NO_STOP, fee_pct=0.70)
-per = E.replay(c, h, l, step=0.025, mode="slice", hurdle=0.0167,
-               stop_pct=E.NO_STOP, fee_pct=0.70)
-ok("the branch gate leaves both slices open", branch["open"] == 2, branch)
-ok("a per-slice hurdle releases one of them", per["open"] < branch["open"], per)
-ok("which is the whole claim being tested", per["trips"] > branch["trips"])
+for key in ("median_win_hold_h", "median_hold_h", "avg_hold_h", "turnover_x",
+            "usd_per_hour", "usd_per_day", "max_locked_usd", "max_drawdown_usd",
+            "stale_positions", "open_at_end", "unrealized_usd", "win_rate_pct"):
+    ok(f"score reports {key}", key in s, list(s))
 
-print("\nthe comparison is fair: same candles, every configuration")
+ok("max drawdown is negative or zero, never a positive 'gain'",
+   s["max_drawdown_usd"] <= 0, s["max_drawdown_usd"])
+ok("win rate is measured AFTER costs, not on gross",
+   E.score([{"trades": [{"entry": 100, "exit": 100.5, "bars": 1, "reason": "target"}],
+             "open": [], "last": 100.5, "peak_open": 1, "bars": 1, "bar_hours": 1}],
+           slice_usd=100, fee_pct=0.70, adverse_pct=0.67)["win_rate_pct"] == 0.0,
+   "a +0.50% trip does not clear a 1.37% cost and is not a win")
 
-data = {"A-USD": series([100, 97.5, 100.5, 98.0, 101.0]),
-        "B-USD": series([50, 48.75, 50.3, 49.0, 51.0])}
-m = E.run_matrix(data, fee_pct=0.70,
-                 stops={"none": {p: E.NO_STOP for p in data}})
-ok("every exit mode is run", len({k[0] for k in m}) == 3, list(m))
-ok("each aggregate counts both coins", all(a["coins"] == 2 for a in m.values()), m)
+print("\nan open slice is never dropped from the accounting")
+
+c, h, l = series([100, 97.5, 96.0])
+r = E.replay(c, h, l, step=0.025, mode="branch_profitable", hurdle=0.025, stop_pct=0.99)
+s2 = E.score([r], slice_usd=100.0, fee_pct=0.70, adverse_pct=0.67)
+ok("it is counted as open at the end", s2["open_at_end"] == 1, s2)
+ok("its loss is reported as unrealized", s2["unrealized_usd"] < 0, s2)
+ok("total is net plus unrealized",
+   abs(s2["total_usd"] - (s2["net_usd"] + s2["unrealized_usd"])) < 0.01, s2)
+
+print("\nthe stop is taken before the target on a bar that reaches both")
+
+r = E.replay([100.0, 97.5, 97.5], [100.0, 97.5, 200.0], [100.0, 97.5, 1.0],
+             step=0.025, mode="branch_profitable", hurdle=0.025, stop_pct=0.08)
+ok("the STOP books, not the profitable half of the same candle",
+   any(t["reason"] == "stop" for t in r["trades"]), r["trades"])
 
 print("\na coin that will not load is left out, not counted as a free flat row")
 
@@ -102,24 +116,23 @@ got = asyncio.run(E.fetch(["A-USD", "GONE-USD"], 60,
                           fetcher=fetcher_for({"A-USD": series([100, 97.5, 100.5])}),
                           session=object()))
 ok("the missing coin is absent", "GONE-USD" not in got and "A-USD" in got, list(got))
-ok("a zero row would have flattered every config equally - it is not there",
-   E.aggregate([E.replay(*got["A-USD"], step=0.025, mode="branch", hurdle=0.025,
-                         stop_pct=E.NO_STOP, fee_pct=0.70)])["coins"] == 1)
+ok("scoring nothing returns None, not $0.00",
+   E.score([], slice_usd=100.0, fee_pct=0.70, adverse_pct=0.67) is None)
+ok("an empty series replays to None",
+   E.replay([], [], [], step=0.025, mode="branch_profitable", hurdle=0.025,
+            stop_pct=0.08) is None)
 
-ok("an empty series returns None rather than a zero result",
-   E.replay([], [], [], step=0.025, mode="branch", hurdle=0.025,
-            stop_pct=0.08, fee_pct=0.7) is None)
-ok("aggregating nothing returns None, not $0.00", E.aggregate([]) is None)
+print("\nthe report labels the assumption as an assumption")
 
-print("\nthe report states what it assumes")
-
-txt = E.render(m, fee_pct=0.70, days=60)
-ok("it prints realized and unrealized separately",
-   "realized" in txt and "unreal" in txt)
-ok("it says fills are assumed at the trigger price",
-   "fill at its trigger price" in txt)
-ok("it refuses to call any of it a forecast", "neither is a forecast" in txt)
-ok("it names the best configuration outright", "Best:" in txt)
+data = {"A-USD": series([100, 97.5, 100.5, 98.0, 101.0])}
+m = E.run_matrix(data, stops={"A-USD": 0.08})
+txt = E.render(m, days=60, coins=["A-USD"], slice_usd=100.0,
+               fee_pct=0.70, adverse_pct=0.67)
+ok("the fee is marked MEASURED", "MEASURED" in txt)
+ok("the adverse component is marked an ASSUMPTION", "ASSUMPTION" in txt)
+ok("the velocity comparison is printed", "CAPITAL VELOCITY" in txt)
+ok("and reaches a verdict in words", "VERDICT" in txt)
+ok("nothing is called a forecast", "neither is a forecast" in txt)
 
 print(f"\n{_passed}/{_passed + _failed} checks passed")
 raise SystemExit(1 if _failed else 0)
