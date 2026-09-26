@@ -419,6 +419,34 @@ def _funnel(rows) -> dict:
         # winning one.
         "net_expectancy_pct": round(sum(nets) / len(nets), 4) if nets else None,
         "would_trade_count": sum(1 for r in rows if r.would_trade),
+        # The most recent reading, so a funnel of zeros still says something.
+        # "0 of 6 would trade" is a verdict with no magnitude; the shortfall
+        # is what tells you whether this coin is marginally short of paying
+        # or nowhere near it, and that difference decides whether waiting is
+        # worth anything.
+        "latest": _latest(rows),
+    }
+
+
+def _latest(rows) -> dict:
+    """Newest reading for one coin: how much movement there is, how much of
+    it is expected to be capturable, and how far that lands from paying."""
+    r = max(rows, key=lambda x: x.scored_at or datetime.min)
+    return {
+        "scored_at": r.scored_at.isoformat() + "Z" if r.scored_at else None,
+        "score_total": r.score_total,
+        "atr_pct": round(r.atr_pct, 3) if r.atr_pct is not None else None,
+        "expected_move_pct": r.expected_move_pct,
+        "expected_net_edge_pct": r.expected_net_edge_pct,
+        "cost_assumed_pct": r.cost_assumed_pct,
+        "spread_pct": round(r.spread_pct, 4) if r.spread_pct is not None else None,
+        "ret_15m_pct": r.ret_15m_pct,
+        "volume_ratio": r.volume_ratio,
+        # How much MORE movement this coin would need before a round trip
+        # pays. Positive means it is short by that much.
+        "short_by_pct": (round(-r.expected_net_edge_pct, 4)
+                         if r.expected_net_edge_pct is not None
+                         and r.expected_net_edge_pct < 0 else None),
     }
 
 
