@@ -4786,6 +4786,17 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
         log.warning(f"[GRID] {branch.bot_name}: could not fetch a real live price for {branch.product_id} - skipping this cycle")
         return
 
+    # The same candle window the price came from, kept for the stop's own
+    # volatility measure. None when unavailable, which keeps the fixed stop.
+    _stop_closes = None
+    try:
+        _c = await engine._fetch_candles(session, branch.product_id)
+        if _c:
+            _stop_closes = _c[0]
+    except Exception as exc:
+        log.info(f"[GRID] {branch.bot_name}: no candle series for the stop ({exc}) - "
+                 f"the fixed stop stands")
+
     slices = await get_grid_slices(branch.bot_name)
 
     # ---- Real per-branch drawdown circuit breaker ----
@@ -5194,11 +5205,38 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     # P&L, shadow logging, row deletion and trade recording below is the
     # existing, already-proven sell path, reused unchanged - the stop must
     # not get its own copy of the most dangerous code in this file.
+    # The stop distance this branch actually trades under. GRID_STOP_LOSS_PCT
+    # remains the default and the fallback; adaptive_stop only moves it when
+    # GRID_STOP_MODE=adaptive and this coin's own volatility can be read, or
+    # when a per-coin override names it explicitly. A stop is never removed
+    # by a path that merely failed to measure - see adaptive_stop.resolve.
+    #
+    # Why per-coin at all: one 8% number was six different policies. Over 60
+    # days, "did price fall 8% below a given entry within a week" fired on
+    # 0.0% of BTC entries and 54.0% of BONK's. The same stop was decorative
+    # on one coin and a coin-flip that pays a fee each time on another.
+    _stop_pct = GRID_STOP_LOSS_PCT
+    try:
+        import adaptive_stop
+        _vol = adaptive_stop.daily_vol_pct_from_closes(_stop_closes)
+        _resolved = adaptive_stop.resolve(branch.product_id, GRID_STOP_LOSS_PCT, _vol)
+        _stop_pct = _resolved["stop_pct"]
+        if _resolved["source"] != "fixed":
+            log.info(f"[GRID] {branch.bot_name}: stop - {_resolved['reason']}")
+        if _stop_pct == 0 and slices:
+            log.warning(f"[GRID] {branch.bot_name}: 🚨 NO STOP - {_resolved['reason']}")
+    except Exception as exc:
+        # Keep the configured stop. An error here must never be the thing
+        # that leaves an open slice without a downside trigger.
+        log.warning(f"[GRID] {branch.bot_name}: adaptive stop unavailable ({exc}) - "
+                    f"keeping the {GRID_STOP_LOSS_PCT * 100:.1f}% fixed stop")
+        _stop_pct = GRID_STOP_LOSS_PCT
+
     _stop_slice = None
-    if GRID_STOP_LOSS_PCT > 0 and slices:
+    if _stop_pct > 0 and slices:
         for _sl in slices:
             _entry = getattr(_sl, "entry_price", None)
-            if _entry and price <= _entry * (1 - GRID_STOP_LOSS_PCT):
+            if _entry and price <= _entry * (1 - _stop_pct):
                 _stop_slice = _sl
                 break
 
@@ -5212,7 +5250,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
             log.warning(
                 f"[GRID] {branch.bot_name}: 🛑 STOP LOSS on {branch.product_id} - slice entered at "
                 f"${oldest.entry_price:,.6f} is down {(1 - price / oldest.entry_price) * 100:.2f}% at "
-                f"${price:,.6f}, past the {GRID_STOP_LOSS_PCT * 100:.1f}% stop. Selling at a loss on "
+                f"${price:,.6f}, past the {_stop_pct * 100:.1f}% stop. Selling at a loss on "
                 f"purpose: a slice this far down waits a very long time for +{grid_pct * 100:.2f}%, "
                 f"and that wait is the risk this stop exists to cut."
             )
@@ -5286,7 +5324,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                               entry_atr_pct=getattr(oldest, "entry_atr_pct", None),
                               entry_spread_pct=getattr(oldest, "entry_spread_pct", None),
                               entry_gate_json=getattr(oldest, "entry_gate_json", None),
-                              stop_pct=(GRID_STOP_LOSS_PCT or None))
+                              stop_pct=(_stop_pct or None))
         is_true_oldest = slices[0].id == oldest.id
         msg = (
             f"{'📈' if pnl >= 0 else '📉'} {branch.bot_name} GRID SELL: sold "

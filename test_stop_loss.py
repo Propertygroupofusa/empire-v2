@@ -49,8 +49,11 @@ ok("an out-of-range value fails at import rather than trading",
 
 
 print("\nit fires only BELOW entry - never on a rise")
+# The distance is resolved per coin now (adaptive_stop), so the constant
+# is no longer the literal in the comparison. The rule it protects is
+# unchanged: strictly below entry, by the stop actually in force.
 ok("trigger is price <= entry * (1 - stop)",
-   "price <= _entry * (1 - GRID_STOP_LOSS_PCT)" in CYCLE,
+   "price <= _entry * (1 - _stop_pct)" in CYCLE,
    "a stop that could fire on a rise would dump winners")
 ok("no comparison that would let it fire above entry", "price >= _entry" not in CYCLE)
 ok("it reads each slice's OWN entry price, not the branch reference",
@@ -61,8 +64,13 @@ ok("a slice with no recorded entry is skipped, never sold",
 
 
 print("\nzero disables it")
-ok("the whole block is guarded by GRID_STOP_LOSS_PCT > 0",
-   "if GRID_STOP_LOSS_PCT > 0 and slices:" in CYCLE)
+ok("the whole block is guarded by a positive stop",
+   "if _stop_pct > 0 and slices:" in CYCLE)
+ok("and the configured constant is still what a failure falls back to",
+   "_stop_pct = GRID_STOP_LOSS_PCT" in CYCLE,
+   "an error resolving the stop must never leave a slice unprotected")
+ok("a resolved stop of zero on an open slice is logged at WARNING",
+   "NO STOP" in CYCLE)
 
 
 print("\nthe never-sell-at-a-loss rule is NOT loosened")

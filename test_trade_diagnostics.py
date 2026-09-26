@@ -89,8 +89,15 @@ print("\nthe close carries the slice's recorded excursions through")
 for field in ("mae_pct", "mfe_pct", "entry_atr_pct"):
     ok(f"{field} is passed at close from the slice",
        f'{field}=getattr(oldest, "{field}", None)' in CYCLE)
+# Stronger than it was: the stop is resolved per coin now, so "the level
+# actually in force" and "the configured constant" are no longer the same
+# thing. What must hold is that the level RECORDED is the same variable
+# the trigger COMPARED against - recording one number while firing on
+# another would corrupt every later study of stop behaviour.
 ok("stop_pct records the level that was actually in force",
-   "stop_pct=(GRID_STOP_LOSS_PCT or None)" in CYCLE)
+   "stop_pct=(_stop_pct or None)" in CYCLE)
+ok("and it is the same value the trigger fired on",
+   "price <= _entry * (1 - _stop_pct)" in CYCLE)
 ok("a missing value writes None, never 0",
    'getattr(oldest, "mae_pct", None)' in CYCLE,
    "a zero would read as 'never moved' and silently corrupt the later test")
