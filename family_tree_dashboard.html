@@ -1282,11 +1282,13 @@ async function apiGet(path, timeoutMs) {
     } finally {
         clearTimeout(timer);
     }
-    if (res.status === 401 || res.status === 403) {
-        localStorage.removeItem(KEY_STORAGE);
-        adminKey = '';
-        throw new Error('Admin key rejected - refresh the page to re-enter it');
-    }
+    // No admin key on this dashboard. The modal was removed in a615d1e and
+    // the server-side gate in 5b4ae8b, but this branch kept referencing two
+    // identifiers - KEY_STORAGE and adminKey - that are declared NOWHERE in
+    // this file. It never ran, so it never threw, and the dead references
+    // survived. They are gone now; see runMoneyAction for the one that did
+    // fire. A 401/403 here would be a real server refusal, so report it as
+    // itself rather than blaming a key this page does not have.
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
 }
@@ -3495,7 +3497,7 @@ async function backfillLessons(btn) {
     try {
         const res = await fetch(API_BASE + '/grid-status/lessons/backfill', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-Admin-Key': adminKey },
+            headers: { 'Content-Type': 'application/json' },
         });
         const body = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
@@ -3595,9 +3597,14 @@ async function runMoneyAction(action, btn) {
     }
     if (btn) { btn.disabled = true; btn.textContent = '\u23f3 Working\u2026'; }
     try {
+        // No X-Admin-Key. `adminKey` was never declared in this file, so
+        // building this header threw ReferenceError before the request was
+        // ever sent - the catch below printed "adminKey is not defined" on
+        // the button, which read as the server refusing an admin key. The
+        // server has no such gate; this endpoint takes no key at all.
         const res = await fetch(API_BASE + action, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-Admin-Key': adminKey },
+            headers: { 'Content-Type': 'application/json' },
         });
         const body = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
