@@ -7566,8 +7566,21 @@ async def _live_ops_runner():
         except Exception:
             grid_alive = False
     beat_age = (grid_beat or {}).get("age_seconds")
-    proof = (f"the grid runner recorded a cycle {beat_age:.0f}s ago, so it is "
-             f"running on its own service" if grid_alive and beat_age is not None
+    # "so it is running on its own service" was an inference the heartbeat
+    # cannot support: it proves a cycle happened, not which process ran it.
+    # Live on 2026-09-26 the loop_lease read this_process='web:1' with
+    # held_by_this_process=true - the WEB service is running the fleet, from
+    # the standby thread. The lease is the field that actually names the
+    # owner, so quote it instead of guessing from the heartbeat.
+    lease_owner = None
+    try:
+        if crypto_grid_bot_module is not None:
+            lease_owner = (await crypto_grid_bot_module.read_grid_lease_state()).get("this_process")
+    except Exception:
+        lease_owner = None
+    proof = (f"the grid runner recorded a cycle {beat_age:.0f}s ago"
+             + (f", on {lease_owner}" if lease_owner else "")
+             if grid_alive and beat_age is not None
              else "the grid runner is recording cycles")
 
     gates = [
@@ -7580,9 +7593,16 @@ async def _live_ops_runner():
          # Coinbase balance, and grid_fleet is live on it from the other
          # service, so that instruction now reads as "start a second strategy
          # on the money the fleet is trading".
-         "fix": "set CRYPTO_STRATEGY_MODE=grid_fleet on the crypto-trading "
-                "service and leave it UNSET on the web service - every mode "
-                "spends the same Coinbase balance"},
+         # Was "...and leave it UNSET on the web service". The web service is
+         # what holds the loop lease here, and it is in grid_fleet mode only
+         # because of a DB override - so unsetting it stands the whole fleet
+         # on one database row. Name the strategy, not a service; grid_fleet
+         # is safe on more than one process because of that same lease.
+         "fix": "set CRYPTO_STRATEGY_MODE=grid_fleet on every service that "
+                "should run the fleet - the lease keeps a second one on "
+                "standby rather than double-ordering. A DIFFERENT mode beside "
+                "a live fleet is what is unsafe: every mode spends the same "
+                "Coinbase balance"},
         {"name": "Grid runner service is wired up",
          # Only THIS process's variables can be checked here, so on the web
          # service they can never say yes. The heartbeat can, and it is the
