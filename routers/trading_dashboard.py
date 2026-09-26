@@ -1863,9 +1863,22 @@ async def get_trading_profile_status():
     except Exception as e:
         raise HTTPException(status_code=500,
                             detail=f"profile unreadable: {type(e).__name__}: {e}")
+    # THE SAME BALANCE THE GATE ITSELF RECEIVES.
+    #
+    # The first version read get_real_free_cash_usd(), which is the wallet
+    # MINUS every branch's unspent reserve - a useful figure for deciding
+    # whether to spawn a new branch, and the wrong one here. It reported
+    # -$384.43 and "$477.43 more cash is needed" when the buy path actually
+    # sees engine.get_usd_balance() and needs $13.70. A number that sounds
+    # right and is 35x wrong is how an operator gets sent to raise half a
+    # thousand dollars they do not need.
     wallet = None
     try:
-        wallet = float(await g.get_real_free_cash_usd() or 0)
+        async with g.engine.aiohttp.ClientSession() as _s:
+            bal, err = await g.engine.get_usd_balance(_s)
+        wallet = float(bal) if err is None and bal is not None else None
+        if wallet is None:
+            log.debug(f"[profile] wallet unreadable: {err}")
     except Exception as e:
         log.debug(f"[profile] wallet unreadable: {type(e).__name__}: {e}")
     out = trading_profile.describe(profile)

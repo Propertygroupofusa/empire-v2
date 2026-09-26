@@ -216,5 +216,27 @@ ok("the section copy states the measured window",
 ok("and that the switch cannot reach a stop",
    "cannot reach a stop" in HTML)
 
+
+print("\nthe status reads the SAME balance the gate receives")
+
+ok("it calls engine.get_usd_balance, as the buy path does",
+   "get_usd_balance" in gsrc2,
+   "the buy path uses engine.get_usd_balance(session)")
+# AST again: the comment above the fix NAMES the wrong function in order to
+# explain why it is wrong, so a substring search flags the warning as the
+# offence. Only an actual call counts.
+_status_calls = {ast.unparse(n.func) for n in ast.walk(dfns["get_trading_profile_status"])
+                 if isinstance(n, ast.Call) and isinstance(n.func, (ast.Name, ast.Attribute))}
+ok("and never CALLS get_real_free_cash_usd",
+   not any("get_real_free_cash_usd" in c for c in _status_calls),
+   "that is the wallet minus branch reserves - it reported -$384.43 and a "
+   "$477.43 shortfall when the real one was $13.70")
+ok("it does call get_usd_balance",
+   any("get_usd_balance" in c for c in _status_calls), sorted(_status_calls))
+ok("a read error yields None, not a number",
+   "wallet = None" in gsrc2 and "err is None" in gsrc2)
+ok("the comment records what the wrong figure did",
+   "35x wrong" in gsrc2 or "35x" in gsrc2)
+
 print(f"\n{_passed}/{_passed + _failed} checks passed")
 raise SystemExit(1 if _failed else 0)
