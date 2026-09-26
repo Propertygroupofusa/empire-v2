@@ -1138,6 +1138,22 @@ async def lifespan(app: FastAPI):
             logger.info("🔔 Newsroom alert queue running (producer + sender)")
         except Exception as e:
             logger.warning(f"alert queue not started: {type(e).__name__}: {e}")
+
+        # THE EXPERIMENT GUARD. A budget nobody enforces is a wish.
+        #
+        # It can only ever move the profile in the SAFE direction - this
+        # task turns gates ON, never off - and it writes without the
+        # dashboard token on purpose: the safety mechanism must not depend
+        # on an operator having a token in a browser somewhere.
+        try:
+            import experiment_worker
+            import crypto_grid_bot as _grid
+            from database import get_session_factory as _exp_sf
+            asyncio.create_task(experiment_worker.run_periodically(
+                _exp_sf, _grid.set_trading_profile))
+            logger.info("🛑 Experiment guard running (budget + deadline auto-revert)")
+        except Exception as e:
+            logger.warning(f"alert queue not started: {type(e).__name__}: {e}")
         log.info("⏱️ Alpaca auto-close loop started (8% profit target / 10-day max hold, 10% skim to locked profit)")
     except Exception as e:
         log.warning(f"Alpaca auto-close loop startup failed: {e}")

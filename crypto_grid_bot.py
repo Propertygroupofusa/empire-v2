@@ -4606,8 +4606,14 @@ async def get_trading_profile() -> str:
         return trading_profile.GUARDED
 
 
-async def set_trading_profile(name: str) -> str:
-    """Switch the gate set, durably. Returns the profile actually stored."""
+async def set_trading_profile(name: str, budget_usd: float = 200.0,
+                              days: int = 14) -> str:
+    """Switch the gate set, durably. Returns the profile actually stored.
+
+    Turning the gates OFF always opens a budgeted experiment - there is
+    no code path that removes the economic checks without something
+    watching the cost.
+    """
     import trading_profile
     p = trading_profile.normalise(name)
     async with get_session_factory()() as db:
@@ -4620,9 +4626,73 @@ async def set_trading_profile(name: str) -> str:
             db.add(row)
         row.base_capital = 1.0 if p == trading_profile.AUG2026 else 0.0
         await db.commit()
+
+    # THE GATES NEVER COME OFF WITHOUT A BUDGET AND A DEADLINE.
+    #
+    # An open-ended "gates off" is how a wash becomes a real loss with no
+    # single moment where anyone chose that. Switching to aug2026 opens an
+    # experiment row; experiment_worker ends it on whichever of the two
+    # arrives first and flips this back. Switching to guarded closes any
+    # running one, so a manual revert is recorded rather than leaving a
+    # row that looks live forever.
+    try:
+        await _record_profile_experiment(p, budget_usd, days)
+    except Exception as e:
+        # A failure to open the budget row must not leave the gates OFF
+        # with nothing watching them.
+        if p == trading_profile.AUG2026:
+            async with get_session_factory()() as db:
+                r2 = (await db.execute(select(TradingBotState).where(
+                    TradingBotState.bot_name == TRADING_PROFILE_KEY))).scalar_one_or_none()
+                if r2 is not None:
+                    r2.base_capital = 0.0
+                    await db.commit()
+            log.error(f"[GRID] could not open the experiment budget "
+                      f"({type(e).__name__}: {e}) - refusing to leave the gates "
+                      f"off unguarded, profile stays GUARDED")
+            return trading_profile.GUARDED
+        log.warning(f"[GRID] experiment row not updated: {type(e).__name__}: {e}")
+
     log.warning(f"[GRID] TRADING PROFILE set to {p.upper()} - "
                 f"economic gates {'OFF' if p == trading_profile.AUG2026 else 'ON'}")
     return p
+
+
+async def _record_profile_experiment(profile: str, budget_usd: float, days: int):
+    """Open a budgeted experiment on aug2026; close any running one on guarded."""
+    import trading_profile
+    from datetime import timedelta
+    from models import CryptoCoinTradeHistory, CryptoGridTradeHistory, TradingExperiment
+    from sqlalchemy import func
+    now = datetime.utcnow()
+    async with get_session_factory()() as db:
+        running = (await db.execute(
+            select(TradingExperiment)
+            .where(TradingExperiment.ended_at == None)       # noqa: E711
+            .order_by(TradingExperiment.id.desc())
+            .limit(1))).scalar_one_or_none()
+
+        if profile != trading_profile.AUG2026:
+            if running is not None:
+                running.ended_at = now
+                running.ended_reason = "MANUAL"
+                await db.commit()
+            return
+
+        if running is not None:
+            return                       # already budgeted; do not reset the clock
+
+        tree = (await db.execute(select(func.sum(CryptoCoinTradeHistory.pnl)))).scalar()
+        grid = (await db.execute(select(func.sum(CryptoGridTradeHistory.pnl)))).scalar()
+        db.add(TradingExperiment(
+            profile=profile, started_at=now,
+            budget_usd=float(budget_usd),
+            deadline_at=now + timedelta(days=int(days)),
+            baseline_realized_pnl=float(tree or 0.0) + float(grid or 0.0),
+            blind_checks=0))
+        await db.commit()
+    log.warning(f"[GRID] experiment opened: ${budget_usd:,.2f} budget, "
+                f"{days} days")
 
 
 async def set_net_edge_gate_active(enabled: bool):

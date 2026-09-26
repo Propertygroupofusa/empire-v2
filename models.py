@@ -2029,6 +2029,67 @@ class CryptoCoinTradeHistory(Base):
         }
 
 
+class TradingExperiment(Base):
+    """A gate set turned off WITH A BUDGET AND A DEADLINE, and what ended it.
+
+    Turning the economic gates off is a deliberate experiment, not a
+    setting. The failure mode it exists to prevent is nobody deciding to
+    spend the money: an open-ended "gates off" is how -$34 a month becomes
+    -$400 without any single decision to let it.
+
+    So the switch records what it is allowed to cost and how long it runs,
+    and a background check ends it on whichever comes first. The row is
+    never deleted - a finished experiment with its ended_reason is the only
+    record of what the trial actually cost, and deleting it would make the
+    next one start blind.
+
+    baseline_realized_pnl is the ledger's combined realized P&L at the
+    instant the gates came off. Spend is baseline minus current, so it
+    measures what the EXPERIMENT did rather than what the market did to
+    coin that was already held.
+    """
+    __tablename__ = "trading_experiments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    profile = Column(String, index=True)              # the profile switched ON
+    started_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    budget_usd = Column(Float)                        # what it may cost
+    deadline_at = Column(DateTime, index=True)        # when it ends regardless
+    baseline_realized_pnl = Column(Float)             # ledger P&L at switch-on
+
+    # Set when it ends. active is derived (ended_at is NULL) rather than
+    # stored separately, so the two can never disagree.
+    ended_at = Column(DateTime, nullable=True, index=True)
+    ended_reason = Column(String, nullable=True)      # BUDGET / DEADLINE / MANUAL / BLIND
+    ended_spend_usd = Column(Float, nullable=True)
+
+    # Consecutive failed measurements. A single API blip must not end an
+    # experiment, but staying open while unable to measure the spend is
+    # exactly what the budget exists to prevent - so this counts, and the
+    # worker ends it as BLIND once it is clear the blindness is not
+    # transient.
+    blind_checks = Column(Integer, default=0)
+    last_checked_at = Column(DateTime, nullable=True)
+    last_spend_usd = Column(Float, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id, "profile": self.profile,
+            "started_at": self.started_at.isoformat() + "Z" if self.started_at else None,
+            "budget_usd": self.budget_usd,
+            "deadline_at": self.deadline_at.isoformat() + "Z" if self.deadline_at else None,
+            "baseline_realized_pnl": self.baseline_realized_pnl,
+            "ended_at": self.ended_at.isoformat() + "Z" if self.ended_at else None,
+            "ended_reason": self.ended_reason,
+            "ended_spend_usd": self.ended_spend_usd,
+            "active": self.ended_at is None,
+            "blind_checks": self.blind_checks,
+            "last_checked_at": self.last_checked_at.isoformat() + "Z" if self.last_checked_at else None,
+            "last_spend_usd": self.last_spend_usd,
+        }
+
+
 class NewsroomAlert(Base):
     """One thing worth waking somebody for, and whether it got out.
 

@@ -1955,6 +1955,7 @@ async def get_trading_profile_status():
         wallet, g.GRID_CASH_RESERVE_USD, g.MIN_TRADE_USD)
         if wallet is not None else
         {"known": False, "note": "wallet balance unreadable - no claim made"})
+    out["experiment"] = await _experiment_status()
     out["profiles"] = list(trading_profile.PROFILES)
     out["how_to_switch"] = ("POST /api/trading-dashboard/trading-profile "
                             "?profile=aug2026&confirm=yes with the "
@@ -1963,7 +1964,9 @@ async def get_trading_profile_status():
 
 
 @router.post("/trading-profile")
-async def set_trading_profile_endpoint(profile: str, confirm: str = ""):
+async def set_trading_profile_endpoint(profile: str, confirm: str = "",
+                                       budget_usd: float = 200.0,
+                                       days: int = 14):
     """Switch the gate set. Behind write_guard AND needs confirm=yes.
 
     Turning the economic gates off means real buys are placed without
@@ -1986,10 +1989,43 @@ async def set_trading_profile_endpoint(profile: str, confirm: str = ""):
             status_code=400,
             detail=("refusing to change the gate set without confirm=yes. "
                     "GET this endpoint first - it says what the change does."))
-    stored = await crypto_grid_bot_module.set_trading_profile(wanted)
+    if wanted != trading_profile.GUARDED:
+        if not (0 < budget_usd <= 5000):
+            raise HTTPException(status_code=400,
+                                detail="budget_usd must be between 0 and 5000")
+        if not (0 < days <= 90):
+            raise HTTPException(status_code=400, detail="days must be 1-90")
+    stored = await crypto_grid_bot_module.set_trading_profile(
+        wanted, budget_usd=budget_usd, days=days)
     out = trading_profile.describe(stored)
     out["changed_to"] = stored
+    if stored != wanted:
+        out["warning"] = ("The gates were NOT turned off. The experiment budget "
+                          "could not be opened, and this refuses to leave the "
+                          "checks off with nothing watching the cost.")
+    out["experiment"] = await _experiment_status()
     return out
+
+
+async def _experiment_status():
+    """The running budget, or the record of the last one. Never raises."""
+    import experiment_guard
+    import experiment_worker
+    from models import TradingExperiment
+    try:
+        from database import get_session_factory
+        async with get_session_factory()() as db:
+            exp = (await db.execute(
+                select(TradingExperiment)
+                .order_by(TradingExperiment.id.desc()).limit(1))).scalar_one_or_none()
+            if exp is None:
+                return experiment_guard.status(None)
+            pnl = (await experiment_worker.current_realized_pnl(get_session_factory)
+                   if exp.ended_at is None else None)
+            return experiment_guard.status(exp.to_dict(), current_pnl=pnl)
+    except Exception as e:
+        return {"running": None,
+                "note": f"experiment state unreadable: {type(e).__name__}: {e}"}
 
 
 @router.get("/alert-queue")

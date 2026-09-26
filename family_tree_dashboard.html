@@ -5309,6 +5309,27 @@ async function loadTradingProfile() {
                    ${d.is_default ? 'the default' : 'not the default'}</div></div>`
             + `<div style="font-size:0.78em; line-height:1.55; margin-bottom:10px;">
                  ${escText(d.summary || '')}</div>`
+            + (d.experiment && d.experiment.running
+                ? `<div style="border:1px solid var(--amber, #f0b429);
+                        background:rgba(240,180,41,0.07); border-radius:8px;
+                        padding:10px 12px; margin:10px 0; font-size:0.8em; line-height:1.6;">
+                     <strong>Experiment running.</strong>
+                     ${d.experiment.spend_usd == null
+                        ? 'Spend is unreadable right now - it is being counted, and if it stays '
+                          + 'unreadable the experiment ends on its own.'
+                        : `<strong>${_wUSD(d.experiment.spend_usd)}</strong> of
+                           <strong>${_wUSD(d.experiment.budget_usd)}</strong> spent \u00b7
+                           ${_wUSD(d.experiment.remaining_usd)} left \u00b7
+                           ${d.experiment.days_left} day(s) to run`}
+                     <div style="font-size:0.9em; color:var(--text-dim); margin-top:4px;">
+                       The gates come back on automatically at whichever arrives first.
+                       Nobody has to remember.</div></div>`
+                : (d.experiment && d.experiment.ended_reason
+                    ? `<div style="font-size:0.76em; color:var(--text-dim);
+                            margin:10px 0; line-height:1.55;">
+                         Last experiment ended on <strong>${escText(d.experiment.ended_reason)}</strong>.
+                         ${escText(d.experiment.note || '')}</div>`
+                    : ''))
             + `<div style="font-size:0.78em; font-weight:700; margin:12px 0 2px;">Economic gates
                  <span style="font-weight:400; color:var(--text-dim);">- what this switch controls</span></div>`
             + gates
