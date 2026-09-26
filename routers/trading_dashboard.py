@@ -7505,7 +7505,17 @@ async def grid_lessons_endpoint():
     imported by nothing.
     """
     import grid_learning
-    return JSONResponse(content=await grid_learning.get_all_lessons(), headers={
+    # The coins the fleet ACTUALLY trades, so a lesson about a retired one
+    # cannot be rendered as current advice. Unreadable -> None, which tags
+    # nothing rather than mislabelling everything.
+    fleet = None
+    try:
+        if crypto_grid_bot_module is not None:
+            branches = await crypto_grid_bot_module.get_grid_branches()
+            fleet = [b.product_id for b in branches if b.active]
+    except Exception as exc:
+        log.warning(f"[dashboard] fleet unreadable for lesson tagging: {exc}")
+    return JSONResponse(content=await grid_learning.get_all_lessons(fleet), headers={
         "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
         "Pragma": "no-cache", "Expires": "0"})
 

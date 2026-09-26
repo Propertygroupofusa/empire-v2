@@ -216,18 +216,53 @@ async def check_before_buy(product_id: str) -> dict:
                 "enforced": False, "lesson": f"Lesson lookup failed: {e}"}
 
 
-async def get_all_lessons() -> dict:
-    """Everything the fleet has learned, worst first. Read-only."""
+async def get_all_lessons(fleet_products=None) -> dict:
+    """Everything the fleet has learned, worst first. Read-only.
+
+    fleet_products is the set of coins the fleet ACTUALLY TRADES right
+    now. Every lesson is tagged with whether its coin is one of them,
+    because on 2026-09-26 this panel showed eleven coins - AAVE, ARB,
+    ATOM, BCH, DOGE, ETC, ETH, LINK, LTC, STX, WIF - every one of them
+    from the RETIRED cohort, against a live fleet of BTC, NEAR, BONK,
+    ONDO, FLOKI and TIA. Zero overlap. It read "DOGE earns +12.80 ... Keep
+    trading it" about a coin the fleet does not hold, under a 2.00% step
+    and market fallback that no longer exist, while the current cohort's
+    own record was {"trades": 0}.
+
+    Passing None means "the fleet is unknown", which tags nothing rather
+    than tagging everything as retired - not knowing is not evidence.
+    """
     try:
         async with get_session_factory()() as db:
             result = await db.execute(select(GridLesson))
             rows = [r.to_dict() for r in result.scalars().all()]
     except Exception as e:
         return {"lessons": [], "error": str(e), "enforcement_active": False}
+
+    fleet = None
+    if fleet_products is not None:
+        fleet = {str(p).upper() for p in fleet_products if p}
+    for r in rows:
+        pid = str(r.get("product_id") or "").upper()
+        r["in_fleet"] = None if fleet is None else (pid in fleet)
+        if r["in_fleet"] is False:
+            coin = pid.replace("-USD", "")
+            r["retired_note"] = (
+                f"The fleet does not trade {coin} any more. This is history from a "
+                f"retired configuration - not advice about what to trade now.")
+
     rows.sort(key=lambda r: r["total_pnl"])
+    in_fleet = [r for r in rows if r.get("in_fleet")]
+    retired = [r for r in rows if r.get("in_fleet") is False]
     return {
         "lessons": rows,
         "lesson_count": len(rows),
+        "fleet_known": fleet is not None,
+        "in_fleet_count": len(in_fleet) if fleet is not None else None,
+        "retired_count": len(retired) if fleet is not None else None,
+        # The headline the panel had no way to state: every lesson on
+        # record can belong to coins the fleet has stopped trading.
+        "all_lessons_are_retired": bool(fleet is not None and rows and not in_fleet),
         "enforcement_active": await is_enforcement_active(),
         "min_trades_for_a_verdict": MIN_TRADES,
         "min_trades_to_block": MIN_TRADES_TO_BLOCK,
@@ -236,7 +271,9 @@ async def get_all_lessons() -> dict:
                  f"when enforcement is switched on AND the coin is down over at least "
                  f"{MIN_TRADES_TO_BLOCK}. At a 75%+ win rate roughly one trade in four is "
                  "red by design; treating that as a lesson is how a profitable fleet "
-                 "talks itself out of its own winners."),
+                 "talks itself out of its own winners. A lesson whose coin the fleet no "
+                 "longer trades is history from a retired configuration, not advice "
+                 "about what to trade now."),
     }
 
 
