@@ -215,6 +215,34 @@ ok("and that unrealized is not a loss until a slice is sold below entry",
 ok("the headline still adds both halves rather than hiding the red one",
    "(lastUnrealizedProfit || 0) + (lastRealizedProfit || 0)" in page)
 
+# --- a gateway blip must not look like data --------------------------------
+#
+# One Railway instance means every deploy has a window where the old
+# container is gone and the new one is still running migrations across 60
+# tables. Requests landing in it get Railway's own "Application failed to
+# respond" - a 502 whose JSON body is not this API's JSON at all. Read as
+# data it says the bot earned $0.00 over zero trades.
+ok("only gateway statuses are treated as transient",
+   "const TRANSIENT_STATUSES = [502, 503, 504]" in page)
+ok("a 4xx is never retried - a 401 is the write guard refusing on purpose",
+   "TRANSIENT_STATUSES.indexOf(res.status) !== -1" in page)
+# Counts CALLS, not the definition - `page.count("_apiGetOnce(path,
+# timeoutMs)")` is 3, because the function's own `async function` line
+# matches too, and an off-by-one there would have hidden a third attempt.
+ok("the retry is bounded to one extra attempt",
+   page.count("await _apiGetOnce(") == 2)
+ok("a fetch that never reached the server counts as transient",
+   "e.transient = true;" in page)
+ok("the second failure says it was the SERVICE, not the numbers",
+   "the last good read, not zeros" in page)
+ok("and names how many attempts it made", "twice, 1.2s apart" in page)
+ok("only GETs go through it, so no write can be repeated",
+   "async function _apiGetOnce(path, timeoutMs)" in page
+   and "method: 'POST'" not in page[page.index("async function _apiGetOnce"):
+                                     page.index("async function _apiGetOnce") + 1200])
+ok("the status is carried on the error so a caller can tell them apart",
+   "err.status = res.status" in page)
+
 # --- hygiene ---------------------------------------------------------------
 ids = re.findall(r'id="([a-zA-Z0-9_-]+)"', page)
 ok("no duplicate element ids", len({i for i in ids if ids.count(i) > 1}) == 0)

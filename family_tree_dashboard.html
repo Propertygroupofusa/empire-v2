@@ -1776,7 +1776,51 @@
 <script>
 const API_BASE = 'https://empire-v2-production.up.railway.app/api/trading-dashboard';
 
+// Transient gateway failures, and ONLY those.
+//
+// This app runs one Railway instance, so every deploy has a window where
+// the old container is gone and the new one is still running migrations
+// across 60 tables and starting its bot threads. Requests landing in it get
+// Railway's own "Application failed to respond" - a 502 with a JSON body
+// that is not this API's JSON at all.
+//
+// 4xx is NEVER retried. A 401 is the write guard refusing on purpose and
+// must surface immediately; retrying it would just delay the truth by a
+// second and a half. Only 502/503/504 and an outright network failure are
+// treated as "ask again", and only once.
+//
+// GET only, which is what makes a retry safe here. Nothing in this helper
+// can repeat a write.
+const TRANSIENT_STATUSES = [502, 503, 504];
+
+function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
 async function apiGet(path, timeoutMs) {
+    try {
+        return await _apiGetOnce(path, timeoutMs);
+    } catch (e) {
+        if (!e || !e.transient) throw e;
+        await _sleep(1200);
+        try {
+            return await _apiGetOnce(path, timeoutMs);
+        } catch (e2) {
+            // Say which kind of failure this was. A gateway blip and a bad
+            // payload look identical in a bare "HTTP 502" and send the
+            // reader looking in completely different places.
+            if (e2 && e2.transient) {
+                const err = new Error(
+                    'the service did not respond (' + (e2.status || 'network') +
+                    ') - twice, 1.2s apart. Usually a deploy restarting; the ' +
+                    'numbers on this page are the last good read, not zeros.');
+                err.transient = true;
+                throw err;
+            }
+            throw e2;
+        }
+    }
+}
+
+async function _apiGetOnce(path, timeoutMs) {
     // Real, bounded timeout (20s default) - a plain fetch() with no
     // AbortController can otherwise sit indefinitely on a stalled real
     // mobile connection (a dropped signal, the page backgrounded and
@@ -1792,6 +1836,9 @@ async function apiGet(path, timeoutMs) {
         });
     } catch (e) {
         if (e.name === 'AbortError') throw new Error('Request timed out - real network hiccup');
+        // A fetch that never reached the server is the same class of
+        // problem as a 502 and gets the same one retry.
+        e.transient = true;
         throw e;
     } finally {
         clearTimeout(timer);
@@ -1803,7 +1850,12 @@ async function apiGet(path, timeoutMs) {
     // survived. They are gone now; see runMoneyAction for the one that did
     // fire. A 401/403 here would be a real server refusal, so report it as
     // itself rather than blaming a key this page does not have.
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+        const err = new Error(`HTTP ${res.status}`);
+        err.status = res.status;
+        err.transient = TRANSIENT_STATUSES.indexOf(res.status) !== -1;
+        throw err;
+    }
     return res.json();
 }
 

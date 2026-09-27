@@ -6,7 +6,10 @@
   "deploy": {
     "startCommand": "python service_entrypoint.py",
     "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 3
+    "restartPolicyMaxRetries": 3,
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 300,
+    "overlapSeconds": 20
   },
   "network": {
     "egress": {
