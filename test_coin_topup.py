@@ -82,11 +82,39 @@ def test_the_claim_grows_by_exactly_the_coin_put_behind_it():
     assert t["allocated_usd_after"] == round(t["allocated_usd_before"] + backed, 2)
 
 
-def test_the_branch_stays_exactly_full_so_it_cannot_buy():
-    """run_grid_branch_cycle buys only when len(slices) < num_levels."""
+def test_the_branch_cannot_buy_after_a_topup():
+    """run_grid_branch_cycle buys only when len(slices) < num_levels.
+
+    The planner proposes num_levels = open + added, which makes the branch
+    exactly full. What it must NOT depend on is that figure surviving: the
+    live fleet runs a global spacing override (3_levels_2.5pct), and
+    run_grid_branch_cycle re-applies it EVERY cycle, forcing num_levels
+    back to 3 on every branch. Measured after the live top-ups: ZEC 6
+    open / 3 levels, XRP 9/3, SHIB 6/3.
+
+    So the property that actually protects the account is open >= levels,
+    and it has to hold under BOTH numbers - the one the writer sets and the
+    one the override reclaims. Asserting equality alone passed while
+    describing something the running system overwrites within a cycle.
+    """
     t = _one()["topups"][0]
-    assert t["num_levels_after"] == t["num_levels_before"] + t["add_levels"]
     assert t["add_levels"] == len(t["slices"])
+
+    proposed = t["num_levels_after"]
+    open_after = t["num_levels_before"] + t["add_levels"]
+    assert proposed == open_after, "the planner still proposes exactly full"
+
+    # ... and under the level count the override will actually force, which
+    # is computed here rather than assumed. A branch left with FEWER open
+    # slices than levels is free to buy on the next cycle.
+    import crypto_grid_bot as grid
+    alloc = t["allocated_usd_after"]
+    safe = grid._safe_num_levels_for_allocation(alloc)
+    for name, cfg in grid.GRID_LEVEL_SPACING_CANDIDATES.items():
+        forced = max(1, min(safe, cfg["num_levels"]))
+        assert open_after >= forced, (
+            f"under {name} this top-up would leave {open_after} open slices "
+            f"against {forced} levels - the branch could buy immediately")
 
 
 def test_it_buys_nothing_and_sells_nothing():
@@ -292,10 +320,69 @@ def test_the_claim_grows_by_the_slices_actually_written():
 
 def test_num_levels_comes_from_the_live_open_count_not_the_plan():
     """A sale between sizing and writing would otherwise leave the branch
-    short of full, and a branch below full is free to buy."""
+    short of full, and a branch below full is free to buy.
+
+    This asserts the WRITE is computed correctly. It deliberately does not
+    assert the value persists - see
+    test_the_topup_num_levels_write_does_not_survive_the_spacing_override.
+    """
     src = _topup_src()
     assert "row.num_levels = len(open_now) + len(t[\"slices\"])" in src
     assert "num_levels_after" not in src          # never the planned figure
+
+
+def test_the_topup_num_levels_write_does_not_survive_the_spacing_override():
+    """Recorded because the opposite was claimed, out loud, and was wrong.
+
+    run_grid_branch_cycle re-applies the live grid spacing override on
+    EVERY cycle: num_levels = max(1, min(safe_for_allocation,
+    override["num_levels"])). With 3_levels_2.5pct live that is 3, so the
+    top-up's write is reclaimed within a cycle and the branch runs 3 coarse
+    rungs rather than the 6 fine ones the plan describes.
+
+    Not dangerous - open(6) >= levels(3) still means it cannot buy, and
+    allocated / levels keeps each rung fully backed - but a test asserting
+    a value the running system overwrites is worse than no test.
+    """
+    bot = open("crypto_grid_bot.py").read()
+    tree = ast.parse(bot)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and n.name == "run_grid_branch_cycle")
+    cycle = "\n".join(bot.splitlines()[fn.lineno - 1:fn.end_lineno])
+
+    assert "row.num_levels = real_effective_levels" in cycle, (
+        "the override no longer writes num_levels - if that is deliberate, "
+        "this test and the top-up's own comment both need revisiting")
+    assert "get_live_grid_spacing_override()" in cycle
+
+    import crypto_grid_bot as grid
+    cfg = grid.GRID_LEVEL_SPACING_CANDIDATES["3_levels_2.5pct"]
+    assert cfg["num_levels"] == 3
+
+    # The live shape, recomputed rather than asserted as a pair of literals:
+    # for each topped-up branch, the level count the override forces must
+    # not EXCEED its open slices. That direction is the one that lets a
+    # branch buy, and it is what a future override change would break.
+    live = [("ZEC-USD", 2272.62, 6), ("XRP-USD", 2240.54, 9), ("SHIB-USD", 267.37, 6)]
+    forced = max(1, min(grid._safe_num_levels_for_allocation(2272.62), cfg["num_levels"]))
+    assert forced == 3, forced
+    for pid, alloc, open_slices in live:
+        f = max(1, min(grid._safe_num_levels_for_allocation(alloc), cfg["num_levels"]))
+        assert open_slices >= f, f"{pid}: {open_slices} open vs {f} forced levels"
+
+    # THE GUARANTEE HAS A BOUNDARY, and it is worth knowing where.
+    # "Cannot buy" holds only while the top-up leaves at least as many open
+    # slices as the override forces. A SMALL top-up does not get it: one new
+    # slice on a branch holding one leaves 2 open against 3 forced levels,
+    # and that branch is free to buy on its next cycle. Backed - allocated
+    # already counts the rung - but not the "starts full" the docstring
+    # describes, so it is asserted here rather than left to be discovered.
+    small_forced = max(1, min(grid._safe_num_levels_for_allocation(140.0),
+                              cfg["num_levels"]))
+    assert small_forced > 2, (
+        "a 2-slice branch is no longer free to buy under this override - the "
+        "boundary this test documents has moved and the docstring should say so")
 
 
 def test_the_peak_moves_with_the_allocation():
