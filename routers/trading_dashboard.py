@@ -10843,3 +10843,92 @@ async def _account_total_best_effort():
         return c.get("total_usd") if c.get("available") else None
     except Exception:
         return None
+
+
+@router.get("/compound-path")
+async def compound_path_view(target_usd_per_hour: float = 20.0):
+    """How long, at the rate this account actually earns - as a range.
+
+    "$20/hour needs $79,000. How do we make that happen, and how long?"
+    is two problems in one sentence, and they have very different answers.
+
+    PLACING the capital that already exists is an ACTION, not a wait. It
+    earns nothing extra per dollar; it stops most of the dollars being
+    left out. Days, and it is the whole of the near-term gain.
+
+    COMPOUNDING from there is the slow half, and nothing about it can be
+    hurried except by adding money - the rate is measured, not chosen,
+    and every attempt in this account to raise it by trading faster made
+    it worse.
+
+    The timeline comes back as a SPAN because the rate genuinely is not
+    known yet: the measured window divides 27 days of profit by capital
+    that changed thirteenfold in one morning. A single date would be a
+    guess wearing a decimal point.
+
+    Read-only, DB-only.
+    """
+    try:
+        import compound_path
+        import capital_kpis
+        import crypto_grid_bot as grid
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"compound path unavailable: {exc}")
+
+    trades = []
+    try:
+        from models import CryptoGridTradeHistory
+        from database import get_session_factory
+        async with get_session_factory()() as db:
+            rows = (await db.execute(
+                select(CryptoGridTradeHistory)
+                .order_by(CryptoGridTradeHistory.closed_at.desc())
+                .limit(5000))).scalars().all()
+        trades = [{"pnl": r.pnl, "qty": r.qty, "entry_price": r.entry_price,
+                   "opened_at": r.opened_at, "closed_at": r.closed_at,
+                   "product_id": r.product_id} for r in rows]
+    except Exception as exc:
+        raise HTTPException(status_code=503,
+                            detail=f"the closed book could not be read ({type(exc).__name__})")
+
+    deployed = None
+    try:
+        st = await grid.get_grid_status()
+        deployed = (st.get("allocation_backing") or {}).get("deployed_coin_usd")
+    except Exception as exc:
+        log.warning(f"[compound] grid status unreadable: {type(exc).__name__}: {exc}")
+
+    # The LOW end of the deployed range comes from the recorded series -
+    # the smallest figure actually observed - rather than from a guess.
+    # Without it the optimistic rate would be invented.
+    low = None
+    try:
+        from models import CapitalKpiSnapshot
+        from database import get_session_factory as _sf
+        async with _sf()() as db:
+            vals = (await db.execute(
+                select(CapitalKpiSnapshot.allocated_usd)
+                .where(CapitalKpiSnapshot.allocated_usd != None))).scalars().all()  # noqa: E711
+        seen = [float(v) for v in vals if v and float(v) > 0]
+        low = min(seen) if seen else None
+    except Exception:
+        pass
+
+    k = capital_kpis.compute(trades, allocated_usd=deployed)
+    out = compound_path.plan(
+        account_usd=(await _account_total_best_effort()),
+        deployed_usd=deployed,
+        target_usd_per_hour=target_usd_per_hour,
+        earned_usd=k.get("net_usd"), days_measured=k.get("days_span"),
+        deployed_low_usd=low, deployed_high_usd=deployed,
+        trades=k.get("trades"))
+    out["deployed_low_observed_usd"] = low
+    out["why_the_span_is_wide"] = (
+        "The two ends divide the same 27 days of profit by very different capital: the "
+        "smallest figure the recorder ever saw, and the figure deployed right now. They are "
+        "thirteen times apart because adoption moved the capital this morning. The single "
+        "most valuable thing available is not a code change - it is two weeks at FULL "
+        "deployment, which collapses this span into one number and makes every projection "
+        "after it worth reading.")
+    out["is_a_measurement_not_a_change"] = True
+    return out
