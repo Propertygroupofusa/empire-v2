@@ -128,7 +128,14 @@ def is_trimmers(asset, share_pct, limit_pct, *, excluded=None,
 
 
 def normalise_mode(value) -> str:
-    """Only the exact string "arm" arms it. Everything else observes."""
+    """Only "arm" arms it, ignoring case and surrounding whitespace.
+
+    " Arm " arms it; "true", "yes", "1", "armed" and None do not. The
+    whitespace and case exception is deliberate - a trailing space on a
+    Railway variable is an accident, not a different intention, and a
+    guard that silently fails to arm on an invisible character leaves the
+    operator believing protection is running when it is not.
+    """
     if not isinstance(value, str):
         return MODE_OBSERVE
     return MODE_ARM if value.strip().lower() == MODE_ARM else MODE_OBSERVE

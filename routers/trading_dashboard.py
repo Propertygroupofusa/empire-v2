@@ -9673,3 +9673,103 @@ async def grid_universe_ranking(step_pct: float = 3.75, hours: int = 350,
                                     "measured rate from actual fills is 0.499%/day."),
     }
     return out
+
+
+class ExpandFleetRequest(BaseModel):
+    confirm: bool = False
+    max_new: int = 20
+    reserve_usd: float = 100.0
+    max_branch_usd: float = 120.0
+    step_pct: float = 3.75
+
+
+@router.post("/grid-universe/expand")
+async def expand_grid_fleet(req: ExpandFleetRequest):
+    """Open grid branches on the coins the ranking selected.
+
+    Two brakes, the same pair the ZEC sale uses:
+      * `confirm` defaults FALSE. The default call plans and creates
+        nothing, so the allocation can be read before cash is earmarked.
+      * the write guard applies, as it does to every POST here.
+
+    Creation goes through crypto_grid_bot.create_grid_branch, which
+    already refuses a coin another grid branch holds, a coin a family-tree
+    branch holds, and an amount over real free cash. Those checks are NOT
+    repeated here - a second copy of a rule is a second place for it to
+    drift out of step with the first.
+
+    Branches are created ONE AT A TIME and every result recorded. A
+    partial failure leaves a known state: the ones before it exist, the
+    ones after do not, and the response names which. Rolling back on a
+    late failure would undo branches that were fine.
+    """
+    try:
+        import branch_expansion
+        import grid_universe
+        import crypto_grid_bot as grid
+        import crypto_selection_backtest as CSB
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"expansion unavailable: {exc}")
+
+    from datetime import datetime, timedelta, timezone
+
+    try:
+        st = await grid.get_grid_status()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"fleet unreadable: {exc}")
+    live = [str(b.get("product_id", "")).split("-")[0]
+            for b in (st.get("branches") or []) if b.get("product_id")]
+    free_cash = st.get("real_free_cash_usd")
+
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(hours=380)
+    candidates = sorted({*live, "ARB", "INJ", "APT", "OP", "AVAX", "SUI", "XLM", "DOT",
+                         "LTC", "ATOM", "SEI", "LINK", "DOGE", "ADA", "SOL", "NEAR",
+                         "ONDO", "TIA", "BONK", "FLOKI", "BTC"})
+    book = {}
+    async with aiohttp.ClientSession() as session:
+        for coin in candidates:
+            try:
+                got = await CSB.fetch_candles_window(
+                    session, f"{coin}-USD", start, end, granularity=3600)
+            except Exception:
+                continue
+            if got and got[0] and len(got[0]) >= 60:
+                book[coin] = [{"close": c, "high": h, "low": l}
+                              for c, h, l in zip(got[0], got[1], got[2])]
+    if not book:
+        raise HTTPException(status_code=502, detail="no candles loaded; nothing planned")
+
+    ranked = grid_universe.rank(book, current=live, step_pct=req.step_pct)
+    plan = branch_expansion.plan(
+        free_cash, ranked, existing=live, reserve_usd=req.reserve_usd,
+        max_branch_usd=req.max_branch_usd, max_new=req.max_new)
+
+    if not plan.get("ok"):
+        return {"created": 0, "plan": plan,
+                "detail": f"{plan.get('reason')}: {plan.get('detail')}"}
+
+    if not req.confirm:
+        return {"created": 0, "preview": True, "plan": plan,
+                "detail": (f"Preview only - nothing was created. This would open "
+                           f"{plan['branches']} branches at ${plan['per_branch_usd']:,.2f} "
+                           f"each, ${plan['total_usd']:,.2f} of ${plan['free_cash_usd']:,.2f} "
+                           f"free cash, leaving ${plan['left_unallocated_usd']:,.2f} free. "
+                           f"Send the same request with confirm=true to create them.")}
+
+    created, failed = [], []
+    for o in plan["open"]:
+        try:
+            branch = await grid.create_grid_branch(o["product_id"], o["allocated_usd"])
+            created.append({"coin": o["coin"],
+                            "bot_name": getattr(branch, "bot_name", None),
+                            "allocated_usd": o["allocated_usd"]})
+            log.warning(f"[EXPAND] opened {o['product_id']} with ${o['allocated_usd']:,.2f}")
+        except Exception as exc:
+            failed.append({"coin": o["coin"], "error": f"{type(exc).__name__}: {exc}"})
+            log.error(f"[EXPAND] {o['product_id']} refused: {exc}")
+
+    return {"created": len(created), "branches": created, "failed": failed, "plan": plan,
+            "detail": (f"{len(created)} opened, {len(failed)} refused. Refusals carry the "
+                       f"bot's own reason. Branches before a failure exist; those after "
+                       f"it do not.")}

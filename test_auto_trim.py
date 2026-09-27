@@ -275,3 +275,18 @@ def test_defaults_are_bounded():
     assert 0 < at.BUFFER_PCT < at.LIMIT_PCT
     assert 0 < at.MAX_POSITION_SHARE_PCT < 100
     assert at.COOLDOWN_HOURS > 0
+
+
+def test_whitespace_and_case_are_forgiven_but_nothing_else_is():
+    """Found by an audit: the docstring claimed " Arm " observes. It arms.
+
+    The behaviour is right - an invisible trailing space on a Railway
+    variable is an accident, and a guard that silently fails to arm on one
+    leaves the operator believing protection is running. The DOCUMENTATION
+    was wrong, and was corrected to match. This test pins the real rule so
+    the two cannot drift again.
+    """
+    for armed in (" arm", "arm ", " Arm ", "\tARM\n", "aRm"):
+        assert at.normalise_mode(armed) == at.MODE_ARM, repr(armed)
+    for observe in ("a rm", "arms", "arm!", "rearm", "arm arm", "", "true"):
+        assert at.normalise_mode(observe) == at.MODE_OBSERVE, repr(observe)

@@ -89,10 +89,18 @@ MODES = (MODE_OBSERVE, MODE_ARM)
 def normalise_mode(value) -> str:
     """Anything that is not exactly "arm" observes.
 
-    Deliberately strict. "true", "on", "1", "ARM " with a stray space and
-    None all mean observe, because the cost of reading a malformed setting
-    as permission to sell is unbounded and the cost of reading it as
-    caution is a dashboard that says it is not armed.
+    Deliberately strict: "true", "on", "1", "yes", "armed" and None all
+    mean observe, because the cost of reading a malformed setting as
+    permission to sell is unbounded and the cost of reading it as caution
+    is a dashboard that says it is not armed.
+
+    Surrounding whitespace and case ARE forgiven - " Arm " arms it. That
+    is a deliberate exception and the docstring said the opposite until an
+    audit caught it. A trailing space on a Railway variable is a near
+    universal accident rather than a different intention, and a setting
+    that silently fails to arm because of an invisible character is its
+    own kind of dangerous: the operator believes protection is running.
+    Every NON-whitespace difference still observes.
     """
     if not isinstance(value, str):
         return MODE_OBSERVE
