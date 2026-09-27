@@ -1194,6 +1194,30 @@ async def lifespan(app: FastAPI):
                 log.warning(f"resting stops not started: {type(e).__name__}: {e}")
             except Exception:
                 pass
+        # COIN ADOPTION.
+        #
+        # Puts coin the account already owns under a grid - no purchase,
+        # no sale, bookkeeping only. Same switch shape as the trimmer and
+        # the resting stops: nothing happens unless COIN_ADOPTION_MODE is
+        # exactly "arm". It has no order path at all (asserted by its
+        # tests), it writes at most $1,000 across three coins, and every
+        # branch it creates carries stop_loss_pct_override=0 because an
+        # adopted entry is the price on the day it was adopted, not a
+        # price anyone paid.
+        try:
+            import coin_adoption_worker
+            from database import get_session_factory as _adopt_sf
+            asyncio.create_task(coin_adoption_worker.run_periodically(_adopt_sf))
+            try:
+                log.info(f"🌱 Coin adoption running, mode={coin_adoption_worker.current_mode()}")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                log.warning(f"coin adoption not started: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+
         # THE GROWTH LEDGER.
         #
         # Writes one reading of every capital KPI on a fixed interval, so

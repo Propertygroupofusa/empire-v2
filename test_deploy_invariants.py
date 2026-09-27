@@ -263,7 +263,8 @@ def test_every_background_worker_is_registered_exactly_once():
     account. A worker imported zero times is the /auto-trim failure: the
     module had tests, the route existed, and nothing ever started it."""
     src = open("main.py").read()
-    for worker in ("auto_trim_worker", "resting_stops_worker", "growth_ledger_worker"):
+    for worker in ("auto_trim_worker", "resting_stops_worker", "growth_ledger_worker",
+                   "coin_adoption_worker"):
         starts = src.count(f"{worker}.run_periodically(")
         assert starts == 1, f"{worker} started {starts} times in main.py"
 
@@ -308,8 +309,8 @@ def test_the_adoption_panel_only_reads_fields_the_endpoint_sends():
         [{"asset": "XLM", "units": 2641.0, "price": 0.2129, "usd": 562.34}],
         account_total_usd=11418.75, claimed_products=())
     produced = set(p) | {"notes", "account_total_usd", "coin_usd", "cash_usd",
-                         "claimed_products", "is_armed", "arming",
-                         "served_from_cache", "cache_age_seconds"}
+                         "claimed_products", "is_armed", "arming", "mode", "worker",
+                         "adopted_stop_pct", "served_from_cache", "cache_age_seconds"}
     read = _panel_fields("loadAdoption")
     assert read, "found no field reads - the slice is wrong, not the panel"
     assert read <= produced, read - produced

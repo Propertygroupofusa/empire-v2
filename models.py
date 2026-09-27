@@ -1040,6 +1040,18 @@ class CryptoGridBranch(Base):
     # moment that same branch's real recent trades improve. Nullable so an
     # existing row (created before this column existed) reads back NULL
     # and is treated as "still on the default," not a crash.
+    # THE STOP THIS BRANCH TRADES UNDER, when it must differ from the fleet's.
+    #
+    # Added for adopted branches. The global stop sells any slice whose
+    # price falls 8% below its ENTRY - and an adopted slice's entry is
+    # the price on the day the branch took charge of coin the owner may
+    # have held for a year. An 8% wobble would liquidate a long-term
+    # hold and book it as a "stop_loss" against a cost basis nobody paid.
+    #
+    # NULL means "use the fleet's stop", which is every existing branch,
+    # so this changes nothing for anything already running.
+    stop_loss_pct_override = Column(Float, nullable=True)
+
     self_tuned_multiplier = Column(Float, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -1110,6 +1122,15 @@ class CryptoGridSlice(Base):
     # every slice opened before this column existed genuinely has no
     # decision price, and a backfilled guess would be worse than a gap.
     entry_expected_price = Column(Float, nullable=True)
+
+    # TRUE when this slice was ADOPTED rather than bought.
+    #
+    # Its entry_price is the price on the day the branch took charge of
+    # coin already held, not a price anyone paid, so every P&L figure
+    # derived from it measures the period since adoption and nothing
+    # before. Without this flag the ledger cannot tell the two apart and
+    # a later reader would compute lifetime returns that never happened.
+    adopted = Column(Boolean, nullable=True, default=False)
 
 
 class ShortTermSignal(Base):

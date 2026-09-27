@@ -5376,21 +5376,51 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     # days, "did price fall 8% below a given entry within a week" fired on
     # 0.0% of BTC entries and 54.0% of BONK's. The same stop was decorative
     # on one coin and a coin-flip that pays a fee each time on another.
-    _stop_pct = GRID_STOP_LOSS_PCT
-    try:
-        import adaptive_stop
-        _resolved = adaptive_stop.resolve(branch.product_id, GRID_STOP_LOSS_PCT, _stop_vol)
-        _stop_pct = _resolved["stop_pct"]
-        if _resolved["source"] != "fixed":
-            log.info(f"[GRID] {branch.bot_name}: stop - {_resolved['reason']}")
+    #
+    # A BRANCH MAY NAME ITS OWN STOP, and when it does nothing else runs.
+    #
+    # Built for adopted branches. The fleet stop sells any slice whose
+    # price falls 8% below its ENTRY - and an adopted slice's entry is
+    # the price on the day the branch took charge of coin the owner may
+    # have held for a year. An 8% wobble would liquidate a long-term hold
+    # and book it as a stop_loss against a cost basis nobody ever paid.
+    #
+    # stop_loss_pct_override is NULL on every branch that existed before
+    # this, so their behaviour is byte-identical to before - the adaptive
+    # block below still runs for them exactly as it did.
+    _override = getattr(branch, "stop_loss_pct_override", None)
+    if _override is not None:
+        try:
+            _stop_pct = float(_override)
+        except (TypeError, ValueError):
+            _stop_pct = GRID_STOP_LOSS_PCT
+            _override = None
+    if _override is not None:
         if _stop_pct == 0 and slices:
-            log.warning(f"[GRID] {branch.bot_name}: 🚨 NO STOP - {_resolved['reason']}")
-    except Exception as exc:
-        # Keep the configured stop. An error here must never be the thing
-        # that leaves an open slice without a downside trigger.
-        log.warning(f"[GRID] {branch.bot_name}: adaptive stop unavailable ({exc}) - "
-                    f"keeping the {GRID_STOP_LOSS_PCT * 100:.1f}% fixed stop")
+            log.warning(
+                f"[GRID] {branch.bot_name}: 🚨 NO GRID STOP - this branch names its own stop "
+                f"of 0. Adopted coin is covered at the portfolio level by the resting stops, "
+                f"not by an 8% trigger measured from the day it was adopted.")
+        else:
+            log.info(f"[GRID] {branch.bot_name}: stop - branch override "
+                     f"{_stop_pct * 100:.1f}%")
+        _resolved = None
+    else:
         _stop_pct = GRID_STOP_LOSS_PCT
+        try:
+            import adaptive_stop
+            _resolved = adaptive_stop.resolve(branch.product_id, GRID_STOP_LOSS_PCT, _stop_vol)
+            _stop_pct = _resolved["stop_pct"]
+            if _resolved["source"] != "fixed":
+                log.info(f"[GRID] {branch.bot_name}: stop - {_resolved['reason']}")
+            if _stop_pct == 0 and slices:
+                log.warning(f"[GRID] {branch.bot_name}: 🚨 NO STOP - {_resolved['reason']}")
+        except Exception as exc:
+            # Keep the configured stop. An error here must never be the
+            # thing that leaves an open slice without a downside trigger.
+            log.warning(f"[GRID] {branch.bot_name}: adaptive stop unavailable ({exc}) - "
+                        f"keeping the {GRID_STOP_LOSS_PCT * 100:.1f}% fixed stop")
+            _stop_pct = GRID_STOP_LOSS_PCT
 
     _stop_slice = None
     if _stop_pct > 0 and slices:

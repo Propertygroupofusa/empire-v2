@@ -10477,12 +10477,32 @@ async def coin_adoption_preview(fresh: int = 0):
     out["coin_usd"] = census.get("coin_usd")
     out["cash_usd"] = census.get("cash_usd")
     out["claimed_products"] = sorted(set(str(c) for c in claimed))
-    out["is_armed"] = False
+    try:
+        import coin_adoption_worker as _adopt
+        out["mode"] = _adopt.current_mode()
+        out["is_armed"] = _adopt.is_armed()
+        hb = dict(_adopt.HEARTBEAT)
+        if not hb.get("started_at"):
+            hb["verdict"] = "the loop has not started in this process"
+        elif not hb.get("last_pass_at"):
+            hb["verdict"] = "the loop started but has not finished a pass yet"
+        else:
+            hb["verdict"] = (f"{hb.get('passes')} pass(es), {hb.get('adopted')} coin(s) "
+                             f"adopted, last finished {hb['last_pass_at']}")
+        out["worker"] = hb
+        out["adopted_stop_pct"] = _adopt.ADOPTED_STOP_PCT
+    except Exception as exc:
+        out["mode"] = "unknown"
+        out["is_armed"] = False
+        out["worker"] = {"verdict": f"worker unreadable ({type(exc).__name__})"}
     out["arming"] = (
-        "There is no arm switch for adoption yet. The planner ships first and the executor "
-        "ships disarmed after it, the same way the trimmer and the resting stops did - a "
-        "loop that writes slices against real holdings is not something to turn on in the "
-        "same hour it was written.")
+        f"Adoption is armed by COIN_ADOPTION_MODE=arm in Railway, and is currently "
+        f"'{out.get('mode')}'. There is no arm button on this page on purpose: handing real "
+        f"holdings to a trading loop should take more than a click on a page anyone with the "
+        f"URL can open. Every branch it creates carries a stop override of "
+        f"{out.get('adopted_stop_pct')} - an adopted entry is the price on the day it was "
+        f"adopted, not a price anyone paid, so an 8% wobble must not liquidate a long-term "
+        f"hold. Those coins stay covered at the portfolio level by the resting stops.")
     out["served_from_cache"] = False
     out["cache_age_seconds"] = 0
     _ADOPTION_CACHE["at"] = _time.time()
