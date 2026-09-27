@@ -53,11 +53,17 @@ FIELDS = (
     "coin_usd", "cash_usd",
     "outside_any_branch_pct", "idle_capital_pct", "capital_velocity",
     "branch_count", "open_slices",
+    # How many of the venue's assets the census could actually price when
+    # this reading was taken. A total computed over fewer priced assets
+    # is a SMALLER total for a reporting reason, and drawing that as a
+    # fall invents money leaving the account.
+    "assets_unpriced",
 )
 
 # Fields that come from the census rather than the KPI payload, and so are
 # passed in explicitly. Named here so a test can hold the boundary.
-NON_KPI_FIELDS = ("claimed_usd", "branch_count", "open_slices", "coin_usd", "cash_usd")
+NON_KPI_FIELDS = ("claimed_usd", "branch_count", "open_slices", "coin_usd", "cash_usd",
+                  "assets_unpriced")
 
 
 def _num(v):
@@ -89,7 +95,8 @@ def rows(snapshots):
         at = _at(s)
         if at is None:
             continue
-        r = {"captured_at": at, "bottleneck": s.get("bottleneck"), "note": s.get("note")}
+        r = {"captured_at": at, "bottleneck": s.get("bottleneck"), "note": s.get("note"),
+             "census_carried": s.get("census_carried")}
         for f in FIELDS:
             r[f] = _num(s.get(f))
         out.append(r)
@@ -98,8 +105,8 @@ def rows(snapshots):
 
 
 def from_kpis(kpis, *, claimed_usd=None, branch_count=None, open_slices=None,
-              coin_usd=None, cash_usd=None,
-              bottleneck=None, note=None, captured_at=None):
+              coin_usd=None, cash_usd=None, assets_unpriced=None,
+              census_carried=None, bottleneck=None, note=None, captured_at=None):
     """One reading, built from a KPI payload. The worker's only shaping
     step, kept here so a renamed KPI key breaks a test rather than
     silently writing a column of NULLs for a month."""
@@ -118,6 +125,10 @@ def from_kpis(kpis, *, claimed_usd=None, branch_count=None, open_slices=None,
         row["coin_usd"] = _num(coin_usd)
     if cash_usd is not None:
         row["cash_usd"] = _num(cash_usd)
+    if assets_unpriced is not None:
+        row["assets_unpriced"] = _num(assets_unpriced)
+    # Not a FIELD: it describes the reading, not the account.
+    row["census_carried"] = bool(census_carried) if census_carried is not None else None
     return row
 
 
@@ -165,12 +176,24 @@ def delta(snapshots, field, *, hours=24.0, min_window_minutes=MIN_WINDOW_MINUTES
 
 
 def integrity(snapshots):
-    """Readings that fell in a field that cannot fall.
+    """Readings that fell in a field that cannot fall, and gaps by KIND.
 
     Realised P&L and the trade count only accumulate. A drop is a ledger
     being rewritten, a database being restored, or a failed read stored
     as a number - and each of those is a reason to distrust a chart
     rather than to draw a loss on it.
+
+    TWO KINDS OF GAP, AND THEY ARE NOT THE SAME FACT.
+
+    The panel reported "8 field(s) could not be read" and every one of
+    them was coin_usd or cash_usd in the first four readings - rows
+    written before those columns existed at all. Nothing failed. Calling
+    that an unreadable field sends someone hunting a bug that is really
+    just a column younger than the series.
+
+    So a null in a contiguous PREFIX, before the field has ever appeared,
+    is NOT_YET_RECORDED. A null after the field has appeared at least
+    once is a real failed read, and only those count against trust.
     """
     rs = rows(snapshots)
     problems = []
@@ -184,9 +207,45 @@ def integrity(snapshots):
                 problems.append({"field": f, "at": r["captured_at"].isoformat(),
                                  "fell_from": prev, "to": v})
             prev = max(prev, v) if prev is not None else v
-    gaps = sum(1 for r in rs for f in FIELDS if r.get(f) is None)
-    return {"monotonic_breaks": problems, "null_fields": gaps,
-            "trustworthy": not problems}
+
+    not_yet, unreadable = {}, {}
+    for f in FIELDS:
+        seen = False
+        for r in rs:
+            if r.get(f) is not None:
+                seen = True
+                continue
+            if seen:
+                unreadable[f] = unreadable.get(f, 0) + 1
+            else:
+                not_yet[f] = not_yet.get(f, 0) + 1
+
+    # Carried-forward readings are measurements of an EARLIER moment.
+    # The census refreshes hourly while snapshots run every 15 minutes,
+    # so two of every three account figures are the previous value shown
+    # again - and a chart that draws them as fresh points renders a
+    # staircase the account never walked.
+    carried = sum(1 for r in rs if r.get("census_carried") is True)
+
+    return {
+        "monotonic_breaks": problems,
+        "null_fields": sum(unreadable.values()),
+        "not_yet_recorded": not_yet,
+        "not_yet_recorded_count": sum(not_yet.values()),
+        "unreadable_by_field": unreadable,
+        "carried_forward_readings": carried,
+        "gap_note": (
+            (f"{sum(not_yet.values())} gap(s) are fields that did not exist when those "
+             f"readings were written ({', '.join(sorted(not_yet))}), not fields that failed. "
+             if not_yet else "")
+            + (f"{sum(unreadable.values())} field(s) genuinely could not be read."
+               if unreadable else "Nothing failed to read.")
+            + (f" {carried} reading(s) carry an account total measured earlier and shown "
+               f"again - the census refreshes on its own slower clock, so those points are "
+               f"repeats, not fresh measurements."
+               if carried else "")),
+        "trustworthy": not problems,
+    }
 
 
 def summarise(snapshots, *, hours=24.0):
@@ -247,7 +306,8 @@ def summarise(snapshots, *, hours=24.0):
         "series": [
             {"at": r["captured_at"].isoformat(),
              **{f: r[f] for f in FIELDS},
-             "bottleneck": r.get("bottleneck")}
+             "bottleneck": r.get("bottleneck"),
+             "census_carried": r.get("census_carried")}
             for r in rs
         ],
         "headline": _headline(rs, earned, placed, len(rs)),

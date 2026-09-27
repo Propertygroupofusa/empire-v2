@@ -233,7 +233,8 @@ def test_the_growth_curve_panel_only_reads_fields_the_endpoint_sends():
     from datetime import datetime, timedelta
     t0 = datetime(2026, 9, 27)
     snaps = [{"captured_at": t0 + timedelta(hours=i), "bottleneck": "CAPITAL_OUTSIDE",
-              "note": None, **{f: 1.0 for f in growth_ledger.FIELDS}} for i in range(3)]
+              "note": None, "census_carried": False,
+              **{f: 1.0 for f in growth_ledger.FIELDS}} for i in range(3)]
     produced = set(growth_ledger.summarise(snaps))
     produced |= set(growth_ledger.summarise([]))          # the no-readings shape
     produced |= {"recorder", "is_a_measurement_not_a_change", "what_happens_next"}

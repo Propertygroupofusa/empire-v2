@@ -51,7 +51,8 @@ CENSUS_EVERY_SECONDS = int(os.getenv("GROWTH_CENSUS_SECONDS", "3600"))
 # months, and an unbounded table on a small instance is its own outage.
 RETAIN_DAYS = int(os.getenv("GROWTH_SNAPSHOT_RETAIN_DAYS", "45"))
 
-_last_census = {"at": None, "total_usd": None, "coin_usd": None, "cash_usd": None}
+_last_census = {"at": None, "total_usd": None, "coin_usd": None, "cash_usd": None,
+                "assets_unpriced": None}
 
 
 def interval_seconds() -> int:
@@ -85,7 +86,8 @@ async def _account_total(now):
              and (now - last_at).total_seconds() < CENSUS_EVERY_SECONDS)
     if fresh:
         age_m = (now - last_at).total_seconds() / 60.0
-        return (_last_census, f"account figures carried forward, {age_m:.0f}m old")
+        return (dict(_last_census, carried=True),
+                f"account figures carried forward, {age_m:.0f}m old")
 
     try:
         import aiohttp
@@ -97,13 +99,14 @@ async def _account_total(now):
             _last_census["total_usd"] = census.get("total_usd")
             _last_census["coin_usd"] = census.get("coin_usd")
             _last_census["cash_usd"] = census.get("cash_usd")
-            return _last_census, None
+            _last_census["assets_unpriced"] = census.get("assets_unpriced")
+            return dict(_last_census, carried=False), None
         err = str(census.get("error") or "unknown")
         # Keep the previous figures rather than blanking the series over a
         # rate limit, and mark the row so a flat stretch is explainable.
-        return _last_census, f"census unavailable ({err[:60]})"
+        return dict(_last_census, carried=True), f"census unavailable ({err[:60]})"
     except Exception as exc:
-        return _last_census, f"census failed ({type(exc).__name__})"
+        return dict(_last_census, carried=True), f"census failed ({type(exc).__name__})"
 
 
 async def check_once(session_factory):
@@ -143,6 +146,8 @@ async def check_once(session_factory):
     total = (acct or {}).get("total_usd")
     coin_usd = (acct or {}).get("coin_usd")
     cash_usd = (acct or {}).get("cash_usd")
+    unpriced = (acct or {}).get("assets_unpriced")
+    carried = (acct or {}).get("carried")
     if census_note:
         notes.append(census_note)
 
@@ -153,6 +158,7 @@ async def check_once(session_factory):
     row = growth_ledger.from_kpis(
         k, claimed_usd=claimed, branch_count=branch_count,
         open_slices=open_slices, coin_usd=coin_usd, cash_usd=cash_usd,
+        assets_unpriced=unpriced, census_carried=carried,
         bottleneck=cause, note="; ".join(notes) or None, captured_at=now)
 
     # The standings, recorded in the same pass. A league table says who is
@@ -168,6 +174,7 @@ async def check_once(session_factory):
             "captured_at": row["captured_at"],
             "bottleneck": row["bottleneck"],
             "note": row["note"],
+            "census_carried": row.get("census_carried"),
             **{f: row[f] for f in growth_ledger.FIELDS},
         }))
         for lr in league_rows:

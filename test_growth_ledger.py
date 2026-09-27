@@ -23,7 +23,8 @@ def snap(minutes, **over):
          "account_total_usd": 11418.75, "coin_usd": 10526.39, "cash_usd": 892.36,
          "outside_any_branch_pct": 90.92,
          "idle_capital_pct": 86.18, "capital_velocity": 10.495,
-         "branch_count": 6, "open_slices": 6, "bottleneck": "CAPITAL_OUTSIDE"}
+         "branch_count": 6, "open_slices": 6, "assets_unpriced": 3,
+         "census_carried": False, "bottleneck": "CAPITAL_OUTSIDE"}
     r.update(over)
     return r
 
@@ -156,9 +157,48 @@ def test_a_clean_series_is_trustworthy():
     assert gl.integrity(rows)["trustworthy"] is True
 
 
-def test_nulls_are_counted_so_a_thin_chart_can_be_explained():
-    rows = [snap(0, account_total_usd=None, capital_velocity=None), snap(60)]
-    assert gl.integrity(rows)["null_fields"] == 2
+def test_a_field_younger_than_the_series_is_not_a_failed_read():
+    """The panel said "8 field(s) could not be read" and all eight were
+    coin_usd/cash_usd in the first four readings - rows written before
+    those columns existed. Nothing failed. Calling it unreadable sends
+    someone hunting a bug that is a column younger than the series."""
+    rows = [snap(0, coin_usd=None, cash_usd=None),
+            snap(30, coin_usd=None, cash_usd=None),
+            snap(60), snap(90)]
+    i = gl.integrity(rows)
+    assert i["null_fields"] == 0                     # nothing FAILED
+    assert i["not_yet_recorded_count"] == 4
+    assert set(i["not_yet_recorded"]) == {"coin_usd", "cash_usd"}
+    assert "did not exist when those readings were written" in i["gap_note"]
+
+
+def test_a_gap_after_the_field_has_appeared_is_a_real_failed_read():
+    rows = [snap(0), snap(30, account_total_usd=None), snap(60)]
+    i = gl.integrity(rows)
+    assert i["null_fields"] == 1
+    assert i["unreadable_by_field"] == {"account_total_usd": 1}
+    assert i["not_yet_recorded_count"] == 0
+
+
+def test_carried_forward_readings_are_counted_as_repeats():
+    """The census refreshes hourly while snapshots run every 15 minutes,
+    so two of every three account figures are the previous value shown
+    again - a chart that draws them fresh renders a staircase the
+    account never walked."""
+    rows = [snap(0, census_carried=False), snap(15, census_carried=True),
+            snap(30, census_carried=True), snap(45, census_carried=False)]
+    i = gl.integrity(rows)
+    assert i["carried_forward_readings"] == 2
+    assert "repeats, not fresh measurements" in i["gap_note"]
+
+
+def test_a_reading_that_priced_fewer_assets_is_recorded_not_hidden():
+    """A total over fewer priced assets is smaller for a REPORTING
+    reason. Drawing that as a fall invents money leaving the account."""
+    rows = [snap(0, assets_unpriced=3), snap(60, assets_unpriced=5)]
+    d = gl.delta(rows, "assets_unpriced")
+    assert d["change"] == 2
+    assert "assets_unpriced" in gl.FIELDS
 
 
 # -------------------------------------------- the cause over time

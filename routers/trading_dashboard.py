@@ -10155,6 +10155,7 @@ async def growth_curve(hours: float = 24.0, limit: int = 500):
                             detail=f"snapshot table unreadable: {type(exc).__name__}")
 
     snaps = [{"captured_at": r.captured_at, "bottleneck": r.bottleneck, "note": r.note,
+              "census_carried": getattr(r, "census_carried", None),
               **{f: getattr(r, f, None) for f in growth_ledger.FIELDS}} for r in rows]
 
     out = growth_ledger.summarise(snaps, hours=float(hours or 24.0))

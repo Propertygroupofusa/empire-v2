@@ -2629,6 +2629,19 @@ class CapitalKpiSnapshot(Base):
     # series at once, instead of a flat total that explains nothing.
     coin_usd = Column(Float, nullable=True)
     cash_usd = Column(Float, nullable=True)
+
+    # How many venue assets the census could NOT price when this reading
+    # was taken. A total computed over fewer priced assets is a smaller
+    # total for a reporting reason; drawing that as a fall invents money
+    # leaving the account.
+    assets_unpriced = Column(Integer, nullable=True)
+
+    # TRUE when the account figures are a repeat of an earlier census
+    # rather than a fresh one. The census runs on its own slower clock,
+    # so most readings carry the previous total forward - and a chart
+    # that draws those as fresh points renders a staircase the account
+    # never walked.
+    census_carried = Column(Boolean, nullable=True)
     outside_any_branch_pct = Column(Float, nullable=True)
     idle_capital_pct = Column(Float, nullable=True)
 

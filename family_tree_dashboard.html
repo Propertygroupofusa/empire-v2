@@ -8107,6 +8107,9 @@ function sparkline(points, opts) {
             stroke="var(--border,#8884)" stroke-width="1" fill="none"/>
       ${segs.map(sg => `<polyline points="${sg.join(' ')}" fill="none"
             stroke="${opts.colour}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`).join('')}
+      ${points.filter(p => p.v != null && p.carried).map(p =>
+        `<circle cx="${x(p).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="2.5" fill="none"
+                 stroke="${opts.colour}" stroke-width="1.5" opacity="0.55"/>`).join('')}
       <circle cx="${x(last).toFixed(1)}" cy="${y(last.v).toFixed(1)}" r="4" fill="${opts.colour}"/>
       <text x="${PAD_L}" y="${(PAD_T - 2).toFixed(1)}" font-size="9" fill="var(--text-dim)">${esc2(opts.fmt(hi))}</text>
       <text x="${PAD_L}" y="${(H - 6).toFixed(1)}" font-size="9" fill="var(--text-dim)">${esc2(opts.fmt(lo))}</text>
@@ -8135,7 +8138,9 @@ async function loadGrowthCurve(hours) {
         }
 
         const series = d.series || [];
-        const pt = f => series.map(s => ({t: Date.parse(s.at), v: s[f]}));
+        const pt = f => series.map(s => ({t: Date.parse(s.at), v: s[f],
+            carried: (f === 'account_total_usd' || f === 'coin_usd' || f === 'cash_usd')
+                     && s.census_carried === true}));
         const chg = k => {
             const c = d[k];
             if (!c) return `<span style="color:${dim}">—</span>`;
@@ -8197,7 +8202,7 @@ async function loadGrowthCurve(hours) {
             <div style="flex:1 1 300px">
               <div style="font-size:0.72em;letter-spacing:.12em;text-transform:uppercase;color:${dim}">Account, whole</div>
               ${sparkline(pt('account_total_usd'), {label: 'Whole account value', colour: 'var(--text,#888)', fmt: money})}
-              <div style="font-size:0.78em;color:${dim}">coin plus cash, priced at the venue</div>
+              <div style="font-size:0.78em;color:${dim}">coin plus cash, priced at the venue${(d.integrity||{}).carried_forward_readings ? ' · ' + (d.integrity.carried_forward_readings) + ' of ' + (d.series||[]).length + ' points are repeats of an earlier census' : ''}</div>
             </div>
           </div>
 
@@ -8207,7 +8212,7 @@ async function loadGrowthCurve(hours) {
             ${d.bottleneck_changed
               ? `It CHANGED across this series: ${esc2(d.bottleneck_first||'—')} → <strong>${esc2(d.bottleneck_now||'—')}</strong>. A different binding cause means a different fix applies now.`
               : `Unchanged across every reading: <strong>${esc2(d.bottleneck_now||'—')}</strong>. The numbers may move, but the thing limiting them has not.`}
-            ${integ.null_fields ? `<br><br><span style="color:${dim}">${integ.null_fields} field(s) across the series could not be read and are drawn as breaks in the line, not as zeroes.</span>` : ''}
+            ${integ.gap_note ? `<br><br><span style="color:${dim}">${esc2(integ.gap_note)}${integ.null_fields ? ' Those are drawn as breaks in the line, never as zeroes.' : ''}${integ.carried_forward_readings ? ' Repeated points are drawn hollow so a carried figure never reads as a fresh measurement.' : ''}</span>` : ''}
           </div>`;
     } catch (e) {
         wrap.innerHTML = '<div class="coin-history-empty">Could not read it: ' + e.message + '</div>';
