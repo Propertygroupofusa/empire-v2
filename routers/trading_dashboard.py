@@ -9523,7 +9523,13 @@ async def resting_stops_preview():
     except ImportError as exc:
         raise HTTPException(status_code=503, detail=f"resting stops unavailable: {exc}")
 
-    watch = await _cached_watch(30) if "_cached_watch" in globals() else None
+    # _cached_watch is SYNCHRONOUS. Awaiting it raises, which is what made
+    # this endpoint 500 on every call from the moment it shipped - caught
+    # only because it was called before telling the owner to arm it. The
+    # `in globals()` guard was noise too: a module-level def is always
+    # there, so it never protected anything and only made the mistake
+    # look considered.
+    watch = _cached_watch(30)
     if not watch:
         watch = await get_holdings_watch(window_days=30)
 

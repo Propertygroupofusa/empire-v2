@@ -118,3 +118,50 @@ def test_no_two_endpoints_end_with_the_same_cache_epilogue():
     n = src.count(line)
     assert n <= 1 or src.count('_AUTO_TRIM_CACHE["at"] = _time.time()') == 1, (
         f"{line} appears {n} times with no unique neighbouring anchor")
+
+
+def test_no_endpoint_awaits_a_synchronous_helper():
+    """/resting-stops 500'd on every call from the moment it shipped.
+
+    `_cached_watch` is a plain def returning a dict or None, and the new
+    endpoint wrote `await _cached_watch(30)`. Awaiting a dict raises, so
+    the route was dead on arrival - and the module behind it had 62
+    passing tests, because the tests exercised the MODULE and nobody ever
+    called the ROUTE.
+
+    This walks the router for awaits of helpers defined without `async`,
+    which is the class of mistake rather than the one instance.
+    """
+    src = open("routers/trading_dashboard.py").read()
+    tree = ast.parse(src)
+
+    sync_defs = {n.name for n in ast.walk(tree)
+                 if isinstance(n, ast.FunctionDef)}
+    async_defs = {n.name for n in ast.walk(tree)
+                  if isinstance(n, ast.AsyncFunctionDef)}
+    sync_only = sync_defs - async_defs
+
+    offenders = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Await) and isinstance(node.value, ast.Call):
+            f = node.value.func
+            name = f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)
+            if name in sync_only:
+                offenders.append(name)
+    assert not offenders, f"awaiting synchronous helper(s): {sorted(set(offenders))}"
+
+
+def test_every_new_route_is_registered_exactly_once():
+    """A duplicated @router.get path silently shadows the first handler."""
+    src = open("routers/trading_dashboard.py").read()
+    tree = ast.parse(src)
+    paths = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            for d in node.decorator_list:
+                if (isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)
+                        and d.func.attr in ("get", "post", "put", "delete")
+                        and d.args and isinstance(d.args[0], ast.Constant)):
+                    paths.append((d.func.attr, d.args[0].value))
+    dupes = {p for p in paths if paths.count(p) > 1}
+    assert not dupes, f"duplicate routes shadow each other: {sorted(dupes)}"
