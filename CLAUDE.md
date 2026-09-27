@@ -13484,6 +13484,54 @@ acting on.
 `CoinLeagueSnapshot` records the standings every pass, because a league
 says who is winning and only a series says who is **climbing**.
 
+## The losses, and why zero is the wrong target
+
+A grid that never sells at a loss already exists - it is called holding.
+`_pick_profitable_slice_to_sell` already refuses to force a losing sale,
+so the ONLY thing that books a loss is the stop. Switch it off and a
+slice that falls 40% is held forever instead: the loss stops being
+counted and starts being **inventory**, which is how a 0.9% step took
+this fleet from +65.4% to -71.1%.
+
+`loss_study.py` measures the reachable goal instead - small average loss
+against a large average win - and refuses the stop comparison below 25
+trades carrying a recorded excursion (today: **2 of 84**, since `mae_pct`
+landed on 2026-09-26).
+
+**The live read, and the split that decided it:** 19 losses, $7.27, two
+of them over 2x the average win (worst -$2.27 and -$1.00, both DOGE; WIF
+took two more of the worst five). **All 19 predate the 2026-09-26 config
+change.** Those DOGE trades are the ones named in
+`_pick_profitable_slice_to_sell`'s own docstring - the bug it was written
+to fix. The worst loss in the whole book is -4.57% against an 8% stop, so
+**the stop has never once fired**. Tightening it would have cost money on
+every future trade and fixed nothing.
+
+## Do not rotate the branches back - the new coins are winning
+
+At one point this session I wrote that the fleet had been "rotated off
+the coins that were working", comparing 82 retired trades against 2
+current ones. **That was 26 days against 27 hours.** At the fleet's own
+3.06 trades/day, ~3.5 were expected in that window and 2 arrived. Normal
+variance, not failure.
+
+Then the real numbers landed:
+
+| config | trades | net | net % per trade |
+|---|---|---|---|
+| retired (DOGE, ETH, STX…) | 82 | $19.55 | 1.308% |
+| **current (BTC, NEAR, BONK…)** | **2** | **$4.91** | **6.448%** |
+
+The current configuration is earning **4.9x the edge per trade and 10.3x
+the dollars per trade**, on a tiny sample. And the short-term pipeline
+unblocked itself in the same window - from 1,715 scans / **0 qualified**
+to 1,766 / **3 qualified**, 9 filled, 2 round trips completed,
+"Bottleneck: none".
+
+Putting the branches back on the old coins would be undoing the change
+that is working, on 27 hours of data, which is the exact mistake the repo
+already paid for on 2026-09-25.
+
 ## Endpoints added
 
 `/capital-kpis` - `/growth-curve` - `/capital-placement` - `/beta-check`
