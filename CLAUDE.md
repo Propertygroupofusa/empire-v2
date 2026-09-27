@@ -13325,6 +13325,139 @@ This fix only stops the next oversized entry from being opened.
 
 ---
 
+# THE CAPITAL STACK - why the profit is that size, 2026-09-27
+
+Built after the account owner asked, repeatedly, why $11,400 was
+producing $19.61. The answer was not a strategy problem, and every tool
+below exists to stop that question being answered wrongly again.
+
+## The finding, in one line
+
+The edge is real and it is being applied to almost nothing.
+
+| | |
+|---|---|
+| net edge per trade, after fees | **+$0.2363** |
+| profit factor | **3.70** (avg win $0.4267, avg loss $0.3826) |
+| win rate / worst drawdown | 75.9% over 83 trades / **-$3.34** |
+| coin actually deployed in branches | **$143.11** |
+| unallocated cash inside the bot | **$892.30** (86.2% idle) |
+| belongs to no branch | **$10,794.12 - 94.5% of the account** |
+
+`bottleneck()` returns `CAPITAL_OUTSIDE`. Not `NO_EDGE`. The distinction
+decides everything: a strategy fix would be wasted work.
+
+## The modules, and what each refuses to do
+
+- **`capital_kpis.py`** - the eleven figures plus one ranked cause
+  (NOT_TRADING / TOO_EARLY / NO_EDGE / CAPITAL_OUTSIDE / CAPITAL_IDLE /
+  LOW_VELOCITY / HEALTHY). A negative edge outranks every placement
+  problem, because more capital and more velocity both SCALE a loss.
+  Refuses a rate below `MIN_TRADES_FOR_RATE` **and** `MIN_SPAN_DAYS` -
+  40 trades in one hour reported 960/day, and a zero span 3e10.
+- **`growth_ledger.py` + `CapitalKpiSnapshot`** - one reading every 15
+  minutes, because "is it growing?" needs two points and nothing was
+  writing down where the numbers had been. EARNED and PLACED are drawn
+  apart and never added. A failed read stores NULL and breaks the line;
+  an unread census drawn at $0.00 is a crash that never happened.
+- **`capital_placement.py`** - the four levers on the $10,794, each open
+  or with its blocker named. Refuses all four at once on a negative edge.
+- **`beta_check.py`** - did the strategy earn it, or did the coin go up?
+- **`coin_adoption.py`** - planner for putting held coin under a grid.
+
+## Three things I got wrong here, recorded so they are not repeated
+
+1. **$137.03 per $1,000 deployed is not a 13.7% return.** Cumulative
+   profit over a point-in-time denominator; deployed capital moved
+   between $159 and $553 across those 27 days. It ships with that stated
+   on the number.
+2. **COMPOUND_REALIZED was never a lever.** `run_grid_branch_cycle` does
+   `allocated_usd += pnl` on every FIFO sell - compounding has been
+   running the whole time and the $19.61 is already inside the $553.89
+   claimed. Acting on it would have deployed the same profit twice:
+   claims up, backing flat, which is an unbacked branch by definition.
+   `already_compounded_usd` defaults to `None` meaning *assume
+   compounded*, because absent evidence the safe reading is that the
+   loop did its job.
+3. **Adoption sized from a holding's full USD value** and produced 1,878
+   XLM out of an available 100 - a branch believing it owns units a
+   resting stop had locked. It sizes from AVAILABLE now.
+
+## ADAPTIVE_FLEET_STAGES has an ordering contradiction - do not "fix" it blind
+
+`evaluate_adaptive_fleet_stages` walks the tuple in order and one unmet
+gate sets `sequence_blocked`, so every LATER stage reads
+`waiting_for_prior_stage`. SOL sits third with a $688 gate against
+$19.61 realised, and behind it sit DOGE, XRP, LINK, AVAX, DOT - **whose
+own gates are $0.00**. Five coins that require no profit wait for profit
+because of where they appear in a tuple, while the auto-deployer's own
+sizing comment plans for exactly those seven $0-gate coins to deploy
+("7 x $70 = $490"). The comment and the loop disagree.
+
+**It was left alone on purpose.** `test_adaptive_fleet` has an explicit
+test asserting the blocking, so it is deliberate, not a slip - and
+unfreezing opens NOTHING today: every frozen coin is then refused on its
+own measured edge (DOGE -23.8%, XRP -12.8%, LINK -12.6%, DOT -10.9%,
+AVAX +11.1%, all under the 20% gate). Fixing it would change a false
+reason into a true one and add no branches. Changing live capital
+deployment on a reading of a comment is the owner's call.
+
+## The evidence asymmetry - the most reusable idea in this repo
+
+Measured over 21 days on three coins:
+
+| coin | window | best rung |
+|---|---|---|
+| BONK | **+19.27%** | 3.0%@72h -> +0.88% |
+| ONDO | **+16.52%** | positive |
+| BTC | **-2.61%** | **every rung, every target, every horizon negative** |
+
+BTC's widest rung filled 0% of the time and returned exactly the window
+return, marking a leg that never opened. Two rose and it won; one fell
+and it lost everywhere. That is beta wearing a strategy's name.
+
+So:
+
+- **A NEGATIVE result in a RISING market is ROBUST.** No regime excuse
+  exists. Six rung configurations are ruled OUT on this basis today.
+- **A POSITIVE result in a rising market proves nothing.** Zero are
+  ruled IN, and none will be until something falls.
+
+Collapsing those two is how a backtest becomes a loss. Every failed
+growth idea in this account had that shape.
+
+## What the whole account says, taken together
+
+Four independent measurements point the same way:
+
+| measurement | tight / fast | wide / slow |
+|---|---|---|
+| grid step | 0.9% -> **-71.1%** | 3.75% -> **+65.4%** |
+| resting rung | 1.0%@6h -> **-1.03%** | 3.0%@72h -> +1.10% (unproven) |
+| horizon to clear cost | 30m -> **8.6%** | 72h -> 96.5% |
+| the 6h gate | passes 4x more | covers only 43.6% |
+
+**Making the numbers tick faster is the one thing the data rules out.**
+The grid already sits in the productive zone - 21.03h average hold,
+75.9% won. Growth comes from capital reaching that edge, not from
+cadence. Which is what the $10,794 line is.
+
+## Endpoints added
+
+`/capital-kpis` - `/growth-curve` - `/capital-placement` - `/beta-check`
+- `/coin-adoption`. All read-only, all cached 180s because a full census
+is ~50 signed requests and the trimmer needs that same allowance. Polling
+them fresh returns a real 429 - I caused one doing exactly that while
+verifying the deploy.
+
+Deploy invariants added: every worker registered exactly once (the
+`/auto-trim` failure was a module with 62 passing tests that nothing ever
+started); `node --check` on every inline dashboard script (one typo kills
+every panel and Python cannot see it); each panel only reads fields its
+endpoint sends; the snapshot writer only sets columns the table has.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md
