@@ -9958,3 +9958,161 @@ async def is_it_growing():
             "the account total. Anything sitting outside a branch earns nothing here "
             "however large it is."),
     }
+
+
+# A census is ~50 signed requests and the trimmer needs that same budget.
+# This panel is a diagnosis, not a tick - a two-minute-old view of where the
+# capital sits is still a correct diagnosis, and polling it fresh would
+# starve the loop that actually places orders.
+_KPI_CACHE = {"at": 0.0, "payload": None}
+_KPI_TTL_SECONDS = 180
+
+
+@router.get("/capital-kpis")
+async def capital_kpis(fresh: int = 0, limit: int = 2000):
+    """Eleven figures that say WHY the profit is small, and one verdict.
+
+    "$19.61 realized" answers one question and hides four. It cannot say
+    whether the figure is small because the edge is thin, because the
+    capital is tiny, because the money sits idle, or because the wins are
+    being given back - and those have four different fixes, only one of
+    which is a strategy change.
+
+    So this reports the account the way a desk would: profit per dollar
+    deployed, how many times that dollar was recycled, what share of it
+    never moved, and what the wins looked like against the losses. Then it
+    names the ONE binding cause rather than listing symptoms, because
+    naming the wrong one sends the next month of work in the wrong
+    direction.
+
+    Read-only. It places nothing and changes nothing.
+    """
+    import time as _time
+    if not fresh and _KPI_CACHE["payload"] is not None:
+        age = _time.time() - _KPI_CACHE["at"]
+        if age < _KPI_TTL_SECONDS:
+            out = dict(_KPI_CACHE["payload"])
+            out["served_from_cache"] = True
+            out["cache_age_seconds"] = round(age, 1)
+            return out
+
+    try:
+        import capital_kpis
+        import account_census
+        import crypto_grid_bot as grid
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"kpis unavailable: {exc}")
+
+    # ---- the real closed book, row by row --------------------------------
+    # Aggregates cannot produce a hold time, a drawdown or a velocity, so
+    # this reads the rows. Unreadable rows are counted by the module, never
+    # guessed at.
+    trades, ledger_note = [], None
+    try:
+        from models import CryptoGridTradeHistory
+        from database import get_session_factory
+        async with get_session_factory()() as db:
+            rows = (await db.execute(
+                select(CryptoGridTradeHistory)
+                .order_by(CryptoGridTradeHistory.closed_at.desc())
+                .limit(max(int(limit or 0), 1)))).scalars().all()
+        trades = [{"pnl": r.pnl, "qty": r.qty, "entry_price": r.entry_price,
+                   "exit_price": r.exit_price, "opened_at": r.opened_at,
+                   "closed_at": r.closed_at, "product_id": r.product_id}
+                  for r in rows]
+    except Exception as exc:
+        ledger_note = (f"the closed book could not be read "
+                       f"({type(exc).__name__}: {exc}), so every figure below is "
+                       f"withheld rather than computed from nothing")
+        log.warning(f"[kpi] ledger unreadable: {type(exc).__name__}: {exc}")
+
+    # ---- where the capital actually is ----------------------------------
+    allocated = free = total = None
+    capital_note = None
+    backing = {}
+    try:
+        st = await grid.get_grid_status()
+        backing = st.get("allocation_backing") or {}
+        # Deployed COIN is the only capital genuinely at work. `claimed_usd`
+        # is an earmark in a database, and an earmark has never earned a
+        # cent - measuring profit per claimed dollar flattered the fleet
+        # every time a branch claimed money it had not spent.
+        allocated = backing.get("deployed_coin_usd")
+        free = backing.get("wallet_cash_usd")
+    except Exception as exc:
+        capital_note = f"grid status unreadable ({type(exc).__name__})"
+        log.warning(f"[kpi] grid status unreadable: {type(exc).__name__}: {exc}")
+
+    census = {}
+    try:
+        async with aiohttp.ClientSession() as session:
+            census = await account_census.census(session, tracked_usd=0.0)
+        if census.get("available"):
+            total = census.get("total_usd")
+        else:
+            err = str(census.get("error") or "")
+            if "429" in err:
+                # Rate limited, not broken. The distinction matters: one is
+                # a fault in the account, the other in how often it was asked.
+                raise HTTPException(
+                    status_code=429,
+                    detail=("Coinbase rate limit reached. This panel runs a full "
+                            "census and competes with the workers for the same "
+                            "allowance. Wait a few minutes - each retry spends "
+                            "the budget the trimmer is waiting on."))
+            capital_note = ((capital_note + "; ") if capital_note else "") + \
+                f"census unavailable ({err or 'unknown'}), so the share of the " \
+                f"account sitting outside every branch cannot be given"
+    except HTTPException:
+        raise
+    except Exception as exc:
+        capital_note = ((capital_note + "; ") if capital_note else "") + \
+            f"census failed ({type(exc).__name__})"
+        log.warning(f"[kpi] census failed: {type(exc).__name__}: {exc}")
+
+    k = capital_kpis.compute(trades, allocated_usd=allocated,
+                             free_cash_usd=free or 0.0,
+                             account_total_usd=total)
+    code, why = capital_kpis.bottleneck(k)
+
+    out = dict(k)
+    out["is_a_measurement_not_a_change"] = True
+    out["bottleneck"] = code
+    out["bottleneck_detail"] = why
+    out["ledger_note"] = ledger_note
+    out["capital_note"] = capital_note
+    out["ledger_rows_read"] = len(trades)
+    out["ledger_row_limit"] = limit
+    out["backing_verdict"] = backing.get("verdict")
+    out["claimed_usd"] = backing.get("claimed_usd")
+
+    # The eleven, in the order a desk reads them: what was made, what each
+    # dollar made, how hard it worked, and what it cost to find out.
+    out["headline"] = (
+        f"{code}: {why}" if code != "NOT_TRADING" else why)
+    out["what_would_move_it"] = {
+        "NOT_TRADING": "Fund a branch above levels x the venue minimum. A branch "
+                       "below that logs 'waiting' forever and never trades.",
+        "TOO_EARLY": "Nothing. Waiting is the fix; a rate invented from this sample "
+                     "would be read as evidence and acted on.",
+        "NO_EDGE": "Widen the grid step until a round trip clears its real cost, or "
+                   "stop trading the coins that do not. Sizing up a negative edge "
+                   "loses money faster, and velocity multiplies it.",
+        "CAPITAL_OUTSIDE": "Move coin into branches, or open branches on the coins "
+                           "already held. The edge is positive and is being applied "
+                           "to a fraction of the money.",
+        "CAPITAL_IDLE": "Open rungs with the unallocated cash, or lower the reserve. "
+                        "The money is inside the system and still not working.",
+        "LOW_VELOCITY": "Tighten spacing ONLY as far as the measured fee-safe floor, "
+                        "never past it - 0.9% cycled five times the capital and "
+                        "turned +65.4% into -71.1%.",
+        "HEALTHY": "Size. Every other lever is already where it should be, so the "
+                   "profit now scales with the capital behind it - and compounding "
+                   "comes after the profit is made, not before.",
+    }.get(code)
+
+    out["served_from_cache"] = False
+    out["cache_age_seconds"] = 0
+    _KPI_CACHE["at"] = _time.time()
+    _KPI_CACHE["payload"] = out
+    return out

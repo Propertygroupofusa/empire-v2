@@ -1219,6 +1219,28 @@
         <div id="growth-wrap"><div class="coin-history-empty">Not loaded.</div></div>
     </div>
 
+    <div class="section-title">🔬 Why the profit is that size</div>
+    <div class="panel">
+        <div class="panel-sub">"$19.61 realized" answers one question and hides four. It cannot
+            tell you whether the figure is small because the <strong>edge is thin</strong>, because
+            the <strong>capital is tiny</strong>, because the <strong>money sits idle</strong>, or
+            because the <strong>wins are being given back</strong> - and those have four different
+            fixes, only one of which is a strategy change.
+            <br><br>So this measures how hard each dollar works, not just how much was made, and
+            then names the <strong>one binding cause</strong> instead of listing symptoms. Naming
+            the wrong one sends the next month of work in the wrong direction.
+            <br><br>Capital velocity is here because it is the headline of the plan this was built
+            from - but it is shown in plain grey, never green, and never without the edge beside it.
+            At a 0.9% grid step this fleet cycled five times the capital it does at 3.75% and went
+            from <strong>+65.4% to -71.1%</strong>. Velocity multiplies the edge; it does not
+            replace it, and a system optimising velocity while its edge is negative is optimising
+            the speed at which it loses.</div>
+        <div style="margin:10px 0; display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="unlock-btn" style="margin-top:0;" onclick="loadCapitalKpis()">🔬 Diagnose it</button>
+        </div>
+        <div id="capital-kpi-wrap"><div class="coin-history-empty">Not loaded.</div></div>
+    </div>
+
     <div class="section-title">💰 What a round trip really costs</div>
     <div class="panel">
         <div class="panel-sub">The gate refuses a setup when the expected move does not beat
@@ -7819,6 +7841,92 @@ async function loadGrowth() {
           <div style="font-size:0.84em;line-height:1.6;padding:10px 12px;border-left:3px solid var(--border);background:var(--panel2,#0000000a)">
             <strong>What this excludes.</strong> ${esc2(d.what_this_excludes || '')}
             <br><br><strong>Why it is small.</strong> ${esc2(d.why_it_is_small || '')}
+          </div>`;
+    } catch (e) {
+        wrap.innerHTML = '<div class="coin-history-empty">Could not read it: ' + e.message + '</div>';
+    }
+}
+
+// ------------------------------------------------------- CAPITAL KPIs
+// Eleven figures and ONE verdict. The tiles are deliberately uneven in
+// weight: the verdict is the headline, the eleven are the evidence for it.
+//
+// Velocity is rendered in plain grey on purpose. Colouring it green would
+// say "more is better", and this account has the counter-example - five
+// times the velocity at a 0.9% step took +65.4% to -71.1%.
+async function loadCapitalKpis() {
+    const wrap = document.getElementById('capital-kpi-wrap');
+    wrap.innerHTML = '<div class="coin-history-empty">Reading the closed book and the census…</div>';
+    try {
+        const r = await fetch('/api/trading-dashboard/capital-kpis');
+        if (r.status === 429) throw new Error('Coinbase rate limit - this panel runs a full census. Wait a few minutes.');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+
+        const money = v => (v == null ? null : (v < 0 ? '-' : '') + '$' +
+            Math.abs(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}));
+        const cents = v => (v == null ? null : (v < 0 ? '-' : '') + '$' + Math.abs(v).toFixed(4));
+        const pct = v => (v == null ? null : v.toFixed(1) + '%');
+        const good = 'var(--success,#16a34a)', bad = 'var(--danger,#e05a4e)', dim = 'var(--text-dim)';
+        const tone = v => v == null ? dim : (v > 0 ? good : v < 0 ? bad : dim);
+
+        // A withheld figure is NOT a zero and is never drawn as one. It says
+        // withheld and why, because a rate invented from nine trades gets
+        // read as evidence and acted on.
+        const tile = (label, value, sub, colour) => `
+          <div style="min-width:150px;flex:1 1 150px">
+            <div style="font-size:0.68em;letter-spacing:.12em;text-transform:uppercase;color:${dim}">${esc2(label)}</div>
+            <div style="font-size:${value == null ? '1.0em' : '1.55em'};font-weight:${value == null ? '400' : '700'};color:${value == null ? dim : (colour || 'inherit')};font-variant-numeric:tabular-nums">${value == null ? 'withheld' : esc2(value)}</div>
+            <div style="font-size:0.74em;color:${dim};line-height:1.45">${esc2(sub || '')}</div>
+          </div>`;
+
+        const verdictTone = {
+            HEALTHY: good, NO_EDGE: bad, NOT_TRADING: bad,
+            CAPITAL_OUTSIDE: 'var(--warning,#d98324)', CAPITAL_IDLE: 'var(--warning,#d98324)',
+            LOW_VELOCITY: 'var(--warning,#d98324)', TOO_EARLY: dim
+        }[d.bottleneck] || dim;
+
+        const sample = n => (n == null ? '' : n + ' trades');
+
+        wrap.innerHTML = `
+          <div style="border-left:4px solid ${verdictTone};padding:10px 14px;margin-bottom:16px;background:var(--panel2,#0000000a)">
+            <div style="font-size:0.7em;letter-spacing:.14em;text-transform:uppercase;color:${dim}">The binding cause</div>
+            <div style="font-size:1.25em;font-weight:700;color:${verdictTone};margin:2px 0 6px">${esc2(d.bottleneck || '—')}</div>
+            <div style="font-size:0.88em;line-height:1.6">${esc2(d.bottleneck_detail || '')}</div>
+            ${d.what_would_move_it ? `<div style="font-size:0.88em;line-height:1.6;margin-top:8px"><strong>What would move it.</strong> ${esc2(d.what_would_move_it)}</div>` : ''}
+          </div>
+
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px">
+            ${tile('Net, banked', money(d.net_usd), sample(d.trades) + (d.days_span ? ' over ' + d.days_span + ' days' : ''), tone(d.net_usd))}
+            ${tile('Per $1,000 deployed', money(d.profit_per_1000_deployed_usd), 'against ' + (money(d.allocated_usd) || '—') + ' really at work', tone(d.profit_per_1000_deployed_usd))}
+            ${tile('Edge per trade', cents(d.net_edge_per_trade_usd), 'after fees', tone(d.net_edge_per_trade_usd))}
+            ${tile('Win rate', pct(d.win_rate_pct), (d.scratch_trades ? d.scratch_trades + ' scratched' : 'wins vs losses'))}
+          </div>
+
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px">
+            ${tile('Capital velocity', d.capital_velocity == null ? null : d.capital_velocity.toFixed(2) + '×',
+                   'cycled ' + (money(d.exposure_cycled_usd) || '—') + ' - read beside the edge, never alone')}
+            ${tile('Trades a day', d.trades_per_day == null ? null : d.trades_per_day.toFixed(2), d.sample_warning ? 'not enough sample' : 'measured')}
+            ${tile('Average hold', d.avg_hold_hours == null ? null : d.avg_hold_hours.toFixed(1) + 'h', sample(d.hold_samples) + ' with both ends')}
+            ${tile('Per day, banked', money(d.net_per_day_usd), d.sample_warning ? 'not enough sample' : 'realised only', tone(d.net_per_day_usd))}
+          </div>
+
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px">
+            ${tile('Outside every branch', pct(d.outside_any_branch_pct), 'of ' + (money(d.account_total_usd) || 'the account') + ' - earns nothing here', d.outside_any_branch_pct > 50 ? 'var(--warning,#d98324)' : null)}
+            ${tile('Idle inside the bot', pct(d.idle_capital_pct), (money(d.free_cash_usd) || '—') + ' unallocated cash', d.idle_capital_pct > 40 ? 'var(--warning,#d98324)' : null)}
+            ${tile('Worst drawdown', money(d.max_drawdown_usd), 'on the realised curve', tone(d.max_drawdown_usd))}
+            ${tile('Profit factor', d.profit_factor == null ? null : d.profit_factor.toFixed(2),
+                   (d.avg_win_usd != null ? 'avg win ' + cents(d.avg_win_usd) : '') + (d.avg_loss_usd != null ? ' · avg loss ' + cents(d.avg_loss_usd) : ''),
+                   d.profit_factor == null ? null : (d.profit_factor > 1 ? good : bad))}
+          </div>
+
+          ${d.sample_warning ? `<div style="font-size:0.84em;line-height:1.6;padding:10px 12px;border-left:3px solid ${dim};background:var(--panel2,#0000000a);margin-bottom:10px"><strong>Why figures are withheld.</strong> ${esc2(d.sample_warning)}</div>` : ''}
+          ${d.ledger_note ? `<div style="font-size:0.84em;line-height:1.6;padding:10px 12px;border-left:3px solid ${bad};background:var(--panel2,#0000000a);margin-bottom:10px"><strong>Ledger.</strong> ${esc2(d.ledger_note)}</div>` : ''}
+          ${d.capital_note ? `<div style="font-size:0.84em;line-height:1.6;padding:10px 12px;border-left:3px solid ${bad};background:var(--panel2,#0000000a);margin-bottom:10px"><strong>Capital.</strong> ${esc2(d.capital_note)}</div>` : ''}
+          <div style="font-size:0.78em;color:${dim};line-height:1.6">
+            ${esc2(d.velocity_note || '')}
+            <br><br>${d.ledger_rows_read ?? 0} ledger row(s) read${d.unreadable_rows ? ', ' + d.unreadable_rows + ' unreadable and dropped' : ''}.
+            ${d.served_from_cache ? 'Served from a ' + d.cache_age_seconds + 's-old cache - a full census competes with the trimmer for the same rate limit.' : 'Read live.'}
           </div>`;
     } catch (e) {
         wrap.innerHTML = '<div class="coin-history-empty">Could not read it: ' + e.message + '</div>';
