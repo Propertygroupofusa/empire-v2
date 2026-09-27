@@ -1219,6 +1219,28 @@
         <div id="growth-wrap"><div class="coin-history-empty">Not loaded.</div></div>
     </div>
 
+    <div class="section-title">🧪 Did it earn that, or did the coin go up?</div>
+    <div class="panel">
+        <div class="panel-sub">The resting-rung study measured three coins over the same 21 days.
+            <strong>BONK rose 19.27%</strong> and its best rung made money. <strong>ONDO rose
+            16.52%</strong> and did the same. <strong>BTC fell 2.61%</strong> and every rung lost -
+            every target, every horizon. Its widest setting filled <strong>0%</strong> of the time
+            and returned exactly the window return, marking a leg that never opened.
+            <br><br>Two rose and it won; one fell and it lost everywhere. That is <strong>beta</strong> -
+            the return of simply holding - wearing a strategy's name.
+            <br><br>The useful part is the asymmetry. A <strong>negative</strong> result in a rising
+            market is <strong>robust</strong>: a long-only rung that loses 1.03% while its coin rose
+            19.27% really loses, and no regime excuse exists. A <strong>positive</strong> result in
+            a rising market proves nothing yet. So tight-and-fast can be ruled OUT today, while
+            wide-and-slow cannot be ruled IN until something falls.
+            <br><br>None of this judges the grid. The grid has a real closed book - 83 round trips,
+            75.9% won, 3.70 profit factor at a 21-hour average hold.</div>
+        <div style="margin:10px 0; display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="unlock-btn" style="margin-top:0;" onclick="loadBetaCheck()">🧪 Attribute every setting</button>
+        </div>
+        <div id="beta-check-wrap"><div class="coin-history-empty">Not loaded.</div></div>
+    </div>
+
     <div class="section-title">📉 Where the numbers have been</div>
     <div class="panel">
         <div class="panel-sub">Every other figure on this page is a <strong>point in time</strong>.
@@ -8177,6 +8199,75 @@ async function loadPlacement() {
         wrap.innerHTML = head + levers + ladder +
           (d.notes ? `<div style="font-size:0.82em;color:${dim};line-height:1.6;margin-top:10px">${esc2(d.notes.join('; '))}</div>` : '') +
           `<div style="font-size:0.78em;color:${dim};margin-top:10px">${d.served_from_cache ? 'Served from a ' + d.cache_age_seconds + 's-old cache - a full census competes with the trimmer for the same rate limit.' : 'Read live.'} This view places nothing.</div>`;
+    } catch (e) {
+        wrap.innerHTML = '<div class="coin-history-empty">Could not read it: ' + e.message + '</div>';
+    }
+}
+
+// ------------------------------------------------ BETA OR EDGE
+// The ranking is the message: what can be ruled OUT today sits above
+// what merely looks good, because a long-only result measured in a
+// rising market is the market's return wearing a strategy's name.
+async function loadBetaCheck() {
+    const wrap = document.getElementById('beta-check-wrap');
+    wrap.innerHTML = '<div class="coin-history-empty">Attributing every configuration…</div>';
+    try {
+        const r = await fetch('/api/trading-dashboard/beta-check');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        const dim = 'var(--text-dim)', good = 'var(--success,#16a34a)',
+              bad = 'var(--danger,#e05a4e)', warn = 'var(--warning,#d98324)';
+
+        if (!d.available) {
+            wrap.innerHTML = `<div style="font-size:0.88em;line-height:1.6;padding:12px 14px;
+              border-left:3px solid ${dim};background:var(--panel2,#0000000a)">${esc2(d.reason || '')}</div>`;
+            return;
+        }
+
+        // Ruled OUT is a finding, not a failure - it is coloured as one.
+        const tone = {
+            EDGE_SURVIVES_A_FALL: good, ROBUST_NEGATIVE: good, FAILED_THE_FALL: good,
+            UNPROVEN_POSITIVE: warn, BETA_NOT_EDGE: bad,
+            NO_REGIME_CONTRAST: dim, TOO_FEW_INSTRUMENTS: dim
+        };
+        const label = {
+            EDGE_SURVIVES_A_FALL: 'survived a fall · rule IN',
+            ROBUST_NEGATIVE: 'lost while coins rose · rule OUT',
+            FAILED_THE_FALL: 'lost when one fell · rule OUT',
+            UNPROVEN_POSITIVE: 'only ever seen a rising market',
+            BETA_NOT_EDGE: 'tracks the coin one for one · beta',
+            NO_REGIME_CONTRAST: 'no contrast to judge on',
+            TOO_FEW_INSTRUMENTS: 'not a cross-section'
+        };
+
+        const wins = Object.entries(d.window_returns_pct || {})
+            .sort((a, b) => b[1] - a[1])
+            .map(([k, v]) => `<span style="color:${v > 0 ? good : bad}">${esc2(k)} ${v > 0 ? '+' : ''}${v.toFixed(2)}%</span>`)
+            .join(' · ');
+
+        const rows = (d.configs || []).map(c => `
+          <div style="border-left:3px solid ${tone[c.verdict] || dim};padding:9px 13px;margin-bottom:9px;background:var(--panel2,#0000000a)">
+            <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline">
+              <div style="font-weight:700;font-variant-numeric:tabular-nums">${esc2(c.config)}</div>
+              <div style="font-size:0.68em;letter-spacing:.08em;text-transform:uppercase;font-weight:700;color:${tone[c.verdict] || dim}">
+                ${esc2(label[c.verdict] || c.verdict)}</div>
+            </div>
+            <div style="font-size:0.8em;color:${dim};margin-top:5px">
+              ${(c.pairs || []).map(p => `${esc2(p.instrument)} <span style="color:${p.result_pct > 0 ? good : bad}">${p.result_pct > 0 ? '+' : ''}${p.result_pct.toFixed(3)}%</span>`).join(' · ')}
+              ${c.correlation != null ? ` · r=${c.correlation.toFixed(2)}` : ''}
+            </div>
+            <div style="font-size:0.84em;line-height:1.55;margin-top:6px">${esc2(c.detail || '')}</div>
+          </div>`).join('');
+
+        wrap.innerHTML = `
+          <div style="font-size:0.88em;line-height:1.6;padding:10px 14px;margin-bottom:14px;
+               border-left:4px solid ${(d.rule_in||[]).length ? good : warn};background:var(--panel2,#0000000a)">
+            <strong>${esc2(d.detail || '')}</strong>
+            <br><br>What each coin did over the ${d.study_days || '?'}-day window: ${wins}
+          </div>
+          ${rows}
+          <div style="font-size:0.82em;color:${dim};line-height:1.6;margin-top:10px">
+            ${esc2(d.what_this_does_not_say || '')}</div>`;
     } catch (e) {
         wrap.innerHTML = '<div class="coin-history-empty">Could not read it: ' + e.message + '</div>';
     }

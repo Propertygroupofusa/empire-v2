@@ -10303,3 +10303,78 @@ async def capital_placement(fresh: int = 0):
     _PLACEMENT_CACHE["at"] = _time.time()
     _PLACEMENT_CACHE["payload"] = out
     return out
+
+
+@router.get("/beta-check")
+async def beta_check_view():
+    """Did the strategy earn that, or did the coin just go up?
+
+    The resting-rung study measured three coins over the same 21 days.
+    BONK rose 19.27% and its best rung made money. ONDO rose 16.52% and
+    did the same. BTC fell 2.61% and EVERY rung lost, at every target and
+    every horizon - its widest setting filled 0% of the time and returned
+    exactly the window return, marking a leg that never opened.
+
+    Two rose and it won; one fell and it lost everywhere. That is beta -
+    the return of simply holding - wearing a strategy's name.
+
+    This judges every configuration in the live horizon study the same
+    way, and separates two very different strengths of evidence:
+
+      a NEGATIVE result in a RISING market is robust. No regime excuse
+      exists, so it can be ruled out today.
+
+      a POSITIVE result in a rising market proves nothing yet. It has not
+      been shown the regime it is supposed to fail in.
+
+    Which is why this can rule tight-and-fast OUT with confidence while
+    being unable to rule wide-and-slow IN. Collapsing those two is how a
+    backtest becomes a loss.
+
+    Read-only, and DB-free - it judges a study that already ran.
+    """
+    try:
+        import beta_check
+        import crypto_grid_bot as grid
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"beta check unavailable: {exc}")
+
+    try:
+        st = await grid.get_grid_status()
+        horizon = st.get("horizon") or {}
+    except Exception as exc:
+        log.warning(f"[beta] horizon unreadable: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=503,
+                            detail=f"horizon study unreadable: {type(exc).__name__}")
+
+    window = horizon.get("window_returns_pct") or {}
+    per_coin = horizon.get("per_coin") or {}
+
+    # Transpose coin -> rung into rung -> coin, which is the shape the
+    # question is actually asked in: one configuration, several markets.
+    configs = {}
+    for coin, blk in per_coin.items():
+        for name, r in (blk.get("rungs") or {}).items():
+            if not hasattr(r, "get"):
+                continue
+            configs.setdefault(name, {})[coin] = r.get("expectancy_all_in_pct")
+
+    if not configs or not window:
+        return {"available": False,
+                "reason": ("the horizon study has not produced rung expectancies and window "
+                           "returns yet, so there is nothing to attribute"),
+                "is_a_measurement_not_a_change": True}
+
+    out = beta_check.scan(configs, window)
+    out["available"] = True
+    out["window_returns_pct"] = window
+    out["instruments"] = sorted(window)
+    out["study_as_of"] = horizon.get("as_of")
+    out["study_days"] = horizon.get("days")
+    out["what_this_does_not_say"] = (
+        "Nothing here is a verdict on the GRID. The grid is a different mechanism with a "
+        "real closed book - 83 round trips, 75.9% won, a 3.70 profit factor at a measured "
+        "21-hour average hold. These rungs are a proposed strategy measured against price "
+        "history, and the point of this page is that most of what looks like their edge is "
+        "the market they were measured in.")
+    return out

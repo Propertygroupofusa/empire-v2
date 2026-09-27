@@ -289,3 +289,14 @@ def test_the_snapshot_writer_only_sets_columns_the_table_has():
                             for k in d.keys:
                                 if isinstance(k, _ast.Constant) and isinstance(k.value, str):
                                     assert k.value in cols, k.value
+
+
+def test_the_beta_check_panel_only_reads_fields_the_endpoint_sends():
+    import beta_check
+    out = beta_check.scan({"1.0%@6h": {"A": -1.0, "B": -1.0, "C": -1.0}},
+                          {"A": 19.0, "B": 16.0, "C": -2.6})
+    produced = set(out) | {"available", "reason", "window_returns_pct", "instruments",
+                           "study_as_of", "study_days", "what_this_does_not_say"}
+    read = _panel_fields("loadBetaCheck")
+    assert read, "found no field reads - the slice is wrong, not the panel"
+    assert read <= produced, read - produced
