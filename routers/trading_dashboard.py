@@ -10488,3 +10488,96 @@ async def coin_adoption_preview(fresh: int = 0):
     _ADOPTION_CACHE["at"] = _time.time()
     _ADOPTION_CACHE["payload"] = out
     return out
+
+
+@router.get("/coin-league")
+async def coin_league_view(challenger: str = ""):
+    """Every coin competing for the crown, on a number that lets a small one win.
+
+    The crown cannot be units. PEPE holds 20,232,619 of them and is worth
+    $87.61 - the largest unit count in the account and the smallest
+    position on the page - because unit count is set by a token's supply
+    and nothing else. It cannot be dollars earned either: a coin with
+    $200 behind it will always out-earn one with $20, which measures the
+    allocation rather than the coin.
+
+    So the league ranks on return per dollar risked, per round trip, net
+    of fees. An $87 position and a $2,250 position produce directly
+    comparable figures, which is the point - the small coin can genuinely
+    take the crown off the big one.
+
+    The crown is PROVISIONAL while the leader's own price rose across the
+    window and CONFIRMED only once it earned through a flat or falling
+    one. Without that the league crowns whatever pumped and the blueprint
+    copies luck to every other coin.
+
+    Pass ?challenger=XLM for the blueprint - what that coin would copy
+    from the leader, which is the settings, never the market.
+
+    Read-only, DB-only. It costs the venue nothing.
+    """
+    try:
+        import coin_league
+        import crypto_grid_bot as grid
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"league unavailable: {exc}")
+
+    by_coin = {}
+    try:
+        from models import CryptoGridTradeHistory
+        from database import get_session_factory
+        async with get_session_factory()() as db:
+            rows = (await db.execute(
+                select(CryptoGridTradeHistory)
+                .order_by(CryptoGridTradeHistory.closed_at.desc())
+                .limit(5000))).scalars().all()
+        for r in rows:
+            by_coin.setdefault(r.product_id or "UNKNOWN", []).append(
+                {"pnl": r.pnl, "qty": r.qty, "entry_price": r.entry_price,
+                 "opened_at": r.opened_at, "closed_at": r.closed_at})
+    except Exception as exc:
+        log.warning(f"[league] ledger unreadable: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=503,
+                            detail=f"the closed book could not be read ({type(exc).__name__}), "
+                                   f"and a league from no trades would rank nothing honestly")
+
+    deployed, configs, notes = {}, {}, []
+    st = {}
+    try:
+        st = await grid.get_grid_status()
+        for b in (st.get("branches") or []):
+            pid = b.get("product_id")
+            if not pid:
+                continue
+            coin_usd = 0.0
+            for s in (b.get("slices") or b.get("open_slices") or []):
+                q, p = s.get("qty"), s.get("entry_price")
+                try:
+                    coin_usd += abs(float(q) * float(p))
+                except (TypeError, ValueError):
+                    pass
+            deployed[pid] = round(coin_usd, 2)
+            configs[pid] = {"grid_pct": b.get("grid_pct"),
+                            "num_levels": b.get("num_levels"),
+                            "allocated_usd": b.get("allocated_usd")}
+    except Exception as exc:
+        notes.append(f"branch settings unreadable ({type(exc).__name__}), so the blueprint "
+                     f"has nothing to hand over")
+        log.warning(f"[league] grid status unreadable: {type(exc).__name__}: {exc}")
+
+    # What each coin's own price did, so a crown can be separated from a
+    # rally. Absent, the crown stays PROVISIONAL rather than being
+    # confirmed on a regime nobody measured.
+    windows = (st.get("horizon") or {}).get("window_returns_pct") or {}
+    if not windows:
+        notes.append("no window returns were available, so no crown can be CONFIRMED - not "
+                     "knowing the regime is not the same as having survived one")
+
+    out = coin_league.table(by_coin, deployed_by_coin=deployed,
+                            window_returns=windows, configs=configs)
+    out["notes"] = notes or None
+    out["window_returns_pct"] = windows or None
+
+    if challenger:
+        out["blueprint"] = coin_league.blueprint(out, challenger)
+    return out

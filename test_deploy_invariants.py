@@ -332,3 +332,13 @@ def test_no_adoption_endpoint_can_place_or_write():
     for banned in ("create_grid_branch", "grid_buy", "grid_sell", "place_market_buy",
                    "place_market_sell", "commit", "add"):
         assert banned not in called, f"the adoption preview CALLS {banned}"
+
+
+def test_the_league_panel_only_reads_fields_the_endpoint_sends():
+    import coin_league
+    out = coin_league.table({"A-USD": [{"pnl": 1.0, "qty": 1.0, "entry_price": 100.0}] * 25},
+                            window_returns={"A-USD": -8.0})
+    produced = set(out) | {"notes", "window_returns_pct", "blueprint"}
+    read = _panel_fields("loadLeague")
+    assert read, "found no field reads - the slice is wrong, not the panel"
+    assert read <= produced, read - produced

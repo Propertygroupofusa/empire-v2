@@ -1241,6 +1241,30 @@
         <div id="beta-check-wrap"><div class="coin-history-empty">Not loaded.</div></div>
     </div>
 
+    <div class="section-title">👑 The league — every coin chasing the crown</div>
+    <div class="panel">
+        <div class="panel-sub">The crown cannot be <strong>units</strong>. PEPE holds
+            <strong>20,232,619</strong> of them and is worth <strong>$87.61</strong> - the largest
+            unit count in the account and the smallest position on the page - because unit count is
+            set by a token's supply and nothing else. Chasing it would mean buying billions of the
+            cheapest thing available.
+            <br><br>It cannot be <strong>dollars earned</strong> either: a coin with $200 behind it
+            will always out-earn one with $20, which measures the allocation, not the coin.
+            <br><br>So the league ranks on <strong>return per dollar risked, per round trip, net of
+            fees</strong>. An $87 position and a $2,250 position produce directly comparable
+            numbers - which is the point. The small coin can genuinely take the crown off the big
+            one, and then every other coin has something real to chase.
+            <br><br>The crown is <strong>PROVISIONAL</strong> while the leader's own price rose, and
+            <strong>CONFIRMED</strong> only once it earned through a flat or falling market. Without
+            that the league crowns whatever pumped and the blueprint copies luck to every coin in
+            the account. <strong>The blueprint hands over the settings, never the market</strong> -
+            that is the part any coin can adopt, including a weak one.</div>
+        <div style="margin:10px 0; display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="unlock-btn" style="margin-top:0;" onclick="loadLeague()">👑 Show the standings</button>
+        </div>
+        <div id="league-wrap"><div class="coin-history-empty">Not loaded.</div></div>
+    </div>
+
     <div class="section-title">🌱 Put the coin you already own to work</div>
     <div class="panel">
         <div class="panel-sub"><strong>$10,526 of this account is coin</strong>, and $10,794 of it
@@ -8362,6 +8386,75 @@ async function loadAdoption() {
             ${money((d.caps||{}).max_per_coin_usd)} per coin, ${(d.caps||{}).max_coins} coins max,
             nothing over ${(d.caps||{}).max_position_share_pct}% of the account.
             <br><br>${esc2(d.arming || '')}
+            ${d.notes ? '<br><br><span style="color:' + warn + '">' + esc2(d.notes.join('; ')) + '</span>' : ''}
+          </div>`;
+    } catch (e) {
+        wrap.innerHTML = '<div class="coin-history-empty">Could not read it: ' + e.message + '</div>';
+    }
+}
+
+// ------------------------------------------------------- THE LEAGUE
+// Ranked on return per dollar risked so size cannot buy the crown, and
+// the crown carries its own confidence because a long grid on a rising
+// coin looks brilliant for reasons that are not the grid.
+async function loadLeague() {
+    const wrap = document.getElementById('league-wrap');
+    wrap.innerHTML = '<div class="coin-history-empty">Reading every coin’s closed book…</div>';
+    try {
+        const r = await fetch('/api/trading-dashboard/coin-league');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        const dim = 'var(--text-dim)', good = 'var(--success,#16a34a)',
+              bad = 'var(--danger,#e05a4e)', warn = 'var(--warning,#d98324)';
+        const money = v => (v == null ? '—' : (v < 0 ? '-' : '') + '$' +
+            Math.abs(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}));
+        const pc = v => v == null ? '—' : (v > 0 ? '+' : '') + v.toFixed(4) + '%';
+
+        const crownTone = d.crown_status === 'CONFIRMED' ? good
+                        : d.crown_status === 'PROVISIONAL' ? warn : dim;
+
+        const row = (c, i) => `
+          <div style="display:flex;gap:12px;align-items:baseline;padding:9px 12px;
+               border-left:3px solid ${c.coin === d.crown ? crownTone : 'transparent'};
+               background:${i % 2 ? 'transparent' : 'var(--panel2,#0000000a)'}">
+            <div style="width:26px;font-variant-numeric:tabular-nums;color:${dim};font-size:0.85em">${c.rank ?? '–'}</div>
+            <div style="width:74px;font-weight:700">${esc2(c.coin || '?')}${c.coin === d.crown ? ' 👑' : ''}</div>
+            <div style="width:96px;text-align:right;font-variant-numeric:tabular-nums;font-weight:700;
+                 color:${c.edge_pct_per_trade == null ? dim : (c.edge_pct_per_trade > 0 ? good : bad)}">
+              ${pc(c.edge_pct_per_trade)}</div>
+            <div style="flex:1;font-size:0.8em;color:${dim}">
+              ${c.trades} trades · ${c.win_rate_pct ?? '—'}% won · ${money(c.net_usd)} banked
+              ${c.deployed_usd != null ? ' · ' + money(c.deployed_usd) + ' at work' : ''}
+              ${c.window_return_pct != null ? ` · coin ${c.window_return_pct > 0 ? '+' : ''}${c.window_return_pct.toFixed(1)}%` : ''}
+              ${c.why_not_ranked ? '<br><span style="color:' + warn + '">' + esc2(c.why_not_ranked) + '</span>' : ''}
+            </div>
+          </div>`;
+
+        wrap.innerHTML = `
+          <div style="border-left:4px solid ${crownTone};padding:10px 14px;margin-bottom:14px;background:var(--panel2,#0000000a)">
+            <div style="font-size:0.7em;letter-spacing:.14em;text-transform:uppercase;color:${dim}">
+              The crown${d.crown_status ? ' · ' + esc2(d.crown_status) : ''}</div>
+            <div style="font-size:1.5em;font-weight:700;color:${crownTone};margin:2px 0 6px">${esc2(d.crown || 'vacant')}</div>
+            <div style="font-size:0.88em;line-height:1.6">${esc2(d.crown_detail || '')}</div>
+          </div>
+
+          ${d.robustly_failing_detail ? `<div style="font-size:0.86em;line-height:1.6;padding:10px 12px;
+             border-left:3px solid ${good};background:var(--panel2,#0000000a);margin-bottom:14px">
+             <strong>Act on this first.</strong> ${esc2(d.robustly_failing_detail)}</div>` : ''}
+
+          <div style="display:flex;gap:12px;padding:0 12px 6px;font-size:0.68em;letter-spacing:.1em;
+               text-transform:uppercase;color:${dim}">
+            <div style="width:26px">#</div><div style="width:74px">Coin</div>
+            <div style="width:96px;text-align:right">Per trade</div><div style="flex:1">Record</div>
+          </div>
+          ${(d.ranked || []).map(row).join('')}
+          ${(d.still_qualifying || []).length ? `<div style="font-size:0.72em;letter-spacing:.1em;
+             text-transform:uppercase;color:${dim};margin:14px 0 4px;padding:0 12px">Still qualifying</div>
+             ${d.still_qualifying.map(row).join('')}` : ''}
+
+          <div style="font-size:0.82em;color:${dim};line-height:1.6;margin-top:14px;padding:10px 12px;
+               border-left:3px solid var(--border,#8884)">
+            <strong style="color:var(--text)">Ranked on.</strong> ${esc2(d.ranked_on || '')}
             ${d.notes ? '<br><br><span style="color:' + warn + '">' + esc2(d.notes.join('; ')) + '</span>' : ''}
           </div>`;
     } catch (e) {
