@@ -9802,9 +9802,24 @@ async def cost_truth():
     except ImportError as exc:
         raise HTTPException(status_code=503, detail=f"cost view unavailable: {exc}")
 
-    fee = None
+    # THE FEE THIS FLEET ACTUALLY PAYS, NOT THE ONE IT WOULD PAY AS A TAKER.
+    #
+    # This read get_effective_round_trip_fee_rate(), which despite its name
+    # returns the TAKER round trip - 1.50%. Maker-only is ALWAYS ON here and
+    # the real cost is expected_leg_fee_rate() x 2 = 0.70%. So this panel
+    # priced the gate's bar at 1.7135% when the true bar is near 0.91%,
+    # overstating the cost of every round trip by roughly double and making
+    # the fleet look far more blocked than it is.
+    #
+    # Both are reported now. A single fee number on a page that has two real
+    # ones is how this went unnoticed.
+    fee = taker_fee = None
     try:
-        fee = round(float(await grid.get_effective_round_trip_fee_rate()) * 100, 4)
+        fee = round(float(await grid.expected_leg_fee_rate()) * 2 * 100, 4)
+    except Exception:
+        pass
+    try:
+        taker_fee = round(float(await grid.get_effective_round_trip_fee_rate()) * 100, 4)
     except Exception:
         pass
 
@@ -9836,6 +9851,11 @@ async def cost_truth():
         log.warning(f"[cost] adverse samples unreadable: {type(exc).__name__}: {exc}")
 
     view = regime_tag.summarise(samples)
+    maker_on = None
+    try:
+        maker_on = bool(await grid.is_maker_orders_active())
+    except Exception:
+        pass
     in_force = view["adverse_pct_in_force"]
     cost_now = regime_tag.round_trip_cost_pct(fee, in_force)
     cost_if = regime_tag.round_trip_cost_pct(fee, view["means_by_regime"].get("RISING"))
@@ -9843,6 +9863,17 @@ async def cost_truth():
     return {
         "is_a_measurement_not_a_change": True,
         "fee_pct": fee,
+        "fee_basis": ("maker - what this fleet actually pays, since maker-only is on"
+                      if maker_on else
+                      "taker - maker-only is OFF, so every leg pays the full rate"),
+        "taker_fee_pct": taker_fee,
+        "maker_orders_active": maker_on,
+        "fee_correction_note": (
+            (f"This panel previously priced the bar using the TAKER round trip "
+             f"({taker_fee}%) while maker-only was on and the fleet was paying {fee}%. "
+             f"It overstated the cost of every round trip by roughly double, which made the "
+             f"gate look about twice as hard to clear as it is."
+             if (fee and taker_fee and taker_fee > fee) else None)),
         "cost_in_force_pct": cost_now,
         "cost_if_measured_were_swapped_pct": cost_if,
         "gap_pct": (round(cost_now - cost_if, 4)

@@ -398,3 +398,24 @@ def test_the_loss_panel_only_reads_fields_the_endpoint_sends():
     read = _panel_fields("loadLossStudy")
     assert read, "found no field reads - the slice is wrong, not the panel"
     assert read <= produced, read - produced
+
+
+def test_the_cost_panel_prices_with_the_fee_the_fleet_actually_pays():
+    """It read get_effective_round_trip_fee_rate(), which despite its name
+    returns the TAKER round trip (1.50%). Maker-only is always on and the
+    real cost is expected_leg_fee_rate() x 2 = 0.70%, so the panel priced
+    the gate's bar at 1.7135% when the true bar is near 0.91% - overstating
+    every round trip's cost by roughly double."""
+    import ast as _ast
+    src = open("routers/trading_dashboard.py").read()
+    tree = _ast.parse(src)
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, (_ast.AsyncFunctionDef, _ast.FunctionDef))
+              and n.name == "cost_truth")
+    body = "\n".join(src.splitlines()[fn.lineno - 1:fn.end_lineno])
+    assert "expected_leg_fee_rate" in body, "the cost panel is not using the maker-aware fee"
+    #  the taker rate may still be REPORTED, but must not be what prices the bar
+    i_maker = body.index("fee = round(float(await grid.expected_leg_fee_rate())")
+    i_taker = body.index("taker_fee = round(")
+    assert i_maker < i_taker, "the taker rate is assigned to `fee` before the maker rate"
+    assert '"taker_fee_pct"' in body, "the taker rate must still be shown for comparison"
