@@ -37,6 +37,7 @@ Simplifications, stated plainly rather than hidden:
 Usage: python3 crypto_selection_backtest.py
 """
 import asyncio
+import weakref
 import bisect
 import sys
 sys.path.insert(0, "/home/user/empire-v2")
@@ -133,17 +134,53 @@ def clears_fees(step_pct: float, round_trip_fee_rate: float = None) -> bool:
 # _fetch_1min_candles_window's own copy below), so no matter how many
 # coins or tools are running at once, at most 2 real requests are ever in
 # flight - a real, process-wide throttle, not just a per-tool one.
-# CRITICAL FIX: Create lazily to avoid "bound to a different event loop" error.
-# Don't create at module import time; create on first use within the running loop.
-_CANDLE_HTTP_SEMAPHORE = None
+# ONE SEMAPHORE PER EVENT LOOP, NOT ONE PER PROCESS.
+#
+# Creating it lazily was half the fix. The other half is that this process
+# runs SEVERAL event loops at once - uvicorn's, plus a loop inside each
+# background bot thread (prop bot, alpaca swing, the grid standby thread).
+# A single cached global binds to whichever loop touched it first, and from
+# then on every OTHER loop raises on every acquire:
+#
+#   [ADA-USD] fetch error for page starting 2026-09-09:
+#   <asyncio.locks.Semaphore object ...> is bound to a different event loop
+#
+# That is not cosmetic. It failed EVERY candle page on the losing loop, so
+# the coin ranking and the horizon study ran with no history at all -
+# "[HORIZON] no usable history for BTC-USD" and the same for NEAR, ONDO and
+# FLOKI. Coin selection was choosing blind while the log looked busy.
+#
+# An asyncio.Semaphore cannot be shared across loops by construction, so a
+# genuinely process-wide throttle is not available here and claiming one
+# would be the fiction. What IS available is per-loop: at most 2 requests in
+# flight per loop instead of 2 per process. With the handful of loops this
+# app runs that is a modest loosening of the throttle, and the alternative
+# is what was happening - one loop throttled correctly and the rest failing
+# outright, which is not a throttle, it is an outage with a retry log.
+#
+# Keyed weakly so a finished loop's semaphore is collected with it rather
+# than leaking one entry per short-lived loop.
+_CANDLE_HTTP_SEMAPHORES = weakref.WeakKeyDictionary()
+_CANDLE_HTTP_CONCURRENCY = 2
+
 
 def _get_candle_semaphore():
-    """Get or create the HTTP semaphore for candle fetching.
-    Must be called from within an async context to bind to the current event loop."""
-    global _CANDLE_HTTP_SEMAPHORE
-    if _CANDLE_HTTP_SEMAPHORE is None:
-        _CANDLE_HTTP_SEMAPHORE = asyncio.Semaphore(2)
-    return _CANDLE_HTTP_SEMAPHORE
+    """The candle throttle for the CURRENTLY RUNNING loop.
+
+    Must be called from inside a coroutine - that is the only moment the
+    right loop can be identified. Outside one, an unkeyed semaphore is
+    returned so a synchronous caller still gets a working object rather
+    than an exception from a throttle.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.Semaphore(_CANDLE_HTTP_CONCURRENCY)
+    sem = _CANDLE_HTTP_SEMAPHORES.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(_CANDLE_HTTP_CONCURRENCY)
+        _CANDLE_HTTP_SEMAPHORES[loop] = sem
+    return sem
 # Real, effective size of the existing live dollar-based giveback cap
 # (MAX_PROFIT_GIVEBACK_USD, $3.75) at the module's own $150 spend size -
 # $3.75 / $150 = 2.5%. Used as the trailing-stop comparison's percentage

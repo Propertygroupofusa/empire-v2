@@ -66,7 +66,13 @@ except Exception as e:
     logging.warning(f"⚠️  Database import failed (non-critical): {e}")
     init_db = None
     ensure_grid_status_schema = None
-    engine = None
+    # get_engine, NOT engine. This module moved to the accessor and the
+    # fallback kept binding the old name, so the bare `engine` references
+    # left behind raised NameError instead of the graceful skip intended.
+    # That is what "Monitor tables failed: name 'engine' is not defined",
+    # the same for foreign-key validation, and "Retention manager failed"
+    # all were on every single boot.
+    get_engine = None
 
 try:
     from initialize_bot_worker import initialize_bot_worker
@@ -300,7 +306,7 @@ async def create_monitor_tables():
     """Create health monitor tables if they don't exist"""
     # AUTOINCREMENT is SQLite-only syntax; Postgres needs SERIAL. Pick the
     # right primary-key clause for whichever DATABASE_URL is actually in use.
-    pk = "SERIAL PRIMARY KEY" if engine.dialect.name == "postgresql" else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    pk = "SERIAL PRIMARY KEY" if get_engine().dialect.name == "postgresql" else "INTEGER PRIMARY KEY AUTOINCREMENT"
     async with get_engine().begin() as conn:
         try:
             await conn.execute(text(f"""
@@ -451,7 +457,7 @@ async def run_migrations():
             if "crypto_rsi_state" not in existing_tables:
                 log.info("Migration: Creating missing crypto_rsi_state table...")
                 try:
-                    if engine.dialect.name == "postgresql":
+                    if get_engine().dialect.name == "postgresql":
                         await conn.execute(text("""
                             CREATE TABLE IF NOT EXISTS crypto_rsi_state (
                                 id SERIAL PRIMARY KEY,
@@ -733,7 +739,7 @@ async def validate_foreign_keys():
     from database import Base
     import models  # noqa: F401
 
-    if engine.dialect.name != "postgresql":
+    if get_engine().dialect.name != "postgresql":
         return  # Foreign key checks are for PostgreSQL only
 
     async with get_engine().begin() as conn:
@@ -1273,7 +1279,7 @@ async def lifespan(app: FastAPI):
 
     try:
         if retention_manager is not None:
-            await retention_manager.initialize_retention_tables(engine)
+            await retention_manager.initialize_retention_tables(get_engine())
             log.info("💾 Data Retention Manager initialized - ALL DATA KEPT FOREVER")
     except Exception as e:
         log.warning(f"Retention manager failed: {e}")
@@ -2395,7 +2401,7 @@ async def get_total_data_stored():
     """Get complete count of all data ever stored (current + archived)"""
     if retention_manager is None:
         return {"error": "Retention manager not available"}
-    return await retention_manager.get_total_data_stored(engine)
+    return await retention_manager.get_total_data_stored(get_engine())
 
 
 @app.get("/retention/status")
@@ -2403,7 +2409,7 @@ async def get_retention_status():
     """Get data retention and archival status"""
     if retention_manager is None:
         return {"error": "Retention manager not available"}
-    return await retention_manager.get_retention_status(engine)
+    return await retention_manager.get_retention_status(get_engine())
 
 
 @app.get("/retention/database-size")
@@ -2411,7 +2417,7 @@ async def get_database_size():
     """Get database size and storage usage"""
     if retention_manager is None:
         return {"error": "Retention manager not available"}
-    return await retention_manager.get_database_size(engine)
+    return await retention_manager.get_database_size(get_engine())
 
 
 @app.post("/retention/archive-old-data")
@@ -2419,7 +2425,7 @@ async def trigger_archival(days_threshold: int = 90):
     """Manually trigger data archival (moves old data to archive tables)"""
     if retention_manager is None:
         return {"error": "Retention manager not available"}
-    await retention_manager.archive_old_data(engine, days_threshold)
+    await retention_manager.archive_old_data(get_engine(), days_threshold)
     return {
         "status": "archived",
         "message": f"Data older than {days_threshold} days moved to permanent archive",
