@@ -192,7 +192,8 @@ def scorecard(trades, *, product_id=None, deployed_usd=None,
 
 
 def table(trades_by_coin, *, deployed_by_coin=None, window_returns=None,
-          configs=None, config_epoch=None, min_trades=MIN_TRADES_TO_RANK):
+          configs=None, config_epoch=None, held_products=None,
+          min_trades=MIN_TRADES_TO_RANK):
     """Every coin, ranked, with the crown awarded only on evidence."""
     deployed = deployed_by_coin or {}
     windows = window_returns or {}
@@ -246,6 +247,26 @@ def table(trades_by_coin, *, deployed_by_coin=None, window_returns=None,
     failing = [c for c in ranked
                if c["regime"] == "ROSE" and (c["edge_pct_per_trade"] or 0) <= 0]
 
+    # RETIRED WHILE EARNING.
+    #
+    # The question this league was built to answer turned out to have a
+    # blunt answer: on 2026-09-27 every single ranked coin was one no
+    # branch holds any more. $19.19 of the fleet's $19.61 lifetime profit
+    # was earned by coins it had rotated away from, and the six it now
+    # holds had produced one trade and $0.06.
+    #
+    # A coin that earned and was then dropped is not a ranking curiosity.
+    # It is capital moved off something that was working, and it is the
+    # first thing to look at before adding capital anywhere.
+    held = {str(p).upper() for p in (held_products or ())}
+    held |= {str(p).split("-")[0].upper() for p in (held_products or ())}
+    dropped = []
+    if held:
+        for c in ranked:
+            if (c["edge_pct_per_trade"] or 0) > 0 and c["coin"] not in held \
+                    and str(c["product_id"] or "").upper() not in held:
+                dropped.append(c)
+
     on_cfg_trades = sum(c["trades_on_current_config"] for c in cards)
     all_trades = sum(c["trades"] for c in cards)
     retired_share = round(1 - (on_cfg_trades / all_trades), 3) if all_trades else None
@@ -276,6 +297,20 @@ def table(trades_by_coin, *, deployed_by_coin=None, window_returns=None,
                           f"{ranked[0]['coin']} at {ranked[0]['edge_pct_per_trade']:+.4f}%."
                           if ranked else
                           "No coin has enough closed trades to rank yet.")),
+        "retired_while_earning": [c["coin"] for c in dropped],
+        "retired_while_earning_usd": round(sum(c["net_usd"] for c in dropped), 2),
+        "retired_while_earning_detail": (
+            (f"{len(dropped)} coin(s) earned a positive edge and no branch holds any of them "
+             f"now: {', '.join(c['coin'] for c in dropped)}, worth "
+             f"${sum(c['net_usd'] for c in dropped):,.2f} of realised profit between them. "
+             f"Capital was moved off things that were working. Before adding money anywhere, "
+             f"that is the first thing to look at - a coin that earned and was then dropped "
+             f"is a decision, not a ranking curiosity."
+             if dropped else
+             "Every coin with a positive edge is still held by a branch.")
+            if held else
+            "No list of currently-held coins was supplied, so nothing can be said about which "
+            "earners were dropped."),
         "robustly_failing": [c["coin"] for c in failing],
         "robustly_failing_detail": (
             f"{', '.join(c['coin'] for c in failing)} lost per round trip while its own price "

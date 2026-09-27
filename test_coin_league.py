@@ -264,3 +264,45 @@ def test_the_retired_share_is_reported_so_the_table_can_be_read():
     assert out["trades_total"] == 10
     assert out["trades_on_current_config"] == 1
     assert out["retired_share"] == pytest.approx(0.9)
+
+
+# --------------------------------------------- retired while earning
+
+def test_a_coin_that_earned_and_was_dropped_is_named():
+    """The blunt answer this league turned up: every ranked coin was one
+    no branch held any more. $19.19 of $19.61 lifetime profit came from
+    coins the fleet had rotated away from."""
+    out = league({"DOGE-USD": many(25, 2.28), "BTC-USD": many(25, 0.1)},
+                 window_returns={"DOGE-USD": 0.0, "BTC-USD": 0.0},
+                 held_products=["BTC-USD"])
+    assert out["retired_while_earning"] == ["DOGE"]
+    assert "not a ranking curiosity" in out["retired_while_earning_detail"]
+
+
+def test_a_losing_coin_that_was_dropped_is_not_flagged():
+    """Dropping something that lost money is not the finding."""
+    out = league({"A-USD": many(25, -1.0), "B-USD": many(25, 0.5)},
+                 window_returns={"A-USD": 0.0, "B-USD": 0.0},
+                 held_products=["B-USD"])
+    assert out["retired_while_earning"] == []
+
+
+def test_an_earner_still_held_is_not_flagged():
+    out = league({"A-USD": many(25, 1.0)}, window_returns={"A-USD": 0.0},
+                 held_products=["A-USD"])
+    assert out["retired_while_earning"] == []
+    assert "still held by a branch" in out["retired_while_earning_detail"]
+
+
+def test_without_a_held_list_nothing_is_claimed_about_drops():
+    """Absent the list, every coin would look dropped - which would be an
+    invented finding, not a measured one."""
+    out = league({"A-USD": many(25, 1.0)}, window_returns={"A-USD": 0.0})
+    assert out["retired_while_earning"] == []
+    assert "No list of currently-held coins" in out["retired_while_earning_detail"]
+
+
+def test_the_dropped_profit_is_totalled():
+    out = league({"A-USD": many(25, 1.0, qty=1.0, entry=100.0)},
+                 window_returns={"A-USD": 0.0}, held_products=["Z-USD"])
+    assert out["retired_while_earning_usd"] == pytest.approx(25.0)

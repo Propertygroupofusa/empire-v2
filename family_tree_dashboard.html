@@ -8443,6 +8443,10 @@ async function loadLeague() {
              border-left:3px solid ${bad};background:var(--panel2,#0000000a);margin-bottom:14px">
              <strong>Read these standings carefully.</strong> ${esc2(d.config_warning)}</div>` : ''}
 
+          ${d.retired_while_earning && d.retired_while_earning.length ? `<div style="font-size:0.9em;line-height:1.6;padding:12px 14px;
+             border-left:4px solid ${bad};background:var(--panel2,#0000000a);margin-bottom:14px">
+             <strong>Look at this before adding capital anywhere.</strong> ${esc2(d.retired_while_earning_detail)}</div>` : ''}
+
           ${d.robustly_failing_detail ? `<div style="font-size:0.86em;line-height:1.6;padding:10px 12px;
              border-left:3px solid ${good};background:var(--panel2,#0000000a);margin-bottom:14px">
              <strong>Act on this first.</strong> ${esc2(d.robustly_failing_detail)}</div>` : ''}

@@ -10607,7 +10607,9 @@ async def coin_league_view(challenger: str = ""):
 
     out = coin_league.table(by_coin, deployed_by_coin=deployed,
                             window_returns=windows, configs=configs,
-                            config_epoch=epoch)
+                            config_epoch=epoch,
+                            held_products=[b.get("product_id")
+                                           for b in (st.get("branches") or [])])
     out["notes"] = notes or None
     out["window_returns_pct"] = windows or None
 
