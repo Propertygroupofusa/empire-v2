@@ -866,6 +866,87 @@
             width: 100%;
         }
     }
+
+/* ==========================================================================
+   THE SCOREBOARD - broadcast treatment, 2026-09-27.
+
+   The account owner asked for this strip to read like the newsroom page:
+   a scoreboard you can take in from across a room, not a paragraph you
+   read up close. It borrows the newsroom palette and monospace figures
+   and nothing else - the panels below stay exactly as they are, because
+   this page carries the live controls and roughly twenty test suites
+   assert on its markup.
+
+   Every id in here is unchanged. renderStatusStrip fills the same
+   elements it always did; only their presentation moved. The ON AIR lamp
+   is driven by the SAME heartbeat that decides RUNNING / STALLED / NOT
+   RUNNING, so it can never disagree with the word beside it - a lamp with
+   its own opinion is the class of bug this strip exists to catch.
+   ========================================================================== */
+#status-strip.tv {
+    --tv-bg:#07090c; --tv-panel:#0d1117; --tv-line:#1e2b3a;
+    --tv-ink:#d7e3f0; --tv-dim:#7b8fa5;
+    --tv-green:#3fd68c; --tv-red:#ff5c5c; --tv-amber:#f0b429; --tv-live:#ff2d2d;
+    --tv-mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+    background:var(--tv-bg); border:1px solid var(--tv-line);
+    border-radius:10px; box-shadow:none;
+    color:var(--tv-ink); font-family:var(--tv-mono);
+    padding:0; overflow:hidden;
+}
+#status-strip.tv .tv-bar {
+    display:flex; align-items:center; justify-content:space-between;
+    gap:12px; flex-wrap:wrap;
+    padding:9px 16px; border-bottom:1px solid var(--tv-line);
+    background:var(--tv-panel);
+}
+#status-strip.tv .tv-brand {
+    font-size:12px; letter-spacing:.18em; font-weight:700; text-transform:uppercase;
+}
+#status-strip.tv .tv-brand b { color:var(--tv-amber); font-weight:700; }
+#status-strip.tv .tv-onair {
+    display:inline-flex; align-items:center; gap:8px;
+    border:1px solid var(--tv-line); color:var(--tv-dim);
+    padding:3px 10px; border-radius:3px;
+    letter-spacing:.16em; font-size:10px; font-weight:700;
+}
+#status-strip.tv .tv-onair.live { border-color:var(--tv-live); color:var(--tv-live); }
+#status-strip.tv .tv-onair .tv-dot {
+    width:7px; height:7px; border-radius:50%; background:currentColor;
+}
+#status-strip.tv .tv-onair.live .tv-dot { animation:tvPulse 1.6s infinite; }
+@keyframes tvPulse { 0%,100%{opacity:1} 50%{opacity:.2} }
+@media (prefers-reduced-motion:reduce) {
+    #status-strip.tv .tv-onair.live .tv-dot { animation:none; }
+}
+#status-strip.tv .tv-cells {
+    display:grid; grid-template-columns:repeat(4,1fr);
+    /* 1px of line showing through the gaps - the segment rule, not a border
+       on every cell, so the outer edges stay clean. */
+    gap:1px; background:var(--tv-line);
+}
+#status-strip.tv .tv-cell { background:var(--tv-bg); padding:14px 16px; min-width:0; }
+#status-strip.tv .tv-cap {
+    font-size:10px; letter-spacing:.16em; text-transform:uppercase;
+    color:var(--tv-dim); margin-bottom:5px;
+}
+#status-strip.tv .tv-val {
+    font-size:1.75em; font-weight:700; line-height:1.15;
+    font-variant-numeric:tabular-nums; letter-spacing:-.01em;
+    overflow-wrap:anywhere;
+}
+#status-strip.tv .tv-sub {
+    font-size:11px; color:var(--tv-dim); margin-top:5px; line-height:1.4;
+}
+/* The banner keeps its own colours - it is a warning, and a warning that
+   blends into the surface it warns about is not one. */
+#status-strip.tv #backing-banner { margin:0 16px 14px; }
+@media (max-width:760px) {
+    #status-strip.tv .tv-cells { grid-template-columns:repeat(2,1fr); }
+    #status-strip.tv .tv-val { font-size:1.45em; }
+}
+@media (max-width:420px) {
+    #status-strip.tv .tv-cells { grid-template-columns:1fr; }
+}
 </style>
 </head>
 <body>
@@ -896,27 +977,31 @@
          first real number, which is how a stopped fleet went unnoticed
          for sixteen days while everything "looked configured".
          Verdict first, detail after. -->
-    <div class="panel" id="status-strip" style="padding:14px 18px; margin-bottom:16px;">
-        <div style="display:flex; flex-wrap:wrap; gap:18px; align-items:baseline;">
-            <div style="min-width:150px;">
-                <div style="font-size:0.72em; letter-spacing:.08em; text-transform:uppercase; color:var(--text-dim);">Grid bot</div>
-                <div id="strip-live" style="font-size:1.5em; font-weight:700;">checking…</div>
-                <div id="strip-live-sub" style="font-size:0.75em; color:var(--text-dim);"></div>
+    <div class="panel tv" id="status-strip" style="margin-bottom:16px;">
+        <div class="tv-bar">
+            <div class="tv-brand">Coinbase <b>Grid Fleet</b></div>
+            <div class="tv-onair" id="strip-onair"><span class="tv-dot"></span><span id="strip-onair-text">CHECKING</span></div>
+        </div>
+        <div class="tv-cells">
+            <div class="tv-cell">
+                <div class="tv-cap">Grid bot</div>
+                <div class="tv-val" id="strip-live">checking…</div>
+                <div class="tv-sub" id="strip-live-sub"></div>
             </div>
-            <div style="min-width:120px;">
-                <div style="font-size:0.72em; letter-spacing:.08em; text-transform:uppercase; color:var(--text-dim);">Crypto total</div>
-                <div id="strip-total" style="font-size:1.5em; font-weight:700;">—</div>
-                <div id="strip-total-sub" style="font-size:0.75em; color:var(--text-dim);"></div>
+            <div class="tv-cell">
+                <div class="tv-cap">Crypto total</div>
+                <div class="tv-val" id="strip-total">—</div>
+                <div class="tv-sub" id="strip-total-sub"></div>
             </div>
-            <div style="min-width:120px;">
-                <div style="font-size:0.72em; letter-spacing:.08em; text-transform:uppercase; color:var(--text-dim);">Traded today</div>
-                <div id="strip-today" style="font-size:1.5em; font-weight:700;">—</div>
-                <div id="strip-today-sub" style="font-size:0.75em; color:var(--text-dim);"></div>
+            <div class="tv-cell">
+                <div class="tv-cap">Traded today</div>
+                <div class="tv-val" id="strip-today">—</div>
+                <div class="tv-sub" id="strip-today-sub"></div>
             </div>
-            <div style="min-width:120px;">
-                <div style="font-size:0.72em; letter-spacing:.08em; text-transform:uppercase; color:var(--text-dim);">Branches</div>
-                <div id="strip-branches" style="font-size:1.5em; font-weight:700;">—</div>
-                <div id="strip-branches-sub" style="font-size:0.75em; color:var(--text-dim);"></div>
+            <div class="tv-cell">
+                <div class="tv-cap">Branches</div>
+                <div class="tv-val" id="strip-branches">—</div>
+                <div class="tv-sub" id="strip-branches-sub"></div>
             </div>
         </div>
         <div id="backing-banner" style="display:none;"></div>
@@ -4342,20 +4427,38 @@ function renderStatusStrip(d, history) {
         var hb = (d && d.heartbeat) || {};
         var live = document.getElementById('strip-live');
         var liveSub = document.getElementById('strip-live-sub');
-        if (hb.seen && hb.alive) {
+        // Broadcast palette. The colours this replaced were picked for a
+        // white card and go nearly black on the scoreboard ground. Do not
+        // quote the old hex values here - test_status_strip asserts they
+        // are gone from this function and cannot tell a comment from code,
+        // the same reason the total subtitle above carries that warning.
+        var TV_GREEN = '#3fd68c', TV_RED = '#ff5c5c';
+        var alive = !!(hb.seen && hb.alive);
+        if (alive) {
             live.textContent = 'RUNNING';
-            live.style.color = '#1a7f37';
+            live.style.color = TV_GREEN;
             liveSub.textContent = 'last cycle ' + hb.age_seconds + 's ago (' + (hb.stage || '') + ')';
         } else if (hb.seen) {
             live.textContent = 'STALLED';
-            live.style.color = '#b42318';
+            live.style.color = TV_RED;
             liveSub.textContent = 'last cycle ' + hb.age_seconds + 's ago — expected under 30s';
         } else {
             live.textContent = 'NOT RUNNING';
-            live.style.color = '#b42318';
+            live.style.color = TV_RED;
             // A missing heartbeat is not "no data" - it is the loop never
             // having executed. Saying so plainly is the point.
             liveSub.textContent = 'no cycle has ever been recorded';
+        }
+
+        // The lamp reads the SAME heartbeat as the word beside it, so the
+        // two can never disagree. A lamp with its own source is the class
+        // of bug this strip was built to catch - for sixteen days this page
+        // showed settings that looked correct while the loop was dead.
+        var onair = document.getElementById('strip-onair');
+        var onairText = document.getElementById('strip-onair-text');
+        if (onair && onairText) {
+            onair.className = 'tv-onair' + (alive ? ' live' : '');
+            onairText.textContent = alive ? 'ON AIR' : (hb.seen ? 'OFF AIR' : 'NO SIGNAL');
         }
 
         var alloc = Number(d.total_allocated_usd || 0);
@@ -4423,7 +4526,7 @@ function renderStatusStrip(d, history) {
             var net = todays.reduce(function (a, t) { return a + Number(t.pnl || 0); }, 0);
             el.textContent = (dayFullyCovered ? '' : '\u2265 ')
                 + (net < 0 ? '-$' : '+$') + Math.abs(net).toFixed(2);
-            el.style.color = net < 0 ? '#b42318' : '#1a7f37';
+            el.style.color = net < 0 ? TV_RED : TV_GREEN;
             sub.textContent = dayFullyCovered
                 ? (todays.length + ' trade' + (todays.length === 1 ? '' : 's') + ' today')
                 : ('at least ' + todays.length + ' trades today \u2014 the '
@@ -4431,7 +4534,7 @@ function renderStatusStrip(d, history) {
                    + 'closes are not counted here');
         } else {
             el.textContent = 'none';
-            el.style.color = 'var(--text-dim)';
+            el.style.color = 'var(--tv-dim)';
             var newest = trades[0] && String(trades[0].closed_at || '').slice(0, 10);
             sub.textContent = newest ? ('last trade ' + newest) : 'no trades on record';
         }
@@ -5311,6 +5414,28 @@ function writeHeaders() {
 /** Every write on this page goes through here, so none can forget the header. */
 async function postGuarded(url, body) {
     const tok = getWriteToken();
+    // SAY WHICH OF THE THREE THINGS IS ACTUALLY MISSING.
+    //
+    // The guard refuses every POST without the header, and the refusal
+    // reads "Missing x-dashboard-token header (or ?token=). This endpoint
+    // changes state." That is correct and it is the guard doing its job,
+    // but it describes the REQUEST, not what the person has to do - and a
+    // caller that wraps it in a "could not read" message turns a locked
+    // door into what looks like a broken read. The old wording is not
+    // quoted here: test_status_strip asserts it is gone from the page
+    // and cannot tell a comment from a template.
+    //
+    // The token lives in sessionStorage, so it is gone after a browser
+    // restart or in a new tab. That is deliberate (it moves real money and
+    // should not outlive the tab) and it means THIS case - unlocked
+    // deployment, locked tab - is the common one. Answer it here, before
+    // anything is sent, so no call site can report it as something else.
+    if (!tok) {
+        throw new Error('This browser tab is locked. Nothing was sent and nothing '
+            + 'changed. Open the \u{1F512} lock bar at the top of this page and paste '
+            + 'the dashboard token - it is kept for this tab only, so it has to be '
+            + 'entered again after a browser restart.');
+    }
     const headers = { 'Content-Type': 'application/json' };
     if (tok) headers['x-dashboard-token'] = tok;
     const res = await fetch(url, {
@@ -7265,18 +7390,29 @@ async function confirmSpreadEvenly() {
     }
 }
 
+// The dry run is a POST, so the write guard refuses it without a token -
+// correctly: it is the same endpoint as the real sell, told to stop short.
+// This used to call fetch() directly and report every failure as "Could not
+// read the position", which made a locked tab look like a broken read on a
+// button whose next step sells real coin. It goes through postGuarded now,
+// like every other write on this page, so the lock is named as a lock.
+//
+// The guard itself is untouched. A dry run that skipped it would be a POST
+// to a state-changing endpoint with no token, which is the exact hole the
+// guard exists to close - the preview is not a different endpoint, it is
+// the same one trusted to behave.
 async function confirmCloseBtcCompound() {
     let plan;
     try {
-        const res = await fetch(API_BASE + '/btc-compound/close-position?dry_run=true', {
-            method: 'POST', headers: writeHeaders(),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
-        if (data.status === 'no_position') { alert(data.detail); return; }
+        const data = await postGuarded(API_BASE + '/btc-compound/close-position?dry_run=true');
+        if (data.status === 'no_position') {
+            alert(data.detail || 'btc_compound is not holding a position, so there is '
+                  + 'nothing to close.');
+            return;
+        }
         plan = data.plan;
     } catch (e) {
-        alert('Could not read the position: ' + e.message);
+        alert(e.message);
         return;
     }
 
@@ -7291,11 +7427,7 @@ async function confirmCloseBtcCompound() {
     )) return;
 
     try {
-        const res = await fetch(API_BASE + '/btc-compound/close-position?dry_run=false', {
-            method: 'POST', headers: writeHeaders(),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        const data = await postGuarded(API_BASE + '/btc-compound/close-position?dry_run=false');
         alert(data.sold
             ? 'Sold. The cash is free.\n\n' + (data.note || '')
             : 'Nothing was sold. ' + (data.detail || ''));

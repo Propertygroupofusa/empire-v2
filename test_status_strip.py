@@ -154,6 +154,46 @@ ok("a covered day still reads exactly as before",
 ok("no trades at all still names the last one",
    "no trades on record" in strip and "last trade " in strip)
 
+# --- the scoreboard reads like a broadcast, and the lamp cannot lie ---------
+ok("the strip carries the tv class", 'id="status-strip"' in page and 'class="panel tv"' in page)
+ok("it defines its own palette rather than inheriting the light one",
+   "#status-strip.tv {" in page and "--tv-green" in page and "--tv-dim" in page)
+ok("the ON AIR lamp exists", 'id="strip-onair"' in page and 'id="strip-onair-text"' in page)
+ok("the lamp is driven by the same heartbeat as the word beside it",
+   "var alive = !!(hb.seen && hb.alive)" in strip and "alive ? 'ON AIR'" in strip)
+ok("a never-started loop reads NO SIGNAL, not OFF AIR",
+   "'NO SIGNAL'" in strip and "hb.seen ? 'OFF AIR'" in strip)
+ok("the pulse is disabled under prefers-reduced-motion",
+   "prefers-reduced-motion" in page and "tvPulse" in page)
+ok("the figures use the broadcast palette, not the white-card one",
+   "TV_GREEN = '#3fd68c'" in strip and "#1a7f37" not in strip)
+ok("numbers line up in columns", "tabular-nums" in page)
+ok("the four cells stack on a phone",
+   "grid-template-columns:1fr" in page and "max-width:420px" in page)
+ok("all four captions survived the restyle",
+   page.count('class="tv-cap"') == 4)
+ok("the backing banner stays inside the strip", 'id="backing-banner"' in page)
+
+# --- a locked tab must say it is locked, not that a read failed -------------
+#
+# The btc_compound dry run is a POST to a state-changing endpoint, so the
+# write guard refuses it without a token - correctly. The old call site
+# wrapped that refusal in "Could not read the position:", which made a
+# locked tab look like a broken read on a button whose next step sells
+# real coin.
+ok("the dry run goes through the guarded poster, not a raw fetch",
+   "postGuarded(API_BASE + '/btc-compound/close-position?dry_run=true')" in page)
+ok("the real sell does too",
+   "postGuarded(API_BASE + '/btc-compound/close-position?dry_run=false')" in page)
+ok("no call site reports a locked tab as a failed read",
+   "Could not read the position" not in page)
+ok("postGuarded names the missing token before sending anything",
+   "This browser tab is locked" in page)
+ok("and says plainly that nothing was sent",
+   "Nothing was sent and nothing" in page)
+ok("the guard itself is not bypassed for the preview",
+   "dry_run=true" in page and "x-dashboard-token" in page)
+
 # --- hygiene ---------------------------------------------------------------
 ids = re.findall(r'id="([a-zA-Z0-9_-]+)"', page)
 ok("no duplicate element ids", len({i for i in ids if ids.count(i) > 1}) == 0)
