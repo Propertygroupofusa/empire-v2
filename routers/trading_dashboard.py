@@ -2327,19 +2327,6 @@ async def get_holdings_watch(window_days: int = 30, fresh: int = 0):
     out["window_days"] = window_days
     out["stop_policy"] = adaptive_stop.policy()
     out["as_of"] = census.get("as_of")
-    # Is the loop actually alive? Without this, an empty trades table means
-    # "not running", "failing every pass" or "has not reached one yet" and
-    # there is no way to tell which.
-    hb = dict(getattr(auto_trim_worker, "HEARTBEAT", {}) or {})
-    if not hb.get("started_at"):
-        hb["verdict"] = ("the worker loop has NOT started in this process - nothing "
-                         "will be placed no matter what the mode says")
-    elif not hb.get("last_pass_at"):
-        hb["verdict"] = "the loop started but has not finished a pass yet"
-    else:
-        hb["verdict"] = (f"{hb.get('passes')} pass(es), last finished {hb['last_pass_at']}")
-    out["worker"] = hb
-
     out["served_from_cache"] = False
     out["cache_age_seconds"] = 0.0
     out["cache_seconds"] = WATCH_CACHE_SECONDS
@@ -9286,6 +9273,19 @@ async def auto_trim_status(fresh: int = 0):
     })
     if history_note:
         out["history_note"] = history_note
+    # Is the loop actually alive? Without this, an empty trades table means
+    # "not running", "failing every pass" or "has not reached one yet" and
+    # there is no way to tell which.
+    hb = dict(getattr(auto_trim_worker, "HEARTBEAT", {}) or {})
+    if not hb.get("started_at"):
+        hb["verdict"] = ("the worker loop has NOT started in this process - nothing "
+                         "will be placed no matter what the mode says")
+    elif not hb.get("last_pass_at"):
+        hb["verdict"] = "the loop started but has not finished a pass yet"
+    else:
+        hb["verdict"] = (f"{hb.get('passes')} pass(es), last finished {hb['last_pass_at']}")
+    out["worker"] = hb
+
     out["served_from_cache"] = False
     out["cache_age_seconds"] = 0
     _AUTO_TRIM_CACHE["at"] = _time.time()
