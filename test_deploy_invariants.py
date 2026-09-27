@@ -300,3 +300,35 @@ def test_the_beta_check_panel_only_reads_fields_the_endpoint_sends():
     read = _panel_fields("loadBetaCheck")
     assert read, "found no field reads - the slice is wrong, not the panel"
     assert read <= produced, read - produced
+
+
+def test_the_adoption_panel_only_reads_fields_the_endpoint_sends():
+    import coin_adoption
+    p = coin_adoption.plan(
+        [{"asset": "XLM", "units": 2641.0, "price": 0.2129, "usd": 562.34}],
+        account_total_usd=11418.75, claimed_products=())
+    produced = set(p) | {"notes", "account_total_usd", "coin_usd", "cash_usd",
+                         "claimed_products", "is_armed", "arming",
+                         "served_from_cache", "cache_age_seconds"}
+    read = _panel_fields("loadAdoption")
+    assert read, "found no field reads - the slice is wrong, not the panel"
+    assert read <= produced, read - produced
+
+
+def test_no_adoption_endpoint_can_place_or_write():
+    """The planner ships before the executor. Until an armed worker
+    exists, nothing on this path may reach a venue or the slice table."""
+    import ast as _ast
+    src = open("routers/trading_dashboard.py").read()
+    tree = _ast.parse(src)
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, (_ast.AsyncFunctionDef, _ast.FunctionDef))
+              and n.name == "coin_adoption_preview")
+    called = set()
+    for node in _ast.walk(fn):
+        if isinstance(node, _ast.Call):
+            f = node.func
+            called.add(f.id if isinstance(f, _ast.Name) else getattr(f, "attr", ""))
+    for banned in ("create_grid_branch", "grid_buy", "grid_sell", "place_market_buy",
+                   "place_market_sell", "commit", "add"):
+        assert banned not in called, f"the adoption preview CALLS {banned}"

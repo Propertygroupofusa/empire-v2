@@ -2602,6 +2602,12 @@ class CapitalKpiSnapshot(Base):
     claimed_usd = Column(Float, nullable=True)        # what branches earmarked
     free_cash_usd = Column(Float, nullable=True)
     account_total_usd = Column(Float, nullable=True)
+    # The line the owner circled: coin is the bulk of this account and the
+    # total alone hides it moving. Tracked apart from cash so a trim that
+    # turns coin into dollars shows as the REARRANGEMENT it is, on both
+    # series at once, instead of a flat total that explains nothing.
+    coin_usd = Column(Float, nullable=True)
+    cash_usd = Column(Float, nullable=True)
     outside_any_branch_pct = Column(Float, nullable=True)
     idle_capital_pct = Column(Float, nullable=True)
 

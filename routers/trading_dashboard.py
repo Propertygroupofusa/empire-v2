@@ -10378,3 +10378,113 @@ async def beta_check_view():
         "history, and the point of this page is that most of what looks like their edge is "
         "the market they were measured in.")
     return out
+
+
+_ADOPTION_CACHE = {"at": 0.0, "payload": None}
+_ADOPTION_TTL_SECONDS = 180
+
+
+@router.get("/coin-adoption")
+async def coin_adoption_preview(fresh: int = 0):
+    """Putting coin the account already owns under a grid - without buying or selling it.
+
+    $10,526.39 of this account is coin, and $10,794.12 of it belongs to no
+    branch. It cannot be put to work today because create_grid_branch()
+    funds a branch from free spendable CASH and refuses more - nothing in
+    the engine can hand a branch units already held. That gap is why the
+    bots count 5.47%.
+
+    Adoption closes it with bookkeeping, not trading: a branch opens on a
+    coin already held, with the existing units registered as open slices
+    at the price on the day they are adopted. Nothing is bought. Nothing
+    is sold. The branch starts full instead of starting in cash, and from
+    then on sells into strength and rebuys lower.
+
+    What it costs, said plainly: adopted coin stops being held and starts
+    being TRADED, and over the prior 90 days holding beat the grid by
+    16.13 points because grids underperform a rally. The account owner
+    chose a bounded test slice for that reason, so the caps here are small
+    on purpose.
+
+    This is the PREVIEW. It places nothing and writes nothing.
+    """
+    import time as _time
+    if not fresh and _ADOPTION_CACHE["payload"] is not None:
+        age = _time.time() - _ADOPTION_CACHE["at"]
+        if age < _ADOPTION_TTL_SECONDS:
+            out = dict(_ADOPTION_CACHE["payload"])
+            out["served_from_cache"] = True
+            out["cache_age_seconds"] = round(age, 1)
+            return out
+
+    try:
+        import coin_adoption
+        import account_census
+        import crypto_grid_bot as grid
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"adoption unavailable: {exc}")
+
+    notes = []
+    claimed = []
+    try:
+        st = await grid.get_grid_status()
+        claimed = [b.get("product_id") for b in (st.get("branches") or [])
+                   if b.get("product_id")]
+    except Exception as exc:
+        # An unreadable claim list is FATAL here, not a note: adopting a
+        # coin a branch already holds puts two systems on one balance,
+        # which is the structural gap behind this repo's phantom positions.
+        log.warning(f"[adopt] claims unreadable: {type(exc).__name__}: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail=("the list of coins already claimed by a branch could not be read, and "
+                    "adopting a claimed coin would put two systems on one balance. Refusing "
+                    "to preview against an unknown claim list."))
+
+    try:
+        import crypto_coin_claims as claims
+        claimed = list(claimed) + list(await claims.claimed_by_other(claims.GRID))
+    except Exception as exc:
+        notes.append(f"family-tree claims unreadable ({type(exc).__name__}) - a coin held by "
+                     f"a tree branch could be proposed here, so check before arming")
+
+    holdings, total = [], None
+    try:
+        async with aiohttp.ClientSession() as session:
+            census = await account_census.census(session, tracked_usd=0.0)
+        if census.get("available"):
+            holdings = census.get("holdings") or []
+            total = census.get("total_usd")
+        else:
+            err = str(census.get("error") or "")
+            if "429" in err:
+                raise HTTPException(
+                    status_code=429,
+                    detail=("Coinbase rate limit reached. Wait a few minutes - each retry "
+                            "spends the allowance the trimmer needs to place orders."))
+            raise HTTPException(status_code=503,
+                                detail=f"census unavailable ({err[:80] or 'unknown'}), so "
+                                       f"nothing can be sized against real holdings")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning(f"[adopt] census failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=503, detail=f"census failed ({type(exc).__name__})")
+
+    out = coin_adoption.plan(holdings, account_total_usd=total, claimed_products=claimed)
+    out["notes"] = notes or None
+    out["account_total_usd"] = total
+    out["coin_usd"] = census.get("coin_usd")
+    out["cash_usd"] = census.get("cash_usd")
+    out["claimed_products"] = sorted(set(str(c) for c in claimed))
+    out["is_armed"] = False
+    out["arming"] = (
+        "There is no arm switch for adoption yet. The planner ships first and the executor "
+        "ships disarmed after it, the same way the trimmer and the resting stops did - a "
+        "loop that writes slices against real holdings is not something to turn on in the "
+        "same hour it was written.")
+    out["served_from_cache"] = False
+    out["cache_age_seconds"] = 0
+    _ADOPTION_CACHE["at"] = _time.time()
+    _ADOPTION_CACHE["payload"] = out
+    return out

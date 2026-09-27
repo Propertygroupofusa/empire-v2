@@ -50,9 +50,14 @@ MONOTONIC_FIELDS = ("trades", "net_usd")
 FIELDS = (
     "trades", "net_usd", "net_edge_per_trade_usd", "profit_factor", "win_rate_pct",
     "allocated_usd", "claimed_usd", "free_cash_usd", "account_total_usd",
+    "coin_usd", "cash_usd",
     "outside_any_branch_pct", "idle_capital_pct", "capital_velocity",
     "branch_count", "open_slices",
 )
+
+# Fields that come from the census rather than the KPI payload, and so are
+# passed in explicitly. Named here so a test can hold the boundary.
+NON_KPI_FIELDS = ("claimed_usd", "branch_count", "open_slices", "coin_usd", "cash_usd")
 
 
 def _num(v):
@@ -93,6 +98,7 @@ def rows(snapshots):
 
 
 def from_kpis(kpis, *, claimed_usd=None, branch_count=None, open_slices=None,
+              coin_usd=None, cash_usd=None,
               bottleneck=None, note=None, captured_at=None):
     """One reading, built from a KPI payload. The worker's only shaping
     step, kept here so a renamed KPI key breaks a test rather than
@@ -108,6 +114,10 @@ def from_kpis(kpis, *, claimed_usd=None, branch_count=None, open_slices=None,
         row["branch_count"] = _num(branch_count)
     if open_slices is not None:
         row["open_slices"] = _num(open_slices)
+    if coin_usd is not None:
+        row["coin_usd"] = _num(coin_usd)
+    if cash_usd is not None:
+        row["cash_usd"] = _num(cash_usd)
     return row
 
 
@@ -197,6 +207,7 @@ def summarise(snapshots, *, hours=24.0):
 
     earned = delta(snapshots, "net_usd", hours=hours)
     placed = delta(snapshots, "allocated_usd", hours=hours)
+    coin = delta(snapshots, "coin_usd", hours=hours)
     outside = delta(snapshots, "outside_any_branch_pct", hours=hours)
     idle = delta(snapshots, "idle_capital_pct", hours=hours)
     trades = delta(snapshots, "trades", hours=hours)
@@ -218,6 +229,10 @@ def summarise(snapshots, *, hours=24.0):
         "earned": earned,
         "placed": placed,
 
+        # Reported, never added to "earned". Coin rising is the market
+        # moving, not the bots working, and the two have been confused on
+        # this dashboard before.
+        "coin_usd": coin,
         "outside_any_branch_pct": outside,
         "idle_capital_pct": idle,
         "trades": trades,

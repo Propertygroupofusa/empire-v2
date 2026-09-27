@@ -1241,6 +1241,29 @@
         <div id="beta-check-wrap"><div class="coin-history-empty">Not loaded.</div></div>
     </div>
 
+    <div class="section-title">🌱 Put the coin you already own to work</div>
+    <div class="panel">
+        <div class="panel-sub"><strong>$10,526 of this account is coin</strong>, and $10,794 of it
+            belongs to no branch. It cannot be put to work today for one structural reason: a grid
+            branch is funded with <strong>cash</strong> and buys its own rungs, and nothing in the
+            engine can hand a branch units you already hold.
+            <br><br>Adoption closes that with bookkeeping, not trading. A branch opens on a coin you
+            already own, and the existing units are registered as open slices at that day's price.
+            <strong>Nothing is bought. Nothing is sold.</strong> The branch starts full instead of
+            starting in cash, and from then on it sells into strength and rebuys lower.
+            <br><br>What it costs, plainly: adopted coin stops being <em>held</em> and starts being
+            <strong>traded</strong>. Over the prior 90 days holding beat the grid by 16.13 points,
+            because grids underperform a rally. That is why this is capped at a
+            <strong>test slice</strong> - a few hundred dollars across at most three coins, run
+            alongside the two-week verdict, so that verdict gets real evidence instead of a guess.
+            <br><br>ZEC is excluded by name, positions over 20% are left to the trimmer, and a coin
+            any branch already claims is refused outright.</div>
+        <div style="margin:10px 0; display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="unlock-btn" style="margin-top:0;" onclick="loadAdoption()">🌱 What would be adopted</button>
+        </div>
+        <div id="adoption-wrap"><div class="coin-history-empty">Not loaded.</div></div>
+    </div>
+
     <div class="section-title">📉 Where the numbers have been</div>
     <div class="panel">
         <div class="panel-sub">Every other figure on this page is a <strong>point in time</strong>.
@@ -8112,9 +8135,22 @@ async function loadGrowthCurve(hours) {
               <div style="font-size:0.78em;color:${dim}">change: ${chg('outside_any_branch_pct')} points · down is the goal</div>
             </div>
             <div style="flex:1 1 300px">
+              <div style="font-size:0.72em;letter-spacing:.12em;text-transform:uppercase;color:${dim}">Coin, whole account</div>
+              ${sparkline(pt('coin_usd'), {label: 'Value of all coin held', colour: warn, fmt: money})}
+              <div style="font-size:0.78em;color:${dim}">change: ${chg('coin_usd')} · the market moving, not the bots</div>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:26px;flex-wrap:wrap;margin-bottom:16px">
+            <div style="flex:1 1 300px">
               <div style="font-size:0.72em;letter-spacing:.12em;text-transform:uppercase;color:${dim}">Closed round trips</div>
               ${sparkline(pt('trades'), {label: 'Cumulative closed trades', colour: 'var(--text,#888)', fmt: v => v.toFixed(0)})}
               <div style="font-size:0.78em;color:${dim}">change: ${chg('trades')} trades</div>
+            </div>
+            <div style="flex:1 1 300px">
+              <div style="font-size:0.72em;letter-spacing:.12em;text-transform:uppercase;color:${dim}">Account, whole</div>
+              ${sparkline(pt('account_total_usd'), {label: 'Whole account value', colour: 'var(--text,#888)', fmt: money})}
+              <div style="font-size:0.78em;color:${dim}">coin plus cash, priced at the venue</div>
             </div>
           </div>
 
@@ -8268,6 +8304,66 @@ async function loadBetaCheck() {
           ${rows}
           <div style="font-size:0.82em;color:${dim};line-height:1.6;margin-top:10px">
             ${esc2(d.what_this_does_not_say || '')}</div>`;
+    } catch (e) {
+        wrap.innerHTML = '<div class="coin-history-empty">Could not read it: ' + e.message + '</div>';
+    }
+}
+
+// --------------------------------------------------------- ADOPTION
+// Buys nothing, sells nothing. The panel leads with that because the
+// instinct on seeing "put your coin to work" is that something is about
+// to be traded away.
+async function loadAdoption() {
+    const wrap = document.getElementById('adoption-wrap');
+    wrap.innerHTML = '<div class="coin-history-empty">Sizing against real holdings…</div>';
+    try {
+        const r = await fetch('/api/trading-dashboard/coin-adoption');
+        if (r.status === 429) throw new Error('Coinbase rate limit - wait a few minutes.');
+        if (!r.ok) {
+            const b = await r.json().catch(() => ({}));
+            throw new Error(b.detail || ('HTTP ' + r.status));
+        }
+        const d = await r.json();
+        const dim = 'var(--text-dim)', good = 'var(--success,#16a34a)',
+              warn = 'var(--warning,#d98324)';
+        const money = v => (v == null ? '—' : (v < 0 ? '-' : '') + '$' +
+            Math.abs(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}));
+
+        const rows = (d.adopt || []).map(a => `
+          <div style="border-left:3px solid ${good};padding:10px 14px;margin-bottom:10px;background:var(--panel2,#0000000a)">
+            <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline">
+              <div style="font-weight:700;font-size:1.05em">${esc2(a.asset)}
+                <span style="font-weight:400;color:${dim};font-size:0.85em">${esc2(a.product_id || '')}</span></div>
+              <div style="font-size:1.2em;font-weight:700;font-variant-numeric:tabular-nums">${money(a.allocated_usd)}</div>
+            </div>
+            <div style="font-size:0.82em;color:${dim};margin-top:5px">
+              ${a.num_levels} slice(s) at ${money(a.price)} · ${a.share_of_holding_pct}% of the holding ·
+              <strong style="color:var(--text)">${money(a.leaves_held_usd)} stays held and untouched</strong>
+            </div>
+          </div>`).join('');
+
+        const refusalCounts = {};
+        for (const f of (d.refusals || [])) refusalCounts[f.reason] = (refusalCounts[f.reason] || 0) + 1;
+
+        wrap.innerHTML = `
+          <div style="border-left:4px solid ${d.ok ? good : warn};padding:10px 14px;margin-bottom:16px;background:var(--panel2,#0000000a)">
+            <div style="font-size:0.7em;letter-spacing:.14em;text-transform:uppercase;color:${dim}">Would be put to work</div>
+            <div style="font-size:1.6em;font-weight:700;font-variant-numeric:tabular-nums">${money(d.total_usd)}
+              <span style="font-size:0.45em;font-weight:400;color:${dim}">across ${d.coins} coin(s)</span></div>
+            <div style="font-size:0.88em;line-height:1.6;margin-top:6px">${esc2(d.detail || '')}</div>
+            <div style="font-size:0.8em;color:${good};margin-top:8px;font-weight:700">
+              ${d.buys_nothing ? 'BUYS NOTHING' : ''} ${d.sells_nothing ? '· SELLS NOTHING' : ''} · PREVIEW ONLY</div>
+          </div>
+          ${rows}
+          <div style="font-size:0.82em;color:${dim};line-height:1.7;margin-top:8px">
+            <strong style="color:var(--text)">Refused:</strong>
+            ${Object.entries(refusalCounts).map(([k, v]) => `${esc2(k.replace(/_/g, ' ').toLowerCase())} ×${v}`).join(' · ') || 'nothing'}
+            <br><br>Caps in force: ${money((d.caps||{}).max_total_usd)} total,
+            ${money((d.caps||{}).max_per_coin_usd)} per coin, ${(d.caps||{}).max_coins} coins max,
+            nothing over ${(d.caps||{}).max_position_share_pct}% of the account.
+            <br><br>${esc2(d.arming || '')}
+            ${d.notes ? '<br><br><span style="color:' + warn + '">' + esc2(d.notes.join('; ')) + '</span>' : ''}
+          </div>`;
     } catch (e) {
         wrap.innerHTML = '<div class="coin-history-empty">Could not read it: ' + e.message + '</div>';
     }

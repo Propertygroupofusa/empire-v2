@@ -20,7 +20,8 @@ def snap(minutes, **over):
          "trades": 83, "net_usd": 19.61, "net_edge_per_trade_usd": 0.2363,
          "profit_factor": 3.697, "win_rate_pct": 75.9,
          "allocated_usd": 143.11, "claimed_usd": 553.89, "free_cash_usd": 892.30,
-         "account_total_usd": 11397.11, "outside_any_branch_pct": 90.92,
+         "account_total_usd": 11418.75, "coin_usd": 10526.39, "cash_usd": 892.36,
+         "outside_any_branch_pct": 90.92,
          "idle_capital_pct": 86.18, "capital_velocity": 10.495,
          "branch_count": 6, "open_slices": 6, "bottleneck": "CAPITAL_OUTSIDE"}
     r.update(over)
@@ -53,7 +54,7 @@ def test_a_missing_reading_is_never_treated_as_a_zero():
     rows = [snap(0), snap(30, account_total_usd=None), snap(60)]
     d = gl.delta(rows, "account_total_usd")
     assert d["change"] == 0.0            # compared the two it could read
-    assert d["from"] == 11397.11 and d["to"] == 11397.11
+    assert d["from"] == 11418.75 and d["to"] == 11418.75
 
 
 def test_a_field_no_reading_carries_is_withheld_not_zeroed():
@@ -117,6 +118,17 @@ def test_earning_and_placing_are_never_added_together():
     assert "earned +0.00" in s["headline"]
 
 
+def test_coin_is_tracked_but_never_counted_as_earnings():
+    """The circled line. Coin is the bulk of this account, and coin rising
+    is the market moving - not the bots working."""
+    rows = [snap(0, coin_usd=10526.39, net_usd=19.61),
+            snap(120, coin_usd=11000.00, net_usd=19.61)]
+    s = gl.summarise(rows)
+    assert s["coin_usd"]["change"] == pytest.approx(473.61)
+    assert s["earned"]["change"] == 0.0
+    assert "473" not in s["headline"]
+
+
 def test_the_summary_has_no_combined_total_field():
     s = gl.summarise([snap(0), snap(120, net_usd=30.0, allocated_usd=900.0)])
     for key in s:
@@ -170,12 +182,15 @@ def test_a_bottleneck_that_changed_is_the_headline_of_the_series():
 def test_a_reading_is_built_from_the_kpi_payload_without_renaming_anything():
     import capital_kpis as ck
     k = ck.compute([], allocated_usd=143.11, free_cash_usd=892.30,
-                   account_total_usd=11397.11)
+                   account_total_usd=11418.75)
     row = gl.from_kpis(k, claimed_usd=553.89, branch_count=6, open_slices=6,
+                       coin_usd=10526.39, cash_usd=892.36,
                        bottleneck="CAPITAL_OUTSIDE")
     assert row["allocated_usd"] == 143.11
     assert row["idle_capital_pct"] is not None
     assert row["claimed_usd"] == 553.89
+    assert row["coin_usd"] == 10526.39
+    assert row["cash_usd"] == 892.36
     assert row["bottleneck"] == "CAPITAL_OUTSIDE"
 
 
@@ -184,9 +199,9 @@ def test_every_field_this_module_writes_is_a_key_the_kpis_produce():
     month before anyone noticed the chart had gone flat."""
     import capital_kpis as ck
     produced = set(ck.compute([], allocated_usd=100.0))
-    # claimed_usd, branch_count and open_slices come from grid status,
-    # not the KPI payload, and are passed in explicitly.
-    from_kpis = set(gl.FIELDS) - {"claimed_usd", "branch_count", "open_slices"}
+    # Some fields come from grid status and the census rather than the KPI
+    # payload, and are passed in explicitly.
+    from_kpis = set(gl.FIELDS) - set(gl.NON_KPI_FIELDS)
     assert from_kpis <= produced, from_kpis - produced
 
 
