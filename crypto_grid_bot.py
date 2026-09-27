@@ -820,13 +820,45 @@ async def get_maker_only_skips() -> dict:
     return out
 
 
-async def expected_leg_fee_rate() -> float:
+async def expected_leg_fee_rate(product_id: str = None) -> float:
     """The REAL per-leg fee rate the next order is expected to pay: the
     maker rate when maker orders are on, the taker rate otherwise. Half the
-    round-trip rate, since a round trip is two legs."""
+    round-trip rate, since a round trip is two legs.
+
+    PER COIN, because maker-only being ON does not mean a maker FILL.
+
+    universe_scan measures every book against a $750,000 depth floor and
+    reports five live branches below it - ACH $52,080, FLOKI $114,810,
+    TIA $395,209, SHIB $471,080, BONK $744,989. An order on a book that
+    thin crosses the spread and pays TAKER. This function returned the
+    maker rate for all of them anyway, because it never looked at which
+    coin was asking.
+
+    That is not cosmetic. _pick_profitable_slice_to_sell uses this rate to
+    decide whether a sale would net a profit, so understating the exit leg
+    by 0.40 points green-lights sales netting between -0.40% and zero -
+    real losses booked as wins, the exact failure that function exists to
+    prevent.
+
+    Passing product_id consults the measured verdict. It can only ever
+    RAISE the rate: a coin known to be thin gets taker, a coin known to be
+    deep keeps maker, and a coin nothing has been measured about behaves
+    exactly as before. Calling with no product_id is unchanged.
+    """
     global _cached_real_maker_fee_rate
     if await is_maker_orders_active() and _cached_real_maker_fee_rate is not None:
-        return _cached_real_maker_fee_rate
+        maker = _cached_real_maker_fee_rate
+        if product_id is None:
+            return maker
+        taker = (await get_effective_round_trip_fee_rate()) / 2
+        try:
+            import maker_viability
+            return maker_viability.leg_fee_rate(product_id, maker, taker,
+                                                maker_only_active=True)
+        except Exception:
+            # A failure to consult the verdict must never LOWER the fee, so
+            # it falls back to exactly what this function returned before.
+            return maker
     return (await get_effective_round_trip_fee_rate()) / 2
 
 
@@ -1153,7 +1185,8 @@ async def slice_round_trip_fee_rate(slice_row, exit_leg_rate: float = None) -> f
     if entry_rate is None or entry_rate <= 0:
         entry_rate = (await get_effective_round_trip_fee_rate()) / 2
     if exit_leg_rate is None:
-        exit_leg_rate = await expected_leg_fee_rate()
+        exit_leg_rate = await expected_leg_fee_rate(
+            getattr(slice_row, "product_id", None))
     return entry_rate + exit_leg_rate
 
 
@@ -5305,7 +5338,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     # finds nothing genuinely profitable to sell simply waits, rather than
     # ever locking in a real loss.
     real_fee_rate = await get_effective_round_trip_fee_rate()
-    exit_leg_rate = await expected_leg_fee_rate()
+    exit_leg_rate = await expected_leg_fee_rate(branch.product_id)
 
     # ---- EXCURSION TRACKING ----
     #
