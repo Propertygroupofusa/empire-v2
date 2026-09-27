@@ -9504,3 +9504,73 @@ async def gate_verdict(days: int = 30):
                           f"That is real separation. It is evidence FOR a change, not a "
                           f"change - the switch stays a deliberate decision.")
     return out
+
+
+@router.get("/resting-stops")
+async def resting_stops_preview():
+    """What real stop orders at the venue would look like. Places nothing.
+
+    Every level here comes from holdings_watch unchanged. This adds only
+    the order mechanics - size, limit band, and the refusals - because a
+    second opinion about where a stop belongs is how the dashboard and the
+    venue end up disagreeing about what is protected.
+    """
+    try:
+        import resting_stops
+        import holdings_watch
+        import account_census
+        import adaptive_stop
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"resting stops unavailable: {exc}")
+
+    watch = await _cached_watch(30) if "_cached_watch" in globals() else None
+    if not watch:
+        watch = await get_holdings_watch(window_days=30)
+
+    async with aiohttp.ClientSession() as session:
+        meta = {}
+        for row in (watch.get("rows") or []):
+            asset = row.get("asset")
+            if not asset or row.get("status") not in (
+                    holdings_watch.OK, holdings_watch.NEAR, holdings_watch.BREACHED):
+                continue
+            pid = f"{asset}-USD"
+            try:
+                path = f"/api/v3/brokerage/products/{pid}"
+                async with session.get(f"https://api.coinbase.com{path}",
+                                       headers=account_census._auth_headers("GET", path),
+                                       timeout=20) as r:
+                    if r.status == 200:
+                        m = await r.json()
+                        meta[asset] = (m.get("base_increment") or "0.00000001",
+                                       m.get("quote_increment") or "0.01",
+                                       m.get("base_min_size"))
+            except Exception:
+                pass
+
+    plans = []
+    for row in (watch.get("rows") or []):
+        asset = row.get("asset")
+        if not asset:
+            continue
+        bi, qi, bms = meta.get(asset, ("0.00000001", "0.01", None))
+        plans.append(resting_stops.plan_stop(
+            asset, units_available=row.get("units"), price=row.get("price"),
+            stop_price=row.get("stop_level"), base_increment=bi,
+            quote_increment=qi, base_min_size=bms))
+
+    out = resting_stops.summarise(plans, os.getenv(resting_stops.MODE_ENV))
+    out["is_a_preview_not_an_order"] = True
+    out["levels_from"] = "holdings_watch, unchanged"
+    out["as_of"] = watch.get("as_of")
+    refusals = {}
+    for p in plans:
+        if not p.get("ok"):
+            refusals.setdefault(p["reason"], []).append(p["asset"])
+    out["refusals"] = refusals
+    out["conflict"] = (
+        "A resting stop holds the coins it covers. Anything covered here becomes "
+        "unavailable to the concentration trimmer, which sizes against the available "
+        "balance. Both are protections and they compete for the same units - that is "
+        "a decision to make deliberately, not a setting to flip.")
+    return out
