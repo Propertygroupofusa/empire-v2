@@ -13442,6 +13442,48 @@ The grid already sits in the productive zone - 21.03h average hold,
 75.9% won. Growth comes from capital reaching that edge, not from
 cadence. Which is what the $10,794 line is.
 
+## The league, and the mistake it nearly shipped with
+
+`coin_league.py` ranks every coin on **return per dollar risked, per
+round trip, net of fees** — `pnl / (qty x entry)`. Not units: PEPE holds
+20,232,619 of them and is worth $87.61, because unit count is set by a
+token's supply and nothing else. Not dollars earned: that measures the
+allocation, not the coin. Per-dollar return is the only number on which
+an $87 position can genuinely beat a $2,250 one, which is what makes the
+competition worth having.
+
+`blueprint()` hands a challenger the leader's SETTINGS, never its market.
+That is the transferable half — any coin can trade the way the winner
+trades, including a weak one, because settings cost nothing to adopt.
+
+**Two guards, both learned the hard way in the same hour:**
+
+1. **PROVISIONAL vs CONFIRMED.** A long grid on a coin that rose looks
+   brilliant for reasons that are not the grid. The crown is PROVISIONAL
+   while the leader's own price rose and CONFIRMED only after a flat or
+   falling window, and a PROVISIONAL crown is never copied.
+2. **The config epoch.** I shipped the league, called it live, and it
+   ranked DOGE first at +2.2810% over 15 trades. Then I read
+   `realized_edge.config_epoch`: **82 of the 83 closed trades predate the
+   2026-09-26 change.** The standings were an accurate measurement of a
+   RETIRED configuration on coins the fleet had stopped trading. Since
+   the entire feature exists so other coins copy the leader, an
+   unqualified crown would have sent the whole account imitating a bot
+   that was already switched off.
+
+   Every trade is now tagged against the epoch, an **untimed trade counts
+   as pre-epoch** (it is not evidence about the current bot, and assuming
+   otherwise flatters it), `crown_eligible` requires
+   `config_status == CURRENT`, and with no epoch readable nothing can be
+   crowned at all.
+
+The live standings still read DOGE, ETH, STX, LINK, ETC, WIF — real
+numbers, retired configuration, crown vacant. Worth reading; worth not
+acting on.
+
+`CoinLeagueSnapshot` records the standings every pass, because a league
+says who is winning and only a series says who is **climbing**.
+
 ## Endpoints added
 
 `/capital-kpis` - `/growth-curve` - `/capital-placement` - `/beta-check`
