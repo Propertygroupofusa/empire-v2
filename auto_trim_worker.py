@@ -35,6 +35,23 @@ import auto_trim
 
 log = logging.getLogger("auto_trim")
 
+# PROOF OF LIFE.
+#
+# On 2026-09-27 the trimmer was armed, the endpoint agreed it was armed,
+# and no order appeared for an hour. There was no way to tell from outside
+# whether the loop was running at all, failing every pass, or simply had
+# not reached one - three very different situations that all look like an
+# empty trades table. A loop that can spend money must be able to say when
+# it last woke up, so the question "is it running" has an answer that is
+# not a guess.
+HEARTBEAT = {
+    "started_at": None,      # when run_periodically was entered
+    "last_pass_at": None,    # when the most recent pass FINISHED
+    "passes": 0,
+    "last_result": None,     # the detail string from that pass
+    "last_error": None,
+}
+
 CHECK_SECONDS = int(os.getenv("AUTO_TRIM_CHECK_SECONDS", "900"))    # 15 min
 MODE_ENV = "AUTO_TRIM_MODE"
 HISTORY_DAYS = 7
@@ -296,12 +313,22 @@ async def check_once(session_factory, *, place=True) -> dict:
 
 async def run_periodically(session_factory):
     """Never dies. A risk control that raises is not a risk control."""
+    HEARTBEAT["started_at"] = datetime.utcnow().isoformat() + "Z"
     log.info(f"[trim] auto-trimmer loop up, mode={current_mode()}, every {CHECK_SECONDS}s")
     while True:
         try:
             r = await check_once(session_factory)
+            HEARTBEAT["last_result"] = r.get("detail")
+            HEARTBEAT["last_error"] = None
             if r.get("acted"):
                 log.warning(f"[trim] {r['acted']} trim(s) placed: {r['detail']}")
         except Exception as e:
+            HEARTBEAT["last_error"] = f"{type(e).__name__}: {e}"
+            HEARTBEAT["last_result"] = None
             log.warning(f"[trim] pass failed: {type(e).__name__}: {e}")
+        # Written whether the pass succeeded or threw. A heartbeat that
+        # only ticks on success cannot distinguish "not running" from
+        # "running and failing", which is the distinction it exists for.
+        HEARTBEAT["last_pass_at"] = datetime.utcnow().isoformat() + "Z"
+        HEARTBEAT["passes"] += 1
         await asyncio.sleep(CHECK_SECONDS)
