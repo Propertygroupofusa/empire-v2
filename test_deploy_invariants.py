@@ -165,3 +165,55 @@ def test_every_new_route_is_registered_exactly_once():
                     paths.append((d.func.attr, d.args[0].value))
     dupes = {p for p in paths if paths.count(p) > 1}
     assert not dupes, f"duplicate routes shadow each other: {sorted(dupes)}"
+
+
+def test_every_inline_script_on_the_dashboard_parses():
+    """One typo in that inline <script> kills EVERY panel, not just the new one.
+
+    The dashboard is a single 450KB page with all of its behaviour in one
+    inline script, so a stray backtick in a template literal does not
+    degrade one card - it stops the whole file executing and the page
+    renders as static furniture with every panel stuck on "Not loaded."
+    Python's parser cannot see that, and no other test in this repo reads
+    the page as code.
+    """
+    import re
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node") or shutil.which("nodejs")
+    if not node:
+        pytest.skip("no node available to parse the page's JavaScript")
+
+    html = open("family_tree_dashboard.html", encoding="utf-8").read()
+    blocks = re.findall(r'<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>', html, re.S)
+    assert blocks, "found no inline script - the regex is broken, not the page"
+
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                     encoding="utf-8") as fh:
+        fh.write("\n;\n".join(blocks))
+        path = fh.name
+    r = subprocess.run([node, "--check", path], capture_output=True, text=True)
+    assert r.returncode == 0, f"the dashboard's JavaScript does not parse:\n{r.stderr}"
+
+
+def test_the_kpi_panel_only_reads_fields_the_endpoint_sends():
+    """The panel is the one consumer of /capital-kpis and nothing type-checks
+    the boundary. A renamed key renders as `undefined` on a money tile."""
+    import capital_kpis
+    import re
+
+    produced = set(capital_kpis.compute([], allocated_usd=100.0))
+    produced |= {"bottleneck", "bottleneck_detail", "what_would_move_it",
+                 "ledger_note", "capital_note", "ledger_rows_read",
+                 "ledger_row_limit", "backing_verdict", "claimed_usd",
+                 "headline", "is_a_measurement_not_a_change",
+                 "served_from_cache", "cache_age_seconds"}
+
+    html = open("family_tree_dashboard.html", encoding="utf-8").read()
+    start = html.index("async function loadCapitalKpis()")
+    body = html[start:html.index("\n}", html.index("} catch (e)", start))]
+    read = set(re.findall(r"\bd\.([A-Za-z_][A-Za-z0-9_]*)", body))
+    assert read, "found no field reads - the slice is wrong, not the panel"
+    assert read <= produced, read - produced
