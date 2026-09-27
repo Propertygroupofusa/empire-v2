@@ -10452,6 +10452,38 @@ _ADOPTION_CACHE = {"at": 0.0, "payload": None}
 _ADOPTION_TTL_SECONDS = 180
 
 
+class SetIdleRotationArmedRequest(BaseModel):
+    armed: bool
+
+
+@router.post("/idle-capital/arm")
+async def idle_capital_set_armed(payload: SetIdleRotationArmedRequest):
+    """Arm or disarm the automatic idle-cash rotation.
+
+    Stored in the database, not the environment. On this deployment
+    CRYPTO_STRATEGY_MODE could not be corrected through the Railway UI at
+    all - six attempts across a confirmed restart - and the fix both times
+    was a control with no deployment history to fight. GRID_IDLE_ROTATION_MODE
+    remains as an override for when the database is the thing that is wrong.
+
+    Armed, the sweep moves cash out of a branch with no completed round trip
+    in 72h and into one that has demonstrably closed one, at most one move
+    per pass, never into another stale branch, never past the 20% rule, and
+    never out to unallocated cash. Disarmed it only observes.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    import idle_rotation_worker
+    result = await idle_rotation_worker.set_armed(bool(payload.armed))
+    result["env_override"] = idle_rotation_worker.env_mode() or None
+    result["effective"] = await idle_rotation_worker.armed_now()
+    if result["env_override"] in ("arm", "observe"):
+        result["note"] = (f"the environment says {result['env_override']!r} and wins over "
+                          f"this switch - clear GRID_IDLE_ROTATION_MODE for the database "
+                          f"flag to take effect")
+    return result
+
+
 @router.post("/idle-capital/rotate")
 async def idle_capital_rotate(dry_run: bool = True):
     """Move stale cash into a branch that is demonstrably trading.

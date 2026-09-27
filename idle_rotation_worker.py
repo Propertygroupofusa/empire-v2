@@ -66,13 +66,93 @@ CHECK_SECONDS = int(os.getenv("GRID_IDLE_ROTATION_CHECK_SECONDS", "900"))
 MAX_MOVES_PER_PASS = int(os.getenv("GRID_IDLE_ROTATION_MAX_PER_PASS", "1"))
 
 
+# THE SWITCH LIVES IN THE DATABASE, WITH THE ENV AS AN ESCAPE HATCH.
+#
+# Not a preference. On this deployment CRYPTO_STRATEGY_MODE could not be
+# corrected through the Railway UI at all - edited, deleted, re-added,
+# across a confirmed restart, six attempts, still reading the old value.
+# The fix both times was a second control with no deployment history to
+# fight: the DB flag, checked FIRST. Maker-only carries the same pair for
+# the same reason.
+#
+# So arming is a write-guarded dashboard action rather than a redeploy, and
+# GRID_IDLE_ROTATION_MODE stays as the override for when the database is
+# the thing that is wrong.
+#
+# FAILS CLOSED. An unreadable switch reads as observing. Every consumer is
+# safe when this answers False and moves money when it answers True.
+IDLE_ROTATION_MODE_KEY = "grid_idle_rotation_mode"
+
+
+def env_mode() -> str:
+    """What GRID_IDLE_ROTATION_MODE reads. Empty when unset."""
+    return (os.getenv(MODE_ENV, "") or "").strip().lower()
+
+
+async def is_armed_db() -> bool:
+    """The stored flag alone. False on anything unreadable."""
+    try:
+        from sqlalchemy import select
+        from models import TradingBotState
+        from database import get_session_factory
+        async with get_session_factory()() as db:
+            row = (await db.execute(
+                select(TradingBotState)
+                .where(TradingBotState.bot_name == IDLE_ROTATION_MODE_KEY))).scalar_one_or_none()
+            return bool(row is not None and row.base_capital and row.base_capital >= 1.0)
+    except Exception as e:
+        log.warning(f"[idle-rot] arm switch unreadable ({e}) - observing")
+        return False
+
+
+async def set_armed(enabled: bool):
+    """Arm or disarm the sweep. The dashboard's door."""
+    from sqlalchemy import select
+    from models import TradingBotState
+    from database import get_session_factory
+    async with get_session_factory()() as db:
+        row = (await db.execute(
+            select(TradingBotState)
+            .where(TradingBotState.bot_name == IDLE_ROTATION_MODE_KEY))).scalar_one_or_none()
+        if row is None:
+            db.add(TradingBotState(bot_name=IDLE_ROTATION_MODE_KEY,
+                                   base_capital=1.0 if enabled else 0.0))
+        else:
+            row.base_capital = 1.0 if enabled else 0.0
+        await db.commit()
+    log.warning(f"[idle-rot] arm switch set to {enabled} - stale cash "
+                f"{'WILL' if enabled else 'will NOT'} be moved automatically")
+    return {"armed": enabled, "source": "database"}
+
+
 def current_mode() -> str:
-    """`observe` unless the setting says exactly `arm`, stripped and lowered."""
+    """Synchronous view: the ENV only.
+
+    Kept because the boot log and the tests read it, and because the env
+    remains the override. It is NOT the whole answer - use armed_now().
+    """
     return (os.getenv(MODE_ENV, "observe") or "observe").strip().lower()
 
 
 def is_armed() -> bool:
+    """Env-only, synchronous. The loop calls armed_now() instead."""
     return current_mode() == "arm"
+
+
+async def armed_now() -> bool:
+    """The real answer: env override first, then the stored flag.
+
+    An env value of exactly `arm` or `observe` decides it outright - that is
+    what makes it an escape hatch. Anything else (unset, blank, a typo) hands
+    the decision to the database rather than silently arming or disarming on
+    a misspelling.
+    """
+    e = env_mode()
+    if e == "arm":
+        return True
+    if e == "observe":
+        return False
+    return await is_armed_db()
 
 
 async def _branches_from_db():
@@ -151,23 +231,28 @@ async def rotate_once(*, dry_run: bool = True, require_arm: bool = True,
     import crypto_grid_bot as grid
 
     max_moves = MAX_MOVES_PER_PASS if max_moves is None else max_moves
-    if require_arm and not is_armed() and not dry_run:
+    # Read ONCE per pass and reused, so every figure this returns describes
+    # the same moment. Re-read immediately before each write below.
+    armed = await armed_now()
+    if require_arm and not armed and not dry_run:
         return {"armed": False, "moved": 0,
-                "detail": f"{MODE_ENV} is '{current_mode()}' - observing, nothing moved"}
+                "detail": (f"idle rotation is observing - env {MODE_ENV}="
+                           f"{env_mode() or '(unset)'}, database flag "
+                           f"{'on' if await is_armed_db() else 'off'}. Nothing moved.")}
 
     report, plan = await plan_now(cheap=require_arm)
     if not plan["ok"]:
-        return {"armed": is_armed(), "moved": 0, "plan": plan, "report": report,
+        return {"armed": armed, "moved": 0, "plan": plan, "report": report,
                 "detail": f"nothing to rotate: {plan['detail'][:160]}"}
     if dry_run:
-        return {"armed": is_armed(), "moved": 0, "dry_run": True,
+        return {"armed": armed, "moved": 0, "dry_run": True,
                 "plan": plan, "report": report,
                 "detail": f"PREVIEW only - would move ${plan['total_usd']:,.2f}"}
 
     moved, failed = [], []
     for m in plan["moves"][:max_moves]:
         # Re-checked immediately before the write, against the same constant.
-        if require_arm and not is_armed():
+        if require_arm and not await armed_now():
             log.warning("[idle-rot] disarmed mid-pass - stopping before the move")
             break
         try:
@@ -185,7 +270,7 @@ async def rotate_once(*, dry_run: bool = True, require_arm: bool = True,
             log.warning(f"[idle-rot] {m['from_product_id']} -> {m['to_product_id']} "
                         f"failed: {type(exc).__name__}: {exc}")
 
-    return {"armed": is_armed(), "moved": len(moved), "moves": moved,
+    return {"armed": armed, "moved": len(moved), "moves": moved,
             "failed": failed, "plan": plan,
             "detail": (f"{len(moved)} move(s), "
                        f"${sum(x['usd'] for x in moved):,.2f} put back to work"
@@ -198,7 +283,7 @@ async def run_periodically(session_factory=None):
     log.info(f"[idle-rot] loop up, mode={current_mode()}, every {CHECK_SECONDS}s")
     while True:
         try:
-            r = await rotate_once(dry_run=not is_armed(), require_arm=True)
+            r = await rotate_once(dry_run=not await armed_now(), require_arm=True)
             HEARTBEAT["last_result"] = r.get("detail")
             HEARTBEAT["last_error"] = None
             if r.get("moved"):

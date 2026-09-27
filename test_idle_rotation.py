@@ -46,7 +46,10 @@ ok("observe is the default", w.current_mode() in ("observe", "arm"))
 ok("only the exact word arms it", w.is_armed() == (w.current_mode() == "arm"))
 ok("the mode is stripped and lowercased", ".strip().lower()" in fn("current_mode"))
 ok("armed twice - once before fetching, once before each move",
-   ROT.count("is_armed()") >= 2)
+   ROT.count("armed_now()") >= 2,
+   "the double-check now goes through armed_now(), which consults the "
+   "database as well as the env - counting the old is_armed() name would "
+   "pass on a function that never checks at all")
 ok("a mid-pass disarm stops before the next move", "disarmed mid-pass" in ROT)
 
 # --- the default is preview, everywhere -------------------------------------
@@ -174,6 +177,41 @@ _stale_minutes = _ic.STALE_AFTER_HOURS * 60
 ok("the sweep is far faster than the condition it watches",
    w.CHECK_SECONDS / 60.0 < _stale_minutes / 100.0,
    f"sweep {w.CHECK_SECONDS / 60:.0f}min vs condition {_stale_minutes:.0f}min")
+
+# --- the arm switch lives where it can actually be flipped ----------------
+#
+# On this deployment CRYPTO_STRATEGY_MODE could not be corrected through the
+# Railway UI across six attempts and a confirmed restart. The fix both times
+# was a DB control with no deployment history to fight. Arming a money-mover
+# through the env alone would repeat that.
+ARMDB = fn("is_armed_db")
+SETA = fn("set_armed")
+NOW = fn("armed_now")
+
+ok("the switch is stored in the database", "TradingBotState" in ARMDB)
+ok("it has its own key", w.IDLE_ROTATION_MODE_KEY == "grid_idle_rotation_mode")
+ok("an unreadable switch observes - fails closed",
+   "except Exception" in ARMDB and "return False" in ARMDB)
+ok("there is a setter for the dashboard to call", "await db.commit()" in SETA)
+
+ok("the env still overrides, both ways",
+   "if e == \"arm\"" in NOW and "if e == \"observe\"" in NOW)
+ok("a typo or blank env hands the decision to the database, not to a guess",
+   "return await is_armed_db()" in NOW)
+
+ok("the executor reads the real answer, not the env alone",
+   "armed = await armed_now()" in ROT)
+ok("it is re-read immediately before each write",
+   "not await armed_now()" in ROT)
+ok("the refusal names BOTH sources so a stuck switch is diagnosable",
+   "database flag" in ROT and "env " in ROT)
+ok("the loop asks the real answer too", "dry_run=not await armed_now()" in SRC)
+
+ok("the endpoint exists", '@router.post("/idle-capital/arm")' in ROUTER)
+ok("it reports what is EFFECTIVE, not just what it wrote",
+   '"effective"' in ROUTER and "armed_now()" in ROUTER)
+ok("and warns when the env is overriding the switch it just set",
+   "wins over" in ROUTER)
 
 _failed = [l for l, p in _checks if not p]
 print(f"\n{len(_checks) - len(_failed)} passed, {len(_failed)} failed")
