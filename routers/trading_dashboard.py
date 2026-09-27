@@ -1646,6 +1646,30 @@ def _build_progress_observations(alpaca_data, crypto_data):
 
     if crypto_data:
         crypto_retired = bool(crypto_data.get("crypto_passive_mode"))
+
+        # A BRAKE ON A CAR WITH NO ENGINE.
+        #
+        # Both gates below live ONLY in the family-tree bot; the grid never
+        # reads either one. This deploy runs grid_fleet, so that loop is
+        # never started and nothing was going to enter regardless - which
+        # makes "entries are tree-wide paused" describe a restraint on
+        # something that cannot move, printed on a page whose live numbers
+        # come from the grid.
+        #
+        # It is worse than noise. The figures behind it come from
+        # CryptoCoinTradeHistory, the RETIRED tree's ledger: 167 trades,
+        # -$508.44, newest 2026-09-09 - eighteen days stale when this was
+        # written. So the banner announced a 35% win rate and -$105.70
+        # directly above a live grid running 87 trades at 77% and +$25.82,
+        # and read as a verdict on the engine that is actually running.
+        #
+        # The client-side copy of this banner was already gated on this
+        # exact flag (renderRollingExpectancyBanner). This server-side copy
+        # was not, so the fix only ever covered one of the two places the
+        # same sentence is produced - which is why it kept appearing.
+        tree_loop_live = crypto_data.get("family_tree_loop_running") is not False
+        tree_gates_apply = (not crypto_retired) and tree_loop_live
+
         if crypto_retired:
             observations.append({
                 "icon": "🔒", "tone": "warn",
@@ -1659,7 +1683,7 @@ def _build_progress_observations(alpaca_data, crypto_data):
         # owner's own screenshot surfaced (three banners, two of them
         # giving different reasons for the same already-explained fact).
         rolling = crypto_data.get("rolling_expectancy")
-        if not crypto_retired and rolling and rolling.get("negative"):
+        if tree_gates_apply and rolling and rolling.get("negative"):
             win_rate = rolling.get("win_rate")
             win_count = rolling.get("win_count")
             loss_count = rolling.get("loss_count")
@@ -1685,7 +1709,7 @@ def _build_progress_observations(alpaca_data, crypto_data):
             })
         branches = crypto_data.get("branches") or []
         paused_dd = [b for b in branches if b.get("drawdown_breached")]
-        if not crypto_retired and paused_dd:
+        if tree_gates_apply and paused_dd:
             names = ", ".join(
                 b["bot_name"].replace("crypto_tree_", "").replace("_usd", "").upper() for b in paused_dd[:4]
             )
