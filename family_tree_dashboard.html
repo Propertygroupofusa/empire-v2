@@ -8426,6 +8426,7 @@ async function loadLeague() {
               ${c.trades} trades · ${c.win_rate_pct ?? '—'}% won · ${money(c.net_usd)} banked
               ${c.deployed_usd != null ? ' · ' + money(c.deployed_usd) + ' at work' : ''}
               ${c.window_return_pct != null ? ` · coin ${c.window_return_pct > 0 ? '+' : ''}${c.window_return_pct.toFixed(1)}%` : ''}
+              ${c.config_status && c.config_status !== 'CURRENT' ? ` · <span style="color:${bad}">${esc2(c.config_status.replace(/_/g, ' ').toLowerCase())}</span>` : ''}
               ${c.why_not_ranked ? '<br><span style="color:' + warn + '">' + esc2(c.why_not_ranked) + '</span>' : ''}
             </div>
           </div>`;
@@ -8437,6 +8438,10 @@ async function loadLeague() {
             <div style="font-size:1.5em;font-weight:700;color:${crownTone};margin:2px 0 6px">${esc2(d.crown || 'vacant')}</div>
             <div style="font-size:0.88em;line-height:1.6">${esc2(d.crown_detail || '')}</div>
           </div>
+
+          ${d.config_warning ? `<div style="font-size:0.86em;line-height:1.6;padding:10px 12px;
+             border-left:3px solid ${bad};background:var(--panel2,#0000000a);margin-bottom:14px">
+             <strong>Read these standings carefully.</strong> ${esc2(d.config_warning)}</div>` : ''}
 
           ${d.robustly_failing_detail ? `<div style="font-size:0.86em;line-height:1.6;padding:10px 12px;
              border-left:3px solid ${good};background:var(--panel2,#0000000a);margin-bottom:14px">

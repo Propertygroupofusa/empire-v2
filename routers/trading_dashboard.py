@@ -10569,12 +10569,25 @@ async def coin_league_view(challenger: str = ""):
     # rally. Absent, the crown stays PROVISIONAL rather than being
     # confirmed on a regime nobody measured.
     windows = (st.get("horizon") or {}).get("window_returns_pct") or {}
+
+    # WHEN THE FLEET LAST CHANGED CONFIGURATION.
+    #
+    # Without it this table ranked DOGE first at +2.28% a round trip while
+    # 82 of the 83 closed trades predated the 2026-09-26 change - a
+    # perfectly accurate measurement of a bot that no longer runs, shown
+    # as live standings. A crown on that sends every other coin chasing a
+    # switched-off configuration.
+    epoch = (st.get("realized_edge") or {}).get("config_epoch")
+    if not epoch:
+        notes.append("the config epoch could not be read, so a retired record cannot be "
+                     "told from a current one and no crown can be awarded")
     if not windows:
         notes.append("no window returns were available, so no crown can be CONFIRMED - not "
                      "knowing the regime is not the same as having survived one")
 
     out = coin_league.table(by_coin, deployed_by_coin=deployed,
-                            window_returns=windows, configs=configs)
+                            window_returns=windows, configs=configs,
+                            config_epoch=epoch)
     out["notes"] = notes or None
     out["window_returns_pct"] = windows or None
 

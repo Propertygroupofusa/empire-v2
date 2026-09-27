@@ -2625,3 +2625,56 @@ class CapitalKpiSnapshot(Base):
     # than in a log, because a chart drawn from rows nobody can explain
     # is how a degraded snapshot gets read as a real fall.
     note = Column(String, nullable=True)
+
+
+class CoinLeagueSnapshot(Base):
+    """One coin's standing at one moment, so the race has a history.
+
+    The league table answers "who is winning" and cannot answer "who is
+    CLIMBING" - that needs two readings, and the second one only exists
+    if the first was written before anyone thought to ask. Same reasoning
+    as CapitalKpiSnapshot: a series is worth nothing on the day it is
+    started and everything a month later, so it starts now.
+
+    One row per ranked coin per pass, written by the same loop that
+    records the account KPIs - no second loop, no extra venue calls.
+
+    A coin still qualifying is written too, with rank NULL, because "it
+    had four trades for three weeks" is exactly the kind of thing that
+    needs to be visible rather than inferred from an absence.
+    """
+    __tablename__ = "coin_league_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    captured_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    coin = Column(String, index=True)
+    product_id = Column(String, nullable=True)
+
+    # NULL while the coin is still qualifying - never 999 or 0, either of
+    # which would sort as a real position and put an unranked coin on the
+    # chart as though it had lost.
+    rank = Column(Integer, nullable=True)
+
+    # The fair number: return per dollar risked, per round trip.
+    edge_pct_per_trade = Column(Float, nullable=True)
+    trades = Column(Integer, nullable=True)
+    net_usd = Column(Float, nullable=True)
+    win_rate_pct = Column(Float, nullable=True)
+    profit_factor = Column(Float, nullable=True)
+    deployed_usd = Column(Float, nullable=True)
+
+    # What the coin's own price did, carried alongside so a later reader
+    # can tell a climb from a rally without re-fetching history nobody
+    # kept.
+    window_return_pct = Column(Float, nullable=True)
+
+    # "CONFIRMED" / "PROVISIONAL" for whoever held the crown, else NULL.
+    crown = Column(String, nullable=True)
+
+    # CURRENT / MOSTLY_RETIRED / RETIRED / UNKNOWN_CONFIG. Kept per row so
+    # a later reader can tell which of these standings measured the bot
+    # that was actually running - the first version of this league ranked
+    # a configuration retired the day before.
+    config_status = Column(String, nullable=True)
+    trades_on_current_config = Column(Integer, nullable=True)

@@ -33,6 +33,7 @@ HEARTBEAT = {
     "last_pass_at": None,
     "passes": 0,
     "rows_written": 0,
+    "league_rows_written": 0,
     "last_result": None,
     "last_error": None,
 }
@@ -108,7 +109,7 @@ async def _account_total(now):
 async def check_once(session_factory):
     """One reading, written. Never raises out."""
     import capital_kpis
-    from models import CapitalKpiSnapshot
+    from models import CapitalKpiSnapshot, CoinLeagueSnapshot
 
     now = datetime.utcnow()
     notes = []
@@ -121,9 +122,13 @@ async def check_once(session_factory):
 
     allocated = free = claimed = None
     branch_count = open_slices = None
+    st_branches, windows, epoch = [], {}, None
     try:
         import crypto_grid_bot as grid
         st = await grid.get_grid_status()
+        st_branches = st.get("branches") or []
+        windows = (st.get("horizon") or {}).get("window_returns_pct") or {}
+        epoch = (st.get("realized_edge") or {}).get("config_epoch")
         backing = st.get("allocation_backing") or {}
         allocated = backing.get("deployed_coin_usd")
         free = backing.get("wallet_cash_usd")
@@ -150,6 +155,14 @@ async def check_once(session_factory):
         open_slices=open_slices, coin_usd=coin_usd, cash_usd=cash_usd,
         bottleneck=cause, note="; ".join(notes) or None, captured_at=now)
 
+    # The standings, recorded in the same pass. A league table says who is
+    # winning; only a series says who is CLIMBING, and the second reading
+    # exists only if the first was written before anyone asked.
+    league_rows, league_note = _league_rows(trades, st_branches, windows, now, epoch)
+    if league_note:
+        notes.append(league_note)
+        row["note"] = "; ".join(notes) or None
+
     async with session_factory()() as db:
         db.add(CapitalKpiSnapshot(**{
             "captured_at": row["captured_at"],
@@ -157,8 +170,11 @@ async def check_once(session_factory):
             "note": row["note"],
             **{f: row[f] for f in growth_ledger.FIELDS},
         }))
+        for lr in league_rows:
+            db.add(CoinLeagueSnapshot(**lr))
         await db.commit()
     HEARTBEAT["rows_written"] += 1
+    HEARTBEAT["league_rows_written"] += len(league_rows)
 
     return {"written": True, "bottleneck": cause,
             "detail": (f"net ${k.get('net_usd')} over {k.get('trades')} trades, "
@@ -166,14 +182,72 @@ async def check_once(session_factory):
                        + (f" [{'; '.join(notes)}]" if notes else ""))}
 
 
+def _league_rows(trades, branches, windows, now, config_epoch=None):
+    """This pass's standings as rows, or a note saying why there are none.
+
+    Deliberately tolerant: a league that cannot be built must never stop
+    the account KPIs being recorded, because the account series is the
+    one that answers the owner's actual question.
+    """
+    try:
+        import coin_league
+        by_coin = {}
+        for t in trades or ():
+            by_coin.setdefault(t.get("product_id") or "UNKNOWN", []).append(t)
+        if not by_coin:
+            return [], None
+
+        deployed, configs = {}, {}
+        for b in (branches or ()):
+            pid = b.get("product_id")
+            if not pid:
+                continue
+            coin_usd = 0.0
+            for sl in (b.get("slices") or b.get("open_slices") or []):
+                try:
+                    coin_usd += abs(float(sl.get("qty")) * float(sl.get("entry_price")))
+                except (TypeError, ValueError):
+                    pass
+            deployed[pid] = round(coin_usd, 2)
+            configs[pid] = {"grid_pct": b.get("grid_pct"),
+                            "num_levels": b.get("num_levels")}
+
+        lg = coin_league.table(by_coin, deployed_by_coin=deployed,
+                               window_returns=windows or {}, configs=configs,
+                               config_epoch=config_epoch)
+        rows = []
+        for c in (lg.get("ranked") or []) + (lg.get("still_qualifying") or []):
+            rows.append({
+                "captured_at": now,
+                "coin": c.get("coin"),
+                "product_id": c.get("product_id"),
+                "rank": c.get("rank"),
+                "edge_pct_per_trade": c.get("edge_pct_per_trade"),
+                "trades": c.get("trades"),
+                "net_usd": c.get("net_usd"),
+                "win_rate_pct": c.get("win_rate_pct"),
+                "profit_factor": c.get("profit_factor"),
+                "deployed_usd": c.get("deployed_usd"),
+                "window_return_pct": c.get("window_return_pct"),
+                "crown": c.get("crown"),
+                "config_status": c.get("config_status"),
+                "trades_on_current_config": c.get("trades_on_current_config"),
+            })
+        return rows, None
+    except Exception as exc:
+        return [], f"standings not recorded ({type(exc).__name__})"
+
+
 async def prune(session_factory):
     """Drop readings past the retention window."""
-    from models import CapitalKpiSnapshot
+    from models import CapitalKpiSnapshot, CoinLeagueSnapshot
     from sqlalchemy import delete
     cutoff = datetime.utcnow() - timedelta(days=max(RETAIN_DAYS, 1))
     async with session_factory()() as db:
         await db.execute(delete(CapitalKpiSnapshot)
                          .where(CapitalKpiSnapshot.captured_at < cutoff))
+        await db.execute(delete(CoinLeagueSnapshot)
+                         .where(CoinLeagueSnapshot.captured_at < cutoff))
         await db.commit()
 
 

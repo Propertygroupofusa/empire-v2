@@ -46,6 +46,7 @@ A challenger is never told to copy a PROVISIONAL crown.
 from __future__ import annotations
 
 import statistics
+from datetime import datetime
 
 # A coin ranks once it has this many closed round trips. Below it the
 # coin is still qualifying - shown, never ranked, because a 100% win rate
@@ -58,6 +59,17 @@ MIN_TRADES_FOR_CROWN = 20
 # A window move smaller than this is flat enough that a win is not
 # obviously the market's doing.
 FLAT_BAND_PCT = 2.0
+
+# Below this share of a coin's trades being on the CURRENT configuration,
+# its standing describes a bot that no longer exists.
+#
+# This is not hypothetical. On 2026-09-27 the league shipped ranking DOGE
+# first at +2.28% a round trip - and 82 of the fleet's 83 closed trades
+# predated the 2026-09-26 config epoch. The table was a perfectly accurate
+# measurement of a retired configuration on coins the fleet had stopped
+# trading, presented as live standings. A crown awarded on that would have
+# sent every other coin chasing a bot that was already switched off.
+MIN_CURRENT_CONFIG_SHARE = 0.5
 
 
 def _num(v):
@@ -72,10 +84,27 @@ def _coin(product_id):
     return str(product_id or "").split("-")[0].upper() or None
 
 
+def _parse(ts):
+    if isinstance(ts, datetime):
+        return ts
+    if not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
 def scorecard(trades, *, product_id=None, deployed_usd=None,
-              window_return_pct=None, config=None,
+              window_return_pct=None, config=None, config_epoch=None,
               min_trades=MIN_TRADES_TO_RANK):
-    """One coin's card, built only from its own closed round trips."""
+    """One coin's card, built only from its own closed round trips.
+
+    `config_epoch` is when the fleet's configuration last changed. Trades
+    closed before it measured a DIFFERENT bot, and a standing built
+    mostly from them is a measurement of something switched off.
+    """
+    epoch = _parse(config_epoch)
     rows = []
     for t in trades or ():
         if not hasattr(t, "get"):
@@ -85,8 +114,13 @@ def scorecard(trades, *, product_id=None, deployed_usd=None,
         if pnl is None:
             continue
         risked = abs(qty * entry) if (qty is not None and entry is not None) else None
+        closed = _parse(t.get("closed_at"))
         rows.append({"pnl": pnl, "risked": risked if (risked or 0) > 0 else None,
-                     "opened_at": t.get("opened_at"), "closed_at": t.get("closed_at")})
+                     "opened_at": t.get("opened_at"), "closed_at": t.get("closed_at"),
+                     # Unknown timestamp counts as PRE-epoch. An untimed
+                     # trade is not evidence about the current bot, and
+                     # assuming otherwise flatters it.
+                     "on_config": bool(epoch and closed and closed >= epoch)})
 
     n = len(rows)
     net = round(sum(r["pnl"] for r in rows), 4) if rows else 0.0
@@ -101,6 +135,17 @@ def scorecard(trades, *, product_id=None, deployed_usd=None,
 
     gross_win, gross_loss = sum(wins), abs(sum(losses))
     factor = round(gross_win / gross_loss, 3) if gross_loss > 0 else None
+
+    on_cfg = sum(1 for r in rows if r["on_config"])
+    share = (on_cfg / n) if n else 0.0
+    if epoch is None:
+        cfg_status = "UNKNOWN_CONFIG"
+    elif share >= MIN_CURRENT_CONFIG_SHARE:
+        cfg_status = "CURRENT"
+    elif on_cfg:
+        cfg_status = "MOSTLY_RETIRED"
+    else:
+        cfg_status = "RETIRED"
 
     w = _num(window_return_pct)
     if w is None:
@@ -128,9 +173,14 @@ def scorecard(trades, *, product_id=None, deployed_usd=None,
         "window_return_pct": w,
         "regime": regime,
         "config": config or {},
+        "trades_on_current_config": on_cfg,
+        "current_config_share": round(share, 3),
+        "config_status": cfg_status,
         "ranked": n >= min_trades and edge_pct is not None,
-        "crown_eligible": n >= MIN_TRADES_FOR_CROWN and edge_pct is not None
-                          and edge_pct > 0,
+        # A crown is evidence about the bot running NOW. A record set by a
+        # configuration that has since been replaced cannot carry it.
+        "crown_eligible": (n >= MIN_TRADES_FOR_CROWN and edge_pct is not None
+                           and edge_pct > 0 and cfg_status == "CURRENT"),
         "why_not_ranked": (
             None if (n >= min_trades and edge_pct is not None) else
             (f"{n} closed round trip(s); a coin ranks at {min_trades}. A perfect record "
@@ -142,7 +192,7 @@ def scorecard(trades, *, product_id=None, deployed_usd=None,
 
 
 def table(trades_by_coin, *, deployed_by_coin=None, window_returns=None,
-          configs=None, min_trades=MIN_TRADES_TO_RANK):
+          configs=None, config_epoch=None, min_trades=MIN_TRADES_TO_RANK):
     """Every coin, ranked, with the crown awarded only on evidence."""
     deployed = deployed_by_coin or {}
     windows = window_returns or {}
@@ -155,7 +205,8 @@ def table(trades_by_coin, *, deployed_by_coin=None, window_returns=None,
             trades, product_id=pid,
             deployed_usd=deployed.get(pid, deployed.get(c)),
             window_return_pct=windows.get(pid, windows.get(c)),
-            config=cfgs.get(pid, cfgs.get(c)), min_trades=min_trades))
+            config=cfgs.get(pid, cfgs.get(c)), config_epoch=config_epoch,
+            min_trades=min_trades))
 
     ranked = [c for c in cards if c["ranked"]]
     qualifying = [c for c in cards if not c["ranked"]]
@@ -195,10 +246,28 @@ def table(trades_by_coin, *, deployed_by_coin=None, window_returns=None,
     failing = [c for c in ranked
                if c["regime"] == "ROSE" and (c["edge_pct_per_trade"] or 0) <= 0]
 
+    on_cfg_trades = sum(c["trades_on_current_config"] for c in cards)
+    all_trades = sum(c["trades"] for c in cards)
+    retired_share = round(1 - (on_cfg_trades / all_trades), 3) if all_trades else None
+
     return {
         "ranked": ranked,
         "still_qualifying": qualifying,
         "coins": len(cards),
+        "config_epoch": config_epoch,
+        "trades_total": all_trades,
+        "trades_on_current_config": on_cfg_trades,
+        "retired_share": retired_share,
+        "config_warning": (
+            (f"{all_trades - on_cfg_trades} of {all_trades} closed trades predate the "
+             f"{config_epoch} config change, so these standings mostly measure a bot that no "
+             f"longer runs. Real numbers, retired configuration - no crown is awarded on them, "
+             f"because sending every coin to chase a switched-off bot is worse than having no "
+             f"leader at all."
+             if (retired_share is not None and retired_share > 0.5 and all_trades) else None)
+            if config_epoch else
+            "No config epoch was supplied, so nothing here can tell a current record from a "
+            "retired one, and no crown can be awarded."),
         "crown": crown["coin"] if crown else None,
         "crown_status": crown["crown"] if crown else None,
         "crown_detail": (crown["crown_detail"] if crown else

@@ -342,3 +342,44 @@ def test_the_league_panel_only_reads_fields_the_endpoint_sends():
     read = _panel_fields("loadLeague")
     assert read, "found no field reads - the slice is wrong, not the panel"
     assert read <= produced, read - produced
+
+
+def test_the_standings_writer_only_sets_columns_the_table_has():
+    """The league rows are built as a dict of literals, so a typo lands as
+    a TypeError inside a background loop and the series silently never
+    fills - the same failure shape as the snapshot writer."""
+    import ast as _ast
+    import models
+    cols = {c.name for c in models.CoinLeagueSnapshot.__table__.columns}
+    tree = _ast.parse(open("growth_ledger_worker.py").read())
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, _ast.FunctionDef) and n.name == "_league_rows")
+    keys = set()
+    for node in _ast.walk(fn):
+        if isinstance(node, _ast.Dict):
+            for k in node.keys:
+                if isinstance(k, _ast.Constant) and isinstance(k.value, str):
+                    keys.add(k.value)
+    # grid_pct / num_levels belong to the config dict, not the table row.
+    keys -= {"grid_pct", "num_levels"}
+    assert keys, "found no literal keys - the walk is broken, not the code"
+    assert keys <= cols, keys - cols
+
+
+def test_a_failed_league_never_stops_the_account_series_being_written():
+    """The account KPIs answer the owner's actual question. A standings
+    build that throws must degrade to a note, not take the pass down."""
+    import ast as _ast
+    tree = _ast.parse(open("growth_ledger_worker.py").read())
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, _ast.FunctionDef) and n.name == "_league_rows")
+    handlers = [n for n in _ast.walk(fn) if isinstance(n, _ast.ExceptHandler)]
+    assert handlers, "_league_rows has no except - a throw would take the pass with it"
+    # The inner handler around a single unreadable slice correctly just
+    # skips it; what matters is that the OUTER one returns a note rather
+    # than re-raising into the pass.
+    assert any(any(isinstance(x, _ast.Return) for x in _ast.walk(h)) for h in handlers), \
+        "no handler RETURNS - a throw would take the account series with it"
+    for h in handlers:
+        assert not any(isinstance(x, _ast.Raise) for x in _ast.walk(h)), \
+            "a handler re-raises, which would take the pass down"
