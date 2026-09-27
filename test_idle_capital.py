@@ -190,3 +190,156 @@ def test_a_missing_open_slices_key_is_treated_as_flat_not_as_working():
 def test_the_window_is_owner_settable():
     assert ic.classify(branch("X"), NOW - timedelta(hours=10), now=NOW,
                        stale_after_hours=6)["state"] == ic.STALE
+
+
+# ---------------------------------------------------------------------------
+# WHERE STALE CASH GOES.
+#
+# "Keep it flipping" has one honest destination: a branch that is
+# demonstrably flipping - the one that most recently CLOSED a round trip on
+# this account with this config, not a backtest or a ranking.
+# ---------------------------------------------------------------------------
+
+def _rep(branches, trades, now=NOW, total=None):
+    return ic.report(branches, trades, now=now, total_trade_count=total)
+
+
+def _fleet(*extra):
+    """A realistically sized fleet.
+
+    The 20% share rule is measured against TOTAL allocation, so in a
+    three-branch fleet every branch already exceeds it and nothing can ever
+    receive. That is the rule working, not a bug - concentrating half the
+    account into one coin to avoid $69 sitting idle is the worse trade - but
+    it means a destination test has to be run against a fleet the cap does
+    not already saturate. The live fleet is 21 branches / $7,422.
+    """
+    base = [branch(f"F{i}", 400.0, open_slices=3, bot=f"f{i}") for i in range(16)]
+    base_trades = [trade(f"f{i}", ago(hours=20 + i)) for i in range(16)]
+    return list(extra) + base, base_trades
+
+
+def test_it_moves_the_stale_branch_into_the_one_trading_most_recently():
+    bs, bt = _fleet(branch("BONK", 69.23, bot="g3"),
+                    branch("XLM", 400.0, open_slices=3, bot="g10"),
+                    branch("ETH", 400.0, open_slices=3, bot="g11"))
+    ts = bt + [trade("g3", ago(days=18)), trade("g10", ago(minutes=5)),
+               trade("g11", ago(hours=9))]
+    p = ic.rotation_plan(_rep(bs, ts))
+    assert p["ok"] and len(p["moves"]) == 1
+    m = p["moves"][0]
+    assert m["from_product_id"] == "BONK" and m["to_product_id"] == "XLM"
+    assert m["usd"] == 69.23
+
+
+def test_it_never_sends_idle_money_to_another_idle_branch():
+    """Churn that pays a fee to move silence somewhere else."""
+    bs, bt = _fleet(branch("BONK", 69.23, bot="g3"), branch("DEAD", 80.0, bot="g9"),
+                    branch("XLM", 400.0, open_slices=3, bot="g10"))
+    ts = bt + [trade("g3", ago(days=18)), trade("g9", ago(days=12)),
+               trade("g10", ago(hours=1))]
+    p = ic.rotation_plan(_rep(bs, ts))
+    assert {m["to_product_id"] for m in p["moves"]} == {"XLM"}
+
+
+def test_a_waiting_branch_is_a_valid_destination_but_never_a_source():
+    """It traded inside the window - it is proving the thing BONK has not.
+
+    A WORKING branch outranks it, because holding slices is stronger evidence
+    of flipping than having flipped hours ago; so this is asserted on a fleet
+    where the WAITING branch is the only candidate.
+    """
+    # Padding is TOO_NEW - it dilutes the share denominator without being
+    # either a source or a candidate, so ONDO is the only destination.
+    pad = [branch(f"S{i}", 120.0, bot=f"s{i}", created=ago(hours=1)) for i in range(8)]
+    bs = [branch("BONK", 69.23, bot="g3"), branch("ONDO", 69.58, bot="g4")] + pad
+    ts = [trade("g3", ago(days=18)), trade("g4", ago(hours=4))]
+    p = ic.rotation_plan(_rep(bs, ts))
+    assert {r["state"] for r in _rep(bs, ts)["branches"] if r["product_id"].startswith("S")} == {ic.TOO_NEW}
+    assert [m["from_product_id"] for m in p["moves"]] == ["BONK"]
+    assert p["moves"][0]["to_product_id"] == "ONDO"
+
+
+def test_a_branch_holding_slices_outranks_one_that_merely_traded_recently():
+    """Holding open rungs is stronger evidence of flipping than a past fill."""
+    bs, bt = _fleet(branch("BONK", 69.23, bot="g3"), branch("ONDO", 69.58, bot="g4"))
+    ts = bt + [trade("g3", ago(days=18)), trade("g4", ago(hours=4))]
+    p = ic.rotation_plan(_rep(bs, ts))
+    assert p["moves"][0]["to_product_id"].startswith("F")
+
+
+def test_no_branch_is_allowed_to_swallow_the_fleet():
+    """The owner's 20% rule, measured on allocation - which is what moves."""
+    bs = [branch("BONK", 300.0, bot="g3"), branch("BIG", 600.0, open_slices=3, bot="g10")]
+    ts = [trade("g3", ago(days=18)), trade("g10", ago(hours=1))]
+    p = ic.rotation_plan(_rep(bs, ts))
+    assert p["moves"] == []
+    assert p["refusals"][0]["reason"] == "NO_DESTINATION_UNDER_THE_SHARE_RULE"
+
+
+def test_two_moves_in_one_pass_cannot_both_overfill_the_same_branch():
+    bs = [branch("A", 60.0, bot="a"), branch("B", 60.0, bot="b"),
+          branch("C", 400.0, open_slices=3, bot="c"), branch("D", 400.0, open_slices=3, bot="d"),
+          branch("E", 400.0, open_slices=3, bot="e")]
+    ts = [trade("a", ago(days=9)), trade("b", ago(days=9)),
+          trade("c", ago(hours=1)), trade("d", ago(hours=2)), trade("e", ago(hours=3))]
+    p = ic.rotation_plan(_rep(bs, ts), max_dest_share_pct=40)
+    dests = [m["to_product_id"] for m in p["moves"]]
+    assert len(dests) == len(set(dests)) or all(
+        m["dest_share_pct_after"] <= 40 for m in p["moves"])
+
+
+def test_dust_below_the_floor_is_not_worth_a_fee():
+    bs = [branch("TINY", 9.0, bot="t"), branch("XLM", 400.0, open_slices=3, bot="g10")]
+    ts = [trade("t", ago(days=30)), trade("g10", ago(hours=1))]
+    p = ic.rotation_plan(_rep(bs, ts))
+    assert p["moves"] == [] and p["refusals"][0]["reason"] == "BELOW_MIN_MOVE"
+
+
+def test_it_never_retires_cash_to_unallocated_usd():
+    """crypto_grid_bot's own rotation does this when nothing clears the ROI
+    floor, turning idle money into MORE idle money - the opposite of the ask."""
+    bs = [branch("BONK", 69.23, bot="g3")]
+    p = ic.rotation_plan(_rep(bs, [trade("g3", ago(days=18))]))
+    assert p["retires_nothing_to_cash"] is True
+    assert p["moves"] == []
+    assert p["refusals"][0]["reason"] == "NO_DESTINATION_UNDER_THE_SHARE_RULE"
+
+
+def test_nothing_stale_plans_nothing():
+    bs = [branch("A", 400.0, open_slices=3, bot="a")]
+    p = ic.rotation_plan(_rep(bs, [trade("a", ago(hours=1))]))
+    assert p["ok"] is False and p["moves"] == []
+
+
+def test_the_plan_changes_nothing_by_itself():
+    bs = [branch("BONK", 69.23, bot="g3"), branch("XLM", 400.0, open_slices=3, bot="g10")]
+    p = ic.rotation_plan(_rep(bs, [trade("g3", ago(days=18)), trade("g10", ago(hours=1))]))
+    assert p["is_a_plan_not_a_change"] is True
+
+
+def test_the_live_case_plans_the_move_the_fleet_actually_needs():
+    """BONK $69.23 idle 18 days, into a branch that closed a trip today."""
+    bs, bt = _fleet(branch("BONK", 69.23, bot="g3"), branch("ONDO", 69.58, bot="g4"),
+                    branch("TIA", 69.67, bot="g7"),
+                    branch("XLM", 400.0, open_slices=3, bot="g10"))
+    ts = bt + [trade("g3", ago(days=18.4)), trade("g4", ago(hours=4.6)),
+               trade("g7", ago(hours=5.8)), trade("g10", ago(minutes=2))]
+    p = ic.rotation_plan(_rep(bs, ts))
+    assert len(p["moves"]) == 1
+    assert p["moves"][0]["from_product_id"] == "BONK"
+    assert p["total_usd"] == 69.23
+
+
+def test_a_fleet_too_small_for_the_share_rule_refuses_rather_than_concentrating():
+    """Deliberate, and stated so it is not read as the rule failing.
+
+    With three branches every one already exceeds 20%, so no destination
+    qualifies and the cash stays put. Concentrating half the account into a
+    single coin to stop $69 sitting idle is the worse trade, and the owner's
+    20% rule is the one that wins.
+    """
+    bs = [branch("BONK", 69.23, bot="g3"), branch("XLM", 400.0, open_slices=3, bot="g10")]
+    p = ic.rotation_plan(_rep(bs, [trade("g3", ago(days=18)), trade("g10", ago(hours=1))]))
+    assert p["moves"] == []
+    assert p["refusals"][0]["reason"] == "NO_DESTINATION_UNDER_THE_SHARE_RULE"

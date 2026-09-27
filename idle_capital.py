@@ -185,3 +185,103 @@ def report(branches, trades, *, now=None, total_trade_count=None,
             "No branch is past the idle window. Every flat branch has traded recently enough "
             "to be a grid waiting for its dip rather than capital in the wrong coin."),
     }
+
+
+# ---------------------------------------------------------------------------
+# WHERE STALE CASH SHOULD GO
+#
+# "Keep it flipping" has one honest destination rule: move it to a branch
+# that is demonstrably flipping. The signal for that is not a backtest or a
+# ranking - it is the branch that most recently CLOSED A ROUND TRIP, on this
+# account, with this config. A coin that completed a trip an hour ago is
+# proving the thing the stale branch has failed to do for days.
+#
+# Two guards it will not cross:
+#
+#   It never sends cash to another STALE branch. Moving idle money from one
+#   silent coin to another silent coin is churn that pays a fee for nothing.
+#
+#   It never lets one branch swallow the fleet. The account owner's standing
+#   rule is that no coin takes more than 20% - measured here on ALLOCATION,
+#   which is what this function actually moves.
+#
+# And it never retires cash to unallocated USD. crypto_grid_bot's own
+# rotation does that when nothing clears the ROI floor, which turns idle
+# money into MORE idle money - the exact opposite of the ask.
+# ---------------------------------------------------------------------------
+
+MIN_MOVE_USD = float(_os.getenv("GRID_IDLE_MIN_MOVE_USD", "25"))
+MAX_DEST_SHARE_PCT = float(_os.getenv("GRID_IDLE_MAX_DEST_SHARE_PCT", "20"))
+
+
+def rotation_plan(report_out, *, min_move_usd=None, max_dest_share_pct=None):
+    """What to move, out of where, into what. Moves nothing itself."""
+    min_move = MIN_MOVE_USD if min_move_usd is None else min_move_usd
+    max_share = MAX_DEST_SHARE_PCT if max_dest_share_pct is None else max_dest_share_pct
+
+    rows = report_out.get("branches") or []
+    total_alloc = sum(float(r.get("allocated_usd") or 0.0) for r in rows)
+    stale = [r for r in rows if r.get("state") == STALE]
+
+    # Ranked by how recently each proved it can complete a round trip.
+    # WORKING branches hold slices and report idle_hours 0, so a tiebreak on
+    # allocation keeps the choice deterministic rather than dict-ordered.
+    candidates = [r for r in rows
+                  if r.get("state") in (WORKING, WAITING)
+                  and float(r.get("allocated_usd") or 0.0) > 0]
+    candidates.sort(key=lambda r: ((r.get("idle_hours") or 0.0),
+                                   -float(r.get("allocated_usd") or 0.0)))
+
+    moves, refusals = [], []
+    # Simulated so two moves in one pass cannot both fill the same branch
+    # past the share rule.
+    projected = {r.get("bot_name"): float(r.get("allocated_usd") or 0.0) for r in rows}
+
+    for s in stale:
+        amount = round(float(s.get("allocated_usd") or 0.0), 2)
+        if amount < min_move:
+            refusals.append({"bot_name": s.get("bot_name"), "product_id": s.get("product_id"),
+                             "usd": amount, "reason": "BELOW_MIN_MOVE"})
+            continue
+        dest = None
+        for c in candidates:
+            if c.get("bot_name") == s.get("bot_name"):
+                continue
+            after = projected.get(c.get("bot_name"), 0.0) + amount
+            if total_alloc > 0 and (after / total_alloc * 100.0) > max_share:
+                continue
+            dest = c
+            break
+        if dest is None:
+            refusals.append({"bot_name": s.get("bot_name"), "product_id": s.get("product_id"),
+                             "usd": amount,
+                             "reason": "NO_DESTINATION_UNDER_THE_SHARE_RULE"})
+            continue
+        projected[dest.get("bot_name")] = projected.get(dest.get("bot_name"), 0.0) + amount
+        moves.append({
+            "from_bot_name": s.get("bot_name"), "from_product_id": s.get("product_id"),
+            "to_bot_name": dest.get("bot_name"), "to_product_id": dest.get("product_id"),
+            "usd": amount,
+            "idle_days": round((s.get("idle_hours") or 0.0) / 24.0, 1),
+            "dest_last_trade_hours": dest.get("idle_hours"),
+            "dest_share_pct_after": (round(projected[dest.get("bot_name")] / total_alloc * 100.0, 2)
+                                     if total_alloc else None),
+            "why": (f"{s.get('product_id')} has not completed a round trip in "
+                    f"{(s.get('idle_hours') or 0) / 24:.1f} days; {dest.get('product_id')} "
+                    f"closed one {dest.get('idle_hours') or 0:.1f}h ago"),
+        })
+
+    return {
+        "ok": bool(moves),
+        "moves": moves,
+        "refusals": refusals,
+        "total_usd": round(sum(m["usd"] for m in moves), 2),
+        "caps": {"min_move_usd": min_move, "max_dest_share_pct": max_share},
+        "retires_nothing_to_cash": True,
+        "is_a_plan_not_a_change": True,
+        "detail": (f"Would move ${sum(m['usd'] for m in moves):,.2f} out of {len(moves)} "
+                   f"stale branch(es) into branches that are demonstrably trading."
+                   if moves else
+                   "Nothing to rotate - no branch is past the idle window, or no "
+                   "destination clears the share rule."),
+    }
