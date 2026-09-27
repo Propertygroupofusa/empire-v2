@@ -1257,15 +1257,47 @@ async def get_maker_expiry_drift() -> dict:
     return out
 
 
+def slice_paid_no_entry_fee(slice_row) -> bool:
+    """True when this slice's cost basis never cost a commission.
+
+    An ADOPTED slice is written by coin_adoption_worker for coin the
+    account ALREADY HOLDS, at the market price on the day it was adopted
+    (see coin_adoption.slice_units: "every slice is adopted at the same
+    moment at the same price"). No buy order is placed, so Coinbase bills
+    no entry commission against that basis. Whatever was paid on the
+    original purchase was paid long ago against a different price - it is
+    sunk, and it is not part of this grid's round trip.
+
+    Charging an entry leg anyway is not only a display error. The same
+    rate feeds _pick_profitable_slice_to_sell(), so a phantom fee makes an
+    adopted slice look less profitable than it really is and holds it back
+    from a sale it has already earned. That is the buy-dip/sell-rise loop
+    being blocked by a fee nobody paid.
+
+    The `adopted` flag is the marker because it is the only one already
+    carried by every live adopted row. Writing entry_fee_rate=0.0 instead
+    would not work: both resolvers treat a non-positive rate as UNKNOWN
+    and fall back, so a recorded zero is indistinguishable from a missing
+    one. Zero-is-unknown is right for a real buy (a leg with no recorded
+    rate still paid something) and wrong for an adopted one, which is
+    exactly why this needs its own marker rather than a magic value.
+    """
+    return bool(getattr(slice_row, "adopted", False))
+
+
 async def slice_round_trip_fee_rate(slice_row, exit_leg_rate: float = None) -> float:
     """The REAL round-trip fee for one specific slice: the rate its BUY leg
     genuinely paid (recorded on the slice) plus the rate its SELL leg is
     expected to pay. With maker orders live the two legs can genuinely
     differ, so assuming one rate for both would misprice the trade - the
     exact class of bug that made the bot sell real losers as wins."""
-    entry_rate = getattr(slice_row, "entry_fee_rate", None)
-    if entry_rate is None or entry_rate <= 0:
-        entry_rate = (await get_effective_round_trip_fee_rate()) / 2
+    if slice_paid_no_entry_fee(slice_row):
+        # No order, no commission - see slice_paid_no_entry_fee().
+        entry_rate = 0.0
+    else:
+        entry_rate = getattr(slice_row, "entry_fee_rate", None)
+        if entry_rate is None or entry_rate <= 0:
+            entry_rate = (await get_effective_round_trip_fee_rate()) / 2
     if exit_leg_rate is None:
         exit_leg_rate = await expected_leg_fee_rate(
             getattr(slice_row, "product_id", None))
@@ -4544,9 +4576,22 @@ def _slice_rate(s, round_trip_fee_rate, exit_leg_rate):
     (maker orders live), each slice is priced with the rate its own BUY leg
     really paid plus the rate its SELL leg is expected to pay - the two can
     genuinely differ once maker and market fills are mixed. Otherwise every
-    slice shares the one flat rate, exactly as before."""
+    slice shares the one flat rate, exactly as before.
+
+    An ADOPTED slice is the exception on both paths: it pays the exit leg
+    only, because its basis was written by bookkeeping and never cost a
+    commission. See slice_paid_no_entry_fee()."""
     if exit_leg_rate is None:
+        # The flat constant prices BOTH legs, so a slice that never paid
+        # an entry leg carries half of it. None stays None - that is the
+        # caller's "no rate supplied", not a rate of zero, and
+        # _grid_slice_net_pnl has its own conservative fallback for it.
+        if round_trip_fee_rate is not None and slice_paid_no_entry_fee(s):
+            return round_trip_fee_rate / 2.0
         return round_trip_fee_rate
+    if slice_paid_no_entry_fee(s):
+        # Exit leg only - see slice_paid_no_entry_fee().
+        return exit_leg_rate
     entry_rate = getattr(s, "entry_fee_rate", None)
     if entry_rate is None or entry_rate <= 0:
         entry_rate = exit_leg_rate
