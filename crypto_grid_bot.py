@@ -5200,12 +5200,27 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
         grid_pct = branch.grid_pct
 
     # ---- Real dip: buy a new slice (skipped while drawdown-breached) ----
-    if drawdown_breached:
+    # A branch may be paused for either of two reasons, and they are not
+    # the same fact: the breaker fires on its own drawdown, while
+    # buys_paused is set deliberately at adoption so an overweight
+    # position walks DOWN through strength instead of being bought back.
+    _sell_only = bool(getattr(branch, "buys_paused", False))
+    if _sell_only and not drawdown_breached:
         log.info(
-            f"[GRID] {branch.bot_name}: 🛑 real equity ${equity:.2f} is down {drawdown_pct*100:.0f}% from its own "
-            f"${stored_peak_equity:,.2f} peak (breaker at {GRID_DRAWDOWN_BREAKER_PCT*100:.0f}%) - new buys paused, "
-            f"existing slices still sell normally"
+            f"[GRID] {branch.bot_name}: SELL-ONLY - this branch may sell its slices but "
+            f"never buy more. Set at adoption because the position was over the 20% rule, "
+            f"so every sale banks profit AND reduces the concentration."
         )
+    if drawdown_breached or _sell_only:
+        # Only the breaker gets the drawdown message. A sell-only branch
+        # at a fresh peak reading "equity is down 0% from its peak" would
+        # be an alarm about nothing.
+        if drawdown_breached:
+            log.info(
+                f"[GRID] {branch.bot_name}: 🛑 real equity ${equity:.2f} is down {drawdown_pct*100:.0f}% from its own "
+                f"${stored_peak_equity:,.2f} peak (breaker at {GRID_DRAWDOWN_BREAKER_PCT*100:.0f}%) - new buys paused, "
+                f"existing slices still sell normally"
+            )
     elif price <= branch.reference_price * (1 - grid_pct) and len(slices) < branch.num_levels:
         slice_usd = branch.allocated_usd / branch.num_levels
         real_balance, real_balance_err = await engine.get_usd_balance(session)

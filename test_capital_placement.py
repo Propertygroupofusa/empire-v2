@@ -149,12 +149,27 @@ def test_a_position_over_the_twenty_percent_rule_is_flagged_not_hidden():
     assert lev["candidates"][0]["over_position_limit"] is True
 
 
-def test_adoption_is_reported_as_blocked_because_the_engine_cannot_do_it():
-    """The engine funds a branch from CASH. Reporting this lever as open
-    would be the dashboard lying in the expensive direction."""
-    lev = cp.lever_adopt(HOLDINGS, CLAIMED, 11397.11)
+def test_a_blocker_that_has_been_fixed_is_not_still_reported():
+    """This said NO_ADOPTION_PATH for hours after coin_adoption shipped
+    AND ran - XRP $400, ETH $400, SHIB $200. A stale blocker is worse
+    than a vague one: it sends someone to build a thing already built,
+    on the largest lever on the page."""
+    lev = cp.lever_adopt(HOLDINGS, CLAIMED, 11397.11, adoption_available=True)
+    assert lev["blocked_by"] is None
+    assert "SELL-ONLY" in lev["what_it_would_take"]
+
+
+def test_the_blocker_is_reported_when_the_path_really_is_missing():
+    lev = cp.lever_adopt(HOLDINGS, CLAIMED, 11397.11, adoption_available=False)
     assert lev["blocked_by"] == "NO_ADOPTION_PATH"
-    assert "without a single dollar being spent" in lev["what_it_would_take"]
+    assert "Nothing in the engine can" in lev["what_it_would_take"]
+
+
+def test_availability_is_measured_not_assumed():
+    """Neither answer is hardcoded - the module either imports or it does
+    not, and that is what decides."""
+    lev = cp.lever_adopt(HOLDINGS, CLAIMED, 11397.11)
+    assert lev["blocked_by"] is None          # coin_adoption is importable here
 
 
 # ---------------------------------------------------- the rungs lever

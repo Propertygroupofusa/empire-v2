@@ -168,3 +168,46 @@ def test_both_rotation_gates_are_reported_not_just_one():
 def test_the_branch_stop_override_is_visible_from_outside():
     """A safety setting that cannot be inspected is one nobody can trust."""
     assert '"stop_loss_pct_override": getattr(b, "stop_loss_pct_override", None)' in SRC
+
+
+# ---------------------------- sell-only: the better path for an overweight
+
+def test_a_sell_only_branch_may_sell_but_never_buys():
+    """A two-way grid on an overweight position fights the trimmer: sells
+    into strength, then buys the dip straight back. Paused, the same
+    branch walks the position DOWN through strength at a profit target."""
+    src = cycle_src()
+    assert '_sell_only = bool(getattr(branch, "buys_paused", False))' in src
+    assert "if drawdown_breached or _sell_only:" in src
+
+
+def test_the_buy_gate_is_the_only_thing_sell_only_touches():
+    """It must not reach the SELL path. A branch that cannot sell is not
+    sell-only, it is stuck."""
+    src = cycle_src()
+    i = src.index("_sell_only = bool(")
+    j = src.index("elif price <= branch.reference_price", i)
+    block = src[i:j]
+    assert "grid_sell" not in block and "_pick_profitable_slice_to_sell" not in block
+
+
+def test_a_sell_only_branch_does_not_get_the_drawdown_alarm():
+    """A branch at a fresh peak reading 'equity is down 0% from its peak'
+    would be an alarm about nothing."""
+    src = cycle_src()
+    i = src.index("if drawdown_breached or _sell_only:")
+    j = src.index("elif price <= branch.reference_price", i)
+    block = src[i:j]
+    assert "if drawdown_breached:" in block
+    assert block.index("if drawdown_breached:") < block.index("real equity")
+
+
+def test_the_column_is_nullable_so_nothing_running_changes():
+    import models
+    col = models.CryptoGridBranch.__table__.columns["buys_paused"]
+    assert col.nullable is True and col.default is None
+
+
+def test_the_worker_sets_it_from_the_plan():
+    src = open("coin_adoption_worker.py").read()
+    assert 'buys_paused=bool(a.get("sell_only"))' in src

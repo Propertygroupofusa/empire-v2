@@ -168,6 +168,10 @@ async def check_once(session_factory, *, force_preview=False):
                     peak_equity=a["allocated_usd"],
                     # An adopted entry is not a price anyone paid.
                     stop_loss_pct_override=ADOPTED_STOP_PCT,
+                    # Over the 20% rule -> may sell, never buys back, so
+                    # the position walks DOWN through strength instead of
+                    # being repurchased on the next dip.
+                    buys_paused=bool(a.get("sell_only")),
                 )
                 db.add(branch)
                 for sl in a["slices"]:
@@ -181,11 +185,15 @@ async def check_once(session_factory, *, force_preview=False):
                     ))
                 await db.commit()
             written.append({"asset": a["asset"], "usd": a["allocated_usd"],
-                            "bot_name": branch.bot_name, "slices": len(a["slices"])})
+                            "bot_name": branch.bot_name, "slices": len(a["slices"]),
+                            "sell_only": bool(a.get("sell_only"))})
             HEARTBEAT["adopted"] += 1
             log.warning(f"[adopt] 🌱 {a['asset']} ${a['allocated_usd']:,.2f} adopted into "
                         f"{branch.bot_name} as {len(a['slices'])} slice(s) at "
-                        f"${a['price']:,.8f}. Nothing bought, nothing sold.")
+                        f"${a['price']:,.8f}"
+                        + (" SELL-ONLY (over the 20% rule - it will walk the position down "
+                           "through strength and never buy back)" if a.get("sell_only") else "")
+                        + ". Nothing bought, nothing sold.")
         except Exception as exc:
             log.warning(f"[adopt] {a['asset']} failed: {type(exc).__name__}: {exc}")
 

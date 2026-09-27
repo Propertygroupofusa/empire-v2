@@ -1040,6 +1040,20 @@ class CryptoGridBranch(Base):
     # moment that same branch's real recent trades improve. Nullable so an
     # existing row (created before this column existed) reads back NULL
     # and is treated as "still on the default," not a crash.
+    # SELL-ONLY. A branch that may sell its slices but never buy more.
+    #
+    # Built for adopting a position that is already over the owner's 20%
+    # rule. A normal two-way grid on an overweight coin fights the trimmer:
+    # it sells into strength (good) and then buys the dip straight back
+    # (not good). Paused, the same branch walks the position DOWN through
+    # strength at a profit target - banking money and reducing the
+    # concentration in one move, instead of choosing between them.
+    #
+    # NULL on every branch that existed before this, so nothing already
+    # running changes. The drawdown breaker already pauses buys the same
+    # way; this is a second reason for the same gate, not a new mechanism.
+    buys_paused = Column(Boolean, nullable=True)
+
     # THE STOP THIS BRANCH TRADES UNDER, when it must differ from the fleet's.
     #
     # Added for adopted branches. The global stop sells any slice whose

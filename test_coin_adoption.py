@@ -108,19 +108,52 @@ def test_a_coin_a_branch_already_holds_is_refused():
                for r in p["refusals"])
 
 
-def test_zec_is_excluded_by_name_by_default():
-    assert "ZEC" not in {a["asset"] for a in full()["adopt"]}
-    assert any(r["asset"] == "ZEC" and r["reason"] == "EXCLUDED_BY_NAME"
-               for r in full()["refusals"])
+def test_nothing_is_excluded_by_name_any_more():
+    """ZEC was, and that was the wrong tool. $2,285.38 - the single
+    largest blocked item on the dashboard - left dead by a hardcoded
+    name. The concern was never ZEC, it was that a two-way grid on an
+    overweight position fights the trimmer, and that is now handled by
+    the mechanism instead."""
+    assert ca.DEFAULT_EXCLUDED == ()
+    assert "EXCLUDED_BY_NAME" not in {r["reason"] for r in full()["refusals"]}
 
 
-def test_a_position_over_the_twenty_percent_rule_is_left_to_the_trimmer():
-    """Putting a grid on an overweight position manages it instead of
-    reducing it - the two loops would work against each other."""
+def test_a_coin_can_still_be_excluded_when_a_caller_names_one():
+    p = full(excluded=("XRP",))
+    assert "XRP" not in {a["asset"] for a in p["adopt"]}
+    assert any(r["asset"] == "XRP" and r["reason"] == "EXCLUDED_BY_NAME"
+               for r in p["refusals"])
+
+
+def test_a_position_over_the_rule_is_adopted_SELL_ONLY_not_refused():
+    """The better path. Refusing it left the money dead; a two-way grid on
+    it would have fought the trimmer. Sell-only walks the position DOWN
+    through strength at a profit target - banking money and reducing the
+    concentration in one move, which is what the 20% rule wanted."""
     p = ca.plan([{"asset": "BIG", "units": 10.0, "price": 300.0, "usd": 3000.0}],
                 account_total_usd=TOTAL, claimed_products=())
-    assert p["adopt"] == []
-    assert p["refusals"][0]["reason"] == "OVER_THE_POSITION_LIMIT"
+    assert len(p["adopt"]) == 1
+    a = p["adopt"][0]
+    assert a["sell_only"] is True
+    assert "never buy more" in a["why_sell_only"]
+    assert p["sell_only_count"] == 1
+
+
+def test_a_position_under_the_rule_is_adopted_two_way():
+    p = ca.plan([{"asset": "SMALL", "units": 10.0, "price": 30.0, "usd": 300.0}],
+                account_total_usd=TOTAL, claimed_products=())
+    a = p["adopt"][0]
+    assert a["sell_only"] is False and a["why_sell_only"] is None
+    assert p["sell_only_count"] == 0
+
+
+def test_a_sell_only_branch_still_claims_exactly_what_its_coin_is_worth():
+    """The backing invariant does not get a pass for being sell-only."""
+    p = ca.plan([{"asset": "BIG", "units": 10.0, "price": 300.0, "usd": 3000.0}],
+                account_total_usd=TOTAL, claimed_products=())
+    a = p["adopt"][0]
+    backed = sum(s["qty"] * s["entry_price"] for s in a["slices"])
+    assert a["allocated_usd"] == pytest.approx(backed, abs=0.01)
 
 
 def test_coin_too_small_to_carry_a_branch_is_refused():

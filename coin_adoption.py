@@ -67,9 +67,19 @@ MAX_POSITION_SHARE_PCT = 20.0
 # must not be able to reach the venue at all.
 STABLE = {"USD", "USDC", "USDT", "DAI", "PYUSD", "USDS"}
 
-# Left alone by name. ZEC carries the owner's standing exclusion from the
-# resting stops and is the largest single position in the account.
-DEFAULT_EXCLUDED = ("ZEC",)
+# Nothing is excluded by name any more.
+#
+# ZEC was, and that was the wrong tool. It is $2,285.38 - the single
+# largest blocked item on the dashboard - and naming it simply left the
+# money dead. The real concern was never ZEC; it was that a two-way grid
+# on an OVERWEIGHT position fights the trimmer, selling into strength and
+# then buying the dip straight back.
+#
+# That is now handled by the mechanism instead of the name: a position
+# over the limit is adopted SELL-ONLY, so it walks down through strength
+# at a profit target - banking money and reducing the concentration in
+# one move, which is what the 20% rule wanted in the first place.
+DEFAULT_EXCLUDED = ()
 
 
 def _num(v):
@@ -139,8 +149,7 @@ def refuse(asset, usd, share_pct, claimed, excluded, min_usd=MIN_ADOPT_USD,
         return "NO_PRICE"
     if usd < min_usd:
         return "TOO_SMALL_TO_TRADE"
-    if share_pct is not None and share_pct > max_share_pct:
-        return "OVER_THE_POSITION_LIMIT"
+    # NOT a refusal any more - see plan(), which adopts these SELL-ONLY.
     return None
 
 
@@ -213,6 +222,13 @@ def plan(holdings, *, account_total_usd, claimed_products=(),
                              "reason": "TOO_LITTLE_AVAILABLE_TO_TRADE"})
             continue
         take_units = min(take_usd / r["price"], r["units"])
+        # OVER THE LIMIT -> SELL-ONLY. The branch takes the units, sells
+        # into strength at its profit target, and never buys back while
+        # it is over. Reducing the concentration and banking the profit
+        # stop being a choice between two things.
+        sell_only = bool(r["share_pct"] is not None
+                         and r["share_pct"] > MAX_POSITION_SHARE_PCT)
+
         lv = levels_for(take_usd, cap=levels)
         slices = slice_units(take_units, r["price"], lv)
         if not slices:
@@ -232,6 +248,13 @@ def plan(holdings, *, account_total_usd, claimed_products=(),
             "allocated_usd": backed,
             "num_levels": len(slices),
             "slices": slices,
+            "sell_only": sell_only,
+            "why_sell_only": (
+                f"{r['share_pct']:.1f}% of the account is over the "
+                f"{MAX_POSITION_SHARE_PCT:.0f}% rule, so this branch may SELL its slices but "
+                f"never buy more. It walks the position down through strength at a profit "
+                f"target instead of being bought straight back on the next dip."
+                if sell_only else None),
             "share_of_holding_pct": round(take_usd / r["usd"] * 100, 1) if r["usd"] else None,
             "position_share_pct": r["share_pct"],
             "leaves_held_usd": round(r["usd"] - backed, 2),
@@ -249,6 +272,7 @@ def plan(holdings, *, account_total_usd, claimed_products=(),
                  "max_position_share_pct": MAX_POSITION_SHARE_PCT},
         "buys_nothing": True,
         "sells_nothing": True,
+        "sell_only_count": sum(1 for a in adopt if a.get("sell_only")),
         "is_a_plan_not_a_change": True,
         "detail": (
             (f"Would put ${spent:,.2f} of coin already owned under {len(adopt)} grid "

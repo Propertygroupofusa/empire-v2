@@ -111,13 +111,22 @@ def branch_floor_usd(levels=DEFAULT_LEVELS, min_trade=MIN_TRADE_USD):
 
 
 def lever_adopt(holdings, claimed_products, account_total_usd, *,
-                min_usd=MIN_ADOPTABLE_USD, max_share_pct=MAX_POSITION_SHARE_PCT):
+                min_usd=MIN_ADOPTABLE_USD, max_share_pct=MAX_POSITION_SHARE_PCT,
+                adoption_available=None):
     """Coin already owned that no branch manages.
 
     Returned as a lever with its blocker named, NOT as an action - there
     is no adoption path in the engine today. Reporting it as actionable
     would be the dashboard lying in the more expensive direction.
     """
+    # Measured, not assumed: the module either imports or it does not.
+    if adoption_available is None:
+        try:
+            import coin_adoption  # noqa: F401
+            adoption_available = True
+        except Exception:
+            adoption_available = False
+
     total = _pos(account_total_usd)
     claimed = {str(c).split("-")[0].upper() for c in (claimed_products or ())}
     rows, usd = [], 0.0
@@ -142,14 +151,24 @@ def lever_adopt(holdings, claimed_products, account_total_usd, *,
         "lever": "ADOPT_HELD_COIN",
         "usd_addressable": round(usd, 2),
         "candidates": rows,
-        "blocked_by": "NO_ADOPTION_PATH",
+        # THE PATH EXISTS NOW. This said NO_ADOPTION_PATH for hours after
+        # coin_adoption shipped and ran - XRP $400, ETH $400, SHIB $200 -
+        # so the panel was reporting a blocker that had already been
+        # fixed, on the largest lever on the page. A stale blocker is
+        # worse than a vague one: it sends someone to build a thing that
+        # is already built.
+        "blocked_by": None if adoption_available else "NO_ADOPTION_PATH",
         "what_it_would_take": (
-            "create_grid_branch() funds a branch from free spendable CASH and lets it buy "
-            "its own rungs; it refuses an amount above that cash. Nothing in the engine can "
-            "hand a branch coin the account already holds. Closing this lever means a branch "
-            "that opens with existing units registered as open slices at the price on the day "
-            "it adopts them - so it can sell into strength immediately and rebuy lower, "
-            "without a single dollar being spent or a single coin being sold."),
+            ("A branch opens with existing units registered as open slices at the price on "
+             "the day it adopts them, so it sells into strength and rebuys lower without a "
+             "dollar being spent or a coin being sold. A position already over the 20% rule "
+             "is adopted SELL-ONLY - it walks down through strength at a profit target "
+             "instead of being bought straight back on the next dip, which is what the rule "
+             "wanted. Capped at a test slice; arming is COIN_ADOPTION_MODE."
+             ) if adoption_available else
+            ("create_grid_branch() funds a branch from free spendable CASH and lets it buy "
+             "its own rungs; it refuses an amount above that cash. Nothing in the engine can "
+             "hand a branch coin the account already holds."))
     }
 
 
