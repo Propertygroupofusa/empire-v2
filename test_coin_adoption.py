@@ -258,3 +258,83 @@ def test_the_stable_set_matches_the_census():
 def test_the_plan_survives_json():
     import json
     assert json.loads(json.dumps(full())) == full()
+
+
+# ---------------------------------------------------------------------------
+# THE CAP MUST BIND ACROSS PASSES, NOT PER CALL.
+#
+# plan() starts `spent` at 0.0 every call and `already_adopted` only stops a
+# coin being taken twice. The hourly loop therefore received a fresh $1,000
+# and a fresh 3-coin allowance every hour, and the live fleet reached 15
+# coins / $3,082.16 against a stated 3 / $1,000. These lock the shape of the
+# fix: the worker measures what is already adopted and hands plan() the
+# REMAINING room.
+# ---------------------------------------------------------------------------
+
+def _holding(asset, usd, price):
+    return {"asset": asset, "usd": usd, "price": price, "units": usd / price}
+
+
+def test_a_fresh_budget_every_call_is_what_the_worker_must_not_give_it():
+    """plan() itself is stateless - that is exactly why the caller must subtract.
+
+    This is not a bug in plan(); it documents the contract the worker relies
+    on, so a future change to plan() cannot silently make the worker's
+    subtraction a double-count.
+    """
+    hs = [_holding("AAA", 500.0, 1.0)]
+    first = ca.plan(hs, account_total_usd=10_000.0)
+    second = ca.plan(hs, account_total_usd=10_000.0)
+    assert first["total_usd"] == second["total_usd"] > 0
+    assert first["caps"]["max_total_usd"] == second["caps"]["max_total_usd"]
+
+
+def test_remaining_room_is_honoured_as_the_total_budget():
+    hs = [_holding("AAA", 500.0, 1.0), _holding("BBB", 500.0, 1.0)]
+    p = ca.plan(hs, account_total_usd=10_000.0, max_total_usd=150.0)
+    assert p["total_usd"] <= 150.0
+    assert p["caps"]["max_total_usd"] == 150.0
+
+
+def test_zero_room_adopts_nothing_and_says_why():
+    hs = [_holding("AAA", 500.0, 1.0)]
+    p = ca.plan(hs, account_total_usd=10_000.0, max_total_usd=0.0)
+    assert p["ok"] is False
+    assert p["adopt"] == []
+    assert any(r["reason"] == "BUDGET_EXHAUSTED" for r in p["refusals"])
+
+
+def test_zero_coin_room_adopts_nothing():
+    hs = [_holding("AAA", 500.0, 1.0)]
+    p = ca.plan(hs, account_total_usd=10_000.0, max_coins=0)
+    assert p["ok"] is False
+    assert any(r["reason"] == "COIN_LIMIT_REACHED" for r in p["refusals"])
+
+
+def test_the_caps_are_owner_settable_and_never_self_raised(monkeypatch):
+    """A limit the code can raise on its own is not a limit."""
+    import importlib
+    monkeypatch.setenv("COIN_ADOPTION_MAX_TOTAL_USD", "2500")
+    monkeypatch.setenv("COIN_ADOPTION_MAX_COINS", "8")
+    mod = importlib.reload(ca)
+    try:
+        assert mod.MAX_TOTAL_ADOPT_USD == 2500.0
+        assert mod.MAX_COINS == 8
+    finally:
+        monkeypatch.delenv("COIN_ADOPTION_MAX_TOTAL_USD")
+        monkeypatch.delenv("COIN_ADOPTION_MAX_COINS")
+        importlib.reload(ca)
+
+
+def test_a_junk_cap_falls_back_to_the_chosen_default(monkeypatch):
+    import importlib
+    monkeypatch.setenv("COIN_ADOPTION_MAX_TOTAL_USD", "not-a-number")
+    monkeypatch.setenv("COIN_ADOPTION_MAX_COINS", "-4")
+    mod = importlib.reload(ca)
+    try:
+        assert mod.MAX_TOTAL_ADOPT_USD == 1000.0
+        assert mod.MAX_COINS == 3
+    finally:
+        monkeypatch.delenv("COIN_ADOPTION_MAX_TOTAL_USD")
+        monkeypatch.delenv("COIN_ADOPTION_MAX_COINS")
+        importlib.reload(ca)

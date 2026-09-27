@@ -211,3 +211,100 @@ def test_the_column_is_nullable_so_nothing_running_changes():
 def test_the_worker_sets_it_from_the_plan():
     src = open("coin_adoption_worker.py").read()
     assert 'buys_paused=bool(a.get("sell_only"))' in src
+
+
+# ---------------------------------------------------------------------------
+# THE REPORTED STOP MUST BE THE STOP THE LOOP OBEYS.
+#
+# _resolve_branch_stop is keyed by PRODUCT; the override that decides the
+# stop lives on the BRANCH. So grid-status reported ZEC-USD as
+# stop_pct 0.158834 / stop_source "adaptive" while run_grid_branch_cycle
+# applied no grid stop at all - a safety figure that disagreed with the code
+# enforcing it. Worse than no figure: it says coin held for a year is
+# protected by a trigger that will never fire.
+# ---------------------------------------------------------------------------
+import crypto_grid_bot as grid
+
+
+class _B:
+    def __init__(self, override=None, buys_paused=False):
+        self.stop_loss_pct_override = override
+        self.buys_paused = buys_paused
+        self.bot_name = "crypto_grid_test"
+        self.product_id = "ZEC-USD"
+
+
+ADAPTIVE = {"stop_pct": 0.158834, "source": "adaptive",
+            "reason": "15.88% for ZEC-USD, 2.50x its 6.35% daily volatility",
+            "daily_vol_pct": 6.3534}
+
+
+def test_a_null_override_reports_exactly_what_the_resolver_said():
+    """Every pre-existing branch is NULL. Its reporting must not move."""
+    out = grid._reported_stop(_B(None), ADAPTIVE)
+    assert out == ADAPTIVE
+    assert out is not ADAPTIVE          # a copy, so callers cannot mutate the cache
+
+
+def test_a_zero_override_reports_no_stop_not_an_adaptive_one():
+    out = grid._reported_stop(_B(0.0), ADAPTIVE)
+    assert out["stop_pct"] == 0.0
+    assert out["source"] == "branch_override_none"
+    assert "NO grid stop" in out["reason"]
+    # the volatility it was measured at is still worth seeing
+    assert out["daily_vol_pct"] == 6.3534
+
+
+def test_zero_is_tested_with_is_not_none_never_truthiness():
+    """`if override:` would send 0.0 straight down the adaptive path.
+
+    This is the same trap the trading loop already avoids, asserted here so
+    the two cannot drift apart.
+    """
+    src = open("crypto_grid_bot.py").read()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_reported_stop")
+    # Asserted on the parsed test, not on the source text - the docstring
+    # above quotes `if override:` as the trap being avoided, and a substring
+    # search would read the warning as the bug.
+    ifs = [n for n in ast.walk(fn) if isinstance(n, ast.If)]
+    assert ifs, "no branch on the override at all"
+    guard = ifs[0].test
+    assert isinstance(guard, ast.Compare), f"guard is {type(guard).__name__}, not a comparison"
+    assert isinstance(guard.ops[0], ast.Is)
+    assert isinstance(guard.comparators[0], ast.Constant)
+    assert guard.comparators[0].value is None
+
+
+def test_a_real_override_reports_that_number_and_names_the_branch_as_its_source():
+    out = grid._reported_stop(_B(0.12), ADAPTIVE)
+    assert out["stop_pct"] == 0.12
+    assert out["source"] == "branch_override"
+
+
+def test_an_unreadable_override_reports_the_fixed_stop_the_loop_falls_back_to():
+    out = grid._reported_stop(_B("nonsense"), ADAPTIVE)
+    assert out["stop_pct"] == grid.GRID_STOP_LOSS_PCT
+    assert out["source"] == "fixed"
+
+
+def test_a_missing_resolver_read_does_not_crash_the_panel():
+    assert grid._reported_stop(_B(0.0), None)["stop_pct"] == 0.0
+    assert grid._reported_stop(_B(None), None) == {}
+
+
+def test_grid_status_serializes_buys_paused():
+    """A rule nobody can see from outside is a rule on trust.
+
+    sell-only is set at adoption on a position over the 20% rule; it was
+    enforced in the loop but absent from grid-status, so the panel could not
+    tell an overweight branch that never buys back from a normal one.
+    """
+    src = open("crypto_grid_bot.py").read()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and n.name == "get_grid_status")
+    body = "\n".join(src.splitlines()[fn.lineno - 1:fn.end_lineno])
+    assert '"buys_paused"' in body
+    # and the per-branch stop, not the per-product one
+    assert "_reported_stop(b, stop_by_product.get(b.product_id))" in body

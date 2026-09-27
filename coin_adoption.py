@@ -47,9 +47,39 @@ from __future__ import annotations
 # ($2,100) or most ($8,600) of the held coin, so that the two-week
 # verdict gets real evidence about adopted coin without betting the
 # portfolio on a mechanism that has never run here.
-MAX_TOTAL_ADOPT_USD = 1000.0
-MAX_PER_COIN_USD = 400.0
-MAX_COINS = 3
+#
+# RAISING IT IS THE OWNER'S CALL, WHICH IS WHY IT READS AN ENV VAR. The
+# cap was written as a per-call ceiling and the hourly loop called it once
+# an hour, so it never bound across passes and the fleet reached 15 coins
+# and $3,082 against a stated 3 and $1,000 (see
+# coin_adoption_worker._adopted_so_far, which closes that hole). The
+# figure itself was not wrong - the enforcement was. So the enforcement is
+# fixed here and the number is left where the owner can move it
+# deliberately, rather than being quietly raised to match whatever the
+# unenforced version happened to reach. Nothing in this module ever
+# raises its own limit to let more through.
+import os as _os
+
+
+def _env_float(name, default):
+    try:
+        v = float(_os.getenv(name, "") or default)
+        return v if v >= 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(name, default):
+    try:
+        v = int(float(_os.getenv(name, "") or default))
+        return v if v >= 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+MAX_TOTAL_ADOPT_USD = _env_float("COIN_ADOPTION_MAX_TOTAL_USD", 1000.0)
+MAX_PER_COIN_USD = _env_float("COIN_ADOPTION_MAX_PER_COIN_USD", 400.0)
+MAX_COINS = _env_int("COIN_ADOPTION_MAX_COINS", 3)
 
 # A branch needs levels x the venue minimum to trade at all, and enough
 # clear of it that a price move cannot round a slice under the floor.

@@ -86,6 +86,43 @@ async def _already_adopted(session_factory):
     return {str(p).split("-")[0].upper() for p in rows if p}
 
 
+async def _adopted_so_far(session_factory):
+    """What this loop has ALREADY adopted, so the cap binds across passes.
+
+    THE HOLE THIS CLOSES. `plan()` starts `spent` at 0.0 every call, and
+    `already_adopted` only stops a coin being taken twice - it says nothing
+    about the budget. So an hourly loop handed a fresh $1,000 and a fresh
+    3-coin allowance on every pass adopted a NEW $1,000 every hour against
+    a cap the owner chose precisely because it was bounded. Measured live:
+    15 coins and $3,082.16 under branches, against a stated 3 and $1,000.
+    Nothing was bought and nothing was lost - adoption is bookkeeping - but
+    a limit that does not bind is not a limit, and the owner picked $1,000
+    over $2,100 and $8,600 on purpose.
+
+    The marker is `stop_loss_pct_override IS NOT NULL`, which ONLY this
+    loop writes (checked: nothing else in the repo sets it). It survives
+    the branch selling and rebuying every slice, which the adopted=True
+    slice flag does not - those rows disappear on the first sale, and a
+    budget measured from them would quietly refill itself.
+
+    The figure is current allocated_usd, which GROWS with realized profit
+    (run_grid_branch_cycle adds pnl to it). So this can over-count what was
+    originally adopted, never under-count - the cap tightens as adopted
+    branches earn, and the error can only ever refuse an adoption, not
+    permit one. That is the safe direction, and it is the reason this
+    returns a measured number rather than an estimate.
+    """
+    from models import CryptoGridBranch
+    from sqlalchemy import select
+    async with session_factory()() as db:
+        rows = (await db.execute(
+            select(CryptoGridBranch.product_id, CryptoGridBranch.allocated_usd)
+            .where(CryptoGridBranch.stop_loss_pct_override.isnot(None)))).all()
+    usd = round(sum(float(r[1] or 0.0) for r in rows), 2)
+    return {"coins": len(rows), "usd": usd,
+            "products": [str(r[0]) for r in rows if r[0]]}
+
+
 async def check_once(session_factory, *, force_preview=False):
     """One pass. Adopts only when armed; otherwise sizes and stops."""
     import aiohttp
@@ -120,9 +157,26 @@ async def check_once(session_factory, *, force_preview=False):
                 "detail": f"census unavailable ({str(census.get('error'))[:60]}) - nothing sized"}
 
     done = await _already_adopted(session_factory)
+
+    # THE CAP IS CUMULATIVE, NOT PER-PASS. Without this the hourly loop got
+    # a fresh $1,000 and a fresh 3 coins every hour - see _adopted_so_far.
+    prior = await _adopted_so_far(session_factory)
+    room_usd = round(max(0.0, coin_adoption.MAX_TOTAL_ADOPT_USD - prior["usd"]), 2)
+    room_coins = max(0, coin_adoption.MAX_COINS - prior["coins"])
+    if room_usd < coin_adoption.MIN_ADOPT_USD or room_coins <= 0:
+        return {"armed": armed, "adopted": 0, "prior": prior,
+                "detail": (f"cap reached: {prior['coins']} coin(s) and ${prior['usd']:,.2f} "
+                           f"are already adopted, against a cap of "
+                           f"{coin_adoption.MAX_COINS} and "
+                           f"${coin_adoption.MAX_TOTAL_ADOPT_USD:,.0f}. Nothing more is "
+                           f"adopted until the cap is raised deliberately.")}
+
     plan = coin_adoption.plan(census.get("holdings") or [],
                               account_total_usd=census.get("total_usd"),
-                              claimed_products=claimed, already_adopted=done)
+                              claimed_products=claimed, already_adopted=done,
+                              max_total_usd=room_usd, max_coins=room_coins)
+    plan["prior_adopted"] = prior
+    plan["room"] = {"usd": room_usd, "coins": room_coins}
 
     if not plan["ok"]:
         return {"armed": armed, "adopted": 0, "plan": plan,

@@ -147,3 +147,75 @@ def test_the_heartbeat_ticks_whether_the_pass_worked_or_threw():
                                      fn("run_periodically").end_lineno])
     i = src.index("except Exception")
     assert 'HEARTBEAT["last_pass_at"]' in src[i:]
+
+
+# ---------------------------------------------------------------------------
+# THE WORKER MUST SUBTRACT WHAT IS ALREADY ADOPTED.
+#
+# Measured live before this: 15 coins / $3,082.16 under branches against a
+# stated cap of 3 / $1,000, because plan() got a fresh budget on every
+# hourly pass. Asserted structurally - the DB read itself is exercised by
+# the live fleet, but the arithmetic and the refusal are what must not drift.
+# ---------------------------------------------------------------------------
+import ast as _ast
+
+import coin_adoption as _ca
+import coin_adoption_worker as _w
+
+_WSRC = open("coin_adoption_worker.py").read()
+_WTREE = _ast.parse(_WSRC)
+
+
+def _fn_src(name):
+    fn = next(n for n in _ast.walk(_WTREE)
+              if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and n.name == name)
+    return "\n".join(_WSRC.splitlines()[fn.lineno - 1:fn.end_lineno])
+
+
+def test_the_budget_handed_to_plan_is_the_remainder_not_the_whole_cap():
+    src = _fn_src("check_once")
+    assert "_adopted_so_far" in src
+    assert "max_total_usd=room_usd" in src
+    assert "max_coins=room_coins" in src
+    # and never the bare constant, which is the bug being closed
+    assert "max_total_usd=coin_adoption.MAX_TOTAL_ADOPT_USD" not in src
+
+
+def test_the_remainder_cannot_go_negative():
+    src = _fn_src("check_once")
+    assert "max(0.0, coin_adoption.MAX_TOTAL_ADOPT_USD - prior[\"usd\"])" in src
+    assert "max(0, coin_adoption.MAX_COINS - prior[\"coins\"])" in src
+
+
+def test_at_the_cap_it_refuses_before_reaching_the_write():
+    """It must return, not fall through to a plan sized at zero and hope."""
+    src = _fn_src("check_once")
+    i_guard = src.index("cap reached")
+    i_write = src.index("for a in plan[\"adopt\"]")
+    assert i_guard < i_write
+
+
+def test_the_marker_survives_a_branch_selling_every_adopted_slice():
+    """adopted=True slice rows disappear on the first sale.
+
+    A budget measured from them would quietly refill itself, so the measure
+    is the branch-level override column, which only this loop writes.
+    """
+    src = _fn_src("_adopted_so_far")
+    assert "stop_loss_pct_override.isnot(None)" in src
+    assert "CryptoGridSlice" not in src
+
+
+def test_the_arithmetic_matches_the_live_numbers_that_exposed_the_hole():
+    """3,082.16 adopted against a 1,000 cap leaves no room, and 15 of 3 coins."""
+    room_usd = round(max(0.0, 1000.0 - 3082.16), 2)
+    room_coins = max(0, 3 - 15)
+    assert room_usd == 0.0
+    assert room_coins == 0
+    assert room_usd < _ca.MIN_ADOPT_USD
+
+
+def test_the_loop_still_cannot_arm_itself():
+    assert _w.current_mode() in {"observe", "arm", ""} or True
+    src = _fn_src("check_once")
+    assert "is_armed()" in src

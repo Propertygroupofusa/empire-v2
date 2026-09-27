@@ -6193,6 +6193,43 @@ async def _resolve_branch_stop(session, product_id):
                 "daily_vol_pct": None}
 
 
+def _reported_stop(branch, resolved):
+    """The stop THIS branch really trades under, for reporting.
+
+    _resolve_branch_stop is keyed by product, but the override that
+    actually decides the stop lives on the BRANCH - so a per-product read
+    alone reported a 15.88% adaptive stop on every adopted branch while
+    run_grid_branch_cycle applied no grid stop at all. A safety figure that
+    disagrees with the code enforcing it is worse than no figure: it says
+    coin held for a year is protected by a trigger that will never fire.
+
+    The precedence here is the SAME test run_grid_branch_cycle uses -
+    `is not None`, never truthiness, because the override adoption writes
+    is 0.0 and `if override:` would silently fall through to adaptive.
+    """
+    override = getattr(branch, "stop_loss_pct_override", None)
+    if override is None:
+        return dict(resolved or {})
+    try:
+        pct = float(override)
+    except (TypeError, ValueError):
+        # Unreadable override -> the branch itself falls back to the fixed
+        # stop, so report that, not the adaptive figure.
+        return {"stop_pct": GRID_STOP_LOSS_PCT, "source": "fixed",
+                "reason": (f"branch override {override!r} is unreadable; the fixed "
+                           f"{GRID_STOP_LOSS_PCT * 100:.0f}% stop stands"),
+                "daily_vol_pct": (resolved or {}).get("daily_vol_pct")}
+    if pct == 0:
+        return {"stop_pct": 0.0, "source": "branch_override_none",
+                "reason": ("this branch names its own stop of 0 - there is NO grid stop. "
+                           "Adopted coin is covered at the portfolio level by the resting "
+                           "stops, not by a trigger measured from the day it was adopted."),
+                "daily_vol_pct": (resolved or {}).get("daily_vol_pct")}
+    return {"stop_pct": pct, "source": "branch_override",
+            "reason": f"this branch names its own {pct * 100:.2f}% stop",
+            "daily_vol_pct": (resolved or {}).get("daily_vol_pct")}
+
+
 def _stop_policy_block():
     """Never reports a policy it could not read."""
     try:
@@ -6325,6 +6362,10 @@ async def get_grid_status() -> dict:
             })
         total_net_pct = (total_net_usd / total_cost_basis) if (current_price is not None and total_cost_basis) else None
 
+        # Resolved per BRANCH, not per product: the override lives on the
+        # branch and is what the trading loop actually obeys.
+        _branch_stop = _reported_stop(b, stop_by_product.get(b.product_id))
+
         out.append({
             "bot_name": b.bot_name, "product_id": b.product_id, "allocated_usd": round(b.allocated_usd, 2),
             "active": b.active, "locked": bool(b.locked), "grid_pct": b.grid_pct, "num_levels": b.num_levels,
@@ -6353,10 +6394,15 @@ async def get_grid_status() -> dict:
             # The stop distance THIS branch trades under, and where it came
             # from - fixed, per-coin override, or scaled to its own
             # volatility. stop_pct 0.0 means the branch has no stop at all.
-            "stop_pct": (stop_by_product.get(b.product_id) or {}).get("stop_pct"),
-            "stop_source": (stop_by_product.get(b.product_id) or {}).get("source"),
-            "stop_reason": (stop_by_product.get(b.product_id) or {}).get("reason"),
-            "stop_daily_vol_pct": (stop_by_product.get(b.product_id) or {}).get("daily_vol_pct"),
+            "stop_pct": _branch_stop.get("stop_pct"),
+            "stop_source": _branch_stop.get("source"),
+            "stop_reason": _branch_stop.get("reason"),
+            "stop_daily_vol_pct": _branch_stop.get("daily_vol_pct"),
+            # Sell-only: set at adoption on a position over the 20% rule.
+            # The branch may sell its slices and never buys back, so the
+            # concentration walks down through strength. Serialized because
+            # a rule nobody can see from outside is a rule on trust.
+            "buys_paused": bool(getattr(b, "buys_paused", False) or False),
         })
 
     # Real grand total across EVERY branch's own "if sold right now" figure

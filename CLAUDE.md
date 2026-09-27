@@ -13532,6 +13532,82 @@ Putting the branches back on the old coins would be undoing the change
 that is working, on 27 hours of data, which is the exact mistake the repo
 already paid for on 2026-09-25.
 
+## Three limits that did not bind, found by reading the live fleet, 2026-09-27
+
+The pattern each one shares: a number was chosen carefully, written down
+honestly, and then enforced somewhere that could not enforce it. None of
+the three was a wrong number. All three were the wrong PLACE.
+
+### 1. The adoption cap was per-call, and the loop called it hourly
+
+`coin_adoption.plan()` starts `spent` at 0.0 on every call. The worker
+calls it once an hour. `already_adopted` stops a coin being taken twice,
+but it says nothing about the budget - so every pass received a fresh
+$1,000 and a fresh 3-coin allowance.
+
+Measured live before the fix: **15 coins and $3,082.16 under branches,
+against a stated cap of 3 and $1,000.** The owner had chosen $1,000 over
+$2,100 and $8,600 deliberately. Nothing was bought and nothing was lost -
+adoption is bookkeeping, and the branches are backed - but a limit that
+does not bind is not a limit, it is a comment.
+
+`coin_adoption_worker._adopted_so_far()` now measures what is already
+adopted and hands `plan()` the REMAINDER. Two details worth keeping:
+
+- **The marker is `stop_loss_pct_override IS NOT NULL`**, not the
+  `adopted=True` slice flag. Adopted slice rows disappear on the first
+  sale, so a budget measured from them would quietly refill itself - the
+  same hole one level down. Only this loop ever writes that column
+  (checked across the repo).
+- **The figure over-counts, never under-counts.** `allocated_usd` grows
+  with realized profit, so the cap tightens as adopted branches earn. The
+  error can only refuse an adoption, never permit one. That direction was
+  chosen on purpose.
+
+The cap is now read from `COIN_ADOPTION_MAX_TOTAL_USD` /
+`COIN_ADOPTION_MAX_COINS`, still defaulting to 1000/3. **It was not
+raised to match what the unenforced version happened to reach.** Fixing
+enforcement and then moving the number to fit the breach would have made
+the fix cosmetic. The fleet is over the cap, adoption is therefore frozen,
+and unfreezing it is a decision with a name on it.
+
+### 2. The panel reported a stop the loop does not apply
+
+`_resolve_branch_stop` is keyed by PRODUCT. The override that decides the
+stop lives on the BRANCH. So `/grid-status` reported every adopted branch
+as `stop_pct: 0.158834, stop_source: "adaptive"` while
+`run_grid_branch_cycle` correctly applied no grid stop at all.
+
+The trading loop was right the whole time - it tests `is not None`, so the
+0.0 override survives. Only the display was wrong, and it was wrong in the
+worst direction: **it said coin held for a year was protected by a trigger
+that can never fire.** A safety figure that disagrees with the code
+enforcing it is worse than no figure, because it is trusted.
+
+`_reported_stop(branch, resolved)` now applies the branch override with
+the same `is not None` test the loop uses, asserted in
+`test_adopted_stop.py` against the parsed AST rather than the source text
+- the docstring quotes `if override:` as the trap being avoided, and a
+substring search reads the warning as the bug.
+
+### 3. Sell-only was enforced but invisible
+
+`buys_paused` is set at adoption on a position over the 20% rule, and
+`run_grid_branch_cycle` obeys it. It was never serialized, so from outside
+an overweight branch that will never buy back looked identical to a normal
+one. Now in `/grid-status`. A rule nobody can see from outside is a rule
+on trust, and this repo has already paid twice for believing a panel over
+the code (the LONG-ONLY banner; the $1M "crash" that never happened).
+
+### The reusable shape
+
+Ask of every limit and every safety setting: **what reads it, and does
+that reader see the whole history?** A per-call ceiling in an hourly loop,
+a per-product lookup for a per-branch setting, and a rule with no
+serializer are the same bug three times. The config epoch lesson is this
+one's sibling - there, the question was what a measurement was drawn
+against; here, it is what a limit is counted against.
+
 ## Endpoints added
 
 `/capital-kpis` - `/growth-curve` - `/capital-placement` - `/beta-check`
