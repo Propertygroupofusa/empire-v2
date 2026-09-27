@@ -880,8 +880,8 @@
         </div>
         <div style="text-align:right;">
             <div class="header-totals">
-                <div class="header-total-row">🪙 Coinbase: <span id="header-total-coinbase" class="v">—</span></div>
-                <div class="header-total-row">📈 Alpaca: <span id="header-total-alpaca" class="v">—</span></div>
+                <div class="header-total-row">🪙 Coinbase <span style="opacity:.6;font-weight:400">balance</span>: <span id="header-total-coinbase" class="v">—</span></div>
+                <div class="header-total-row">📈 Alpaca <span style="opacity:.6;font-weight:400">balance</span>: <span id="header-total-alpaca" class="v">—</span></div>
             </div>
             <div id="status">Loading…</div>
         </div>
@@ -1202,6 +1202,21 @@
                     onclick="previewSale('ZEC', 400)">Sell $400 instead</button>
         </div>
         <div id="sell-amount-wrap"></div>
+    </div>
+
+    <div class="section-title">📈 Is it actually growing?</div>
+    <div class="panel">
+        <div class="panel-sub">Every other headline on this page is a <strong>balance</strong>.
+            A balance rises when coin is sold for cash and falls when cash buys coin - it says
+            how the account is arranged, never whether anything earned. The header used to show
+            one with a plus sign in green, and it went UP the day the trimmer sold $882.68 of
+            holdings. That was rewarding liquidation as profit.
+            <br><br>This panel separates the three things that move the account, because only
+            one of them is the bots working.</div>
+        <div style="margin:10px 0; display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="unlock-btn" style="margin-top:0;" onclick="loadGrowth()">📈 Show real growth</button>
+        </div>
+        <div id="growth-wrap"><div class="coin-history-empty">Not loaded.</div></div>
     </div>
 
     <div class="section-title">💰 What a round trip really costs</div>
@@ -7222,11 +7237,32 @@ async function executeConsolidate() {
     }
 }
 
-function renderHeaderTotal(elId, total) {
+// A BALANCE IS NOT A GAIN.
+//
+// This function put a "+" and the green `pos` class on whatever it was
+// handed. It was being handed real_usd_balance and alpaca_equity - two
+// BALANCES. A balance is always positive, so the header always read
+// "+$892.30" in green, styled exactly like a profit.
+//
+// It was worse than cosmetic. On 2026-09-27 the trimmer sold $882.68 of
+// ZEC and XRP, that cash landed in the wallet, and the green number went
+// UP. The display rewarded liquidating holdings as if it were earning -
+// which is the precise opposite of the thing the account owner was
+// trying to watch, and they had been watching it all day.
+//
+// So a balance renders neutral with no sign, and only a genuine P&L
+// figure gets a sign and a colour. The caller has to say which it is;
+// there is no default, because the default is what caused this.
+function renderHeaderTotal(elId, value, kind) {
     const el = document.getElementById(elId);
-    const cls = total >= 0 ? 'pos' : 'neg';
-    el.className = 'v ' + cls;
-    el.textContent = (total >= 0 ? '+' : '-') + fmtUsd(Math.abs(total));
+    if (kind === 'pnl') {
+        el.className = 'v ' + (value >= 0 ? 'pos' : 'neg');
+        el.textContent = (value >= 0 ? '+' : '-') + fmtUsd(Math.abs(value));
+    } else {
+        el.className = 'v';                      // no gain/loss colour
+        el.textContent = fmtUsd(Math.abs(value));
+        el.title = 'This is a balance, not a gain. It rises when you sell coin for cash.';
+    }
 }
 
 async function loadHeaderTotals() {
@@ -7236,7 +7272,7 @@ async function loadHeaderTotals() {
 
         // Coinbase: display real USD balance (actual cash + holdings in Coinbase)
         if (data.real_usd_balance !== null && data.real_usd_balance !== undefined) {
-            renderHeaderTotal('header-total-coinbase', data.real_usd_balance);
+            renderHeaderTotal('header-total-coinbase', data.real_usd_balance, 'balance');
         } else {
             // If Coinbase balance unavailable (401 error), show diagnostic link
             const coinbaseEl = document.getElementById('header-total-coinbase');
@@ -7247,7 +7283,7 @@ async function loadHeaderTotals() {
 
         // Alpaca: display real equity (actual account value)
         if (data.alpaca_equity !== null && data.alpaca_equity !== undefined) {
-            renderHeaderTotal('header-total-alpaca', data.alpaca_equity);
+            renderHeaderTotal('header-total-alpaca', data.alpaca_equity, 'balance');
         } else {
             document.getElementById('header-total-alpaca').textContent = '—';
         }
@@ -7740,6 +7776,54 @@ async function loadCostTruth() {
     }
 }
 function esc2(t){ const d=document.createElement('div'); d.textContent=String(t==null?'':t); return d.innerHTML; }
+
+
+// ------------------------------------------------- IS IT ACTUALLY GROWING
+// Three numbers kept apart on purpose. A single blended "profit" figure is
+// how an account looks like it is working while nothing is.
+async function loadGrowth() {
+    const wrap = document.getElementById('growth-wrap');
+    wrap.innerHTML = '<div class="coin-history-empty">Reading the trade ledger…</div>';
+    try {
+        const r = await fetch('/api/trading-dashboard/is-it-growing');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        const money = v => (v == null ? '—' : (v < 0 ? '-' : '') + '$' +
+            Math.abs(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}));
+        const tone = v => v == null ? 'var(--text-dim)'
+            : (v > 0 ? 'var(--success,#16a34a)' : v < 0 ? 'var(--danger,#e05a4e)' : 'var(--text-dim)');
+
+        wrap.innerHTML = `
+          <div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:14px">
+            <div>
+              <div style="font-size:0.72em;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim)">Earned · banked</div>
+              <div style="font-size:1.9em;font-weight:700;color:${tone(d.realized_usd)}">${money(d.realized_usd)}</div>
+              <div style="font-size:0.78em;color:var(--text-dim)">${d.trades ?? '—'} closed round trips${d.win_rate_pct != null ? ' · ' + d.win_rate_pct + '% win' : ''}</div>
+            </div>
+            <div>
+              <div style="font-size:0.72em;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim)">Open · not banked</div>
+              <div style="font-size:1.9em;font-weight:700;color:${tone(d.unrealized_usd)}">${money(d.unrealized_usd)}</div>
+              <div style="font-size:0.78em;color:var(--text-dim)">reverses with price</div>
+            </div>
+            <div>
+              <div style="font-size:0.72em;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim)">Rate</div>
+              <div style="font-size:1.9em;font-weight:700">${money(d.realized_per_hour_usd)}<span style="font-size:0.45em;font-weight:400;color:var(--text-dim)">/hr</span></div>
+              <div style="font-size:0.78em;color:var(--text-dim)">${money(d.realized_per_day_usd)} a day${d.days_trading ? ' over ' + d.days_trading + ' days' : ''}</div>
+            </div>
+            <div>
+              <div style="font-size:0.72em;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim)">Capital behind it</div>
+              <div style="font-size:1.9em;font-weight:700">${money(d.capital_behind_it_usd)}</div>
+              <div style="font-size:0.78em;color:var(--text-dim)">only this earns</div>
+            </div>
+          </div>
+          <div style="font-size:0.84em;line-height:1.6;padding:10px 12px;border-left:3px solid var(--border);background:var(--panel2,#0000000a)">
+            <strong>What this excludes.</strong> ${esc2(d.what_this_excludes || '')}
+            <br><br><strong>Why it is small.</strong> ${esc2(d.why_it_is_small || '')}
+          </div>`;
+    } catch (e) {
+        wrap.innerHTML = '<div class="coin-history-empty">Could not read it: ' + e.message + '</div>';
+    }
+}
 
 </script>
 </body>

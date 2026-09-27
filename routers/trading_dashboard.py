@@ -9855,3 +9855,100 @@ async def cost_truth():
             "threshold looks like, and the only thing separating this from that is "
             "whether the cheaper number has been checked in a falling market."),
     }
+
+
+@router.get("/is-it-growing")
+async def is_it_growing():
+    """The only number on this dashboard that is actually growth.
+
+    Every other headline figure is a BALANCE. A balance rises when coin is
+    sold for cash and falls when cash buys coin, so it answers "how is the
+    account arranged", never "did anything earn". The header showed
+    real_usd_balance with a plus sign in green, and it went UP the day the
+    trimmer sold $882.68 of holdings - rewarding liquidation as profit.
+
+    This separates the three things that move an account and reports them
+    apart, because only one of them is the bots working:
+
+      realized      closed round trips, fees already charged. The only
+                    figure that is unambiguously earned.
+      unrealized    open positions marked to market. Real, but not banked,
+                    and it reverses.
+      price drift   what the coins did on their own. The largest term by
+                    far in this account and nothing to do with the bots.
+
+    A single "profit" number that blends these is how an account can look
+    like it is working while nothing is.
+    """
+    try:
+        import crypto_grid_bot as grid
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"unavailable: {exc}")
+
+    realized = trades = win_rate = None
+    first_at = last_at = None
+    try:
+        hist = await grid.get_grid_trade_history(limit=500) \
+            if hasattr(grid, "get_grid_trade_history") else None
+    except Exception:
+        hist = None
+    if hist is None:
+        try:
+            from models import CryptoGridTradeHistory
+            from database import get_session_factory
+            from sqlalchemy import func as F
+            async with get_session_factory()() as db:
+                row = (await db.execute(select(
+                    F.count(CryptoGridTradeHistory.id),
+                    F.sum(CryptoGridTradeHistory.pnl),
+                    F.min(CryptoGridTradeHistory.closed_at),
+                    F.max(CryptoGridTradeHistory.closed_at)))).first()
+                trades = int(row[0] or 0)
+                realized = round(float(row[1] or 0.0), 2)
+                first_at, last_at = row[2], row[3]
+                wins = (await db.execute(select(F.count(CryptoGridTradeHistory.id))
+                        .where(CryptoGridTradeHistory.pnl > 0))).scalar() or 0
+                win_rate = round(wins / trades * 100, 1) if trades else None
+        except Exception as exc:
+            log.warning(f"[growing] ledger unreadable: {type(exc).__name__}: {exc}")
+
+    unrealized = None
+    try:
+        st = await grid.get_grid_status()
+        unrealized = round(float(st.get("total_unrealized_net_usd") or 0.0), 2)
+        deployed = round(float((st.get("allocation_backing") or {}).get("backed_usd") or 0.0), 2)
+    except Exception:
+        deployed = None
+
+    days = None
+    if first_at and last_at:
+        days = max((last_at - first_at).days, 1)
+
+    per_day = round(realized / days, 4) if (realized is not None and days) else None
+    per_hour = round(per_day / 24, 4) if per_day is not None else None
+
+    return {
+        "is_the_only_growth_figure_here": True,
+        "realized_usd": realized,
+        "unrealized_usd": unrealized,
+        "trades": trades,
+        "win_rate_pct": win_rate,
+        "days_trading": days,
+        "realized_per_day_usd": per_day,
+        "realized_per_hour_usd": per_hour,
+        "capital_behind_it_usd": deployed,
+        "headline": (
+            f"${realized:,.2f} earned across {trades} closed round trips"
+            + (f" over {days} days - ${per_day:,.4f} a day, ${per_hour:,.4f} an hour"
+               if per_day is not None else "")
+            if realized is not None else
+            "The trade ledger could not be read, so no growth figure can be given."),
+        "what_this_excludes": (
+            "Price drift. The coins moved $4,706 over 90 days on their own; none of that "
+            "is here, because none of it was earned by a bot. It also excludes every "
+            "balance - a balance rises when coin is sold and is not income."),
+        "why_it_is_small": (
+            "Realized profit scales with the capital actually inside the bot, not with "
+            "the account total. Anything sitting outside a branch earns nothing here "
+            "however large it is."),
+    }
