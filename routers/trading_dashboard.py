@@ -10484,6 +10484,58 @@ async def idle_capital_set_armed(payload: SetIdleRotationArmedRequest):
     return result
 
 
+@router.post("/idle-capital/deploy-cash")
+async def idle_capital_deploy_cash(dry_run: bool = True):
+    """Put cash that no branch claims into branches that can spend it.
+
+    DRY RUN BY DEFAULT - a bare POST previews. Only ?dry_run=false moves
+    anything, and both go through the write guard.
+
+    It adds to branches that CAN buy (open slices below levels) and have
+    completed at least one round trip, in EQUAL amounts. Not weighted by
+    performance: coin_evidence calls every current coin HOLD, because ten
+    closed trips can only separate a coin below ~17% green from a fleet at
+    79%. Backing a four-trade sample like a proven one is the same mistake
+    as talking yourself out of a winner, pointed the other way.
+
+    A parked branch is skipped - allocation it cannot spend is idle money
+    with a branch's name on it. A reserve is held back, because a wallet at
+    zero turns an ordinary rebuy into a failed order. Nothing may be pushed
+    past the 20% share rule.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    import idle_cash
+
+    status = await crypto_grid_bot_module.get_grid_status()
+    history = await crypto_grid_bot_module.get_grid_trade_history()
+    backing = status.get("allocation_backing") or {}
+    # unbacked is NEGATIVE when there is surplus cash - that surplus is
+    # exactly the cash no branch claims, which is the only deployable pot.
+    unclaimed = -float(backing.get("unbacked_usd") or 0.0)
+
+    plan = idle_cash.plan(status.get("branches") or [],
+                          history.get("recent_trades") or [],
+                          unclaimed_usd=unclaimed)
+    plan["backing_verdict"] = backing.get("verdict")
+    if dry_run or not plan["ok"]:
+        plan["dry_run"] = True
+        return plan
+
+    added, failed = [], []
+    for a in plan["adds"]:
+        try:
+            await crypto_grid_bot_module.add_cash_to_grid_branch(a["bot_name"], a["usd"])
+            added.append(a)
+        except Exception as e:
+            failed.append({**a, "error": f"{type(e).__name__}: {e}"})
+    plan["dry_run"] = False
+    plan["added"] = added
+    plan["failed"] = failed
+    plan["added_usd"] = round(sum(x["usd"] for x in added), 2)
+    return plan
+
+
 @router.post("/idle-capital/rotate")
 async def idle_capital_rotate(dry_run: bool = True):
     """Move stale cash into a branch that is demonstrably trading.
