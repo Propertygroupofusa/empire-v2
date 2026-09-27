@@ -9155,8 +9155,19 @@ def _live_ops_headline(trades_section, grid_section):
     return {"ok": True, "data": data, "error": None}
 
 
+# A full census is ~50 signed requests. The worker needs that budget to
+# place trims, and this endpoint competes with it for the same Coinbase
+# rate limit - on 2026-09-27 a poll every 55s drove /auto-trim to
+# "accounts HTTP 429" AND starved the worker, which correctly refused to
+# trim against an account it could not read. So reads are served from a
+# short cache and only the worker pays full price. ?fresh=1 forces a read
+# for the rare case where the cached view is being doubted.
+_AUTO_TRIM_CACHE = {"at": 0.0, "payload": None}
+_AUTO_TRIM_TTL_SECONDS = 120
+
+
 @router.get("/auto-trim")
-async def auto_trim_status():
+async def auto_trim_status(fresh: int = 0):
     """What the trimmer would do right now, and whether it is allowed to.
 
     A GET on purpose: reading what a money-moving loop intends must not
@@ -9166,6 +9177,15 @@ async def auto_trim_status():
     This endpoint NEVER places anything. It runs exactly the sizing the
     worker runs, against the same live census, and stops before the order.
     """
+    import time as _time
+    if not fresh and _AUTO_TRIM_CACHE["payload"] is not None:
+        age = _time.time() - _AUTO_TRIM_CACHE["at"]
+        if age < _AUTO_TRIM_TTL_SECONDS:
+            out = dict(_AUTO_TRIM_CACHE["payload"])
+            out["served_from_cache"] = True
+            out["cache_age_seconds"] = round(age, 1)
+            return out
+
     try:
         import auto_trim
         import auto_trim_worker
@@ -9197,8 +9217,18 @@ async def auto_trim_status():
     async with aiohttp.ClientSession() as session:
         census = await account_census.census(session, tracked_usd=0.0)
     if not census.get("available"):
-        raise HTTPException(status_code=502,
-                            detail=f"account unreadable: {census.get('error')}")
+        err = str(census.get("error") or "")
+        if "429" in err:
+            # Rate limited, not broken. Say which, because "unreadable"
+            # reads as a fault in the account and this is a fault in how
+            # often it was asked.
+            raise HTTPException(
+                status_code=429,
+                detail=("Coinbase rate limit reached. This endpoint runs a full "
+                        "census; the worker needs that same budget to place "
+                        "trims. Wait a few minutes rather than retrying - each "
+                        "retry spends the allowance the trimmer is waiting on."))
+        raise HTTPException(status_code=502, detail=f"account unreadable: {err}")
 
     import position_rules
     holdings = census.get("holdings") or []
@@ -9243,6 +9273,10 @@ async def auto_trim_status():
     })
     if history_note:
         out["history_note"] = history_note
+    out["served_from_cache"] = False
+    out["cache_age_seconds"] = 0
+    _AUTO_TRIM_CACHE["at"] = _time.time()
+    _AUTO_TRIM_CACHE["payload"] = out
     return out
 
 
