@@ -1135,9 +1135,9 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(alert_worker.run_producer_periodically(
                 get_holdings_watch, _alert_sf))
             asyncio.create_task(alert_worker.run_sender_periodically(_alert_sf))
-            logger.info("🔔 Newsroom alert queue running (producer + sender)")
+            log.info("🔔 Newsroom alert queue running (producer + sender)")
         except Exception as e:
-            logger.warning(f"alert queue not started: {type(e).__name__}: {e}")
+            log.warning(f"alert queue not started: {type(e).__name__}: {e}")
 
         # THE EXPERIMENT GUARD. A budget nobody enforces is a wish.
         #
@@ -1151,9 +1151,9 @@ async def lifespan(app: FastAPI):
             from database import get_session_factory as _exp_sf
             asyncio.create_task(experiment_worker.run_periodically(
                 _exp_sf, _grid.set_trading_profile))
-            logger.info("🛑 Experiment guard running (budget + deadline auto-revert)")
+            log.info("🛑 Experiment guard running (budget + deadline auto-revert)")
         except Exception as e:
-            logger.warning(f"alert queue not started: {type(e).__name__}: {e}")
+            log.warning(f"experiment guard not started: {type(e).__name__}: {e}")
 
         # THE AUTO-TRIMMER. The only background task in this process that
         # can SELL, so the switch is stated here as well as in the module:
@@ -1165,9 +1165,15 @@ async def lifespan(app: FastAPI):
             import auto_trim_worker
             from database import get_session_factory as _trim_sf
             asyncio.create_task(auto_trim_worker.run_periodically(_trim_sf))
-            logger.info(f"✂️ Auto-trimmer running, mode={auto_trim_worker.current_mode()}")
+            try:
+                log.info(f"✂️ Auto-trimmer running, mode={auto_trim_worker.current_mode()}")
+            except Exception:
+                pass          # a failure to LOG must never unstart the task
         except Exception as e:
-            logger.warning(f"auto-trimmer not started: {type(e).__name__}: {e}")
+            try:
+                log.warning(f"auto-trimmer not started: {type(e).__name__}: {e}")
+            except Exception:
+                pass
         log.info("⏱️ Alpaca auto-close loop started (8% profit target / 10-day max hold, 10% skim to locked profit)")
     except Exception as e:
         log.warning(f"Alpaca auto-close loop startup failed: {e}")
