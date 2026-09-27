@@ -6274,6 +6274,11 @@ async function loadGridStatus() {
         // assigned for what it used to be.
         lastRealizedProfit = history.total_realized_pnl != null ? history.total_realized_pnl : 0;
         lastUnrealizedProfit = data.total_unrealized_net_usd != null ? data.total_unrealized_net_usd : 0;
+        // What the unrealized half is measured AGAINST. Without it the
+        // dollar figure has no scale: -$68 reads the same whether it sits
+        // on $500 of coin or $5,600 of it, and the fleet moved from one to
+        // the other in a single afternoon.
+        lastDeployedCoin = (data.allocation_backing || {}).deployed_coin_usd;
         renderTotalProfit();
         await renderScaleBotStatus(data);
     } catch (e) {
@@ -6862,6 +6867,7 @@ function toggleCoinTrades(i) {
 
 let lastUnrealizedProfit = null;
 let lastRealizedProfit = null;
+let lastDeployedCoin = null;
 let lastLockedProfit = null;
 let lastKnownBranches = [];
 
@@ -6906,11 +6912,39 @@ function renderTotalProfit() {
         const unrealized = lastUnrealizedProfit || 0;
         const locked = lastLockedProfit || 0;
         const part = (label, val) => `${label} <span class="${val >= 0 ? 'pos' : 'neg'}">${val >= 0 ? '+' : '-'}${fmtUsd(Math.abs(val))}</span>`;
+
+        // THE TWO HALVES ARE NOT THE SAME KIND OF NUMBER, AND THE HEADLINE
+        // ADDS THEM.
+        //
+        // Realized is banked: it only moves when a slice actually sells,
+        // and the grid sells at a profit target, so it has never gone
+        // backwards. Unrealized is a mark-to-market on coin the owner
+        // ALREADY OWNED - putting a branch on it started REPORTING that
+        // exposure, it did not create it. The same ZEC was in the wallet
+        // at the same price the day before, its dip simply was not in this
+        // card.
+        //
+        // So the unrealized half scales with how much coin is being
+        // measured, not with how much risk was taken, and a dollar figure
+        // with no denominator hides that completely. The percentage is
+        // what makes -$68 legible as an ordinary -1.2% day across the
+        // whole fleet rather than something going wrong.
+        const dep = Number(lastDeployedCoin);
+        const pct = (isFinite(dep) && dep > 0) ? (unrealized / dep * 100) : null;
+        const unrealLabel = pct === null
+            ? 'Unrealized'
+            : `Unrealized (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}% of ${fmtUsd(dep)} of coin)`;
+
         breakdownEl.innerHTML = [
             part('Realized', realized),
-            part('Unrealized', unrealized),
+            part(unrealLabel, unrealized),
             part('🔒 Locked', locked),
-        ].join(' · ');
+        ].join(' · ')
+        + '<div style="font-size:0.78em; color:var(--text-dim); margin-top:6px; line-height:1.4;">'
+        + 'Realized is banked and only moves on a completed sell. Unrealized marks coin that '
+        + 'was already owned - a branch on it reports the price move, it does not add one, so '
+        + 'this half grows as more coin is put to work and is not money lost unless a slice is '
+        + 'sold below its entry.</div>';
     }
 }
 

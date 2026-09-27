@@ -194,6 +194,27 @@ ok("and says plainly that nothing was sent",
 ok("the guard itself is not bypassed for the preview",
    "dry_run=true" in page and "x-dashboard-token" in page)
 
+# --- the two halves of TOTAL PROFIT are not the same kind of number --------
+#
+# Realized is banked and only moves on a completed sell. Unrealized marks
+# coin the owner ALREADY OWNED - a branch on it reports the price move, it
+# does not create one. So the unrealized half scales with how much coin is
+# being MEASURED, and the headline adds the two together. When deployed
+# coin went $3,641 -> $5,642 in an afternoon, unrealized went -$13 -> -$68
+# on an ordinary -1.2% day and the card turned red.
+ok("unrealized is shown against what it is measured on",
+   "lastDeployedCoin" in page and "deployed_coin_usd" in page)
+ok("the percentage is computed, not asserted",
+   "unrealized / dep * 100" in page)
+ok("a missing or zero denominator falls back to the plain label",
+   "pct === null" in page and "dep > 0" in page)
+ok("the card says realized only moves on a completed sell",
+   "only moves on a completed sell" in page)
+ok("and that unrealized is not a loss until a slice is sold below entry",
+   "sold below its entry" in page)
+ok("the headline still adds both halves rather than hiding the red one",
+   "(lastUnrealizedProfit || 0) + (lastRealizedProfit || 0)" in page)
+
 # --- hygiene ---------------------------------------------------------------
 ids = re.findall(r'id="([a-zA-Z0-9_-]+)"', page)
 ok("no duplicate element ids", len({i for i in ids if ids.count(i) > 1}) == 0)
