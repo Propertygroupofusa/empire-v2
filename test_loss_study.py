@@ -172,3 +172,52 @@ def test_everything_survives_json():
     assert json.loads(json.dumps(a)) == a
     s = ls.stop_sweep(LIVE)
     assert json.loads(json.dumps(s)) == s
+
+
+# ------------------------------------- whose losses are these
+
+EPOCH = "2026-09-26T02:45:00Z"
+AFTER, BEFORE = "2026-09-27T00:00:00", "2026-09-20T00:00:00"
+
+
+def trt(pnl, closed, reason=None, qty=1.0, entry=100.0):
+    return {"pnl": pnl, "qty": qty, "entry_price": entry,
+            "exit_reason": reason, "closed_at": closed, "mae_pct": None}
+
+
+def test_losses_from_a_replaced_configuration_are_not_a_live_problem():
+    """All 19 of this fleet's losses predate the 2026-09-26 change,
+    including the DOGE trades that prompted the sell-path fix. Tightening
+    a stop over that history costs money on every future trade."""
+    rows = ([trt(1.0, BEFORE) for _ in range(60)]
+            + [trt(-0.5, BEFORE) for _ in range(19)]
+            + [trt(2.45, AFTER) for _ in range(2)])
+    a = ls.analyse(rows, config_epoch=EPOCH)
+    assert a["losses"] == 19
+    assert a["losses_on_current_config"] == 0
+    assert a["trades_on_current_config"] == 2
+    code, why = ls.verdict(a)
+    assert code == "EVERY_LOSS_PREDATES_THIS_CONFIG"
+    assert "already fixed" in why
+
+
+def test_a_loss_on_the_current_config_is_still_a_live_problem():
+    rows = ([trt(1.0, BEFORE) for _ in range(60)]
+            + [trt(-0.5, BEFORE) for _ in range(19)]
+            + [trt(-3.0, AFTER, reason="stop_loss")])
+    a = ls.analyse(rows, config_epoch=EPOCH)
+    assert a["losses_on_current_config"] == 1
+    assert ls.verdict(a)[0] != "EVERY_LOSS_PREDATES_THIS_CONFIG"
+
+
+def test_an_untimed_trade_counts_as_predating_the_config():
+    rows = [trt(1.0, BEFORE) for _ in range(30)] + [{"pnl": -1.0, "qty": 1.0,
+                                                    "entry_price": 100.0}]
+    a = ls.analyse(rows, config_epoch=EPOCH)
+    assert a["trades_on_current_config"] == 0
+
+
+def test_without_an_epoch_no_claim_is_made_about_whose_losses_they_are():
+    a = ls.analyse([trt(-1.0, BEFORE) for _ in range(5)])
+    assert "cannot be told" in a["config_split"]
+    assert ls.verdict(a)[0] != "EVERY_LOSS_PREDATES_THIS_CONFIG"

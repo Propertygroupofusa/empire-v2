@@ -10663,7 +10663,15 @@ async def loss_study_view():
         raise HTTPException(status_code=503,
                             detail=f"the closed book could not be read ({type(exc).__name__})")
 
-    analysis = loss_study.analyse(trades)
+    epoch = None
+    try:
+        import crypto_grid_bot as grid
+        st = await grid.get_grid_status()
+        epoch = (st.get("realized_edge") or {}).get("config_epoch")
+    except Exception as exc:
+        log.warning(f"[loss] config epoch unreadable: {type(exc).__name__}: {exc}")
+
+    analysis = loss_study.analyse(trades, config_epoch=epoch)
     sweep = loss_study.stop_sweep(trades)
     code, why = loss_study.verdict(analysis, sweep)
 

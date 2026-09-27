@@ -44,6 +44,7 @@ sample that can support it.
 from __future__ import annotations
 
 import statistics
+from datetime import datetime
 
 # Below this, a stop comparison is arithmetic on anecdotes.
 MIN_TRADES_FOR_STOP_SWEEP = 25
@@ -56,6 +57,17 @@ CANDIDATE_STOPS = (0.03, 0.04, 0.05, 0.06, 0.08, 0.10, 0.12)
 BIG_LOSS_MULTIPLE = 2.0
 
 
+def _parse(ts):
+    if isinstance(ts, datetime):
+        return ts
+    if not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
 def _num(v):
     try:
         f = float(v)
@@ -64,7 +76,8 @@ def _num(v):
     return None if (f != f or f in (float("inf"), float("-inf"))) else f
 
 
-def _rows(trades):
+def _rows(trades, config_epoch=None):
+    epoch = _parse(config_epoch)
     out = []
     for t in trades or ():
         if not hasattr(t, "get"):
@@ -83,13 +96,27 @@ def _rows(trades):
             "mfe_pct": _num(t.get("mfe_pct")),
             "product_id": t.get("product_id"),
             "closed_at": t.get("closed_at"),
+            # An untimed trade counts as PRE-epoch. It is not evidence
+            # about the bot running now, and assuming otherwise flatters
+            # it - the same rule the league learned the hard way.
+            "on_config": bool(epoch and _parse(t.get("closed_at"))
+                              and _parse(t.get("closed_at")) >= epoch),
         })
     return out
 
 
-def analyse(trades):
-    """The shape of the losses, and which kind they are."""
-    rows = _rows(trades)
+def analyse(trades, *, config_epoch=None):
+    """The shape of the losses, and which kind they are.
+
+    Split against `config_epoch`, because a loss booked by a
+    configuration that has since been replaced is history, not a problem
+    to fix. This fleet's 19 losses were ALL taken before the 2026-09-26
+    change - including the DOGE trades that prompted the sell-path fix in
+    _pick_profitable_slice_to_sell, whose whole job is to refuse a losing
+    sale. Reading them as a live loss problem would send someone
+    tightening a stop that never fired.
+    """
+    rows = _rows(trades, config_epoch)
     n = len(rows)
     wins = [r for r in rows if r["pnl"] > 0]
     losses = [r for r in rows if r["pnl"] < 0]
@@ -108,6 +135,9 @@ def analyse(trades):
 
     loss_pcts = [r["pct"] for r in losses if r["pct"] is not None]
     win_pcts = [r["pct"] for r in wins if r["pct"] is not None]
+
+    on_cfg = [r for r in rows if r["on_config"]]
+    losses_on_cfg = [r for r in on_cfg if r["pnl"] < 0]
 
     # THE RATIO THAT DECIDES FRAGILITY. With wins and losses the same
     # size, the whole edge rests on the win RATE holding - and a win rate
@@ -136,6 +166,23 @@ def analyse(trades):
         "breakeven_win_rate_pct": breakeven_win_rate,
         "margin_of_safety_points": (round(actual_win_rate - breakeven_win_rate, 1)
                                     if (actual_win_rate and breakeven_win_rate) else None),
+
+        "trades_on_current_config": len(on_cfg),
+        "losses_on_current_config": len(losses_on_cfg),
+        "lost_on_current_config_usd": round(sum(r["pnl"] for r in losses_on_cfg), 2),
+        "config_epoch": config_epoch,
+        "config_split": (
+            (f"{len(losses)} loss(es) in the book and {len(losses_on_cfg)} of them were taken "
+             f"by the configuration running now. "
+             + ("The rest were booked by a bot that has since been replaced - including the "
+                "trades that prompted the sell-path fix, whose whole job is to refuse a "
+                "losing sale. Reading them as a live problem would send someone tightening "
+                "a stop that never fired."
+                if len(losses_on_cfg) < len(losses) else
+                "Every loss here was taken by the current bot."))
+            if config_epoch else
+            "No config epoch supplied, so a loss taken by the current bot cannot be told "
+            "from one a replaced configuration booked."),
 
         "losses_by_exit_reason": by_reason,
         "big_losses": len(big),
@@ -221,6 +268,20 @@ def verdict(analysis, sweep=None):
     a = analysis or {}
     if not a.get("trades"):
         return ("NO_TRADES", "No closed trades, so there are no losses to size.")
+
+    # BEFORE ANYTHING ELSE: are these even THIS bot's losses? A stop
+    # tightened over a replaced configuration's history costs money on
+    # every future trade and fixes nothing.
+    if (a.get("config_epoch") and a.get("losses")
+            and not a.get("losses_on_current_config")):
+        return ("EVERY_LOSS_PREDATES_THIS_CONFIG",
+                f"All {a['losses']} loss(es) were booked before the {a['config_epoch']} "
+                f"change, and the configuration running now has lost nothing across "
+                f"{a.get('trades_on_current_config')} trade(s). The worst of them came from "
+                f"DOGE and WIF under a sell path that has since been fixed to refuse a losing "
+                f"sale. Tightening a stop over this history would cost money on every future "
+                f"trade and fix a problem that is already fixed.")
+
     if not a.get("losses"):
         return ("NO_LOSSES_YET",
                 "No closed trade has lost money. That is not a solved problem yet - it is a "

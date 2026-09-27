@@ -8567,6 +8567,11 @@ async function loadLossStudy() {
             ${tile('Big losses', d.big_losses, 'over 2× the average win', d.big_losses ? bad : good)}
           </div>
 
+          ${d.config_split ? `<div style="font-size:0.86em;line-height:1.6;padding:10px 12px;
+             border-left:3px solid ${d.losses_on_current_config ? warn : good};
+             background:var(--panel2,#0000000a);margin-bottom:12px">
+             <strong>Whose losses are these?</strong> ${esc2(d.config_split)}</div>` : ''}
+
           ${Object.keys(d.losses_by_exit_reason || {}).length ? `<div style="font-size:0.84em;color:${dim};margin-bottom:10px">
              How the losses were taken: ${Object.entries(d.losses_by_exit_reason).map(([k, v]) => `${esc2(k.replace(/_/g, ' '))} ×${v}`).join(' · ')}</div>` : ''}
 
