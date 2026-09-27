@@ -9359,3 +9359,148 @@ async def matrix_desk(top: int = 18, window: int = 30):
         "mean rotate: acting on it was measured over 350 sessions and loses "
         "money at every gate setting once both legs are paid for.")
     return out
+
+
+@router.get("/gate-verdict")
+async def gate_verdict(days: int = 30):
+    """Did the gate refuse things that would have paid? Read-only.
+
+    THE QUESTION THIS ANSWERS
+
+    1,503 setups scored and 0 cleared the live gate. That is either a
+    market with no edge in it, or a gate asking the wrong question, and
+    the difference matters enormously: one means wait, the other means fix.
+
+    The live gate computes expected_move as HALF A FIFTEEN-MINUTE return
+    and compares it against the cost of a whole round trip. For that to
+    pass, a coin must move ~1.4% in fifteen minutes; BTC's daily
+    volatility is 1.81%. The cost, meanwhile, is paid once and a rung has
+    no deadline - so the two sides are not the same kind of quantity.
+    opportunity_signals.py says exactly this in its own comments and
+    records a six-hour version of the identical arithmetic beside the
+    live one for this purpose.
+
+    WHAT MAKES THIS EVIDENCE RATHER THAN AN ARGUMENT
+
+    horizon_gate_paid is not a prediction. It is filled in afterwards from
+    what the price actually did: whether the six-hour MFE really cleared
+    the round trip. So this compares what each gate SAID against what the
+    market then DID, on the same rows, with nothing re-derived here.
+
+    A gate that passes more is not automatically better - it is usually
+    worse, because the easiest way to pass more is to charge less than the
+    trade costs. So the number that decides is the pay RATE among the
+    setups a gate would have taken, not how many it took.
+    """
+    try:
+        from models import ShortTermSignal
+        from database import get_session_factory
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"telemetry unavailable: {exc}")
+
+    from datetime import datetime, timedelta
+    from sqlalchemy import func as F
+
+    days = max(1, min(int(days or 30), 365))
+    since = datetime.utcnow() - timedelta(days=days)
+
+    try:
+        async with get_session_factory()() as db:
+            rows = (await db.execute(
+                select(
+                    ShortTermSignal.would_trade,
+                    ShortTermSignal.materialized,
+                    ShortTermSignal.horizon_gate_would_trade,
+                    ShortTermSignal.horizon_gate_paid,
+                    ShortTermSignal.horizon_gate_net_pct,
+                    ShortTermSignal.reject_category,
+                    ShortTermSignal.expected_move_pct,
+                    ShortTermSignal.cost_assumed_pct,
+                    ShortTermSignal.actual_mfe_pct,
+                    ShortTermSignal.horizon_gate_mfe_pct,
+                ).where(ShortTermSignal.scored_at >= since))).all()
+    except Exception as exc:
+        raise HTTPException(status_code=503,
+                            detail=f"telemetry unreadable: {type(exc).__name__}: {exc}")
+
+    total = len(rows)
+    if not total:
+        return {"scanned": 0, "days": days,
+                "verdict": "No scored setups in this window - nothing to judge."}
+
+    def rate(sel, key):
+        got = [r for r in sel if getattr(r, key) is not None]
+        if not got:
+            return None
+        return round(sum(1 for r in got if getattr(r, key)) / len(got) * 100, 1), len(got)
+
+    live_yes = [r for r in rows if r.would_trade]
+    hz_yes = [r for r in rows if r.horizon_gate_would_trade]
+    hz_no = [r for r in rows if r.horizon_gate_would_trade is False]
+
+    live_pay = rate(live_yes, "materialized")
+    hz_pay = rate(hz_yes, "horizon_gate_paid")
+    hz_skip_pay = rate(hz_no, "horizon_gate_paid")
+
+    nets = [r.horizon_gate_net_pct for r in hz_yes if r.horizon_gate_net_pct is not None]
+    nets.sort()
+    mean_net = round(sum(nets) / len(nets), 4) if nets else None
+
+    cats = {}
+    for r in rows:
+        if r.reject_category:
+            cats[r.reject_category] = cats.get(r.reject_category, 0) + 1
+
+    # Unresolved rows are named rather than dropped. A pay rate computed on
+    # whatever happened to have resolved is a different measurement from one
+    # computed on everything, and the difference is exactly where optimism
+    # hides.
+    unresolved = sum(1 for r in rows if r.horizon_gate_paid is None)
+
+    out = {
+        "is_a_measurement_not_a_change": True,
+        "days": days,
+        "scanned": total,
+        "live_gate": {
+            "would_take": len(live_yes),
+            "take_rate_pct": round(len(live_yes) / total * 100, 2),
+            "paid_pct": live_pay[0] if live_pay else None,
+            "resolved": live_pay[1] if live_pay else 0,
+            "basis": "expected_move = half a 15-minute return, vs a full round-trip cost",
+        },
+        "six_hour_gate": {
+            "would_take": len(hz_yes),
+            "take_rate_pct": round(len(hz_yes) / total * 100, 2),
+            "paid_pct": hz_pay[0] if hz_pay else None,
+            "resolved": hz_pay[1] if hz_pay else 0,
+            "mean_net_pct": mean_net,
+            "basis": "the identical arithmetic over six hours; same cost, same haircut",
+        },
+        "the_control": {
+            "setups_the_six_hour_gate_REFUSED": len(hz_no),
+            "of_those_that_paid_anyway_pct": hz_skip_pay[0] if hz_skip_pay else None,
+            "why_this_matters": ("A gate is only worth having if what it takes pays "
+                                 "MORE often than what it refuses. If these two rates "
+                                 "are the same, the gate is sorting noise."),
+        },
+        "unresolved_rows": unresolved,
+        "reject_categories": dict(sorted(cats.items(), key=lambda kv: -kv[1])),
+    }
+
+    hp = out["six_hour_gate"]["paid_pct"]
+    sp = out["the_control"]["of_those_that_paid_anyway_pct"]
+    if hp is None:
+        out["verdict"] = ("The six-hour gate has no resolved outcomes yet. Nothing can "
+                          "be concluded, and nothing should be changed on this.")
+    elif sp is not None and hp - sp < 5:
+        out["verdict"] = (f"The six-hour gate takes {out['six_hour_gate']['take_rate_pct']}% "
+                          f"of setups and they pay {hp}% of the time, against {sp}% for the "
+                          f"ones it refused. That gap is not real separation - switching to "
+                          f"it would trade more without trading better.")
+    else:
+        out["verdict"] = (f"The six-hour gate would take {len(hz_yes)} of {total} setups "
+                          f"({out['six_hour_gate']['take_rate_pct']}%) and {hp}% of those "
+                          f"cleared the round trip, against {sp}% of the ones it refused. "
+                          f"That is real separation. It is evidence FOR a change, not a "
+                          f"change - the switch stays a deliberate decision.")
+    return out
